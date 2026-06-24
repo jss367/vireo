@@ -13524,10 +13524,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         * ``"exact"`` — walks the destination uncapped for the true file
           count. The UI fires this in the background to replace the capped
           "at least 1000" line once the fast check reported a truncation.
-        * ``"preview"`` — also runs ``preview_merge`` to report how many
-          source files would actually copy vs. be skipped as already present.
-          Fired on the deliberate merge-confirm click, where a source-tree
-          walk is acceptable.
+        * ``"preview"`` — keeps the destination count on the capped fast
+          path (same as ``quick``) and adds a ``preview_merge`` block
+          reporting how many source files would actually copy vs. be
+          skipped as already present. The deliberate merge-confirm click
+          fires this; the source-tree walk for ``preview_merge`` is
+          acceptable there, but a second uncapped destination walk is not
+          — the dialog displays the preview's copy/skip counts, not the
+          raw destination count, so capping the destination here keeps the
+          Flask worker free even when the resume target is a NAS folder
+          with millions of unrelated files.
         """
         from move import preview_merge, resolve_folder_dest
 
@@ -13560,11 +13566,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         file_count = 0
         file_count_truncated = False
         if exists:
-            if mode == "quick":
+            if mode == "exact":
+                file_count, file_count_truncated = _scan_dir_file_count(resolved)
+            else:
+                # Both "quick" and "preview" cap the destination scan. The
+                # merge dialog uses preview_merge's copy/skip counts, not
+                # this number, so walking the destination uncapped here
+                # would block a Flask worker for no UI benefit.
                 file_count, file_count_truncated = _scan_dir_file_count(
                     resolved, file_limit=1000, dir_limit=2000)
-            else:
-                file_count, file_count_truncated = _scan_dir_file_count(resolved)
 
         result = {
             "resolved_dest": resolved,

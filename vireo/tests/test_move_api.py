@@ -350,6 +350,42 @@ def test_move_folder_preflight_preview_reports_transfer_counts(app_and_db, tmp_p
     assert preview["source_total"] == 3
 
 
+def test_move_folder_preflight_preview_caps_destination_scan(app_and_db, tmp_path):
+    """mode='preview' must NOT walk the destination uncapped. The merge dialog
+    uses the preview's copy/skip counts, not the raw destination file_count, so
+    a full destination-tree walk here would block a Flask worker on large
+    resume targets (NAS folders with millions of unrelated files) for no UI
+    benefit. Capped behavior matches mode='quick': file_count plateaus at the
+    cap and file_count_truncated flips to True."""
+    app, db = app_and_db
+
+    src = tmp_path / "src_folder"
+    src.mkdir()
+    (src / "a.jpg").write_bytes(b"a")
+    fid = db.add_folder(str(src), name="src_folder")
+
+    dst = tmp_path / "dest"
+    dst.mkdir()
+    landing = dst / "src_folder"
+    landing.mkdir()
+    for idx in range(1001):
+        (landing / f"already-{idx}.jpg").write_bytes(b"x")
+
+    client = app.test_client()
+    resp = client.post("/api/move-folder/preflight", json={
+        "folder_id": fid,
+        "destination": str(dst),
+        "mode": "preview",
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["exists"] is True
+    assert data["file_count"] == 1000
+    assert data["file_count_truncated"] is True
+    # The preview block still describes the source -> destination transfer.
+    assert "preview" in data
+
+
 def test_move_folder_preflight_preview_omitted_when_dest_missing(app_and_db, tmp_path):
     """No preview block when the destination doesn't exist — there is nothing
     to merge into, so a fresh move copies everything."""
