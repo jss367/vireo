@@ -687,14 +687,44 @@ async function runQuickPreflight(fid, dest, seq) {
   status = document.getElementById('quickDestStatus');
   if (!status) return;
   if (data.exists) {
-    var n = data.file_count;
-    status.textContent = '⚠ Destination already exists — contains ' + n + ' file' +
-      (n !== 1 ? 's' : '') + '. Existing files with a matching size are skipped; only missing files are copied.';
-    status.style.color = 'var(--warning)';
+    setDestExistsStatus(status, data.file_count, data.file_count_truncated);
+    // The fast count caps out at 1000. When it was truncated, fetch the exact
+    // number in the background and update the line in place — without blocking
+    // the user or holding up typing.
+    if (data.file_count_truncated) requestExactDestCount(fid, dest, seq);
   } else {
     status.textContent = '✓ New folder — nothing exists at this location yet.';
     status.style.color = 'var(--text-dim)';
   }
+}
+
+// Render the "destination already exists" warning. When `truncated` is true
+// the count is a floor (the fast scan stopped at its cap), so say "at least N"
+// rather than implying an exact total — the line must mean what it says.
+function setDestExistsStatus(status, n, truncated) {
+  var countText = truncated ? ('at least ' + n.toLocaleString()) : n.toLocaleString();
+  status.textContent = '⚠ Destination already exists — contains ' + countText + ' file' +
+    (n !== 1 || truncated ? 's' : '') + '. Files already there are left untouched; only missing files are copied. If a same-name file differs, the merge is canceled and nothing is changed.';
+  status.style.color = 'var(--warning)';
+}
+
+// Background, non-blocking exact count. Reuses the keystroke seq guard so a
+// result landing after the user has changed the destination is discarded
+// instead of overwriting the line for the wrong path. Stays silent on failure:
+// the capped "at least N" line is already a valid answer.
+function requestExactDestCount(fid, dest, seq) {
+  fetch('/api/move-folder/preflight', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({folder_id: fid, destination: dest, mode: 'exact'}),
+  }).then(function(resp) {
+    return resp.ok ? resp.json() : null;
+  }).then(function(data) {
+    if (!data || !data.exists) return;
+    if (seq !== quickPreflightSeq) return;  // a newer keystroke superseded us
+    var status = document.getElementById('quickDestStatus');
+    if (status) setDestExistsStatus(status, data.file_count, data.file_count_truncated);
+  }).catch(function() { /* background nicety — leave the capped line in place */ });
 }
 
 function clearQuickDestStatus() {
@@ -717,10 +747,15 @@ async function startQuickMove() {
   var pf;
   setQuickMoveBusy(true);
   try {
+    // mode:'preview' also reports how many source files would actually copy
+    // vs. be skipped as already present — the number the user really needs
+    // before committing to a merge. This is a deliberate click, so the
+    // server-side source-tree walk it triggers is acceptable here (unlike on
+    // the keystroke-driven status line above).
     pf = await safeFetch('/api/move-folder/preflight', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({folder_id: fid, destination: dest}),
+      body: JSON.stringify({folder_id: fid, destination: dest, mode: 'preview'}),
     });
   } catch (e) {
     return;  // safeFetch already shows error toast
@@ -730,12 +765,51 @@ async function startQuickMove() {
 
   var finalPath = pf.resolved_dest;
   if (pf.exists) {
-    var n = pf.file_count || 0;
-    var countText = pf.file_count_truncated ? ('at least ' + n) : String(n);
+    var p = pf.preview || {};
+    var copyN = p.will_copy;
+    var skipN = p.will_skip;
+    var blockN = p.will_block || 0;
+    var msg;
+    if (typeof copyN === 'number') {
+      // Truthful transfer counts. These count every file under the source
+      // (sidecars included), not just tracked photos — that's what rsync moves.
+      // Files already present are left untouched, never overwritten; a
+      // same-name file whose content differs cancels the whole merge, so only
+      // mention that caveat when there are overlapping files (skipN > 0).
+      // blockN is the count of source files whose destination entry is a
+      // symlink, a directory, or otherwise not a plain file: rsync would skip
+      // those by name, but the post-copy verifier rejects them and the merge
+      // would abort with "Verification failed". Surface the block so the
+      // dialog never says "all already present" when the move would not in
+      // fact complete.
+      var conflictNote = skipN ? ' If a same-name file differs, the merge is canceled and nothing is changed.' : '';
+      var blockNote = blockN ?
+        ' ⚠ ' + blockN.toLocaleString() + ' source file' + (blockN !== 1 ? 's have' : ' has') +
+        ' a destination entry that is a symlink or non-file — the merge will be canceled at the verify step before any originals are removed.' : '';
+      if (copyN === 0 && blockN === 0) {
+        msg = 'All ' + skipN.toLocaleString() + ' file' + (skipN !== 1 ? 's' : '') +
+          ' from "' + folderName + '" are already present at "' + finalPath +
+          '". Merging copies nothing new.' + conflictNote +
+          ' Originals are removed only after every source file is verified at the destination. Continue?';
+      } else {
+        var skipPart = skipN ? ', ' + skipN.toLocaleString() + ' already present will be left untouched' : '';
+        var blockPart = blockN ? ', ' + blockN.toLocaleString() + ' blocked by a non-file at the destination' : '';
+        msg = 'Merge "' + folderName + '" into "' + finalPath + '"? ' +
+          copyN.toLocaleString() + ' file' + (copyN !== 1 ? 's' : '') + ' will be copied' +
+          skipPart + blockPart + '.' + conflictNote + blockNote +
+          ' Originals are removed only after every source file is verified at the destination.';
+      }
+    } else {
+      // Preview unavailable (e.g. server omitted it) — fall back to the
+      // destination file count rather than inventing a transfer number.
+      var n = pf.file_count || 0;
+      var countText = pf.file_count_truncated ? ('at least ' + n.toLocaleString()) : n.toLocaleString();
+      msg = '"' + finalPath + '" already exists and contains ' + countText + ' file' + (n !== 1 || pf.file_count_truncated ? 's' : '') +
+        '. Merge "' + folderName + '" (' + photoCount + ' photos) into it? Files already there are left untouched; only missing files are copied. If a same-name file differs, the merge is canceled and nothing is changed. Originals are removed only after every source file is verified at the destination.';
+    }
     showConfirm(
       'Destination Exists — Merge & Resume',
-      '"' + finalPath + '" already exists and contains ' + countText + ' file' + (n !== 1 || pf.file_count_truncated ? 's' : '') +
-        '. Merge "' + folderName + '" (' + photoCount + ' photos) into it? Files already present with a matching size are skipped; only missing files are copied. Originals are removed only after every source file is verified at the destination.',
+      msg,
       function() {
         executeQuickMove(fid, dest, true);
       }

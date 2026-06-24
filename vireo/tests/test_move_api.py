@@ -284,6 +284,218 @@ def test_move_folder_preflight_caps_existing_destination_dir_fanout(app_and_db, 
     assert data["file_count_truncated"] is True
 
 
+def test_scan_dir_file_count_stops_walking_after_truncation(tmp_path, monkeypatch):
+    """Once the inner-loop cap trips ``truncated`` mid-scan, the outer walk
+    must stop immediately — not keep popping the already-queued sibling
+    directories until ``dirs_seen`` mechanically catches up to ``dir_limit``.
+
+    On a flat fanout NAS target, the queued-sibling drain is the same
+    worker-stalling behavior the cap is meant to avoid: it can open ~dir_limit
+    extra directories after the decision to truncate is already made.
+    """
+    import app as app_module
+
+    # 30 subdirectories under one root. With dir_limit=10, the inner for-loop
+    # appends children to the stack one at a time. After the 9th append the
+    # check ``dirs_seen (1) + len(stack) (9) >= 10`` trips and sets
+    # ``truncated`` — but the stack still holds 9 queued sibling dirs.
+    root = tmp_path / "fanout"
+    root.mkdir()
+    for d in range(30):
+        (root / f"sub-{d:02d}").mkdir()
+
+    real_scandir = os.scandir
+    scanned = []
+
+    def counting_scandir(path):
+        scanned.append(str(path))
+        return real_scandir(path)
+
+    monkeypatch.setattr(app_module.os, "scandir", counting_scandir)
+
+    file_count, truncated = app_module._scan_dir_file_count(
+        str(root), file_limit=None, dir_limit=10)
+
+    assert truncated is True
+    assert file_count == 0
+    # Only the root dir should have been scanned. Before the fix, the outer
+    # ``while stack:`` would have kept popping the 9 already-queued children
+    # and called os.scandir on each one even though ``truncated`` was already
+    # True — exactly the worker-stalling drain the cap is meant to prevent.
+    assert len(scanned) == 1, scanned
+
+
+def test_move_folder_preflight_exact_mode_counts_past_quick_cap(app_and_db, tmp_path):
+    """mode='exact' counts past the 1000-file quick-scan cap and reports the
+    true number with truncated=False, since the destination's true size is
+    well under the larger exact-mode cap."""
+    app, db = app_and_db
+    dst = tmp_path / "dest"
+    dst.mkdir()
+
+    folder = db.get_folder_tree()[0]
+    folder_name = folder["name"] or os.path.basename(folder["path"].rstrip("/\\"))
+    landing = dst / folder_name
+    landing.mkdir()
+    for idx in range(1001):
+        (landing / f"already-{idx}.jpg").write_bytes(b"x")
+
+    client = app.test_client()
+    resp = client.post("/api/move-folder/preflight", json={
+        "folder_id": folder["id"],
+        "destination": str(dst),
+        "mode": "exact",
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["exists"] is True
+    assert data["file_count"] == 1001
+    assert data["file_count_truncated"] is False
+    assert "preview" not in data
+
+
+def test_move_folder_preflight_exact_mode_is_capped_not_unbounded(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """mode='exact' must NOT walk the destination tree uncapped. The UI's
+    requestExactDestCount fires from the keystroke-driven path, so an
+    unbounded walk on a hoarder-NAS target with millions of files would pin
+    a Flask worker for minutes (the UI seq guard only discards stale replies,
+    not server-side work). Exact mode passes a generous but finite cap so the
+    worst case is seconds, and the response surfaces truncated=True if the
+    cap was hit — the UI already renders that as 'at least N'."""
+    import app as app_module
+
+    app, db = app_and_db
+    dst = tmp_path / "dest"
+    dst.mkdir()
+    folder = db.get_folder_tree()[0]
+    folder_name = folder["name"] or os.path.basename(folder["path"].rstrip("/\\"))
+    landing = dst / folder_name
+    landing.mkdir()
+
+    captured = {}
+
+    def fake_scan(root_path, file_limit=None, dir_limit=None):
+        captured["file_limit"] = file_limit
+        captured["dir_limit"] = dir_limit
+        # Pretend the cap was hit so the truncated flag can be checked too.
+        return file_limit or 0, True
+
+    monkeypatch.setattr(app_module, "_scan_dir_file_count", fake_scan)
+
+    client = app.test_client()
+    resp = client.post("/api/move-folder/preflight", json={
+        "folder_id": folder["id"],
+        "destination": str(dst),
+        "mode": "exact",
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Both caps must be set (not None) so the walk is bounded, and both must
+    # be much larger than the quick-mode caps so realistic libraries never
+    # see "at least N" from exact mode.
+    assert captured["file_limit"] is not None and captured["file_limit"] >= 100000
+    assert captured["dir_limit"] is not None and captured["dir_limit"] >= 50000
+    # Truncation from the helper must surface in the response so the UI can
+    # render "at least N" instead of implying an exact total.
+    assert data["file_count_truncated"] is True
+    assert data["file_count"] == captured["file_limit"]
+
+
+def test_move_folder_preflight_preview_reports_transfer_counts(app_and_db, tmp_path):
+    """mode='preview' reports how many source files would copy vs. be skipped
+    as already present — counting every file (sidecars included), not just
+    tracked photos."""
+    app, db = app_and_db
+
+    # Real on-disk source folder with a nested file and an XMP sidecar.
+    src = tmp_path / "src_folder"
+    src.mkdir()
+    (src / "a.jpg").write_bytes(b"a")
+    (src / "a.jpg.xmp").write_bytes(b"sidecar")
+    (src / "sub").mkdir()
+    (src / "sub" / "c.jpg").write_bytes(b"c")
+    fid = db.add_folder(str(src), name="src_folder")
+
+    # Destination already holds one of the source files (a resume scenario).
+    dst = tmp_path / "dest"
+    dst.mkdir()
+    landing = dst / "src_folder"
+    landing.mkdir()
+    (landing / "a.jpg").write_bytes(b"a")
+
+    client = app.test_client()
+    resp = client.post("/api/move-folder/preflight", json={
+        "folder_id": fid,
+        "destination": str(dst),
+        "mode": "preview",
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["exists"] is True
+    preview = data["preview"]
+    # a.jpg already present -> skip; a.jpg.xmp and sub/c.jpg missing -> copy.
+    assert preview["will_skip"] == 1
+    assert preview["will_copy"] == 2
+    assert preview["will_block"] == 0
+    assert preview["source_total"] == 3
+
+
+def test_move_folder_preflight_preview_caps_destination_scan(app_and_db, tmp_path):
+    """mode='preview' must NOT walk the destination uncapped. The merge dialog
+    uses the preview's copy/skip counts, not the raw destination file_count, so
+    a full destination-tree walk here would block a Flask worker on large
+    resume targets (NAS folders with millions of unrelated files) for no UI
+    benefit. Capped behavior matches mode='quick': file_count plateaus at the
+    cap and file_count_truncated flips to True."""
+    app, db = app_and_db
+
+    src = tmp_path / "src_folder"
+    src.mkdir()
+    (src / "a.jpg").write_bytes(b"a")
+    fid = db.add_folder(str(src), name="src_folder")
+
+    dst = tmp_path / "dest"
+    dst.mkdir()
+    landing = dst / "src_folder"
+    landing.mkdir()
+    for idx in range(1001):
+        (landing / f"already-{idx}.jpg").write_bytes(b"x")
+
+    client = app.test_client()
+    resp = client.post("/api/move-folder/preflight", json={
+        "folder_id": fid,
+        "destination": str(dst),
+        "mode": "preview",
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["exists"] is True
+    assert data["file_count"] == 1000
+    assert data["file_count_truncated"] is True
+    # The preview block still describes the source -> destination transfer.
+    assert "preview" in data
+
+
+def test_move_folder_preflight_preview_omitted_when_dest_missing(app_and_db, tmp_path):
+    """No preview block when the destination doesn't exist — there is nothing
+    to merge into, so a fresh move copies everything."""
+    app, db = app_and_db
+    folder = db.get_folder_tree()[0]
+
+    client = app.test_client()
+    resp = client.post("/api/move-folder/preflight", json={
+        "folder_id": folder["id"],
+        "destination": str(tmp_path / "nonexistent"),
+        "mode": "preview",
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["exists"] is False
+    assert "preview" not in data
+
+
 def test_move_folder_preflight_requires_params(app_and_db):
     """Preflight without folder_id returns 400."""
     app, _ = app_and_db
