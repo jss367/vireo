@@ -638,15 +638,21 @@ var quickPreflightTimer = null;
 
 function scheduleQuickPreflight(fid, dest) {
   if (quickPreflightTimer) clearTimeout(quickPreflightTimer);
+  // Bump the sequence on *every* call, not just when a request starts. Any
+  // change to the destination must immediately invalidate an in-flight
+  // response for the previous value — otherwise a response landing during the
+  // 350ms debounce window, or when the new value is non-absolute (so no new
+  // request is scheduled), would still pass the seq guard and write stale
+  // exists/new-folder text for the wrong destination.
+  var seq = ++quickPreflightSeq;
   // The preflight route rejects non-absolute paths, so wait until the input
   // looks absolute (POSIX '/...' or Windows 'C:\...') before asking.
   var isAbs = dest.charAt(0) === '/' || /^[A-Za-z]:[\\\/]/.test(dest);
   if (!isAbs) return;
-  quickPreflightTimer = setTimeout(function() { runQuickPreflight(fid, dest); }, 350);
+  quickPreflightTimer = setTimeout(function() { runQuickPreflight(fid, dest, seq); }, 350);
 }
 
-async function runQuickPreflight(fid, dest) {
-  var seq = ++quickPreflightSeq;
+async function runQuickPreflight(fid, dest, seq) {
   var status = document.getElementById('quickDestStatus');
   if (status) {
     status.textContent = 'Checking destination…';
