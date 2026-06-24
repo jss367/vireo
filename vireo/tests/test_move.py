@@ -341,6 +341,40 @@ def test_preview_merge_counts_directory_symlinks(move_env, tmp_path):
     assert preview["source_total"] == 4
 
 
+def test_preview_merge_blocks_source_file_symlinks_with_missing_dest(move_env, tmp_path):
+    """A source file that is itself a symlink, with nothing yet at the
+    destination, must surface as ``will_block`` — not ``will_copy``.
+
+    rsync -a (and the shutil fallback's os.symlink) recreate it as a
+    symlink at the destination rather than materializing a regular file,
+    and ``_first_missing_source_file`` then rejects the freshly-created
+    symlink via its islink check. The merge aborts at the verify step
+    after creating the link. Reporting it as "will be copied" would be a
+    false promise: the dialog must warn instead so the user can choose
+    not to commit to a merge that deterministically fails.
+    """
+    from move import preview_merge
+
+    env = move_env
+    # Source file symlink pointing outside the source tree. The link target
+    # itself doesn't matter — the merge would create a symlink at the
+    # destination either way, and the verifier rejects on islink alone.
+    link_target = tmp_path / "real_bird3.jpg"
+    link_target.write_bytes(b"x")
+    os.symlink(str(link_target), str(env["src"] / "bird3.jpg"))
+
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    preview = preview_merge(str(env["src"]), str(landing))
+    # 3 plain source files (bird1.jpg, bird1.xmp, bird2.jpg) are missing
+    # at the destination — those are honest copies. bird3.jpg is a source
+    # symlink with no destination entry — would-fail-verify after copy.
+    assert preview["will_copy"] == 3
+    assert preview["will_block"] == 1
+    assert preview["will_skip"] == 0
+    assert preview["source_total"] == 4
+
+
 def test_preview_merge_is_name_only(move_env):
     """A same-name destination file counts as a skip even when its bytes
     differ — rsync --ignore-existing skips by name, and the differing-content

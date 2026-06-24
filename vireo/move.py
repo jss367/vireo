@@ -337,6 +337,15 @@ def preview_merge(src_path, dest_path):
     untouched". Surfaced separately so the confirm dialog can warn that
     the merge would not complete instead of implying a no-op resume.
 
+    It also covers source files that are themselves symlinks with no
+    destination entry yet. ``rsync -a`` (and the shutil fallback's
+    ``os.symlink``) recreate them as symlinks at the destination rather
+    than materializing a regular file — and the verifier then rejects the
+    freshly-created symlink and aborts the merge. Telling the user the
+    file will be copied when the job deterministically fails at verify
+    after creating it is the same false promise as the destination-entry
+    case, so it's classified as blocked too.
+
     Directory symlinks under ``src_path`` count as one transfer item each:
     the rsync ``-a`` path and the shutil fallback (see
     ``_copy_tree_with_progress``) both recreate them as symlinks at the
@@ -367,7 +376,16 @@ def preview_merge(src_path, dest_path):
             rel_name = fn if rel == "." else os.path.join(rel, fn)
             dst_file = os.path.join(dest_path, rel_name)
             if not os.path.lexists(dst_file):
-                will_copy += 1
+                # A source-file symlink gets recreated as a symlink at the
+                # destination by rsync -a / the shutil fallback's os.symlink;
+                # the verifier then rejects that symlink via its islink check
+                # and the merge aborts with "Verification failed". Surface it
+                # as blocked so the dialog never promises a copy that won't
+                # survive verification.
+                if os.path.islink(src_file):
+                    will_block += 1
+                else:
+                    will_copy += 1
             elif _verifier_would_accept_skip(src_file, dst_file):
                 will_skip += 1
             else:
