@@ -11,6 +11,74 @@ def test_move_page_returns_200(app_and_db):
     assert resp.status_code == 200
 
 
+def test_move_page_folder_browser_exposes_volumes_shortcut(app_and_db):
+    """Move destinations should be able to jump directly to mounted volumes.
+    Mac uses /Volumes (a real directory). Windows + Linux use /api/volumes
+    since mount roots vary per host (drive letters; /media, /run/media,
+    /mnt)."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/move")
+    html = resp.data.decode()
+
+    assert "browseTo('__volumes__')" in html
+    # Non-Mac hosts (Windows + Linux) fan through /api/volumes.
+    assert "if (navigator.userAgent.indexOf('Mac') < 0)" in html
+    assert "await safeFetch('/api/volumes')" in html
+    # Mac still goes through /api/browse on /Volumes.
+    assert (
+        "url = '/api/browse?path=' + encodeURIComponent('/Volumes');"
+    ) in html
+
+
+def test_move_page_browser_stamps_requests(app_and_db):
+    """Each browseTo call must stamp a sequence number and drop stale
+    responses. Otherwise a slow initial /api/browse for the prefilled
+    destination can land after a Pictures/Volumes shortcut click and
+    silently revert the list."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/move")
+    html = resp.data.decode()
+
+    assert "var browseSeq = 0;" in html
+    assert "var seq = ++browseSeq;" in html
+    assert "if (seq !== browseSeq) return;" in html
+
+
+def test_move_page_pictures_shortcut_resolves_home_on_demand(app_and_db):
+    """The Pictures shortcut must resolve the user's home directory before
+    composing the path. Otherwise, opening the modal with a prefilled
+    destination (which skips the initial browseTo(null)) sends an absolute
+    '/Pictures' to the backend and lands at the wrong root."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/move")
+    html = resp.data.decode()
+
+    assert "if (path === '__pictures__')" in html
+    # The on-demand home fetch must happen inside the Pictures branch.
+    assert "if (!browserHomePath)" in html
+    assert "await safeFetch('/api/browse')" in html
+    assert (
+        "url = '/api/browse?path=' + encodeURIComponent("
+        "browserHomePath + '/Pictures');"
+    ) in html
+
+
+def test_move_page_windows_parent_preserves_drive_root(app_and_db):
+    """When drilling up from 'C:\\Users', the parent must be 'C:\\', not 'C:'.
+    Without the trailing backslash the backend treats it as the drive's cwd
+    and the '..' link sends users to the wrong place."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/move")
+    html = resp.data.decode()
+
+    assert "/^[A-Za-z]:$/.test(parent)" in html
+    assert "parent += '\\\\'" in html
+
+
 def test_move_photos_job_starts(app_and_db, tmp_path):
     """POST /api/jobs/move-photos starts a job."""
     app, db = app_and_db

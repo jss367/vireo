@@ -23,6 +23,15 @@ def _fill_slots(runner, workspace_id=1):
     start. Returns ``(ids, release_event)``; call ``release_event.set()``
     to let them finish. Used by tests that need the next enqueue to
     land in the ``queued`` state.
+
+    The blocker wait carries a generous safety-net timeout so a stuck
+    test still terminates, but it must comfortably outlast worst-case
+    CI scheduling delays. Under ``pytest -n 2`` an xdist worker can be
+    starved of CPU for 20+ seconds while another worker loads ONNX
+    models; a tighter timeout would let slot-fillers exit early,
+    freeing slots and promoting the supposedly-queued pipeline to
+    completion before the test can read its status. pytest-timeout's
+    project-wide cap is 120s, leaving plenty of headroom.
     """
     from jobs import SLOT_CAP
     release = threading.Event()
@@ -32,13 +41,13 @@ def _fill_slots(runner, workspace_id=1):
         evt = started_events[i]
         def work(job, _evt=evt, _release=release):
             _evt.set()
-            _release.wait(timeout=5.0)
+            _release.wait(timeout=60.0)
             return {}
         ids.append(runner.enqueue_pipeline(
             work_fn=work, config={}, workspace_id=workspace_id,
         ))
     for i, evt in enumerate(started_events):
-        assert evt.wait(timeout=2.0), f"slot-filler {i} never started"
+        assert evt.wait(timeout=10.0), f"slot-filler {i} never started"
     return ids, release
 
 
