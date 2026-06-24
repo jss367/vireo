@@ -42,3 +42,4 @@ def test_move_folder_button_shows_preflight_progress(live_server, page):
     )
     expect(page.locator("#confirmModal")).to_have_class(re.compile(r"\bopen\b"))
     expect(btn).to_have_text("Move Folder")
+    expect(btn).to_be_enabled()
