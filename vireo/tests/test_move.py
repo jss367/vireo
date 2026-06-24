@@ -1458,3 +1458,39 @@ def test_move_folder_progress_shutil_fallback(move_env, monkeypatch):
     copy_calls = [c for c in calls if c[3] == "Copying files" and c[0] > 0]
     assert copy_calls, "shutil fallback reported no per-file progress"
     assert copy_calls[-1][1] == 3  # same 3-file denominator
+
+
+def test_move_folder_shutil_fallback_preserves_dir_symlink(move_env, monkeypatch):
+    """The shutil fallback (rsync unavailable) must not silently drop a
+    symlinked subdirectory. os.walk doesn't recurse into one, so without
+    explicit handling its contents would never reach the destination yet the
+    count verification would still pass and delete the originals. The symlink
+    must be recreated at the destination, matching rsync -a."""
+    import move as move_mod
+
+    env = move_env
+    # A symlinked subdirectory inside the source pointing at an external dir.
+    external = env["tmp_path"] / "external"
+    external.mkdir()
+    (external / "target.txt").write_text("payload")
+    try:
+        os.symlink(str(external), str(env["src"] / "linkdir"))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    monkeypatch.setattr(move_mod.subprocess, "Popen",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            FileNotFoundError("rsync")))
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"])
+    )
+    assert result["errors"] == []
+    landing = env["dst"] / "src"
+    link = landing / "linkdir"
+    # The symlink is preserved as a symlink, still resolving to the payload.
+    assert link.is_symlink()
+    assert (link / "target.txt").read_text() == "payload"
+    # External target untouched; source removed after a verified copy.
+    assert (external / "target.txt").exists()
+    assert not env["src"].exists()

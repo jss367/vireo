@@ -62,10 +62,26 @@ def _copy_tree_with_progress(src_path, dest_path, skip_existing, total_files,
     dest_path) and a merge share one progress-emitting walk.
     """
     copied = 0
-    for root, _, files in os.walk(src_path):
+    for root, dirs, files in os.walk(src_path):
         rel = os.path.relpath(root, src_path)
         target_dir = dest_path if rel == "." else os.path.join(dest_path, rel)
         os.makedirs(target_dir, exist_ok=True)
+        # os.walk lists a symlinked subdirectory in `dirs` but, with its
+        # default followlinks=False, never recurses into it — so its contents
+        # would be silently dropped here while the post-copy file-count
+        # verification (also a default os.walk) skips it on both sides and
+        # still matches, letting rmtree(src) delete the originals. Recreate
+        # each directory symlink as a symlink at the destination, matching the
+        # primary rsync -a path (which preserves symlinks rather than
+        # following them) and keeping the verification counts consistent.
+        for d in dirs:
+            src_sub = os.path.join(root, d)
+            if not os.path.islink(src_sub):
+                continue
+            dst_sub = os.path.join(target_dir, d)
+            if skip_existing and os.path.lexists(dst_sub):
+                continue
+            os.symlink(os.readlink(src_sub), dst_sub)
         for fn in files:
             dst_file = os.path.join(target_dir, fn)
             if skip_existing and os.path.exists(dst_file):
