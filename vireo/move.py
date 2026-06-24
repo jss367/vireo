@@ -760,12 +760,14 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         progress_cb: optional callback(current, total, filename)
         merge: when False (default), refuse to write into a destination
             that already exists — the safe all-or-nothing behavior. When
-            True, merge/resume into the existing destination: rsync skips
-            files already present with a matching checksum and copies only
-            what is missing (this is how an interrupted move is resumed).
-            Originals are deleted only after every source file is verified
-            present at the destination. A failed merge never removes the
-            destination, since it may hold the user's pre-existing files.
+            True, merge/resume into the existing destination: a pre-copy scan
+            refuses the merge if any same-name file differs in content;
+            otherwise rsync (``--ignore-existing``) copies only the files
+            missing at the destination and never overwrites one already there
+            (this is how an interrupted move is resumed). Originals are deleted
+            only after every source file is verified present at the
+            destination. A failed merge never removes the destination, since it
+            may hold the user's pre-existing files.
         developed_dir: optional path to the configured
             `darktable_output_dir`. When set, the folder's developed
             subdirectory — nested under a hash of its source path, see

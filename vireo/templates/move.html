@@ -704,7 +704,7 @@ async function runQuickPreflight(fid, dest, seq) {
 function setDestExistsStatus(status, n, truncated) {
   var countText = truncated ? ('at least ' + n.toLocaleString()) : n.toLocaleString();
   status.textContent = '⚠ Destination already exists — contains ' + countText + ' file' +
-    (n !== 1 || truncated ? 's' : '') + '. Existing files with a matching size are skipped; only missing files are copied.';
+    (n !== 1 || truncated ? 's' : '') + '. Files already there are left untouched; only missing files are copied. If a same-name file differs, the merge is canceled and nothing is changed.';
   status.style.color = 'var(--warning)';
 }
 
@@ -772,15 +772,21 @@ async function startQuickMove() {
     if (typeof copyN === 'number') {
       // Truthful transfer counts. These count every file under the source
       // (sidecars included), not just tracked photos — that's what rsync moves.
+      // Files already present are left untouched, never overwritten; a
+      // same-name file whose content differs cancels the whole merge, so only
+      // mention that caveat when there are overlapping files (skipN > 0).
+      var conflictNote = skipN ? ' If a same-name file differs, the merge is canceled and nothing is changed.' : '';
       if (copyN === 0) {
         msg = 'All ' + skipN.toLocaleString() + ' file' + (skipN !== 1 ? 's' : '') +
           ' from "' + folderName + '" are already present at "' + finalPath +
-          '". Merging copies nothing new, then removes the originals after verifying every file is at the destination. Continue?';
+          '". Merging copies nothing new.' + conflictNote +
+          ' Originals are removed only after every source file is verified at the destination. Continue?';
       } else {
         msg = 'Merge "' + folderName + '" into "' + finalPath + '"? ' +
           copyN.toLocaleString() + ' file' + (copyN !== 1 ? 's' : '') + ' will be copied' +
-          (skipN ? ', ' + skipN.toLocaleString() + ' already present will be skipped' : '') +
-          '. Originals are removed only after every source file is verified at the destination.';
+          (skipN ? ', ' + skipN.toLocaleString() + ' already present will be left untouched' : '') +
+          '.' + conflictNote +
+          ' Originals are removed only after every source file is verified at the destination.';
       }
     } else {
       // Preview unavailable (e.g. server omitted it) — fall back to the
@@ -788,7 +794,7 @@ async function startQuickMove() {
       var n = pf.file_count || 0;
       var countText = pf.file_count_truncated ? ('at least ' + n.toLocaleString()) : n.toLocaleString();
       msg = '"' + finalPath + '" already exists and contains ' + countText + ' file' + (n !== 1 || pf.file_count_truncated ? 's' : '') +
-        '. Merge "' + folderName + '" (' + photoCount + ' photos) into it? Files already present with a matching size are skipped; only missing files are copied. Originals are removed only after every source file is verified at the destination.';
+        '. Merge "' + folderName + '" (' + photoCount + ' photos) into it? Files already there are left untouched; only missing files are copied. If a same-name file differs, the merge is canceled and nothing is changed. Originals are removed only after every source file is verified at the destination.';
     }
     showConfirm(
       'Destination Exists — Merge & Resume',
