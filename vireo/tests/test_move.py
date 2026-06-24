@@ -1590,7 +1590,9 @@ def test_move_folder_shutil_fallback_preserves_file_symlink(move_env, monkeypatc
     assert result["errors"] == []
     dest_link = env["dst"] / "src" / "alias.txt"
     assert dest_link.is_symlink()
-    assert os.readlink(str(dest_link)) == str(external)
+    # samefile compares by inode/device, so it tolerates the `\\?\` extended-length
+    # prefix Windows stamps onto absolute symlink targets returned by os.readlink.
+    assert os.path.samefile(str(dest_link), str(external))
     # External target untouched; source removed after a verified copy.
     assert external.read_text() == "external payload"
     assert not env["src"].exists()
