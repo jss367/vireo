@@ -1106,7 +1106,19 @@ function closeBrowser() {
 async function browseTo(path) {
   var url = '/api/browse';
   if (path === '__pictures__') {
-    url = '/api/browse?path=' + encodeURIComponent((browserHomePath || '') + '/Pictures');
+    // When the modal opens with a prefilled destination we skip the
+    // browseTo(null) call that would otherwise cache the home path, so
+    // resolve it on demand here. Without this, '/Pictures' is sent as an
+    // absolute path and lands at the wrong root.
+    if (!browserHomePath) {
+      try {
+        var home = await safeFetch('/api/browse');
+        browserHomePath = home.path;
+      } catch (e) {
+        return;
+      }
+    }
+    url = '/api/browse?path=' + encodeURIComponent(browserHomePath + '/Pictures');
   } else if (path === '__volumes__') {
     if (navigator.userAgent.indexOf('Win') >= 0) {
       try {
@@ -1142,6 +1154,10 @@ function renderBrowserList(data, opts) {
   var parent = '';
   if (data.path && data.path.indexOf('\\') !== -1) {
     parent = data.path.replace(/[\\\/]?[^\\\/]+[\\\/]?$/, '') || data.path;
+    // Drive-root edge case: 'C:\Users'.replace(...) yields 'C:', which the
+    // backend treats as the drive's process-local cwd. Restore the trailing
+    // backslash so '..' returns to the drive root instead.
+    if (/^[A-Za-z]:$/.test(parent)) parent += '\\';
   } else if (data.path) {
     parent = data.path.substring(0, data.path.lastIndexOf('/')) || '/';
   }
