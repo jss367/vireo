@@ -1239,8 +1239,8 @@ def test_move_folder_merge_verify_fail_preserves_originals_and_dest(move_env, mo
     sentinel.write_text("pre-existing")
 
     # Force the copy step to be a no-op so a source file is "missing" at dest.
-    monkeypatch.setattr(move_mod.subprocess, "run",
-                        lambda *a, **k: type("R", (), {"returncode": 0, "stderr": ""})())
+    monkeypatch.setattr(move_mod, "_run_rsync",
+                        lambda *a, **k: (0, ""))
 
     result = move_mod.move_folder(
         db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
@@ -1275,8 +1275,8 @@ def test_move_folder_merge_rejects_symlinked_dest_file(move_env, monkeypatch):
 
     # Force rsync to no-op (it would normally honor --ignore-existing and
     # leave the symlink anyway; this just removes the dependency on rsync).
-    monkeypatch.setattr(move_mod.subprocess, "run",
-                        lambda *a, **k: type("R", (), {"returncode": 0, "stderr": ""})())
+    monkeypatch.setattr(move_mod, "_run_rsync",
+                        lambda *a, **k: (0, ""))
 
     result = move_mod.move_folder(
         db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
@@ -1314,8 +1314,8 @@ def test_move_folder_merge_rejects_symlinked_dest_subdir(move_env, monkeypatch):
     except (OSError, NotImplementedError):
         pytest.skip("symlinks not supported on this platform")
 
-    monkeypatch.setattr(move_mod.subprocess, "run",
-                        lambda *a, **k: type("R", (), {"returncode": 0, "stderr": ""})())
+    monkeypatch.setattr(move_mod, "_run_rsync",
+                        lambda *a, **k: (0, ""))
 
     result = move_mod.move_folder(
         db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
@@ -1343,8 +1343,8 @@ def test_move_folder_merge_rejects_broken_symlink(move_env, monkeypatch):
     except (OSError, NotImplementedError):
         pytest.skip("symlinks not supported on this platform")
 
-    monkeypatch.setattr(move_mod.subprocess, "run",
-                        lambda *a, **k: type("R", (), {"returncode": 0, "stderr": ""})())
+    monkeypatch.setattr(move_mod, "_run_rsync",
+                        lambda *a, **k: (0, ""))
 
     result = move_mod.move_folder(
         db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
@@ -1379,6 +1379,59 @@ def test_move_folder_updates_counts(move_env):
         (str(env["dst"] / "src"),),
     ).fetchone()
     assert row["photo_count"] == 2
+
+
+def test_move_folder_reports_file_progress(move_env):
+    """move_folder reports progress in file units while copying, ending at
+    N-of-N. The denominator is the folder's file count (3: two jpgs + one xmp),
+    not the photo count (2). Regression: progress used to fire only once, at
+    the very end, so the UI bar sat frozen for the whole copy."""
+    from move import move_folder
+
+    env = move_env
+    calls = []
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]),
+        progress_cb=lambda cur, tot, fn: calls.append((cur, tot, fn)),
+    )
+    assert result["errors"] == []
+    assert calls, "progress_cb was never called"
+    # Denominator is the file count, reported consistently on every call.
+    assert all(tot == 3 for _, tot, _ in calls)
+    # Counter is monotonic and finishes at the full count.
+    currents = [cur for cur, _, _ in calls]
+    assert currents == sorted(currents)
+    assert currents[-1] == 3
+
+
+def test_run_rsync_streams_per_file_progress(tmp_path):
+    """_run_rsync advances the counter once per transferred file and seeds it
+    with the baseline of already-present files."""
+    import shutil as _shutil
+    from move import _run_rsync
+
+    if _shutil.which("rsync") is None:
+        pytest.skip("rsync not available")
+
+    src = tmp_path / "src"
+    src.mkdir()
+    for i in range(3):
+        (src / f"f{i}.bin").write_bytes(b"x" * (i + 1))
+    dst = tmp_path / "dst"
+
+    calls = []
+    rc, stderr = _run_rsync(
+        str(src), str(dst), "--checksum",
+        progress_cb=lambda cur, tot, fn: calls.append((cur, tot, fn)),
+        baseline=2, total=5,
+    )
+    assert rc == 0, stderr
+    currents = [cur for cur, _, _ in calls]
+    # Three files transferred, counted on top of the baseline of 2 → 3,4,5.
+    assert currents == [3, 4, 5]
+    assert all(tot == 5 for _, tot, _ in calls)
+    # Filenames are reported, directory lines are not counted.
+    assert {fn for _, _, fn in calls} == {"f0.bin", "f1.bin", "f2.bin"}
 
 
 def test_move_photos_progress_callback(move_env):

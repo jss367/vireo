@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 
 log = logging.getLogger(__name__)
 
@@ -545,6 +546,66 @@ def move_photos(db, photo_ids, destination, progress_cb=None):
     return {"moved": moved, "errors": errors, "destination_folder_id": dest_folder_id}
 
 
+def _run_rsync(src_path, dest_path, rsync_flag, progress_cb=None,
+               baseline=0, total=0, timeout=3600):
+    """Run rsync, reporting per-file progress as the copy proceeds.
+
+    `--out-format=%n` makes rsync print the name of each item it actually
+    transfers (files skipped by --ignore-existing are not printed), so the
+    progress counter advances file-by-file instead of leaving the UI frozen
+    for the entire copy. `baseline` seeds the count with files already present
+    at a merge destination so a resumed move's bar starts where the interrupted
+    run stopped rather than at zero; `total` is the folder's full file count,
+    used as the denominator.
+
+    Returns (returncode, stderr). Raises FileNotFoundError if rsync is missing
+    and subprocess.TimeoutExpired if the copy exceeds `timeout` seconds, so the
+    caller's existing fallback and timeout handling still apply.
+    """
+    proc = subprocess.Popen(
+        ["rsync", "-a", rsync_flag, "--out-format=%n",
+         src_path + "/", dest_path + "/"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+
+    count = baseline
+
+    def _pump_stdout():
+        nonlocal count
+        for line in proc.stdout:
+            name = line.rstrip("\n")
+            # rsync also lists the directories it creates (printed with a
+            # trailing slash) and the "./" root; count only files.
+            if not name or name.endswith("/"):
+                continue
+            count += 1
+            if progress_cb:
+                shown = min(count, total) if total else count
+                progress_cb(shown, total, os.path.basename(name))
+
+    # Drain stderr on its own thread so a chatty failure can't fill the pipe
+    # buffer and wedge rsync (and our proc.wait) mid-copy.
+    err = []
+
+    def _pump_stderr():
+        err.append(proc.stderr.read())
+
+    out_t = threading.Thread(target=_pump_stdout, daemon=True)
+    err_t = threading.Thread(target=_pump_stderr, daemon=True)
+    out_t.start()
+    err_t.start()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        raise
+    finally:
+        out_t.join(timeout=5)
+        err_t.join(timeout=5)
+    return proc.returncode, "".join(err)
+
+
 def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
                 merge=False):
     """Move an entire folder (and subfolders) to a destination.
@@ -653,13 +714,27 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     # differs from the source) is left untouched here and caught by the
     # post-copy verification below, which then refuses to delete the originals.
     rsync_flag = "--ignore-existing" if dest_exists else "--checksum"
-    try:
-        result = subprocess.run(
-            ["rsync", "-a", rsync_flag, src_path + "/", dest_path + "/"],
-            capture_output=True, text=True, timeout=3600,
+
+    # Progress denominator: every file that should end up in the destination
+    # folder (the local source walk is cheap and exact). On a merge/resume,
+    # seed the counter with the files already present so the bar starts where
+    # the interrupted run stopped instead of at zero — and reuse this count for
+    # the fresh-move integrity check below rather than walking the source twice.
+    total_files = sum(1 for _, _, files in os.walk(src_path) for _ in files)
+    baseline = 0
+    if dest_exists:
+        baseline = min(
+            sum(1 for _, _, files in os.walk(dest_path) for _ in files),
+            total_files,
         )
-        if result.returncode != 0:
-            return {"moved": 0, "errors": [f"rsync failed: {result.stderr.strip()}"]}
+
+    try:
+        returncode, stderr = _run_rsync(
+            src_path, dest_path, rsync_flag, progress_cb=progress_cb,
+            baseline=baseline, total=total_files, timeout=3600,
+        )
+        if returncode != 0:
+            return {"moved": 0, "errors": [f"rsync failed: {stderr.strip()}"]}
     except FileNotFoundError:
         # rsync not available, fall back to shutil
         try:
@@ -690,8 +765,9 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             ]}
     else:
         # Fresh move into a destination we created: a whole-tree file
-        # count is a cheap, sufficient integrity check.
-        src_count = sum(1 for _, _, files in os.walk(src_path) for _ in files)
+        # count is a cheap, sufficient integrity check (source is unchanged
+        # by the copy, so the pre-copy total still holds).
+        src_count = total_files
         dst_count = sum(1 for _, _, files in os.walk(dest_path) for _ in files)
         if src_count != dst_count:
             shutil.rmtree(dest_path, ignore_errors=True)
@@ -747,6 +823,8 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     shutil.rmtree(src_path)
 
     if progress_cb:
-        progress_cb(total_photos, total_photos, folder_name)
+        # Report completion in the same file units the streaming copy used, so
+        # the bar reads "N of N files" rather than jumping to a photo count.
+        progress_cb(total_files, total_files, folder_name)
 
     return {"moved": total_photos, "errors": []}
