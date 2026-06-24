@@ -1494,3 +1494,50 @@ def test_move_folder_shutil_fallback_preserves_dir_symlink(move_env, monkeypatch
     # External target untouched; source removed after a verified copy.
     assert (external / "target.txt").exists()
     assert not env["src"].exists()
+
+
+def test_move_folder_fresh_move_detects_late_source_file(move_env, monkeypatch):
+    """A file added to the source after the upfront file count but before
+    verification — a concurrent writer race rsync's scan missed — must be
+    detected before `shutil.rmtree(src_path)` would silently delete it.
+
+    Trusting the upfront `total_files` as the source count makes this
+    silently incorrect: src now holds total_files+1 files, rsync copied
+    only total_files of them, dst_count equals total_files, and a stale
+    count compare passes — then rmtree wipes the new source file.
+    Verification must re-examine the source against the destination
+    instead of reusing the pre-copy count."""
+    import shutil as _shutil
+
+    import move as move_mod
+
+    env = move_env
+    landing = env["dst"] / "src"
+    assert not landing.exists()  # fresh move (no merge path)
+
+    def _copy_then_inject(src_path, dest_path, *args, **kwargs):
+        # Stand in for rsync: copy the tree as it looked when scanning began,
+        # then simulate a concurrent writer adding a new file to the source
+        # before verification runs.
+        _shutil.copytree(src_path, dest_path)
+        (env["src"] / "late_arrival.jpg").write_bytes(b"new content")
+        return 0, "", False
+
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed", _copy_then_inject)
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]),
+    )
+    # The move must abort — assert the safety property (originals survive,
+    # late arrival is not silently deleted) without coupling to the exact
+    # error wording. A count-mismatch fix surfaces this differently from a
+    # per-source-file presence check; both are valid signals.
+    assert result["moved"] == 0
+    assert result["errors"], "expected an error explaining why verification failed"
+    assert (env["src"] / "late_arrival.jpg").exists(), \
+        "the late source file was silently deleted"
+    assert (env["src"] / "late_arrival.jpg").read_bytes() == b"new content"
+    # The pre-existing source files must also still be present — a fresh
+    # move that aborts at verification preserves originals.
+    assert (env["src"] / "bird1.jpg").exists()
+    assert (env["src"] / "bird2.jpg").exists()
