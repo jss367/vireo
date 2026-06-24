@@ -103,6 +103,20 @@ def _run_rsync_streamed(src_path, dest_path, rsync_flag, total_files,
 
     killer = threading.Timer(timeout, _kill)
     killer.start()
+
+    # Drain stderr on a separate thread. rsync can emit a lot of stderr (e.g.
+    # many permission-denied or "file vanished" notices); if that fills the
+    # pipe buffer while this thread is blocked reading stdout, rsync blocks on
+    # the stderr write and neither side progresses — a deadlock that would
+    # only break when the 1-hour timer kills the job. Reading both streams
+    # concurrently keeps the error surfacing promptly, matching the old
+    # subprocess.run(capture_output=True) behavior.
+    stderr_chunks = []
+    stderr_thread = threading.Thread(
+        target=lambda: stderr_chunks.append(proc.stderr.read())
+    )
+    stderr_thread.start()
+
     copied = 0
     try:
         for line in proc.stdout:
@@ -116,7 +130,8 @@ def _run_rsync_streamed(src_path, dest_path, rsync_flag, total_files,
         proc.wait()
     finally:
         killer.cancel()
-    return proc.returncode, proc.stderr.read(), state["timed_out"]
+    stderr_thread.join()
+    return proc.returncode, "".join(stderr_chunks), state["timed_out"]
 
 
 def _find_content_conflict(src_path, dest_path):
@@ -759,9 +774,13 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             ]}
     else:
         # Fresh move into a destination we created: a whole-tree file
-        # count is a cheap, sufficient integrity check. Reuse the source
-        # count taken before the copy — rsync never mutates the source.
-        src_count = total_files
+        # count is a cheap, sufficient integrity check. Recount the source
+        # here rather than reusing the pre-copy `total_files` — if a file
+        # appeared in the source after that upfront count (and rsync didn't
+        # pick it up), a stale count could spuriously match `dst_count` and
+        # the rmtree below would delete the never-copied file. The fresh
+        # walk catches that mismatch and preserves the originals.
+        src_count = sum(1 for _, _, files in os.walk(src_path) for _ in files)
         dst_count = sum(1 for _, _, files in os.walk(dest_path) for _ in files)
         if src_count != dst_count:
             shutil.rmtree(dest_path, ignore_errors=True)
