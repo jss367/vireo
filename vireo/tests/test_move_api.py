@@ -128,6 +128,48 @@ def test_move_folder_job_starts(app_and_db, tmp_path):
     assert data["job_id"].startswith("move-folder-")
 
 
+def test_move_folder_failed_move_recorded_as_failed(app_and_db, tmp_path):
+    """A move that copies nothing (here: a destination that overlaps the
+    source, so move_folder returns {"moved": 0, "errors": [...]} without
+    raising) must be recorded in history as 'failed', not 'completed' — and
+    error_count must reflect the failure. Regression for move jobs that read
+    "completed, 0 errors" despite moving nothing.
+    """
+    import sys
+
+    sys.path.insert(0, os.path.dirname(__file__))
+    from wait import wait_for_job_via_client
+
+    app, db = app_and_db
+
+    # Real on-disk source folder so move_folder's overlap check runs.
+    src = tmp_path / "src_folder"
+    src.mkdir()
+    (src / "a.jpg").write_bytes(b"data")
+    fid = db.add_folder(str(src), name="src_folder")
+
+    client = app.test_client()
+    # destination == source ⇒ resolved dest nests inside the source ⇒ overlap
+    # ⇒ deterministic failure with moved=0 and no needs_merge.
+    resp = client.post("/api/jobs/move-folder", json={
+        "folder_id": fid,
+        "destination": str(src),
+    })
+    assert resp.status_code == 200
+    job_id = resp.get_json()["job_id"]
+
+    job = wait_for_job_via_client(client, job_id, wait_for_history=True)
+    assert job["status"] == "failed", job
+    # The source must be untouched — a failed move never deletes originals.
+    assert (src / "a.jpg").exists()
+
+    row = db.conn.execute(
+        "SELECT status, error_count FROM job_history WHERE id = ?", (job_id,)
+    ).fetchone()
+    assert row["status"] == "failed"
+    assert row["error_count"] >= 1
+
+
 def test_move_folder_merge_param_accepted(app_and_db, tmp_path):
     """POST /api/jobs/move-folder accepts merge=true and starts a job."""
     app, db = app_and_db

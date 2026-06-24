@@ -101,6 +101,99 @@ def test_job_runner_still_records_novel_exception_text():
     assert "orchestrator failure: unexpected state" in job['errors']
 
 
+def test_job_result_ok_false_marks_failed(tmp_path):
+    """A work function that returns normally but signals failure via
+    {"ok": False, "errors": [...]} must be recorded as 'failed', not
+    'completed' — and its result errors must be folded into error_count.
+
+    This is the move-folder case: rsync times out, move_folder returns
+    {"moved": 0, "errors": [...]} (no exception), and the run used to read
+    as "completed, 0 errors" in history.
+    """
+    from jobs import JobRunner
+
+    runner = JobRunner()
+
+    def work(job):
+        return {"moved": 0, "errors": ["rsync timed out"], "ok": False}
+
+    job_id = runner.start('move-folder', work)
+
+    job = wait_for_job_via_runner(runner, job_id)
+    assert job['status'] == 'failed'
+    assert "rsync timed out" in job['errors']
+
+
+def test_job_result_ok_true_with_warnings_stays_completed(tmp_path):
+    """A work function returning {"ok": True, "errors": [...]} represents a
+    partial success: the job completes, but the result errors are still
+    folded into the job's error tally so the count is honest."""
+    from jobs import JobRunner
+
+    runner = JobRunner()
+
+    def work(job):
+        return {"moved": 5, "errors": ["one file skipped"], "ok": True}
+
+    job_id = runner.start('move-folder', work)
+
+    job = wait_for_job_via_runner(runner, job_id)
+    assert job['status'] == 'completed'
+    assert "one file skipped" in job['errors']
+
+
+def test_job_result_without_ok_key_unaffected(tmp_path):
+    """The ok/errors folding is opt-in: a result dict with no "ok" key keeps
+    today's behavior (completed, runner-level error list untouched)."""
+    from jobs import JobRunner
+
+    runner = JobRunner()
+
+    def work(job):
+        return {"moved": 0, "errors": ["informational note"]}
+
+    job_id = runner.start('test', work)
+
+    job = wait_for_job_via_runner(runner, job_id)
+    assert job['status'] == 'completed'
+    assert job['errors'] == []
+
+
+def test_job_result_ok_false_persists_failed_with_error_count(tmp_path):
+    """End-to-end: an ok=False result is persisted to job_history with
+    status='failed' and error_count reflecting the result errors."""
+    from db import Database
+    from jobs import JobRunner
+
+    db = Database(str(tmp_path / "test.db"))
+    runner = JobRunner(db=db)
+
+    def work(job):
+        return {
+            "moved": 0,
+            "errors": ["rsync timed out", "renameat: Operation timed out"],
+            "ok": False,
+            "summary": "Move failed — rsync timed out",
+        }
+
+    job_id = runner.start('move-folder', work)
+
+    row = None
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        row = db.conn.execute(
+            "SELECT status, error_count, summary FROM job_history WHERE id = ?",
+            (job_id,),
+        ).fetchone()
+        if row is not None:
+            break
+        time.sleep(0.05)
+    assert row is not None
+    assert row["status"] == "failed"
+    assert row["error_count"] == 2, f"expected error_count=2, got {row['error_count']}"
+    assert row["summary"] == "Move failed — rsync timed out"
+
+
 def test_failed_job_history_preserves_structured_result(tmp_path):
     """When a work function stashes a structured result on job['result']
     before raising, _persist_job must preserve that structure in history
