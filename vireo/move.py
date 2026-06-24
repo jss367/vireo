@@ -188,8 +188,15 @@ def _run_rsync_streamed(src_path, dest_path, rsync_flag, total_files,
     stderr_chunks = []
 
     def _drain_stderr():
-        for chunk in iter(lambda: proc.stderr.read(4096), ""):
-            stderr_chunks.append(chunk)
+        # Iterate line-by-line rather than read(4096): a fixed-size read on a
+        # buffered text stream blocks until the buffer fills or EOF, so sparse
+        # rsync diagnostics ("file vanished", permission notices) wouldn't
+        # refresh last_activity until 4096 chars had accumulated — long enough
+        # that the watchdog could kill a transfer that's still emitting
+        # stderr. Line iteration yields each message as it's flushed, so every
+        # stderr emission counts as liveness.
+        for line in proc.stderr:
+            stderr_chunks.append(line)
             last_activity["t"] = time.monotonic()
 
     stderr_thread = threading.Thread(target=_drain_stderr)

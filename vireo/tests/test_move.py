@@ -1648,11 +1648,11 @@ def test_move_folder_fresh_move_detects_late_source_file(move_env, monkeypatch):
 
 
 class _FakeStderr:
-    """rsync stderr that's empty: the first read returns "" so the drain
-    loop (iter(read, "")) stops immediately."""
+    """rsync stderr that's empty: iterating it yields no lines, so the drain
+    loop (for line in proc.stderr) ends immediately."""
 
-    def read(self, _n=-1):
-        return ""
+    def __iter__(self):
+        return iter(())
 
 
 class _SilentStdout:
