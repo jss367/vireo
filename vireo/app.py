@@ -13454,13 +13454,47 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         resolved = resolve_folder_dest(folder["path"], folder["name"], destination)
         exists = os.path.isdir(resolved)
         file_count = 0
+        file_count_truncated = False
         if exists:
-            file_count = sum(1 for _, _, files in os.walk(resolved) for _ in files)
+            # os.scandir yields entries lazily, so we can bail out the moment
+            # the cap is reached without waiting for the OS to enumerate a
+            # directory with millions of files.
+            file_limit = 1000
+            dir_limit = 2000
+            stack = [resolved]
+            dirs_seen = 0
+            while stack and not file_count_truncated:
+                if file_count >= file_limit or dirs_seen >= dir_limit:
+                    file_count_truncated = True
+                    break
+                current = stack.pop()
+                dirs_seen += 1
+                try:
+                    scanner = os.scandir(current)
+                except OSError:
+                    continue
+                with scanner:
+                    for entry in scanner:
+                        # Check the caps inside the inner loop so a single
+                        # directory with a huge number of children cannot
+                        # blow past either limit before we bail out.
+                        if file_count >= file_limit or dirs_seen + len(stack) >= dir_limit:
+                            file_count_truncated = True
+                            break
+                        try:
+                            is_dir = entry.is_dir(follow_symlinks=False)
+                        except OSError:
+                            is_dir = False
+                        if is_dir:
+                            stack.append(entry.path)
+                        else:
+                            file_count += 1
 
         return jsonify({
             "resolved_dest": resolved,
             "exists": exists,
             "file_count": file_count,
+            "file_count_truncated": file_count_truncated,
         })
 
     @app.route("/api/jobs/import-full", methods=["POST"])

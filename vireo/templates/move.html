@@ -503,6 +503,7 @@ var browserHomePath = '';
 var browseSeq = 0;
 var confirmCallback = null;
 var editingRuleId = null;
+var quickMoveBusy = false;
 
 /* ---------- Init ---------- */
 document.addEventListener('DOMContentLoaded', function() {
@@ -576,8 +577,15 @@ function onQuickFolderChange() {
 function updateQuickMoveBtn() {
   var fid = document.getElementById('quickFolderSelect').value;
   var dest = document.getElementById('quickDestInput').value.trim();
-  document.getElementById('quickMoveBtn').disabled = !(fid && dest);
+  var btn = document.getElementById('quickMoveBtn');
+  btn.disabled = quickMoveBusy || !(fid && dest);
+  btn.textContent = quickMoveBusy ? 'Checking...' : 'Move Folder';
   updateQuickMovePreview();
+}
+
+function setQuickMoveBusy(isBusy) {
+  quickMoveBusy = !!isBusy;
+  updateQuickMoveBtn();
 }
 
 // Compute the final landing path, mirroring move.py move_folder():
@@ -616,6 +624,7 @@ function updateQuickMovePreview() {
 }
 
 async function startQuickMove() {
+  if (quickMoveBusy) return;
   var fid = parseInt(document.getElementById('quickFolderSelect').value);
   var dest = document.getElementById('quickDestInput').value.trim();
   if (!fid || !dest) return;
@@ -627,6 +636,7 @@ async function startQuickMove() {
   // Ask the backend for the resolved destination and whether it already
   // exists, so we can offer merge/resume instead of failing on collision.
   var pf;
+  setQuickMoveBusy(true);
   try {
     pf = await safeFetch('/api/move-folder/preflight', {
       method: 'POST',
@@ -635,14 +645,17 @@ async function startQuickMove() {
     });
   } catch (e) {
     return;  // safeFetch already shows error toast
+  } finally {
+    setQuickMoveBusy(false);
   }
 
   var finalPath = pf.resolved_dest;
   if (pf.exists) {
-    var n = pf.file_count;
+    var n = pf.file_count || 0;
+    var countText = pf.file_count_truncated ? ('at least ' + n) : String(n);
     showConfirm(
       'Destination Exists — Merge & Resume',
-      '"' + finalPath + '" already exists and contains ' + n + ' file' + (n !== 1 ? 's' : '') +
+      '"' + finalPath + '" already exists and contains ' + countText + ' file' + (n !== 1 || pf.file_count_truncated ? 's' : '') +
         '. Merge "' + folderName + '" (' + photoCount + ' photos) into it? Files already present with a matching size are skipped; only missing files are copied. Originals are removed only after every source file is verified at the destination.',
       function() {
         executeQuickMove(fid, dest, true);
