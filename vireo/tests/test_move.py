@@ -212,6 +212,41 @@ def test_move_folder_merge_resumes(move_env):
     assert folder["path"] == str(landing)
 
 
+def test_preview_merge_counts_copy_and_skip(move_env):
+    """preview_merge classifies every source file (sidecars included) as copy
+    or skip by name, matching what rsync --ignore-existing actually does."""
+    from move import preview_merge
+
+    env = move_env
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    # bird1.jpg already present at the destination -> skip; bird1.xmp and
+    # bird2.jpg are missing -> copy.
+    (landing / "bird1.jpg").write_bytes((env["src"] / "bird1.jpg").read_bytes())
+
+    preview = preview_merge(str(env["src"]), str(landing))
+    assert preview["will_skip"] == 1
+    assert preview["will_copy"] == 2
+    assert preview["source_total"] == 3
+
+
+def test_preview_merge_is_name_only(move_env):
+    """A same-name destination file counts as a skip even when its bytes
+    differ — rsync --ignore-existing skips by name, and the differing-content
+    case is caught separately as a hard conflict at merge time."""
+    from move import preview_merge
+
+    env = move_env
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    # Same name, different content: still classified as a skip by the preview.
+    (landing / "bird1.jpg").write_bytes(b"totally different bytes")
+
+    preview = preview_merge(str(env["src"]), str(landing))
+    assert preview["will_skip"] == 1
+    assert preview["will_copy"] == 2
+
+
 def test_move_folder_merge_never_overwrites_differing_dest_file(move_env):
     """A same-name destination file with DIFFERENT content (different size)
     is a hard conflict: the merge aborts before copying, leaving both the

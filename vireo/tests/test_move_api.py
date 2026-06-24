@@ -284,6 +284,90 @@ def test_move_folder_preflight_caps_existing_destination_dir_fanout(app_and_db, 
     assert data["file_count_truncated"] is True
 
 
+def test_move_folder_preflight_exact_mode_counts_uncapped(app_and_db, tmp_path):
+    """mode='exact' walks the destination uncapped, returning the true count
+    and truncated=False even past the 1000-file quick-scan cap."""
+    app, db = app_and_db
+    dst = tmp_path / "dest"
+    dst.mkdir()
+
+    folder = db.get_folder_tree()[0]
+    folder_name = folder["name"] or os.path.basename(folder["path"].rstrip("/\\"))
+    landing = dst / folder_name
+    landing.mkdir()
+    for idx in range(1001):
+        (landing / f"already-{idx}.jpg").write_bytes(b"x")
+
+    client = app.test_client()
+    resp = client.post("/api/move-folder/preflight", json={
+        "folder_id": folder["id"],
+        "destination": str(dst),
+        "mode": "exact",
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["exists"] is True
+    assert data["file_count"] == 1001
+    assert data["file_count_truncated"] is False
+    assert "preview" not in data
+
+
+def test_move_folder_preflight_preview_reports_transfer_counts(app_and_db, tmp_path):
+    """mode='preview' reports how many source files would copy vs. be skipped
+    as already present — counting every file (sidecars included), not just
+    tracked photos."""
+    app, db = app_and_db
+
+    # Real on-disk source folder with a nested file and an XMP sidecar.
+    src = tmp_path / "src_folder"
+    src.mkdir()
+    (src / "a.jpg").write_bytes(b"a")
+    (src / "a.jpg.xmp").write_bytes(b"sidecar")
+    (src / "sub").mkdir()
+    (src / "sub" / "c.jpg").write_bytes(b"c")
+    fid = db.add_folder(str(src), name="src_folder")
+
+    # Destination already holds one of the source files (a resume scenario).
+    dst = tmp_path / "dest"
+    dst.mkdir()
+    landing = dst / "src_folder"
+    landing.mkdir()
+    (landing / "a.jpg").write_bytes(b"a")
+
+    client = app.test_client()
+    resp = client.post("/api/move-folder/preflight", json={
+        "folder_id": fid,
+        "destination": str(dst),
+        "mode": "preview",
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["exists"] is True
+    preview = data["preview"]
+    # a.jpg already present -> skip; a.jpg.xmp and sub/c.jpg missing -> copy.
+    assert preview["will_skip"] == 1
+    assert preview["will_copy"] == 2
+    assert preview["source_total"] == 3
+
+
+def test_move_folder_preflight_preview_omitted_when_dest_missing(app_and_db, tmp_path):
+    """No preview block when the destination doesn't exist — there is nothing
+    to merge into, so a fresh move copies everything."""
+    app, db = app_and_db
+    folder = db.get_folder_tree()[0]
+
+    client = app.test_client()
+    resp = client.post("/api/move-folder/preflight", json={
+        "folder_id": folder["id"],
+        "destination": str(tmp_path / "nonexistent"),
+        "mode": "preview",
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["exists"] is False
+    assert "preview" not in data
+
+
 def test_move_folder_preflight_requires_params(app_and_db):
     """Preflight without folder_id returns 400."""
     app, _ = app_and_db

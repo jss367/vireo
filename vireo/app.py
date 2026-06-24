@@ -450,6 +450,55 @@ def _chunked(seq, size=_SQL_PARAM_CHUNK):
         yield seq[i:i + size]
 
 
+def _scan_dir_file_count(root_path, file_limit=None, dir_limit=None):
+    """Count files (non-directory entries) under ``root_path`` with a lazy
+    ``os.scandir`` walk. ``os.scandir`` yields entries one at a time, so with
+    ``file_limit``/``dir_limit`` set we bail the moment either cap is reached
+    rather than waiting for the OS to enumerate a directory with millions of
+    entries. Pass ``None`` for both to count the whole tree exactly.
+
+    Returns ``(file_count, truncated)`` where ``truncated`` is True iff a cap
+    stopped the walk early.
+    """
+    file_count = 0
+    dirs_seen = 0
+    truncated = False
+    stack = [root_path]
+    while stack:
+        if file_limit is not None and file_count >= file_limit:
+            truncated = True
+            break
+        if dir_limit is not None and dirs_seen >= dir_limit:
+            truncated = True
+            break
+        current = stack.pop()
+        dirs_seen += 1
+        try:
+            scanner = os.scandir(current)
+        except OSError:
+            continue
+        with scanner:
+            for entry in scanner:
+                # Check the caps inside the inner loop so a single directory
+                # with a huge number of children cannot blow past either limit
+                # before we bail out.
+                if file_limit is not None and file_count >= file_limit:
+                    truncated = True
+                    break
+                if dir_limit is not None and dirs_seen + len(stack) >= dir_limit:
+                    truncated = True
+                    break
+                try:
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                except OSError:
+                    is_dir = False
+                if is_dir:
+                    stack.append(entry.path)
+                else:
+                    file_count += 1
+    return file_count, truncated
+
+
 def _filename_sequence_key(filename):
     """Return (prefix, number, width, ext) for names like DSC_3069.NEF."""
     stem, ext = os.path.splitext(filename or "")
@@ -13465,14 +13514,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_move_folder_preflight():
         """Report the resolved destination for a folder move and whether it
         already exists, so the UI can offer a merge/resume confirmation
-        instead of silently failing on an existing destination."""
-        from move import resolve_folder_dest
+        instead of silently failing on an existing destination.
+
+        ``mode`` controls how much work the endpoint does:
+
+        * ``"quick"`` (default) — caps the destination file count at 1000 so
+          the live, keystroke-debounced status line stays instant even when
+          the destination holds millions of files.
+        * ``"exact"`` — walks the destination uncapped for the true file
+          count. The UI fires this in the background to replace the capped
+          "at least 1000" line once the fast check reported a truncation.
+        * ``"preview"`` — also runs ``preview_merge`` to report how many
+          source files would actually copy vs. be skipped as already present.
+          Fired on the deliberate merge-confirm click, where a source-tree
+          walk is acceptable.
+        """
+        from move import preview_merge, resolve_folder_dest
 
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
             return json_error("JSON body must be an object")
         folder_id = body.get("folder_id")
         destination = body.get("destination", "")
+        mode = body.get("mode", "quick")
+        if mode not in ("quick", "exact", "preview"):
+            mode = "quick"
 
         if not folder_id:
             return json_error("folder_id required")
@@ -13494,46 +13560,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         file_count = 0
         file_count_truncated = False
         if exists:
-            # os.scandir yields entries lazily, so we can bail out the moment
-            # the cap is reached without waiting for the OS to enumerate a
-            # directory with millions of files.
-            file_limit = 1000
-            dir_limit = 2000
-            stack = [resolved]
-            dirs_seen = 0
-            while stack and not file_count_truncated:
-                if file_count >= file_limit or dirs_seen >= dir_limit:
-                    file_count_truncated = True
-                    break
-                current = stack.pop()
-                dirs_seen += 1
-                try:
-                    scanner = os.scandir(current)
-                except OSError:
-                    continue
-                with scanner:
-                    for entry in scanner:
-                        # Check the caps inside the inner loop so a single
-                        # directory with a huge number of children cannot
-                        # blow past either limit before we bail out.
-                        if file_count >= file_limit or dirs_seen + len(stack) >= dir_limit:
-                            file_count_truncated = True
-                            break
-                        try:
-                            is_dir = entry.is_dir(follow_symlinks=False)
-                        except OSError:
-                            is_dir = False
-                        if is_dir:
-                            stack.append(entry.path)
-                        else:
-                            file_count += 1
+            if mode == "quick":
+                file_count, file_count_truncated = _scan_dir_file_count(
+                    resolved, file_limit=1000, dir_limit=2000)
+            else:
+                file_count, file_count_truncated = _scan_dir_file_count(resolved)
 
-        return jsonify({
+        result = {
             "resolved_dest": resolved,
             "exists": exists,
             "file_count": file_count,
             "file_count_truncated": file_count_truncated,
-        })
+        }
+        if mode == "preview" and exists:
+            result["preview"] = preview_merge(folder["path"], resolved)
+        return jsonify(result)
 
     @app.route("/api/jobs/import-full", methods=["POST"])
     def api_job_import_full():

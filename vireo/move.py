@@ -283,6 +283,43 @@ def _first_missing_source_file(src_path, dest_path):
     return None
 
 
+def preview_merge(src_path, dest_path):
+    """Classify how a merge of ``src_path`` into an existing ``dest_path``
+    would play out, the same way the ``rsync --ignore-existing`` copy does:
+    every source file absent at the destination is copied; every source file
+    already present (by name) is left untouched.
+
+    Returns a dict with ``will_copy``, ``will_skip``, and ``source_total``
+    (their sum). The total counts *every* file under ``src_path`` — XMP
+    sidecars and other companions rsync carries along, not just tracked
+    photos — so it reflects what actually transfers, unlike a tracked-photo
+    count.
+
+    This is a name-only classification, matching what rsync actually copies:
+    a same-name destination file whose bytes differ still counts as a skip
+    here, because rsync would skip it. That genuine collision is caught
+    separately by ``_find_content_conflict``, which refuses the whole merge
+    before anything is copied — so this preview never reads file contents and
+    stays fast on large trees.
+    """
+    will_copy = 0
+    will_skip = 0
+    for root, _, files in os.walk(src_path):
+        rel = os.path.relpath(root, src_path)
+        for fn in files:
+            rel_name = fn if rel == "." else os.path.join(rel, fn)
+            dst_file = os.path.join(dest_path, rel_name)
+            if os.path.lexists(dst_file):
+                will_skip += 1
+            else:
+                will_copy += 1
+    return {
+        "will_copy": will_copy,
+        "will_skip": will_skip,
+        "source_total": will_copy + will_skip,
+    }
+
+
 def _samefile_tristate(a, b):
     """Whether two paths resolve to the same inode, or None if samefile
     raised (broken symlink, permission error, transient race — the probe
