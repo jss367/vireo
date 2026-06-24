@@ -1146,11 +1146,11 @@ function renderBrowserList(data, opts) {
     parent = data.path.substring(0, data.path.lastIndexOf('/')) || '/';
   }
   if (data.path && data.path !== '/' && parent !== data.path) {
-    html += '<div class="browser-folder-item" ondblclick="browseTo(\'' + escapeAttr(parent) + '\')">&#128194; ..</div>';
+    html += '<div class="browser-folder-item" data-browse-path="' + escapeAttr(parent) + '">&#128194; ..</div>';
   }
   if (data.dirs) {
     data.dirs.forEach(function(d) {
-      html += '<div class="browser-folder-item" ondblclick="browseTo(\'' + escapeAttr(d.path) + '\')">&#128194; ' + escapeHtml(d.name) + '</div>';
+      html += '<div class="browser-folder-item" data-browse-path="' + escapeAttr(d.path) + '">&#128194; ' + escapeHtml(d.name) + '</div>';
     });
   }
   if ((!data.dirs || data.dirs.length === 0) && (data.path === '/' || isSyntheticRoot)) {
@@ -1213,6 +1213,16 @@ document.addEventListener('DOMContentLoaded', function() {
 
   var photoDest = document.getElementById('photoDestInput');
   if (photoDest) photoDest.addEventListener('input', updatePhotoSelectionUI);
+
+  // Delegated handler so folder paths (which can contain backslashes on
+  // Windows, e.g. C:\) don't have to be JS-escaped into inline handlers.
+  var moveBrowserList = document.getElementById('moveBrowserList');
+  if (moveBrowserList) {
+    moveBrowserList.addEventListener('dblclick', function(e) {
+      var item = e.target.closest('.browser-folder-item[data-browse-path]');
+      if (item) browseTo(item.getAttribute('data-browse-path'));
+    });
+  }
 });
 
 /* ---------- Utility ---------- */
