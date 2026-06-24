@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 
 log = logging.getLogger(__name__)
 
@@ -51,18 +52,71 @@ def resolve_folder_dest(folder_path, folder_name, destination):
     return os.path.join(destination, name)
 
 
-def _copy_missing(src_path, dest_path):
-    """Recursively copy only files that don't already exist at dest_path,
-    never overwriting an existing destination file. shutil fallback for a
-    merge when rsync is unavailable; mirrors rsync --ignore-existing."""
+def _copy_tree_with_progress(src_path, dest_path, skip_existing, total_files,
+                             progress_cb):
+    """Recursively copy src_path into dest_path, reporting each file copied.
+
+    ``skip_existing`` mirrors rsync ``--ignore-existing`` (merge/resume): a
+    destination file that already exists is never overwritten. Used only as
+    the shutil fallback when rsync is unavailable, so a fresh move (creating
+    dest_path) and a merge share one progress-emitting walk.
+    """
+    copied = 0
     for root, _, files in os.walk(src_path):
         rel = os.path.relpath(root, src_path)
         target_dir = dest_path if rel == "." else os.path.join(dest_path, rel)
         os.makedirs(target_dir, exist_ok=True)
         for fn in files:
             dst_file = os.path.join(target_dir, fn)
-            if not os.path.exists(dst_file):
-                shutil.copy2(os.path.join(root, fn), dst_file)
+            if skip_existing and os.path.exists(dst_file):
+                continue
+            shutil.copy2(os.path.join(root, fn), dst_file)
+            copied += 1
+            if progress_cb:
+                progress_cb(copied, total_files, fn, "Copying files")
+
+
+def _run_rsync_streamed(src_path, dest_path, rsync_flag, total_files,
+                        progress_cb, timeout=3600):
+    """Run rsync, reporting each transferred file through progress_cb.
+
+    rsync's ``--out-format=%n`` prints the relative name of every item it
+    transfers (directories end in ``/``). Streaming that line-by-line lets
+    the move job show live per-file progress instead of a frozen bar while a
+    large copy runs, without changing rsync's copy semantics.
+
+    Returns ``(returncode, stderr, timed_out)``. ``timed_out`` is True when
+    the copy ran past ``timeout`` and rsync was killed — the same safety net
+    the previous ``subprocess.run(timeout=...)`` provided, preserved here
+    because a streamed Popen can't pass ``timeout`` to the read loop.
+    """
+    proc = subprocess.Popen(
+        ["rsync", "-a", "--out-format=%n", rsync_flag,
+         src_path + "/", dest_path + "/"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    state = {"timed_out": False}
+
+    def _kill():
+        state["timed_out"] = True
+        proc.kill()
+
+    killer = threading.Timer(timeout, _kill)
+    killer.start()
+    copied = 0
+    try:
+        for line in proc.stdout:
+            name = line.rstrip("\n")
+            if not name or name.endswith("/"):
+                continue  # directory entry, not a file
+            copied += 1
+            if progress_cb:
+                progress_cb(copied, total_files, os.path.basename(name),
+                            "Copying files")
+        proc.wait()
+    finally:
+        killer.cancel()
+    return proc.returncode, proc.stderr.read(), state["timed_out"]
 
 
 def _find_content_conflict(src_path, dest_path):
@@ -585,6 +639,12 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     folder_name = folder["name"] or os.path.basename(src_path)
     dest_path = resolve_folder_dest(src_path, folder["name"], destination)
 
+    # Validation (overlap, tracked-folder, and the per-file content-conflict
+    # scan a merge runs) can take a noticeable moment on a large tree, so name
+    # the phase before it starts rather than leaving the bar blank.
+    if progress_cb:
+        progress_cb(0, 0, "", "Checking destination")
+
     # Refuse a destination that overlaps the source. Moving a folder into
     # itself (or into one of its own descendants) would make the post-copy
     # rmtree(src) delete the only copy of the files. This is especially
@@ -644,6 +704,14 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     log.info("%s folder %s -> %s",
              "Merging" if dest_exists else "Moving", src_path, dest_path)
 
+    # Count source files up front so the copy phase reports against a real
+    # denominator from the first file, and so the fresh-move verification
+    # below can reuse the count (rsync never mutates the source) instead of
+    # walking the tree a second time.
+    total_files = sum(1 for _, _, files in os.walk(src_path) for _ in files)
+    if progress_cb:
+        progress_cb(0, total_files, "", "Copying files")
+
     # Use rsync for a robust copy. A merge/resume uses --ignore-existing so
     # rsync only creates files absent at the destination and NEVER overwrites
     # a file already there: this resumes an interrupted move (missing files get
@@ -654,29 +722,30 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     # post-copy verification below, which then refuses to delete the originals.
     rsync_flag = "--ignore-existing" if dest_exists else "--checksum"
     try:
-        result = subprocess.run(
-            ["rsync", "-a", rsync_flag, src_path + "/", dest_path + "/"],
-            capture_output=True, text=True, timeout=3600,
+        returncode, stderr, timed_out = _run_rsync_streamed(
+            src_path, dest_path, rsync_flag, total_files, progress_cb,
         )
-        if result.returncode != 0:
-            return {"moved": 0, "errors": [f"rsync failed: {result.stderr.strip()}"]}
+        if timed_out:
+            return {"moved": 0, "errors": ["rsync timed out after 1 hour"]}
+        if returncode != 0:
+            return {"moved": 0, "errors": [f"rsync failed: {stderr.strip()}"]}
     except FileNotFoundError:
-        # rsync not available, fall back to shutil
+        # rsync not available, fall back to shutil. skip_existing mirrors
+        # --ignore-existing for a merge; a fresh move copies everything.
         try:
-            if dest_exists:
-                _copy_missing(src_path, dest_path)  # never overwrites
-            else:
-                shutil.copytree(src_path, dest_path)
+            _copy_tree_with_progress(
+                src_path, dest_path, dest_exists, total_files, progress_cb,
+            )
         except Exception as exc:
             # Only remove a destination we created — never one that
             # pre-existed (a merge target may hold the user's own files).
             if not dest_exists:
                 shutil.rmtree(dest_path, ignore_errors=True)
             return {"moved": 0, "errors": [f"Copy failed: {exc}"]}
-    except subprocess.TimeoutExpired:
-        return {"moved": 0, "errors": ["rsync timed out after 1 hour"]}
 
     # Verify before deleting originals.
+    if progress_cb:
+        progress_cb(total_files, total_files, "", "Verifying copy")
     if dest_exists:
         # Merge: the destination may legitimately hold extra unrelated
         # files (and leftover temp files from an interrupted run), so a
@@ -690,8 +759,9 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             ]}
     else:
         # Fresh move into a destination we created: a whole-tree file
-        # count is a cheap, sufficient integrity check.
-        src_count = sum(1 for _, _, files in os.walk(src_path) for _ in files)
+        # count is a cheap, sufficient integrity check. Reuse the source
+        # count taken before the copy — rsync never mutates the source.
+        src_count = total_files
         dst_count = sum(1 for _, _, files in os.walk(dest_path) for _ in files)
         if src_count != dst_count:
             shutil.rmtree(dest_path, ignore_errors=True)
@@ -713,6 +783,8 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     # paths). A merge into an already-tracked destination is refused above, so
     # dest_path is never a different existing folder row here and this cascade
     # (root + all descendants) cannot collide with folders.path UNIQUE.
+    if progress_cb:
+        progress_cb(total_files, total_files, "", "Updating catalog")
     db.move_folder_path(folder_id, dest_path)
     db.update_folder_counts()
 
@@ -743,10 +815,12 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             relocate_developed_dir(developed_dir, old_child, new_child)
 
     # Delete originals
+    if progress_cb:
+        progress_cb(total_files, total_files, "", "Removing originals")
     log.info("Verification passed, deleting originals: %s", src_path)
     shutil.rmtree(src_path)
 
     if progress_cb:
-        progress_cb(total_photos, total_photos, folder_name)
+        progress_cb(total_files, total_files, folder_name, "Done")
 
     return {"moved": total_photos, "errors": []}

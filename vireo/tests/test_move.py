@@ -1239,8 +1239,8 @@ def test_move_folder_merge_verify_fail_preserves_originals_and_dest(move_env, mo
     sentinel.write_text("pre-existing")
 
     # Force the copy step to be a no-op so a source file is "missing" at dest.
-    monkeypatch.setattr(move_mod.subprocess, "run",
-                        lambda *a, **k: type("R", (), {"returncode": 0, "stderr": ""})())
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed",
+                        lambda *a, **k: (0, "", False))
 
     result = move_mod.move_folder(
         db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
@@ -1275,8 +1275,8 @@ def test_move_folder_merge_rejects_symlinked_dest_file(move_env, monkeypatch):
 
     # Force rsync to no-op (it would normally honor --ignore-existing and
     # leave the symlink anyway; this just removes the dependency on rsync).
-    monkeypatch.setattr(move_mod.subprocess, "run",
-                        lambda *a, **k: type("R", (), {"returncode": 0, "stderr": ""})())
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed",
+                        lambda *a, **k: (0, "", False))
 
     result = move_mod.move_folder(
         db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
@@ -1314,8 +1314,8 @@ def test_move_folder_merge_rejects_symlinked_dest_subdir(move_env, monkeypatch):
     except (OSError, NotImplementedError):
         pytest.skip("symlinks not supported on this platform")
 
-    monkeypatch.setattr(move_mod.subprocess, "run",
-                        lambda *a, **k: type("R", (), {"returncode": 0, "stderr": ""})())
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed",
+                        lambda *a, **k: (0, "", False))
 
     result = move_mod.move_folder(
         db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
@@ -1343,8 +1343,8 @@ def test_move_folder_merge_rejects_broken_symlink(move_env, monkeypatch):
     except (OSError, NotImplementedError):
         pytest.skip("symlinks not supported on this platform")
 
-    monkeypatch.setattr(move_mod.subprocess, "run",
-                        lambda *a, **k: type("R", (), {"returncode": 0, "stderr": ""})())
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed",
+                        lambda *a, **k: (0, "", False))
 
     result = move_mod.move_folder(
         db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
@@ -1397,3 +1397,64 @@ def test_move_photos_progress_callback(move_env):
     assert calls[0][0] == 1  # current=1
     assert calls[1][0] == 2  # current=2
     assert calls[0][1] == 2  # total=2
+
+
+def test_move_folder_reports_phases_and_per_file_progress(move_env):
+    """move_folder streams the move through named phases and reports each
+    file as it is copied, instead of one progress call at the end."""
+    from move import move_folder
+
+    env = move_env
+    calls = []
+    result = move_folder(
+        db=env["db"],
+        folder_id=env["fid_src"],
+        destination=str(env["dst"]),
+        progress_cb=lambda cur, tot, fn, phase: calls.append(
+            (cur, tot, fn, phase)
+        ),
+    )
+    assert result["errors"] == []
+    phases = [c[3] for c in calls]
+    # The move walks through these phases in order.
+    for expected in ("Checking destination", "Copying files",
+                     "Verifying copy", "Updating catalog",
+                     "Removing originals", "Done"):
+        assert expected in phases, f"missing phase {expected!r} in {phases}"
+
+    # The copy phase reports a real denominator (3 files: 2 jpgs + 1 xmp)
+    # and at least one per-file update naming the file being copied.
+    copy_calls = [c for c in calls if c[3] == "Copying files"]
+    assert copy_calls, "no copy-phase progress reported"
+    total = copy_calls[-1][1]
+    assert total == 3
+    named = [c for c in copy_calls if c[0] > 0 and c[2]]
+    assert named, "no per-file progress during copy"
+    assert all(c[1] == total for c in copy_calls)
+
+
+def test_move_folder_progress_shutil_fallback(move_env, monkeypatch):
+    """When rsync is unavailable, the shutil fallback still reports per-file
+    copy progress through the same phase contract."""
+    import move as move_mod
+
+    def _no_rsync(*a, **k):
+        raise FileNotFoundError("rsync")
+
+    monkeypatch.setattr(move_mod.subprocess, "Popen", _no_rsync)
+
+    env = move_env
+    calls = []
+    result = move_mod.move_folder(
+        db=env["db"],
+        folder_id=env["fid_src"],
+        destination=str(env["dst"]),
+        progress_cb=lambda cur, tot, fn, phase: calls.append(
+            (cur, tot, fn, phase)
+        ),
+    )
+    assert result["errors"] == []
+    assert (env["dst"] / "src" / "bird1.jpg").exists()
+    copy_calls = [c for c in calls if c[3] == "Copying files" and c[0] > 0]
+    assert copy_calls, "shutil fallback reported no per-file progress"
+    assert copy_calls[-1][1] == 3  # same 3-file denominator

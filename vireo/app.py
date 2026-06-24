@@ -13396,15 +13396,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
             job["_start_time"] = time.time()
 
-            def progress_cb(current, total, filename):
+            last_phase = {"value": None}
+
+            def progress_cb(current, total, filename, phase="Moving folder"):
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
                 job["progress"]["current_file"] = filename
+                job["progress"]["phase"] = phase
+                # The copy phase fires once per file; on a large folder that
+                # would flood the SSE stream and tie up Flask threads. Throttle
+                # to every 10th file, but always emit on a phase change and on
+                # the first/last file so the panel never looks stalled.
+                phase_changed = phase != last_phase["value"]
+                last_phase["value"] = phase
+                if not phase_changed and current % 10 != 0 \
+                        and current not in (1, total):
+                    return
                 runner.push_event(job["id"], "progress", {
                     "current": current,
                     "total": total,
                     "current_file": filename,
-                    "phase": "Moving folder",
+                    "phase": phase,
                 })
 
             return move_folder(
