@@ -227,7 +227,85 @@ def test_preview_merge_counts_copy_and_skip(move_env):
     preview = preview_merge(str(env["src"]), str(landing))
     assert preview["will_skip"] == 1
     assert preview["will_copy"] == 2
+    assert preview["will_block"] == 0
     assert preview["source_total"] == 3
+
+
+def test_preview_merge_blocks_unverifiable_destination_entries(move_env, tmp_path):
+    """A source file whose destination entry is something the post-copy
+    verifier rejects — a symlink, a directory, or a path that resolves to
+    the same inode as the source — must surface as ``will_block``, not
+    ``will_skip``. rsync --ignore-existing would silently skip these by
+    name, but _first_missing_source_file then refuses to delete the
+    originals and the move aborts with "Verification failed". Reporting
+    them as "already present and will be left untouched" would tell the
+    user the merge is a no-op resume when it actually wouldn't complete.
+    """
+    from move import preview_merge
+
+    env = move_env
+    landing = env["dst"] / "src"
+    landing.mkdir()
+
+    # bird1.jpg at the destination is a symlink — the verifier's islink
+    # check rejects this even when the link target's bytes match.
+    real_bird1 = tmp_path / "real_bird1.jpg"
+    real_bird1.write_bytes((env["src"] / "bird1.jpg").read_bytes())
+    os.symlink(str(real_bird1), str(landing / "bird1.jpg"))
+
+    # bird1.xmp at the destination is a directory, not a file — the
+    # verifier's isfile check rejects.
+    (landing / "bird1.xmp").mkdir()
+
+    # bird2.jpg missing -> a normal will_copy. Establishes that blocks
+    # don't displace genuine copies.
+    preview = preview_merge(str(env["src"]), str(landing))
+    assert preview["will_block"] == 2
+    assert preview["will_copy"] == 1
+    assert preview["will_skip"] == 0
+    assert preview["source_total"] == 3
+
+
+def test_preview_merge_blocks_samefile_via_symlinked_parent(move_env, tmp_path):
+    """A destination path that resolves to the same inode as the source
+    file (e.g. the destination's parent is a symlink back into the source
+    tree) is rejected by the verifier's samefile probe. preview_merge must
+    classify it as ``will_block`` so the merge dialog doesn't claim the
+    merge is a no-op when it would in fact fail to verify and abort.
+
+    The trap this catches: rmtree(src) after a merge that "verified" via
+    an aliased destination would destroy the only on-disk copy.
+    """
+    from move import preview_merge
+
+    env = move_env
+    # Add a nested source file that we can reach at the destination via a
+    # symlinked parent (not a symlinked leaf — the islink branch already
+    # catches that case; samefile guards the parent-alias path).
+    sub = env["src"] / "nested"
+    sub.mkdir()
+    (sub / "bird3.jpg").write_bytes(b"x")
+
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    # landing/nested -> src/nested: when preview_merge computes dst_file =
+    # landing/nested/bird3.jpg, path resolution follows the symlinked
+    # parent so the leaf itself is a regular file (islink check is False),
+    # but the inode matches the source — the case _first_missing_source_file
+    # protects against by calling samefile.
+    os.symlink(str(env["src"] / "nested"), str(landing / "nested"))
+
+    dst_leaf = landing / "nested" / "bird3.jpg"
+    assert os.path.samefile(str(env["src"] / "nested" / "bird3.jpg"), str(dst_leaf))
+    assert not os.path.islink(str(dst_leaf))  # parent is the symlink, not the leaf
+
+    preview = preview_merge(str(env["src"]), str(landing))
+    # bird1.jpg, bird1.xmp, bird2.jpg at top-level: all missing -> copy.
+    # nested/bird3.jpg: samefile with the source -> blocked.
+    assert preview["will_block"] == 1
+    assert preview["will_skip"] == 0
+    assert preview["will_copy"] == 3
+    assert preview["source_total"] == 4
 
 
 def test_preview_merge_counts_directory_symlinks(move_env, tmp_path):

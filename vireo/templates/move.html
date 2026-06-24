@@ -768,6 +768,7 @@ async function startQuickMove() {
     var p = pf.preview || {};
     var copyN = p.will_copy;
     var skipN = p.will_skip;
+    var blockN = p.will_block || 0;
     var msg;
     if (typeof copyN === 'number') {
       // Truthful transfer counts. These count every file under the source
@@ -775,17 +776,27 @@ async function startQuickMove() {
       // Files already present are left untouched, never overwritten; a
       // same-name file whose content differs cancels the whole merge, so only
       // mention that caveat when there are overlapping files (skipN > 0).
+      // blockN is the count of source files whose destination entry is a
+      // symlink, a directory, or otherwise not a plain file: rsync would skip
+      // those by name, but the post-copy verifier rejects them and the merge
+      // would abort with "Verification failed". Surface the block so the
+      // dialog never says "all already present" when the move would not in
+      // fact complete.
       var conflictNote = skipN ? ' If a same-name file differs, the merge is canceled and nothing is changed.' : '';
-      if (copyN === 0) {
+      var blockNote = blockN ?
+        ' ⚠ ' + blockN.toLocaleString() + ' source file' + (blockN !== 1 ? 's have' : ' has') +
+        ' a destination entry that is a symlink or non-file — the merge will be canceled at the verify step before any originals are removed.' : '';
+      if (copyN === 0 && blockN === 0) {
         msg = 'All ' + skipN.toLocaleString() + ' file' + (skipN !== 1 ? 's' : '') +
           ' from "' + folderName + '" are already present at "' + finalPath +
           '". Merging copies nothing new.' + conflictNote +
           ' Originals are removed only after every source file is verified at the destination. Continue?';
       } else {
+        var skipPart = skipN ? ', ' + skipN.toLocaleString() + ' already present will be left untouched' : '';
+        var blockPart = blockN ? ', ' + blockN.toLocaleString() + ' blocked by a non-file at the destination' : '';
         msg = 'Merge "' + folderName + '" into "' + finalPath + '"? ' +
           copyN.toLocaleString() + ' file' + (copyN !== 1 ? 's' : '') + ' will be copied' +
-          (skipN ? ', ' + skipN.toLocaleString() + ' already present will be left untouched' : '') +
-          '.' + conflictNote +
+          skipPart + blockPart + '.' + conflictNote + blockNote +
           ' Originals are removed only after every source file is verified at the destination.';
       }
     } else {

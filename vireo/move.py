@@ -283,24 +283,59 @@ def _first_missing_source_file(src_path, dest_path):
     return None
 
 
+def _verifier_would_accept_skip(src_file, dst_file):
+    """True iff a same-name entry at ``dst_file`` would be accepted as
+    already-present by ``_first_missing_source_file`` (the post-copy
+    verifier the merge gates the source delete on). Mirrors that
+    verifier's structural predicates — destination must exist, must NOT be
+    a symlink, must NOT resolve to the same inode as the source, and must
+    be a regular file. The size check the verifier also performs is
+    deliberately omitted: this backs ``preview_merge``, which is name-only
+    by design and must not stat the destination tree's bytes. Same-size
+    content collisions are caught separately by ``_find_content_conflict``
+    before the merge runs; this only filters entries the verifier would
+    reject structurally (symlink, directory, broken samefile probe), where
+    rsync ``--ignore-existing`` skips the copy but the verifier then
+    refuses to delete the originals with ``Verification failed``.
+    """
+    if not os.path.lexists(dst_file) or os.path.islink(dst_file):
+        return False
+    try:
+        if os.path.samefile(src_file, dst_file):
+            return False
+    except OSError:
+        return False
+    return os.path.isfile(dst_file)
+
+
 def preview_merge(src_path, dest_path):
     """Classify how a merge of ``src_path`` into an existing ``dest_path``
     would play out, the same way the ``rsync --ignore-existing`` copy does:
     every source file absent at the destination is copied; every source file
     already present (by name) is left untouched.
 
-    Returns a dict with ``will_copy``, ``will_skip``, and ``source_total``
-    (their sum). The total counts *every* file under ``src_path`` — XMP
-    sidecars and other companions rsync carries along, not just tracked
-    photos — so it reflects what actually transfers, unlike a tracked-photo
-    count.
+    Returns a dict with ``will_copy``, ``will_skip``, ``will_block``, and
+    ``source_total`` (their sum). The total counts *every* file under
+    ``src_path`` — XMP sidecars and other companions rsync carries along,
+    not just tracked photos — so it reflects what actually transfers,
+    unlike a tracked-photo count.
 
     This is a name-only classification, matching what rsync actually copies:
-    a same-name destination file whose bytes differ still counts as a skip
-    here, because rsync would skip it. That genuine collision is caught
-    separately by ``_find_content_conflict``, which refuses the whole merge
-    before anything is copied — so this preview never reads file contents and
-    stays fast on large trees.
+    a same-name destination *file* whose bytes differ still counts as a
+    skip here, because rsync would skip it. That genuine collision is
+    caught separately by ``_find_content_conflict``, which refuses the
+    whole merge before anything is copied — so this preview never reads
+    file contents and stays fast on large trees.
+
+    ``will_block`` covers source files whose destination entry is something
+    the post-copy verifier (``_first_missing_source_file``) refuses to
+    accept as already-present — a symlink, a directory, or a path that
+    resolves to the same inode as the source. ``rsync --ignore-existing``
+    silently skips those entries by name, but the verifier then rejects
+    them and the merge aborts with "Verification failed", so they must not
+    be presented to the user as "already present and will be left
+    untouched". Surfaced separately so the confirm dialog can warn that
+    the merge would not complete instead of implying a no-op resume.
 
     Directory symlinks under ``src_path`` count as one transfer item each:
     the rsync ``-a`` path and the shutil fallback (see
@@ -308,10 +343,12 @@ def preview_merge(src_path, dest_path):
     destination without descending, so omitting them would let the confirm
     dialog say "All 0 files are already present" for a source that is
     actually just a directory symlink, undercounting what the move
-    transfers.
+    transfers. The verifier does not check directory entries, so they stay
+    name-only (skip iff anything exists at the destination name).
     """
     will_copy = 0
     will_skip = 0
+    will_block = 0
     # os.walk defaults to followlinks=False, so a symlinked subdirectory
     # appears in `dirs` but is not descended into — which is exactly the
     # transfer semantics the merge applies, so each such entry is one item.
@@ -326,16 +363,20 @@ def preview_merge(src_path, dest_path):
             else:
                 will_copy += 1
         for fn in files:
+            src_file = os.path.join(root, fn)
             rel_name = fn if rel == "." else os.path.join(rel, fn)
             dst_file = os.path.join(dest_path, rel_name)
-            if os.path.lexists(dst_file):
+            if not os.path.lexists(dst_file):
+                will_copy += 1
+            elif _verifier_would_accept_skip(src_file, dst_file):
                 will_skip += 1
             else:
-                will_copy += 1
+                will_block += 1
     return {
         "will_copy": will_copy,
         "will_skip": will_skip,
-        "source_total": will_copy + will_skip,
+        "will_block": will_block,
+        "source_total": will_copy + will_skip + will_block,
     }
 
 

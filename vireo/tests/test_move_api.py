@@ -438,6 +438,7 @@ def test_move_folder_preflight_preview_reports_transfer_counts(app_and_db, tmp_p
     # a.jpg already present -> skip; a.jpg.xmp and sub/c.jpg missing -> copy.
     assert preview["will_skip"] == 1
     assert preview["will_copy"] == 2
+    assert preview["will_block"] == 0
     assert preview["source_total"] == 3
 
 
