@@ -1565,6 +1565,37 @@ def test_move_folder_shutil_fallback_preserves_dir_mode(move_env, monkeypatch):
     assert not env["src"].exists()
 
 
+def test_move_folder_shutil_fallback_preserves_file_symlink(move_env, monkeypatch):
+    """The shutil fallback must preserve a symlinked file as a symlink rather
+    than dereferencing it through copy2 (matching rsync -a). Dereferencing
+    would silently replace the link with its target's bytes and could write
+    through a symlinked destination entry."""
+    import move as move_mod
+
+    env = move_env
+    external = env["tmp_path"] / "ext_target.txt"
+    external.write_text("external payload")
+    try:
+        os.symlink(str(external), str(env["src"] / "alias.txt"))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    monkeypatch.setattr(move_mod.subprocess, "Popen",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            FileNotFoundError("rsync")))
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"])
+    )
+    assert result["errors"] == []
+    dest_link = env["dst"] / "src" / "alias.txt"
+    assert dest_link.is_symlink()
+    assert os.readlink(str(dest_link)) == str(external)
+    # External target untouched; source removed after a verified copy.
+    assert external.read_text() == "external payload"
+    assert not env["src"].exists()
+
+
 def test_move_folder_fresh_move_detects_late_source_file(move_env, monkeypatch):
     """A file added to the source after the upfront file count but before
     verification — a concurrent writer race rsync's scan missed — must be

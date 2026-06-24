@@ -94,10 +94,20 @@ def _copy_tree_with_progress(src_path, dest_path, skip_existing, total_files,
                 continue
             os.symlink(os.readlink(src_sub), dst_sub)
         for fn in files:
+            src_file = os.path.join(root, fn)
             dst_file = os.path.join(target_dir, fn)
-            if skip_existing and os.path.exists(dst_file):
+            # lexists (not exists): a broken or symlinked destination entry
+            # still counts as present for a merge, so we never dereference it
+            # and write through to its target. exists() returns False for a
+            # broken symlink and would fall through to copy2 below.
+            if skip_existing and os.path.lexists(dst_file):
                 continue
-            shutil.copy2(os.path.join(root, fn), dst_file)
+            if os.path.islink(src_file):
+                # Preserve the symlink rather than copy2's dereferenced target,
+                # matching rsync -a and the directory-symlink handling above.
+                os.symlink(os.readlink(src_file), dst_file)
+            else:
+                shutil.copy2(src_file, dst_file)
             copied += 1
             if progress_cb:
                 progress_cb(copied, total_files, fn, "Copying files")
@@ -759,9 +769,9 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
              "Merging" if dest_exists else "Moving", src_path, dest_path)
 
     # Count source files up front so the copy phase reports against a real
-    # denominator from the first file, and so the fresh-move verification
-    # below can reuse the count (rsync never mutates the source) instead of
-    # walking the tree a second time.
+    # denominator from the first file. This count is the progress denominator
+    # only — the fresh-move verification below deliberately recounts the
+    # source at verify time rather than trusting this pre-copy number.
     total_files = sum(1 for _, _, files in os.walk(src_path) for _ in files)
     if progress_cb:
         progress_cb(0, total_files, "", "Copying files")
