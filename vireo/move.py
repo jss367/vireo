@@ -301,11 +301,30 @@ def preview_merge(src_path, dest_path):
     separately by ``_find_content_conflict``, which refuses the whole merge
     before anything is copied — so this preview never reads file contents and
     stays fast on large trees.
+
+    Directory symlinks under ``src_path`` count as one transfer item each:
+    the rsync ``-a`` path and the shutil fallback (see
+    ``_copy_tree_with_progress``) both recreate them as symlinks at the
+    destination without descending, so omitting them would let the confirm
+    dialog say "All 0 files are already present" for a source that is
+    actually just a directory symlink, undercounting what the move
+    transfers.
     """
     will_copy = 0
     will_skip = 0
-    for root, _, files in os.walk(src_path):
+    # os.walk defaults to followlinks=False, so a symlinked subdirectory
+    # appears in `dirs` but is not descended into — which is exactly the
+    # transfer semantics the merge applies, so each such entry is one item.
+    for root, dirs, files in os.walk(src_path):
         rel = os.path.relpath(root, src_path)
+        for d in dirs:
+            if not os.path.islink(os.path.join(root, d)):
+                continue
+            rel_name = d if rel == "." else os.path.join(rel, d)
+            if os.path.lexists(os.path.join(dest_path, rel_name)):
+                will_skip += 1
+            else:
+                will_copy += 1
         for fn in files:
             rel_name = fn if rel == "." else os.path.join(rel, fn)
             dst_file = os.path.join(dest_path, rel_name)

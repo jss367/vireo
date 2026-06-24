@@ -230,6 +230,39 @@ def test_preview_merge_counts_copy_and_skip(move_env):
     assert preview["source_total"] == 3
 
 
+def test_preview_merge_counts_directory_symlinks(move_env, tmp_path):
+    """A directory symlink under the source is one transfer item: rsync -a /
+    the shutil fallback recreate it as a symlink without descending. Omitting
+    it would make the confirm dialog undercount and, for a source that's just
+    a symlinked subdir, claim 0 files would transfer."""
+    from move import preview_merge
+
+    env = move_env
+    # Real directory the symlinked subdir points at — kept outside the source
+    # tree so its contents don't count on their own. The number of files it
+    # holds is irrelevant: the preview must not descend.
+    link_target = tmp_path / "linked_tree"
+    link_target.mkdir()
+    (link_target / "unused.jpg").write_bytes(b"x")
+    os.symlink(str(link_target), str(env["src"] / "extras"))
+
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    preview = preview_merge(str(env["src"]), str(landing))
+    # 3 source files + 1 directory symlink, none present at destination.
+    assert preview["will_copy"] == 4
+    assert preview["will_skip"] == 0
+    assert preview["source_total"] == 4
+
+    # Re-create the symlink at the destination — now the preview must classify
+    # it as a skip rather than a copy, mirroring rsync --ignore-existing.
+    os.symlink(str(link_target), str(landing / "extras"))
+    preview = preview_merge(str(env["src"]), str(landing))
+    assert preview["will_copy"] == 3
+    assert preview["will_skip"] == 1
+    assert preview["source_total"] == 4
+
+
 def test_preview_merge_is_name_only(move_env):
     """A same-name destination file counts as a skip even when its bytes
     differ — rsync --ignore-existing skips by name, and the differing-content
