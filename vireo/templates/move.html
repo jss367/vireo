@@ -292,6 +292,10 @@ body { padding-bottom: 36px; }
   color: var(--text-secondary);
   font-family: var(--font-mono, monospace);
 }
+.dest-status {
+  margin-top: 4px;
+  line-height: 1.4;
+}
 
 /* Empty state */
 .empty-state {
@@ -608,11 +612,78 @@ function updateQuickMovePreview() {
   }
   var folder = allFolders.find(function(f) { return f.id === fid; });
   var finalPath = resolvedMoveDest(folder, dest);
-  preview.textContent = 'Folder will be moved to: ';
+
+  // The resolved path is computable client-side, so show it instantly.
+  preview.textContent = '';
+  var pathLine = document.createElement('div');
+  pathLine.textContent = 'Folder will be moved to: ';
   var pathSpan = document.createElement('span');
   pathSpan.className = 'dest-preview-path';
   pathSpan.textContent = finalPath;
-  preview.appendChild(pathSpan);
+  pathLine.appendChild(pathSpan);
+  preview.appendChild(pathLine);
+
+  // Whether the destination already exists (and how much is in it) requires
+  // hitting the filesystem, so fetch it from the preflight endpoint and fill
+  // in this line asynchronously. Debounced so typing a path doesn't spam it.
+  var status = document.createElement('div');
+  status.id = 'quickDestStatus';
+  status.className = 'dest-status';
+  preview.appendChild(status);
+  scheduleQuickPreflight(fid, dest);
+}
+
+var quickPreflightSeq = 0;
+var quickPreflightTimer = null;
+
+function scheduleQuickPreflight(fid, dest) {
+  if (quickPreflightTimer) clearTimeout(quickPreflightTimer);
+  // The preflight route rejects non-absolute paths, so wait until the input
+  // looks absolute (POSIX '/...' or Windows 'C:\...') before asking.
+  var isAbs = dest.charAt(0) === '/' || /^[A-Za-z]:[\\\/]/.test(dest);
+  if (!isAbs) return;
+  quickPreflightTimer = setTimeout(function() { runQuickPreflight(fid, dest); }, 350);
+}
+
+async function runQuickPreflight(fid, dest) {
+  var seq = ++quickPreflightSeq;
+  var status = document.getElementById('quickDestStatus');
+  if (status) {
+    status.textContent = 'Checking destination…';
+    status.style.color = 'var(--text-dim)';
+  }
+  // Plain fetch (not safeFetch): this fires while the user types, so a
+  // transient failure must stay silent rather than raising an error toast.
+  var data;
+  try {
+    var resp = await fetch('/api/move-folder/preflight', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({folder_id: fid, destination: dest}),
+    });
+    if (!resp.ok) { if (seq === quickPreflightSeq) clearQuickDestStatus(); return; }
+    data = await resp.json();
+  } catch (e) {
+    if (seq === quickPreflightSeq) clearQuickDestStatus();
+    return;
+  }
+  if (seq !== quickPreflightSeq) return;  // a newer keystroke superseded us
+  status = document.getElementById('quickDestStatus');
+  if (!status) return;
+  if (data.exists) {
+    var n = data.file_count;
+    status.textContent = '⚠ Destination already exists — contains ' + n + ' file' +
+      (n !== 1 ? 's' : '') + '. Existing files with a matching size are skipped; only missing files are copied.';
+    status.style.color = 'var(--warning)';
+  } else {
+    status.textContent = '✓ New folder — nothing exists at this location yet.';
+    status.style.color = 'var(--text-dim)';
+  }
+}
+
+function clearQuickDestStatus() {
+  var status = document.getElementById('quickDestStatus');
+  if (status) status.textContent = '';
 }
 
 async function startQuickMove() {
