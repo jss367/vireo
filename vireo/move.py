@@ -8,8 +8,27 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 
 log = logging.getLogger(__name__)
+
+# How long rsync may make NO forward progress (no file transferred and no
+# stderr activity) before we treat it as wedged and kill it. This is a STALL
+# watchdog, not a total-runtime cap: a healthy copy of thousands of RAW files
+# over a slow network share can legitimately run for many hours, and it is
+# allowed to as long as it keeps moving data. The window is generous because
+# rsync is silent during its initial file-list build and the destination scan
+# a merge (--ignore-existing) performs, which over a slow SMB share can take
+# several minutes before the first file transfers.
+#
+# Known limitation: progress is detected per FILE (rsync emits one
+# --out-format=%n line per item, not continuous byte progress), so a single
+# file whose transfer exceeds this window over a very slow link could be
+# killed mid-flight. That can't happen for Vireo's data — source files are RAW
+# frames (tens of MB; ~12s/file even on the slow SMB share this was built for),
+# orders of magnitude under the window — so it's accepted rather than paying
+# the complexity of char-level --info=progress2 byte-progress parsing.
+RSYNC_STALL_TIMEOUT = 1800  # 30 minutes
 
 
 def _xmp_path(filepath):
@@ -126,7 +145,7 @@ def _copy_tree_with_progress(src_path, dest_path, skip_existing, total_files,
 
 
 def _run_rsync_streamed(src_path, dest_path, rsync_flag, total_files,
-                        progress_cb, timeout=3600):
+                        progress_cb, stall_timeout=RSYNC_STALL_TIMEOUT):
     """Run rsync, reporting each transferred file through progress_cb.
 
     rsync's ``--out-format=%n`` prints the relative name of every item it
@@ -135,9 +154,13 @@ def _run_rsync_streamed(src_path, dest_path, rsync_flag, total_files,
     large copy runs, without changing rsync's copy semantics.
 
     Returns ``(returncode, stderr, timed_out)``. ``timed_out`` is True when
-    the copy ran past ``timeout`` and rsync was killed — the same safety net
-    the previous ``subprocess.run(timeout=...)`` provided, preserved here
-    because a streamed Popen can't pass ``timeout`` to the read loop.
+    rsync made no forward progress for ``stall_timeout`` seconds and was
+    killed. This is a STALL watchdog rather than a total-runtime cap: a
+    healthy but slow transfer (e.g. thousands of RAW files over a network
+    share) runs for as long as it keeps moving data, while a genuinely wedged
+    rsync — which the job's cancel path can't reach, since it never sees the
+    subprocess — still gets reaped. The clock resets on every transferred
+    file and on stderr activity, so only true silence trips it.
     """
     proc = subprocess.Popen(
         ["rsync", "-a", "--out-format=%n", rsync_flag,
@@ -145,31 +168,53 @@ def _run_rsync_streamed(src_path, dest_path, rsync_flag, total_files,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     state = {"timed_out": False}
+    # Last time rsync showed any sign of life (process start counts, so the
+    # silent file-list/scan phase before the first transfer isn't a stall).
+    last_activity = {"t": time.monotonic()}
+    done = threading.Event()
 
-    def _kill():
-        state["timed_out"] = True
-        proc.kill()
+    def _watchdog():
+        # Poll well below stall_timeout so a stall is detected promptly once
+        # the window elapses, without busy-waiting.
+        while not done.wait(min(stall_timeout, 30)):
+            if time.monotonic() - last_activity["t"] > stall_timeout:
+                state["timed_out"] = True
+                proc.kill()
+                return
 
-    killer = threading.Timer(timeout, _kill)
-    killer.start()
+    watchdog = threading.Thread(target=_watchdog, daemon=True)
+    watchdog.start()
 
     # Drain stderr on a separate thread. rsync can emit a lot of stderr (e.g.
     # many permission-denied or "file vanished" notices); if that fills the
     # pipe buffer while this thread is blocked reading stdout, rsync blocks on
-    # the stderr write and neither side progresses — a deadlock that would
-    # only break when the 1-hour timer kills the job. Reading both streams
+    # the stderr write and neither side progresses — a deadlock that the stall
+    # watchdog would only break after stall_timeout. Reading both streams
     # concurrently keeps the error surfacing promptly, matching the old
-    # subprocess.run(capture_output=True) behavior.
+    # subprocess.run(capture_output=True) behavior. Reading stderr is also a
+    # liveness signal, so it resets the stall clock too.
     stderr_chunks = []
-    stderr_thread = threading.Thread(
-        target=lambda: stderr_chunks.append(proc.stderr.read())
-    )
+
+    def _drain_stderr():
+        # Iterate line-by-line rather than read(4096): a fixed-size read on a
+        # buffered text stream blocks until the buffer fills or EOF, so sparse
+        # rsync diagnostics ("file vanished", permission notices) wouldn't
+        # refresh last_activity until 4096 chars had accumulated — long enough
+        # that the watchdog could kill a transfer that's still emitting
+        # stderr. Line iteration yields each message as it's flushed, so every
+        # stderr emission counts as liveness.
+        for line in proc.stderr:
+            stderr_chunks.append(line)
+            last_activity["t"] = time.monotonic()
+
+    stderr_thread = threading.Thread(target=_drain_stderr)
     stderr_thread.start()
 
     copied = 0
     try:
         for line in proc.stdout:
             name = line.rstrip("\n")
+            last_activity["t"] = time.monotonic()
             if not name or name.endswith("/"):
                 continue  # directory entry, not a file
             copied += 1
@@ -178,8 +223,9 @@ def _run_rsync_streamed(src_path, dest_path, rsync_flag, total_files,
                             "Copying files")
         proc.wait()
     finally:
-        killer.cancel()
+        done.set()
     stderr_thread.join()
+    watchdog.join()
     return proc.returncode, "".join(stderr_chunks), state["timed_out"]
 
 
@@ -790,7 +836,12 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             src_path, dest_path, rsync_flag, total_files, progress_cb,
         )
         if timed_out:
-            return {"moved": 0, "errors": ["rsync timed out after 1 hour"]}
+            mins = RSYNC_STALL_TIMEOUT // 60
+            return {"moved": 0, "errors": [
+                f"rsync stalled — no progress for over {mins} minutes, so the "
+                f"copy was stopped. Originals are untouched; re-run with "
+                f"merge/resume to continue from where it left off."
+            ]}
         if returncode != 0:
             return {"moved": 0, "errors": [f"rsync failed: {stderr.strip()}"]}
     except FileNotFoundError:

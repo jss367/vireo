@@ -2007,6 +2007,7 @@ def _setup_fake_downloaded_model(tmp_path, monkeypatch):
     import classify_job
     import model_verify
     import models
+    import taxonomy
     monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
     monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
     _write_fake_model_files(tmp_path / "models" / "bioclip-vit-b-16")
@@ -2017,6 +2018,14 @@ def _setup_fake_downloaded_model(tmp_path, monkeypatch):
     monkeypatch.setattr(
         classify_job, "_load_labels", lambda *a, **k: (["test-label"], False)
     )
+    # model_loader_stage triggers a real iNat DWCA download whenever
+    # params.download_taxonomy is True (the default) and no taxonomy file is
+    # available — which is always the case in the test's isolated HOME. That
+    # download is hundreds of MB and can exceed the per-test timeout on
+    # slower CI runners, surfacing as an opaque "worker crashed" failure.
+    # Stub it to a no-op; tests that exercise the real download path
+    # re-monkeypatch this after calling the helper.
+    monkeypatch.setattr(taxonomy, "download_taxonomy", lambda *a, **k: None)
     # Short-circuit hash verification — these tests use stub files that
     # would never match any real HF hash, and the verification path has
     # its own dedicated unit tests.
@@ -2032,6 +2041,7 @@ def _setup_two_fake_downloaded_models(tmp_path, monkeypatch):
     """Install two bioclip models side-by-side; both reported as downloaded."""
     import classify_job
     import models
+    import taxonomy
     monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
     monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
     _write_fake_model_files(tmp_path / "models" / "bioclip-vit-b-16")
@@ -2044,6 +2054,8 @@ def _setup_two_fake_downloaded_models(tmp_path, monkeypatch):
     monkeypatch.setattr(
         classify_job, "_load_labels", lambda *a, **k: (["test-label"], False)
     )
+    # See _setup_fake_downloaded_model for why this stub is required.
+    monkeypatch.setattr(taxonomy, "download_taxonomy", lambda *a, **k: None)
     return ["bioclip-vit-b-16", "bioclip-2"]
 
 
@@ -2450,19 +2462,22 @@ def test_pipeline_redownloads_taxonomy_when_existing_file_is_corrupt(
     )
     monkeypatch.setattr(taxonomy_mod, "load_local_taxonomy", lambda: None)
 
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Test", "[]")
+
+    # Helper installs a no-op download_taxonomy stub; override it AFTER the
+    # helper so this test's recording stub wins. Order matters: the helper's
+    # monkeypatch.setattr would clobber an earlier override.
+    _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
     download_calls = []
 
     def fake_download(output_path, progress_callback=None):
         download_calls.append(output_path)
 
     monkeypatch.setattr(taxonomy_mod, "download_taxonomy", fake_download)
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
-    col_id = db.add_collection("Test", "[]")
-
-    _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
     class FakeClassifier:
         def __init__(self, *args, **kwargs):
@@ -2515,6 +2530,15 @@ def test_pipeline_skips_taxonomy_download_when_file_is_usable(
     )
     monkeypatch.setattr(taxonomy_mod, "load_local_taxonomy", lambda: None)
 
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Test", "[]")
+
+    # Override the helper's no-op download stub AFTER calling the helper, so
+    # this test's recording stub wins. See sibling test above.
+    _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
     download_calls = []
     monkeypatch.setattr(
         taxonomy_mod,
@@ -2523,13 +2547,6 @@ def test_pipeline_skips_taxonomy_download_when_file_is_usable(
             output_path
         ),
     )
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
-    col_id = db.add_collection("Test", "[]")
-
-    _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
     class FakeClassifier:
         def __init__(self, *args, **kwargs):

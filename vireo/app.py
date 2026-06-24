@@ -13424,7 +13424,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "phase": phase,
                 })
 
-            return move_folder(
+            result = move_folder(
                 db=thread_db,
                 folder_id=folder_id,
                 destination=destination,
@@ -13432,6 +13432,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 developed_dir=developed_dir,
                 merge=merge,
             )
+
+            # Tell the JobRunner whether the move actually succeeded. Without
+            # this the runner marks any normal return "completed" — so a move
+            # that copied nothing because rsync timed out used to read as
+            # "completed, 0 errors" in the history. A `needs_merge` return is
+            # NOT a failure: it's a soft signal that the destination already
+            # exists and the UI should re-prompt for a merge/resume, so leave
+            # it for the caller without flagging the job failed.
+            if not result.get("needs_merge"):
+                errors = result.get("errors") or []
+                moved = result.get("moved", 0)
+                if errors and moved == 0:
+                    result["ok"] = False
+                    result["summary"] = f"Move failed — {errors[0]}"
+                else:
+                    result["ok"] = True
+                    result["summary"] = (
+                        f"Moved {moved} photo{'s' if moved != 1 else ''}"
+                        + (f", {len(errors)} error(s)" if errors else "")
+                    )
+            return result
 
         job_id = runner.start(
             "move-folder", work,

@@ -457,7 +457,27 @@ class JobRunner:
                     self._cancelled.discard(job_id)
                 else:
                     job["status"] = "completed"
+                    # A work function can return normally yet still have
+                    # failed (e.g. move-folder returns {"moved": 0, "errors":
+                    # [...]} when rsync times out). When the result opts into
+                    # the convention by carrying an "ok" key, honor it: fold
+                    # its errors into the job's tally so error_count is
+                    # accurate, and demote a falsy "ok" to "failed" so the
+                    # history doesn't read "completed, 0 errors" for a run
+                    # that accomplished nothing.
+                    if isinstance(result, dict) and "ok" in result:
+                        for err in (result.get("errors") or []):
+                            err_str = str(err)
+                            if err_str not in job["errors"]:
+                                job["errors"].append(err_str)
+                        if result["ok"] is False:
+                            job["status"] = "failed"
                 job["result"] = result
+            if job["status"] == "failed":
+                log.warning(
+                    "Job %s reported failure via result: %s",
+                    job["id"], "; ".join(job["errors"]) or "(no detail)",
+                )
         except Exception as e:
             # Cancellation takes precedence over failure: if the user cancelled
             # while the work function was raising (e.g. a stage crash happened
