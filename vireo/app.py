@@ -13454,13 +13454,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         resolved = resolve_folder_dest(folder["path"], folder["name"], destination)
         exists = os.path.isdir(resolved)
         file_count = 0
+        file_count_truncated = False
         if exists:
-            file_count = sum(1 for _, _, files in os.walk(resolved) for _ in files)
+            file_limit = 1000
+            dir_limit = 2000
+            dirs_seen = 0
+            for _, dirs, files in os.walk(resolved):
+                dirs_seen += 1
+                file_count += len(files)
+                if file_count >= file_limit:
+                    file_count = file_limit
+                    file_count_truncated = True
+                    dirs[:] = []
+                    break
+                if dirs_seen >= dir_limit:
+                    file_count_truncated = True
+                    dirs[:] = []
+                    break
 
         return jsonify({
             "resolved_dest": resolved,
             "exists": exists,
             "file_count": file_count,
+            "file_count_truncated": file_count_truncated,
         })
 
     @app.route("/api/jobs/import-full", methods=["POST"])

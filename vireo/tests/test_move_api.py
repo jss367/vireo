@@ -118,7 +118,33 @@ def test_move_folder_preflight_dest_exists(app_and_db, tmp_path):
     data = resp.get_json()
     assert data["exists"] is True
     assert data["file_count"] == 1
+    assert data["file_count_truncated"] is False
     assert data["resolved_dest"] == str(landing)
+
+
+def test_move_folder_preflight_caps_existing_destination_count(app_and_db, tmp_path):
+    """Preflight should not recursively count an unbounded destination tree."""
+    app, db = app_and_db
+    dst = tmp_path / "dest"
+    dst.mkdir()
+
+    folder = db.get_folder_tree()[0]
+    folder_name = folder["name"] or os.path.basename(folder["path"].rstrip("/\\"))
+    landing = dst / folder_name
+    landing.mkdir()
+    for idx in range(1001):
+        (landing / f"already-{idx}.jpg").write_bytes(b"x")
+
+    client = app.test_client()
+    resp = client.post("/api/move-folder/preflight", json={
+        "folder_id": folder["id"],
+        "destination": str(dst),
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["exists"] is True
+    assert data["file_count"] == 1000
+    assert data["file_count_truncated"] is True
 
 
 def test_move_folder_preflight_requires_params(app_and_db):
