@@ -500,6 +500,7 @@ var lastSelectedIdx = -1;
 var browserTargetInput = null;
 var browserPath = '';
 var browserHomePath = '';
+var browseSeq = 0;
 var confirmCallback = null;
 var editingRuleId = null;
 
@@ -1104,6 +1105,11 @@ function closeBrowser() {
 }
 
 async function browseTo(path) {
+  // Stamp each browse so a slow initial fetch can't clobber a later
+  // shortcut click. Without this, opening the modal with a prefilled
+  // destination and immediately clicking Pictures/Volumes can leave the
+  // list and browserPath silently reverted to the destination's listing.
+  var seq = ++browseSeq;
   var url = '/api/browse';
   if (path === '__pictures__') {
     // When the modal opens with a prefilled destination we skip the
@@ -1113,6 +1119,7 @@ async function browseTo(path) {
     if (!browserHomePath) {
       try {
         var home = await safeFetch('/api/browse');
+        if (seq !== browseSeq) return;
         browserHomePath = home.path;
       } catch (e) {
         return;
@@ -1120,9 +1127,14 @@ async function browseTo(path) {
     }
     url = '/api/browse?path=' + encodeURIComponent(browserHomePath + '/Pictures');
   } else if (path === '__volumes__') {
-    if (navigator.userAgent.indexOf('Win') >= 0) {
+    // Mac's /Volumes is a real directory the browse endpoint can list.
+    // Windows drive letters and Linux mount roots (/media, /run/media,
+    // /mnt) vary per host, so use /api/volumes — which scans all of
+    // them — and render a synthetic root list.
+    if (navigator.userAgent.indexOf('Mac') < 0) {
       try {
         var volumes = await safeFetch('/api/volumes');
+        if (seq !== browseSeq) return;
         browserPath = '';
         renderBrowserList({path: '', dirs: volumes}, {syntheticRoot: true});
       } catch (e) {
@@ -1130,13 +1142,13 @@ async function browseTo(path) {
       }
       return;
     }
-    var volDir = navigator.userAgent.indexOf('Mac') >= 0 ? '/Volumes' : '/media';
-    url = '/api/browse?path=' + encodeURIComponent(volDir);
+    url = '/api/browse?path=' + encodeURIComponent('/Volumes');
   } else if (path) {
     url = '/api/browse?path=' + encodeURIComponent(path);
   }
   try {
     var data = await safeFetch(url);
+    if (seq !== browseSeq) return;
     browserPath = data.path;
     if (!path) browserHomePath = data.path;
     renderBrowserList(data);
