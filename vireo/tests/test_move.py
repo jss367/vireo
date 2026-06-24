@@ -3,6 +3,8 @@
 import os
 import sys
 import tempfile
+import threading
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -1643,3 +1645,113 @@ def test_move_folder_fresh_move_detects_late_source_file(move_env, monkeypatch):
     # move that aborts at verification preserves originals.
     assert (env["src"] / "bird1.jpg").exists()
     assert (env["src"] / "bird2.jpg").exists()
+
+
+class _FakeStderr:
+    """rsync stderr that's empty: the first read returns "" so the drain
+    loop (iter(read, "")) stops immediately."""
+
+    def read(self, _n=-1):
+        return ""
+
+
+class _SilentStdout:
+    """stdout that never yields a line and blocks until the process is
+    killed — simulates a wedged rsync producing no progress."""
+
+    def __init__(self, killed):
+        self._killed = killed
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        # Block until the watchdog kills the process, then end the stream.
+        self._killed.wait(timeout=5)
+        raise StopIteration
+
+
+class _StreamingStdout:
+    """stdout that emits ``n`` file lines with a small gap between each, then
+    ends — simulates a slow-but-progressing transfer."""
+
+    def __init__(self, n, gap):
+        self._remaining = n
+        self._gap = gap
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._remaining <= 0:
+            raise StopIteration
+        time.sleep(self._gap)
+        self._remaining -= 1
+        return f"DSC_{self._remaining}.NEF\n"
+
+
+class _FakeProc:
+    def __init__(self, stdout, returncode=0):
+        self.killed = threading.Event()
+        self.stdout = stdout
+        self.stderr = _FakeStderr()
+        self.returncode = returncode
+
+    def kill(self):
+        self.returncode = -9
+        self.killed.set()
+
+    def wait(self):
+        # The streamed read loop only reaches wait() after stdout iteration
+        # has ended, so the fake "process" is already done — return at once.
+        return self.returncode
+
+
+def test_rsync_stall_watchdog_kills_silent_process(monkeypatch):
+    """A rsync that produces no output for longer than the stall window is
+    treated as wedged and killed, with timed_out=True — even though no
+    total-runtime cap was hit."""
+    import move as move_mod
+
+    proc_holder = {}
+
+    def _fake_popen(*_a, **_k):
+        proc = _FakeProc.__new__(_FakeProc)
+        proc.killed = threading.Event()
+        proc.stdout = _SilentStdout(proc.killed)
+        proc.stderr = _FakeStderr()
+        proc.returncode = 0
+        proc_holder["proc"] = proc
+        return proc
+
+    monkeypatch.setattr(move_mod.subprocess, "Popen", _fake_popen)
+
+    rc, stderr, timed_out = move_mod._run_rsync_streamed(
+        "/src", "/dst", "--checksum", 10, None, stall_timeout=0.3,
+    )
+    assert timed_out is True
+    assert proc_holder["proc"].killed.is_set()
+
+
+def test_rsync_streamed_runs_as_long_as_it_progresses(monkeypatch):
+    """A slow transfer that keeps emitting files past the stall window is NOT
+    killed: each transferred file resets the stall clock, so a copy can run
+    far longer than stall_timeout as long as it keeps moving data."""
+    import move as move_mod
+
+    def _fake_popen(*_a, **_k):
+        # 8 files, one every 0.1s = 0.8s total — well past the 0.3s stall
+        # window, but never idle for 0.3s, so the watchdog must not fire.
+        return _FakeProc(_StreamingStdout(n=8, gap=0.1))
+
+    monkeypatch.setattr(move_mod.subprocess, "Popen", _fake_popen)
+
+    seen = []
+    rc, stderr, timed_out = move_mod._run_rsync_streamed(
+        "/src", "/dst", "--ignore-existing", 8,
+        lambda cur, tot, name, phase: seen.append(name),
+        stall_timeout=0.3,
+    )
+    assert timed_out is False
+    assert rc == 0
+    assert len(seen) == 8  # progress reported for every transferred file
