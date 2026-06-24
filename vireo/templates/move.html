@@ -309,6 +309,25 @@ body { padding-bottom: 36px; }
 }
 
 /* Folder browser modal (move-specific, reuses modal base from navbar) */
+.browser-shortcuts {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.browser-shortcuts button {
+  padding: 5px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-secondary);
+}
+.browser-shortcuts button:hover {
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
 .browser-breadcrumb {
   font-size: 12px;
   color: var(--text-secondary);
@@ -442,6 +461,11 @@ body { padding-bottom: 36px; }
 <div class="modal-overlay" id="moveBrowserModal" style="z-index:1001;">
   <div class="modal" style="max-width:600px;width:85%;">
     <h3>Select Folder</h3>
+    <div class="browser-shortcuts">
+      <button onclick="browseTo(null)">Home</button>
+      <button onclick="browseTo('__pictures__')">Pictures</button>
+      <button onclick="browseTo('__volumes__')">Volumes</button>
+    </div>
     <div class="browser-breadcrumb" id="moveBrowserBreadcrumb"></div>
     <div id="moveBrowserList" style="height:300px;overflow-y:auto;border:1px solid var(--border-primary);border-radius:4px;margin-bottom:12px;"></div>
     <div class="new-folder-row">
@@ -475,6 +499,7 @@ var selectedPhotos = new Set();
 var lastSelectedIdx = -1;
 var browserTargetInput = null;
 var browserPath = '';
+var browserHomePath = '';
 var confirmCallback = null;
 var editingRuleId = null;
 
@@ -1079,33 +1104,59 @@ function closeBrowser() {
 }
 
 async function browseTo(path) {
-  var url = path ? '/api/browse?path=' + encodeURIComponent(path) : '/api/browse';
+  var url = '/api/browse';
+  if (path === '__pictures__') {
+    url = '/api/browse?path=' + encodeURIComponent((browserHomePath || '') + '/Pictures');
+  } else if (path === '__volumes__') {
+    if (navigator.userAgent.indexOf('Win') >= 0) {
+      try {
+        var volumes = await safeFetch('/api/volumes');
+        browserPath = '';
+        renderBrowserList({path: '', dirs: volumes}, {syntheticRoot: true});
+      } catch (e) {
+        // safeFetch handles error toast
+      }
+      return;
+    }
+    var volDir = navigator.userAgent.indexOf('Mac') >= 0 ? '/Volumes' : '/media';
+    url = '/api/browse?path=' + encodeURIComponent(volDir);
+  } else if (path) {
+    url = '/api/browse?path=' + encodeURIComponent(path);
+  }
   try {
     var data = await safeFetch(url);
     browserPath = data.path;
-
-    document.getElementById('moveBrowserBreadcrumb').textContent = data.path;
-
-    var list = document.getElementById('moveBrowserList');
-    var html = '';
-    var parent = data.path.substring(0, data.path.lastIndexOf('/')) || '/';
-    if (data.path !== '/') {
-      html += '<div class="browser-folder-item" ondblclick="browseTo(\'' + escapeAttr(parent) + '\')">&#128194; ..</div>';
-    }
-    if (data.dirs) {
-      data.dirs.forEach(function(d) {
-        html += '<div class="browser-folder-item" ondblclick="browseTo(\'' + escapeAttr(d.path) + '\')">&#128194; ' + escapeHtml(d.name) + '</div>';
-      });
-    }
-    if (!data.dirs || data.dirs.length === 0) {
-      if (data.path === '/') {
-        html += '<div style="padding:10px;color:var(--text-dim);font-size:13px;">No subdirectories</div>';
-      }
-    }
-    list.innerHTML = html;
+    if (!path) browserHomePath = data.path;
+    renderBrowserList(data);
   } catch (e) {
     // safeFetch handles error toast
   }
+}
+
+function renderBrowserList(data, opts) {
+  document.getElementById('moveBrowserBreadcrumb').textContent = data.path || 'Volumes';
+
+  var list = document.getElementById('moveBrowserList');
+  var html = '';
+  var isSyntheticRoot = opts && opts.syntheticRoot;
+  var parent = '';
+  if (data.path && data.path.indexOf('\\') !== -1) {
+    parent = data.path.replace(/[\\\/]?[^\\\/]+[\\\/]?$/, '') || data.path;
+  } else if (data.path) {
+    parent = data.path.substring(0, data.path.lastIndexOf('/')) || '/';
+  }
+  if (data.path && data.path !== '/' && parent !== data.path) {
+    html += '<div class="browser-folder-item" ondblclick="browseTo(\'' + escapeAttr(parent) + '\')">&#128194; ..</div>';
+  }
+  if (data.dirs) {
+    data.dirs.forEach(function(d) {
+      html += '<div class="browser-folder-item" ondblclick="browseTo(\'' + escapeAttr(d.path) + '\')">&#128194; ' + escapeHtml(d.name) + '</div>';
+    });
+  }
+  if ((!data.dirs || data.dirs.length === 0) && (data.path === '/' || isSyntheticRoot)) {
+    html += '<div style="padding:10px;color:var(--text-dim);font-size:13px;">No subdirectories</div>';
+  }
+  list.innerHTML = html;
 }
 
 function selectBrowserFolder() {

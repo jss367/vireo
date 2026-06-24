@@ -11,6 +11,21 @@ def test_move_page_returns_200(app_and_db):
     assert resp.status_code == 200
 
 
+def test_move_page_folder_browser_exposes_volumes_shortcut(app_and_db):
+    """Move destinations should be able to jump directly to mounted volumes."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/move")
+    html = resp.data.decode()
+
+    assert "browseTo('__volumes__')" in html
+    assert (
+        "var volDir = navigator.userAgent.indexOf('Mac') >= 0 "
+        "? '/Volumes' : '/media';"
+    ) in html
+    assert "url = '/api/browse?path=' + encodeURIComponent(volDir);" in html
+
+
 def test_move_photos_job_starts(app_and_db, tmp_path):
     """POST /api/jobs/move-photos starts a job."""
     app, db = app_and_db
