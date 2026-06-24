@@ -13456,21 +13456,36 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         file_count = 0
         file_count_truncated = False
         if exists:
+            # os.scandir yields entries lazily, so we can bail out the moment
+            # the cap is reached without waiting for the OS to enumerate a
+            # directory with millions of files.
             file_limit = 1000
             dir_limit = 2000
+            stack = [resolved]
             dirs_seen = 0
-            for _, dirs, files in os.walk(resolved):
+            while stack:
+                if file_count >= file_limit or dirs_seen >= dir_limit:
+                    file_count_truncated = True
+                    break
+                current = stack.pop()
                 dirs_seen += 1
-                file_count += len(files)
-                if file_count >= file_limit:
-                    file_count = file_limit
-                    file_count_truncated = True
-                    dirs[:] = []
-                    break
-                if dirs_seen >= dir_limit:
-                    file_count_truncated = True
-                    dirs[:] = []
-                    break
+                try:
+                    scanner = os.scandir(current)
+                except OSError:
+                    continue
+                with scanner:
+                    for entry in scanner:
+                        try:
+                            is_dir = entry.is_dir(follow_symlinks=False)
+                        except OSError:
+                            is_dir = False
+                        if is_dir:
+                            stack.append(entry.path)
+                        else:
+                            file_count += 1
+                            if file_count >= file_limit:
+                                file_count_truncated = True
+                                break
 
         return jsonify({
             "resolved_dest": resolved,
