@@ -4,6 +4,7 @@ import contextlib
 import filecmp
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -11,6 +12,13 @@ import threading
 import time
 
 log = logging.getLogger(__name__)
+
+# How long the remote verification rsync (a --checksum dry-run over SSH) may
+# run before we give up and treat the move as unverified. This only gates the
+# *verify* step, never the transfer: a timeout here is conservative-safe — it
+# returns a verification failure, so the originals are preserved rather than
+# deleted against an unconfirmed copy.
+REMOTE_VERIFY_TIMEOUT = 7200  # 2 hours
 
 # How long rsync may make NO forward progress (no file transferred and no
 # stderr activity) before we treat it as wedged and kill it. This is a STALL
@@ -57,6 +65,55 @@ def _copy_and_verify(src, dst):
         os.remove(dst)
         return False
     return True
+
+
+def sanitize_subpath(subpath):
+    """Normalize an optional relative subpath under a remote target's base.
+
+    Rejects absolute paths and any ``..`` traversal so a move can't escape the
+    configured remote_path/mount_path. Returns a clean ``/``-joined relative
+    path (possibly empty).
+    """
+    sub = (subpath or "").strip()
+    if not sub:
+        return ""
+    parts = []
+    for seg in sub.replace("\\", "/").split("/"):
+        if seg in ("", "."):
+            continue
+        if seg == "..":
+            raise ValueError("Subpath may not contain '..'")
+        parts.append(seg)
+    return "/".join(parts)
+
+
+def build_remote_move_spec(target, subpath, rsync_bin):
+    """Build the ``remote`` dict ``move_folder`` expects from a config target.
+
+    ``target`` is a validated dict from ``config.get_remote_target`` (host,
+    user, port, ssh_key, remote_path, mount_path, bwlimit_kbps). ``subpath``
+    is an optional relative path under both base paths. The SSH base is joined
+    POSIX-style (the NAS is POSIX); the mount base uses the local separator.
+    Raises ValueError on a bad subpath.
+    """
+    import posixpath
+    sub = sanitize_subpath(subpath)
+    ssh_base = target["remote_path"]
+    mount_base = target.get("mount_path", "")
+    if sub:
+        ssh_base = posixpath.join(ssh_base, sub)
+        if mount_base:
+            mount_base = os.path.join(mount_base, *sub.split("/"))
+    return {
+        "host": target["host"],
+        "user": target["user"],
+        "port": target.get("port", 22),
+        "ssh_key": target.get("ssh_key", ""),
+        "bwlimit_kbps": target.get("bwlimit_kbps", 0),
+        "rsync_bin": rsync_bin,
+        "ssh_dest_base": ssh_base,
+        "mount_dest_base": mount_base,
+    }
 
 
 def resolve_folder_dest(folder_path, folder_name, destination):
@@ -144,14 +201,241 @@ def _copy_tree_with_progress(src_path, dest_path, skip_existing, total_files,
             shutil.copystat(src_dir, target_dir)
 
 
-def _run_rsync_streamed(src_path, dest_path, rsync_flag, total_files,
-                        progress_cb, stall_timeout=RSYNC_STALL_TIMEOUT):
+# Path candidates for a GNU rsync usable for remote (SSH) moves. macOS's
+# /usr/bin/rsync is Apple's openrsync, which can't drive rsync-over-SSH to a
+# GNU rsync peer, so it is deliberately absent here. A packaged build drops a
+# bundled static GNU rsync next to this module (vireo/bin/rsync) or in the
+# app's Resources dir; dev machines fall back to a Homebrew/MacPorts install.
+_BUNDLED_RSYNC_CANDIDATES = (
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "rsync"),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Resources", "rsync"),
+    "/opt/homebrew/bin/rsync",
+    "/usr/local/bin/rsync",
+    "/opt/local/bin/rsync",
+)
+
+
+def resolve_rsync_bin(configured=""):
+    """Return an absolute path to a GNU rsync binary for remote moves, or None.
+
+    Resolution order: an explicit ``configured`` path (the ``rsync_bin``
+    config value), the ``VIREO_RSYNC_BIN`` environment override, then the
+    bundled/known-install candidates. Apple's openrsync at /usr/bin/rsync is
+    never auto-selected — it can't do rsync-over-SSH — so a host with only
+    that returns None, and the caller surfaces a clear "install GNU rsync"
+    error rather than failing mid-transfer.
+    """
+    candidates = []
+    if configured:
+        candidates.append(configured)
+    env = os.environ.get("VIREO_RSYNC_BIN")
+    if env:
+        candidates.append(env)
+    candidates.extend(_BUNDLED_RSYNC_CANDIDATES)
+    for c in candidates:
+        if c and os.path.isfile(c) and os.access(c, os.X_OK):
+            return os.path.abspath(c)
+    return None
+
+
+def is_gnu_rsync(rsync_bin):
+    """True if ``rsync_bin`` looks like GNU rsync (not Apple openrsync).
+
+    Used by the connection test to give a precise error before a move: Apple's
+    openrsync reports ``openrsync:`` in --version and can't drive SSH. Failures
+    to execute return False (treated as unusable).
+    """
+    try:
+        out = subprocess.run([rsync_bin, "--version"], capture_output=True,
+                             text=True, timeout=10).stdout.lower()
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "openrsync" not in out and "rsync" in out
+
+
+def ssh_base_args(remote):
+    """Base ``ssh`` option args (list) for connecting to a remote target.
+
+    Non-interactive (BatchMode) so a headless job thread can never hang on a
+    password prompt; ``accept-new`` trust-on-first-use for the host key so the
+    first move from a freshly configured target doesn't fail host-key
+    verification. Port and identity file are added only when set.
+    """
+    args = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=10"]
+    port = remote.get("port") or 22
+    with contextlib.suppress(TypeError, ValueError):
+        if int(port) != 22:
+            args += ["-p", str(int(port))]
+    key = remote.get("ssh_key")
+    if key:
+        args += ["-i", key]
+    return args
+
+
+def _ssh_rsh_string(remote):
+    """The ``-e`` value for rsync: an ``ssh ...`` command string.
+
+    rsync splits this on whitespace (no shell quoting), so identity-file paths
+    containing spaces aren't supported — an accepted limitation; the default
+    key needs no -i, and key paths almost never contain spaces.
+    """
+    return " ".join(["ssh"] + ssh_base_args(remote))
+
+
+def _ssh_target(remote):
+    return f'{remote["user"]}@{remote["host"]}'
+
+
+def _remote_dir_exists(remote, path):
+    """True if ``path`` is a directory on the remote host (via SSH)."""
+    cmd = (["ssh"] + ssh_base_args(remote)
+           + [_ssh_target(remote), f"test -d {shlex.quote(path)}"])
+    try:
+        return subprocess.run(cmd, capture_output=True,
+                              timeout=30).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def remote_preflight(remote, dest_path, file_cap=1000):
+    """Probe a remote destination for the move UI's merge/resume prompt.
+
+    Returns ``(exists, file_count, truncated, reachable, error)``:
+      * reachable=False + error — couldn't connect/run over SSH.
+      * exists — whether ``dest_path`` is already a directory on the remote.
+      * file_count/truncated — capped count of files already there (so the
+        UI can say "N files present" before a merge), via
+        ``find | head | wc -l`` so a huge tree can't hang the probe.
+    """
+    target = _ssh_target(remote)
+    base = ["ssh"] + ssh_base_args(remote) + [target]
+    q = shlex.quote(dest_path)
+    probe = base + [f"if [ -d {q} ]; then echo EXISTS; else echo NOPE; fi"]
+    try:
+        r = subprocess.run(probe, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return (False, 0, False, False, str(exc))
+    if r.returncode != 0:
+        return (False, 0, False, False,
+                r.stderr.strip() or "SSH connection failed")
+    if "EXISTS" not in r.stdout:
+        return (False, 0, False, True, None)
+    cnt_cmd = base + [
+        f"find {q} -type f 2>/dev/null | head -n {file_cap + 1} | wc -l"]
+    try:
+        c = subprocess.run(cnt_cmd, capture_output=True, text=True, timeout=120)
+        n = int((c.stdout or "0").strip() or 0)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return (True, 0, False, True, None)
+    return (True, min(n, file_cap), n > file_cap, True, None)
+
+
+def test_remote_connection(remote, rsync_bin):
+    """Run the checks the settings UI shows when testing a remote target.
+
+    ``remote`` is a coerced target dict; ``rsync_bin`` is a resolved GNU rsync
+    path (or "" if none/openrsync). Returns a dict with per-check booleans
+    (``ssh``, ``remote_path_writable``, ``rsync_ok``), an overall ``ok``, and
+    a human ``message``.
+    """
+    result = {"ok": False, "ssh": False, "remote_path_writable": False,
+              "rsync_ok": bool(rsync_bin), "message": ""}
+    target = _ssh_target(remote)
+    base = ["ssh"] + ssh_base_args(remote) + [target]
+    try:
+        r = subprocess.run(base + ["echo vireo_ok"], capture_output=True,
+                           text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError) as exc:
+        result["message"] = f"SSH connection failed: {exc}"
+        return result
+    if r.returncode != 0 or "vireo_ok" not in r.stdout:
+        result["message"] = (r.stderr.strip()
+                             or "SSH connection failed — check host, user, "
+                                "and that your key is authorized.")
+        return result
+    result["ssh"] = True
+    rp = shlex.quote(remote["remote_path"])
+    try:
+        w = subprocess.run(
+            base + [f"test -d {rp} && test -w {rp} && echo WRITABLE"],
+            capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError) as exc:
+        result["message"] = f"SSH connection failed: {exc}"
+        return result
+    if "WRITABLE" not in w.stdout:
+        result["message"] = (
+            f"Connected, but '{remote['remote_path']}' isn't a writable "
+            f"directory for {remote['user']}. Check the path and that the "
+            f"Synology rsync service is enabled.")
+        return result
+    result["remote_path_writable"] = True
+    if not rsync_bin:
+        result["message"] = (
+            "SSH and the remote path are reachable, but no GNU rsync was "
+            "found for the transfer (macOS's built-in rsync can't do this). "
+            "Install GNU rsync or set its path under Settings → Paths.")
+        return result
+    result["ok"] = True
+    result["message"] = "Connection OK — SSH, remote path, and rsync all good."
+    return result
+
+
+def _remote_verify_complete(rsync_bin, src_path, rsync_target, remote):
+    """Independent verification that the remote copy is complete and correct.
+
+    The local move's safety check walks the destination filesystem before
+    deleting originals; a remote destination isn't locally walkable, so this
+    runs ``rsync -an --checksum`` (a dry run) and inspects what it WOULD
+    transfer. rsync prints (via ``--out-format=%n``) only items it would
+    change, comparing by *checksum* — so any regular-file line means that
+    file is missing at the destination OR present with different content.
+    Returns:
+      * ``None`` — every source file is present at the destination with
+        matching content; safe to delete originals.
+      * ``(name, None)`` — first source file still absent/different; the
+        move must preserve originals.
+      * ``("__ERROR__", detail)`` — the verification rsync itself failed or
+        timed out; treated as a verification failure (originals preserved).
+    Bandwidth-cheap: the NAS checksums its own local disk and only hashes
+    cross the wire, so no bulk data is re-transferred.
+    """
+    cmd = [rsync_bin, "-an", "--checksum", "--out-format=%n",
+           "-e", _ssh_rsh_string(remote),
+           src_path + "/", rsync_target + "/"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=REMOTE_VERIFY_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return ("__ERROR__", f"verification timed out after "
+                f"{REMOTE_VERIFY_TIMEOUT // 60} minutes")
+    except OSError as exc:
+        return ("__ERROR__", str(exc))
+    if proc.returncode != 0:
+        return ("__ERROR__", proc.stderr.strip() or f"rsync exit {proc.returncode}")
+    for line in proc.stdout.splitlines():
+        name = line.rstrip("\n")
+        if not name or name.endswith("/"):
+            continue  # directory entry, not a file needing transfer
+        return (name, None)
+    return None
+
+
+def _run_rsync_streamed(src_path, dest_spec, rsync_flags, total_files,
+                        progress_cb, rsync_bin="rsync", extra_args=None,
+                        stall_timeout=RSYNC_STALL_TIMEOUT):
     """Run rsync, reporting each transferred file through progress_cb.
 
     rsync's ``--out-format=%n`` prints the relative name of every item it
     transfers (directories end in ``/``). Streaming that line-by-line lets
     the move job show live per-file progress instead of a frozen bar while a
     large copy runs, without changing rsync's copy semantics.
+
+    ``dest_spec`` is a local path for a local move or ``user@host:/path`` for
+    a remote (SSH) move; ``rsync_bin`` selects the binary (a bundled GNU rsync
+    for remote moves) and ``extra_args`` carries the SSH transport flags
+    (``-e ssh ...``, ``--partial``, ``--bwlimit``). ``rsync_flags`` is a list;
+    empty strings are dropped so a fresh move can pass no extra flag.
 
     Returns ``(returncode, stderr, timed_out)``. ``timed_out`` is True when
     rsync made no forward progress for ``stall_timeout`` seconds and was
@@ -162,10 +446,12 @@ def _run_rsync_streamed(src_path, dest_path, rsync_flag, total_files,
     subprocess — still gets reaped. The clock resets on every transferred
     file and on stderr activity, so only true silence trips it.
     """
+    cmd = [rsync_bin, "-a", "--out-format=%n"]
+    cmd += list(extra_args or [])
+    cmd += [f for f in (rsync_flags or []) if f]
+    cmd += [src_path + "/", dest_spec + "/"]
     proc = subprocess.Popen(
-        ["rsync", "-a", "--out-format=%n", rsync_flag,
-         src_path + "/", dest_path + "/"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     state = {"timed_out": False}
     # Last time rsync showed any sign of life (process start counts, so the
@@ -825,7 +1111,7 @@ def move_photos(db, photo_ids, destination, progress_cb=None):
 
 
 def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
-                merge=False):
+                merge=False, remote=None):
     """Move an entire folder (and subfolders) to a destination.
 
     The folder is placed inside the destination, preserving its name.
@@ -834,7 +1120,8 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     Args:
         db: Database instance
         folder_id: ID of the source folder
-        destination: absolute path to parent destination directory
+        destination: absolute path to parent destination directory. Ignored
+            for a remote move (the destination comes from ``remote``).
         progress_cb: optional callback(current, total, filename)
         merge: when False (default), refuse to write into a destination
             that already exists — the safe all-or-nothing behavior. When
@@ -853,6 +1140,16 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             path after the move. Without this, exports silently fall
             back to RAW for every previously-developed photo in the
             moved folder.
+        remote: optional dict to transfer over SSH instead of to a local
+            path. Keys: ``host``, ``user``, ``port``, ``ssh_key``,
+            ``bwlimit_kbps``, ``rsync_bin`` (a GNU rsync path), and the two
+            destination *parents* — ``ssh_dest_base`` (the NAS-side
+            filesystem path rsync writes to) and ``mount_dest_base`` (the
+            local path, e.g. an SMB mount, where Vireo can read those same
+            files afterward). The transfer and verification use the SSH
+            path; the catalog is repointed at the mount path once the move
+            succeeds, so the photos stay in the library and resolve whenever
+            the NAS is mounted.
 
     Returns dict with keys: moved (int), errors (list of str)
     """
@@ -864,7 +1161,26 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
 
     src_path = folder["path"]
     folder_name = folder["name"] or os.path.basename(src_path)
-    dest_path = resolve_folder_dest(src_path, folder["name"], destination)
+
+    # Three destination views:
+    #   transfer_dest — where rsync writes (NAS-side path for remote, local
+    #     path otherwise); also the path used for existence/verify.
+    #   rsync_target  — transfer_dest addressed for rsync (user@host:path
+    #     remote, bare path local).
+    #   catalog_path  — where the catalog points AFTER the move (the local
+    #     mount path for remote, same as transfer_dest local). The local
+    #     destination and catalog coincide; for remote they diverge because
+    #     the NAS path isn't reachable through the local filesystem.
+    if remote:
+        transfer_dest = resolve_folder_dest(
+            src_path, folder["name"], remote["ssh_dest_base"])
+        catalog_path = resolve_folder_dest(
+            src_path, folder["name"], remote["mount_dest_base"])
+        rsync_target = f'{remote["user"]}@{remote["host"]}:{transfer_dest}'
+    else:
+        transfer_dest = resolve_folder_dest(src_path, folder["name"], destination)
+        catalog_path = transfer_dest
+        rsync_target = transfer_dest
 
     # Validation (overlap, tracked-folder, and the per-file content-conflict
     # scan a merge runs) can take a noticeable moment on a large tree, so name
@@ -872,56 +1188,69 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     if progress_cb:
         progress_cb(0, 0, "", "Checking destination")
 
-    # Refuse a destination that overlaps the source. Moving a folder into
-    # itself (or into one of its own descendants) would make the post-copy
-    # rmtree(src) delete the only copy of the files. This is especially
-    # dangerous for a merge, where a destination equal to the source passes
-    # verification trivially (every source file is already "there") before the
-    # delete wipes everything. See _destination_overlaps_source for the alias
-    # surface (symlinks, Windows case folding, case-insensitive POSIX).
-    if _destination_overlaps_source(src_path, dest_path):
-        return {"moved": 0, "errors": [
-            f"Destination overlaps the source folder: {dest_path}"
-        ]}
+    # Overlap and tracked-folder guards exist to stop a local move from
+    # deleting the only copy of files (dest equals/contains src) or colliding
+    # with another tracked folder row. A remote destination lives on a
+    # different machine's filesystem reached over SSH, so it can neither be
+    # the local source tree nor a locally tracked folder — these path-aliasing
+    # checks are meaningless there, and the post-transfer --checksum verify is
+    # the safety backstop for remote.
+    if not remote:
+        # Refuse a destination that overlaps the source. Moving a folder into
+        # itself (or into one of its own descendants) would make the post-copy
+        # rmtree(src) delete the only copy of the files. This is especially
+        # dangerous for a merge, where a destination equal to the source passes
+        # verification trivially (every source file is already "there") before
+        # the delete wipes everything. See _destination_overlaps_source for the
+        # alias surface (symlinks, Windows case folding, case-insensitive POSIX).
+        if _destination_overlaps_source(src_path, transfer_dest):
+            return {"moved": 0, "errors": [
+                f"Destination overlaps the source folder: {transfer_dest}"
+            ]}
 
-    # Refuse moving into — or around — a destination Vireo already tracks as a
-    # folder, regardless of whether that path currently exists on disk. A
-    # correct tracked-tree merge needs recursive folder/photo reconciliation we
-    # don't do here; a partial attempt would leave folders pointing at the
-    # deleted source path, or collide on the folders.path UNIQUE constraint when
-    # the source's children cascade onto a tracked descendant. Match the
-    # destination itself and anything below it. The cases this feature exists
-    # for — resuming an interrupted move, or moving into an untracked folder —
-    # never hit this.
-    #
-    # Comparison goes through _path_equal_or_descends so symlink aliases, Windows
-    # case folding, AND case-only aliases on case-insensitive POSIX (default
-    # macOS APFS) all collapse to the same tracked row — otherwise a destination
-    # reached via any of those would slip past and leave two folder rows managing
-    # the same on-disk tree.
-    tracked = _tracked_destination_overlap(db, folder_id, dest_path)
-    if tracked:
-        return {"moved": 0, "errors": [
-            f"Destination overlaps a folder Vireo already manages "
-            f"({tracked['path']}). Merging into or around a tracked folder "
-            f"isn't supported."
-        ]}
+        # Refuse moving into — or around — a destination Vireo already tracks
+        # as a folder, regardless of whether that path currently exists on
+        # disk. A correct tracked-tree merge needs recursive folder/photo
+        # reconciliation we don't do here; a partial attempt would leave
+        # folders pointing at the deleted source path, or collide on the
+        # folders.path UNIQUE constraint when the source's children cascade
+        # onto a tracked descendant. Match the destination itself and anything
+        # below it. The cases this feature exists for — resuming an interrupted
+        # move, or moving into an untracked folder — never hit this.
+        #
+        # Comparison goes through _path_equal_or_descends so symlink aliases,
+        # Windows case folding, AND case-only aliases on case-insensitive POSIX
+        # (default macOS APFS) all collapse to the same tracked row — otherwise
+        # a destination reached via any of those would slip past and leave two
+        # folder rows managing the same on-disk tree.
+        tracked = _tracked_destination_overlap(db, folder_id, transfer_dest)
+        if tracked:
+            return {"moved": 0, "errors": [
+                f"Destination overlaps a folder Vireo already manages "
+                f"({tracked['path']}). Merging into or around a tracked folder "
+                f"isn't supported."
+            ]}
 
-    dest_exists = os.path.exists(dest_path)
+    if remote:
+        dest_exists = _remote_dir_exists(remote, transfer_dest)
+    else:
+        dest_exists = os.path.exists(transfer_dest)
     if dest_exists and not merge:
         return {
             "moved": 0,
-            "errors": [f"Destination already exists: {dest_path}"],
+            "errors": [f"Destination already exists: {transfer_dest}"],
             "needs_merge": True,
         }
 
-    if dest_exists:
-
+    if dest_exists and not remote:
         # Refuse if any same-name file already at the destination differs in
         # content. Never overwrite or later delete the user's data over a real
         # collision — only files that are byte-identical (a genuine resume) may
-        # be treated as already-moved.
-        conflict = _find_content_conflict(src_path, dest_path)
+        # be treated as already-moved. (Remote: the post-transfer --checksum
+        # verify catches a differing same-name file just as well, since
+        # --ignore-existing never overwrites it and the dry-run then reports it
+        # as still needing transfer — so the move refuses to delete originals.)
+        conflict = _find_content_conflict(src_path, transfer_dest)
         if conflict is not None:
             return {"moved": 0, "errors": [
                 f"Conflict: '{conflict}' already exists at the destination with "
@@ -929,7 +1258,7 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             ]}
 
     log.info("%s folder %s -> %s",
-             "Merging" if dest_exists else "Moving", src_path, dest_path)
+             "Merging" if dest_exists else "Moving", src_path, rsync_target)
 
     # Count source files up front so the copy phase reports against a real
     # denominator from the first file. This count is the progress denominator
@@ -943,47 +1272,93 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     # rsync only creates files absent at the destination and NEVER overwrites
     # a file already there: this resumes an interrupted move (missing files get
     # copied, already-copied ones are left alone) while guaranteeing a merge
-    # cannot destroy pre-existing destination data. A fresh move uses --checksum
-    # for integrity. Any genuine same-name collision (an existing dest file that
-    # differs from the source) is left untouched here and caught by the
-    # post-copy verification below, which then refuses to delete the originals.
-    rsync_flag = "--ignore-existing" if dest_exists else "--checksum"
+    # cannot destroy pre-existing destination data. A local fresh move uses
+    # --checksum for integrity; a remote fresh move skips it (the destination
+    # is empty, and the post-transfer --checksum dry-run verifies integrity).
+    # Any genuine same-name collision (an existing dest file that differs from
+    # the source) is left untouched here and caught by the post-copy
+    # verification below, which then refuses to delete the originals.
+    rsync_bin = "rsync"
+    extra_args = None
+    if remote:
+        rsync_bin = remote.get("rsync_bin")
+        if not rsync_bin:
+            return {"moved": 0, "errors": [
+                "No GNU rsync binary available for remote moves. macOS's "
+                "built-in rsync can't do this — set the GNU rsync path in "
+                "Settings."
+            ]}
+        extra_args = ["-e", _ssh_rsh_string(remote), "--partial"]
+        if remote.get("bwlimit_kbps"):
+            extra_args.append(f"--bwlimit={int(remote['bwlimit_kbps'])}")
+        rsync_flags = ["--ignore-existing"] if dest_exists else []
+    else:
+        rsync_flags = ["--ignore-existing"] if dest_exists else ["--checksum"]
+
     try:
         returncode, stderr, timed_out = _run_rsync_streamed(
-            src_path, dest_path, rsync_flag, total_files, progress_cb,
+            src_path, rsync_target, rsync_flags, total_files, progress_cb,
+            rsync_bin=rsync_bin, extra_args=extra_args,
         )
-        if timed_out:
-            mins = RSYNC_STALL_TIMEOUT // 60
-            return {"moved": 0, "errors": [
-                f"rsync stalled — no progress for over {mins} minutes, so the "
-                f"copy was stopped. Originals are untouched; re-run with "
-                f"merge/resume to continue from where it left off."
-            ]}
-        if returncode != 0:
-            return {"moved": 0, "errors": [f"rsync failed: {stderr.strip()}"]}
     except FileNotFoundError:
-        # rsync not available, fall back to shutil. skip_existing mirrors
+        if remote:
+            # No shutil fallback over SSH — the binary path was resolved before
+            # the move started, so this means it vanished. Surface it plainly.
+            return {"moved": 0, "errors": [
+                f"GNU rsync not found at '{rsync_bin}'. Install GNU rsync or "
+                f"set its path in Settings."
+            ]}
+        # Local rsync missing: fall back to shutil. skip_existing mirrors
         # --ignore-existing for a merge; a fresh move copies everything.
         try:
             _copy_tree_with_progress(
-                src_path, dest_path, dest_exists, total_files, progress_cb,
+                src_path, catalog_path, dest_exists, total_files, progress_cb,
             )
+            returncode, stderr, timed_out = 0, "", False
         except Exception as exc:
             # Only remove a destination we created — never one that
             # pre-existed (a merge target may hold the user's own files).
             if not dest_exists:
-                shutil.rmtree(dest_path, ignore_errors=True)
+                shutil.rmtree(catalog_path, ignore_errors=True)
             return {"moved": 0, "errors": [f"Copy failed: {exc}"]}
+
+    if timed_out:
+        mins = RSYNC_STALL_TIMEOUT // 60
+        return {"moved": 0, "errors": [
+            f"rsync stalled — no progress for over {mins} minutes, so the "
+            f"copy was stopped. Originals are untouched; re-run with "
+            f"merge/resume to continue from where it left off."
+        ]}
+    if returncode != 0:
+        return {"moved": 0, "errors": [f"rsync failed: {stderr.strip()}"]}
 
     # Verify before deleting originals.
     if progress_cb:
         progress_cb(total_files, total_files, "", "Verifying copy")
-    if dest_exists:
+    if remote:
+        # The local filesystem can't be walked to confirm a remote copy, so
+        # run a --checksum dry-run over SSH: any file it would still transfer
+        # is missing or differs at the destination. Covers both fresh and
+        # merge moves, and is the safety backstop replacing the local
+        # content-conflict and file-count checks.
+        verify = _remote_verify_complete(rsync_bin, src_path, rsync_target, remote)
+        if verify is not None:
+            name, detail = verify
+            if name == "__ERROR__":
+                return {"moved": 0, "errors": [
+                    f"Verification could not be completed ({detail}). "
+                    f"Originals preserved."
+                ]}
+            return {"moved": 0, "errors": [
+                f"Verification failed: '{name}' is missing or differs at the "
+                f"destination. Originals preserved."
+            ]}
+    elif dest_exists:
         # Merge: the destination may legitimately hold extra unrelated
         # files (and leftover temp files from an interrupted run), so a
         # count comparison is meaningless. Instead require that every
         # source file is present at the destination with a matching size.
-        missing = _first_missing_source_file(src_path, dest_path)
+        missing = _first_missing_source_file(src_path, transfer_dest)
         if missing is not None:
             return {"moved": 0, "errors": [
                 f"Verification failed: '{missing}' missing, size mismatch, "
@@ -998,9 +1373,9 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         # the rmtree below would delete the never-copied file. The fresh
         # walk catches that mismatch and preserves the originals.
         src_count = sum(1 for _, _, files in os.walk(src_path) for _ in files)
-        dst_count = sum(1 for _, _, files in os.walk(dest_path) for _ in files)
+        dst_count = sum(1 for _, _, files in os.walk(transfer_dest) for _ in files)
         if src_count != dst_count:
-            shutil.rmtree(dest_path, ignore_errors=True)
+            shutil.rmtree(transfer_dest, ignore_errors=True)
             return {"moved": 0, "errors": [
                 f"File count mismatch: source={src_count}, dest={dst_count}. Originals preserved."
             ]}
@@ -1017,11 +1392,13 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     # Update DB first: cascade folder paths (safer — if rmtree fails, the old
     # folder becomes an orphan on disk rather than the DB pointing to deleted
     # paths). A merge into an already-tracked destination is refused above, so
-    # dest_path is never a different existing folder row here and this cascade
-    # (root + all descendants) cannot collide with folders.path UNIQUE.
+    # catalog_path is never a different existing folder row here and this
+    # cascade (root + all descendants) cannot collide with folders.path UNIQUE.
+    # For a remote move catalog_path is the local mount path, so the catalog
+    # keeps resolving to the photos whenever the NAS is mounted.
     if progress_cb:
         progress_cb(total_files, total_files, "", "Updating catalog")
-    db.move_folder_path(folder_id, dest_path)
+    db.move_folder_path(folder_id, catalog_path)
     db.update_folder_counts()
 
     # Rebase any developed-output subdirs nested under the configured
@@ -1031,7 +1408,7 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     # to any descendant folders whose paths also shifted.
     if developed_dir:
         from export import relocate_developed_dir
-        relocate_developed_dir(developed_dir, src_path, dest_path)
+        relocate_developed_dir(developed_dir, src_path, catalog_path)
         # SQL LIKE treats `_` and `%` (and the escape char) as wildcards,
         # all of which are valid POSIX path characters. Without a strict
         # prefix guard, an unrelated folder like `/dXst/birds/fake` would
@@ -1040,14 +1417,14 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         # developed subdir. Filter results by a literal prefix check.
         descendant_rows = db.conn.execute(
             "SELECT path FROM folders WHERE path LIKE ?",
-            (dest_path + "/%",),
+            (catalog_path + "/%",),
         ).fetchall()
-        prefix = dest_path + "/"
+        prefix = catalog_path + "/"
         for row in descendant_rows:
             new_child = row["path"]
             if not new_child.startswith(prefix):
                 continue
-            old_child = src_path + new_child[len(dest_path):]
+            old_child = src_path + new_child[len(catalog_path):]
             relocate_developed_dir(developed_dir, old_child, new_child)
 
     # Delete originals

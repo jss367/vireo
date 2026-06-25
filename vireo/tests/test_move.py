@@ -1907,7 +1907,7 @@ def test_rsync_stall_watchdog_kills_silent_process(monkeypatch):
     monkeypatch.setattr(move_mod.subprocess, "Popen", _fake_popen)
 
     rc, stderr, timed_out = move_mod._run_rsync_streamed(
-        "/src", "/dst", "--checksum", 10, None, stall_timeout=0.3,
+        "/src", "/dst", ["--checksum"], 10, None, stall_timeout=0.3,
     )
     assert timed_out is True
     assert proc_holder["proc"].killed.is_set()
@@ -1928,7 +1928,7 @@ def test_rsync_streamed_runs_as_long_as_it_progresses(monkeypatch):
 
     seen = []
     rc, stderr, timed_out = move_mod._run_rsync_streamed(
-        "/src", "/dst", "--ignore-existing", 8,
+        "/src", "/dst", ["--ignore-existing"], 8,
         lambda cur, tot, name, phase: seen.append(name),
         stall_timeout=0.3,
     )

@@ -23,6 +23,9 @@ EXCLUDED = (
     # List of {name, path} dicts — has custom settings UI rather than a
     # generic widget, so it lives outside SCHEMA.
     "external_editors",
+    # List of remote-target dicts — custom settings UI (Remote targets
+    # section), so it lives outside SCHEMA like external_editors.
+    "remote_targets",
 )
 
 
@@ -294,6 +297,14 @@ SCHEMA = {
         "category": "Paths", "scope": "global",
         "label": "Adobe DNG Converter path",
         "desc": "Optional path to Adobe DNG Converter. Leave empty to auto-detect the app.",
+    },
+    "rsync_bin": {
+        "type": "path",
+        "category": "Paths", "scope": "global",
+        "label": "GNU rsync path (remote moves)",
+        "desc": "Path to a GNU rsync binary for remote (SSH) folder moves. "
+                "macOS ships openrsync, which can't do rsync-over-SSH. "
+                "Leave empty to auto-detect.",
     },
 
     # --- Integrations -----------------------------------------------------
