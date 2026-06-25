@@ -8571,8 +8571,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         cfg.DEFAULTS["keyboard_shortcuts"], validated
                     )
 
+            # Normalize remote_targets on save (assign stable ids, coerce
+            # field types, drop unusable entries) so stored entries always
+            # have the shape get_remote_targets() guarantees on read.
+            if "remote_targets" in body:
+                raw_targets = body["remote_targets"]
+                normalized = []
+                if isinstance(raw_targets, list):
+                    import uuid
+                    for entry in raw_targets:
+                        coerced = cfg._coerce_remote_target(entry)
+                        if coerced is None:
+                            continue
+                        # A client-supplied id wins (stable across edits);
+                        # otherwise mint one so future edits can key the row.
+                        if not (isinstance(entry, dict) and (entry.get("id") or "").strip()):
+                            coerced["id"] = uuid.uuid4().hex
+                        normalized.append(coerced)
+                current["remote_targets"] = normalized
+
             for key in body:
-                if key == "keyboard_shortcuts":
+                if key in ("keyboard_shortcuts", "remote_targets"):
                     continue
                 if key in cfg.DEFAULTS:
                     current[key] = body[key]
@@ -13421,6 +13440,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("JSON body must be an object")
         folder_id = body.get("folder_id")
         destination = body.get("destination", "")
+        remote_target_id = (body.get("remote_target_id") or "").strip()
+        subpath = body.get("subpath", "")
         merge_raw = body.get("merge", False)
         if not isinstance(merge_raw, bool):
             return json_error("merge must be a boolean")
@@ -13428,19 +13449,70 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         if not folder_id:
             return json_error("folder_id required")
-        if not isinstance(destination, str):
-            return json_error("destination must be a string")
-        if not destination:
-            return json_error("destination required")
-        if not os.path.isabs(destination):
-            return json_error("destination must be an absolute path")
+
+        import config as cfg
+        import move as move_mod
+        effective_cfg = _get_db().get_effective_config(cfg.load())
+        developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
+
+        # Remote (SSH) destination vs local path. A remote target carries its
+        # own destination (remote_path + optional subpath), so `destination`
+        # is not required in that case.
+        remote = None
+        if remote_target_id:
+            target = cfg.get_remote_target(remote_target_id)
+            if not target:
+                return json_error("Remote target not found", status=404)
+            mount_path = (target.get("mount_path") or "").strip()
+            if not mount_path:
+                return json_error(
+                    "This remote target has no local mount path, so moved "
+                    "photos couldn't stay in your library. Add a mount path "
+                    "under Settings → Remote targets."
+                )
+            # Reject a relative mount path (e.g. saved as "Photos" instead of
+            # "/Volumes/Photos") before any transfer runs. move_folder also
+            # refuses as a defense-in-depth check, but failing here gives the
+            # UI a clean error instead of starting a job that immediately
+            # reports failure.
+            if not os.path.isabs(mount_path):
+                return json_error(
+                    "This remote target's local mount path isn't absolute "
+                    f"(\"{mount_path}\"). Moved photos would be repointed "
+                    "to a path relative to the server's working directory "
+                    "and appear missing. Set an absolute mount path under "
+                    "Settings → Remote targets."
+                )
+            rsync_bin = move_mod.resolve_rsync_bin(
+                effective_cfg.get("rsync_bin", "") or "")
+            if not rsync_bin:
+                return json_error(
+                    "No GNU rsync found for remote moves — macOS's "
+                    "built-in rsync can't drive rsync-over-SSH. Install GNU "
+                    "rsync (e.g. `brew install rsync`) or set its path under "
+                    "Settings → Paths."
+                )
+            try:
+                remote = move_mod.build_remote_move_spec(
+                    target, subpath, rsync_bin)
+            except ValueError as exc:
+                return json_error(str(exc))
+            # Pass the mount path as `destination` for informational use; the
+            # move uses the SSH base from `remote`.
+            destination = remote["mount_dest_base"]
+            display_dest = move_mod.rsync_dest_spec(
+                target, remote["ssh_dest_base"])
+        else:
+            if not isinstance(destination, str):
+                return json_error("destination must be a string")
+            if not destination:
+                return json_error("destination required")
+            if not os.path.isabs(destination):
+                return json_error("destination must be an absolute path")
+            display_dest = destination
 
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
-
-        import config as cfg
-        effective_cfg = _get_db().get_effective_config(cfg.load())
-        developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
 
         def work(job):
             from move import move_folder
@@ -13485,6 +13557,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 progress_cb=progress_cb,
                 developed_dir=developed_dir,
                 merge=merge,
+                remote=remote,
             )
 
             # Tell the JobRunner whether the move actually succeeded. Without
@@ -13508,9 +13581,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     )
             return result
 
+        job_config = {
+            "folder_id": folder_id, "destination": display_dest, "merge": merge,
+        }
+        if remote:
+            # Surface that this is an SSH transfer (and to where) so the job
+            # panel can show it, per the UI-transparency rule.
+            job_config["remote"] = {
+                "host": remote["host"], "user": remote["user"],
+                "ssh_dest_base": remote["ssh_dest_base"],
+                "mount_dest_base": remote["mount_dest_base"],
+                "bwlimit_kbps": remote["bwlimit_kbps"],
+            }
         job_id = runner.start(
             "move-folder", work,
-            config={"folder_id": folder_id, "destination": destination, "merge": merge},
+            config=job_config,
             workspace_id=active_ws,
         )
         return jsonify({"job_id": job_id})
@@ -13519,9 +13604,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_move_folder_preflight():
         """Report the resolved destination for a folder move and whether it
         already exists, so the UI can offer a merge/resume confirmation
-        instead of silently failing on an existing destination.
+        instead of silently failing on an existing destination. Handles both
+        local-path and remote-target (SSH) destinations.
 
-        ``mode`` controls how much work the endpoint does:
+        ``mode`` controls how much work the endpoint does (local paths only;
+        a remote target returns its SSH-probed result and ignores ``mode``):
 
         * ``"quick"`` (default) — caps the destination file count at 1000 so
           the live, keystroke-debounced status line stays instant even when
@@ -13545,6 +13632,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
           Flask worker free even when the resume target is a NAS folder
           with millions of unrelated files.
         """
+        import move as move_mod
         from move import preview_merge, resolve_folder_dest
 
         body = request.get_json(silent=True)
@@ -13555,21 +13643,59 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         mode = body.get("mode", "quick")
         if mode not in ("quick", "exact", "preview"):
             mode = "quick"
+        remote_target_id = (body.get("remote_target_id") or "").strip()
+        subpath = body.get("subpath", "")
 
         if not folder_id:
             return json_error("folder_id required")
-        if not isinstance(destination, str):
-            return json_error("destination must be a string")
-        if not destination:
-            return json_error("destination required")
-        if not os.path.isabs(destination):
-            return json_error("destination must be an absolute path")
 
         folder = _get_db().conn.execute(
             "SELECT path, name FROM folders WHERE id = ?", (folder_id,)
         ).fetchone()
         if not folder:
             return json_error("Folder not found", status=404)
+
+        # Remote target: resolve the NAS-side dest and probe it over SSH.
+        if remote_target_id:
+            import posixpath
+
+            import config as cfg
+            target = cfg.get_remote_target(remote_target_id)
+            if not target:
+                return json_error("Remote target not found", status=404)
+            try:
+                spec = move_mod.build_remote_move_spec(target, subpath, "")
+            except ValueError as exc:
+                return json_error(str(exc))
+            # The NAS path is POSIX, so the preview/probe path must join with
+            # '/' even when this server runs on Windows — resolve_folder_dest
+            # uses os.path.join and would produce ``/volume1/Photo\trip``,
+            # which the SSH ``test -d`` probe would then look up at a
+            # different remote path than the actual transfer (move_folder
+            # uses posixpath.join), so an existing destination would be
+            # reported as new and the first non-merge move would fail.
+            folder_name = (folder["name"]
+                           or os.path.basename(folder["path"].rstrip("/\\")))
+            resolved = posixpath.join(spec["ssh_dest_base"], folder_name)
+            exists, fcount, truncated, reachable, err = \
+                move_mod.remote_preflight(target, resolved)
+            return jsonify({
+                "resolved_dest": move_mod.rsync_dest_spec(target, resolved),
+                "exists": exists,
+                "file_count": fcount,
+                "file_count_truncated": truncated,
+                "remote": True,
+                "reachable": reachable,
+                "error": err,
+                "mount_path_set": bool(target.get("mount_path")),
+            })
+
+        if not isinstance(destination, str):
+            return json_error("destination must be a string")
+        if not destination:
+            return json_error("destination required")
+        if not os.path.isabs(destination):
+            return json_error("destination must be an absolute path")
 
         resolved = resolve_folder_dest(folder["path"], folder["name"], destination)
         exists = os.path.isdir(resolved)
@@ -13603,6 +13729,49 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if mode == "preview" and exists:
             result["preview"] = preview_merge(folder["path"], resolved)
         return jsonify(result)
+
+    @app.route("/api/remote-targets")
+    def api_remote_targets_list():
+        """List configured remote (SSH) move targets for the move-form picker,
+        plus whether a usable GNU rsync is available for the transfer."""
+        import config as cfg
+        import move as move_mod
+
+        effective_cfg = _get_db().get_effective_config(cfg.load())
+        rsync_bin = move_mod.resolve_rsync_bin(
+            effective_cfg.get("rsync_bin", "") or "")
+        usable = bool(rsync_bin and move_mod.is_gnu_rsync(rsync_bin))
+        return jsonify({
+            "targets": cfg.get_remote_targets(),
+            "rsync_available": usable,
+            "rsync_bin": rsync_bin if usable else None,
+        })
+
+    @app.route("/api/remote-targets/test", methods=["POST"])
+    def api_remote_target_test():
+        """Test connectivity for a remote target (saved or in-progress edit):
+        SSH reachability, remote-path writability, GNU rsync availability, and
+        whether the local mount path is currently present."""
+        import config as cfg
+        import move as move_mod
+
+        body = request.get_json(silent=True) or {}
+        target = cfg._coerce_remote_target(body)
+        if target is None:
+            return json_error("Host, user, and remote path are required.")
+
+        effective_cfg = _get_db().get_effective_config(cfg.load())
+        rsync_bin = move_mod.resolve_rsync_bin(
+            effective_cfg.get("rsync_bin", "") or "")
+        # Apple openrsync resolves but can't drive SSH — treat as unusable.
+        if rsync_bin and not move_mod.is_gnu_rsync(rsync_bin):
+            rsync_bin = ""
+        res = move_mod.test_remote_connection(target, rsync_bin)
+        mount = target.get("mount_path")
+        res["mount_path"] = mount
+        res["mount_present"] = bool(mount and os.path.isdir(mount))
+        res["rsync_bin"] = rsync_bin or None
+        return jsonify(res)
 
     @app.route("/api/jobs/import-full", methods=["POST"])
     def api_job_import_full():

@@ -31,6 +31,21 @@ DEFAULTS = {
     "scan_roots": [],
     "scan_workers": 0,
     "setup_complete": False,
+    # Path to a GNU rsync binary used for remote (SSH) folder moves. macOS
+    # ships Apple's `openrsync`, which cannot drive rsync-over-SSH, so a
+    # remote move needs real GNU rsync. Empty = auto-resolve (bundled binary,
+    # then a few known install paths) via move.resolve_rsync_bin(). Local
+    # moves are unaffected and keep using whatever `rsync` is on PATH.
+    "rsync_bin": "",
+    # Saved remote (NAS) destinations for folder moves over SSH. Each entry:
+    #   {"id", "name", "host", "user", "port", "ssh_key",
+    #    "remote_path", "mount_path", "bwlimit_kbps"}
+    # `remote_path` is the NAS-side filesystem path used for the rsync-over-SSH
+    # transfer; `mount_path` is the local path (e.g. an SMB mount) where Vireo
+    # can read those same files afterward, and is what the catalog points at
+    # once a move completes. Custom settings UI (like external_editors), so
+    # it's excluded from SCHEMA.
+    "remote_targets": [],
     "darktable_bin": "",
     # Legacy single-editor field. Kept for one-cycle migration: if
     # `external_editors` is empty and this is set, get_editors() synthesizes
@@ -367,3 +382,87 @@ def get_editors():
         if isinstance(legacy, str) and legacy.strip():
             editors.append({"name": "Editor", "path": legacy.strip()})
     return editors
+
+
+def _coerce_remote_target(entry):
+    """Validate/normalize one remote-target dict, or return None if unusable.
+
+    A usable target needs at least a host, user, and an *absolute POSIX*
+    remote_path (the rest have sane fallbacks). A relative remote_path like
+    "Photos" would be sent unchanged to ``user@host:Photos/<folder>`` —
+    rsync and the checksum verify would then operate under the SSH user's
+    remote cwd, while the catalog gets repointed to the absolute local
+    mount_path. The original source would be deleted on a verified copy
+    that lives at a different remote location than the path Vireo records,
+    so reject relative remote paths at the entry boundary rather than
+    after a move is already in flight. ``mount_path`` may be empty — a
+    target with no local mount simply can't keep its photos catalogued
+    after a move (the move route enforces that where it matters), but the
+    entry is still valid for transfer. Numeric fields are coerced; junk
+    falls back to defaults.
+    """
+    if not isinstance(entry, dict):
+        return None
+    host = (entry.get("host") or "").strip()
+    user = (entry.get("user") or "").strip()
+    remote_path = (entry.get("remote_path") or "").strip()
+    if not host or not user or not remote_path:
+        return None
+    # POSIX-absolute only: rsync ships this path to the NAS-side shell, so
+    # Windows drive forms / backslashes are also non-starters (the NAS is
+    # POSIX). Comparing to "/" handles every absolute form that survives a
+    # POSIX shell intact.
+    if not remote_path.startswith("/"):
+        return None
+    name = (entry.get("name") or "").strip() or f"{user}@{host}"
+    try:
+        port = int(entry.get("port") or 22)
+    except (TypeError, ValueError):
+        port = 22
+    try:
+        bwlimit = int(entry.get("bwlimit_kbps") or 0)
+    except (TypeError, ValueError):
+        bwlimit = 0
+    tid = (entry.get("id") or "").strip()
+    if not tid:
+        # Stable-ish id derived from the connection tuple so the UI can key
+        # rows even for legacy entries saved before ids existed.
+        tid = f"{user}@{host}:{remote_path}"
+    return {
+        "id": tid,
+        "name": name,
+        "host": host,
+        "user": user,
+        "port": port,
+        "ssh_key": (entry.get("ssh_key") or "").strip(),
+        "remote_path": remote_path,
+        "mount_path": (entry.get("mount_path") or "").strip(),
+        "bwlimit_kbps": max(0, bwlimit),
+    }
+
+
+def get_remote_targets():
+    """Return configured remote (SSH) move targets, validated/normalized.
+
+    Malformed entries (missing host/user/remote_path) are dropped so callers
+    can trust the shape. See DEFAULTS["remote_targets"] for the field set.
+    """
+    raw = load().get("remote_targets") or []
+    if not isinstance(raw, list):
+        return []
+    targets = []
+    for entry in raw:
+        coerced = _coerce_remote_target(entry)
+        if coerced is not None:
+            targets.append(coerced)
+    return targets
+
+
+def get_remote_target(target_id):
+    """Return the validated remote target with the given id, or None."""
+    if not target_id:
+        return None
+    for t in get_remote_targets():
+        if t["id"] == target_id:
+            return t
+    return None

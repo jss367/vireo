@@ -541,12 +541,96 @@ def test_move_folder_rejects_non_bool_merge(app_and_db):
     assert "boolean" in resp.get_json()["error"].lower()
 
 
+def test_move_folder_rejects_remote_target_with_relative_mount_path(
+        app_and_db, tmp_path, monkeypatch):
+    """A remote target whose mount_path is relative (e.g. "Photos") must be
+    rejected before the job starts. The catalog gets repointed to mount_path
+    after the move; a server-cwd-relative value there would leave every moved
+    photo appearing missing."""
+    import config as cfg
+
+    app, db = app_and_db
+    folders = db.get_folder_tree()
+    fid = folders[0]["id"]
+
+    fake_target = {
+        "id": "t1", "name": "nas", "host": "nas", "user": "me",
+        "port": 22, "ssh_key": "", "remote_path": "/volume1/Photo",
+        "mount_path": "Photos",  # relative — the bug
+        "bwlimit_kbps": 0,
+    }
+    monkeypatch.setattr(cfg, "get_remote_target",
+                        lambda tid: fake_target if tid == "t1" else None)
+
+    client = app.test_client()
+    resp = client.post("/api/jobs/move-folder", json={
+        "folder_id": fid,
+        "remote_target_id": "t1",
+        "subpath": "",
+    })
+    assert resp.status_code == 400
+    body = resp.get_json()["error"].lower()
+    assert "absolute" in body
+    assert "mount" in body
+
+
 def test_move_folder_preflight_rejects_non_object_body(app_and_db):
     """Preflight: same type guard as the job endpoint."""
     app, _ = app_and_db
     client = app.test_client()
     resp = client.post("/api/move-folder/preflight", json="not-an-object")
     assert resp.status_code == 400
+
+
+def test_move_folder_preflight_remote_uses_posix_join_for_dest(
+        app_and_db, tmp_path, monkeypatch):
+    """The remote preflight builds the NAS-side path the SSH probe will look
+    up. On a Windows client, resolve_folder_dest would use os.path.join and
+    produce ``/volume1/Photo\trip`` — but move_folder transfers to the POSIX
+    path ``/volume1/Photo/trip``, so the existence probe would miss an
+    existing destination (reporting it as new) and the user's first
+    non-merge move would fail at rsync. Pin that the preflight joins NAS
+    paths with '/' regardless of os.path semantics."""
+    import config as cfg
+    import move as move_mod
+
+    app, db = app_and_db
+    # Use a folder whose path is recorded with POSIX separators so the
+    # basename derivation matches the transfer-side derivation in move_folder
+    # (which strips both / and \ before taking the basename).
+    fid = db.add_folder("/srv/photos/trip", name="trip")
+
+    fake_target = {
+        "id": "t1", "name": "nas", "host": "nas", "user": "me",
+        "port": 22, "ssh_key": "", "remote_path": "/volume1/Photo",
+        "mount_path": "/mnt/nas", "bwlimit_kbps": 0,
+    }
+    monkeypatch.setattr(cfg, "get_remote_target",
+                        lambda tid: fake_target if tid == "t1" else None)
+    # The probe itself isn't under test — stub it so we only inspect the
+    # resolved_dest the route built before calling it.
+    captured = {}
+
+    def fake_preflight(remote, dest_path, file_cap=1000):
+        captured["dest_path"] = dest_path
+        return (False, 0, False, True, None)
+
+    monkeypatch.setattr(move_mod, "remote_preflight", fake_preflight)
+
+    client = app.test_client()
+    resp = client.post("/api/move-folder/preflight", json={
+        "folder_id": fid,
+        "remote_target_id": "t1",
+        "subpath": "",
+    })
+    assert resp.status_code == 200, resp.data
+    body = resp.get_json()
+    # Both the probed NAS path and the displayed resolved_dest must be the
+    # POSIX-joined target — no backslashes, no os.path.join surprises.
+    assert captured["dest_path"] == "/volume1/Photo/trip"
+    assert "\\" not in captured["dest_path"]
+    assert body["resolved_dest"] == "me@nas:/volume1/Photo/trip"
+    assert "\\" not in body["resolved_dest"]
 
 
 def test_move_rules_crud(app_and_db):
