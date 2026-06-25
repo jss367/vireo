@@ -163,7 +163,10 @@ def test_remote_move_success_repoints_catalog_to_mount(remote_env, monkeypatch):
     # rsync addressed the SSH target, with the bundled binary + ssh transport.
     assert calls["dest_spec"] == "me@nas:/volume1/Photography/trip"
     assert calls["rsync_bin"] == "/usr/bin/rsync"
-    assert "-e" in calls["extra_args"] and "--partial" in calls["extra_args"]
+    # Partials go to a dot-prefixed subdir so they don't collide with
+    # --ignore-existing on retry; --partial-dir implies --partial.
+    assert "-e" in calls["extra_args"]
+    assert "--partial-dir=.rsync-partial" in calls["extra_args"]
     # Originals deleted.
     assert not env["src"].exists()
     # Catalog now points at the LOCAL MOUNT path, not the NAS path.
@@ -266,3 +269,68 @@ def test_remote_move_merge_uses_ignore_existing(remote_env, monkeypatch):
 
     assert result["moved"] == 2
     assert "--ignore-existing" in seen["flags"]
+
+
+def test_remote_move_merge_uses_partial_dir_for_resume(remote_env, monkeypatch):
+    """A merge/resume must use --partial-dir, not bare --partial: otherwise a
+    stalled file would be left at the destination filename and skipped by
+    --ignore-existing on every retry, stranding it short of complete forever."""
+    env = remote_env
+    seen = {}
+
+    def fake_rsync(src_path, dest_spec, flags, total, cb, rsync_bin="rsync",
+                   extra_args=None, **kw):
+        seen["extra_args"] = list(extra_args or [])
+        return (0, "", False)
+
+    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: True)
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
+    monkeypatch.setattr(move_mod, "_remote_verify_complete",
+                        lambda *a, **k: None)
+
+    move_mod.move_folder(
+        db=env["db"], folder_id=env["fid"], destination="", merge=True,
+        remote=env["remote"])
+
+    assert "--partial-dir=.rsync-partial" in seen["extra_args"]
+    # Bare --partial must not also appear: it would put partials back at the
+    # destination filename and re-introduce the --ignore-existing collision.
+    assert "--partial" not in seen["extra_args"]
+
+
+def test_remote_move_refuses_when_catalog_path_overlaps_tracked(remote_env, monkeypatch):
+    """The local mount path the catalog is repointed to after a remote move
+    must not overlap another tracked folder — that would copy the tree over
+    SSH only to hit folders.path UNIQUE on the post-move repoint. Refuse the
+    move before any SSH transfer happens."""
+    env = remote_env
+    # Pre-register a tracked folder at the resolved catalog_path.
+    catalog_path = os.path.join(env["remote"]["mount_dest_base"], "trip")
+    other_fid = env["db"].add_folder(catalog_path, name="trip")
+    assert other_fid != env["fid"]
+
+    called = {"rsync": False, "exists": False}
+
+    def fake_rsync(*a, **k):
+        called["rsync"] = True
+        return (0, "", False)
+
+    def fake_exists(*a, **k):
+        called["exists"] = True
+        return False
+
+    monkeypatch.setattr(move_mod, "_remote_dir_exists", fake_exists)
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
+    monkeypatch.setattr(move_mod, "_remote_verify_complete",
+                        lambda *a, **k: None)
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid"], destination="",
+        remote=env["remote"])
+
+    assert result["moved"] == 0
+    assert any("already manages" in e for e in result["errors"])
+    # Nothing transferred — overlap detected before any SSH call.
+    assert called["rsync"] is False
+    # Source untouched.
+    assert (env["src"] / "a.nef").exists()

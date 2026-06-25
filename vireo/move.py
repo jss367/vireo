@@ -1188,48 +1188,52 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     if progress_cb:
         progress_cb(0, 0, "", "Checking destination")
 
-    # Overlap and tracked-folder guards exist to stop a local move from
-    # deleting the only copy of files (dest equals/contains src) or colliding
-    # with another tracked folder row. A remote destination lives on a
-    # different machine's filesystem reached over SSH, so it can neither be
-    # the local source tree nor a locally tracked folder — these path-aliasing
-    # checks are meaningless there, and the post-transfer --checksum verify is
-    # the safety backstop for remote.
-    if not remote:
-        # Refuse a destination that overlaps the source. Moving a folder into
-        # itself (or into one of its own descendants) would make the post-copy
-        # rmtree(src) delete the only copy of the files. This is especially
-        # dangerous for a merge, where a destination equal to the source passes
-        # verification trivially (every source file is already "there") before
-        # the delete wipes everything. See _destination_overlaps_source for the
-        # alias surface (symlinks, Windows case folding, case-insensitive POSIX).
-        if _destination_overlaps_source(src_path, transfer_dest):
-            return {"moved": 0, "errors": [
-                f"Destination overlaps the source folder: {transfer_dest}"
-            ]}
+    # Refuse a destination that overlaps the source. Moving a folder into
+    # itself (or into one of its own descendants) would make the post-copy
+    # rmtree(src) delete the only copy of the files. This is especially
+    # dangerous for a merge, where a destination equal to the source passes
+    # verification trivially (every source file is already "there") before the
+    # delete wipes everything. See _destination_overlaps_source for the alias
+    # surface (symlinks, Windows case folding, case-insensitive POSIX).
+    #
+    # Local-only: a remote destination lives on a different machine reached
+    # over SSH, so it can't alias the local source tree — the post-transfer
+    # --checksum verify is the safety backstop for remote.
+    if not remote and _destination_overlaps_source(src_path, transfer_dest):
+        return {"moved": 0, "errors": [
+            f"Destination overlaps the source folder: {transfer_dest}"
+        ]}
 
-        # Refuse moving into — or around — a destination Vireo already tracks
-        # as a folder, regardless of whether that path currently exists on
-        # disk. A correct tracked-tree merge needs recursive folder/photo
-        # reconciliation we don't do here; a partial attempt would leave
-        # folders pointing at the deleted source path, or collide on the
-        # folders.path UNIQUE constraint when the source's children cascade
-        # onto a tracked descendant. Match the destination itself and anything
-        # below it. The cases this feature exists for — resuming an interrupted
-        # move, or moving into an untracked folder — never hit this.
-        #
-        # Comparison goes through _path_equal_or_descends so symlink aliases,
-        # Windows case folding, AND case-only aliases on case-insensitive POSIX
-        # (default macOS APFS) all collapse to the same tracked row — otherwise
-        # a destination reached via any of those would slip past and leave two
-        # folder rows managing the same on-disk tree.
-        tracked = _tracked_destination_overlap(db, folder_id, transfer_dest)
-        if tracked:
-            return {"moved": 0, "errors": [
-                f"Destination overlaps a folder Vireo already manages "
-                f"({tracked['path']}). Merging into or around a tracked folder "
-                f"isn't supported."
-            ]}
+    # Refuse moving into — or around — a destination Vireo already tracks as a
+    # folder, regardless of whether that path currently exists on disk. A
+    # correct tracked-tree merge needs recursive folder/photo reconciliation we
+    # don't do here; a partial attempt would leave folders pointing at the
+    # deleted source path, or collide on the folders.path UNIQUE constraint
+    # when the source's children cascade onto a tracked descendant. Match the
+    # destination itself and anything below it. The cases this feature exists
+    # for — resuming an interrupted move, or moving into an untracked folder —
+    # never hit this.
+    #
+    # For remote, check against `catalog_path` (the local mount path the
+    # catalog is repointed to after the move) rather than `transfer_dest` (the
+    # NAS-side path, which isn't in the local catalog). Without this guard, a
+    # remote move into a mount path that overlaps an already-scanned folder
+    # would copy the whole tree over SSH and then hit folders.path UNIQUE on
+    # the post-move db.move_folder_path cascade.
+    #
+    # Comparison goes through _path_equal_or_descends so symlink aliases,
+    # Windows case folding, AND case-only aliases on case-insensitive POSIX
+    # (default macOS APFS) all collapse to the same tracked row — otherwise
+    # a destination reached via any of those would slip past and leave two
+    # folder rows managing the same on-disk tree.
+    overlap_check_path = catalog_path if remote else transfer_dest
+    tracked = _tracked_destination_overlap(db, folder_id, overlap_check_path)
+    if tracked:
+        return {"moved": 0, "errors": [
+            f"Destination overlaps a folder Vireo already manages "
+            f"({tracked['path']}). Merging into or around a tracked folder "
+            f"isn't supported."
+        ]}
 
     if remote:
         dest_exists = _remote_dir_exists(remote, transfer_dest)
@@ -1278,6 +1282,14 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     # Any genuine same-name collision (an existing dest file that differs from
     # the source) is left untouched here and caught by the post-copy
     # verification below, which then refuses to delete the originals.
+    #
+    # Remote uses --partial-dir (instead of plain --partial) so a stalled or
+    # cancelled transfer leaves the partial in `.rsync-partial/` rather than
+    # at the destination filename. That keeps --ignore-existing honest: only
+    # *complete* dest files are skipped, so the next run resumes the partial
+    # from `.rsync-partial/` instead of treating it as already-moved (which
+    # would then fail the --checksum verify forever, stranding the partial
+    # until the user manually deletes it).
     rsync_bin = "rsync"
     extra_args = None
     if remote:
@@ -1288,7 +1300,10 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
                 "built-in rsync can't do this — set the GNU rsync path in "
                 "Settings."
             ]}
-        extra_args = ["-e", _ssh_rsh_string(remote), "--partial"]
+        extra_args = [
+            "-e", _ssh_rsh_string(remote),
+            "--partial-dir=.rsync-partial",
+        ]
         if remote.get("bwlimit_kbps"):
             extra_args.append(f"--bwlimit={int(remote['bwlimit_kbps'])}")
         rsync_flags = ["--ignore-existing"] if dest_exists else []
