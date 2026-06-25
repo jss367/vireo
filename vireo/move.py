@@ -426,11 +426,20 @@ def test_remote_connection(remote, rsync_bin):
 
     ``remote`` is a coerced target dict; ``rsync_bin`` is a resolved GNU rsync
     path (or "" if none/openrsync). Returns a dict with per-check booleans
-    (``ssh``, ``remote_path_writable``, ``rsync_ok``), an overall ``ok``, and
-    a human ``message``.
+    (``ssh``, ``remote_path_writable``, ``rsync_ok``, ``remote_rsync_ok``),
+    an overall ``ok``, and a human ``message``.
+
+    Both rsync ends are probed: rsync-over-SSH needs a working rsync on the
+    REMOTE side too (the ``--rsync-path`` program the local rsync invokes
+    after SSH connects). On a Synology NAS, that program is gated by DSM's
+    "Enable rsync service" toggle: SSH and the remote path can be reachable
+    while the remote rsync binary is absent or disabled, so without this
+    probe the test reports "Connection OK" and the user only discovers the
+    misconfiguration when a real move fails mid-transfer.
     """
     result = {"ok": False, "ssh": False, "remote_path_writable": False,
-              "rsync_ok": bool(rsync_bin), "message": ""}
+              "rsync_ok": bool(rsync_bin), "remote_rsync_ok": False,
+              "message": ""}
     target = _ssh_target(remote)
     base = ["ssh"] + ssh_base_args(remote) + [target]
     try:
@@ -466,6 +475,29 @@ def test_remote_connection(remote, rsync_bin):
             "found for the transfer (macOS's built-in rsync can't do this). "
             "Install GNU rsync or set its path under Settings → Paths.")
         return result
+    # Probe the REMOTE rsync. `rsync --version` is cheap and side-effect-free;
+    # any non-zero exit (or a missing binary, which the remote shell reports
+    # as "command not found" / exit 127) means an actual move would fail at
+    # the rsync handshake. On Synology, the setuid rsync only appears on PATH
+    # when DSM's "Enable rsync service" toggle is on — the most common cause
+    # of this check failing on an otherwise reachable NAS.
+    try:
+        rr = subprocess.run(
+            base + ["rsync --version 2>/dev/null | head -n 1"],
+            capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError) as exc:
+        result["message"] = (
+            f"SSH and the remote path are reachable, but couldn't probe the "
+            f"remote rsync: {exc}")
+        return result
+    if rr.returncode != 0 or "rsync" not in rr.stdout.lower():
+        result["message"] = (
+            "SSH and the remote path are reachable, but rsync isn't "
+            "available on the remote — moves would fail at handshake. On a "
+            "Synology NAS, enable Control Panel → File Services → rsync → "
+            "Enable rsync service. Otherwise, install rsync on the remote.")
+        return result
+    result["remote_rsync_ok"] = True
     result["ok"] = True
     result["message"] = "Connection OK — SSH, remote path, and rsync all good."
     return result

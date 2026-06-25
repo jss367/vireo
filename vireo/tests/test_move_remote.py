@@ -562,3 +562,59 @@ def test_remote_dir_exists_tri_state(monkeypatch):
         raise OSError("ssh: not found")
     monkeypatch.setattr(move_mod.subprocess, "run", boom)
     assert move_mod._remote_dir_exists(remote, "/p") is None
+
+
+def test_test_remote_connection_probes_remote_rsync(monkeypatch):
+    """test_remote_connection must verify rsync is available on the REMOTE
+    side, not just locally. SSH + writable remote_path + a local rsync_bin
+    isn't enough on its own: rsync-over-SSH invokes a `--rsync-path` program
+    on the remote, and on a Synology NAS that program is gated by DSM's
+    "Enable rsync service" toggle. Without this probe the test reports
+    "Connection OK" and the user only finds out at first move."""
+    remote = {"host": "nas", "user": "me", "port": 22, "ssh_key": "",
+              "remote_path": "/volume1/Photography"}
+
+    class FakeCompleted:
+        def __init__(self, rc=0, stdout="", stderr=""):
+            self.returncode = rc
+            self.stdout = stdout
+            self.stderr = stderr
+
+    # Three SSH commands run in order: echo probe, writable check, rsync
+    # probe. A step counter lets the fake return the appropriate response.
+    calls = {"n": 0}
+
+    def fake_run_remote_rsync_missing(cmd, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return FakeCompleted(0, "vireo_ok\n", "")
+        if calls["n"] == 2:
+            return FakeCompleted(0, "WRITABLE\n", "")
+        # Remote rsync probe — simulate command-not-found (exit 127).
+        return FakeCompleted(127, "", "rsync: command not found\n")
+
+    monkeypatch.setattr(move_mod.subprocess, "run",
+                        fake_run_remote_rsync_missing)
+    res = move_mod.test_remote_connection(remote, "/usr/bin/rsync")
+    assert res["ssh"] is True
+    assert res["remote_path_writable"] is True
+    assert res["rsync_ok"] is True  # local rsync_bin was provided
+    assert res["remote_rsync_ok"] is False
+    assert res["ok"] is False
+    assert "remote" in res["message"].lower()
+
+    # Now stage the rsync probe to succeed — full green path.
+    calls["n"] = 0
+
+    def fake_run_all_ok(cmd, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return FakeCompleted(0, "vireo_ok\n", "")
+        if calls["n"] == 2:
+            return FakeCompleted(0, "WRITABLE\n", "")
+        return FakeCompleted(0, "rsync  version 3.2.7\n", "")
+
+    monkeypatch.setattr(move_mod.subprocess, "run", fake_run_all_ok)
+    res = move_mod.test_remote_connection(remote, "/usr/bin/rsync")
+    assert res["remote_rsync_ok"] is True
+    assert res["ok"] is True
