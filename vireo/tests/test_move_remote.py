@@ -10,12 +10,10 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import config as cfg
+import move as move_mod
 import pytest
 from db import Database
-
-import move as move_mod
-import config as cfg
-
 
 # --------------------------------------------------------------------------
 # Pure helpers — no SSH/rsync needed.
