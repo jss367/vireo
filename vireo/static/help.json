@@ -3,7 +3,7 @@
     "question": "How do I add photos to Vireo?",
     "category": "Getting Started",
     "keywords": ["scan", "import", "add", "folder", "photos", "directory"],
-    "answer": "Open Settings and add a folder under Scan Roots. Then go to the Jobs page and click Scan. Vireo will find all supported image files in that folder and its subfolders. First runs download AI models (~500 MB), so give it a few minutes."
+    "answer": "Open Settings and add a folder under Scan Roots. Then go to the Jobs page and click Scan. Vireo will find all supported image files in that folder and its subfolders. First runs download AI models — anywhere from a few hundred megabytes to a few gigabytes depending on the classifier you choose — so give it a few minutes."
   },
   {
     "question": "How do I classify my photos?",
