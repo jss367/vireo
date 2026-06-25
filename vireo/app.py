@@ -13657,6 +13657,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Remote target: resolve the NAS-side dest and probe it over SSH.
         if remote_target_id:
+            import posixpath
+
             import config as cfg
             target = cfg.get_remote_target(remote_target_id)
             if not target:
@@ -13665,8 +13667,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 spec = move_mod.build_remote_move_spec(target, subpath, "")
             except ValueError as exc:
                 return json_error(str(exc))
-            resolved = resolve_folder_dest(
-                folder["path"], folder["name"], spec["ssh_dest_base"])
+            # The NAS path is POSIX, so the preview/probe path must join with
+            # '/' even when this server runs on Windows — resolve_folder_dest
+            # uses os.path.join and would produce ``/volume1/Photo\trip``,
+            # which the SSH ``test -d`` probe would then look up at a
+            # different remote path than the actual transfer (move_folder
+            # uses posixpath.join), so an existing destination would be
+            # reported as new and the first non-merge move would fail.
+            folder_name = (folder["name"]
+                           or os.path.basename(folder["path"].rstrip("/\\")))
+            resolved = posixpath.join(spec["ssh_dest_base"], folder_name)
             exists, fcount, truncated, reachable, err = \
                 move_mod.remote_preflight(target, resolved)
             return jsonify({
