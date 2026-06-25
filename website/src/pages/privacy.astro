@@ -30,14 +30,15 @@ import Base from '../layouts/Base.astro';
       <p>Vireo contacts external services in the following ways:</p>
       <ul class="service-list">
         <li><strong>iNaturalist</strong> — Vireo contacts iNaturalist in two ways. First, on startup it may query the iNaturalist taxonomy API to resolve unknown keyword names — only the keyword text is sent, no photos or personal data. Second, when you submit an observation, your photo, GPS coordinates, species name, observation date, and geoprivacy setting are sent to iNaturalist. Observation submissions require an API token you provide. Submitted data is governed by <a href="https://www.inaturalist.org/pages/privacy" target="_blank" rel="noopener">iNaturalist's privacy policy</a>.</li>
-        <li><strong>HuggingFace Hub</strong> — When you download AI models, Vireo fetches model weights from HuggingFace. No photos or personal data are sent. If you provide a HuggingFace token for private model access, it is sent as an authentication header.</li>
+        <li><strong>HuggingFace Hub</strong> — When you download AI models, Vireo fetches model weights from HuggingFace. This includes the species classifiers and the MegaDetector subject detector. No photos or personal data are sent. If you provide a HuggingFace token for private model access, it is sent as an authentication header.</li>
         <li><strong>iNaturalist Open Data / AWS</strong> — Vireo downloads public taxonomy and species list data. No personal data is sent.</li>
-        <li><strong>Zenodo</strong> — Vireo downloads the MegaDetector model weights from Zenodo. No personal data is sent.</li>
+        <li><strong>Google Maps Platform</strong> — Only if you configure a Google Maps API key, Vireo uses Google's Geocoding and Places APIs to turn your photos' GPS coordinates into place names. When enabled, the GPS coordinates of geotagged photos are sent to Google. If you do not provide a key, no location data is sent and this feature is inactive.</li>
+        <li><strong>Bug reports</strong> — Only when you choose to submit an in-app issue report, Vireo sends your description along with diagnostics — recent application logs, photo/folder/prediction counts, system information, and your configuration with any tokens and keys redacted — to a hosted reporting endpoint. Nothing is sent unless you submit a report.</li>
       </ul>
-      <p>Vireo has no analytics, telemetry, or automated crash reporting.</p>
+      <p>Beyond the bug reports you choose to submit, Vireo has no analytics, telemetry, or automated crash reporting.</p>
 
       <h2>Credentials</h2>
-      <p>API tokens you provide (for iNaturalist and HuggingFace) are stored in plaintext in <code>~/.vireo/config.json</code> on your device. Vireo does not transmit these tokens to anyone other than the respective service they belong to. Protect this file as you would any file containing credentials.</p>
+      <p>API tokens and keys you provide (for iNaturalist, HuggingFace, and Google Maps) are stored in plaintext in <code>~/.vireo/config.json</code> on your device. Vireo does not transmit these credentials to anyone other than the respective service they belong to. Protect this file as you would any file containing credentials.</p>
 
       <h2>Changes to this policy</h2>
       <p>If this policy changes, the updated version will be posted in the Vireo repository with a new effective date.</p>
