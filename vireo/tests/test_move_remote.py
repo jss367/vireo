@@ -177,6 +177,32 @@ def test_coerce_remote_target_drops_relative_remote_path():
     }) is not None
 
 
+def test_rsync_dest_spec_brackets_ipv6_hosts():
+    """rsync parses the FIRST colon in ``user@host:path`` as the host/path
+    separator, so an IPv6 literal like ``2001:db8::1`` must be wrapped in
+    brackets — ``me@2001:db8::1:/volume/x`` ships to ssh as host ``2001``
+    with remote command ``db8::1:/volume/x``, so the transfer goes to the
+    wrong machine or fails. DNS names and IPv4 addresses don't contain a
+    colon and pass through unchanged."""
+    # IPv4 / DNS host — bare host, no brackets.
+    assert move_mod.rsync_dest_spec(
+        {"user": "me", "host": "nas"}, "/volume1/x") == "me@nas:/volume1/x"
+    assert move_mod.rsync_dest_spec(
+        {"user": "me", "host": "10.0.0.5"}, "/x") == "me@10.0.0.5:/x"
+
+    # IPv6 literal — bracketed.
+    assert move_mod.rsync_dest_spec(
+        {"user": "me", "host": "2001:db8::1"}, "/volume1/x"
+    ) == "me@[2001:db8::1]:/volume1/x"
+    # Compressed form is also IPv6 — must bracket.
+    assert move_mod.rsync_dest_spec(
+        {"user": "me", "host": "::1"}, "/x") == "me@[::1]:/x"
+    # IPv6 with zone id (uncommon but legal) still contains colons.
+    assert move_mod.rsync_dest_spec(
+        {"user": "me", "host": "fe80::1%eth0"}, "/x"
+    ) == "me@[fe80::1%eth0]:/x"
+
+
 def test_coerce_remote_target_coerces_and_defaults():
     t = cfg._coerce_remote_target({
         "host": "nas", "user": "me", "remote_path": "/volume1/Photo",
@@ -522,6 +548,36 @@ def test_remote_move_uses_posix_join_for_transfer_dest(remote_env, monkeypatch):
     # Windows would have inserted one. Asserts the join was POSIX-only.
     assert "\\" not in captured["dest_spec"]
     assert captured["dest_spec"] == "me@nas:/volume1/Photography/trip"
+
+
+def test_remote_move_brackets_ipv6_host_in_rsync_target(remote_env, monkeypatch):
+    """End-to-end: an IPv6-literal host on the remote target must reach rsync
+    as ``user@[addr]:path``. Otherwise rsync would parse the first colon as
+    the host/path separator (rsync(1) single-colon remote form), ship to ssh
+    as the wrong host, and the SSH probe at ``_remote_dir_exists`` — which
+    talks directly to ssh, where ``user@host`` parses unambiguously — could
+    succeed beforehand, masking the bug until the transfer itself."""
+    env = remote_env
+    env["remote"]["host"] = "2001:db8::1"
+    captured = {}
+
+    def fake_rsync(src_path, dest_spec, flags, total, cb, rsync_bin="rsync",
+                   extra_args=None, **kw):
+        captured["dest_spec"] = dest_spec
+        return (0, "", False)
+
+    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: False)
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
+    monkeypatch.setattr(move_mod, "_remote_verify_complete",
+                        lambda *a, **k: None)
+
+    move_mod.move_folder(
+        db=env["db"], folder_id=env["fid"], destination="",
+        remote=env["remote"])
+
+    # The IPv6 host is wrapped; the rsync side now has an unambiguous
+    # host/path split at the bracket-then-colon boundary.
+    assert captured["dest_spec"] == "me@[2001:db8::1]:/volume1/Photography/trip"
 
 
 def test_remote_move_refuses_when_catalog_path_overlaps_tracked(remote_env, monkeypatch):

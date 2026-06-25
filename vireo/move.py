@@ -357,6 +357,38 @@ def _ssh_target(remote):
     return f'{remote["user"]}@{remote["host"]}'
 
 
+def _rsync_host_token(host):
+    """Bracket a host for rsync's ``user@host:path`` syntax when needed.
+
+    The rsync remote-shell form uses the FIRST colon as the host/path
+    separator (see the rsync(1) manpage). An IPv6 literal like
+    ``2001:db8::1`` therefore can't be passed bare: ``me@2001:db8::1:/path``
+    ships to ssh as host ``2001`` and remote command ``db8::1:/path``, so
+    rsync's preflight probe of THIS routine's target can succeed (we use
+    direct ssh, where user@host parses cleanly without brackets) while the
+    actual transfer goes to the wrong host or fails entirely. Wrapping the
+    host in brackets disambiguates it and is rsync's documented IPv6 form;
+    DNS names and IPv4 addresses don't contain colons so are passed through
+    unchanged. Plain ssh invocations stay unbracketed because OpenSSH parses
+    ``user@host`` unambiguously without a trailing path component.
+    """
+    if ":" in host:
+        return f"[{host}]"
+    return host
+
+
+def rsync_dest_spec(remote, path):
+    """Format ``user@host:path`` for rsync, bracketing the host iff it's IPv6.
+
+    The single place every rsync transfer/verify spec is built so the IPv6
+    wrap can't be forgotten at one call site and silently land in the wrong
+    place. Display strings (the move preflight's ``resolved_dest``, the
+    move-form's SSH preview) use this too, so a value the user sees and a
+    value rsync would actually accept are the same string.
+    """
+    return f'{remote["user"]}@{_rsync_host_token(remote["host"])}:{path}'
+
+
 def _remote_mkdir_p(remote, path):
     """Create ``path`` (and any missing intermediate parents) on the remote
     host via SSH. Idempotent — ``mkdir -p`` accepts an already-existing
@@ -1361,7 +1393,7 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         transfer_dest = posixpath.join(remote["ssh_dest_base"], name)
         catalog_path = resolve_folder_dest(
             src_path, folder["name"], mount_base)
-        rsync_target = f'{remote["user"]}@{remote["host"]}:{transfer_dest}'
+        rsync_target = rsync_dest_spec(remote, transfer_dest)
     else:
         transfer_dest = resolve_folder_dest(src_path, folder["name"], destination)
         catalog_path = transfer_dest
@@ -1435,7 +1467,7 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             # the post-transfer --checksum verify could preserve the originals.
             return {"moved": 0, "errors": [
                 f"Couldn't probe remote destination via SSH: "
-                f"{remote['user']}@{remote['host']}:{transfer_dest}. "
+                f"{rsync_dest_spec(remote, transfer_dest)}. "
                 f"Refusing the move so a transient SSH error isn't confused "
                 f"with an absent destination."
             ]}

@@ -13500,8 +13500,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # Pass the mount path as `destination` for informational use; the
             # move uses the SSH base from `remote`.
             destination = remote["mount_dest_base"]
-            display_dest = (f'{target["user"]}@{target["host"]}:'
-                            f'{remote["ssh_dest_base"]}')
+            display_dest = move_mod.rsync_dest_spec(
+                target, remote["ssh_dest_base"])
         else:
             if not isinstance(destination, str):
                 return json_error("destination must be a string")
@@ -13680,7 +13680,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             exists, fcount, truncated, reachable, err = \
                 move_mod.remote_preflight(target, resolved)
             return jsonify({
-                "resolved_dest": f'{target["user"]}@{target["host"]}:{resolved}',
+                "resolved_dest": move_mod.rsync_dest_spec(target, resolved),
                 "exists": exists,
                 "file_count": fcount,
                 "file_count_truncated": truncated,

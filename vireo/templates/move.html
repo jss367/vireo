@@ -699,7 +699,7 @@ function updateQuickMovePreview() {
     line.textContent = 'Transferring over SSH to: ';
     var span = document.createElement('span');
     span.className = 'dest-preview-path';
-    span.textContent = t.user + '@' + t.host + ':' + finalPath;
+    span.textContent = rsyncDestSpec(t.user, t.host, finalPath);
     line.appendChild(span);
     preview.appendChild(line);
 
@@ -767,6 +767,18 @@ function _destWarn(text) {
 function _isAbsolutePath(p) {
   if (!p) return false;
   return p.charAt(0) === '/' || /^[A-Za-z]:[\\\/]/.test(p) || /^\\\\/.test(p);
+}
+
+// Mirror move.py rsync_dest_spec(): rsync's user@host:path form parses the
+// FIRST colon as the host/path separator, so an IPv6 literal like
+// 2001:db8::1 needs brackets to avoid being chopped at "2001". DNS/IPv4
+// hosts have no colons and pass through unchanged. The backend formats the
+// /api/move-folder/preflight resolved_dest with the same rule; this helper
+// keeps the move-form's local preview honest before the user has typed
+// anything that would trigger the preflight call.
+function rsyncDestSpec(user, host, path) {
+  var hostToken = host && host.indexOf(':') !== -1 ? '[' + host + ']' : host;
+  return user + '@' + hostToken + ':' + path;
 }
 
 // Normalize a remote-target subpath the same way move.py sanitize_subpath
