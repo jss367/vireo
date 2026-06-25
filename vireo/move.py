@@ -357,6 +357,32 @@ def _ssh_target(remote):
     return f'{remote["user"]}@{remote["host"]}'
 
 
+def _remote_mkdir_p(remote, path):
+    """Create ``path`` (and any missing intermediate parents) on the remote
+    host via SSH. Idempotent — ``mkdir -p`` accepts an already-existing
+    directory.
+
+    Without this, a remote move into a configured subpath like ``USA/2026``
+    that has never been written before fails at rsync with
+    ``mkdir ... failed: No such file or directory`` — rsync creates the
+    leaf folder but not its intermediate parents. The UI advertises a
+    free-text subpath, so users wouldn't otherwise know to pre-create
+    every level manually on the NAS.
+
+    Returns ``(True, "")`` on success or ``(False, detail)`` where
+    ``detail`` is a short message suitable for surfacing to the user.
+    """
+    cmd = (["ssh"] + ssh_base_args(remote) + [_ssh_target(remote)]
+           + [f"mkdir -p {shlex.quote(path)}"])
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+    if r.returncode != 0:
+        return False, r.stderr.strip() or f"ssh mkdir exit {r.returncode}"
+    return True, ""
+
+
 def _remote_dir_exists(remote, path):
     """Probe whether ``path`` is a directory on the remote host (via SSH).
 
@@ -1294,6 +1320,25 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     #     destination and catalog coincide; for remote they diverge because
     #     the NAS path isn't reachable through the local filesystem.
     if remote:
+        ssh_base = remote.get("ssh_dest_base") or ""
+        # Same hazard as the mount-path check below, on the NAS side: a
+        # relative ssh_dest_base like "Photos" would ship to rsync as
+        # ``user@host:Photos/<folder>`` and resolve under the SSH user's
+        # remote cwd — but the catalog gets repointed to the absolute
+        # mount_dest_base, so a verified copy can live at a different
+        # remote location than the path Vireo records before originals are
+        # deleted. ``_coerce_remote_target`` already drops relative-path
+        # entries at the config boundary; this is the defense-in-depth
+        # check for callers (tests, direct use) that build a remote dict
+        # themselves. POSIX-absolute (startswith "/") because the NAS is
+        # POSIX — os.path.isabs would accept ``C:\foo`` on Windows.
+        if not ssh_base.startswith("/"):
+            return {"moved": 0, "errors": [
+                "Remote target needs an absolute remote (NAS) path before "
+                "moving files — otherwise rsync would write under the SSH "
+                "user's cwd, not where the catalog will point. Set the "
+                "remote path under Settings → Remote targets."
+            ]}
         mount_base = remote.get("mount_dest_base") or ""
         # Without an absolute mount path, resolve_folder_dest below would
         # produce a relative catalog_path like 'Birds' — then after the SSH
@@ -1421,6 +1466,25 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
 
     log.info("%s folder %s -> %s",
              "Merging" if dest_exists else "Moving", src_path, rsync_target)
+
+    # For a fresh remote move, ensure the destination's PARENT directory
+    # exists on the NAS. rsync creates the leaf folder itself but not its
+    # intermediate parents, so a configured subpath like ``USA/2026`` that
+    # has never been written before would fail with ``mkdir ... failed: No
+    # such file or directory`` even though every preceding check passed.
+    # Skip on a merge — if the leaf exists, the parents must too. Skip when
+    # the parent is empty (the bare base "/", or a transfer_dest with no
+    # parent component) since mkdir-p there is meaningless.
+    if remote and not dest_exists:
+        parent_dir = posixpath.dirname(transfer_dest)
+        if parent_dir and parent_dir != "/":
+            ok, detail = _remote_mkdir_p(remote, parent_dir)
+            if not ok:
+                return {"moved": 0, "errors": [
+                    f"Couldn't create the remote destination's parent "
+                    f"directory '{parent_dir}' on the NAS: {detail}. "
+                    f"Check permissions or pre-create the subpath."
+                ]}
 
     # Count source files up front so the copy phase reports against a real
     # denominator from the first file. This count is the progress denominator

@@ -153,6 +153,30 @@ def test_coerce_remote_target_drops_incomplete():
     assert cfg._coerce_remote_target("not a dict") is None
 
 
+def test_coerce_remote_target_drops_relative_remote_path():
+    """A relative remote_path like "Photos" would ship to rsync as
+    user@host:Photos/<folder> and resolve under the SSH user's remote cwd,
+    while the catalog gets repointed to the absolute mount_path — i.e. the
+    verified copy ends up at a different remote location than the path Vireo
+    records. The coerce path drops these entries so they never reach the
+    settings dropdown."""
+    assert cfg._coerce_remote_target({
+        "host": "nas", "user": "me", "remote_path": "Photos",
+    }) is None
+    assert cfg._coerce_remote_target({
+        "host": "nas", "user": "me", "remote_path": "volume1/Photo",
+    }) is None
+    # A Windows-form path is also rejected — the NAS is POSIX, and
+    # backslashes/drive letters wouldn't survive the SSH-side shell intact.
+    assert cfg._coerce_remote_target({
+        "host": "nas", "user": "me", "remote_path": r"C:\Photos",
+    }) is None
+    # The absolute counterpart is accepted.
+    assert cfg._coerce_remote_target({
+        "host": "nas", "user": "me", "remote_path": "/volume1/Photo",
+    }) is not None
+
+
 def test_coerce_remote_target_coerces_and_defaults():
     t = cfg._coerce_remote_target({
         "host": "nas", "user": "me", "remote_path": "/volume1/Photo",
@@ -170,7 +194,7 @@ def test_coerce_remote_target_coerces_and_defaults():
 # --------------------------------------------------------------------------
 
 @pytest.fixture
-def remote_env(tmp_path):
+def remote_env(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
@@ -191,6 +215,10 @@ def remote_env(tmp_path):
         "ssh_dest_base": "/volume1/Photography",
         "mount_dest_base": str(tmp_path / "mount"),
     }
+    # Default the parent-dir mkdir to success so individual tests don't have
+    # to. The dedicated mkdir tests below override this where it matters.
+    monkeypatch.setattr(move_mod, "_remote_mkdir_p",
+                        lambda r, p: (True, ""))
     return {"db": db, "src": src, "fid": fid, "remote": remote,
             "tmp_path": tmp_path}
 
@@ -355,6 +383,44 @@ def test_remote_move_merge_uses_partial_dir_for_resume(remote_env, monkeypatch):
     # Bare --partial must not also appear: it would put partials back at the
     # destination filename and re-introduce the --ignore-existing collision.
     assert "--partial" not in seen["extra_args"]
+
+
+def test_remote_move_refuses_relative_ssh_dest_base(remote_env, monkeypatch):
+    """A relative ssh_dest_base would resolve under the SSH user's remote cwd
+    (rsync target ``user@host:Photos/<folder>``), while catalog_path is the
+    absolute mount_dest_base. A "verified" copy would then live at a
+    different remote location than the path Vireo records — and the
+    original would be deleted on that mis-recorded state. Refuse before
+    any SSH probing or transfer happens. ``_coerce_remote_target`` already
+    drops these at the config boundary; this guards direct callers
+    (tests, ad-hoc scripts) that hand-build the remote dict."""
+    env = remote_env
+    env["remote"]["ssh_dest_base"] = "Photos"  # relative — not absolute POSIX
+
+    called = {"rsync": False, "exists": False}
+
+    def fake_rsync(*a, **k):
+        called["rsync"] = True
+        return (0, "", False)
+
+    def fake_exists(*a, **k):
+        called["exists"] = True
+        return False
+
+    monkeypatch.setattr(move_mod, "_remote_dir_exists", fake_exists)
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid"], destination="",
+        remote=env["remote"])
+
+    assert result["moved"] == 0
+    assert any("absolute" in e.lower() and "remote" in e.lower()
+               for e in result["errors"])
+    # No SSH calls at all — refusal happens before any probing or transfer.
+    assert called["rsync"] is False
+    assert called["exists"] is False
+    assert (env["src"] / "a.nef").exists()
 
 
 def test_remote_move_refuses_relative_mount_dest_base(remote_env, monkeypatch):
@@ -528,6 +594,103 @@ def test_remote_move_refuses_when_ssh_probe_fails(remote_env, monkeypatch):
     assert called["rsync"] is False
     # Source untouched.
     assert (env["src"] / "a.nef").exists()
+
+
+def test_remote_move_creates_subpath_parents_before_rsync(remote_env, monkeypatch):
+    """When the configured subpath has missing intermediate parents (e.g.
+    "USA/2026" under /volume1/Photography), the move must ``mkdir -p`` the
+    parent on the NAS before rsync runs. rsync creates the leaf folder
+    itself but not intermediate parents, so without this the move fails
+    with ``mkdir ... failed: No such file or directory`` for any subpath
+    the user hasn't already pre-created.
+
+    Verify the mkdir is called with the parent of the transfer destination
+    and that it runs BEFORE the rsync transfer."""
+    env = remote_env
+    env["remote"]["ssh_dest_base"] = "/volume1/Photography/USA/2026"
+
+    order = []
+
+    def fake_mkdir(remote, path):
+        order.append(("mkdir", path))
+        return (True, "")
+
+    def fake_rsync(*a, **k):
+        order.append(("rsync", None))
+        return (0, "", False)
+
+    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: False)
+    monkeypatch.setattr(move_mod, "_remote_mkdir_p", fake_mkdir)
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
+    monkeypatch.setattr(move_mod, "_remote_verify_complete",
+                        lambda *a, **k: None)
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid"], destination="",
+        remote=env["remote"])
+
+    assert result["moved"] == 2
+    # mkdir was called with the configured subpath as the parent (not the
+    # leaf "trip" folder — rsync handles that). And it ran BEFORE rsync, so
+    # rsync never sees a missing parent.
+    mkdir_calls = [p for kind, p in order if kind == "mkdir"]
+    assert mkdir_calls == ["/volume1/Photography/USA/2026"]
+    assert order.index(("mkdir", "/volume1/Photography/USA/2026")) < \
+           order.index(("rsync", None))
+
+
+def test_remote_move_refuses_when_mkdir_p_fails(remote_env, monkeypatch):
+    """If the SSH mkdir -p fails (permission denied, broken connection,
+    read-only share), the move must NOT proceed to rsync — otherwise rsync
+    would fail with the same underlying error but in a noisier way, and the
+    user wouldn't get a clear "fix permissions / pre-create the subpath"
+    pointer. Source must remain intact."""
+    env = remote_env
+
+    called = {"rsync": False}
+
+    def fake_rsync(*a, **k):
+        called["rsync"] = True
+        return (0, "", False)
+
+    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: False)
+    monkeypatch.setattr(move_mod, "_remote_mkdir_p",
+                        lambda r, p: (False, "Permission denied"))
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid"], destination="",
+        remote=env["remote"])
+
+    assert result["moved"] == 0
+    assert any("Permission denied" in e for e in result["errors"])
+    assert called["rsync"] is False
+    assert (env["src"] / "a.nef").exists()
+
+
+def test_remote_move_merge_skips_mkdir_p(remote_env, monkeypatch):
+    """On merge/resume the leaf already exists, so the parent must too — the
+    mkdir is unnecessary work over SSH on every retry. Verify it's skipped
+    for merge moves (dest_exists=True)."""
+    env = remote_env
+    mkdir_calls = []
+
+    def fake_mkdir(remote, path):
+        mkdir_calls.append(path)
+        return (True, "")
+
+    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: True)
+    monkeypatch.setattr(move_mod, "_remote_mkdir_p", fake_mkdir)
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed",
+                        lambda *a, **k: (0, "", False))
+    monkeypatch.setattr(move_mod, "_remote_verify_complete",
+                        lambda *a, **k: None)
+
+    move_mod.move_folder(
+        db=env["db"], folder_id=env["fid"], destination="", merge=True,
+        remote=env["remote"])
+
+    assert mkdir_calls == []  # No mkdir on merge.
 
 
 def test_remote_dir_exists_tri_state(monkeypatch):

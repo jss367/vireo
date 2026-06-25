@@ -387,11 +387,19 @@ def get_editors():
 def _coerce_remote_target(entry):
     """Validate/normalize one remote-target dict, or return None if unusable.
 
-    A usable target needs at least a host, user, and remote_path (the rest
-    have sane fallbacks). `mount_path` may be empty — a target with no local
-    mount simply can't keep its photos catalogued after a move (the move
-    route enforces that where it matters), but the entry is still valid for
-    transfer. Numeric fields are coerced; junk falls back to defaults.
+    A usable target needs at least a host, user, and an *absolute POSIX*
+    remote_path (the rest have sane fallbacks). A relative remote_path like
+    "Photos" would be sent unchanged to ``user@host:Photos/<folder>`` —
+    rsync and the checksum verify would then operate under the SSH user's
+    remote cwd, while the catalog gets repointed to the absolute local
+    mount_path. The original source would be deleted on a verified copy
+    that lives at a different remote location than the path Vireo records,
+    so reject relative remote paths at the entry boundary rather than
+    after a move is already in flight. ``mount_path`` may be empty — a
+    target with no local mount simply can't keep its photos catalogued
+    after a move (the move route enforces that where it matters), but the
+    entry is still valid for transfer. Numeric fields are coerced; junk
+    falls back to defaults.
     """
     if not isinstance(entry, dict):
         return None
@@ -399,6 +407,12 @@ def _coerce_remote_target(entry):
     user = (entry.get("user") or "").strip()
     remote_path = (entry.get("remote_path") or "").strip()
     if not host or not user or not remote_path:
+        return None
+    # POSIX-absolute only: rsync ships this path to the NAS-side shell, so
+    # Windows drive forms / backslashes are also non-starters (the NAS is
+    # POSIX). Comparing to "/" handles every absolute form that survives a
+    # POSIX shell intact.
+    if not remote_path.startswith("/"):
         return None
     name = (entry.get("name") or "").strip() or f"{user}@{host}"
     try:
