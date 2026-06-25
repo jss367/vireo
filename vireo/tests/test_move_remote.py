@@ -62,13 +62,17 @@ def test_build_remote_move_spec_bad_subpath_raises():
         move_mod.build_remote_move_spec(target, "../x", "rsync")
 
 
+# Windows has no execute bit; executability is defined by extension (PATHEXT).
+_EXE_SUFFIX = ".exe" if sys.platform == "win32" else ""
+
+
 def test_resolve_rsync_bin(tmp_path, monkeypatch):
     monkeypatch.setattr(move_mod, "_BUNDLED_RSYNC_CANDIDATES", ())
     monkeypatch.delenv("VIREO_RSYNC_BIN", raising=False)
     # Nothing available -> None.
     assert move_mod.resolve_rsync_bin("") is None
     # An explicit executable path wins.
-    fake = tmp_path / "rsync"
+    fake = tmp_path / f"rsync{_EXE_SUFFIX}"
     fake.write_text("#!/bin/sh\n")
     fake.chmod(0o755)
     assert move_mod.resolve_rsync_bin(str(fake)) == str(fake)
@@ -81,7 +85,7 @@ def test_resolve_rsync_bin(tmp_path, monkeypatch):
 
 def test_resolve_rsync_bin_env_override(tmp_path, monkeypatch):
     monkeypatch.setattr(move_mod, "_BUNDLED_RSYNC_CANDIDATES", ())
-    fake = tmp_path / "rsync"
+    fake = tmp_path / f"rsync{_EXE_SUFFIX}"
     fake.write_text("#!/bin/sh\n")
     fake.chmod(0o755)
     monkeypatch.setenv("VIREO_RSYNC_BIN", str(fake))

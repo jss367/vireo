@@ -4,6 +4,7 @@ import contextlib
 import filecmp
 import logging
 import os
+import posixpath
 import shlex
 import shutil
 import subprocess
@@ -96,7 +97,6 @@ def build_remote_move_spec(target, subpath, rsync_bin):
     POSIX-style (the NAS is POSIX); the mount base uses the local separator.
     Raises ValueError on a bad subpath.
     """
-    import posixpath
     sub = sanitize_subpath(subpath)
     ssh_base = target["remote_path"]
     mount_base = target.get("mount_path", "")
@@ -215,6 +215,23 @@ _BUNDLED_RSYNC_CANDIDATES = (
 )
 
 
+def _is_executable_file(path):
+    """True if ``path`` is a regular file the OS would treat as executable.
+
+    On POSIX this is the X bit. Windows has no execute bit (``os.access(p,
+    os.X_OK)`` returns True for any regular file), so executability there is
+    defined by file extension via PATHEXT — match that.
+    """
+    if not path or not os.path.isfile(path):
+        return False
+    if os.name == "nt":
+        ext = os.path.splitext(path)[1].lower()
+        pathext = [e.lower() for e in os.environ.get(
+            "PATHEXT", ".COM;.EXE;.BAT;.CMD").split(os.pathsep)]
+        return ext in pathext
+    return os.access(path, os.X_OK)
+
+
 def resolve_rsync_bin(configured=""):
     """Return an absolute path to a GNU rsync binary for remote moves, or None.
 
@@ -233,7 +250,7 @@ def resolve_rsync_bin(configured=""):
         candidates.append(env)
     candidates.extend(_BUNDLED_RSYNC_CANDIDATES)
     for c in candidates:
-        if c and os.path.isfile(c) and os.access(c, os.X_OK):
+        if _is_executable_file(c):
             return os.path.abspath(c)
     return None
 
@@ -1172,8 +1189,11 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     #     destination and catalog coincide; for remote they diverge because
     #     the NAS path isn't reachable through the local filesystem.
     if remote:
-        transfer_dest = resolve_folder_dest(
-            src_path, folder["name"], remote["ssh_dest_base"])
+        # The NAS side is POSIX, so the SSH dest must be joined with '/' even
+        # when this code runs on Windows; os.path.join would produce a
+        # backslash and rsync would treat it as a single path segment.
+        name = folder["name"] or os.path.basename(src_path.rstrip("/\\"))
+        transfer_dest = posixpath.join(remote["ssh_dest_base"], name)
         catalog_path = resolve_folder_dest(
             src_path, folder["name"], remote["mount_dest_base"])
         rsync_target = f'{remote["user"]}@{remote["host"]}:{transfer_dest}'
