@@ -541,6 +541,39 @@ def test_move_folder_rejects_non_bool_merge(app_and_db):
     assert "boolean" in resp.get_json()["error"].lower()
 
 
+def test_move_folder_rejects_remote_target_with_relative_mount_path(
+        app_and_db, tmp_path, monkeypatch):
+    """A remote target whose mount_path is relative (e.g. "Photos") must be
+    rejected before the job starts. The catalog gets repointed to mount_path
+    after the move; a server-cwd-relative value there would leave every moved
+    photo appearing missing."""
+    import config as cfg
+
+    app, db = app_and_db
+    folders = db.get_folder_tree()
+    fid = folders[0]["id"]
+
+    fake_target = {
+        "id": "t1", "name": "nas", "host": "nas", "user": "me",
+        "port": 22, "ssh_key": "", "remote_path": "/volume1/Photo",
+        "mount_path": "Photos",  # relative — the bug
+        "bwlimit_kbps": 0,
+    }
+    monkeypatch.setattr(cfg, "get_remote_target",
+                        lambda tid: fake_target if tid == "t1" else None)
+
+    client = app.test_client()
+    resp = client.post("/api/jobs/move-folder", json={
+        "folder_id": fid,
+        "remote_target_id": "t1",
+        "subpath": "",
+    })
+    assert resp.status_code == 400
+    body = resp.get_json()["error"].lower()
+    assert "absolute" in body
+    assert "mount" in body
+
+
 def test_move_folder_preflight_rejects_non_object_body(app_and_db):
     """Preflight: same type guard as the job endpoint."""
     app, _ = app_and_db

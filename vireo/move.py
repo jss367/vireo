@@ -8,6 +8,7 @@ import posixpath
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -232,15 +233,40 @@ def _is_executable_file(path):
     return os.access(path, os.X_OK)
 
 
+def _platform_rsync_candidates():
+    """Standard GNU rsync locations on non-macOS platforms.
+
+    The openrsync-at-/usr/bin avoidance baked into _BUNDLED_RSYNC_CANDIDATES is
+    macOS-specific: every other major OS ships GNU rsync as ``/usr/bin/rsync``
+    and on ``$PATH``, so on Linux/BSD/Windows a usable rsync is normally just
+    there and ``resolve_rsync_bin("")`` should find it without the user setting
+    anything. We probe ``$PATH`` via shutil.which first so a custom rsync
+    earlier on PATH (e.g. /usr/local/bin) is preferred over /usr/bin's, and
+    fall back to /usr/bin/rsync explicitly in case PATH is unset/sparse in a
+    headless context. Returns an empty tuple on darwin so this never
+    short-circuits the Homebrew/MacPorts candidates above.
+    """
+    if sys.platform == "darwin":
+        return ()
+    cands = []
+    found = shutil.which("rsync")
+    if found:
+        cands.append(found)
+    cands.append("/usr/bin/rsync")
+    return tuple(cands)
+
+
 def resolve_rsync_bin(configured=""):
     """Return an absolute path to a GNU rsync binary for remote moves, or None.
 
     Resolution order: an explicit ``configured`` path (the ``rsync_bin``
-    config value), the ``VIREO_RSYNC_BIN`` environment override, then the
-    bundled/known-install candidates. Apple's openrsync at /usr/bin/rsync is
-    never auto-selected — it can't do rsync-over-SSH — so a host with only
-    that returns None, and the caller surfaces a clear "install GNU rsync"
-    error rather than failing mid-transfer.
+    config value), the ``VIREO_RSYNC_BIN`` environment override, the
+    bundled/known-install candidates, then on non-macOS platforms ``$PATH``
+    and ``/usr/bin/rsync`` (where GNU rsync normally lives). Apple's openrsync
+    at /usr/bin/rsync is never auto-selected on macOS — it can't do
+    rsync-over-SSH — so a macOS host with only that returns None, and the
+    caller surfaces a clear "install GNU rsync" error rather than failing
+    mid-transfer.
     """
     candidates = []
     if configured:
@@ -249,9 +275,17 @@ def resolve_rsync_bin(configured=""):
     if env:
         candidates.append(env)
     candidates.extend(_BUNDLED_RSYNC_CANDIDATES)
+    candidates.extend(_platform_rsync_candidates())
+    seen = set()
     for c in candidates:
-        if _is_executable_file(c):
-            return os.path.abspath(c)
+        if not c:
+            continue
+        ap = os.path.abspath(c)
+        if ap in seen:
+            continue
+        seen.add(ap)
+        if _is_executable_file(ap):
+            return ap
     return None
 
 
@@ -305,14 +339,34 @@ def _ssh_target(remote):
 
 
 def _remote_dir_exists(remote, path):
-    """True if ``path`` is a directory on the remote host (via SSH)."""
+    """Probe whether ``path`` is a directory on the remote host (via SSH).
+
+    Returns True if it is, False if the SSH command ran and reported it isn't,
+    and None if the probe itself couldn't run cleanly — SSH connect failure,
+    auth failure, timeout, ``ssh`` binary missing, etc. The caller MUST treat
+    None as "inconclusive, refuse the move" rather than as "destination
+    absent": if a transient SSH glitch on an actually-existing destination
+    were collapsed to False, the move would proceed as a fresh transfer
+    (omitting --ignore-existing) and rsync would happily overwrite same-name
+    files before the post-transfer --checksum verify could preserve the
+    originals.
+
+    ``test -d`` exit codes: 0 = directory, 1 = not a directory / absent. SSH
+    returns the remote command's exit code on success, or 255 when SSH itself
+    couldn't complete the session — so any other return code (255 or
+    otherwise unexpected) is bucketed with the OSError/SubprocessError path.
+    """
     cmd = (["ssh"] + ssh_base_args(remote)
            + [_ssh_target(remote), f"test -d {shlex.quote(path)}"])
     try:
-        return subprocess.run(cmd, capture_output=True,
-                              timeout=30).returncode == 0
+        rc = subprocess.run(cmd, capture_output=True, timeout=30).returncode
     except (OSError, subprocess.SubprocessError):
+        return None
+    if rc == 0:
+        return True
+    if rc == 1:
         return False
+    return None
 
 
 def remote_preflight(remote, dest_path, file_cap=1000):
@@ -1256,7 +1310,19 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         ]}
 
     if remote:
-        dest_exists = _remote_dir_exists(remote, transfer_dest)
+        probe = _remote_dir_exists(remote, transfer_dest)
+        if probe is None:
+            # Refuse rather than proceed as a fresh transfer: a transient SSH
+            # failure on a real existing destination would otherwise omit
+            # --ignore-existing and let rsync overwrite same-name files before
+            # the post-transfer --checksum verify could preserve the originals.
+            return {"moved": 0, "errors": [
+                f"Couldn't probe remote destination via SSH: "
+                f"{remote['user']}@{remote['host']}:{transfer_dest}. "
+                f"Refusing the move so a transient SSH error isn't confused "
+                f"with an absent destination."
+            ]}
+        dest_exists = probe
     else:
         dest_exists = os.path.exists(transfer_dest)
     if dest_exists and not merge:

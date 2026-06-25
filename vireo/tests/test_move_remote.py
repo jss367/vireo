@@ -68,6 +68,7 @@ _EXE_SUFFIX = ".exe" if sys.platform == "win32" else ""
 
 def test_resolve_rsync_bin(tmp_path, monkeypatch):
     monkeypatch.setattr(move_mod, "_BUNDLED_RSYNC_CANDIDATES", ())
+    monkeypatch.setattr(move_mod, "_platform_rsync_candidates", lambda: ())
     monkeypatch.delenv("VIREO_RSYNC_BIN", raising=False)
     # Nothing available -> None.
     assert move_mod.resolve_rsync_bin("") is None
@@ -85,11 +86,52 @@ def test_resolve_rsync_bin(tmp_path, monkeypatch):
 
 def test_resolve_rsync_bin_env_override(tmp_path, monkeypatch):
     monkeypatch.setattr(move_mod, "_BUNDLED_RSYNC_CANDIDATES", ())
+    monkeypatch.setattr(move_mod, "_platform_rsync_candidates", lambda: ())
     fake = tmp_path / f"rsync{_EXE_SUFFIX}"
     fake.write_text("#!/bin/sh\n")
     fake.chmod(0o755)
     monkeypatch.setenv("VIREO_RSYNC_BIN", str(fake))
     assert move_mod.resolve_rsync_bin("") == str(fake)
+
+
+def test_resolve_rsync_bin_finds_linux_path_via_platform_candidates(
+        tmp_path, monkeypatch):
+    """On a Linux host with no config and no bundled rsync, resolve_rsync_bin
+    should still find a usable GNU rsync via the platform-aware candidates
+    ($PATH / /usr/bin/rsync). macOS-only candidate avoidance is intentionally
+    macOS-only — every other major OS ships GNU rsync at those locations."""
+    monkeypatch.setattr(move_mod, "_BUNDLED_RSYNC_CANDIDATES", ())
+    monkeypatch.delenv("VIREO_RSYNC_BIN", raising=False)
+
+    # Pretend a usable rsync is discoverable on $PATH at tmp_path/rsync.
+    # Use _EXE_SUFFIX so the Windows leg of the CI matrix (which judges
+    # executability by PATHEXT) treats this file as executable.
+    fake = tmp_path / f"rsync{_EXE_SUFFIX}"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+
+    monkeypatch.setattr(
+        move_mod, "_platform_rsync_candidates",
+        lambda: (str(fake),))
+
+    assert move_mod.resolve_rsync_bin("") == str(fake)
+
+
+def test_platform_rsync_candidates_excludes_darwin(monkeypatch):
+    """macOS's /usr/bin/rsync is openrsync (can't drive SSH), so on darwin the
+    platform-aware probe must return empty — the bundled Homebrew/MacPorts
+    candidates handle macOS, and including /usr/bin/rsync would silently
+    auto-select an unusable binary."""
+    monkeypatch.setattr(move_mod.sys, "platform", "darwin")
+    assert move_mod._platform_rsync_candidates() == ()
+
+
+def test_platform_rsync_candidates_includes_usr_bin_on_linux(monkeypatch):
+    """On Linux/BSD/Windows, /usr/bin/rsync is GNU rsync. The probe must offer
+    it as a candidate so an unconfigured Linux install has a usable default."""
+    monkeypatch.setattr(move_mod.sys, "platform", "linux")
+    monkeypatch.setattr(move_mod.shutil, "which", lambda name: None)
+    assert "/usr/bin/rsync" in move_mod._platform_rsync_candidates()
 
 
 def test_coerce_remote_target_drops_incomplete():
@@ -338,3 +380,71 @@ def test_remote_move_refuses_when_catalog_path_overlaps_tracked(remote_env, monk
     assert called["rsync"] is False
     # Source untouched.
     assert (env["src"] / "a.nef").exists()
+
+
+def test_remote_move_refuses_when_ssh_probe_fails(remote_env, monkeypatch):
+    """A failed SSH ``test -d`` probe (auth failure, connect timeout, ssh
+    binary missing, etc.) must NOT collapse to "destination absent". Otherwise
+    the move would proceed as a fresh transfer (omitting --ignore-existing)
+    and overwrite same-name files on a real existing destination before the
+    --checksum verify could preserve the originals. _remote_dir_exists returns
+    None on probe failure; the caller must refuse the move."""
+    env = remote_env
+    called = {"rsync": False}
+
+    def fake_rsync(*a, **k):
+        called["rsync"] = True
+        return (0, "", False)
+
+    # None == "probe couldn't conclude" — caller must refuse, not assume False.
+    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: None)
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
+    monkeypatch.setattr(move_mod, "_remote_verify_complete",
+                        lambda *a, **k: None)
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid"], destination="",
+        remote=env["remote"])
+
+    assert result["moved"] == 0
+    assert any("ssh" in e.lower() or "probe" in e.lower()
+               for e in result["errors"])
+    # Crucially: rsync was NOT invoked. The transient probe failure must not
+    # be silently treated as "fresh transfer ok".
+    assert called["rsync"] is False
+    # Source untouched.
+    assert (env["src"] / "a.nef").exists()
+
+
+def test_remote_dir_exists_tri_state(monkeypatch):
+    """_remote_dir_exists distinguishes exists / absent / probe-failed.
+
+    test -d exits 0 if dir, 1 if not; ssh returns 255 on its own failure. Any
+    return code outside {0, 1} or an OSError must collapse to None (the caller
+    refuses), not to False (the caller would proceed without --ignore-existing
+    on a real existing destination).
+    """
+    remote = {"host": "h", "user": "u", "port": 22, "ssh_key": ""}
+
+    class FakeCompleted:
+        def __init__(self, rc):
+            self.returncode = rc
+
+    monkeypatch.setattr(move_mod.subprocess, "run",
+                        lambda *a, **k: FakeCompleted(0))
+    assert move_mod._remote_dir_exists(remote, "/p") is True
+
+    monkeypatch.setattr(move_mod.subprocess, "run",
+                        lambda *a, **k: FakeCompleted(1))
+    assert move_mod._remote_dir_exists(remote, "/p") is False
+
+    # SSH-level failure (returncode 255).
+    monkeypatch.setattr(move_mod.subprocess, "run",
+                        lambda *a, **k: FakeCompleted(255))
+    assert move_mod._remote_dir_exists(remote, "/p") is None
+
+    # subprocess raising (ssh binary missing, timeout, etc.).
+    def boom(*a, **k):
+        raise OSError("ssh: not found")
+    monkeypatch.setattr(move_mod.subprocess, "run", boom)
+    assert move_mod._remote_dir_exists(remote, "/p") is None
