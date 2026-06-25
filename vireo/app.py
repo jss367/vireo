@@ -13463,25 +13463,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             target = cfg.get_remote_target(remote_target_id)
             if not target:
                 return json_error("Remote target not found", status=404)
-            if not target.get("mount_path"):
+            mount_path = (target.get("mount_path") or "").strip()
+            if not mount_path:
                 return json_error(
                     "This remote target has no local mount path, so moved "
                     "photos couldn't stay in your library. Add a mount path "
                     "under Settings → Remote targets."
                 )
-            # The Settings field is free text, so a saved target could carry
-            # a relative path (e.g. "Photos"). Local moves require an absolute
-            # destination — remote moves must too, because mount_path is what
-            # the catalog gets repointed to after the transfer, and a
-            # server-cwd-relative path there would make every moved photo
-            # appear missing.
-            if not os.path.isabs(target["mount_path"]):
+            # Reject a relative mount path (e.g. saved as "Photos" instead of
+            # "/Volumes/Photos") before any transfer runs. move_folder also
+            # refuses as a defense-in-depth check, but failing here gives the
+            # UI a clean error instead of starting a job that immediately
+            # reports failure.
+            if not os.path.isabs(mount_path):
                 return json_error(
                     "This remote target's local mount path isn't absolute "
-                    f"(\"{target['mount_path']}\"). Moved photos would be "
-                    "repointed to a path relative to the server's working "
-                    "directory and appear missing. Set an absolute mount "
-                    "path under Settings → Remote targets."
+                    f"(\"{mount_path}\"). Moved photos would be repointed "
+                    "to a path relative to the server's working directory "
+                    "and appear missing. Set an absolute mount path under "
+                    "Settings → Remote targets."
                 )
             rsync_bin = move_mod.resolve_rsync_bin(
                 effective_cfg.get("rsync_bin", "") or "")

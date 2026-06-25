@@ -22,7 +22,7 @@ from db import Database
 def test_sanitize_subpath_basic():
     assert move_mod.sanitize_subpath("") == ""
     assert move_mod.sanitize_subpath(None) == ""
-    assert move_mod.sanitize_subpath("/USA/2026/") == "USA/2026"
+    assert move_mod.sanitize_subpath("USA/2026/") == "USA/2026"
     assert move_mod.sanitize_subpath("USA//2026") == "USA/2026"
     assert move_mod.sanitize_subpath("a/./b") == "a/b"
 
@@ -32,6 +32,19 @@ def test_sanitize_subpath_rejects_traversal():
         move_mod.sanitize_subpath("../escape")
     with pytest.raises(ValueError):
         move_mod.sanitize_subpath("a/../../b")
+
+
+def test_sanitize_subpath_rejects_absolute():
+    # An absolute input must not be silently normalized into a relative segment:
+    # '/foo' previously slipped through as 'foo' and landed under a different
+    # base than the user typed. Reject POSIX, Windows-backslash, and drive
+    # forms so the contract matches the docstring.
+    with pytest.raises(ValueError):
+        move_mod.sanitize_subpath("/USA/2026")
+    with pytest.raises(ValueError):
+        move_mod.sanitize_subpath("\\\\server\\share")
+    with pytest.raises(ValueError):
+        move_mod.sanitize_subpath("C:\\foo")
 
 
 def test_build_remote_move_spec_joins_both_bases():
@@ -342,6 +355,107 @@ def test_remote_move_merge_uses_partial_dir_for_resume(remote_env, monkeypatch):
     # Bare --partial must not also appear: it would put partials back at the
     # destination filename and re-introduce the --ignore-existing collision.
     assert "--partial" not in seen["extra_args"]
+
+
+def test_remote_move_refuses_relative_mount_dest_base(remote_env, monkeypatch):
+    """A relative mount_dest_base would make resolve_folder_dest produce a
+    relative catalog_path. After the SSH copy succeeds and originals are
+    deleted, the DB row would point at a non-resolving path relative to the
+    server cwd. Refuse before any transfer happens."""
+    env = remote_env
+    env["remote"]["mount_dest_base"] = "Photos"  # relative — not absolute
+
+    called = {"rsync": False, "exists": False}
+
+    def fake_rsync(*a, **k):
+        called["rsync"] = True
+        return (0, "", False)
+
+    def fake_exists(*a, **k):
+        called["exists"] = True
+        return False
+
+    monkeypatch.setattr(move_mod, "_remote_dir_exists", fake_exists)
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid"], destination="",
+        remote=env["remote"])
+
+    assert result["moved"] == 0
+    assert any("absolute" in e.lower() for e in result["errors"])
+    # No SSH calls at all — refusal happens before any probing or transfer.
+    assert called["rsync"] is False
+    assert called["exists"] is False
+    assert (env["src"] / "a.nef").exists()
+
+
+def test_remote_move_refuses_when_catalog_path_overlaps_source(
+        remote_env, monkeypatch):
+    """Codex P1: if the source folder is already on the configured local
+    mount (src=/Volumes/Photography/trip, mount=/Volumes/Photography), the
+    catalog_path the move resolves to overlaps the source. The SSH copy and
+    --checksum verify would both pass against the same underlying tree, and
+    the post-move rmtree(src) would wipe the only copy. The overlap guard
+    must check catalog_path for remote moves, not just transfer_dest."""
+    env = remote_env
+    # Set the mount path to the source itself so the resolved catalog_path
+    # (mount + folder name) is a child of the source — i.e. moving into a
+    # subdirectory of the source via the configured local mount. After the
+    # "copy" and verify, rmtree(src) would wipe both source and copy.
+    env["remote"]["mount_dest_base"] = str(env["src"])
+
+    called = {"rsync": False, "exists": False}
+
+    def fake_rsync(*a, **k):
+        called["rsync"] = True
+        return (0, "", False)
+
+    def fake_exists(*a, **k):
+        called["exists"] = True
+        return False
+
+    monkeypatch.setattr(move_mod, "_remote_dir_exists", fake_exists)
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid"], destination="",
+        remote=env["remote"])
+
+    assert result["moved"] == 0
+    assert any("overlap" in e.lower() for e in result["errors"])
+    # No transfer happens.
+    assert called["rsync"] is False
+    # Source untouched.
+    assert (env["src"] / "a.nef").exists()
+
+
+def test_remote_move_uses_posix_join_for_transfer_dest(remote_env, monkeypatch):
+    """The NAS-side rsync target must use forward slashes regardless of the
+    client OS. os.path.join on Windows would build
+    "/volume1/Photo\\trip"; rsync would then ship the backslash as part of
+    the remote path and fail or write to the wrong directory."""
+    env = remote_env
+    captured = {}
+
+    def fake_rsync(src_path, dest_spec, flags, total, cb, rsync_bin="rsync",
+                   extra_args=None, **kw):
+        captured["dest_spec"] = dest_spec
+        return (0, "", False)
+
+    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: False)
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
+    monkeypatch.setattr(move_mod, "_remote_verify_complete",
+                        lambda *a, **k: None)
+
+    move_mod.move_folder(
+        db=env["db"], folder_id=env["fid"], destination="",
+        remote=env["remote"])
+
+    # No backslashes in the rsync target — even though os.path.join on
+    # Windows would have inserted one. Asserts the join was POSIX-only.
+    assert "\\" not in captured["dest_spec"]
+    assert captured["dest_spec"] == "me@nas:/volume1/Photography/trip"
 
 
 def test_remote_move_refuses_when_catalog_path_overlaps_tracked(remote_env, monkeypatch):

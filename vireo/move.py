@@ -76,11 +76,18 @@ def sanitize_subpath(subpath):
     configured remote_path/mount_path. Returns a clean ``/``-joined relative
     path (possibly empty).
     """
-    sub = (subpath or "").strip()
-    if not sub:
+    raw = (subpath or "").strip()
+    if not raw:
         return ""
+    sub = raw.replace("\\", "/")
+    # Reject absolute inputs BEFORE the segment loop strips leading separators.
+    # Without this, '/foo' and '\foo' silently land as 'foo' and slip into a
+    # different target than the user typed; Windows drive prefixes ('C:...')
+    # would also slip through to a non-relative target.
+    if sub.startswith("/") or (len(sub) >= 2 and sub[1] == ":"):
+        raise ValueError("Subpath must be relative")
     parts = []
-    for seg in sub.replace("\\", "/").split("/"):
+    for seg in sub.split("/"):
         if seg in ("", "."):
             continue
         if seg == "..":
@@ -204,9 +211,12 @@ def _copy_tree_with_progress(src_path, dest_path, skip_existing, total_files,
 
 # Path candidates for a GNU rsync usable for remote (SSH) moves. macOS's
 # /usr/bin/rsync is Apple's openrsync, which can't drive rsync-over-SSH to a
-# GNU rsync peer, so it is deliberately absent here. A packaged build drops a
+# GNU rsync peer; it is intentionally absent here AND the resolver verifies
+# any PATH/`/usr/bin/rsync` candidate with is_gnu_rsync before returning it,
+# so a host with only openrsync still returns None. A packaged build drops a
 # bundled static GNU rsync next to this module (vireo/bin/rsync) or in the
-# app's Resources dir; dev machines fall back to a Homebrew/MacPorts install.
+# app's Resources dir; dev machines fall back to a Homebrew/MacPorts install
+# or the distro's `/usr/bin/rsync` (GNU rsync on every Linux distro).
 _BUNDLED_RSYNC_CANDIDATES = (
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "rsync"),
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Resources", "rsync"),
@@ -214,6 +224,13 @@ _BUNDLED_RSYNC_CANDIDATES = (
     "/usr/local/bin/rsync",
     "/opt/local/bin/rsync",
 )
+
+# Candidates that may resolve to Apple's openrsync on macOS (PATH lookup and
+# the system /usr/bin/rsync). These are checked LAST so an explicit config or
+# bundled GNU rsync always wins, and each is probed with is_gnu_rsync before
+# being returned — so a macOS host with only openrsync still gets None, while
+# every Linux distro (where /usr/bin/rsync IS GNU rsync) gets remote moves.
+_FALLBACK_RSYNC_CANDIDATES = ("/usr/bin/rsync",)
 
 
 def _is_executable_file(path):
@@ -325,13 +342,15 @@ def ssh_base_args(remote):
 
 
 def _ssh_rsh_string(remote):
-    """The ``-e`` value for rsync: an ``ssh ...`` command string.
+    """The ``-e`` value for rsync: a shell-quoted ``ssh ...`` command string.
 
-    rsync splits this on whitespace (no shell quoting), so identity-file paths
-    containing spaces aren't supported — an accepted limitation; the default
-    key needs no -i, and key paths almost never contain spaces.
+    rsync's ``-e`` argument is parsed with popt-style tokenisation that
+    respects shell-style quoting — quoting an identity-file path with spaces
+    keeps it as a single argument when rsync re-splits the string. Use
+    ``shlex.join`` so a key path like ``/Users/me/My Keys/id_ed25519`` (or a
+    port flag carrying any whitespace) survives the round-trip intact.
     """
-    return " ".join(["ssh"] + ssh_base_args(remote))
+    return shlex.join(["ssh"] + ssh_base_args(remote))
 
 
 def _ssh_target(remote):
@@ -1243,13 +1262,28 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     #     destination and catalog coincide; for remote they diverge because
     #     the NAS path isn't reachable through the local filesystem.
     if remote:
+        mount_base = remote.get("mount_dest_base") or ""
+        # Without an absolute mount path, resolve_folder_dest below would
+        # produce a relative catalog_path like 'Birds' — then after the SSH
+        # copy succeeds and originals are deleted, the catalog row points at
+        # a non-resolving location relative to the server cwd. The
+        # /api/jobs/move-folder route also validates this, but move_folder is
+        # called directly from tests and other code paths; checking here too
+        # means the bug can't slip past whichever caller forgets.
+        if not os.path.isabs(mount_base):
+            return {"moved": 0, "errors": [
+                "Remote target needs an absolute local mount path before "
+                "moving files — otherwise the catalog would point at a "
+                "relative location after the move. Set the mount path under "
+                "Settings → Remote targets."
+            ]}
         # The NAS side is POSIX, so the SSH dest must be joined with '/' even
         # when this code runs on Windows; os.path.join would produce a
         # backslash and rsync would treat it as a single path segment.
         name = folder["name"] or os.path.basename(src_path.rstrip("/\\"))
         transfer_dest = posixpath.join(remote["ssh_dest_base"], name)
         catalog_path = resolve_folder_dest(
-            src_path, folder["name"], remote["mount_dest_base"])
+            src_path, folder["name"], mount_base)
         rsync_target = f'{remote["user"]}@{remote["host"]}:{transfer_dest}'
     else:
         transfer_dest = resolve_folder_dest(src_path, folder["name"], destination)
@@ -1270,12 +1304,18 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     # delete wipes everything. See _destination_overlaps_source for the alias
     # surface (symlinks, Windows case folding, case-insensitive POSIX).
     #
-    # Local-only: a remote destination lives on a different machine reached
-    # over SSH, so it can't alias the local source tree — the post-transfer
-    # --checksum verify is the safety backstop for remote.
-    if not remote and _destination_overlaps_source(src_path, transfer_dest):
+    # The NAS-side transfer_dest can't alias the local source tree for a
+    # remote move — but the LOCAL MOUNT PATH the catalog is repointed to
+    # (catalog_path) absolutely can if the source already lives on the same
+    # mount. e.g. src=/Volumes/Photography/trip with remote mount_path=
+    # /Volumes/Photography would copy a tree onto itself over SSH; the
+    # checksum verify passes (everything is "already there") and then the
+    # rmtree(src) deletes the only copy. So check the local-facing path:
+    # transfer_dest for local moves, catalog_path for remote.
+    overlap_src_check = catalog_path if remote else transfer_dest
+    if _destination_overlaps_source(src_path, overlap_src_check):
         return {"moved": 0, "errors": [
-            f"Destination overlaps the source folder: {transfer_dest}"
+            f"Destination overlaps the source folder: {overlap_src_check}"
         ]}
 
     # Refuse moving into — or around — a destination Vireo already tracks as a

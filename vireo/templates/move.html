@@ -676,8 +676,19 @@ function updateQuickMovePreview() {
   if (remoteId) {
     var t = quickRemoteTargets.find(function(x) { return x.id === remoteId; });
     if (!t) { preview.textContent = ''; return; }
-    var sub = document.getElementById('quickSubpathInput').value.trim()
-      .replace(/^\/+|\/+$/g, '');
+    // Use the same normalization the backend does, so the preview path
+    // matches what move.py / sanitize_subpath will actually write. Without
+    // this the UI can show e.g. "/volume1/Photo/USA" while the move
+    // ultimately rejects "/USA" (absolute) or lands at a different path
+    // because the backend collapses ".", strips backslashes, etc.
+    var subResult = normalizeRemoteSubpath(
+      document.getElementById('quickSubpathInput').value);
+    if (subResult.error) {
+      preview.textContent = '';
+      preview.appendChild(_destWarn('⚠ ' + subResult.error));
+      return;
+    }
+    var sub = subResult.value;
     var folderName = (folder && folder.name) ||
       ((folder && folder.path) || '').replace(/\/+$/, '').split('/').pop();
     var base = t.remote_path.replace(/\/+$/, '') + (sub ? '/' + sub : '');
@@ -699,6 +710,13 @@ function updateQuickMovePreview() {
     if (!t.mount_path) {
       preview.appendChild(_destWarn('⚠ This target has no local mount path, so '
         + 'moved photos can’t stay in your library. Add one in Settings.'));
+    } else if (!_isAbsolutePath(t.mount_path)) {
+      // The backend refuses a relative mount path before starting the
+      // move (the catalog would point at a non-resolving location after).
+      // Surface that here so the user sees it before clicking Move.
+      preview.appendChild(_destWarn('⚠ This target’s local mount path must be '
+        + 'absolute (e.g. "/Volumes/Photos"). Fix it under Settings → '
+        + 'Remote targets.'));
     }
     var rstatus = document.createElement('div');
     rstatus.id = 'quickDestStatus';
@@ -738,6 +756,42 @@ function _destWarn(text) {
   d.style.color = 'var(--warning)';
   d.textContent = text;
   return d;
+}
+
+// True if `p` looks absolute on either backend OS (POSIX leading slash,
+// Windows drive like "C:\foo", or UNC "\\server\share"). Matches what
+// Python's os.path.isabs would say on the corresponding platform — the
+// JS side has no way to know which platform the backend is running, so
+// accept any form. Used to warn before the backend refuses a relative
+// mount path on the remote target.
+function _isAbsolutePath(p) {
+  if (!p) return false;
+  return p.charAt(0) === '/' || /^[A-Za-z]:[\\\/]/.test(p) || /^\\\\/.test(p);
+}
+
+// Normalize a remote-target subpath the same way move.py sanitize_subpath
+// does: trim, fold backslashes to forward slashes, reject absolute paths
+// (POSIX, Windows drive, or UNC), drop empty / `.` segments, and reject any
+// `..` traversal. Returns {value, error}: callers either use `value` or
+// surface `error`. Sharing one helper between the preview, scheduled
+// preflight, and the actual move submission means the path the UI shows
+// matches the path the backend will write — a UI-transparency requirement.
+function normalizeRemoteSubpath(raw) {
+  var trimmed = (raw || '').trim();
+  if (!trimmed) return {value: '', error: ''};
+  var s = trimmed.replace(/\\/g, '/');
+  if (s.charAt(0) === '/' || /^[A-Za-z]:/.test(s)) {
+    return {value: '', error: 'Subpath must be relative.'};
+  }
+  var parts = [];
+  var segs = s.split('/');
+  for (var i = 0; i < segs.length; i++) {
+    var seg = segs[i];
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') return {value: '', error: "Subpath may not contain '..'."};
+    parts.push(seg);
+  }
+  return {value: parts.join('/'), error: ''};
 }
 
 var quickPreflightSeq = 0;
@@ -861,9 +915,20 @@ async function startQuickMove() {
         + 'path under Settings → Paths.', 'error');
       return;
     }
+    // Normalize once, here, so the path the user is about to confirm matches
+    // the path the backend will actually write. A raw .trim() would let an
+    // absolute or `..` subpath through; the move would then fail mid-flight
+    // after the user has clicked "Move", which is a worse UX than refusing
+    // here with the same error string the preview surfaces.
+    var subResult = normalizeRemoteSubpath(
+      document.getElementById('quickSubpathInput').value);
+    if (subResult.error) {
+      showToast(subResult.error, 'error');
+      return;
+    }
     destBody = {
       remote_target_id: remoteId,
-      subpath: document.getElementById('quickSubpathInput').value.trim(),
+      subpath: subResult.value,
     };
   } else {
     var dest = document.getElementById('quickDestInput').value.trim();
