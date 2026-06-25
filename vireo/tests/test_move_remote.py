@@ -245,6 +245,12 @@ def remote_env(tmp_path, monkeypatch):
     # to. The dedicated mkdir tests below override this where it matters.
     monkeypatch.setattr(move_mod, "_remote_mkdir_p",
                         lambda r, p: (True, ""))
+    # Default the pre-merge content-conflict probe to "no conflict" so the
+    # existing merge tests don't have to shell out to rsync just to traverse
+    # the conflict gate. The dedicated tests below override it where the
+    # probe finding (or failing) is the point.
+    monkeypatch.setattr(move_mod, "_find_remote_content_conflict",
+                        lambda *a, **k: None)
     return {"db": db, "src": src, "fid": fid, "remote": remote,
             "tmp_path": tmp_path}
 
@@ -409,6 +415,143 @@ def test_remote_move_merge_uses_partial_dir_for_resume(remote_env, monkeypatch):
     # Bare --partial must not also appear: it would put partials back at the
     # destination filename and re-introduce the --ignore-existing collision.
     assert "--partial" not in seen["extra_args"]
+
+
+def test_remote_merge_refuses_when_content_conflict_found(
+        remote_env, monkeypatch):
+    """A remote merge must run the same pre-copy content-conflict check the
+    local path runs. If a same-name destination file differs in content,
+    refuse with NOTHING copied — otherwise --ignore-existing would still copy
+    every MISSING source file to the NAS first, and only the post-transfer
+    --checksum verify would catch the conflict, leaving stray files behind."""
+    env = remote_env
+    called = {"rsync": False, "verify": False}
+
+    def fake_rsync(*a, **k):
+        called["rsync"] = True
+        return (0, "", False)
+
+    def fake_verify(*a, **k):
+        called["verify"] = True
+        return None
+
+    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: True)
+    monkeypatch.setattr(move_mod, "_find_remote_content_conflict",
+                        lambda *a, **k: ("b.nef", None))
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
+    monkeypatch.setattr(move_mod, "_remote_verify_complete", fake_verify)
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid"], destination="", merge=True,
+        remote=env["remote"])
+
+    assert result["moved"] == 0
+    assert any("b.nef" in e and "different content" in e
+               for e in result["errors"])
+    # Refusal must precede any transfer or verify SSH call so nothing lands
+    # on the NAS.
+    assert called["rsync"] is False
+    assert called["verify"] is False
+    assert (env["src"] / "a.nef").exists()
+
+
+def test_remote_merge_refuses_when_conflict_probe_errors(
+        remote_env, monkeypatch):
+    """A pre-merge conflict check that itself can't complete (SSH error,
+    timeout, missing rsync) is treated as a refusal — proceeding would risk
+    a partial transfer landing on the NAS without ever confirming the merge
+    is safe. Same defensive stance as the inconclusive dest-exists probe."""
+    env = remote_env
+    called = {"rsync": False}
+
+    def fake_rsync(*a, **k):
+        called["rsync"] = True
+        return (0, "", False)
+
+    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: True)
+    monkeypatch.setattr(
+        move_mod, "_find_remote_content_conflict",
+        lambda *a, **k: ("__ERROR__", "connection reset"))
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid"], destination="", merge=True,
+        remote=env["remote"])
+
+    assert result["moved"] == 0
+    assert any("could not run" in e.lower() and "connection reset" in e
+               for e in result["errors"])
+    assert called["rsync"] is False
+    assert (env["src"] / "a.nef").exists()
+
+
+def test_remote_merge_skips_conflict_check_for_fresh_move(
+        remote_env, monkeypatch):
+    """A FRESH remote move (dest doesn't exist) has nothing to conflict
+    against — the destination tree is empty by definition. The conflict probe
+    must NOT run, both to avoid the SSH round-trip and to preserve the
+    "fresh transfer" semantics that omit --ignore-existing."""
+    env = remote_env
+    called = {"conflict": False}
+
+    def fake_conflict(*a, **k):
+        called["conflict"] = True
+        return None
+
+    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: False)
+    monkeypatch.setattr(move_mod, "_find_remote_content_conflict",
+                        fake_conflict)
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed",
+                        lambda *a, **k: (0, "", False))
+    monkeypatch.setattr(move_mod, "_remote_verify_complete",
+                        lambda *a, **k: None)
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid"], destination="",
+        remote=env["remote"])
+
+    assert result["moved"] == 2
+    assert called["conflict"] is False
+
+
+def test_remote_merge_conflict_check_targets_existing_files_only(
+        tmp_path, monkeypatch):
+    """The pre-merge probe must use ``rsync -an --existing --checksum``: any
+    other shape silently breaks the contract. ``--existing`` is what filters
+    out missing source files (legitimate transfers, not conflicts); without
+    ``--checksum`` rsync would compare on size+mtime and miss same-size
+    edits; without ``-n`` it would mutate the destination. Lock the shape in
+    a test so a refactor can't quietly drop one of these flags."""
+    seen = {"cmd": None}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = list(cmd)
+        # Mimic rsync's "nothing to transfer" output: empty stdout, rc=0.
+        class _R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return _R()
+
+    monkeypatch.setattr(move_mod.subprocess, "run", fake_run)
+
+    remote = {
+        "host": "nas", "user": "me", "port": 22, "ssh_key": "",
+        "bwlimit_kbps": 0, "rsync_bin": "/usr/bin/rsync",
+        "ssh_dest_base": "/volume1/Photography",
+        "mount_dest_base": str(tmp_path / "mount"),
+    }
+    out = move_mod._find_remote_content_conflict(
+        "/usr/bin/rsync", str(tmp_path),
+        "me@nas:/volume1/Photography/trip", remote)
+
+    assert out is None
+    cmd = seen["cmd"]
+    assert "-an" in cmd
+    assert "--existing" in cmd
+    assert "--checksum" in cmd
+    # Must address the SSH target, not a local path.
+    assert any(arg.startswith("me@nas:") for arg in cmd)
 
 
 def test_remote_move_refuses_relative_ssh_dest_base(remote_env, monkeypatch):

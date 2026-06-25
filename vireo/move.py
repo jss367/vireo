@@ -714,6 +714,48 @@ def _find_content_conflict(src_path, dest_path):
     return None
 
 
+def _find_remote_content_conflict(rsync_bin, src_path, rsync_target, remote):
+    """Remote counterpart to ``_find_content_conflict`` — find the first
+    source file whose same-name twin at the remote destination differs in
+    content. The destination is on the NAS so we can't filecmp it directly;
+    instead run ``rsync -an --existing --checksum`` over SSH, which only
+    inspects items that ALREADY exist at the receiver and reports any whose
+    bytes don't match. Missing destination files are skipped — those are
+    legitimate transfers the merge will perform, not conflicts.
+    Returns:
+      * ``None`` — no same-name file differs; safe to start the merge.
+      * ``(name, None)`` — first colliding file (rsync's relative path).
+      * ``("__ERROR__", detail)`` — the conflict probe itself failed; the
+        caller treats this as a refusal so a half-transferred state never
+        lands on the NAS.
+    Without this, ``--ignore-existing`` would still copy every MISSING
+    source file before the post-transfer ``--checksum`` verify could spot
+    the conflict — leaving the newly-copied files orphaned on the NAS,
+    breaking the local-merge contract that a content conflict cancels with
+    nothing changed.
+    """
+    cmd = [rsync_bin, "-an", "--existing", "--checksum",
+           "--out-format=%n",
+           "-e", _ssh_rsh_string(remote),
+           src_path + "/", rsync_target + "/"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=REMOTE_VERIFY_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return ("__ERROR__", f"conflict check timed out after "
+                f"{REMOTE_VERIFY_TIMEOUT // 60} minutes")
+    except OSError as exc:
+        return ("__ERROR__", str(exc))
+    if proc.returncode != 0:
+        return ("__ERROR__", proc.stderr.strip() or f"rsync exit {proc.returncode}")
+    for line in proc.stdout.splitlines():
+        name = line.rstrip("\n")
+        if not name or name.endswith("/"):
+            continue  # directory entry, not a file rsync would transfer
+        return (name, None)
+    return None
+
+
 def _first_missing_source_file(src_path, dest_path):
     """Return the relative path of the first source file absent (or
     size-mismatched, or a symlink) at dest_path, or None if every source
@@ -1481,20 +1523,53 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             "needs_merge": True,
         }
 
-    if dest_exists and not remote:
+    if dest_exists:
         # Refuse if any same-name file already at the destination differs in
         # content. Never overwrite or later delete the user's data over a real
-        # collision — only files that are byte-identical (a genuine resume) may
-        # be treated as already-moved. (Remote: the post-transfer --checksum
-        # verify catches a differing same-name file just as well, since
-        # --ignore-existing never overwrites it and the dry-run then reports it
-        # as still needing transfer — so the move refuses to delete originals.)
-        conflict = _find_content_conflict(src_path, transfer_dest)
-        if conflict is not None:
-            return {"moved": 0, "errors": [
-                f"Conflict: '{conflict}' already exists at the destination with "
-                f"different content. Nothing was copied or deleted."
-            ]}
+        # collision — only files that are byte-identical (a genuine resume)
+        # may be treated as already-moved. Both branches enforce the same
+        # contract: a content conflict cancels the move with NOTHING copied
+        # or deleted on either end.
+        if remote:
+            # The destination lives on the NAS, so the walk is delegated to
+            # rsync over SSH: ``-an --existing --checksum`` inspects only
+            # files that already exist at the receiver and reports any whose
+            # bytes don't match. Without this pre-copy check, the actual
+            # transfer (--ignore-existing + --partial-dir) would still copy
+            # every MISSING source file before the post-transfer --checksum
+            # verify could surface the conflict — leaving stray newly-copied
+            # files orphaned on the NAS instead of cancelling cleanly. A
+            # probe error is also treated as a refusal so a flaky link can't
+            # downgrade the "nothing changed" guarantee.
+            remote_rsync = remote.get("rsync_bin")
+            if not remote_rsync:
+                return {"moved": 0, "errors": [
+                    "No GNU rsync binary available for remote moves. macOS's "
+                    "built-in rsync can't do this — set the GNU rsync path "
+                    "in Settings."
+                ]}
+            conflict = _find_remote_content_conflict(
+                remote_rsync, src_path, rsync_target, remote)
+            if conflict is not None:
+                name, detail = conflict
+                if name == "__ERROR__":
+                    return {"moved": 0, "errors": [
+                        f"Pre-merge content check could not run ({detail}). "
+                        f"Nothing was copied — re-run when the connection is "
+                        f"stable."
+                    ]}
+                return {"moved": 0, "errors": [
+                    f"Conflict: '{name}' already exists at the remote "
+                    f"destination with different content. Nothing was copied "
+                    f"or deleted."
+                ]}
+        else:
+            conflict = _find_content_conflict(src_path, transfer_dest)
+            if conflict is not None:
+                return {"moved": 0, "errors": [
+                    f"Conflict: '{conflict}' already exists at the destination "
+                    f"with different content. Nothing was copied or deleted."
+                ]}
 
     log.info("%s folder %s -> %s",
              "Merging" if dest_exists else "Moving", src_path, rsync_target)
