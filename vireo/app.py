@@ -1944,7 +1944,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return _rendered_recipe_long_edge(width, height, recipe) >= required_long
 
     def _recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
-        from image_loader import get_canonical_image_path
+        from image_loader import RAW_EXTENSIONS, get_canonical_image_path
 
         def _is_working_copy_path(path):
             wc_rel = photo["working_copy_path"]
@@ -1957,14 +1957,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             canonical = get_canonical_image_path(photo, vireo_dir, folders)
             return canonical, _is_working_copy_path(canonical)
 
-        canonical = get_canonical_image_path(photo, vireo_dir, folders)
-        if not recipe.get("crop") and _is_working_copy_path(canonical):
-            return canonical, True
+        primary_is_raw = (
+            os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+        )
 
-        if recipe.get("crop") and _working_copy_satisfies_recipe_render(
-            photo, recipe, max_size, vireo_dir,
-        ):
-            return canonical, _is_working_copy_path(canonical)
+        canonical = get_canonical_image_path(photo, vireo_dir, folders)
+        # For RAW primaries with a recipe, never short-circuit to the working
+        # copy: legacy working copies predate the highlight-preserving RAW
+        # decode and EDIT_MATH_VERSION's migration only purges preview/thumb
+        # caches, not working copies. Reusing one would apply the recipe to
+        # clipped bytes and bypass RAW_DECODE_PRESERVE_HIGHLIGHTS. Force the
+        # RAW path; the working copy is still the very last fallback below
+        # if the RAW file itself is missing.
+        if not primary_is_raw:
+            if not recipe.get("crop") and _is_working_copy_path(canonical):
+                return canonical, True
+
+            if recipe.get("crop") and _working_copy_satisfies_recipe_render(
+                photo, recipe, max_size, vireo_dir,
+            ):
+                return canonical, _is_working_copy_path(canonical)
 
         folder_path = folders.get(photo["folder_id"])
         if not folder_path:
@@ -1979,10 +1991,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # the RAW is known to fail extraction for this mtime — otherwise edited
         # previews for unsupported RAWs would 500 out even when a full-size
         # companion is available.
-        from image_loader import RAW_EXTENSIONS
-        primary_is_raw = (
-            os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
-        )
         companion_path = photo["companion_path"]
         original_abs = os.path.join(folder_path, photo["filename"])
         allow_companion = not primary_is_raw or _has_current_working_copy_failure(
@@ -9215,14 +9223,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         def _external_edit_recipe_source(photo, recipe, fallback_path):
             from image_loader import RAW_EXTENSIONS
 
+            primary_is_raw = (
+                os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+            )
+
             if recipe.get("crop"):
                 source_path, _using_working_copy = _recipe_render_source(
                     photo, recipe, 0, vireo_dir, folders,
                 )
                 return source_path or fallback_path
 
+            # For RAW primaries, skip the working-copy short-circuit: legacy
+            # working copies predate the highlight-preserving RAW decode and
+            # would feed the editor a clipped JPEG to apply the recipe to.
             wc_rel = photo["working_copy_path"]
-            if wc_rel:
+            if wc_rel and not primary_is_raw:
                 wc_path = (
                     wc_rel if os.path.isabs(wc_rel)
                     else os.path.join(vireo_dir, wc_rel)
@@ -9237,9 +9252,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # highlights are already clipped, so the handoff would apply the
             # recipe to a clipped render even though the RAW would have been
             # decoded with RAW_DECODE_PRESERVE_HIGHLIGHTS otherwise.
-            primary_is_raw = (
-                os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
-            )
 
             folder_path = folders.get(photo["folder_id"])
             if folder_path:
@@ -11448,14 +11460,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
         folders = {photo["folder_id"]: photo["folder_path"]}
+        primary_is_raw = (
+            os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+        )
         if recipe.get("crop"):
             source_path, _using_working_copy = _recipe_render_source(
                 photo, recipe, 0, vireo_dir, folders,
             )
             return source_path or fallback_path
 
+        # For RAW primaries, skip the working-copy short-circuit: legacy
+        # working copies predate the highlight-preserving RAW decode and
+        # would feed iNat a clipped JPEG to apply the recipe to.
         wc_rel = photo["working_copy_path"]
-        if wc_rel:
+        if wc_rel and not primary_is_raw:
             wc_path = (
                 wc_rel if os.path.isabs(wc_rel)
                 else os.path.join(vireo_dir, wc_rel)
@@ -11469,7 +11487,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # RAW primaries are decoded with RAW_DECODE_PRESERVE_HIGHLIGHTS later;
         # substituting the camera JPEG companion here would apply the recipe
         # to a clipped render instead.
-        if os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS:
+        if primary_is_raw:
             return fallback_path
 
         companion_path = photo["companion_path"]
@@ -18355,7 +18373,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ).fetchone()
             if not folder:
                 return "Not found", 404
-            image_path = trusted_wc_path
+            # For edited RAW primaries, a "trusted" working copy can still
+            # predate the highlight-preserving RAW decode (the migration
+            # purges previews and thumbnails but not working copies). Force
+            # the RAW path so the recipe runs over preserve-highlights bytes,
+            # not the older clipped-JPEG working copy.
+            primary_is_raw = (
+                os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+            )
+            image_path = None if primary_is_raw else trusted_wc_path
             using_offline_cache = False
             if image_path is None:
                 from offline_cache import resolve_original_path
@@ -18373,7 +18399,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     image_path = companion_source
             resolved_ext = os.path.splitext(image_path)[1].lower()
             if (
-                trusted_wc_path is None
+                (primary_is_raw or trusted_wc_path is None)
                 and resolved_ext in RAW_EXTENSIONS
                 and _has_current_working_copy_failure(
                     photo,
@@ -18396,6 +18422,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
             load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
             img = load_image(image_path, max_size=None, **load_kwargs)
+            if img is None and resolved_ext in RAW_EXTENSIONS:
+                # RAW couldn't decode (unsupported variant, no embedded JPEG).
+                # Fall back to the full-resolution companion JPEG when one
+                # exists so an unsupported-RAW edit doesn't 500 with a usable
+                # sidecar sitting next to the RAW.
+                companion_fallback = _full_res_companion_path(
+                    folder["path"], using_offline_cache,
+                )
+                if companion_fallback and companion_fallback != image_path:
+                    log.info(
+                        "RAW decode failed for photo %s edited original; "
+                        "falling back to companion JPEG", photo_id,
+                    )
+                    _record_working_copy_failure(db, photo, image_path)
+                    img = load_image(companion_fallback, max_size=None)
+                    if img is not None:
+                        image_path = companion_fallback
             if img is None:
                 _record_working_copy_failure(db, photo, image_path)
                 return "Could not load image", 500
@@ -18500,6 +18543,39 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db.conn.commit()
             return send_file(wc_abs, mimetype="image/jpeg")
 
+        # extract_working_copy failed on a RAW source: try the full-res
+        # companion JPEG as a fallback before giving up. This catches
+        # unsupported RAW variants (libraw can't demosaic, no usable
+        # embedded JPEG) on RAW+JPEG rows — without it, a usable sidecar
+        # JPEG would be ignored and the request would 500.
+        if (
+            resolved_ext in RAW_EXTENSIONS
+            and companion_for_extraction
+            and companion_for_extraction != source_for_extraction
+            and extract_working_copy(
+                companion_for_extraction, wc_abs, max_size=0, quality=quality,
+            )
+        ):
+            from PIL import Image as _PILImage
+            with _PILImage.open(wc_abs) as upgraded:
+                uw, uh = upgraded.size
+            updates = ["working_copy_path=?"]
+            params = [wc_rel]
+            if not photo["width"] or not photo["height"]:
+                updates.extend(["width=?", "height=?"])
+                params.extend([uw, uh])
+            params.append(photo_id)
+            db.conn.execute(
+                f"UPDATE photos SET {', '.join(updates)} WHERE id=?",
+                params,
+            )
+            db.conn.commit()
+            log.info(
+                "RAW extraction failed for photo %s original; served "
+                "companion JPEG instead", photo_id,
+            )
+            return send_file(wc_abs, mimetype="image/jpeg")
+
         # Fallback: serve via load_image
         raw_decode = (
             RAW_DECODE_PRESERVE_HIGHLIGHTS
@@ -18508,6 +18584,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
         img = load_image(image_path, max_size=None, **load_kwargs)
+        if (
+            img is None
+            and resolved_ext in RAW_EXTENSIONS
+            and companion_for_extraction
+            and companion_for_extraction != image_path
+        ):
+            log.info(
+                "RAW decode failed for photo %s original; falling back to "
+                "companion JPEG", photo_id,
+            )
+            img = load_image(companion_for_extraction, max_size=None)
+            if img is not None:
+                image_path = companion_for_extraction
         if img is None:
             _record_working_copy_failure(db, photo, image_path)
             return "Could not load image", 500

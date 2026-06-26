@@ -192,16 +192,25 @@ def _recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
 
     if not recipe:
         return get_canonical_image_path(photo, vireo_dir, folders)
+    primary_is_raw = (
+        os.path.splitext(photo["filename"])[1].lower() in _RAW_EXTENSIONS
+    )
     canonical = get_canonical_image_path(photo, vireo_dir, folders)
     wc_rel = photo["working_copy_path"]
-    if not recipe.get("crop") and canonical and wc_rel:
-        wc_path = wc_rel if os.path.isabs(wc_rel) else os.path.join(vireo_dir, wc_rel)
-        if os.path.abspath(canonical) == os.path.abspath(wc_path):
+    # For RAW primaries with a recipe, never short-circuit to the working
+    # copy: legacy working copies predate the highlight-preserving RAW
+    # decode, and EDIT_MATH_VERSION's migration only purges preview/thumb
+    # caches, not working copies. Reusing one would apply the recipe to
+    # clipped bytes and bypass RAW_DECODE_PRESERVE_HIGHLIGHTS.
+    if not primary_is_raw:
+        if not recipe.get("crop") and canonical and wc_rel:
+            wc_path = wc_rel if os.path.isabs(wc_rel) else os.path.join(vireo_dir, wc_rel)
+            if os.path.abspath(canonical) == os.path.abspath(wc_path):
+                return canonical
+        if recipe.get("crop") and _working_copy_satisfies_recipe_render(
+            photo, recipe, max_size, vireo_dir,
+        ):
             return canonical
-    if recipe.get("crop") and _working_copy_satisfies_recipe_render(
-        photo, recipe, max_size, vireo_dir,
-    ):
-        return canonical
 
     folder_path = folders.get(photo["folder_id"])
     if not folder_path:
@@ -216,9 +225,6 @@ def _recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
     # RAW is known to fail extraction for this mtime — otherwise edited
     # previews/exports for unsupported RAWs would 500 out even though a
     # full-size companion JPEG is available.
-    primary_is_raw = (
-        os.path.splitext(photo["filename"])[1].lower() in _RAW_EXTENSIONS
-    )
     companion_path = photo["companion_path"]
     original = os.path.join(folder_path, photo["filename"])
     allow_companion = not primary_is_raw or _has_current_working_copy_failure(
