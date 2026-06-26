@@ -1367,28 +1367,6 @@ def _migrate_edit_math_render_caches(app):
         ).fetchall()
         photo_ids = [row["photo_id"] for row in rows]
 
-        # Scan preview_dir once and group untracked preview files by photo id.
-        # The per-photo listdir would otherwise be O(N*M) (N edited photos x M
-        # preview files) and can spend minutes just rescanning the same
-        # directory on a large library before the server even starts.
-        edited_set = set(photo_ids)
-        untracked_previews_by_pid = {}
-        try:
-            for name in os.listdir(preview_dir):
-                if not name.endswith(".jpg"):
-                    continue
-                underscore = name.find("_")
-                if underscore <= 0:
-                    continue
-                try:
-                    file_pid = int(name[:underscore])
-                except ValueError:
-                    continue
-                if file_pid in edited_set:
-                    untracked_previews_by_pid.setdefault(file_pid, []).append(name)
-        except FileNotFoundError:
-            pass
-
         invalidated_previews = 0
         invalidated_thumbs = 0
         # If any unlink fails (locked file on Windows, transient permission
@@ -1397,6 +1375,45 @@ def _migrate_edit_math_render_caches(app):
         # next boot skip the migration and never retry. Leaving the version
         # behind makes the migration idempotent and self-retrying.
         purge_failed = False
+
+        # Scan preview_dir once and group untracked preview files by photo id.
+        # The per-photo listdir would otherwise be O(N*M) (N edited photos x M
+        # preview files) and can spend minutes just rescanning the same
+        # directory on a large library before the server even starts.
+        edited_set = set(photo_ids)
+        untracked_previews_by_pid = {}
+        try:
+            preview_names = os.listdir(preview_dir)
+        except FileNotFoundError:
+            # Cache dir doesn't exist yet — nothing untracked to clean up.
+            preview_names = ()
+        except OSError:
+            # Permissions / locked network volume / other transient read
+            # failure: we can't see what's in there, so we don't know whether
+            # there are stale orphans to purge. Skip the scan but leave the
+            # version old so the next boot retries — matches the unlink-error
+            # contract instead of taking the app down for a disposable cache
+            # problem.
+            log.warning(
+                "Failed to list preview cache dir %s during edit-math "
+                "migration; leaving version at %s to retry next boot",
+                preview_dir, stored_version, exc_info=True,
+            )
+            preview_names = ()
+            purge_failed = True
+
+        for name in preview_names:
+            if not name.endswith(".jpg"):
+                continue
+            underscore = name.find("_")
+            if underscore <= 0:
+                continue
+            try:
+                file_pid = int(name[:underscore])
+            except ValueError:
+                continue
+            if file_pid in edited_set:
+                untracked_previews_by_pid.setdefault(file_pid, []).append(name)
         for pid in photo_ids:
             for row in db.conn.execute(
                 "SELECT size FROM preview_cache WHERE photo_id = ?", (pid,)
