@@ -35,11 +35,14 @@ SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | RAW_EXTENSIONS
 # apps" (kTCCServiceSystemPolicyAppData) consent prompt — and because such a
 # bundle holds thousands of files, the prompt reappears on every file the
 # walk touches, so clicking Allow never makes it stop. The contents are also
-# app-managed derivatives we'd never want to ingest. Any directory walker
+# app-managed derivatives or media-library internals we'd never want to ingest.
+# Any directory walker
 # that traverses user-chosen roots (~/Pictures by default contains
-# "Photos Library.photoslibrary") must prune these. Matched case-insensitively.
+# "Photos Library.photoslibrary"; ~/Music can contain
+# "Music Library.musiclibrary") must prune these. Matched case-insensitively.
 _EXCLUDED_DIR_SUFFIXES = (
     ".photoslibrary",          # Apple Photos
+    ".musiclibrary",           # Apple Music
     ".photolibrary",           # legacy iPhoto / older Photos
     ".migratedphotolibrary",
     ".aplibrary",              # Aperture

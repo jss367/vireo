@@ -54,13 +54,14 @@ def test_scan_discovers_folders(tmp_path):
     assert os.path.join(root, '2024', 'January') in paths
 
 
-def test_scan_skips_photos_library_bundle(tmp_path):
-    """scan() must not descend into a macOS Photos library bundle.
+def test_scan_skips_app_managed_library_bundles(tmp_path):
+    """scan() must not descend into macOS app-managed library bundles.
 
     Walking into "*.photoslibrary" (which ~/Pictures contains by default)
-    triggers the recurring macOS "access data from other apps" TCC prompt and
-    would ingest app-managed derivatives. Images inside the bundle must be
-    ignored while real sibling photos are still discovered.
+    or "*.musiclibrary" (which ~/Music can contain) triggers the recurring
+    macOS "access data from other apps" TCC prompt and would ingest
+    app-managed derivatives or media internals. Images inside the bundle must
+    be ignored while real sibling photos are still discovered.
     """
     from db import Database
     from scanner import scan
@@ -69,6 +70,7 @@ def test_scan_skips_photos_library_bundle(tmp_path):
     _create_test_images(root, {
         '': ['real.jpg'],
         'Photos Library.photoslibrary/originals/0': ['managed.jpg'],
+        'Music Library.musiclibrary/Media.localized': ['cover.jpg'],
         'Photo Booth Library/Pictures': ['booth.jpg'],
     })
 
@@ -81,6 +83,7 @@ def test_scan_skips_photos_library_bundle(tmp_path):
 
     folder_paths = [f['path'] for f in db.get_folder_tree()]
     assert not any('.photoslibrary' in p for p in folder_paths)
+    assert not any('.musiclibrary' in p for p in folder_paths)
     assert not any('Photo Booth Library' in p for p in folder_paths)
 
 
