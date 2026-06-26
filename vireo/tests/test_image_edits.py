@@ -208,3 +208,27 @@ def test_apply_recipe_white_balance_preserves_palette_transparency():
 
     assert edited.mode == "RGBA"
     assert edited.getpixel((0, 0))[3] == 123
+
+
+def test_edit_math_version_template_constant_matches_python():
+    """The client-side `_VIREO_EDIT_MATH_VERSION` in `_navbar.html` is folded
+    into the `er` query param on every rendered URL so a math bump busts the
+    browser's cached thumbnail/preview bytes (server response is
+    `Cache-Control: public, max-age=86400`, so server purges alone are not
+    enough). The JS literal must stay in sync with `image_edits.EDIT_MATH_VERSION`
+    or the cache key drifts and stale renders survive deploys.
+    """
+    import re
+
+    navbar = os.path.join(
+        os.path.dirname(__file__), '..', 'templates', '_navbar.html',
+    )
+    with open(navbar, encoding='utf-8') as f:
+        src = f.read()
+    match = re.search(
+        r'var\s+_VIREO_EDIT_MATH_VERSION\s*=\s*([0-9]+)\s*;', src,
+    )
+    assert match, (
+        'could not find `var _VIREO_EDIT_MATH_VERSION = ...;` in _navbar.html'
+    )
+    assert int(match.group(1)) == image_edits.EDIT_MATH_VERSION

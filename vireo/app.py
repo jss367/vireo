@@ -11406,7 +11406,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not recipe:
             return fallback_path, None
 
-        from image_edits import apply_recipe, recipe_to_json
+        from image_edits import EDIT_MATH_VERSION, apply_recipe, recipe_to_json
         from image_loader import load_image
 
         source_path = _inat_edit_recipe_source(photo, recipe, fallback_path)
@@ -11419,10 +11419,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         meta_path = os.path.join(out_dir, f"{photo['id']}.json")
         source_mtime = os.path.getmtime(source_path)
         recipe_json = recipe_to_json(recipe) or ""
+        # Include the edit-math version so a math bump invalidates this cached
+        # render — the JPEG is keyed by recipe/source/mtime, none of which
+        # change when only the per-pixel rendering math does, so without this
+        # we'd keep submitting stale renders to iNaturalist after a deploy.
         expected_meta = {
             "recipe": recipe_json,
             "source_path": source_path,
             "source_mtime": source_mtime,
+            "edit_math_version": EDIT_MATH_VERSION,
         }
         try:
             if os.path.isfile(out_path) and os.path.isfile(meta_path):

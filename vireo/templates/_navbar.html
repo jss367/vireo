@@ -3585,10 +3585,21 @@ function _vireoHashString(s) {
   return (hash >>> 0).toString(36);
 }
 
+// Must equal image_edits.EDIT_MATH_VERSION. Folded into the `er` query
+// param below so a math bump invalidates the browser cache for every
+// edited render — server-side purges alone are not enough because the
+// thumbnail response is `Cache-Control: public, max-age=86400`, so a user
+// who viewed an edited photo before the deploy would otherwise keep
+// seeing the old bytes from their own browser cache until they expire.
+// test_edit_math_version_template_constant_matches_python locks the two
+// constants together.
+var _VIREO_EDIT_MATH_VERSION = 2;
+
 function _vireoEditRecipeCacheKey(recipe) {
   var normalized = _lbCloneEditRecipe(recipe);
   if (!_lbRecipeHasEdits(normalized)) return '';
-  return _vireoHashString(JSON.stringify(normalized));
+  return _vireoHashString(JSON.stringify(normalized))
+    + '.m' + _VIREO_EDIT_MATH_VERSION;
 }
 
 function _lbRecipeHasEdits(recipe) {
