@@ -3747,6 +3747,131 @@ def test_legacy_migration_preserves_preview_max_size_zero(tmp_path, monkeypatch)
     assert not (preview_dir / "42_1920.jpg").exists()
 
 
+def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkeypatch):
+    """When EDIT_MATH_VERSION bumps, startup must purge cached renders for
+    photos that have a non-null edit recipe — keeping them would serve the
+    old tone-math bytes after the deploy that changed the math. Recipe-free
+    photos render identically across versions and must be left alone."""
+    import os
+
+    import config as cfg
+    from app import create_app
+    from db import Database
+    from image_edits import EDIT_MATH_VERSION
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({**cfg.DEFAULTS, "preview_max_size": 1920})
+
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    src_edited = photos_dir / "edited.jpg"
+    src_plain = photos_dir / "plain.jpg"
+    Image.new("RGB", (200, 150), (40, 90, 180)).save(str(src_edited), "JPEG", quality=85)
+    Image.new("RGB", (200, 150), (200, 90, 40)).save(str(src_plain), "JPEG", quality=85)
+
+    vireo_dir = tmp_path / "vireo"
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir(parents=True)
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(photos_dir), name="photos")
+    pid_edited = db.add_photo(
+        folder_id=fid, filename="edited.jpg", extension=".jpg",
+        file_size=os.path.getsize(src_edited),
+        file_mtime=os.path.getmtime(src_edited),
+        width=200, height=150,
+    )
+    pid_plain = db.add_photo(
+        folder_id=fid, filename="plain.jpg", extension=".jpg",
+        file_size=os.path.getsize(src_plain),
+        file_mtime=os.path.getmtime(src_plain),
+        width=200, height=150,
+    )
+    db.set_photo_edit_recipe(pid_edited, {"adjustments": {"exposure": 1.0}})
+
+    # Simulate a pre-version-bump deployment: cached renders exist on disk
+    # and in preview_cache, and the stored version lags behind the current.
+    edited_preview = preview_dir / f"{pid_edited}_1920.jpg"
+    plain_preview = preview_dir / f"{pid_plain}_1920.jpg"
+    edited_thumb = thumb_dir / f"{pid_edited}.jpg"
+    plain_thumb = thumb_dir / f"{pid_plain}.jpg"
+    edited_preview.write_bytes(b"\xff\xd8\xff\xe0" + b"o" * 1024)
+    plain_preview.write_bytes(b"\xff\xd8\xff\xe0" + b"p" * 1024)
+    edited_thumb.write_bytes(b"\xff\xd8\xff\xe0" + b"t" * 1024)
+    plain_thumb.write_bytes(b"\xff\xd8\xff\xe0" + b"u" * 1024)
+    db.preview_cache_insert(pid_edited, 1920, edited_preview.stat().st_size)
+    db.preview_cache_insert(pid_plain, 1920, plain_preview.stat().st_size)
+    db.conn.execute(
+        "UPDATE photos SET thumb_path = ? WHERE id = ?",
+        (f"{pid_edited}.jpg", pid_edited),
+    )
+    db.conn.execute(
+        "UPDATE photos SET thumb_path = ? WHERE id = ?",
+        (f"{pid_plain}.jpg", pid_plain),
+    )
+    db.set_meta("edit_math_version", str(EDIT_MATH_VERSION - 1))
+    db.conn.commit()
+
+    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+
+    # Edited photo: preview and thumb gone, thumb_path cleared, no row.
+    assert not edited_preview.exists()
+    assert not edited_thumb.exists()
+    assert db.preview_cache_get(pid_edited, 1920) is None
+    edited_row = db.conn.execute(
+        "SELECT thumb_path FROM photos WHERE id = ?", (pid_edited,),
+    ).fetchone()
+    assert edited_row["thumb_path"] is None
+
+    # Plain photo: cache survives because no recipe → output bytes unchanged.
+    assert plain_preview.exists()
+    assert plain_thumb.exists()
+    assert db.preview_cache_get(pid_plain, 1920) is not None
+    plain_row = db.conn.execute(
+        "SELECT thumb_path FROM photos WHERE id = ?", (pid_plain,),
+    ).fetchone()
+    assert plain_row["thumb_path"] == f"{pid_plain}.jpg"
+
+    # Version is bumped, so a second create_app is a no-op.
+    assert db.get_meta("edit_math_version") == str(EDIT_MATH_VERSION)
+    new_preview = preview_dir / f"{pid_edited}_1920.jpg"
+    new_preview.write_bytes(b"\xff\xd8\xff\xe0" + b"x" * 1024)
+    db.preview_cache_insert(pid_edited, 1920, new_preview.stat().st_size)
+    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+    assert new_preview.exists()
+    assert db.preview_cache_get(pid_edited, 1920) is not None
+
+
+def test_edit_math_version_migration_is_noop_on_fresh_db(tmp_path, monkeypatch):
+    """A brand-new DB has no recipes and no stored version. The migration
+    must just stamp the current version so the next deploy bumps cleanly."""
+    import config as cfg
+    from app import create_app
+    from db import Database
+    from image_edits import EDIT_MATH_VERSION
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({**cfg.DEFAULTS, "preview_max_size": 1920})
+
+    vireo_dir = tmp_path / "vireo"
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+
+    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+
+    db = Database(db_path)
+    assert db.get_meta("edit_math_version") == str(EDIT_MATH_VERSION)
+
+
 def test_storage_clear_previews_resets_preview_cache(client_with_photo):
     """/api/storage/clear type=previews drops preview_cache rows so
     Settings "Current usage" doesn't report phantom bytes."""

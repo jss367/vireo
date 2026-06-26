@@ -10,6 +10,19 @@ from PIL import Image
 
 SCHEMA_VERSION = 1
 
+# Bump whenever the per-pixel rendering math in this module or `tone.py` changes
+# in a way that produces different output bytes for the same recipe. Cached
+# previews/thumbnails are keyed by (photo_id, size) — they have no recipe hash,
+# so without this version a deploy that changes the math keeps serving the old
+# bytes until each recipe is touched again. `app._migrate_edit_math_render_caches`
+# reads `db_meta["edit_math_version"]` at startup and purges stale renders when
+# it lags behind this constant.
+#
+# History:
+#   1 — original gamma-encoded sRGB multiply with hard clip at white.
+#   2 — linear-light pipeline with gated highlight shoulder (this PR).
+EDIT_MATH_VERSION = 2
+
 _ADJUSTMENT_RANGES = {
     "exposure": (-5.0, 5.0),
     "contrast": (-100.0, 100.0),

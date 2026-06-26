@@ -1325,6 +1325,116 @@ def _migrate_legacy_preview_cache(app):
             pass
 
 
+def _migrate_edit_math_render_caches(app):
+    """Invalidate rendered caches when the edit-math version has bumped.
+
+    Cached previews/thumbnails are keyed by ``(photo_id, size)`` only — the
+    edit recipe isn't part of the key. When the per-pixel rendering math in
+    ``image_edits`` / ``tone`` changes, the old bytes on disk are no longer
+    what we'd produce now, but a recipe-unchanged photo would otherwise keep
+    serving them until the user manually cleared the cache.
+
+    On each startup we compare ``db_meta["edit_math_version"]`` against
+    ``image_edits.EDIT_MATH_VERSION``. If it lags, we drop:
+
+      * every ``preview_cache`` row plus its on-disk JPEG
+      * every per-photo thumbnail file plus its ``photos.thumb_path``
+
+    for photos that have a non-null edit recipe (recipe-free photos render
+    identically across math versions and don't need re-rendering). Then we
+    write the new version so the migration is a no-op next boot.
+
+    On a fresh DB with no recipes, the walk does nothing and we still bump
+    the version so future deploys only act on real prior state.
+    """
+    from image_edits import EDIT_MATH_VERSION
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    thumb_dir = app.config["THUMB_CACHE_DIR"]
+    preview_dir = os.path.join(vireo_dir, "previews")
+    db = Database(app.config["DB_PATH"])
+    try:
+        stored = db.get_meta("edit_math_version")
+        try:
+            stored_version = int(stored) if stored is not None else 1
+        except (TypeError, ValueError):
+            stored_version = 1
+        if stored_version >= EDIT_MATH_VERSION:
+            return
+
+        rows = db.conn.execute(
+            "SELECT photo_id FROM photo_edit_recipes"
+        ).fetchall()
+        photo_ids = [row["photo_id"] for row in rows]
+
+        invalidated_previews = 0
+        invalidated_thumbs = 0
+        for pid in photo_ids:
+            for row in db.conn.execute(
+                "SELECT size FROM preview_cache WHERE photo_id = ?", (pid,)
+            ).fetchall():
+                size_value = row["size"]
+                path = os.path.join(preview_dir, f"{pid}_{size_value}.jpg")
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except OSError:
+                    log.warning(
+                        "Failed to remove stale preview cache %s during "
+                        "edit-math migration", path, exc_info=True,
+                    )
+                    continue
+                db.conn.execute(
+                    "DELETE FROM preview_cache WHERE photo_id=? AND size=?",
+                    (pid, size_value),
+                )
+                invalidated_previews += 1
+            try:
+                for name in os.listdir(preview_dir):
+                    if name.startswith(f"{pid}_") and name.endswith(".jpg"):
+                        try:
+                            os.remove(os.path.join(preview_dir, name))
+                        except OSError:
+                            pass
+            except FileNotFoundError:
+                pass
+            thumb_cache = os.path.join(thumb_dir, f"{pid}.jpg")
+            try:
+                if os.path.exists(thumb_cache):
+                    os.remove(thumb_cache)
+                    invalidated_thumbs += 1
+            except OSError:
+                log.warning(
+                    "Failed to remove stale thumbnail %s during "
+                    "edit-math migration", thumb_cache, exc_info=True,
+                )
+                continue
+            db.conn.execute(
+                "UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,),
+            )
+
+        db.set_meta("edit_math_version", EDIT_MATH_VERSION, _commit=False)
+        db.conn.commit()
+
+        if photo_ids:
+            log.info(
+                "edit_math_version %s -> %s: invalidated %d preview-cache "
+                "entries and %d thumbnails across %d edited photos",
+                stored_version, EDIT_MATH_VERSION,
+                invalidated_previews, invalidated_thumbs, len(photo_ids),
+            )
+        else:
+            log.info(
+                "edit_math_version %s -> %s: no edited photos, nothing to "
+                "invalidate", stored_version, EDIT_MATH_VERSION,
+            )
+    finally:
+        try:
+            db.conn.close()
+        except Exception:
+            pass
+
+
 def _enforce_preview_cache_quota_at_startup(app):
     """Reconcile and evict at startup so prior runs / external deletes
     can't leave the table out of sync or over quota.
@@ -1404,6 +1514,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     app.config["API_TOKEN"] = api_token
 
     _migrate_legacy_preview_cache(app)
+    _migrate_edit_math_render_caches(app)
     _enforce_preview_cache_quota_at_startup(app)
 
     # Request timing middleware — logs slow requests and user actions

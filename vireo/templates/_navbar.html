@@ -4191,7 +4191,7 @@ function _lbClearAdjustmentPreviewCss() {
 var VireoToneGL = (function() {
   var KNEE = 0.85; // == tone.HIGHLIGHT_KNEE
   var canvas = null, gl = null, prog = null, tex = null, locs = null;
-  var texKey = null, failed = false;
+  var texKey = null, failed = false, maxTextureSize = 0;
 
   var VERT = [
     'attribute vec2 aPos;',
@@ -4292,20 +4292,36 @@ var VireoToneGL = (function() {
     };
     gl.uniform1i(locs.tex, 0);
     gl.uniform1f(locs.knee, KNEE);
+    maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 0;
     return true;
   }
 
   function uploadSource(img) {
     var w = img.naturalWidth, h = img.naturalHeight;
     if (!w || !h) return false;
+    // GPU limit: oversized images make texImage2D emit a GL error (e.g.
+    // INVALID_VALUE) rather than throw, so the upload would otherwise look
+    // successful and the canvas would render black. Bail to the CSS fallback.
+    if (maxTextureSize && (w > maxTextureSize || h > maxTextureSize)) return false;
     if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
     var key = img.currentSrc || img.src;
     if (key !== texKey) {
       gl.bindTexture(gl.TEXTURE_2D, tex);
+      // Drain any prior error so getError() below reflects only this upload.
+      while (gl.getError() !== gl.NO_ERROR) {}
       try {
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
       } catch (e) {
         console.warn('VireoToneGL texture upload failed:', e);
+        return false;
+      }
+      // texImage2D signals failures (e.g. cross-origin canvas tainting,
+      // GPU limits the MAX_TEXTURE_SIZE check above didn't already catch)
+      // through the GL error flag, not exceptions. Leaving texKey unset
+      // forces a retry on the next frame.
+      if (gl.getError() !== gl.NO_ERROR) {
+        console.warn('VireoToneGL texture upload reported a GL error; '
+          + 'falling back to CSS preview');
         return false;
       }
       texKey = key;
