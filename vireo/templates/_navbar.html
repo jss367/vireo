@@ -4235,10 +4235,18 @@ var VireoToneGL = (function() {
     '}',
     'void main(){',
     '  vec4 src = texture2D(uTex, vUv);',
-    '  vec3 lin = srgbToLinear(src.rgb);',
+    '  vec3 linPre = srgbToLinear(src.rgb);',
+    '  vec3 lin = linPre;',
     '  lin *= exp2(uExposure);',
     '  lin *= uWbGain;',
-    '  if (uRolloff > 0.5) { lin = vec3(roll(lin.r), roll(lin.g), roll(lin.b)); }',
+    // Mirror tone.apply_adjustments' monotonicity clamp: the shoulder is below
+    // identity in (knee, ∞), so a 0.95-linear pixel at +0.1 EV would otherwise
+    // darken to ~0.929. Clamp per channel to min(linPre, lin) so the rolloff
+    // can only raise values toward white, never below the natural floor.
+    '  if (uRolloff > 0.5) {',
+    '    vec3 rolled = vec3(roll(lin.r), roll(lin.g), roll(lin.b));',
+    '    lin = max(rolled, min(linPre, lin));',
+    '  }',
     '  vec3 disp = linearToSrgb(lin);',
     '  disp = (disp - 0.5) * uContrast + 0.5;',
     '  float luma = dot(disp, vec3(0.2126, 0.7152, 0.0722));',

@@ -52,6 +52,27 @@ def test_highlights_roll_off_instead_of_clipping():
         prev = out
 
 
+def test_positive_exposure_never_darkens_near_white_highlights():
+    # Regression: before the per-channel ``max(rolled, min(lin_pre, lin))``
+    # clamp, the shoulder curve being below identity on (knee, 1.0] meant a
+    # 0.95-linear pixel (sRGB ~0.977, already above the 0.85 knee) at +0.1 EV
+    # would darken to ~0.929 — non-monotonic in exposure. Lock the contract:
+    # a positive exposure can only raise or hold the output, never lower it.
+    srgb_in = float(linear_to_srgb(np.array([0.95], dtype=np.float32))[0])
+    rgb = np.full((1, 1, 3), srgb_in, dtype=np.float32)
+    base = float(apply_adjustments(rgb)[0, 0, 0])
+    prev = base
+    for ev in (0.05, 0.1, 0.25, 0.5, 1.0, 2.0):
+        out = float(apply_adjustments(rgb, exposure=ev)[0, 0, 0])
+        assert out >= base - 1e-5, (
+            f"+{ev} EV darkened below the ev=0 baseline: {base:.4f} -> {out:.4f}"
+        )
+        assert out >= prev - 1e-5, (
+            f"+{ev} EV non-monotonic vs prev step: {prev:.4f} -> {out:.4f}"
+        )
+        prev = out
+
+
 def test_highlight_rolloff_is_identity_below_knee():
     lin = np.array([0.0, 0.25, 0.5, HIGHLIGHT_KNEE], dtype=np.float32)
     assert np.allclose(highlight_rolloff(lin), lin, atol=1e-6)

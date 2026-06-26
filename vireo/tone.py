@@ -130,7 +130,8 @@ def apply_adjustments(
     rgb = np.asarray(rgb, dtype=np.float32)
 
     # --- scene-referred ops, in linear light ---
-    lin = srgb_to_linear(rgb)
+    lin_pre = srgb_to_linear(rgb)
+    lin = lin_pre
     exp_gain = 2.0 ** float(exposure)
     if exposure:
         lin = lin * np.float32(exp_gain)
@@ -142,7 +143,19 @@ def apply_adjustments(
     # no net gain, nothing can exceed display white, so the shoulder must stay
     # disabled to keep an un-pushed image a true no-op (ev=0 == original).
     if exp_gain * max(gr, gg, gb) > 1.0 + 1e-6:
-        lin = highlight_rolloff(lin)
+        # The shoulder curve is below identity for inputs in (knee, ∞), so
+        # naively rolling every post-gain value above the knee can darken
+        # near-white pixels — e.g. a 0.95-linear pixel at +0.1 EV becomes
+        # 1.018 post-gain and the shoulder maps that to 0.929. That violates
+        # monotonicity in exposure: a positive boost must never lower a
+        # pixel's output. Clamp per channel to the channel's "would-be" value
+        # without rolloff: that's lin_pre when the channel's net gain >= 1
+        # (the channel can only brighten, so its floor is the input), and
+        # the post-gain value itself when the channel's net gain < 1 (e.g.
+        # a negative-tint blue channel that WB legitimately reduces).
+        # ``min(lin_pre, lin)`` collapses to whichever is the natural floor.
+        rolled = highlight_rolloff(lin)
+        lin = np.maximum(rolled, np.minimum(lin_pre, lin))
 
     # --- display-referred ops, in sRGB ---
     disp = linear_to_srgb(lin)

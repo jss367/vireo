@@ -63,9 +63,13 @@ def _shader_mirror(c, exposure, wb_gain, contrast, saturation, rolloff):
         r = KNEE + h * (o / (o + h))
         return np.where(x > KNEE, r, x)
 
-    lin = srgb_to_linear(c) * (2.0 ** exposure) * np.asarray(wb_gain)
+    lin_pre = srgb_to_linear(c)
+    lin = lin_pre * (2.0 ** exposure) * np.asarray(wb_gain)
     if rolloff:
-        lin = roll(lin)
+        # Per-channel clamp matches the shader's `max(rolled, min(linPre, lin))`
+        # which keeps the shoulder from darkening pixels below their natural
+        # (unrolled) value — see the monotonicity note in apply_adjustments.
+        lin = np.maximum(roll(lin), np.minimum(lin_pre, lin))
     disp = linear_to_srgb(lin)
     disp = (disp - 0.5) * contrast + 0.5
     luma = disp @ np.array([0.2126, 0.7152, 0.0722])
