@@ -1824,21 +1824,31 @@ def test_cropped_thumbnail_uses_companion_before_raw_failure_marker(
         photo_id,
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
     )
+    from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS
     original_load_image = thumbnails.load_image
-    loaded_paths = []
+    loaded = []
 
-    def tracking_load_image(file_path, max_size=1024):
-        loaded_paths.append(file_path)
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        loaded.append((file_path, kwargs))
         if str(file_path).lower().endswith(".nef"):
             raise AssertionError("thumbnail retried RAW before companion")
-        return original_load_image(file_path, max_size=max_size)
+        return original_load_image(file_path, max_size=max_size, **kwargs)
 
     monkeypatch.setattr(thumbnails, "load_image", tracking_load_image)
 
     rendered = client.get(f"/thumbnails/{photo_id}.jpg")
 
     assert rendered.status_code == 200
+    loaded_paths = [path for path, _ in loaded]
     assert loaded_paths == [companion_path]
+    # Even though the resolved source is the companion JPEG, the
+    # thumbnail self-heal must request RAW_DECODE_PRESERVE_HIGHLIGHTS so
+    # the call would demosaic the RAW with highlight preservation if
+    # _recipe_render_source had returned the RAW path instead. Keying
+    # the decode mode off the photo's primary extension (not the
+    # resolved source) keeps thumbnails in sync with previews/exports.
+    _, loaded_kwargs = loaded[0]
+    assert loaded_kwargs.get("raw_decode") == RAW_DECODE_PRESERVE_HIGHLIGHTS
     with Image.open(io.BytesIO(rendered.data)) as img:
         assert img.size == (267, 400)
 

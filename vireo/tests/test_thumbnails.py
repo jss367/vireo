@@ -56,6 +56,45 @@ def test_generate_thumbnail_bounds_non_crop_recipe_load(tmp_path, monkeypatch):
     assert seen_max_sizes == [400]
 
 
+def test_generate_thumbnail_forwards_raw_decode(tmp_path, monkeypatch):
+    """generate_thumbnail must forward raw_decode to load_image so an
+    edited RAW thumbnail demosaics with highlight preservation. Without
+    the override, the EDIT_MATH_VERSION cache purge would regenerate the
+    thumb through the default JPEG-first decode and diverge from the
+    preview / export pipeline.
+    """
+    import thumbnails
+    from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS
+    from thumbnails import generate_thumbnail
+
+    src = str(tmp_path / "source.jpg")
+    Image.new("RGB", (400, 300), color="red").save(src)
+    cache_dir = str(tmp_path / "thumbs")
+    os.makedirs(cache_dir)
+
+    seen_raw_decode = []
+    original_load_image = thumbnails.load_image
+
+    def tracking_load_image(file_path, max_size=1024, raw_decode=None):
+        seen_raw_decode.append(raw_decode)
+        return original_load_image(file_path, max_size=max_size)
+
+    monkeypatch.setattr(thumbnails, "load_image", tracking_load_image)
+
+    # Caller passes raw_decode through.
+    result = generate_thumbnail(
+        1, src, cache_dir, raw_decode=RAW_DECODE_PRESERVE_HIGHLIGHTS,
+    )
+    assert result is not None
+    assert seen_raw_decode == [RAW_DECODE_PRESERVE_HIGHLIGHTS]
+
+    # Caller omits raw_decode → load_image gets its default.
+    seen_raw_decode.clear()
+    os.remove(result)
+    assert generate_thumbnail(1, src, cache_dir) is not None
+    assert seen_raw_decode == [None]
+
+
 def test_recipe_source_path_uses_exif_oriented_dimensions(tmp_path):
     import json
 

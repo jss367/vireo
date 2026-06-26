@@ -275,6 +275,26 @@ _RAW_EXTENSIONS = (".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf
 _WORKING_COPY_FAILURE_RETRY_SECONDS = 24 * 60 * 60
 
 
+def _thumb_raw_decode_kwargs(photo, recipe):
+    """Return raw_decode kwargs for generate_thumbnail.
+
+    When the primary photo is a RAW and a recipe is being applied, the
+    thumbnail must demosaic with the same highlight-preserving mode used
+    by preview/export. Otherwise EDIT_MATH_VERSION's cache purge would
+    regenerate grid thumbnails through load_image's default JPEG-first
+    decode and the grid would diverge from the preview/export pipeline.
+    Returns an empty dict for non-RAW primaries or no-recipe paths so
+    the caller's existing behavior is preserved.
+    """
+    if not recipe or not photo:
+        return {}
+    filename = _photo_value(photo, "filename") or ""
+    if os.path.splitext(filename)[1].lower() not in _RAW_EXTENSIONS:
+        return {}
+    from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS
+    return {"raw_decode": RAW_DECODE_PRESERVE_HIGHLIGHTS}
+
+
 def _has_current_working_copy_failure(
     photo, vireo_dir=None, trust_existing_working_copy=True,
     live_source_path=None, folder_path=None,
@@ -1504,12 +1524,18 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 skipped += 1
                                 continue
                     recipe_kwargs = {"recipe": recipe} if recipe else {}
+                    # Derive the decode mode from the primary photo's
+                    # extension rather than photo_path so a future change
+                    # to _recipe_render_source cannot silently bypass
+                    # RAW_DECODE_PRESERVE_HIGHLIGHTS for a RAW primary.
+                    raw_decode_kwargs = _thumb_raw_decode_kwargs(detail_photo, recipe)
                     result_path = generate_thumbnail(
                         photo_id,
                         photo_path,
                         cache_dir,
                         size=thumb_size,
                         **recipe_kwargs,
+                        **raw_decode_kwargs,
                     )
                     if result_path is None:
                         failed += 1
@@ -1589,12 +1615,21 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 skipped += 1
                                 continue
                         recipe_kwargs = {"recipe": recipe} if recipe else {}
+                        # Derive the decode mode from the primary photo's
+                        # extension rather than photo_path so a future
+                        # change to _recipe_render_source cannot silently
+                        # bypass RAW_DECODE_PRESERVE_HIGHLIGHTS for a RAW
+                        # primary.
+                        raw_decode_kwargs = _thumb_raw_decode_kwargs(
+                            detail_photo, recipe,
+                        )
                         result_path = generate_thumbnail(
                             photo_id,
                             photo_path,
                             cache_dir,
                             size=thumb_size,
                             **recipe_kwargs,
+                            **raw_decode_kwargs,
                         )
                         if result_path is None:
                             failed += 1

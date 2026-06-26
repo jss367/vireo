@@ -15227,12 +15227,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     photo_id,
                 )
                 return "", 404
+            # Derive the decode mode from the primary photo's extension
+            # rather than source so a future change to render-source
+            # resolution cannot silently bypass RAW_DECODE_PRESERVE_HIGHLIGHTS
+            # for a RAW primary. Without this, EDIT_MATH_VERSION's cache
+            # purge regenerates edited-RAW thumbnails through the default
+            # JPEG-first decode and grid thumbnails diverge from previews
+            # / exports (which preserve highlights).
+            from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS, RAW_EXTENSIONS
+            raw_decode = (
+                RAW_DECODE_PRESERVE_HIGHLIGHTS
+                if recipe
+                and os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+                else None
+            )
             result = generate_thumbnail(
                 photo_id,
                 source,
                 thumb_dir,
                 size=thumb_size,
                 recipe=recipe,
+                raw_decode=raw_decode,
             )
         except Exception:
             log.exception(

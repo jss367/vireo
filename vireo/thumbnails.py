@@ -7,7 +7,12 @@ import os
 import tempfile
 from datetime import UTC, datetime
 
-from image_loader import RAW_EXTENSIONS, get_canonical_image_path, load_image
+from image_loader import (
+    RAW_DECODE_PRESERVE_HIGHLIGHTS,
+    RAW_EXTENSIONS,
+    get_canonical_image_path,
+    load_image,
+)
 
 log = logging.getLogger(__name__)
 
@@ -187,6 +192,7 @@ def _has_current_raw_failure(photo, source_path):
 
 def generate_thumbnail(
     photo_id, source_path, cache_dir, size=THUMB_SIZE, quality=85, recipe=None,
+    raw_decode=None,
 ):
     """Generate a JPEG thumbnail for a photo.
 
@@ -196,6 +202,13 @@ def generate_thumbnail(
         cache_dir: directory to store thumbnails
         size: max dimension in pixels
         quality: JPEG quality (1-95)
+        raw_decode: optional RAW decode mode forwarded to ``load_image``.
+            Defaults to ``None``, which uses ``load_image``'s default
+            (RAW_DECODE_JPEG_FIRST). Pass
+            ``RAW_DECODE_PRESERVE_HIGHLIGHTS`` when regenerating an
+            edited RAW thumbnail so the demosaic matches the preview /
+            export pipeline instead of falling back to the embedded
+            camera JPEG's clipped highlights.
 
     Returns:
         path to the thumbnail file, or None on failure
@@ -206,7 +219,8 @@ def generate_thumbnail(
         return thumb_path
 
     load_max_size = None if recipe and recipe.get("crop") else size
-    img = load_image(source_path, max_size=load_max_size)
+    load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
+    img = load_image(source_path, max_size=load_max_size, **load_kwargs)
     if img is None:
         log.warning("Could not load image for thumbnail: %s", source_path)
         return None
@@ -304,6 +318,15 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
         # iterations and avoid blocking concurrent jobs (a parallel scan's
         # add_photo INSERT) past the 30s busy_timeout.
         recipe_kwargs = {"recipe": recipe} if recipe else {}
+        # Derive the decode mode from the primary photo's extension so
+        # edited RAWs that fall through to the original source path are
+        # demosaiced with highlight preservation, matching the preview /
+        # export pipeline rather than the default JPEG-first decode.
+        raw_decode_kwargs = {}
+        if recipe and os.path.splitext(
+            source_photo["filename"]
+        )[1].lower() in RAW_EXTENSIONS:
+            raw_decode_kwargs["raw_decode"] = RAW_DECODE_PRESERVE_HIGHLIGHTS
         if generate_thumbnail(
             photo["id"],
             source_path,
@@ -311,6 +334,7 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
             size=thumb_size,
             quality=thumb_quality,
             **recipe_kwargs,
+            **raw_decode_kwargs,
         ) is not None:
             generated += 1
             # Record on-disk presence in the photos table so the dashboard's
