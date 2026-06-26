@@ -344,6 +344,43 @@ def test_ingest_copies_files_to_date_folders(tmp_path):
     assert (dst / "2026" / "2026-03-28" / "photo.jpg").exists()
 
 
+def test_ingest_uses_metadata_dates_when_lightweight_exif_fails(
+    tmp_path, monkeypatch
+):
+    """ExifTool metadata keeps copied files split by capture date."""
+    import ingest as ingest_module
+    import metadata as metadata_module
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    files = ["a.jpg", "b.jpg"]
+    for i, name in enumerate(files):
+        Image.new("RGB", (100, 100), color=(i * 80, 0, 0)).save(str(src / name))
+        mtime = datetime(2026, 3, 30, 12, 0, 0).timestamp()
+        os.utime(str(src / name), (mtime, mtime))
+
+    monkeypatch.setattr(ingest_module, "read_exif_timestamp", lambda _path: None)
+
+    def fake_extract_metadata(paths, restricted_tags=None):
+        return {
+            str(src / "a.jpg"): {"EXIF": {"DateTimeOriginal": "2026:03:25 10:00:00"}},
+            str(src / "b.jpg"): {"EXIF": {"DateTimeOriginal": "2026:03:26 10:00:00"}},
+        }
+
+    monkeypatch.setattr(metadata_module, "extract_metadata", fake_extract_metadata)
+
+    db = Database(str(tmp_path / "test.db"))
+    result = ingest(str(src), str(dst), db=db)
+
+    assert result["copied"] == 2
+    assert (dst / "2026" / "2026-03-25" / "a.jpg").exists()
+    assert (dst / "2026" / "2026-03-26" / "b.jpg").exists()
+    assert not (dst / "2026" / "2026-03-30" / "a.jpg").exists()
+
+
 def test_ingest_unsorted_fallback(tmp_path):
     """Files with no EXIF and no readable mtime go to unsorted/."""
     src = tmp_path / "sd_card"
@@ -1506,6 +1543,46 @@ def test_preview_destination_groups_by_date(tmp_path):
     assert by_path["2026/2026-03-25"]["exists"] is False
     assert "2026/2026-03-26" in by_path
     assert by_path["2026/2026-03-26"]["count"] == 1
+
+
+def test_preview_destination_uses_metadata_dates_when_lightweight_exif_fails(
+    tmp_path, monkeypatch
+):
+    """Preview keeps capture-date folders when ExifTool has the date."""
+    import ingest as ingest_module
+    import metadata as metadata_module
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    for name in ("a.jpg", "b.jpg"):
+        Image.new("RGB", (100, 100)).save(str(src / name))
+        mtime = datetime(2026, 3, 30, 12, 0, 0).timestamp()
+        os.utime(str(src / name), (mtime, mtime))
+
+    monkeypatch.setattr(ingest_module, "read_exif_timestamp", lambda _path: None)
+
+    def fake_extract_metadata(paths, restricted_tags=None):
+        return {
+            str(src / "a.jpg"): {"EXIF": {"DateTimeOriginal": "2026:03:25 10:00:00"}},
+            str(src / "b.jpg"): {"EXIF": {"DateTimeOriginal": "2026:03:26 10:00:00"}},
+        }
+
+    monkeypatch.setattr(metadata_module, "extract_metadata", fake_extract_metadata)
+
+    result = preview_destination(
+        sources=[str(src)],
+        destination=str(dst),
+        folder_template="%Y/%Y-%m-%d",
+    )
+
+    by_path = {f["path"]: f for f in result["folders"]}
+    assert result["total_folders"] == 2
+    assert by_path["2026/2026-03-25"]["count"] == 1
+    assert by_path["2026/2026-03-26"]["count"] == 1
+    assert "2026/2026-03-30" not in by_path
 
 
 def test_preview_destination_detects_existing_folders(tmp_path):
