@@ -325,6 +325,68 @@ def test_export_edited_raw_skips_companion_jpeg_substitution(
     assert loaded_kwargs.get("raw_decode") == RAW_DECODE_PRESERVE_HIGHLIGHTS
 
 
+def test_export_falls_back_to_companion_when_raw_decode_fails(
+    export_env, monkeypatch,
+):
+    """When the RAW primary fails to decode, fall back to the companion JPEG.
+
+    A camera JPEG with clipped highlights still beats a failed export. The
+    unconditional RAW skip in `_companion_can_satisfy_export` would otherwise
+    leave RAW+JPEG photos with no usable source whenever libraw can't
+    demosaic the RAW.
+    """
+    import export as export_module
+
+    env = export_env
+    db = env["db"]
+    raw_path = env["src"] / "source.NEF"
+    raw_path.write_bytes(b"\x00")
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path='bird1.jpg',
+               working_copy_path=NULL,
+               width=800, height=600
+           WHERE id=?""",
+        (env["p1"],),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        env["p1"],
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
+    )
+
+    load_calls = []
+
+    def flaky_load_image(file_path, max_size=1024, **kwargs):
+        load_calls.append((str(file_path), kwargs))
+        if str(file_path).lower().endswith(".nef"):
+            return None
+        return Image.new("RGB", (800, 600), color="green")
+
+    monkeypatch.setattr(export_module, "load_image", flaky_load_image)
+
+    result = export_photos(
+        db=db,
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={
+            "naming_template": "{original}",
+            "max_size": 300,
+        },
+    )
+
+    assert result["exported"] == 1
+    assert result["errors"] == []
+    # RAW first (preserve-highlights), then companion as fallback.
+    assert len(load_calls) == 2
+    assert load_calls[0][0].lower().endswith(".nef")
+    assert load_calls[1][0].lower().endswith(".jpg")
+    # The fallback companion load must NOT pass raw_decode (it's a JPEG).
+    assert "raw_decode" not in load_calls[1][1]
+
+
 def test_export_cropped_recipe_avoids_undersized_developed_output(export_env):
     """Cropped resized exports skip developed files that lack source pixels."""
     env = export_env

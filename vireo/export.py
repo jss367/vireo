@@ -275,13 +275,29 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
             load_max_size = (
                 None if recipe and recipe.get("crop") else (max_size or None)
             )
+            source_is_raw = (
+                os.path.splitext(source_path)[1].lower() in RAW_EXTENSIONS
+            )
             raw_decode = (
-                RAW_DECODE_PRESERVE_HIGHLIGHTS
-                if recipe and os.path.splitext(source_path)[1].lower() in RAW_EXTENSIONS
-                else None
+                RAW_DECODE_PRESERVE_HIGHLIGHTS if recipe and source_is_raw else None
             )
             load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
             img = load_image(source_path, max_size=load_max_size, **load_kwargs)
+            if img is None and source_is_raw:
+                # RAW decode failed (unsupported sensor, corrupt file, etc.).
+                # The previously rejected companion JPEG is still a usable
+                # fallback even though its highlights are clipped — a
+                # rendered camera JPEG beats a failed export.
+                companion_fallback = _companion_can_satisfy_export(
+                    photo, folder_path, recipe, max_size,
+                    exif_data=exif_data, skip_raw_primary=False,
+                )
+                if companion_fallback:
+                    log.info(
+                        "RAW decode failed for %s; falling back to companion JPEG",
+                        photo["filename"],
+                    )
+                    img = load_image(companion_fallback, max_size=load_max_size)
             if img is None:
                 errors.append(f"{photo['filename']}: failed to load image")
                 if progress_cb:
@@ -713,15 +729,24 @@ def _working_copy_can_satisfy_export(
     return wc_render_long >= required_long
 
 
-def _companion_can_satisfy_export(photo, folder_path, recipe, max_size, exif_data=None):
-    """Return a full-resolution companion path when it can satisfy edited export."""
+def _companion_can_satisfy_export(
+    photo, folder_path, recipe, max_size, exif_data=None,
+    *, skip_raw_primary=True,
+):
+    """Return a full-resolution companion path when it can satisfy edited export.
+
+    By default RAW primaries are skipped so the export decodes the RAW with
+    ``RAW_DECODE_PRESERVE_HIGHLIGHTS`` instead of the camera JPEG (whose
+    highlights are already clipped). Pass ``skip_raw_primary=False`` to get
+    the companion path as a fallback when the RAW decode itself fails — a
+    rendered camera JPEG is still better than a failed export.
+    """
     if not recipe:
         return None
-    # When the primary is a RAW, decoding the RAW with the highlight-preserving
-    # mode yields better edit results than the in-camera JPEG companion (whose
-    # highlights are already clipped). Skip the substitution so the export
-    # path falls back to the RAW primary and gets RAW_DECODE_PRESERVE_HIGHLIGHTS.
-    if os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS:
+    if (
+        skip_raw_primary
+        and os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+    ):
         return None
     companion_rel = photo["companion_path"]
     if not companion_rel or not folder_path:
