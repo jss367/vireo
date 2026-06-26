@@ -530,7 +530,7 @@ function updateFeedbackControls() {
   if (canvas) canvas.classList.toggle('show-before', !!editorState.showBefore);
   var note = document.getElementById('feedbackNote');
   if (note) {
-    note.textContent = editorState.showBefore ? 'Saved preview' : 'Current preview';
+    note.textContent = editorState.showBefore ? 'Approximate saved preview' : 'Approximate current preview';
   }
 }
 
@@ -881,7 +881,7 @@ function updateHistogramFeedback() {
     var pct = count * 100 / total;
     var value = document.getElementById(kind + 'ClipValue');
     var chip = document.getElementById(kind + 'ClipChip');
-    if (value) value.textContent = pct.toFixed(pct < 1 ? 2 : 1) + '% clipped';
+    if (value) value.textContent = '~' + pct.toFixed(pct < 1 ? 2 : 1) + '% clipped';
     if (chip) chip.classList.toggle('warning', pct >= 1);
   }
   setClip('shadow', clippedLow);
@@ -1015,14 +1015,14 @@ function setAdjustment(key, value) {
 function resetAdjustments() {
   delete editorState.recipe.adjustments;
   syncControls();
-  schedulePreview();
+  markChanged(true);
 }
 
 function resetAllEdits() {
   editorState.recipe = {};
   ensureCrop(editorState.recipe);
   syncControls();
-  updatePreview();
+  markChanged(true);
 }
 
 async function saveRecipe(description) {
