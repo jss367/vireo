@@ -717,6 +717,12 @@ def _companion_can_satisfy_export(photo, folder_path, recipe, max_size, exif_dat
     """Return a full-resolution companion path when it can satisfy edited export."""
     if not recipe:
         return None
+    # When the primary is a RAW, decoding the RAW with the highlight-preserving
+    # mode yields better edit results than the in-camera JPEG companion (whose
+    # highlights are already clipped). Skip the substitution so the export
+    # path falls back to the RAW primary and gets RAW_DECODE_PRESERVE_HIGHLIGHTS.
+    if os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS:
+        return None
     companion_rel = photo["companion_path"]
     if not companion_rel or not folder_path:
         return None

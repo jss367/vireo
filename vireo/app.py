@@ -9199,6 +9199,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("No photos found", 404)
 
         def _external_edit_recipe_source(photo, recipe, fallback_path):
+            from image_loader import RAW_EXTENSIONS
+
             if recipe.get("crop"):
                 source_path, _using_working_copy = _recipe_render_source(
                     photo, recipe, 0, vireo_dir, folders,
@@ -9217,18 +9219,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 ):
                     return wc_path
 
+            # For RAW primaries, never substitute the companion JPEG: its
+            # highlights are already clipped, so the handoff would apply the
+            # recipe to a clipped render even though the RAW would have been
+            # decoded with RAW_DECODE_PRESERVE_HIGHLIGHTS otherwise.
+            primary_is_raw = (
+                os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+            )
+
             folder_path = folders.get(photo["folder_id"])
             if folder_path:
-                companion_path = photo["companion_path"]
-                if companion_path:
-                    companion = os.path.join(folder_path, companion_path)
-                    if (
-                        os.path.exists(companion)
-                        and _path_satisfies_recipe_render(
-                            companion, photo, recipe, 0,
-                        )
-                    ):
-                        return companion
+                if not primary_is_raw:
+                    companion_path = photo["companion_path"]
+                    if companion_path:
+                        companion = os.path.join(folder_path, companion_path)
+                        if (
+                            os.path.exists(companion)
+                            and _path_satisfies_recipe_render(
+                                companion, photo, recipe, 0,
+                            )
+                        ):
+                            return companion
                 original = os.path.join(folder_path, photo["filename"])
                 if os.path.exists(original):
                     return original
@@ -11415,6 +11426,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return jsonify(result)
 
     def _inat_edit_recipe_source(photo, recipe, fallback_path):
+        from image_loader import RAW_EXTENSIONS
+
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
         folders = {photo["folder_id"]: photo["folder_path"]}
         if recipe.get("crop"):
@@ -11434,6 +11447,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 and _path_satisfies_recipe_render(wc_path, photo, recipe, 0)
             ):
                 return wc_path
+
+        # RAW primaries are decoded with RAW_DECODE_PRESERVE_HIGHLIGHTS later;
+        # substituting the camera JPEG companion here would apply the recipe
+        # to a clipped render instead.
+        if os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS:
+            return fallback_path
 
         companion_path = photo["companion_path"]
         if companion_path:

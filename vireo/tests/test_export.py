@@ -265,10 +265,22 @@ def test_export_cropped_recipe_avoids_undersized_working_copy(export_env):
         assert img.size == (300, 225)
 
 
-def test_export_cropped_recipe_uses_full_res_companion_before_raw(export_env):
-    """Cropped RAW+JPEG exports should use a sufficient companion before RAW."""
+def test_export_edited_raw_skips_companion_jpeg_substitution(
+    export_env, monkeypatch,
+):
+    """Edited RAW+JPEG exports must decode the RAW, not the clipped companion JPEG.
+
+    Companion JPEGs are camera-baked: their highlights are already clipped.
+    Substituting the companion would silently bypass the RAW_DECODE_PRESERVE_HIGHLIGHTS
+    decode mode and apply edits to clipped data.
+    """
+    import export as export_module
+    from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS
+
     env = export_env
     db = env["db"]
+    raw_path = env["src"] / "source.NEF"
+    raw_path.write_bytes(b"\x00")
     db.conn.execute(
         """UPDATE photos
            SET filename='source.NEF', extension='.nef',
@@ -284,6 +296,14 @@ def test_export_cropped_recipe_uses_full_res_companion_before_raw(export_env):
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
     )
 
+    load_calls = []
+
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        load_calls.append((str(file_path), kwargs))
+        return Image.new("RGB", (800, 600), color="red")
+
+    monkeypatch.setattr(export_module, "load_image", tracking_load_image)
+
     result = export_photos(
         db=db,
         vireo_dir=env["vireo_dir"],
@@ -297,105 +317,12 @@ def test_export_cropped_recipe_uses_full_res_companion_before_raw(export_env):
 
     assert result["exported"] == 1
     assert result["errors"] == []
-    with Image.open(os.path.join(env["dest"], "source.jpg")) as img:
-        assert img.size == (300, 225)
-
-
-def test_export_non_crop_recipe_uses_full_res_companion_before_raw(
-    export_env, monkeypatch,
-):
-    """Non-crop RAW+JPEG edits should use a sufficient companion before RAW."""
-    import export as export_module
-
-    env = export_env
-    db = env["db"]
-    companion_path = os.path.join(env["src"], "bird1.jpg")
-    db.conn.execute(
-        """UPDATE photos
-           SET filename='source.NEF', extension='.nef',
-               companion_path='bird1.jpg',
-               working_copy_path=NULL,
-               width=800, height=600
-           WHERE id=?""",
-        (env["p1"],),
+    assert len(load_calls) == 1
+    loaded_path, loaded_kwargs = load_calls[0]
+    assert loaded_path.lower().endswith(".nef"), (
+        f"export should load the RAW primary, got {loaded_path!r}"
     )
-    db.conn.commit()
-    db.set_photo_edit_recipe(env["p1"], {"rotation": 90})
-    original_load_image = export_module.load_image
-    loaded_paths = []
-
-    def tracking_load_image(file_path, max_size=1024):
-        loaded_paths.append(file_path)
-        if str(file_path).lower().endswith(".nef"):
-            raise AssertionError("export decoded RAW before companion")
-        return original_load_image(file_path, max_size=max_size)
-
-    monkeypatch.setattr(export_module, "load_image", tracking_load_image)
-
-    result = export_photos(
-        db=db,
-        vireo_dir=env["vireo_dir"],
-        photo_ids=[env["p1"]],
-        destination=env["dest"],
-        options={
-            "naming_template": "{original}",
-            "max_size": 500,
-        },
-    )
-
-    assert result["exported"] == 1
-    assert result["errors"] == []
-    assert loaded_paths == [companion_path]
-    with Image.open(os.path.join(env["dest"], "source.jpg")) as img:
-        assert img.size == (375, 500)
-
-
-def test_export_cropped_recipe_uses_exif_oriented_companion(export_env):
-    """Companion eligibility must match load_image's EXIF-transposed source."""
-    env = export_env
-    db = env["db"]
-    companion_path = env["src"] / "bird1.jpg"
-    companion = Image.new("RGB", (600, 400), color="red")
-    exif = companion.getexif()
-    exif[0x0112] = 6
-    companion.save(str(companion_path), "JPEG", quality=95, exif=exif.tobytes())
-    db.conn.execute(
-        """UPDATE photos
-           SET filename='source.NEF', extension='.nef',
-               companion_path='bird1.jpg',
-               working_copy_path=NULL,
-               width=?, height=?, exif_data=?
-           WHERE id=?""",
-        (
-            600,
-            400,
-            json.dumps({"EXIF": {"Orientation": 6}}),
-            env["p1"],
-        ),
-    )
-    db.conn.commit()
-    db.set_photo_edit_recipe(
-        env["p1"],
-        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
-    )
-
-    result = export_photos(
-        db=db,
-        vireo_dir=env["vireo_dir"],
-        photo_ids=[env["p1"]],
-        destination=env["dest"],
-        options={
-            "naming_template": "{original}",
-            "max_size": 500,
-        },
-    )
-
-    assert result["exported"] == 1
-    assert result["errors"] == []
-    with Image.open(os.path.join(env["dest"], "source.jpg")) as img:
-        assert max(img.size) == 500
-        r, g, b = img.resize((1, 1)).getpixel((0, 0))
-    assert r > g and r > b
+    assert loaded_kwargs.get("raw_decode") == RAW_DECODE_PRESERVE_HIGHLIGHTS
 
 
 def test_export_cropped_recipe_avoids_undersized_developed_output(export_env):

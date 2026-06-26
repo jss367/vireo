@@ -1923,6 +1923,68 @@ def test_edited_original_does_not_use_companion_after_raw_failure_marker(
     assert loaded_paths == []
 
 
+def test_edited_original_decodes_raw_with_highlight_preservation(
+    client_with_photo, monkeypatch,
+):
+    """Edited RAW+JPEG originals must decode the RAW, not substitute the JPEG.
+
+    The companion JPEG is the camera-baked render with highlights already
+    clipped; substituting it bypasses RAW_DECODE_PRESERVE_HIGHLIGHTS and applies
+    the user's edits to clipped data.
+    """
+    import io
+    import os
+
+    import app as app_module
+    import image_loader
+    from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    raw_path = os.path.join(folder["path"], "source.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(b"\x00")
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path='test.jpg',
+               working_copy_path=NULL,
+               width=800, height=600,
+               file_mtime=1234.0
+           WHERE id=?""",
+        (photo_id,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+
+    load_calls = []
+
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        load_calls.append((str(file_path), kwargs))
+        return Image.new("RGB", (800, 600), color="red")
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+    if hasattr(app_module, "load_image"):
+        monkeypatch.setattr(app_module, "load_image", tracking_load_image)
+
+    rendered = client.get(f"/photos/{photo_id}/original")
+
+    assert rendered.status_code == 200, rendered.data
+    assert len(load_calls) == 1
+    loaded_path, loaded_kwargs = load_calls[0]
+    assert loaded_path.lower().endswith(".nef"), (
+        f"endpoint should load RAW primary, got {loaded_path!r}"
+    )
+    assert loaded_kwargs.get("raw_decode") == RAW_DECODE_PRESERVE_HIGHLIGHTS
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (600, 800)
+
+
 def test_edited_original_cache_write_is_atomic(client_with_photo, monkeypatch):
     import os
 
