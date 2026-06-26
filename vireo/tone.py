@@ -1,9 +1,10 @@
 """Scene-referred tone pipeline for non-destructive photo edits.
 
 This module is the single source of truth for how the editable adjustments
-(exposure, white balance, contrast, saturation) map input pixels to output
-pixels. Geometry (rotate/flip/straighten/crop) lives in ``image_edits`` and is
-not part of this pipeline.
+(exposure, white balance, highlights, shadows, whites, blacks, contrast,
+vibrance, saturation) map input pixels to output pixels. Geometry
+(rotate/flip/straighten/crop) lives in ``image_edits`` and is not part of this
+pipeline.
 
 Why this exists
 ---------------
@@ -17,7 +18,7 @@ flat white. This pipeline therefore:
   2. applies the scene-referred ops (exposure, white balance) in linear,
   3. rolls highlights off with a smooth shoulder (no hard clip to 1.0),
   4. re-encodes linear -> sRGB,
-  5. applies the display-referred ops (contrast, saturation) in sRGB.
+  5. applies the display-referred ops (range controls, contrast, color) in sRGB.
 
 Data ceiling: this operates on whatever 8-bit source it is handed. It produces
 a pleasing rolloff but cannot *recover* highlights that were already clipped
@@ -92,6 +93,13 @@ def highlight_rolloff(lin, knee=HIGHLIGHT_KNEE):
     return np.where(lin > knee, rolled, lin)
 
 
+def smoothstep(edge0, edge1, x):
+    """GLSL-compatible smoothstep for scalar or array inputs."""
+    x = np.asarray(x, dtype=np.float32)
+    t = np.clip((x - edge0) / (edge1 - edge0), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
 def white_balance_gains(white_balance):
     """Return per-channel linear gains (r, g, b) for a white-balance dict.
 
@@ -107,12 +115,71 @@ def white_balance_gains(white_balance):
     return r, g, b
 
 
+def _luma(rgb):
+    return (
+        LUMA_R * rgb[..., 0]
+        + LUMA_G * rgb[..., 1]
+        + LUMA_B * rgb[..., 2]
+    )[..., None]
+
+
+def _blend_range(rgb, amount, mask):
+    """Move masked pixels toward white or black without hard clipping."""
+    amount = float(amount) / 100.0
+    if abs(amount) < 1e-9:
+        return rgb
+    mask = mask * abs(amount)
+    if amount > 0:
+        return rgb + (1.0 - rgb) * mask
+    return rgb - rgb * mask
+
+
+def apply_range_adjustments(
+    rgb, *, highlights=0.0, shadows=0.0, whites=0.0, blacks=0.0
+):
+    """Apply display-space tonal range controls with smooth luma masks."""
+    out = np.asarray(rgb, dtype=np.float32)
+    lum = _luma(out)
+
+    if shadows:
+        out = _blend_range(out, shadows, (1.0 - smoothstep(0.05, 0.65, lum)) * 0.48)
+    if highlights:
+        out = _blend_range(out, highlights, smoothstep(0.35, 0.95, lum) * 0.42)
+    if blacks:
+        out = _blend_range(out, blacks, (1.0 - smoothstep(0.00, 0.30, lum)) * 0.34)
+    if whites:
+        out = _blend_range(out, whites, smoothstep(0.70, 1.00, lum) * 0.34)
+
+    return np.clip(out, 0.0, 1.0)
+
+
+def apply_vibrance(rgb, vibrance=0.0):
+    """Apply luma-preserving selective saturation."""
+    amount = float(vibrance) / 100.0
+    if abs(amount) < 1e-9:
+        return rgb
+    luma = _luma(rgb)
+    maxc = np.max(rgb, axis=-1, keepdims=True)
+    minc = np.min(rgb, axis=-1, keepdims=True)
+    chroma = np.clip(maxc - minc, 0.0, 1.0)
+    if amount > 0:
+        factor = 1.0 + amount * (1.0 - chroma) * 0.85
+    else:
+        factor = 1.0 + amount * 0.65
+    return np.clip(luma + (rgb - luma) * factor, 0.0, 1.0)
+
+
 def apply_adjustments(
     rgb,
     *,
     exposure=0.0,
     white_balance=None,
+    highlights=0.0,
+    shadows=0.0,
+    whites=0.0,
+    blacks=0.0,
     contrast=0.0,
+    vibrance=0.0,
     saturation=0.0,
 ):
     """Apply tonal adjustments to an sRGB float image and return sRGB float.
@@ -121,7 +188,12 @@ def apply_adjustments(
         rgb: float array shaped ``(..., 3)`` with sRGB-encoded values in [0,1].
         exposure: stops of exposure (linear gain ``2 ** exposure``).
         white_balance: dict with ``temperature``/``tint`` in [-100, 100], or None.
+        highlights: [-100, 100]; display-space highlight range adjustment.
+        shadows: [-100, 100]; display-space shadow range adjustment.
+        whites: [-100, 100]; display-space white point range adjustment.
+        blacks: [-100, 100]; display-space black point range adjustment.
         contrast: [-100, 100]; a linear contrast around mid-grey (0.5).
+        vibrance: [-100, 100]; luma-preserving selective saturation.
         saturation: [-100, 100]; luma-preserving saturation in display space.
 
     Returns:
@@ -159,16 +231,22 @@ def apply_adjustments(
 
     # --- display-referred ops, in sRGB ---
     disp = linear_to_srgb(lin)
+    if highlights or shadows or whites or blacks:
+        disp = apply_range_adjustments(
+            disp,
+            highlights=highlights,
+            shadows=shadows,
+            whites=whites,
+            blacks=blacks,
+        )
     if contrast:
         c = np.float32(1.0 + float(contrast) / 100.0)
         disp = (disp - 0.5) * c + 0.5
+    if vibrance:
+        disp = apply_vibrance(disp, vibrance)
     if saturation:
         s = np.float32(max(0.0, 1.0 + float(saturation) / 100.0))
-        luma = (
-            LUMA_R * disp[..., 0]
-            + LUMA_G * disp[..., 1]
-            + LUMA_B * disp[..., 2]
-        )[..., None]
+        luma = _luma(disp)
         disp = luma + (disp - luma) * s
 
     return np.clip(disp, 0.0, 1.0)

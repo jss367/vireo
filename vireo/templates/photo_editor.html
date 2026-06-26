@@ -354,6 +354,26 @@ body {
         <span class="control-value" id="exposureValue">0.0</span>
       </div>
       <div class="control-row">
+        <label for="highlightsRange">Highlights</label>
+        <input id="highlightsRange" data-adjustment="highlights" type="range" min="-100" max="100" step="1" value="0" oninput="setAdjustment('highlights', this.value)">
+        <span class="control-value" id="highlightsValue">0</span>
+      </div>
+      <div class="control-row">
+        <label for="shadowsRange">Shadows</label>
+        <input id="shadowsRange" data-adjustment="shadows" type="range" min="-100" max="100" step="1" value="0" oninput="setAdjustment('shadows', this.value)">
+        <span class="control-value" id="shadowsValue">0</span>
+      </div>
+      <div class="control-row">
+        <label for="whitesRange">Whites</label>
+        <input id="whitesRange" data-adjustment="whites" type="range" min="-100" max="100" step="1" value="0" oninput="setAdjustment('whites', this.value)">
+        <span class="control-value" id="whitesValue">0</span>
+      </div>
+      <div class="control-row">
+        <label for="blacksRange">Blacks</label>
+        <input id="blacksRange" data-adjustment="blacks" type="range" min="-100" max="100" step="1" value="0" oninput="setAdjustment('blacks', this.value)">
+        <span class="control-value" id="blacksValue">0</span>
+      </div>
+      <div class="control-row">
         <label for="contrastRange">Contrast</label>
         <input id="contrastRange" data-adjustment="contrast" type="range" min="-100" max="100" step="1" value="0" oninput="setAdjustment('contrast', this.value)">
         <span class="control-value" id="contrastValue">0</span>
@@ -367,6 +387,11 @@ body {
         <label for="tintRange">Tint</label>
         <input id="tintRange" data-adjustment="tint" type="range" min="-100" max="100" step="1" value="0" oninput="setAdjustment('tint', this.value)">
         <span class="control-value" id="tintValue">0</span>
+      </div>
+      <div class="control-row">
+        <label for="vibranceRange">Vibrance</label>
+        <input id="vibranceRange" data-adjustment="vibrance" type="range" min="-100" max="100" step="1" value="0" oninput="setAdjustment('vibrance', this.value)">
+        <span class="control-value" id="vibranceValue">0</span>
       </div>
       <div class="control-row">
         <label for="saturationRange">Saturation</label>
@@ -537,9 +562,14 @@ function adjustmentValues(recipe) {
   var wb = adj.white_balance || {};
   return {
     exposure: Number(adj.exposure || 0),
+    highlights: Number(adj.highlights || 0),
+    shadows: Number(adj.shadows || 0),
+    whites: Number(adj.whites || 0),
+    blacks: Number(adj.blacks || 0),
     contrast: Number(adj.contrast || 0),
     temperature: Number(wb.temperature || adj.temperature || 0),
     tint: Number(wb.tint || adj.tint || 0),
+    vibrance: Number(adj.vibrance || 0),
     saturation: Number(adj.saturation || 0),
   };
 }
@@ -575,7 +605,7 @@ function recipeForSave(recipe) {
 
   var vals = adjustmentValues(out);
   var adj = {};
-  ['exposure', 'contrast', 'saturation'].forEach(function(key) {
+  ['exposure', 'highlights', 'shadows', 'whites', 'blacks', 'contrast', 'vibrance', 'saturation'].forEach(function(key) {
     if (Math.abs(Number(vals[key] || 0)) > 0.000001) adj[key] = Number(vals[key]);
   });
   var wb = {};
@@ -627,9 +657,14 @@ function syncControls() {
     if (label) label.textContent = fixed ? Number(value || 0).toFixed(1) : String(Math.round(Number(value || 0)));
   };
   set('exposure', vals.exposure, true);
+  set('highlights', vals.highlights, false);
+  set('shadows', vals.shadows, false);
+  set('whites', vals.whites, false);
+  set('blacks', vals.blacks, false);
   set('contrast', vals.contrast, false);
   set('temperature', vals.temperature, false);
   set('tint', vals.tint, false);
+  set('vibrance', vals.vibrance, false);
   set('saturation', vals.saturation, false);
   var straight = Number(r.straighten || 0);
   document.getElementById('straightenRange').value = String(straight);
@@ -745,7 +780,7 @@ function setAdjustment(key, value) {
   if (key === 'exposure') document.getElementById('exposureValue').textContent = vals[key].toFixed(1);
   else document.getElementById(key + 'Value').textContent = String(Math.round(vals[key]));
   var adj = cloneRecipe(editorState.recipe.adjustments || {});
-  ['exposure', 'contrast', 'saturation'].forEach(function(name) {
+  ['exposure', 'highlights', 'shadows', 'whites', 'blacks', 'contrast', 'vibrance', 'saturation'].forEach(function(name) {
     if (Math.abs(vals[name]) > 0.000001) adj[name] = vals[name];
     else delete adj[name];
   });

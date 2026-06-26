@@ -20,12 +20,18 @@ SCHEMA_VERSION = 1
 #
 # History:
 #   1 — original gamma-encoded sRGB multiply with hard clip at white.
-#   2 — linear-light pipeline with gated highlight shoulder (this PR).
-EDIT_MATH_VERSION = 2
+#   2 — linear-light pipeline with gated highlight shoulder.
+#   3 — expanded tone controls: highlights/shadows/whites/blacks/vibrance.
+EDIT_MATH_VERSION = 3
 
 _ADJUSTMENT_RANGES = {
     "exposure": (-5.0, 5.0),
+    "highlights": (-100.0, 100.0),
+    "shadows": (-100.0, 100.0),
+    "whites": (-100.0, 100.0),
+    "blacks": (-100.0, 100.0),
     "contrast": (-100.0, 100.0),
+    "vibrance": (-100.0, 100.0),
     "saturation": (-100.0, 100.0),
 }
 
@@ -60,7 +66,7 @@ def normalize_recipe(recipe):
     out = {"version": SCHEMA_VERSION}
 
     rotation = recipe.get("rotation", 0)
-    if isinstance(rotation, bool) or not isinstance(rotation, (int, float)):
+    if isinstance(rotation, bool) or not isinstance(rotation, int | float):
         raise RecipeError("rotation must be one of 0, 90, 180, or 270")
     if isinstance(rotation, float) and not rotation.is_integer():
         raise RecipeError("rotation must be one of 0, 90, 180, or 270")
@@ -73,7 +79,7 @@ def normalize_recipe(recipe):
     straighten = recipe.get("straighten", 0)
     if straighten in (None, ""):
         straighten = 0
-    if isinstance(straighten, bool) or not isinstance(straighten, (int, float)):
+    if isinstance(straighten, bool) or not isinstance(straighten, int | float):
         raise RecipeError("straighten must be numeric")
     straighten = float(straighten)
     if not math.isfinite(straighten) or straighten < -45.0 or straighten > 45.0:
@@ -146,7 +152,7 @@ def normalize_recipe(recipe):
         raw = adjustments.get(name)
         if raw in (None, ""):
             continue
-        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        if isinstance(raw, bool) or not isinstance(raw, int | float):
             raise RecipeError(f"{name} adjustment must be numeric")
         val = float(raw)
         if not math.isfinite(val) or val < lo or val > hi:
@@ -170,7 +176,7 @@ def normalize_recipe(recipe):
         raw = white_balance.get(name)
         if raw in (None, ""):
             continue
-        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        if isinstance(raw, bool) or not isinstance(raw, int | float):
             raise RecipeError(f"white_balance.{name} adjustment must be numeric")
         val = float(raw)
         if not math.isfinite(val) or val < lo or val > hi:
@@ -206,7 +212,7 @@ def _apply_adjustments(img, adjustments):
 
     Bridges PIL <-> numpy: promotes the image to RGB(A), runs the shared
     per-pixel pipeline in :mod:`tone` (linear-light exposure/white balance with
-    a highlight shoulder, then display-space contrast/saturation), and merges
+    a highlight shoulder, then display-space tonal/color controls), and merges
     any alpha channel back unchanged.
     """
     import numpy as np
@@ -224,7 +230,12 @@ def _apply_adjustments(img, adjustments):
 
     exposure = adjustments.get("exposure", 0.0)
     white_balance = adjustments.get("white_balance")
+    highlights = adjustments.get("highlights", 0.0)
+    shadows = adjustments.get("shadows", 0.0)
+    whites = adjustments.get("whites", 0.0)
+    blacks = adjustments.get("blacks", 0.0)
     contrast = adjustments.get("contrast", 0.0)
+    vibrance = adjustments.get("vibrance", 0.0)
     saturation = adjustments.get("saturation", 0.0)
 
     src = np.asarray(img)  # uint8, view onto the PIL buffer (no copy)
@@ -244,7 +255,12 @@ def _apply_adjustments(img, adjustments):
             tile[..., :3],
             exposure=exposure,
             white_balance=white_balance,
+            highlights=highlights,
+            shadows=shadows,
+            whites=whites,
+            blacks=blacks,
             contrast=contrast,
+            vibrance=vibrance,
             saturation=saturation,
         )
         out8[top:bottom, :, :3] = np.clip(adj * 255.0 + 0.5, 0, 255).astype(

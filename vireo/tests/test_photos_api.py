@@ -2052,9 +2052,14 @@ def test_edit_recipe_api_stores_adjustments(client_with_photo):
             "recipe": {
                 "adjustments": {
                     "exposure": 0.5,
+                    "highlights": -20,
+                    "shadows": 35,
+                    "whites": 12,
+                    "blacks": -8,
                     "contrast": 12,
                     "temperature": 25,
                     "tint": -8,
+                    "vibrance": 22,
                     "saturation": 18,
                 },
             },
@@ -2065,7 +2070,12 @@ def test_edit_recipe_api_stores_adjustments(client_with_photo):
     stored = db.get_photo_edit_recipe(photo_id)
     assert stored["adjustments"] == {
         "exposure": 0.5,
+        "highlights": -20.0,
+        "shadows": 35.0,
+        "whites": 12.0,
+        "blacks": -8.0,
         "contrast": 12.0,
+        "vibrance": 22.0,
         "saturation": 18.0,
         "white_balance": {
             "temperature": 25.0,
