@@ -35,22 +35,22 @@ See [CORE_PHILOSOPHY.md](CORE_PHILOSOPHY.md) for more.
 
 ## Getting started
 
+For downloads, system requirements, and user documentation, visit [vireo.photo](https://vireo.photo).
+
+AI models are downloaded automatically on first use.
+
+## Developing from source
+
 ### Requirements
 
 - Python 3.11+
 - A GPU is recommended for classification but not required
 
-### Install
+### Install for development
 
 ```bash
 git clone https://github.com/jss367/vireo.git
 cd vireo
-pip install -e .
-```
-
-For development:
-
-```bash
 pip install -e ".[dev]"
 ```
 
@@ -61,8 +61,6 @@ python vireo/app.py --db ~/.vireo/vireo.db --port 8080
 ```
 
 Then open [http://localhost:8080](http://localhost:8080).
-
-ML models are downloaded automatically from HuggingFace on first use.
 
 ## Tests
 
