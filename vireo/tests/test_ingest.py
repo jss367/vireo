@@ -344,6 +344,95 @@ def test_ingest_copies_files_to_date_folders(tmp_path):
     assert (dst / "2026" / "2026-03-28" / "photo.jpg").exists()
 
 
+def test_ingest_uses_metadata_dates_when_lightweight_exif_fails(
+    tmp_path, monkeypatch
+):
+    """ExifTool metadata keeps copied files split by capture date."""
+    import ingest as ingest_module
+    import metadata as metadata_module
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    files = ["a.jpg", "b.jpg"]
+    for i, name in enumerate(files):
+        Image.new("RGB", (100, 100), color=(i * 80, 0, 0)).save(str(src / name))
+        mtime = datetime(2026, 3, 30, 12, 0, 0).timestamp()
+        os.utime(str(src / name), (mtime, mtime))
+
+    monkeypatch.setattr(ingest_module, "read_exif_timestamp", lambda _path: None)
+
+    def fake_extract_metadata(paths, restricted_tags=None):
+        return {
+            str(src / "a.jpg"): {"EXIF": {"DateTimeOriginal": "2026:03:25 10:00:00"}},
+            str(src / "b.jpg"): {"EXIF": {"DateTimeOriginal": "2026:03:26 10:00:00"}},
+        }
+
+    monkeypatch.setattr(metadata_module, "extract_metadata", fake_extract_metadata)
+
+    db = Database(str(tmp_path / "test.db"))
+    result = ingest(str(src), str(dst), db=db)
+
+    assert result["copied"] == 2
+    assert (dst / "2026" / "2026-03-25" / "a.jpg").exists()
+    assert (dst / "2026" / "2026-03-26" / "b.jpg").exists()
+    assert not (dst / "2026" / "2026-03-30" / "a.jpg").exists()
+
+
+def test_ingest_skips_timestamp_resolution_for_duplicates(
+    tmp_path, monkeypatch
+):
+    """Duplicate-only re-imports must not trigger EXIF or ExifTool work."""
+    import ingest as ingest_module
+    import metadata as metadata_module
+    from scanner import compute_file_hash
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    files = ["a.jpg", "b.jpg"]
+    hashes = set()
+    for i, name in enumerate(files):
+        Image.new("RGB", (100, 100), color=(i * 80, 0, 0)).save(str(src / name))
+        hashes.add(compute_file_hash(str(src / name)))
+
+    exif_calls: list[str] = []
+    extract_calls: list[list[str]] = []
+
+    def tracking_read_exif(path):
+        exif_calls.append(path)
+        return None
+
+    def tracking_extract_metadata(paths, restricted_tags=None):
+        extract_calls.append(list(paths))
+        return {}
+
+    monkeypatch.setattr(ingest_module, "read_exif_timestamp", tracking_read_exif)
+    monkeypatch.setattr(
+        metadata_module, "extract_metadata", tracking_extract_metadata
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    result = ingest(
+        str(src),
+        str(dst),
+        db=db,
+        skip_duplicates=True,
+        extra_known_hashes=hashes,
+    )
+
+    assert result["copied"] == 0
+    assert result["skipped_duplicate"] == 2
+    # The duplicate gate short-circuits before any timestamp work runs,
+    # so neither the lightweight EXIF reader nor ExifTool is touched.
+    assert exif_calls == []
+    assert extract_calls == []
+
+
 def test_ingest_unsorted_fallback(tmp_path):
     """Files with no EXIF and no readable mtime go to unsorted/."""
     src = tmp_path / "sd_card"
@@ -386,6 +475,84 @@ def test_ingest_skip_duplicates(tmp_path):
     result2 = ingest(str(src), str(dst), db=db, skip_duplicates=True)
     assert result2["copied"] == 0
     assert result2["skipped_duplicate"] == 1
+
+
+def test_ingest_skip_duplicates_within_single_batch(tmp_path):
+    """Two byte-identical source files (different names) in one import are deduped.
+
+    Regression: the two-pass ingest (hash → partition → copy) must still
+    suppress intra-batch duplicates the way the prior single-pass loop
+    did, where each copied hash was visible to subsequent iterations.
+    """
+    import shutil
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    # Same bytes, two filenames. Different mtimes so a naive
+    # "different timestamp → different destination folder" path
+    # would copy both — only the hash check catches it.
+    Image.new("RGB", (100, 100), color="blue").save(str(src / "IMG_001.jpg"))
+    shutil.copyfile(str(src / "IMG_001.jpg"), str(src / "IMG_002.jpg"))
+    mtime_a = datetime(2026, 3, 28).timestamp()
+    mtime_b = datetime(2026, 4, 15).timestamp()
+    os.utime(str(src / "IMG_001.jpg"), (mtime_a, mtime_a))
+    os.utime(str(src / "IMG_002.jpg"), (mtime_b, mtime_b))
+
+    db = Database(str(tmp_path / "test.db"))
+    result = ingest(str(src), str(dst), db=db, skip_duplicates=True)
+
+    assert result["copied"] == 1
+    assert result["skipped_duplicate"] == 1
+    # Exactly one file on disk under dst.
+    on_disk = [p for p in dst.rglob("*") if p.is_file()]
+    assert len(on_disk) == 1
+
+
+def test_ingest_intra_batch_dup_retries_after_primary_failure(tmp_path):
+    """If the primary copy of a hash fails in pass 2, a byte-identical
+    sibling in the same batch still gets a chance to import the bytes.
+
+    Regression: when intra-batch dedup was eagerly marked in pass 1, a
+    failed primary copy left every byte-identical sibling permanently
+    skipped — no copy ever landed for that hash even though the user
+    asked for ``skip_duplicates=True`` (which only means "don't import
+    bytes I already have", not "give up if the first try fails").
+    """
+    import shutil
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    # Two byte-identical files; same mtime so they target the same date folder.
+    Image.new("RGB", (100, 100), color="green").save(str(src / "IMG_001.jpg"))
+    shutil.copyfile(str(src / "IMG_001.jpg"), str(src / "IMG_002.jpg"))
+    mtime = datetime(2026, 3, 28).timestamp()
+    os.utime(str(src / "IMG_001.jpg"), (mtime, mtime))
+    os.utime(str(src / "IMG_002.jpg"), (mtime, mtime))
+
+    # Squat the primary's destination path with a directory of the same
+    # name. shutil.copy2 (and compute_file_hash on the "dest_file")
+    # then raise IsADirectoryError, so the primary fails in pass 2.
+    dest_folder = dst / "2026" / "2026-03-28"
+    dest_folder.mkdir(parents=True)
+    (dest_folder / "IMG_001.jpg").mkdir()
+
+    db = Database(str(tmp_path / "test.db"))
+    result = ingest(str(src), str(dst), db=db, skip_duplicates=True)
+
+    assert result["failed"] == 1, result
+    assert result["copied"] == 1, result
+    assert result["skipped_duplicate"] == 0, result
+    # The sibling should have landed under the date folder.
+    files_on_disk = sorted(
+        p.name for p in dest_folder.iterdir() if p.is_file()
+    )
+    assert "IMG_002.jpg" in files_on_disk, files_on_disk
 
 
 def test_ingest_custom_folder_template(tmp_path):
@@ -1506,6 +1673,46 @@ def test_preview_destination_groups_by_date(tmp_path):
     assert by_path["2026/2026-03-25"]["exists"] is False
     assert "2026/2026-03-26" in by_path
     assert by_path["2026/2026-03-26"]["count"] == 1
+
+
+def test_preview_destination_uses_metadata_dates_when_lightweight_exif_fails(
+    tmp_path, monkeypatch
+):
+    """Preview keeps capture-date folders when ExifTool has the date."""
+    import ingest as ingest_module
+    import metadata as metadata_module
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    for name in ("a.jpg", "b.jpg"):
+        Image.new("RGB", (100, 100)).save(str(src / name))
+        mtime = datetime(2026, 3, 30, 12, 0, 0).timestamp()
+        os.utime(str(src / name), (mtime, mtime))
+
+    monkeypatch.setattr(ingest_module, "read_exif_timestamp", lambda _path: None)
+
+    def fake_extract_metadata(paths, restricted_tags=None):
+        return {
+            str(src / "a.jpg"): {"EXIF": {"DateTimeOriginal": "2026:03:25 10:00:00"}},
+            str(src / "b.jpg"): {"EXIF": {"DateTimeOriginal": "2026:03:26 10:00:00"}},
+        }
+
+    monkeypatch.setattr(metadata_module, "extract_metadata", fake_extract_metadata)
+
+    result = preview_destination(
+        sources=[str(src)],
+        destination=str(dst),
+        folder_template="%Y/%Y-%m-%d",
+    )
+
+    by_path = {f["path"]: f for f in result["folders"]}
+    assert result["total_folders"] == 2
+    assert by_path["2026/2026-03-25"]["count"] == 1
+    assert by_path["2026/2026-03-26"]["count"] == 1
+    assert "2026/2026-03-30" not in by_path
 
 
 def test_preview_destination_detects_existing_folders(tmp_path):

@@ -4,6 +4,7 @@ import contextlib
 import logging
 import os
 import posixpath
+import re
 import shutil
 import sys
 from datetime import datetime
@@ -137,6 +138,103 @@ def build_destination_path(exif_timestamp, template="%Y/%Y-%m-%d"):
     return result
 
 
+_EXIFTOOL_DT_RE = re.compile(
+    r"(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})"
+)
+
+
+def _parse_metadata_timestamp(value):
+    if not value:
+        return None
+    match = _EXIFTOOL_DT_RE.search(str(value))
+    if not match:
+        return None
+    try:
+        return datetime(
+            int(match.group(1)),
+            int(match.group(2)),
+            int(match.group(3)),
+            int(match.group(4)),
+            int(match.group(5)),
+            int(match.group(6)),
+        )
+    except ValueError:
+        return None
+
+
+def _metadata_capture_timestamp(metadata):
+    for group_name in ("EXIF", "XMP", "QuickTime", "Composite"):
+        group = metadata.get(group_name)
+        if not isinstance(group, dict):
+            continue
+        for key in (
+            "DateTimeOriginal",
+            "CreateDate",
+            "DateTimeDigitized",
+            "SubSecDateTimeOriginal",
+            "MediaCreateDate",
+            "TrackCreateDate",
+        ):
+            dt = _parse_metadata_timestamp(group.get(key))
+            if dt is not None:
+                return dt
+    return None
+
+
+def _source_file_timestamps(files):
+    """Resolve capture timestamps for source files.
+
+    Use the existing lightweight EXIF reader first. For files it cannot parse,
+    ask ExifTool in batches via metadata.extract_metadata, then fall back to
+    file modification time. This keeps date-folder planning aligned with the
+    richer metadata path used elsewhere in Vireo without requiring ExifTool
+    for the common JPEG/RAW fast path.
+    """
+    timestamps = {}
+    missing = []
+
+    for source_file in files:
+        exif_dt = None
+        with contextlib.suppress(OSError, ValueError):
+            exif_dt = read_exif_timestamp(str(source_file))
+        if exif_dt is None:
+            missing.append(source_file)
+        else:
+            timestamps[source_file] = exif_dt
+
+    if missing:
+        try:
+            from metadata import extract_metadata
+
+            metadata_by_path = extract_metadata(
+                [str(path) for path in missing],
+                restricted_tags=[
+                    "-DateTimeOriginal",
+                    "-CreateDate",
+                    "-DateTimeDigitized",
+                    "-SubSecDateTimeOriginal",
+                    "-MediaCreateDate",
+                    "-TrackCreateDate",
+                ],
+            )
+        except Exception:
+            log.debug(
+                "Could not read ExifTool metadata for import timestamps",
+                exc_info=True,
+            )
+            metadata_by_path = {}
+
+        for source_file in missing:
+            metadata = metadata_by_path.get(str(source_file), {})
+            exif_dt = _metadata_capture_timestamp(metadata)
+            if exif_dt is None:
+                with contextlib.suppress(OSError, ValueError, OverflowError):
+                    exif_dt = datetime.fromtimestamp(source_file.stat().st_mtime)
+            timestamps[source_file] = exif_dt
+
+    return timestamps
+
+
 def preview_destination(sources, destination, folder_template="%Y/%Y-%m-%d",
                         file_types="both", recursive=True, exclude_paths=None):
     """Dry-run preview of destination folder structure.
@@ -155,16 +253,10 @@ def preview_destination(sources, destination, folder_template="%Y/%Y-%m-%d",
         skip = set(exclude_paths)
         all_files = [f for f in all_files if str(f) not in skip]
 
+    timestamps = _source_file_timestamps(all_files)
     folder_counts = {}
     for source_file in all_files:
-        exif_dt = None
-        with contextlib.suppress(OSError, ValueError):
-            exif_dt = read_exif_timestamp(str(source_file))
-        if exif_dt is None:
-            with contextlib.suppress(OSError, ValueError, OverflowError):
-                exif_dt = datetime.fromtimestamp(source_file.stat().st_mtime)
-
-        rel_folder = build_destination_path(exif_dt, folder_template)
+        rel_folder = build_destination_path(timestamps.get(source_file), folder_template)
         if not rel_folder:
             rel_folder = "."
         folder_counts[rel_folder] = folder_counts.get(rel_folder, 0) + 1
@@ -435,38 +527,76 @@ def ingest(
     failed = 0
     copied_paths = []
     duplicate_folders: set[str] = set()
+    emitted = 0
 
-    for i, source_file in enumerate(files):
+    # Pass 1: hash each file and partition into duplicates vs. survivors.
+    # Timestamp resolution is deferred to Pass 2 so a duplicate-only
+    # re-import of a large card does not run the EXIF/ExifTool prepass on
+    # files we already have — the duplicate gate short-circuits first.
+    to_copy: list[tuple[Path, str]] = []
+    for source_file in files:
         try:
-            # Compute hash for duplicate detection
             file_hash = compute_file_hash(str(source_file))
+        except Exception as e:
+            log.warning("Failed to ingest %s: %s", source_file, e)
+            failed += 1
+            emitted += 1
+            if progress_callback:
+                progress_callback(emitted, total, source_file.name)
+            continue
 
-            if skip_duplicates and file_hash in known_hashes:
-                skipped_duplicate += 1
-                # Record every destination folder that holds a copy of
-                # this file, not just one. The pipeline uses this set
-                # verbatim as restrict_dirs, so if we only report one
-                # folder the others never get linked to the active
-                # workspace.
-                duplicate_folders.update(
-                    known_hash_folders.get(file_hash, ())
-                )
-                if progress_callback:
-                    progress_callback(i + 1, total, source_file.name)
-                continue
+        if skip_duplicates and file_hash in known_hashes:
+            skipped_duplicate += 1
+            # Record every destination folder that holds a copy of
+            # this file, not just one. The pipeline uses this set
+            # verbatim as restrict_dirs, so if we only report one
+            # folder the others never get linked to the active
+            # workspace.
+            duplicate_folders.update(
+                known_hash_folders.get(file_hash, ())
+            )
+            emitted += 1
+            if progress_callback:
+                progress_callback(emitted, total, source_file.name)
+            continue
 
-            # Determine destination folder from EXIF date
-            exif_dt = None
-            try:
-                exif_dt = read_exif_timestamp(str(source_file))
-            except (OSError, ValueError):
-                log.debug("Could not read EXIF timestamp from %s", source_file)
-            if exif_dt is None:
-                # Fall back to file modification time
-                with contextlib.suppress(OSError, ValueError, OverflowError):
-                    exif_dt = datetime.fromtimestamp(source_file.stat().st_mtime)
+        to_copy.append((source_file, file_hash))
 
-            rel_folder = build_destination_path(exif_dt, folder_template)
+    # Pass 2: resolve timestamps only for survivors and copy. Batching
+    # ExifTool across survivors keeps the fresh-card import fast for
+    # formats that lack lightweight EXIF (HEIC, video) without paying
+    # that cost for files the duplicate gate already rejected.
+    timestamps = _source_file_timestamps([s for s, _ in to_copy])
+
+    # Records the destination folder where each hash actually landed
+    # during this batch. Populated only when pass 2 marks a hash as
+    # known (successful copy or exact-match destination collision) so
+    # an intra-batch duplicate can report the correct post-import scan
+    # folder.
+    batch_dest_folders: dict[str, str] = {}
+
+    for source_file, file_hash in to_copy:
+        # Intra-batch dedup: a byte-identical sibling earlier in this
+        # batch already landed (or matched an existing destination
+        # file). Skip without re-copying. We intentionally defer this
+        # mark to pass 2 success rather than recording it in pass 1 —
+        # if the primary's copy fails (e.g. the destination filename
+        # collides with a directory of the same name), the sibling
+        # still gets a chance to import the bytes.
+        if skip_duplicates and file_hash in known_hashes:
+            skipped_duplicate += 1
+            dest = batch_dest_folders.get(file_hash)
+            if dest is not None:
+                duplicate_folders.add(dest)
+            emitted += 1
+            if progress_callback:
+                progress_callback(emitted, total, source_file.name)
+            continue
+
+        try:
+            rel_folder = build_destination_path(
+                timestamps.get(source_file), folder_template
+            )
             dest_folder = Path(destination_dir) / rel_folder
             dest_folder.mkdir(parents=True, exist_ok=True)
 
@@ -479,9 +609,11 @@ def ingest(
                     # Exact same file already there
                     skipped_duplicate += 1
                     known_hashes.add(file_hash)
+                    batch_dest_folders[file_hash] = str(dest_folder)
                     duplicate_folders.add(str(dest_folder))
+                    emitted += 1
                     if progress_callback:
-                        progress_callback(i + 1, total, source_file.name)
+                        progress_callback(emitted, total, source_file.name)
                     continue
                 # Different file, same name — add numeric suffix
                 stem = dest_file.stem
@@ -493,6 +625,7 @@ def ingest(
 
             shutil.copy2(str(source_file), str(dest_file))
             known_hashes.add(file_hash)
+            batch_dest_folders[file_hash] = str(dest_folder)
             copied_paths.append(str(dest_file))
             copied += 1
 
@@ -500,8 +633,9 @@ def ingest(
             log.warning("Failed to ingest %s: %s", source_file, e)
             failed += 1
 
+        emitted += 1
         if progress_callback:
-            progress_callback(i + 1, total, source_file.name)
+            progress_callback(emitted, total, source_file.name)
 
     return {
         "copied": copied,
