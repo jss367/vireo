@@ -6,7 +6,7 @@ import copy
 import json
 import math
 
-from PIL import Image, ImageEnhance
+from PIL import Image
 
 SCHEMA_VERSION = 1
 
@@ -183,19 +183,20 @@ def recipe_to_json(recipe):
     return json.dumps(normalized, sort_keys=True, separators=(",", ":"))
 
 
-def _clamp_channel(value):
-    return max(0, min(255, int(round(value))))
+def _apply_adjustments(img, adjustments):
+    """Apply tonal adjustments to a PIL image via the linear tone pipeline.
 
+    Bridges PIL <-> numpy: promotes the image to RGB(A), runs the shared
+    per-pixel pipeline in :mod:`tone` (linear-light exposure/white balance with
+    a highlight shoulder, then display-space contrast/saturation), and merges
+    any alpha channel back unchanged.
+    """
+    import numpy as np
 
-def _channel_lut(gain):
-    return [_clamp_channel(i * gain) for i in range(256)]
-
-
-def _apply_white_balance(img, white_balance):
-    temperature = float((white_balance or {}).get("temperature") or 0.0) / 100.0
-    tint = float((white_balance or {}).get("tint") or 0.0) / 100.0
-    if abs(temperature) < 1e-9 and abs(tint) < 1e-9:
-        return img
+    try:
+        from .tone import apply_adjustments
+    except ImportError:
+        from tone import apply_adjustments
 
     has_alpha = "A" in img.getbands() or "transparency" in img.info
     if img.mode not in ("RGB", "RGBA"):
@@ -203,22 +204,20 @@ def _apply_white_balance(img, white_balance):
     elif img.mode == "RGB" and "transparency" in img.info:
         img = img.convert("RGBA")
 
-    bands = img.split()
-    red_gain = 1.0 + (0.26 * temperature) + (0.06 * tint)
-    green_gain = 1.0 - (0.18 * tint)
-    blue_gain = 1.0 - (0.26 * temperature) + (0.06 * tint)
-    red_gain = max(0.05, red_gain)
-    green_gain = max(0.05, green_gain)
-    blue_gain = max(0.05, blue_gain)
-
-    adjusted = (
-        bands[0].point(_channel_lut(red_gain)),
-        bands[1].point(_channel_lut(green_gain)),
-        bands[2].point(_channel_lut(blue_gain)),
+    arr = np.asarray(img, dtype=np.float32) / 255.0
+    out = apply_adjustments(
+        arr[..., :3],
+        exposure=adjustments.get("exposure", 0.0),
+        white_balance=adjustments.get("white_balance"),
+        contrast=adjustments.get("contrast", 0.0),
+        saturation=adjustments.get("saturation", 0.0),
     )
-    if "A" in img.getbands():
-        return Image.merge("RGBA", adjusted + (bands[3],))
-    return Image.merge("RGB", adjusted)
+    out8 = np.clip(out * 255.0 + 0.5, 0, 255).astype(np.uint8)
+
+    if img.mode == "RGBA":
+        a8 = np.clip(arr[..., 3:4] * 255.0 + 0.5, 0, 255).astype(np.uint8)
+        return Image.fromarray(np.concatenate([out8, a8], axis=-1), "RGBA")
+    return Image.fromarray(out8, "RGB")
 
 
 def apply_recipe(img, recipe):
@@ -261,18 +260,8 @@ def apply_recipe(img, recipe):
         result = result.crop((left, top, right, bottom))
 
     adjustments = normalized.get("adjustments") or {}
-    if "white_balance" in adjustments:
-        result = _apply_white_balance(result, adjustments["white_balance"])
-    if "exposure" in adjustments:
-        result = ImageEnhance.Brightness(result).enhance(2 ** adjustments["exposure"])
-    if "contrast" in adjustments:
-        result = ImageEnhance.Contrast(result).enhance(
-            max(0.0, 1.0 + adjustments["contrast"] / 100.0)
-        )
-    if "saturation" in adjustments:
-        result = ImageEnhance.Color(result).enhance(
-            max(0.0, 1.0 + adjustments["saturation"] / 100.0)
-        )
+    if adjustments:
+        result = _apply_adjustments(result, adjustments)
 
     return result
 

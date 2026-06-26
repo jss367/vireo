@@ -686,6 +686,20 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   display: none;
 }
 .lb-mask-overlay.show { display: block; }
+/* GPU adjustment preview (Tier 3). Sits over #lightboxImg inside
+   .lightbox-transform so it inherits the same zoom + pan transform and
+   overlays the exact same pixels. Shown only while previewing slider edits. */
+.lb-tone-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 4px;
+  pointer-events: none;
+  display: none;
+}
+.lb-tone-canvas.show { display: block; }
 .lb-mask-controls {
   display: none;
   align-items: center;
@@ -3246,6 +3260,7 @@ async function createWorkspace() {
     <span class="lightbox-zoom-badge" id="lightboxZoomBadge" style="display:none;">1:1</span>
     <div class="lightbox-transform" id="lightboxTransform">
       <img id="lightboxImg" src="" alt="">
+      <canvas id="lightboxToneCanvas" class="lb-tone-canvas" aria-hidden="true"></canvas>
       <img id="lightboxMaskOverlay" class="lb-mask-overlay" src="" alt="">
       <div id="lightboxDetections" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></div>
       <div id="lightboxEye" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;display:none;"></div>
@@ -4166,6 +4181,203 @@ function _lbClearAdjustmentPreviewCss() {
   if (img) img.style.filter = '';
 }
 
+// --- Tier 3: GPU live preview -------------------------------------------------
+// WebGL transcription of vireo/tone.py. The CSS-filter preview above operates
+// in gamma-encoded sRGB and cannot express linear-light exposure or the
+// highlight rolloff, so when WebGL is available we render the adjustment
+// preview through this shader instead and it matches the server's tone.py
+// render. The shader math below MUST stay in sync with vireo/tone.py
+// (sRGB<->linear transfer, HIGHLIGHT_KNEE, white-balance gains, op order).
+var VireoToneGL = (function() {
+  var KNEE = 0.85; // == tone.HIGHLIGHT_KNEE
+  var canvas = null, gl = null, prog = null, tex = null, locs = null;
+  var texKey = null, failed = false;
+
+  var VERT = [
+    'attribute vec2 aPos;',
+    'varying vec2 vUv;',
+    'void main(){ vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }'
+  ].join('\n');
+
+  var FRAG = [
+    'precision highp float;',
+    'varying vec2 vUv;',
+    'uniform sampler2D uTex;',
+    'uniform float uExposure;',   // stops (linear gain = exp2(uExposure))
+    'uniform vec3 uWbGain;',      // per-channel linear gains
+    'uniform float uContrast;',   // display-space contrast factor about 0.5
+    'uniform float uSaturation;', // display-space luma-preserving factor
+    'uniform float uRolloff;',    // 1.0 -> apply highlight shoulder, else 0.0
+    'uniform float uKnee;',
+    'vec3 srgbToLinear(vec3 c){',
+    '  return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));',
+    '}',
+    'vec3 linearToSrgb(vec3 c){',
+    '  c = max(c, 0.0);',
+    '  return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));',
+    '}',
+    'float roll(float x){',
+    '  float h = 1.0 - uKnee;',
+    '  float o = max(x - uKnee, 0.0);',
+    '  float r = uKnee + h * (o / (o + h));',
+    '  return x > uKnee ? r : x;',
+    '}',
+    'void main(){',
+    '  vec3 lin = srgbToLinear(texture2D(uTex, vUv).rgb);',
+    '  lin *= exp2(uExposure);',
+    '  lin *= uWbGain;',
+    '  if (uRolloff > 0.5) { lin = vec3(roll(lin.r), roll(lin.g), roll(lin.b)); }',
+    '  vec3 disp = linearToSrgb(lin);',
+    '  disp = (disp - 0.5) * uContrast + 0.5;',
+    '  float luma = dot(disp, vec3(0.2126, 0.7152, 0.0722));',
+    '  disp = vec3(luma) + (disp - vec3(luma)) * uSaturation;',
+    '  gl_FragColor = vec4(clamp(disp, 0.0, 1.0), 1.0);',
+    '}'
+  ].join('\n');
+
+  function compile(type, src) {
+    var s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      console.warn('VireoToneGL shader compile error:', gl.getShaderInfoLog(s));
+      return null;
+    }
+    return s;
+  }
+
+  function init() {
+    if (gl) return true;
+    if (failed) return false;
+    canvas = document.getElementById('lightboxToneCanvas');
+    if (!canvas) { failed = true; return false; }
+    try {
+      var opts = { premultipliedAlpha: false, preserveDrawingBuffer: false };
+      gl = canvas.getContext('webgl', opts) || canvas.getContext('experimental-webgl', opts);
+    } catch (e) { gl = null; }
+    if (!gl) { failed = true; return false; }
+    var vs = compile(gl.VERTEX_SHADER, VERT);
+    var fs = compile(gl.FRAGMENT_SHADER, FRAG);
+    if (!vs || !fs) { failed = true; gl = null; return false; }
+    prog = gl.createProgram();
+    gl.attachShader(prog, vs);
+    gl.attachShader(prog, fs);
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      console.warn('VireoToneGL link error:', gl.getProgramInfoLog(prog));
+      failed = true; gl = null; return false;
+    }
+    gl.useProgram(prog);
+    var buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    var aPos = gl.getAttribLocation(prog, 'aPos');
+    gl.enableVertexAttribArray(aPos);
+    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+    tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    locs = {
+      tex: gl.getUniformLocation(prog, 'uTex'),
+      exposure: gl.getUniformLocation(prog, 'uExposure'),
+      wbGain: gl.getUniformLocation(prog, 'uWbGain'),
+      contrast: gl.getUniformLocation(prog, 'uContrast'),
+      saturation: gl.getUniformLocation(prog, 'uSaturation'),
+      rolloff: gl.getUniformLocation(prog, 'uRolloff'),
+      knee: gl.getUniformLocation(prog, 'uKnee')
+    };
+    gl.uniform1i(locs.tex, 0);
+    gl.uniform1f(locs.knee, KNEE);
+    return true;
+  }
+
+  function uploadSource(img) {
+    var w = img.naturalWidth, h = img.naturalHeight;
+    if (!w || !h) return false;
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    var key = img.currentSrc || img.src;
+    if (key !== texKey) {
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      try {
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+      } catch (e) {
+        console.warn('VireoToneGL texture upload failed:', e);
+        return false;
+      }
+      texKey = key;
+    }
+    return true;
+  }
+
+  return {
+    supported: function() { return init(); },
+    // Force a texture re-upload (call when the underlying image pixels change).
+    invalidate: function() { texKey = null; },
+    render: function(img, u) {
+      if (!init() || !uploadSource(img)) return false;
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.uniform1f(locs.exposure, u.exposure);
+      gl.uniform3f(locs.wbGain, u.wbGain[0], u.wbGain[1], u.wbGain[2]);
+      gl.uniform1f(locs.contrast, u.contrast);
+      gl.uniform1f(locs.saturation, u.saturation);
+      gl.uniform1f(locs.rolloff, u.rolloff ? 1.0 : 0.0);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      return true;
+    }
+  };
+})();
+
+// Dispatcher: prefer the GPU (linear-light, matches tone.py); fall back to the
+// approximate CSS-filter preview when WebGL is unavailable or upload fails.
+// Both work on the displayed image, which already has the saved recipe baked
+// in, so adjustments are previewed as a delta from the rendered values.
+function _lbApplyAdjustmentPreview(values) {
+  var img = document.getElementById('lightboxImg');
+  var canvas = document.getElementById('lightboxToneCanvas');
+  if (img && canvas && img.naturalWidth && VireoToneGL.supported()) {
+    var base = _lbRenderedAdjustmentValues || _lbAdjustmentValues(null);
+    var dExposure = Number(values.exposure || 0) - Number(base.exposure || 0);
+    var valGains = _lbWhiteBalanceGains(values.temperature, values.tint);
+    var baseGains = _lbWhiteBalanceGains(base.temperature, base.tint);
+    var wbGain = [
+      valGains.r / baseGains.r,
+      valGains.g / baseGains.g,
+      valGains.b / baseGains.b
+    ];
+    var dContrast = Math.max(0, 1 + Number(values.contrast || 0) / 100)
+      / Math.max(0.001, 1 + Number(base.contrast || 0) / 100);
+    var dSaturation = Math.max(0, 1 + Number(values.saturation || 0) / 100)
+      / Math.max(0.001, 1 + Number(base.saturation || 0) / 100);
+    // Roll highlights off only when the net change actually pushes values up,
+    // matching tone.apply_adjustments' gate so an un-pushed preview is a no-op.
+    var pushed = Math.pow(2, dExposure) * Math.max(wbGain[0], wbGain[1], wbGain[2]) > 1.000001;
+    var ok = VireoToneGL.render(img, {
+      exposure: dExposure,
+      wbGain: wbGain,
+      contrast: dContrast,
+      saturation: dSaturation,
+      rolloff: pushed
+    });
+    if (ok) {
+      img.style.filter = '';
+      canvas.classList.add('show');
+      return;
+    }
+  }
+  if (canvas) canvas.classList.remove('show');
+  _lbApplyAdjustmentPreviewCss(values);
+}
+
+function _lbClearAdjustmentPreview() {
+  var canvas = document.getElementById('lightboxToneCanvas');
+  if (canvas) canvas.classList.remove('show');
+  _lbClearAdjustmentPreviewCss();
+}
+
 function _lbBumpRecipeBust(photoId) {
   var key = String(photoId);
   _lbRecipeBustByPhotoId[key] = Date.now();
@@ -4214,7 +4426,10 @@ function _lbReloadEditedSource(photoId, seq) {
     img.removeEventListener('load', onEditedReload);
     if (_lightboxCurrentId !== photoId || seq !== _lbAdjustSeq) return;
     _lbRenderedAdjustmentValues = _lbAdjustmentValues(_lbEditRecipe);
-    _lbClearAdjustmentPreviewCss();
+    // The image just reloaded with the new render baked in; drop the cached
+    // GPU texture so the next preview re-uploads the fresh pixels.
+    VireoToneGL.invalidate();
+    _lbClearAdjustmentPreview();
     _lbRecomputeNativeZoom();
     _lbApplyTransform();
   });
@@ -4330,7 +4545,7 @@ function onLightboxAdjustmentInput(input) {
   _lbBumpAdjustmentInputSeq(_lightboxCurrentId);
   var values = _lbReadAdjustmentControls();
   _lbEditRecipe = _lbRecipeWithAdjustments(values);
-  _lbApplyAdjustmentPreviewCss(values);
+  _lbApplyAdjustmentPreview(values);
   _lbSetAdjustmentStatus('Previewing...');
   if (_lbAdjustSaveTimer) clearTimeout(_lbAdjustSaveTimer);
   _lbAdjustSaveTimer = setTimeout(function() {
@@ -4351,7 +4566,7 @@ function resetLightboxAdjustments() {
   _lbSetAdjustmentControl('lbAdjSaturation', 0);
   var values = _lbReadAdjustmentControls();
   _lbEditRecipe = _lbRecipeWithAdjustments(values);
-  _lbApplyAdjustmentPreviewCss(values);
+  _lbApplyAdjustmentPreview(values);
   _lbBumpAdjustmentInputSeq(_lightboxCurrentId);
   if (_lbAdjustSaveTimer) {
     clearTimeout(_lbAdjustSaveTimer);
@@ -5681,7 +5896,7 @@ function openLightbox(photoId, filename, photoList, options) {
     _lbAdjustSaveTimer = null;
   }
   _lbAdjustSeq += 1;
-  _lbClearAdjustmentPreviewCss();
+  _lbClearAdjustmentPreview();
   _lbRenderAdjustmentControls();
   _lbSetAdjustmentControlsDisabled(true);
   _lbSetAdjustmentStatus('');
@@ -6063,7 +6278,7 @@ function closeLightbox(e) {
   _lbClearPendingViewportRestore();
   if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
   _lbDesiredSrcKey = null;
-  _lbClearAdjustmentPreviewCss();
+  _lbClearAdjustmentPreview();
   var adjustPanel = document.getElementById('lightboxAdjustPanel');
   if (adjustPanel) adjustPanel.classList.remove('open');
   var adjustBtn = document.getElementById('lightboxAdjustBtn');
