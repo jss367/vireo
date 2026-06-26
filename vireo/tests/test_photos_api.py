@@ -2606,7 +2606,10 @@ def test_preview_honors_raw_marker_after_companion_bypass_retry_fails(
 
     assert first.status_code == 500
     assert second.status_code == 500
-    assert calls["count"] == 1
+    # First request: RAW load fails → companion fallback attempted → also
+    # fails → source marker stamped. Second request: the source marker
+    # short-circuits before any load_image call.
+    assert calls["count"] == 2
     row = db.conn.execute(
         """SELECT working_copy_failed_mtime, working_copy_failed_source
            FROM photos WHERE id=?""",
@@ -2785,6 +2788,81 @@ def test_preview_does_not_refresh_failure_marker_when_working_copy_jpeg_is_corru
         (photo_id,),
     ).fetchone()
     assert row["age_seconds"] is not None and row["age_seconds"] > 24 * 60 * 60
+
+
+def test_preview_falls_back_to_companion_on_first_raw_decode_failure(
+    client_with_photo, monkeypatch,
+):
+    """When an edited RAW+JPEG preview has no failure marker yet,
+    ``_recipe_render_source`` returns the RAW for highlight-preserving
+    decode. If libraw can't decode that RAW, the preview must try the
+    companion JPEG before 500ing — otherwise an unsupported RAW edit fails
+    even though a usable sidecar exists. Mirrors
+    serve_original_photo's edited-path companion fallback.
+    """
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+
+    raw_path = os.path.join(folder["path"], "bad.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(b"unsupported raw")
+    companion_abs = os.path.join(folder["path"], "bad.jpg")
+    Image.new("RGB", (1600, 1200), (40, 90, 180)).save(
+        companion_abs, "JPEG", quality=85,
+    )
+
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               companion_path='bad.jpg',
+               working_copy_path=NULL,
+               width=1600, height=1200,
+               working_copy_failed_at=NULL,
+               working_copy_failed_mtime=NULL,
+               working_copy_failed_source=NULL
+           WHERE id=?""",
+        (photo_id,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+
+    original_load_image = image_loader.load_image
+    loaded_paths = []
+
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        loaded_paths.append(file_path)
+        if str(file_path).lower().endswith(".nef"):
+            return None
+        return original_load_image(file_path, max_size=max_size, **kwargs)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert resp.mimetype == "image/jpeg"
+    # RAW first (preserve-highlights), then companion as fallback.
+    assert len(loaded_paths) == 2
+    assert str(loaded_paths[0]).lower().endswith(".nef")
+    assert str(loaded_paths[1]) == companion_abs
+
+    # The failed RAW decode must stamp the source marker so subsequent
+    # requests skip the slow RAW retry and _recipe_render_source selects
+    # the companion directly.
+    row = db.conn.execute(
+        "SELECT working_copy_failed_source FROM photos WHERE id=?",
+        (photo_id,),
+    ).fetchone()
+    assert row["working_copy_failed_source"] == "source"
 
 
 def test_original_skips_recent_failed_raw_working_copy(

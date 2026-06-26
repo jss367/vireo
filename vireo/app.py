@@ -18165,6 +18165,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
         img = load_image(canonical, max_size=load_max_size, **load_kwargs)
+        if img is None and selected_ext in RAW_EXTENSIONS:
+            # libraw couldn't decode this RAW (unsupported variant, corrupt
+            # file, no usable embedded JPEG). Try the companion JPEG before
+            # 500ing so a sidecar that can satisfy the preview isn't refused
+            # — mirrors the fallback in serve_original_photo's edited path.
+            companion_rel = photo["companion_path"]
+            if companion_rel:
+                companion_abs = os.path.join(folder_row["path"], companion_rel)
+                if (
+                    os.path.exists(companion_abs)
+                    and companion_abs != canonical
+                ):
+                    log.info(
+                        "RAW decode failed for photo %s preview at size=%s; "
+                        "falling back to companion JPEG",
+                        photo_id, size,
+                    )
+                    _record_working_copy_failure(db, photo, canonical)
+                    img = load_image(companion_abs, max_size=load_max_size)
+                    if img is not None:
+                        canonical = companion_abs
         if img is None:
             _record_working_copy_failure(db, photo, canonical)
             return "Could not load image", 500

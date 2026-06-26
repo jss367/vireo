@@ -877,6 +877,7 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
         # extract_working_copy is slow (RAW decode + JPEG encode); run it
         # before any DB write so no transaction is open while it runs.
         ok = extract_working_copy(source, wc_abs, max_size=wc_max_size, quality=wc_quality)
+        raw_failed_then_companion = False
         if not ok and primary_is_raw and companion_path:
             log.info(
                 "RAW working-copy extraction failed for photo %s (%s); "
@@ -892,15 +893,32 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
             ok = extract_working_copy(
                 source, wc_abs, max_size=wc_max_size, quality=wc_quality,
             )
+            raw_failed_then_companion = ok
         if ok:
-            db.conn.execute(
-                "UPDATE photos SET working_copy_path=?,"
-                " working_copy_failed_at=NULL,"
-                " working_copy_failed_mtime=NULL,"
-                " working_copy_failed_source=NULL"
-                " WHERE id=?",
-                (wc_rel, row["id"]),
-            )
+            if raw_failed_then_companion:
+                # The companion-derived working copy is usable, but request
+                # paths still need to know the RAW itself failed: edited RAW
+                # render paths (preview/edit-preview/original/export) gate
+                # companion selection in _recipe_render_source on a present
+                # "source" failure marker. Clearing it here would push those
+                # paths back through the unsupported RAW decode and 500.
+                db.conn.execute(
+                    "UPDATE photos SET working_copy_path=?,"
+                    " working_copy_failed_at=datetime('now'),"
+                    " working_copy_failed_mtime=?,"
+                    " working_copy_failed_source='source'"
+                    " WHERE id=?",
+                    (wc_rel, row["file_mtime"], row["id"]),
+                )
+            else:
+                db.conn.execute(
+                    "UPDATE photos SET working_copy_path=?,"
+                    " working_copy_failed_at=NULL,"
+                    " working_copy_failed_mtime=NULL,"
+                    " working_copy_failed_source=NULL"
+                    " WHERE id=?",
+                    (wc_rel, row["id"]),
+                )
         else:
             # Mark failure gated on current file_mtime so a future content
             # change (mtime bump) clears the gate and we retry. The

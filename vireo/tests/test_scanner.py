@@ -1645,6 +1645,21 @@ def test_scan_falls_back_to_companion_when_raw_extraction_fails(
     assert sources_used[0].endswith("IMG_002.nef")
     assert sources_used[1].endswith("IMG_002.jpg")
 
+    # The companion-derived working copy is set, but the source failure marker
+    # must remain so _recipe_render_source still allows companion selection for
+    # edited RAW renders. Without this, _has_current_working_copy_failure
+    # returns False, allow_companion stays False for the RAW primary, and the
+    # render paths retry the unsupported RAW and 500.
+    raw_row = db.conn.execute(
+        "SELECT working_copy_path, working_copy_failed_source,"
+        " working_copy_failed_at, working_copy_failed_mtime, file_mtime"
+        " FROM photos WHERE extension = '.nef'"
+    ).fetchone()
+    assert raw_row["working_copy_path"] is not None
+    assert raw_row["working_copy_failed_source"] == "source"
+    assert raw_row["working_copy_failed_at"] is not None
+    assert float(raw_row["working_copy_failed_mtime"]) == float(raw_row["file_mtime"])
+
 
 def test_scan_marks_source_failure_when_raw_and_companion_both_fail(
     tmp_path, monkeypatch,
