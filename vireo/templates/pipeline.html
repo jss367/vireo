@@ -2057,18 +2057,18 @@ async function previewDestinationFolders() {
     var parts = [data.total_photos + ' photo' + (data.total_photos !== 1 ? 's' : '')];
     parts.push(data.total_folders + ' folder' + (data.total_folders !== 1 ? 's' : ''));
     var detail = [];
-    if (newCount > 0) detail.push(newCount + ' new');
-    if (existCount > 0) detail.push(existCount + ' existing');
+    if (newCount > 0) detail.push(newCount + ' new folder' + (newCount !== 1 ? 's' : ''));
+    if (existCount > 0) detail.push(existCount + ' existing folder' + (existCount !== 1 ? 's' : ''));
     summaryDiv.textContent = parts.join(' \u2192 ') + (detail.length ? ' (' + detail.join(', ') + ')' : '');
 
     // Render folder list
     listDiv.innerHTML = data.folders.map(function(f) {
       var tag = f.exists
-        ? '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:var(--accent);color:#fff;margin-left:6px;">exists</span>'
-        : '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:var(--success,#28a745);color:#fff;margin-left:6px;">new</span>';
-      var label = f.path === '.' ? '(destination root)' : escapeHtml(f.path) + '/';
+        ? '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:var(--accent);color:#fff;margin-left:6px;white-space:nowrap;">Existing folder</span>'
+        : '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:var(--success,#28a745);color:#fff;margin-left:6px;white-space:nowrap;">New folder</span>';
+      var fullPath = f.full_path || (f.path === '.' ? destination : destination.replace(/\/$/, '') + '/' + f.path);
       return '<div style="padding:3px 0;display:flex;align-items:center;gap:4px;">'
-        + '<span style="font-family:monospace;color:var(--text-secondary);">' + label + '</span>'
+        + '<span title="' + escapeAttr(fullPath) + '" style="font-family:monospace;color:var(--text-secondary);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(fullPath) + '</span>'
         + tag
         + '<span style="color:var(--text-dim);margin-left:auto;">' + f.count + ' photo' + (f.count !== 1 ? 's' : '') + '</span>'
         + '</div>';
