@@ -477,6 +477,40 @@ def test_ingest_skip_duplicates(tmp_path):
     assert result2["skipped_duplicate"] == 1
 
 
+def test_ingest_skip_duplicates_within_single_batch(tmp_path):
+    """Two byte-identical source files (different names) in one import are deduped.
+
+    Regression: the two-pass ingest (hash → partition → copy) must still
+    suppress intra-batch duplicates the way the prior single-pass loop
+    did, where each copied hash was visible to subsequent iterations.
+    """
+    import shutil
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    # Same bytes, two filenames. Different mtimes so a naive
+    # "different timestamp → different destination folder" path
+    # would copy both — only the hash check catches it.
+    Image.new("RGB", (100, 100), color="blue").save(str(src / "IMG_001.jpg"))
+    shutil.copyfile(str(src / "IMG_001.jpg"), str(src / "IMG_002.jpg"))
+    mtime_a = datetime(2026, 3, 28).timestamp()
+    mtime_b = datetime(2026, 4, 15).timestamp()
+    os.utime(str(src / "IMG_001.jpg"), (mtime_a, mtime_a))
+    os.utime(str(src / "IMG_002.jpg"), (mtime_b, mtime_b))
+
+    db = Database(str(tmp_path / "test.db"))
+    result = ingest(str(src), str(dst), db=db, skip_duplicates=True)
+
+    assert result["copied"] == 1
+    assert result["skipped_duplicate"] == 1
+    # Exactly one file on disk under dst.
+    on_disk = [p for p in dst.rglob("*") if p.is_file()]
+    assert len(on_disk) == 1
+
+
 def test_ingest_custom_folder_template(tmp_path):
     """Custom folder template is used for organization."""
     src = tmp_path / "sd_card"

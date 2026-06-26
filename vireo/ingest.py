@@ -561,6 +561,14 @@ def ingest(
             continue
 
         to_copy.append((source_file, file_hash))
+        # Mark the survivor as known so a later byte-identical file in
+        # the same import (different name, or destined for a different
+        # subfolder) is caught by the duplicate gate above. The previous
+        # single-pass loop got this for free because it added each
+        # copied hash before processing the next file; the two-pass
+        # split must do it explicitly. Pass 2 also adds the hash on
+        # successful copy — the dual-write is harmless.
+        known_hashes.add(file_hash)
 
     # Pass 2: resolve timestamps only for survivors and copy. Batching
     # ExifTool across survivors keeps the fresh-card import fast for
