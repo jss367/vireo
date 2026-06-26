@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from tone import (
     HIGHLIGHT_KNEE,
     apply_adjustments,
+    apply_vibrance,
     highlight_rolloff,
     linear_to_srgb,
     srgb_to_linear,
@@ -106,3 +107,42 @@ def test_saturation_zero_is_grey_and_preserves_luma():
     out = apply_adjustments(rgb, saturation=-100.0)
     r, g, b = out[0, 0]
     assert abs(r - g) < 1e-3 and abs(g - b) < 1e-3  # fully desaturated -> grey
+
+
+def test_shadows_lift_dark_pixels_more_than_midtones():
+    rgb = np.array([[[0.12, 0.12, 0.12], [0.55, 0.55, 0.55]]], dtype=np.float32)
+    out = apply_adjustments(rgb, shadows=80)
+    dark_delta = float(out[0, 0, 0] - rgb[0, 0, 0])
+    mid_delta = float(out[0, 1, 0] - rgb[0, 1, 0])
+    assert dark_delta > mid_delta
+    assert dark_delta > 0
+
+
+def test_highlights_pull_bright_pixels_more_than_midtones():
+    rgb = np.array([[[0.55, 0.55, 0.55], [0.9, 0.9, 0.9]]], dtype=np.float32)
+    out = apply_adjustments(rgb, highlights=-80)
+    mid_delta = float(rgb[0, 0, 0] - out[0, 0, 0])
+    bright_delta = float(rgb[0, 1, 0] - out[0, 1, 0])
+    assert bright_delta > mid_delta
+    assert bright_delta > 0
+
+
+def test_whites_and_blacks_target_extreme_ranges():
+    rgb = np.array(
+        [[[0.05, 0.05, 0.05], [0.30, 0.30, 0.30], [0.85, 0.85, 0.85]]],
+        dtype=np.float32,
+    )
+    out = apply_adjustments(rgb, blacks=-80, whites=80)
+    assert out[0, 0, 0] < rgb[0, 0, 0]
+    assert abs(float(out[0, 1, 0] - rgb[0, 1, 0])) < 0.02
+    assert out[0, 2, 0] > rgb[0, 2, 0]
+
+
+def test_positive_vibrance_prefers_less_saturated_colors():
+    low = np.array([[[0.55, 0.50, 0.48]]], dtype=np.float32)
+    high = np.array([[[0.95, 0.20, 0.10]]], dtype=np.float32)
+    low_out = apply_vibrance(low, 80)
+    high_out = apply_vibrance(high, 80)
+    low_gain = float(np.max(low_out) - np.min(low_out)) / float(np.max(low) - np.min(low))
+    high_gain = float(np.max(high_out) - np.min(high_out)) / float(np.max(high) - np.min(high))
+    assert low_gain > high_gain

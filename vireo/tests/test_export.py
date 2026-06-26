@@ -171,7 +171,7 @@ def test_export_photos_applies_edit_recipe(export_env):
 
 
 def test_export_photos_applies_adjustment_recipe(export_env):
-    """export_photos applies exposure, white balance, contrast, and saturation."""
+    """export_photos applies stored adjustment recipes."""
     env = export_env
     Image.new("RGB", (80, 60), color=(100, 100, 100)).save(
         str(env["src"] / "bird1.jpg"), "JPEG", quality=95,

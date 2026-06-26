@@ -549,6 +549,8 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   right: 24px;
   top: 64px;
   width: min(320px, calc(100vw - 48px));
+  max-height: calc(100vh - 112px);
+  overflow-y: auto;
   padding: 12px;
   border-radius: 6px;
   background: rgba(0, 0, 0, 0.76);
@@ -3301,10 +3303,70 @@ async function createWorkspace() {
     <button class="lb-action-btn lb-action-accent" id="lightboxInspect" onclick="">
       Inspect Pipeline
     </button>
+    <button class="lb-action-btn lb-action-accent" id="lightboxAdjustBtn" onclick="event.stopPropagation(); toggleLightboxAdjustPanel();" title="Quick non-destructive adjustments">
+      Adjust
+    </button>
     <button class="lb-action-btn lb-action-accent" id="lightboxEditPhoto" onclick="">
       Edit Photo
     </button>
     <button class="lb-action-btn lb-action-danger" onclick="lightboxDelete()" title="Delete photo">Delete</button>
+  </div>
+  <div class="lightbox-adjust-panel" id="lightboxAdjustPanel" onclick="event.stopPropagation();">
+    <div class="lb-adjust-header">
+      <span>Adjustments</span>
+      <button class="lb-adjust-reset" type="button" onclick="resetLightboxAdjustments()">Reset</button>
+    </div>
+    <div class="lb-adjust-row">
+      <label for="lbAdjExposure">Exposure</label>
+      <input id="lbAdjExposure" data-adjustment="exposure" type="range" min="-5" max="5" step="0.1" value="0" oninput="onLightboxAdjustmentInput(this)">
+      <span class="lb-adjust-value" id="lbAdjExposureValue">0.0</span>
+    </div>
+    <div class="lb-adjust-row">
+      <label for="lbAdjHighlights">Highlights</label>
+      <input id="lbAdjHighlights" data-adjustment="highlights" type="range" min="-100" max="100" step="1" value="0" oninput="onLightboxAdjustmentInput(this)">
+      <span class="lb-adjust-value" id="lbAdjHighlightsValue">0</span>
+    </div>
+    <div class="lb-adjust-row">
+      <label for="lbAdjShadows">Shadows</label>
+      <input id="lbAdjShadows" data-adjustment="shadows" type="range" min="-100" max="100" step="1" value="0" oninput="onLightboxAdjustmentInput(this)">
+      <span class="lb-adjust-value" id="lbAdjShadowsValue">0</span>
+    </div>
+    <div class="lb-adjust-row">
+      <label for="lbAdjWhites">Whites</label>
+      <input id="lbAdjWhites" data-adjustment="whites" type="range" min="-100" max="100" step="1" value="0" oninput="onLightboxAdjustmentInput(this)">
+      <span class="lb-adjust-value" id="lbAdjWhitesValue">0</span>
+    </div>
+    <div class="lb-adjust-row">
+      <label for="lbAdjBlacks">Blacks</label>
+      <input id="lbAdjBlacks" data-adjustment="blacks" type="range" min="-100" max="100" step="1" value="0" oninput="onLightboxAdjustmentInput(this)">
+      <span class="lb-adjust-value" id="lbAdjBlacksValue">0</span>
+    </div>
+    <div class="lb-adjust-row">
+      <label for="lbAdjContrast">Contrast</label>
+      <input id="lbAdjContrast" data-adjustment="contrast" type="range" min="-100" max="100" step="1" value="0" oninput="onLightboxAdjustmentInput(this)">
+      <span class="lb-adjust-value" id="lbAdjContrastValue">0</span>
+    </div>
+    <div class="lb-adjust-row">
+      <label for="lbAdjTemperature">Temp</label>
+      <input id="lbAdjTemperature" data-adjustment="temperature" type="range" min="-100" max="100" step="1" value="0" oninput="onLightboxAdjustmentInput(this)">
+      <span class="lb-adjust-value" id="lbAdjTemperatureValue">0</span>
+    </div>
+    <div class="lb-adjust-row">
+      <label for="lbAdjTint">Tint</label>
+      <input id="lbAdjTint" data-adjustment="tint" type="range" min="-100" max="100" step="1" value="0" oninput="onLightboxAdjustmentInput(this)">
+      <span class="lb-adjust-value" id="lbAdjTintValue">0</span>
+    </div>
+    <div class="lb-adjust-row">
+      <label for="lbAdjVibrance">Vibrance</label>
+      <input id="lbAdjVibrance" data-adjustment="vibrance" type="range" min="-100" max="100" step="1" value="0" oninput="onLightboxAdjustmentInput(this)">
+      <span class="lb-adjust-value" id="lbAdjVibranceValue">0</span>
+    </div>
+    <div class="lb-adjust-row">
+      <label for="lbAdjSaturation">Saturation</label>
+      <input id="lbAdjSaturation" data-adjustment="saturation" type="range" min="-100" max="100" step="1" value="0" oninput="onLightboxAdjustmentInput(this)">
+      <span class="lb-adjust-value" id="lbAdjSaturationValue">0</span>
+    </div>
+    <div class="lb-adjust-status" id="lightboxAdjustStatus"></div>
   </div>
 </div>
 
@@ -3593,7 +3655,7 @@ function _vireoHashString(s) {
 // seeing the old bytes from their own browser cache until they expire.
 // test_edit_math_version_template_constant_matches_python locks the two
 // constants together.
-var _VIREO_EDIT_MATH_VERSION = 2;
+var _VIREO_EDIT_MATH_VERSION = 3;
 
 function _vireoEditRecipeCacheKey(recipe) {
   var normalized = _lbCloneEditRecipe(recipe);
@@ -4017,9 +4079,14 @@ function _lbAdjustmentValues(recipe) {
   var wb = adj.white_balance || {};
   return {
     exposure: Number(adj.exposure || 0),
+    highlights: Number(adj.highlights || 0),
+    shadows: Number(adj.shadows || 0),
+    whites: Number(adj.whites || 0),
+    blacks: Number(adj.blacks || 0),
     contrast: Number(adj.contrast || 0),
     temperature: Number(wb.temperature || adj.temperature || 0),
     tint: Number(wb.tint || adj.tint || 0),
+    vibrance: Number(adj.vibrance || 0),
     saturation: Number(adj.saturation || 0),
   };
 }
@@ -4048,9 +4115,14 @@ function _lbSetAdjustmentControl(id, value) {
 function _lbSetAdjustmentControlsDisabled(disabled) {
   [
     'lbAdjExposure',
+    'lbAdjHighlights',
+    'lbAdjShadows',
+    'lbAdjWhites',
+    'lbAdjBlacks',
     'lbAdjContrast',
     'lbAdjTemperature',
     'lbAdjTint',
+    'lbAdjVibrance',
     'lbAdjSaturation',
   ].forEach(function(id) {
     var input = document.getElementById(id);
@@ -4061,9 +4133,14 @@ function _lbSetAdjustmentControlsDisabled(disabled) {
 function _lbRenderAdjustmentControls() {
   var values = _lbAdjustmentValues(_lbEditRecipe);
   _lbSetAdjustmentControl('lbAdjExposure', values.exposure);
+  _lbSetAdjustmentControl('lbAdjHighlights', values.highlights);
+  _lbSetAdjustmentControl('lbAdjShadows', values.shadows);
+  _lbSetAdjustmentControl('lbAdjWhites', values.whites);
+  _lbSetAdjustmentControl('lbAdjBlacks', values.blacks);
   _lbSetAdjustmentControl('lbAdjContrast', values.contrast);
   _lbSetAdjustmentControl('lbAdjTemperature', values.temperature);
   _lbSetAdjustmentControl('lbAdjTint', values.tint);
+  _lbSetAdjustmentControl('lbAdjVibrance', values.vibrance);
   _lbSetAdjustmentControl('lbAdjSaturation', values.saturation);
 }
 
@@ -4074,9 +4151,14 @@ function _lbReadAdjustmentControls() {
   }
   return {
     exposure: val('lbAdjExposure'),
+    highlights: val('lbAdjHighlights'),
+    shadows: val('lbAdjShadows'),
+    whites: val('lbAdjWhites'),
+    blacks: val('lbAdjBlacks'),
     contrast: val('lbAdjContrast'),
     temperature: val('lbAdjTemperature'),
     tint: val('lbAdjTint'),
+    vibrance: val('lbAdjVibrance'),
     saturation: val('lbAdjSaturation'),
   };
 }
@@ -4085,7 +4167,7 @@ function _lbRecipeWithAdjustments(values) {
   var recipe = _lbCloneRecipe(_lbEditRecipe);
   delete recipe.version;
   var adj = _lbCloneRecipe(recipe.adjustments || {});
-  ['exposure', 'contrast', 'saturation'].forEach(function(key) {
+  ['exposure', 'highlights', 'shadows', 'whites', 'blacks', 'contrast', 'vibrance', 'saturation'].forEach(function(key) {
     var value = Number(values[key] || 0);
     if (Math.abs(value) > 0.000001) adj[key] = value;
     else delete adj[key];
@@ -4107,7 +4189,7 @@ function _lbRecipeWithAdjustments(values) {
   return recipe;
 }
 
-// Mirror image_edits._apply_white_balance: per-channel sRGB gains. Keep these
+// Mirror tone.white_balance_gains: per-channel linear-light gains. Keep these
 // coefficients in sync with the server so the live preview matches the render.
 function _lbWhiteBalanceGains(temperature, tint) {
   var t = Number(temperature || 0) / 100;
@@ -4162,6 +4244,24 @@ function _lbApplyAdjustmentPreviewCss(values) {
   var contrast = Math.max(0, 1 + Number(values.contrast || 0) / 100) / baseContrast;
   var baseSaturation = Math.max(0.001, 1 + Number(base.saturation || 0) / 100);
   var saturation = Math.max(0, 1 + Number(values.saturation || 0) / 100) / baseSaturation;
+  // CSS filters can't target tonal ranges, so the highlights/shadows/whites/
+  // blacks/vibrance sliders are folded into brightness/contrast/saturate as a
+  // directional cue. The GPU path is canonical when available; this only runs
+  // when WebGL is unavailable or uploadSource rejected the image.
+  var dHighlights = Number(values.highlights || 0) - Number(base.highlights || 0);
+  var dShadows = Number(values.shadows || 0) - Number(base.shadows || 0);
+  var dWhites = Number(values.whites || 0) - Number(base.whites || 0);
+  var dBlacks = Number(values.blacks || 0) - Number(base.blacks || 0);
+  var dVibrance = Number(values.vibrance || 0) - Number(base.vibrance || 0);
+  // Positive on any of the four lifts pixels toward white in its mask, so the
+  // net effect on average luma is a brightness shift; the denominator damps it
+  // because each slider only touches part of the tone range.
+  exposure *= Math.max(0, 1 + (dHighlights + dShadows + dWhites + dBlacks) / 400);
+  // Highlights/whites push the upper end up while shadows/blacks pull the
+  // lower end up, so their signed sum tracks apparent contrast.
+  contrast *= Math.max(0, 1 + (dHighlights + dWhites - dShadows - dBlacks) / 400);
+  // Vibrance is a gentler saturate(); weight smaller than saturation itself.
+  saturation *= Math.max(0, 1 + dVibrance / 200);
   // White balance: the displayed source already has the saved WB baked in, so
   // preview the delta as new-gain / rendered-gain per channel.
   var valGains = _lbWhiteBalanceGains(values.temperature, values.tint);
@@ -4216,7 +4316,12 @@ var VireoToneGL = (function() {
     'uniform sampler2D uTex;',
     'uniform float uExposure;',   // stops (linear gain = exp2(uExposure))
     'uniform vec3 uWbGain;',      // per-channel linear gains
+    'uniform float uHighlights;',
+    'uniform float uShadows;',
+    'uniform float uWhites;',
+    'uniform float uBlacks;',
     'uniform float uContrast;',   // display-space contrast factor about 0.5
+    'uniform float uVibrance;',
     'uniform float uSaturation;', // display-space luma-preserving factor
     'uniform float uRolloff;',    // 1.0 -> apply highlight shoulder, else 0.0
     'uniform float uKnee;',
@@ -4233,6 +4338,22 @@ var VireoToneGL = (function() {
     '  float r = uKnee + h * (o / (o + h));',
     '  return x > uKnee ? r : x;',
     '}',
+    'vec3 blendRange(vec3 rgb, float amount, float mask){',
+    '  float a = amount / 100.0;',
+    '  float m = abs(a) * mask;',
+    '  if (a > 0.0) return rgb + (vec3(1.0) - rgb) * m;',
+    '  return rgb - rgb * m;',
+    '}',
+    'vec3 applyVibrance(vec3 rgb, float amount){',
+    '  float a = amount / 100.0;',
+    '  if (abs(a) < 0.000001) return rgb;',
+    '  float l = dot(rgb, vec3(0.2126, 0.7152, 0.0722));',
+    '  float hi = max(max(rgb.r, rgb.g), rgb.b);',
+    '  float lo = min(min(rgb.r, rgb.g), rgb.b);',
+    '  float chroma = clamp(hi - lo, 0.0, 1.0);',
+    '  float factor = a > 0.0 ? 1.0 + a * (1.0 - chroma) * 0.85 : 1.0 + a * 0.65;',
+    '  return clamp(vec3(l) + (rgb - vec3(l)) * factor, 0.0, 1.0);',
+    '}',
     'void main(){',
     '  vec4 src = texture2D(uTex, vUv);',
     '  vec3 linPre = srgbToLinear(src.rgb);',
@@ -4248,7 +4369,21 @@ var VireoToneGL = (function() {
     '    lin = max(rolled, min(linPre, lin));',
     '  }',
     '  vec3 disp = linearToSrgb(lin);',
+    '  float rangeLuma = dot(disp, vec3(0.2126, 0.7152, 0.0722));',
+    '  if (abs(uShadows) > 0.000001) {',
+    '    disp = blendRange(disp, uShadows, (1.0 - smoothstep(0.05, 0.65, rangeLuma)) * 0.48);',
+    '  }',
+    '  if (abs(uHighlights) > 0.000001) {',
+    '    disp = blendRange(disp, uHighlights, smoothstep(0.35, 0.95, rangeLuma) * 0.42);',
+    '  }',
+    '  if (abs(uBlacks) > 0.000001) {',
+    '    disp = blendRange(disp, uBlacks, (1.0 - smoothstep(0.00, 0.30, rangeLuma)) * 0.34);',
+    '  }',
+    '  if (abs(uWhites) > 0.000001) {',
+    '    disp = blendRange(disp, uWhites, smoothstep(0.70, 1.00, rangeLuma) * 0.34);',
+    '  }',
     '  disp = (disp - 0.5) * uContrast + 0.5;',
+    '  disp = applyVibrance(disp, uVibrance);',
     '  float luma = dot(disp, vec3(0.2126, 0.7152, 0.0722));',
     '  disp = vec3(luma) + (disp - vec3(luma)) * uSaturation;',
     // Pass through the source alpha (don't force 1.0) so transparent or
@@ -4309,7 +4444,12 @@ var VireoToneGL = (function() {
       tex: gl.getUniformLocation(prog, 'uTex'),
       exposure: gl.getUniformLocation(prog, 'uExposure'),
       wbGain: gl.getUniformLocation(prog, 'uWbGain'),
+      highlights: gl.getUniformLocation(prog, 'uHighlights'),
+      shadows: gl.getUniformLocation(prog, 'uShadows'),
+      whites: gl.getUniformLocation(prog, 'uWhites'),
+      blacks: gl.getUniformLocation(prog, 'uBlacks'),
       contrast: gl.getUniformLocation(prog, 'uContrast'),
+      vibrance: gl.getUniformLocation(prog, 'uVibrance'),
       saturation: gl.getUniformLocation(prog, 'uSaturation'),
       rolloff: gl.getUniformLocation(prog, 'uRolloff'),
       knee: gl.getUniformLocation(prog, 'uKnee')
@@ -4362,7 +4502,12 @@ var VireoToneGL = (function() {
       gl.viewport(0, 0, canvas.width, canvas.height);
       gl.uniform1f(locs.exposure, u.exposure);
       gl.uniform3f(locs.wbGain, u.wbGain[0], u.wbGain[1], u.wbGain[2]);
+      gl.uniform1f(locs.highlights, u.highlights);
+      gl.uniform1f(locs.shadows, u.shadows);
+      gl.uniform1f(locs.whites, u.whites);
+      gl.uniform1f(locs.blacks, u.blacks);
       gl.uniform1f(locs.contrast, u.contrast);
+      gl.uniform1f(locs.vibrance, u.vibrance);
       gl.uniform1f(locs.saturation, u.saturation);
       gl.uniform1f(locs.rolloff, u.rolloff ? 1.0 : 0.0);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -4390,6 +4535,10 @@ function _lbApplyAdjustmentPreview(values) {
   if (img && canvas && img.naturalWidth && VireoToneGL.supported()) {
     var base = _lbRenderedAdjustmentValues || _lbAdjustmentValues(null);
     var dExposure = Number(values.exposure || 0) - Number(base.exposure || 0);
+    var dHighlights = Number(values.highlights || 0) - Number(base.highlights || 0);
+    var dShadows = Number(values.shadows || 0) - Number(base.shadows || 0);
+    var dWhites = Number(values.whites || 0) - Number(base.whites || 0);
+    var dBlacks = Number(values.blacks || 0) - Number(base.blacks || 0);
     var valGains = _lbWhiteBalanceGains(values.temperature, values.tint);
     var baseGains = _lbWhiteBalanceGains(base.temperature, base.tint);
     var wbGain = [
@@ -4399,6 +4548,7 @@ function _lbApplyAdjustmentPreview(values) {
     ];
     var dContrast = Math.max(0, 1 + Number(values.contrast || 0) / 100)
       / Math.max(0.001, 1 + Number(base.contrast || 0) / 100);
+    var dVibrance = Number(values.vibrance || 0) - Number(base.vibrance || 0);
     var dSaturation = Math.max(0, 1 + Number(values.saturation || 0) / 100)
       / Math.max(0.001, 1 + Number(base.saturation || 0) / 100);
     // Roll highlights off only when the net change actually pushes values up,
@@ -4407,7 +4557,12 @@ function _lbApplyAdjustmentPreview(values) {
     var ok = VireoToneGL.render(img, {
       exposure: dExposure,
       wbGain: wbGain,
+      highlights: dHighlights,
+      shadows: dShadows,
+      whites: dWhites,
+      blacks: dBlacks,
       contrast: dContrast,
+      vibrance: dVibrance,
       saturation: dSaturation,
       rolloff: pushed
     });
@@ -4609,9 +4764,14 @@ function resetLightboxAdjustments() {
     return;
   }
   _lbSetAdjustmentControl('lbAdjExposure', 0);
+  _lbSetAdjustmentControl('lbAdjHighlights', 0);
+  _lbSetAdjustmentControl('lbAdjShadows', 0);
+  _lbSetAdjustmentControl('lbAdjWhites', 0);
+  _lbSetAdjustmentControl('lbAdjBlacks', 0);
   _lbSetAdjustmentControl('lbAdjContrast', 0);
   _lbSetAdjustmentControl('lbAdjTemperature', 0);
   _lbSetAdjustmentControl('lbAdjTint', 0);
+  _lbSetAdjustmentControl('lbAdjVibrance', 0);
   _lbSetAdjustmentControl('lbAdjSaturation', 0);
   var values = _lbReadAdjustmentControls();
   _lbEditRecipe = _lbRecipeWithAdjustments(values);

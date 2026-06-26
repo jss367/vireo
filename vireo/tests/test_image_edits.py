@@ -91,9 +91,37 @@ def test_normalize_recipe_canonicalizes_white_balance():
     }
 
 
+def test_normalize_recipe_accepts_expanded_adjustments():
+    assert normalize_recipe(
+        {
+            "adjustments": {
+                "highlights": -20,
+                "shadows": 35,
+                "whites": 12,
+                "blacks": -8,
+                "vibrance": 25,
+            }
+        }
+    ) == {
+        "version": 1,
+        "adjustments": {
+            "highlights": -20.0,
+            "shadows": 35.0,
+            "whites": 12.0,
+            "blacks": -8.0,
+            "vibrance": 25.0,
+        },
+    }
+
+
 def test_normalize_recipe_rejects_invalid_white_balance():
     with pytest.raises(RecipeError, match="white_balance.temperature"):
         normalize_recipe({"adjustments": {"white_balance": {"temperature": 200}}})
+
+
+def test_normalize_recipe_rejects_invalid_expanded_adjustment():
+    with pytest.raises(RecipeError, match="highlights adjustment"):
+        normalize_recipe({"adjustments": {"highlights": 200}})
 
 
 def test_apply_recipe_rotates_flips_and_crops():
@@ -130,6 +158,36 @@ def test_apply_recipe_adjusts_exposure_white_balance_contrast_and_saturation():
     assert max(r, g, b) > 100
 
 
+def test_apply_recipe_adjusts_expanded_tone_controls():
+    img = Image.fromarray(
+        np.array(
+            [
+                [[35, 35, 35], [128, 110, 96], [230, 230, 230]],
+            ],
+            dtype=np.uint8,
+        ),
+        "RGB",
+    )
+
+    edited = apply_recipe(
+        img,
+        {
+            "adjustments": {
+                "shadows": 60,
+                "highlights": -60,
+                "whites": 30,
+                "blacks": -30,
+                "vibrance": 40,
+            },
+        },
+    )
+
+    dark, mid, bright = [edited.getpixel((x, 0)) for x in range(3)]
+    assert sum(dark) > 35 * 3
+    assert sum(bright) < 230 * 3
+    assert max(mid) - min(mid) > 128 - 96
+
+
 @pytest.mark.parametrize("mode", ["RGB", "RGBA"])
 def test_apply_recipe_tiling_matches_single_pass(mode, monkeypatch):
     """A multi-tile image must be byte-identical to a whole-frame pass.
@@ -149,8 +207,13 @@ def test_apply_recipe_tiling_matches_single_pass(mode, monkeypatch):
     recipe = {
         "adjustments": {
             "exposure": 1.3,
+            "highlights": -30,
+            "shadows": 45,
+            "whites": 15,
+            "blacks": -10,
             "contrast": 15,
             "white_balance": {"temperature": 40, "tint": -20},
+            "vibrance": 35,
             "saturation": 25,
         }
     }
@@ -165,7 +228,12 @@ def test_apply_recipe_tiling_matches_single_pass(mode, monkeypatch):
         arr[..., :3],
         exposure=1.3,
         white_balance={"temperature": 40, "tint": -20},
+        highlights=-30,
+        shadows=45,
+        whites=15,
+        blacks=-10,
         contrast=15,
+        vibrance=35,
         saturation=25,
     )
     ref8 = np.clip(ref_rgb * 255.0 + 0.5, 0, 255).astype(np.uint8)
