@@ -936,11 +936,12 @@ function renderCropBox() {
 }
 
 function markChanged(render) {
-  if (editorState.showBefore) editorState.showBefore = false;
+  var wasShowingBefore = editorState.showBefore;
+  if (wasShowingBefore) editorState.showBefore = false;
   updateFeedbackControls();
   updateDirtyState();
   renderCropBox();
-  if (render) schedulePreview();
+  if (render || wasShowingBefore) schedulePreview();
 }
 
 function rotateRecipe(delta) {
