@@ -9322,13 +9322,36 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # than source_path so a future change to source_path resolution
             # (working copy, companion JPEG fallback, etc.) cannot silently
             # bypass RAW_DECODE_PRESERVE_HIGHLIGHTS for a RAW primary.
-            raw_decode = (
-                RAW_DECODE_PRESERVE_HIGHLIGHTS
-                if os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
-                else None
+            primary_is_raw = (
+                os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
             )
+            raw_decode = RAW_DECODE_PRESERVE_HIGHLIGHTS if primary_is_raw else None
             load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
             img = load_image(source_path, max_size=None, **load_kwargs)
+            if img is None and primary_is_raw:
+                # libraw can't decode this RAW (unsupported variant, corrupt
+                # sensor data, no usable embedded JPEG). Fall back to the
+                # full-size companion JPEG so Open External still works for
+                # RAW+JPEG pairs that have a usable handoff JPEG. Cache key
+                # stays on the RAW source so a future RAW replacement (mtime
+                # bump) re-tries the RAW; we accept that companion-only edits
+                # won't invalidate this render — matching the cache contract
+                # used elsewhere for RAW-primary photos.
+                folder_path = folders.get(photo["folder_id"])
+                companion_path = photo["companion_path"]
+                if folder_path and companion_path:
+                    companion_abs = os.path.join(folder_path, companion_path)
+                    if (
+                        os.path.exists(companion_abs)
+                        and os.path.abspath(companion_abs)
+                        != os.path.abspath(source_path)
+                    ):
+                        log.info(
+                            "External-edit RAW decode failed for photo %s; "
+                            "falling back to companion JPEG %s",
+                            photo["id"], companion_abs,
+                        )
+                        img = load_image(companion_abs, max_size=None)
             if img is None:
                 return None, f"{photo['filename']}: failed to load image"
             rendered = None
@@ -11548,13 +11571,34 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # than source_path so a future change to source_path resolution
         # (working copy, companion JPEG fallback, etc.) cannot silently
         # bypass RAW_DECODE_PRESERVE_HIGHLIGHTS for a RAW primary.
-        raw_decode = (
-            RAW_DECODE_PRESERVE_HIGHLIGHTS
-            if os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
-            else None
+        primary_is_raw = (
+            os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
         )
+        raw_decode = RAW_DECODE_PRESERVE_HIGHLIGHTS if primary_is_raw else None
         load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
         img = load_image(source_path, max_size=None, **load_kwargs)
+        if img is None and primary_is_raw:
+            # Mirror _external_edit_handoff_path: libraw may fail to decode
+            # this RAW variant, but the full-size companion JPEG can still
+            # carry the recipe for iNaturalist. Without this fallback the
+            # upload silently fails for RAW+JPEG pairs whose RAW is
+            # unsupported. Cache key stays on the RAW source — see comment
+            # in _external_edit_handoff_path for the contract trade-off.
+            companion_path = photo["companion_path"]
+            folder_path = photo["folder_path"]
+            if folder_path and companion_path:
+                companion_abs = os.path.join(folder_path, companion_path)
+                if (
+                    os.path.exists(companion_abs)
+                    and os.path.abspath(companion_abs)
+                    != os.path.abspath(source_path)
+                ):
+                    log.info(
+                        "iNat upload RAW decode failed for photo %s; "
+                        "falling back to companion JPEG %s",
+                        photo["id"], companion_abs,
+                    )
+                    img = load_image(companion_abs, max_size=None)
         if img is None:
             return None, f"{photo['filename']}: failed to load image"
         rendered = None

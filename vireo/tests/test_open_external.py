@@ -149,6 +149,76 @@ def test_open_external_edit_recipe_avoids_capped_working_copy(
         assert img.size == (600, 800)
 
 
+def test_open_external_falls_back_to_companion_when_raw_decode_fails(
+    app_and_db, monkeypatch, tmp_path,
+):
+    """For edited RAW+JPEG pairs, the handoff render must fall back to the
+    full-size companion JPEG when libraw can't decode the RAW. Without the
+    fallback, Open External fails for any RAW variant the system can't decode
+    even though a usable JPEG handoff sits right next to it.
+    """
+    import image_loader
+    from PIL import Image
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    source_dir = tmp_path / "ext-raw"
+    source_dir.mkdir()
+    raw_path = source_dir / "bird.NEF"
+    raw_path.write_bytes(b"unsupported raw")
+    jpg_path = source_dir / "bird.JPG"
+    Image.new("RGB", (1200, 800), (60, 120, 200)).save(
+        str(jpg_path), "JPEG", quality=85,
+    )
+
+    fid = db.add_folder(str(source_dir), name="ext-raw")
+    pid = db.add_photo(
+        folder_id=fid, filename="bird.NEF", extension=".nef",
+        file_size=raw_path.stat().st_size,
+        file_mtime=raw_path.stat().st_mtime,
+        width=1200, height=800,
+    )
+    db.conn.execute(
+        "UPDATE photos SET companion_path=? WHERE id=?",
+        ("bird.JPG", pid),
+    )
+    db.set_photo_edit_recipe(pid, {"adjustments": {"exposure": 0.5}})
+    db.conn.commit()
+
+    real_load_image = image_loader.load_image
+    load_calls = []
+
+    def fake_load_image(path, *args, **kwargs):
+        load_calls.append(path)
+        # Simulate libraw refusing the RAW variant.
+        if path.lower().endswith(".nef"):
+            return None
+        return real_load_image(path, *args, **kwargs)
+
+    monkeypatch.setattr(image_loader, "load_image", fake_load_image)
+
+    client.post(
+        '/api/config',
+        data=json.dumps({"external_editor": "/usr/bin/gimp"}),
+        content_type='application/json',
+    )
+    launched = _patch_launchers(monkeypatch)
+
+    resp = client.post(
+        '/api/photos/open-external',
+        data=json.dumps({"photo_ids": [pid]}),
+        content_type='application/json',
+    )
+    assert resp.status_code == 200, resp.get_json()
+    # RAW was tried first, then the companion fallback succeeded.
+    assert any(p.lower().endswith(".nef") for p in load_calls), load_calls
+    assert any(p.lower().endswith(".jpg") for p in load_calls), load_calls
+    opened_path = launched[0][1][1]
+    assert os.path.exists(opened_path)
+    assert os.path.basename(os.path.dirname(opened_path)) == "external-edits"
+
+
 def test_open_external_returns_500_on_launch_failure(app_and_db, monkeypatch):
     """POST /api/photos/open-external returns 500 when launcher raises."""
     app, _ = app_and_db

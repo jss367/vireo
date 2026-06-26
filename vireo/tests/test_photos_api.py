@@ -2954,6 +2954,64 @@ def test_original_refreshes_failure_marker_when_stale_retry_fails(
     assert row["age_seconds"] is not None and row["age_seconds"] < 60
 
 
+def test_original_falls_back_to_companion_when_raw_extraction_fails(
+    client_with_photo, monkeypatch,
+):
+    """For a RAW+JPEG row whose RAW libraw can't decode, /photos/<id>/original
+    must use the full-size companion JPEG instead of returning 500.
+    _full_res_companion_path() already confirms a usable sidecar; bailing out
+    when the RAW alone fails throws away a request the system can satisfy.
+    """
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    folder_row = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    folder_path = folder_row["path"]
+
+    # Replace the JPEG with a RAW+JPEG pair so the row looks like RAW+companion.
+    raw_path = os.path.join(folder_path, "bad.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(b"unsupported raw")
+    companion_path = os.path.join(folder_path, "bad.JPG")
+    Image.new("RGB", (1600, 1200), (90, 140, 180)).save(
+        companion_path, "JPEG", quality=85,
+    )
+
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               companion_path=?,
+               working_copy_path=NULL,
+               working_copy_failed_at=NULL,
+               working_copy_failed_mtime=NULL,
+               working_copy_failed_source=NULL
+           WHERE id=?""",
+        ("bad.JPG", photo_id),
+    )
+    db.conn.commit()
+
+    real_extract = image_loader.extract_working_copy
+
+    def extract_only_companion(source, output, *args, **kwargs):
+        if source.lower().endswith(".nef"):
+            return False
+        return real_extract(source, output, *args, **kwargs)
+
+    monkeypatch.setattr(image_loader, "extract_working_copy", extract_only_companion)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/original")
+
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert resp.mimetype == "image/jpeg"
+
+
 def test_eviction_removes_oldest_files_when_over_quota(tmp_path, monkeypatch):
     """When writes push cache over quota, oldest-accessed entries are evicted."""
     import os

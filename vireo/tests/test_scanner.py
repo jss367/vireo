@@ -1646,6 +1646,58 @@ def test_scan_falls_back_to_companion_when_raw_extraction_fails(
     assert sources_used[1].endswith("IMG_002.jpg")
 
 
+def test_scan_marks_source_failure_when_raw_and_companion_both_fail(
+    tmp_path, monkeypatch,
+):
+    """When the RAW fails AND the companion fallback also fails, the failure
+    marker must stay 'source' so request paths
+    (_has_current_working_copy_failure) skip the slow RAW retry. Marking
+    'companion' here would silently un-shield request paths from the known
+    RAW failure: that helper explicitly ignores companion markers while both
+    files exist.
+    """
+    import config as cfg
+    import scanner
+    from db import Database
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+
+    nef_file = photo_dir / "IMG_003.nef"
+    nef_file.write_bytes(b"fake raw data")
+    jpg_file = photo_dir / "IMG_003.jpg"
+    Image.new("RGB", (6000, 4000), color=(0, 0, 255)).save(str(jpg_file), "JPEG")
+
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths: {})
+
+    def fake_extract(source, output, max_size=4096, quality=92):
+        # Both RAW and companion fail (e.g. RAW unsupported + companion
+        # write-locked or corrupt).
+        return False
+
+    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+
+    db = Database(str(vireo_dir / "test.db"))
+    scanner.scan(str(photo_dir), db, vireo_dir=str(vireo_dir))
+
+    raw_row = db.conn.execute(
+        "SELECT working_copy_path, working_copy_failed_source"
+        " FROM photos WHERE extension = '.nef'"
+    ).fetchone()
+    assert raw_row is not None
+    assert raw_row["working_copy_path"] is None
+    assert raw_row["working_copy_failed_source"] == "source", (
+        "RAW failure marker must remain 'source' so "
+        "_has_current_working_copy_failure honors it; got "
+        f"{raw_row['working_copy_failed_source']!r}"
+    )
+
+
 # --- _extract_timestamp tests ---
 
 def test_extract_timestamp_subsec():

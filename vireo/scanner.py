@@ -884,7 +884,11 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
                 row["id"], primary_path, companion_path,
             )
             source = companion_path
-            failure_source = "companion"
+            # Keep failure_source = "source": the RAW already failed, and
+            # _has_current_working_copy_failure ignores "companion" markers
+            # while both files exist — overwriting here would silently
+            # un-shield request paths from the known RAW failure if the
+            # companion extraction also fails.
             ok = extract_working_copy(
                 source, wc_abs, max_size=wc_max_size, quality=wc_quality,
             )
