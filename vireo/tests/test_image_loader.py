@@ -495,18 +495,21 @@ def test_load_image_does_not_retry_on_unsupported_format(tmp_path, monkeypatch):
     assert calls["n"] == 1  # no retry
 
 
-def test_is_excluded_scan_dir_matches_photo_library_bundles():
+def test_is_excluded_scan_dir_matches_app_managed_library_bundles():
     from image_loader import is_excluded_scan_dir
 
     assert is_excluded_scan_dir("Photos Library.photoslibrary")
+    assert is_excluded_scan_dir("Music Library.musiclibrary")
     assert is_excluded_scan_dir("Old Library.photolibrary")
     assert is_excluded_scan_dir("Aperture.aplibrary")
     assert is_excluded_scan_dir("PHOTOS LIBRARY.PHOTOSLIBRARY")  # case-insensitive
+    assert is_excluded_scan_dir("MUSIC LIBRARY.MUSICLIBRARY")  # case-insensitive
     assert is_excluded_scan_dir("Photo Booth Library")
     # Real photo folders must NOT be excluded.
     assert not is_excluded_scan_dir("2026")
     assert not is_excluded_scan_dir("Pictures")
     assert not is_excluded_scan_dir("photoslibrary_backup")  # not a suffix match
+    assert not is_excluded_scan_dir("musiclibrary_backup")  # not a suffix match
 
 
 def test_prune_scan_dirs_removes_in_place_and_reports():
@@ -547,9 +550,15 @@ def test_is_excluded_scan_path_matches_nested_paths():
     assert is_excluded_scan_path(
         "/Users/me/Photo Booth Library/Pictures/IMG.jpg"
     )
+    assert is_excluded_scan_path(
+        "/Users/me/Music/Music Library.musiclibrary/Library.musicdb"
+    )
     # Case-insensitive on the bundle component.
     assert is_excluded_scan_path(
         "/Users/me/PHOTOS LIBRARY.PHOTOSLIBRARY/originals"
+    )
+    assert is_excluded_scan_path(
+        "/Users/me/MUSIC LIBRARY.MUSICLIBRARY/Library.musicdb"
     )
     # Real photo folders must NOT be excluded.
     assert not is_excluded_scan_path("/Users/me/Pictures/2026/January")
@@ -557,6 +566,9 @@ def test_is_excluded_scan_path_matches_nested_paths():
     # Substring matches on non-bundle component names must NOT trigger.
     assert not is_excluded_scan_path(
         "/Users/me/Pictures/photoslibrary_backup/2024"
+    )
+    assert not is_excluded_scan_path(
+        "/Users/me/Music/musiclibrary_backup/2024"
     )
 
 
