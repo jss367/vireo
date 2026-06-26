@@ -1367,6 +1367,28 @@ def _migrate_edit_math_render_caches(app):
         ).fetchall()
         photo_ids = [row["photo_id"] for row in rows]
 
+        # Scan preview_dir once and group untracked preview files by photo id.
+        # The per-photo listdir would otherwise be O(N*M) (N edited photos x M
+        # preview files) and can spend minutes just rescanning the same
+        # directory on a large library before the server even starts.
+        edited_set = set(photo_ids)
+        untracked_previews_by_pid = {}
+        try:
+            for name in os.listdir(preview_dir):
+                if not name.endswith(".jpg"):
+                    continue
+                underscore = name.find("_")
+                if underscore <= 0:
+                    continue
+                try:
+                    file_pid = int(name[:underscore])
+                except ValueError:
+                    continue
+                if file_pid in edited_set:
+                    untracked_previews_by_pid.setdefault(file_pid, []).append(name)
+        except FileNotFoundError:
+            pass
+
         invalidated_previews = 0
         invalidated_thumbs = 0
         # If any unlink fails (locked file on Windows, transient permission
@@ -1396,15 +1418,13 @@ def _migrate_edit_math_render_caches(app):
                     (pid, size_value),
                 )
                 invalidated_previews += 1
-            try:
-                for name in os.listdir(preview_dir):
-                    if name.startswith(f"{pid}_") and name.endswith(".jpg"):
-                        try:
-                            os.remove(os.path.join(preview_dir, name))
-                        except OSError:
-                            purge_failed = True
-            except FileNotFoundError:
-                pass
+            for name in untracked_previews_by_pid.get(pid, ()):
+                path = os.path.join(preview_dir, name)
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except OSError:
+                    purge_failed = True
             thumb_cache = os.path.join(thumb_dir, f"{pid}.jpg")
             try:
                 if os.path.exists(thumb_cache):

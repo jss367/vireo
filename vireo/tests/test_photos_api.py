@@ -3953,6 +3953,77 @@ def test_external_edit_handoff_meta_includes_math_version(client_with_photo):
     assert meta.get("edit_math_version") == EDIT_MATH_VERSION
 
 
+def test_edit_math_version_migration_scans_preview_dir_once(
+    tmp_path, monkeypatch,
+):
+    """The migration must scan preview_dir once, not once per edited photo.
+    With N edited photos and M preview files the old per-photo os.listdir
+    was O(N*M) and could stall startup on large libraries — guard against
+    a regression by counting calls."""
+    import os
+    from types import SimpleNamespace
+
+    import app as app_module
+    from db import Database
+    from image_edits import EDIT_MATH_VERSION
+
+    vireo_dir = tmp_path / "vireo"
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir(parents=True)
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(tmp_path), name="photos")
+
+    edited_pids = []
+    for i in range(5):
+        pid = db.add_photo(
+            folder_id=fid, filename=f"edited_{i}.jpg", extension=".jpg",
+            file_size=100, file_mtime=0.0, width=40, height=30,
+        )
+        db.set_photo_edit_recipe(
+            pid, {"adjustments": {"exposure": 0.2 * (i + 1)}},
+        )
+        edited_pids.append(pid)
+        # An untracked preview file (not in preview_cache) so the migration
+        # actually exercises the listdir-driven orphan sweep.
+        (preview_dir / f"{pid}_640.jpg").write_bytes(b"\xff\xd8\xff\xe0junk")
+
+    db.set_meta("edit_math_version", str(EDIT_MATH_VERSION - 1))
+    db.conn.commit()
+    db.conn.close()
+
+    real_listdir = app_module.os.listdir
+    calls = []
+
+    def counting_listdir(path):
+        if os.path.abspath(path) == os.path.abspath(str(preview_dir)):
+            calls.append(path)
+        return real_listdir(path)
+
+    monkeypatch.setattr(app_module.os, "listdir", counting_listdir)
+
+    fake_app = SimpleNamespace(
+        config={"THUMB_CACHE_DIR": str(thumb_dir), "DB_PATH": db_path},
+    )
+    app_module._migrate_edit_math_render_caches(fake_app)
+
+    # One scan total, regardless of how many edited photos there are.
+    assert len(calls) == 1, calls
+    # And the orphans were actually purged.
+    for pid in edited_pids:
+        assert not (preview_dir / f"{pid}_640.jpg").exists()
+    db2 = Database(db_path)
+    try:
+        assert db2.get_meta("edit_math_version") == str(EDIT_MATH_VERSION)
+    finally:
+        db2.conn.close()
+
+
 def test_edit_math_version_migration_is_noop_on_fresh_db(tmp_path, monkeypatch):
     """A brand-new DB has no recipes and no stored version. The migration
     must just stamp the current version so the next deploy bumps cleanly."""
