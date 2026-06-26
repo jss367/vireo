@@ -4244,6 +4244,24 @@ function _lbApplyAdjustmentPreviewCss(values) {
   var contrast = Math.max(0, 1 + Number(values.contrast || 0) / 100) / baseContrast;
   var baseSaturation = Math.max(0.001, 1 + Number(base.saturation || 0) / 100);
   var saturation = Math.max(0, 1 + Number(values.saturation || 0) / 100) / baseSaturation;
+  // CSS filters can't target tonal ranges, so the highlights/shadows/whites/
+  // blacks/vibrance sliders are folded into brightness/contrast/saturate as a
+  // directional cue. The GPU path is canonical when available; this only runs
+  // when WebGL is unavailable or uploadSource rejected the image.
+  var dHighlights = Number(values.highlights || 0) - Number(base.highlights || 0);
+  var dShadows = Number(values.shadows || 0) - Number(base.shadows || 0);
+  var dWhites = Number(values.whites || 0) - Number(base.whites || 0);
+  var dBlacks = Number(values.blacks || 0) - Number(base.blacks || 0);
+  var dVibrance = Number(values.vibrance || 0) - Number(base.vibrance || 0);
+  // Positive on any of the four lifts pixels toward white in its mask, so the
+  // net effect on average luma is a brightness shift; the denominator damps it
+  // because each slider only touches part of the tone range.
+  exposure *= Math.max(0, 1 + (dHighlights + dShadows + dWhites + dBlacks) / 400);
+  // Highlights/whites push the upper end up while shadows/blacks pull the
+  // lower end up, so their signed sum tracks apparent contrast.
+  contrast *= Math.max(0, 1 + (dHighlights + dWhites - dShadows - dBlacks) / 400);
+  // Vibrance is a gentler saturate(); weight smaller than saturation itself.
+  saturation *= Math.max(0, 1 + dVibrance / 200);
   // White balance: the displayed source already has the saved WB baked in, so
   // preview the delta as new-gain / rendered-gain per channel.
   var valGains = _lbWhiteBalanceGains(values.temperature, values.tint);
