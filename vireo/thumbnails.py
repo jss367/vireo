@@ -123,19 +123,30 @@ def _recipe_source_path(photo, recipe, max_size, vireo_dir, folders):
             return get_canonical_image_path(photo, vireo_dir, folders)
         return os.path.join(folders.get(photo["folder_id"], ""), photo["filename"])
 
+    primary_is_raw = (
+        os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+    )
+
     canonical = get_canonical_image_path(photo, vireo_dir, folders)
     wc_rel = photo["working_copy_path"]
-    if not recipe.get("crop") and canonical and wc_rel:
-        wc_path = wc_rel if os.path.isabs(wc_rel) else os.path.join(vireo_dir, wc_rel)
-        if os.path.abspath(canonical) == os.path.abspath(wc_path):
-            return canonical
-    if recipe.get("crop") and wc_rel:
-        wc_path = os.path.join(vireo_dir, wc_rel)
-        if (
-            os.path.exists(wc_path)
-            and _path_satisfies_recipe_render(wc_path, photo, recipe, max_size)
-        ):
-            return canonical
+    # For RAW primaries, never short-circuit to a JPEG working copy or
+    # camera JPEG companion: legacy working copies predate the highlight-
+    # preserving RAW decode (and EDIT_MATH_VERSION's migration only purges
+    # preview/thumbnail caches, not working copies), and the companion JPEG
+    # is already clipped. Apply the recipe to the RAW so the thumbnail
+    # matches preview/export bytes.
+    if not primary_is_raw:
+        if not recipe.get("crop") and canonical and wc_rel:
+            wc_path = wc_rel if os.path.isabs(wc_rel) else os.path.join(vireo_dir, wc_rel)
+            if os.path.abspath(canonical) == os.path.abspath(wc_path):
+                return canonical
+        if recipe.get("crop") and wc_rel:
+            wc_path = os.path.join(vireo_dir, wc_rel)
+            if (
+                os.path.exists(wc_path)
+                and _path_satisfies_recipe_render(wc_path, photo, recipe, max_size)
+            ):
+                return canonical
 
     folder_path = folders.get(photo["folder_id"])
     if not folder_path:
@@ -145,19 +156,26 @@ def _recipe_source_path(photo, recipe, max_size, vireo_dir, folders):
                 return wc_path
         return ""
     companion_path = photo["companion_path"]
-    if companion_path:
+    original_abs = os.path.join(folder_path, photo["filename"])
+    # Allow companion substitution only for non-RAW primaries, or when the
+    # RAW source is known to fail extraction at its current mtime — same
+    # gate as app._recipe_render_source so the thumbnail/preview/export
+    # paths stay in sync.
+    allow_companion = not primary_is_raw or _has_current_raw_failure(
+        photo, original_abs,
+    )
+    if companion_path and allow_companion:
         companion = os.path.join(folder_path, companion_path)
         if (
             os.path.exists(companion)
             and _path_satisfies_recipe_render(companion, photo, recipe, max_size)
         ):
             return companion
-    original = os.path.join(folder_path, photo["filename"])
-    if not os.path.exists(original) and wc_rel:
+    if not os.path.exists(original_abs) and wc_rel:
         wc_path = os.path.join(vireo_dir, wc_rel)
         if os.path.exists(wc_path):
             return wc_path
-    return original
+    return original_abs
 
 
 def _has_current_raw_failure(photo, source_path):
