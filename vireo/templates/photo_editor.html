@@ -104,7 +104,7 @@ body {
   max-width: none;
   max-height: none;
 }
-.editor-canvas.show-before .crop-box { display: none; }
+.editor-canvas.show-before .crop-box { pointer-events: none; }
 #editorImg {
   display: block;
   max-width: min(100%, calc(100vw - 700px));
@@ -924,7 +924,9 @@ function renderCropBox() {
   var img = document.getElementById('editorImg');
   var box = document.getElementById('editorCropBox');
   if (!img || !box || !img.complete || !img.clientWidth || !img.clientHeight) return;
-  var crop = ensureCrop(editorState.recipe);
+  var crop = editorState.showBefore
+    ? Object.assign({x: 0, y: 0, w: 1, h: 1}, editorState.savedRecipe.crop || {})
+    : ensureCrop(editorState.recipe);
   box.style.left = (crop.x * img.clientWidth) + 'px';
   box.style.top = (crop.y * img.clientHeight) + 'px';
   box.style.width = (crop.w * img.clientWidth) + 'px';
