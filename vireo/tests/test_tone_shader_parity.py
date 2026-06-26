@@ -2,9 +2,16 @@
 
 The live preview in ``_navbar.html`` (``VireoToneGL``) is a GLSL transcription
 of :mod:`tone`. This test mirrors that GLSL arithmetic in numpy and asserts it
-reproduces ``tone.apply_adjustments`` for the first-edit case the shader is
-exact on (the displayed image has no baked adjustments, so the previewed
-"delta" equals the full recipe). If the two pipelines drift, this fails.
+reproduces ``tone.apply_adjustments`` for the **first-edit case only** — the
+displayed image has no baked adjustments (base == zeros), so the previewed
+"delta" equals the full recipe and the two pipelines must agree exactly.
+
+It deliberately does *not* claim parity for re-edits: there the preview applies
+a delta on top of already tone-mapped pixels, and the highlight rolloff /
+clamping are neither reversible nor associative, so the preview is only an
+approximation that snaps to the exact server render after save. We test the
+exact case because it's the one the two formulas are supposed to match; if they
+drift, that case fails.
 
 It can't execute the actual shader headlessly, but it locks the *formula*:
 sRGB<->linear transfer, the highlight-knee rolloff, the white-balance gains and
@@ -12,6 +19,7 @@ push-gate, and the display-space contrast/saturation — in the same order.
 """
 
 import os
+import re
 import sys
 
 import numpy as np
@@ -20,11 +28,23 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import tone
 
+NAVBAR = os.path.join(
+    os.path.dirname(__file__), '..', 'templates', '_navbar.html'
+)
+
 KNEE = 0.85  # must equal VireoToneGL KNEE and tone.HIGHLIGHT_KNEE
 
 
 def test_shader_knee_constant_matches_tone():
+    # The local KNEE used by _shader_mirror must equal the server constant...
     assert KNEE == tone.HIGHLIGHT_KNEE
+    # ...and the literal baked into the actual shader must match too, so the
+    # template can't silently drift away from tone.HIGHLIGHT_KNEE.
+    with open(NAVBAR, encoding='utf-8') as f:
+        src = f.read()
+    match = re.search(r'var\s+KNEE\s*=\s*([0-9.]+)\s*;', src)
+    assert match, 'could not find `var KNEE = ...;` in VireoToneGL'
+    assert float(match.group(1)) == tone.HIGHLIGHT_KNEE
 
 
 def _shader_mirror(c, exposure, wb_gain, contrast, saturation, rolloff):

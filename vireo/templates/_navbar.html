@@ -4223,7 +4223,8 @@ var VireoToneGL = (function() {
     '  return x > uKnee ? r : x;',
     '}',
     'void main(){',
-    '  vec3 lin = srgbToLinear(texture2D(uTex, vUv).rgb);',
+    '  vec4 src = texture2D(uTex, vUv);',
+    '  vec3 lin = srgbToLinear(src.rgb);',
     '  lin *= exp2(uExposure);',
     '  lin *= uWbGain;',
     '  if (uRolloff > 0.5) { lin = vec3(roll(lin.r), roll(lin.g), roll(lin.b)); }',
@@ -4231,7 +4232,11 @@ var VireoToneGL = (function() {
     '  disp = (disp - 0.5) * uContrast + 0.5;',
     '  float luma = dot(disp, vec3(0.2126, 0.7152, 0.0722));',
     '  disp = vec3(luma) + (disp - vec3(luma)) * uSaturation;',
-    '  gl_FragColor = vec4(clamp(disp, 0.0, 1.0), 1.0);',
+    // Pass through the source alpha (don't force 1.0) so transparent or
+    // semi-transparent sources preview correctly, matching tone.py which
+    // merges alpha back unchanged. Lightbox images are opaque JPEGs in
+    // practice, so src.a == 1.0 there and the common case is unchanged.
+    '  gl_FragColor = vec4(clamp(disp, 0.0, 1.0), src.a);',
     '}'
   ].join('\n');
 
@@ -4347,10 +4352,19 @@ var VireoToneGL = (function() {
   };
 })();
 
-// Dispatcher: prefer the GPU (linear-light, matches tone.py); fall back to the
-// approximate CSS-filter preview when WebGL is unavailable or upload fails.
-// Both work on the displayed image, which already has the saved recipe baked
-// in, so adjustments are previewed as a delta from the rendered values.
+// Dispatcher: prefer the GPU (linear-light, same formula as tone.py); fall back
+// to the cruder CSS-filter preview when WebGL is unavailable or upload fails.
+// Both work on the *displayed* image, which already has the saved recipe baked
+// in, so adjustments are previewed as a delta applied on top of the rendered
+// values.
+//
+// Parity caveat: the GPU preview reproduces tone.py exactly only for a first
+// edit (no baked adjustments, base == zeros) — then the delta equals the full
+// recipe. For a re-edit the delta is applied to already tone-mapped pixels, and
+// highlight rolloff / clamping are neither reversible nor associative, so the
+// preview is an approximation that snaps to the exact server render once the
+// recipe is saved and the image is re-fetched. test_tone_shader_parity asserts
+// only the first-edit (exact) case for that reason.
 function _lbApplyAdjustmentPreview(values) {
   var img = document.getElementById('lightboxImg');
   var canvas = document.getElementById('lightboxToneCanvas');
