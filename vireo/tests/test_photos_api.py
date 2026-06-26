@@ -2146,6 +2146,12 @@ def test_photo_editor_page_renders(client_with_photo):
     assert "Photo Editor" in html
     assert "Edit History" in html
     assert "Save Changes" in html
+    assert "Feedback" in html
+    assert "histogramCanvas" in html
+    assert "shadowClipValue" in html
+    assert "highlightClipValue" in html
+    assert "Before" in html
+    assert "100%" in html
 
 
 def test_photo_edit_history_endpoint_lists_recipe_checkpoints(client_with_photo):
