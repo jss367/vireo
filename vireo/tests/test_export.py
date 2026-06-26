@@ -336,6 +336,7 @@ def test_export_falls_back_to_companion_when_raw_decode_fails(
     demosaic the RAW.
     """
     import export as export_module
+    from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS
 
     env = export_env
     db = env["db"]
@@ -382,6 +383,12 @@ def test_export_falls_back_to_companion_when_raw_decode_fails(
     # RAW first (preserve-highlights), then companion as fallback.
     assert len(load_calls) == 2
     assert load_calls[0][0].lower().endswith(".nef")
+    # The failed RAW attempt must still request preserve-highlights so the
+    # fallback path can't quietly downgrade the RAW-first contract by
+    # passing the default JPEG-first decode mode.
+    assert (
+        load_calls[0][1].get("raw_decode") == RAW_DECODE_PRESERVE_HIGHLIGHTS
+    )
     assert load_calls[1][0].lower().endswith(".jpg")
     # The fallback companion load must NOT pass raw_decode (it's a JPEG).
     assert "raw_decode" not in load_calls[1][1]

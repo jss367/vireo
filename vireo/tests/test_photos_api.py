@@ -1891,9 +1891,15 @@ def test_edited_original_uses_trusted_working_copy_when_source_missing(
         assert img.size == (600, 800)
 
 
-def test_edited_original_does_not_use_companion_after_raw_failure_marker(
+def test_edited_original_uses_companion_after_raw_failure_marker(
     client_with_photo, monkeypatch,
 ):
+    """When the scanner has marked the RAW as failed for the current mtime,
+    the edited original endpoint must route through the full-resolution
+    companion JPEG instead of returning 500. Otherwise the same photo
+    that already rendered via the companion fallback once would stop
+    serving on every subsequent request until the marker expires —
+    exactly what _recipe_render_source already prevents for previews."""
     import image_loader
 
     app, db, photo_id = client_with_photo
@@ -1921,16 +1927,18 @@ def test_edited_original_does_not_use_companion_after_raw_failure_marker(
     original_load_image = image_loader.load_image
     loaded_paths = []
 
-    def tracking_load_image(file_path, max_size=1024):
-        loaded_paths.append(file_path)
-        return original_load_image(file_path, max_size=max_size)
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        loaded_paths.append(str(file_path))
+        return original_load_image(file_path, max_size=max_size, **kwargs)
 
     monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
 
     rendered = client.get(f"/photos/{photo_id}/original")
 
-    assert rendered.status_code == 500
-    assert loaded_paths == []
+    assert rendered.status_code == 200, rendered.data
+    # The endpoint must skip the failed RAW and load the companion JPEG.
+    assert len(loaded_paths) == 1
+    assert loaded_paths[0].lower().endswith(".jpg")
 
 
 def test_edited_original_decodes_raw_with_highlight_preservation(

@@ -1850,6 +1850,48 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         {"raw_decode": raw_decode} if raw_decode else {}
                     )
                     img = load_image(canonical, max_size=load_max_size, **load_kwargs)
+                    if (
+                        img is None
+                        and os.path.splitext(canonical)[1].lower() in _RAW_EXTENSIONS
+                    ):
+                        # Mirror serve_preview's cache-miss fallback: libraw
+                        # couldn't decode this RAW, so try the companion JPEG
+                        # before counting the photo as failed and leaving the
+                        # warmed cache cold. Record the source failure so
+                        # future _recipe_render_source calls (preview, edit-
+                        # preview, original) route through the companion
+                        # instead of retrying the failed RAW.
+                        companion_rel = detail_photo["companion_path"]
+                        folder_path = folders.get(detail_photo["folder_id"])
+                        if companion_rel and folder_path:
+                            companion_abs = os.path.join(folder_path, companion_rel)
+                            if (
+                                os.path.exists(companion_abs)
+                                and companion_abs != canonical
+                            ):
+                                log.info(
+                                    "RAW decode failed for photo %s pipeline "
+                                    "preview at size=%s; falling back to "
+                                    "companion JPEG",
+                                    detail_photo["id"], max_size,
+                                )
+                                file_mtime = detail_photo["file_mtime"]
+                                if file_mtime is not None:
+                                    with contextlib.suppress(Exception):
+                                        thread_db.conn.execute(
+                                            "UPDATE photos SET"
+                                            " working_copy_failed_at=datetime('now'),"
+                                            " working_copy_failed_mtime=?,"
+                                            " working_copy_failed_source='source'"
+                                            " WHERE id=?",
+                                            (file_mtime, detail_photo["id"]),
+                                        )
+                                        commit_with_retry(thread_db.conn)
+                                img = load_image(
+                                    companion_abs, max_size=load_max_size,
+                                )
+                                if img is not None:
+                                    canonical = companion_abs
                     if img:
                         if recipe:
                             img = apply_recipe_to_loaded_image(
