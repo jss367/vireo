@@ -283,21 +283,60 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
             )
             load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
             img = load_image(source_path, max_size=load_max_size, **load_kwargs)
-            if img is None and source_is_raw:
-                # RAW decode failed (unsupported sensor, corrupt file, etc.).
-                # The previously rejected companion JPEG is still a usable
-                # fallback even though its highlights are clipped — a
-                # rendered camera JPEG beats a failed export.
-                companion_fallback = _companion_can_satisfy_export(
-                    photo, folder_path, recipe, max_size,
-                    exif_data=exif_data, skip_raw_primary=False,
-                )
-                if companion_fallback:
-                    log.info(
-                        "RAW decode failed for %s; falling back to companion JPEG",
-                        photo["filename"],
+            if source_is_raw:
+                # RAW decode either failed outright (`img is None`) or
+                # silently fell back to the embedded JPEG. ``_load_raw``
+                # returns ``raw.extract_thumb()`` when libraw cannot
+                # demosaic the RAW; that preview can be much smaller than
+                # the full-size companion JPEG, so the export would
+                # quietly produce undersized bytes for unsupported RAW+JPEG
+                # files. Compare the loaded long edge to the source's
+                # expected dimensions (capped by ``load_max_size`` when
+                # set) and prefer the companion when the RAW result is
+                # smaller.
+                needs_companion = img is None
+                expected_long = 0
+                if img is not None:
+                    orig_w, orig_h = _recipe_source_dimensions(photo, exif_data)
+                    expected_long = max(orig_w, orig_h)
+                    if load_max_size and (
+                        expected_long == 0 or expected_long > load_max_size
+                    ):
+                        expected_long = load_max_size
+                    if expected_long > 0 and max(img.size) < expected_long:
+                        needs_companion = True
+                if needs_companion:
+                    companion_fallback = _companion_can_satisfy_export(
+                        photo, folder_path, recipe, max_size,
+                        exif_data=exif_data, skip_raw_primary=False,
                     )
-                    img = load_image(companion_fallback, max_size=load_max_size)
+                    if companion_fallback:
+                        companion_img = load_image(
+                            companion_fallback, max_size=load_max_size,
+                        )
+                        if companion_img is not None and (
+                            img is None
+                            or max(companion_img.size) > max(img.size)
+                        ):
+                            if img is None:
+                                log.info(
+                                    "RAW decode failed for %s; falling back "
+                                    "to companion JPEG",
+                                    photo["filename"],
+                                )
+                            else:
+                                log.info(
+                                    "RAW decode fell back to undersized "
+                                    "embedded JPEG (%dx%d, expected %d on "
+                                    "long edge) for %s; using companion "
+                                    "JPEG instead",
+                                    img.size[0], img.size[1], expected_long,
+                                    photo["filename"],
+                                )
+                                img.close()
+                            img = companion_img
+                        elif companion_img is not None:
+                            companion_img.close()
             if img is None:
                 errors.append(f"{photo['filename']}: failed to load image")
                 if progress_cb:

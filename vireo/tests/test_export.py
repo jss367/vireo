@@ -394,6 +394,134 @@ def test_export_falls_back_to_companion_when_raw_decode_fails(
     assert "raw_decode" not in load_calls[1][1]
 
 
+def test_export_falls_back_to_companion_when_raw_returns_undersized_image(
+    export_env, monkeypatch,
+):
+    """Undersized RAW results (embedded preview) trigger the companion fallback.
+
+    ``image_loader._load_raw`` returns ``raw.extract_thumb()`` when libraw
+    cannot demosaic the RAW. That preview can be much smaller than the
+    full-size companion JPEG, so a non-None ``img`` here would silently
+    produce a downscaled export. Compare against the source's expected
+    long edge and prefer the companion when the RAW result falls short.
+    """
+    import export as export_module
+
+    env = export_env
+    db = env["db"]
+    raw_path = env["src"] / "source.NEF"
+    raw_path.write_bytes(b"\x00")
+    # Overwrite the fixture's 800x600 JPEG with a full-size companion so
+    # _companion_can_satisfy_export accepts it for a crop against the
+    # 6000x4000 source.
+    Image.new("RGB", (6000, 4000), color="green").save(
+        str(env["src"] / "bird1.jpg"), "JPEG", quality=85,
+    )
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path='bird1.jpg',
+               working_copy_path=NULL,
+               width=6000, height=4000
+           WHERE id=?""",
+        (env["p1"],),
+    )
+    db.conn.commit()
+    # Crop recipe so load_max_size is None and we ask for the full source.
+    db.set_photo_edit_recipe(
+        env["p1"],
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
+    )
+
+    load_calls = []
+
+    def fake_load_image(file_path, max_size=1024, **kwargs):
+        load_calls.append((str(file_path), kwargs))
+        if str(file_path).lower().endswith(".nef"):
+            # Stand in for _load_raw returning an undersized embedded JPEG
+            # when libraw fails to demosaic the RAW.
+            return Image.new("RGB", (1600, 1067), color="red")
+        # Companion JPEG is the actual full-size source.
+        return Image.new("RGB", (6000, 4000), color="green")
+
+    monkeypatch.setattr(export_module, "load_image", fake_load_image)
+
+    result = export_photos(
+        db=db,
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={
+            "naming_template": "{original}",
+            # No max_size so the recipe's crop runs against the full source.
+        },
+    )
+
+    assert result["exported"] == 1
+    assert result["errors"] == []
+    # RAW first (preserve-highlights), companion as fallback since the RAW
+    # load returned an undersized result.
+    assert len(load_calls) == 2
+    assert load_calls[0][0].lower().endswith(".nef")
+    assert load_calls[1][0].lower().endswith(".jpg")
+    # Final export must be the full-resolution cropped output (3000x2000),
+    # not the downscaled embedded preview's crop (800x533).
+    with Image.open(os.path.join(env["dest"], "source.jpg")) as img:
+        assert img.size == (3000, 2000)
+
+
+def test_export_keeps_raw_when_decode_succeeds_at_full_size(
+    export_env, monkeypatch,
+):
+    """A successful preserve-highlights RAW decode is not replaced by companion."""
+    import export as export_module
+
+    env = export_env
+    db = env["db"]
+    raw_path = env["src"] / "source.NEF"
+    raw_path.write_bytes(b"\x00")
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path='bird1.jpg',
+               working_copy_path=NULL,
+               width=6000, height=4000
+           WHERE id=?""",
+        (env["p1"],),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        env["p1"],
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
+    )
+
+    load_calls = []
+
+    def fake_load_image(file_path, max_size=1024, **kwargs):
+        load_calls.append((str(file_path), kwargs))
+        # RAW decode succeeds at full sensor dimensions.
+        return Image.new("RGB", (6000, 4000), color="red")
+
+    monkeypatch.setattr(export_module, "load_image", fake_load_image)
+
+    result = export_photos(
+        db=db,
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={
+            "naming_template": "{original}",
+        },
+    )
+
+    assert result["exported"] == 1
+    assert result["errors"] == []
+    # Only the RAW load; no companion fallback when the RAW result is
+    # already full-size.
+    assert len(load_calls) == 1
+    assert load_calls[0][0].lower().endswith(".nef")
+
+
 def test_export_cropped_recipe_avoids_undersized_developed_output(export_env):
     """Cropped resized exports skip developed files that lack source pixels."""
     env = export_env
