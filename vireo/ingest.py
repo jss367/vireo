@@ -561,14 +561,6 @@ def ingest(
             continue
 
         to_copy.append((source_file, file_hash))
-        # Mark the survivor as known so a later byte-identical file in
-        # the same import (different name, or destined for a different
-        # subfolder) is caught by the duplicate gate above. The previous
-        # single-pass loop got this for free because it added each
-        # copied hash before processing the next file; the two-pass
-        # split must do it explicitly. Pass 2 also adds the hash on
-        # successful copy — the dual-write is harmless.
-        known_hashes.add(file_hash)
 
     # Pass 2: resolve timestamps only for survivors and copy. Batching
     # ExifTool across survivors keeps the fresh-card import fast for
@@ -576,7 +568,31 @@ def ingest(
     # that cost for files the duplicate gate already rejected.
     timestamps = _source_file_timestamps([s for s, _ in to_copy])
 
+    # Records the destination folder where each hash actually landed
+    # during this batch. Populated only when pass 2 marks a hash as
+    # known (successful copy or exact-match destination collision) so
+    # an intra-batch duplicate can report the correct post-import scan
+    # folder.
+    batch_dest_folders: dict[str, str] = {}
+
     for source_file, file_hash in to_copy:
+        # Intra-batch dedup: a byte-identical sibling earlier in this
+        # batch already landed (or matched an existing destination
+        # file). Skip without re-copying. We intentionally defer this
+        # mark to pass 2 success rather than recording it in pass 1 —
+        # if the primary's copy fails (e.g. the destination filename
+        # collides with a directory of the same name), the sibling
+        # still gets a chance to import the bytes.
+        if skip_duplicates and file_hash in known_hashes:
+            skipped_duplicate += 1
+            dest = batch_dest_folders.get(file_hash)
+            if dest is not None:
+                duplicate_folders.add(dest)
+            emitted += 1
+            if progress_callback:
+                progress_callback(emitted, total, source_file.name)
+            continue
+
         try:
             rel_folder = build_destination_path(
                 timestamps.get(source_file), folder_template
@@ -593,6 +609,7 @@ def ingest(
                     # Exact same file already there
                     skipped_duplicate += 1
                     known_hashes.add(file_hash)
+                    batch_dest_folders[file_hash] = str(dest_folder)
                     duplicate_folders.add(str(dest_folder))
                     emitted += 1
                     if progress_callback:
@@ -608,6 +625,7 @@ def ingest(
 
             shutil.copy2(str(source_file), str(dest_file))
             known_hashes.add(file_hash)
+            batch_dest_folders[file_hash] = str(dest_folder)
             copied_paths.append(str(dest_file))
             copied += 1
 

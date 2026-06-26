@@ -511,6 +511,50 @@ def test_ingest_skip_duplicates_within_single_batch(tmp_path):
     assert len(on_disk) == 1
 
 
+def test_ingest_intra_batch_dup_retries_after_primary_failure(tmp_path):
+    """If the primary copy of a hash fails in pass 2, a byte-identical
+    sibling in the same batch still gets a chance to import the bytes.
+
+    Regression: when intra-batch dedup was eagerly marked in pass 1, a
+    failed primary copy left every byte-identical sibling permanently
+    skipped — no copy ever landed for that hash even though the user
+    asked for ``skip_duplicates=True`` (which only means "don't import
+    bytes I already have", not "give up if the first try fails").
+    """
+    import shutil
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    # Two byte-identical files; same mtime so they target the same date folder.
+    Image.new("RGB", (100, 100), color="green").save(str(src / "IMG_001.jpg"))
+    shutil.copyfile(str(src / "IMG_001.jpg"), str(src / "IMG_002.jpg"))
+    mtime = datetime(2026, 3, 28).timestamp()
+    os.utime(str(src / "IMG_001.jpg"), (mtime, mtime))
+    os.utime(str(src / "IMG_002.jpg"), (mtime, mtime))
+
+    # Squat the primary's destination path with a directory of the same
+    # name. shutil.copy2 (and compute_file_hash on the "dest_file")
+    # then raise IsADirectoryError, so the primary fails in pass 2.
+    dest_folder = dst / "2026" / "2026-03-28"
+    dest_folder.mkdir(parents=True)
+    (dest_folder / "IMG_001.jpg").mkdir()
+
+    db = Database(str(tmp_path / "test.db"))
+    result = ingest(str(src), str(dst), db=db, skip_duplicates=True)
+
+    assert result["failed"] == 1, result
+    assert result["copied"] == 1, result
+    assert result["skipped_duplicate"] == 0, result
+    # The sibling should have landed under the date folder.
+    files_on_disk = sorted(
+        p.name for p in dest_folder.iterdir() if p.is_file()
+    )
+    assert "IMG_002.jpg" in files_on_disk, files_on_disk
+
+
 def test_ingest_custom_folder_template(tmp_path):
     """Custom folder template is used for organization."""
     src = tmp_path / "sd_card"
