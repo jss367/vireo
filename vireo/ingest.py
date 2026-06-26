@@ -175,6 +175,7 @@ def preview_destination(sources, destination, folder_template="%Y/%Y-%m-%d",
         check_path = dest_path if path == "." else dest_path / path
         folders.append({
             "path": path,
+            "full_path": str(check_path),
             "count": folder_counts[path],
             "exists": check_path.is_dir(),
         })

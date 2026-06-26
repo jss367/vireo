@@ -1504,6 +1504,7 @@ def test_preview_destination_groups_by_date(tmp_path):
     assert "2026/2026-03-25" in by_path
     assert by_path["2026/2026-03-25"]["count"] == 2
     assert by_path["2026/2026-03-25"]["exists"] is False
+    assert by_path["2026/2026-03-25"]["full_path"] == str(dst / "2026" / "2026-03-25")
     assert "2026/2026-03-26" in by_path
     assert by_path["2026/2026-03-26"]["count"] == 1
 
@@ -1576,6 +1577,7 @@ def test_preview_destination_flat_template(tmp_path):
 
     assert result["total_folders"] == 1
     assert result["folders"][0]["path"] == "."
+    assert result["folders"][0]["full_path"] == str(dst)
     # dst itself exists, so flat folder should show exists=True
     assert result["folders"][0]["exists"] is True
 

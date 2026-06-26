@@ -311,6 +311,7 @@ def test_destination_preview_returns_folder_structure(setup, tmp_path):
         assert data["new_folders"] == 1
         assert len(data["folders"]) == 1
         assert data["folders"][0]["path"] == "2026/2026-03-25"
+        assert data["folders"][0]["full_path"] == str(dst / "2026" / "2026-03-25")
         assert data["folders"][0]["exists"] is False
 
 
