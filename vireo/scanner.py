@@ -850,10 +850,16 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
         wc_rel = f"working/{row['id']}.jpg"
         wc_abs = os.path.join(vireo_dir, wc_rel)
 
-        # Prefer companion JPEG if available
+        # Prefer companion JPEG for non-RAW primaries. For RAW primaries,
+        # working copies are the edit-quality source, so decode the RAW with
+        # image_loader's highlight-preserving settings instead of baking in
+        # a camera JPEG that may already have clipped highlights.
         source = os.path.join(row["folder_path"], row["filename"])
         failure_source = "source"
-        if row["companion_path"]:
+        if (
+            os.path.splitext(row["filename"])[1].lower() not in RAW_EXTENSIONS
+            and row["companion_path"]
+        ):
             companion = os.path.join(row["folder_path"], row["companion_path"])
             if os.path.isfile(companion):
                 source = companion

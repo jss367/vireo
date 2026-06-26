@@ -110,7 +110,7 @@ def _exif_orientation(exif_data):
 def _orientation_swaps_axes(orientation):
     if orientation is None or isinstance(orientation, bool):
         return False
-    if isinstance(orientation, (int, float)):
+    if isinstance(orientation, int | float):
         return int(orientation) in (5, 6, 7, 8)
     text = str(orientation).strip().lower()
     if not text:

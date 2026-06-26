@@ -1871,7 +1871,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def _orientation_swaps_axes(orientation):
         if orientation is None or isinstance(orientation, bool):
             return False
-        if isinstance(orientation, (int, float)):
+        if isinstance(orientation, int | float):
             return int(orientation) in (5, 6, 7, 8)
         text = str(orientation).strip().lower()
         if not text:
@@ -9244,7 +9244,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 apply_recipe,
                 recipe_to_json,
             )
-            from image_loader import load_image
+            from image_loader import (
+                RAW_DECODE_PRESERVE_HIGHLIGHTS,
+                RAW_EXTENSIONS,
+                load_image,
+            )
 
             source_path = _external_edit_recipe_source(
                 photo, recipe, fallback_path,
@@ -9277,7 +9281,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             except (OSError, ValueError, TypeError):
                 pass
 
-            img = load_image(source_path, max_size=None)
+            raw_decode = (
+                RAW_DECODE_PRESERVE_HIGHLIGHTS
+                if os.path.splitext(source_path)[1].lower() in RAW_EXTENSIONS
+                else None
+            )
+            load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
+            img = load_image(source_path, max_size=None, **load_kwargs)
             if img is None:
                 return None, f"{photo['filename']}: failed to load image"
             rendered = None
@@ -11444,7 +11454,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return fallback_path, None
 
         from image_edits import EDIT_MATH_VERSION, apply_recipe, recipe_to_json
-        from image_loader import load_image
+        from image_loader import (
+            RAW_DECODE_PRESERVE_HIGHLIGHTS,
+            RAW_EXTENSIONS,
+            load_image,
+        )
 
         source_path = _inat_edit_recipe_source(photo, recipe, fallback_path)
         if not source_path or not os.path.isfile(source_path):
@@ -11475,7 +11489,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except (OSError, ValueError, TypeError):
             pass
 
-        img = load_image(source_path, max_size=None)
+        raw_decode = (
+            RAW_DECODE_PRESERVE_HIGHLIGHTS
+            if os.path.splitext(source_path)[1].lower() in RAW_EXTENSIONS
+            else None
+        )
+        load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
+        img = load_image(source_path, max_size=None, **load_kwargs)
         if img is None:
             return None, f"{photo['filename']}: failed to load image"
         rendered = None
@@ -17971,7 +17991,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return Response(data, mimetype="image/jpeg")
 
         # Cache miss: generate, insert, evict-if-over-quota, serve.
-        from image_loader import RAW_EXTENSIONS, load_image
+        from image_loader import (
+            RAW_DECODE_PRESERVE_HIGHLIGHTS,
+            RAW_EXTENSIONS,
+            load_image,
+        )
 
         folder_row = db.conn.execute(
             "SELECT id, path FROM folders WHERE id=?", (photo["folder_id"],)
@@ -18002,7 +18026,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
             return "Could not load image", 500
         load_max_size = None if recipe and recipe.get("crop") else size
-        img = load_image(canonical, max_size=load_max_size)
+        raw_decode = (
+            RAW_DECODE_PRESERVE_HIGHLIGHTS
+            if recipe and selected_ext in RAW_EXTENSIONS
+            else None
+        )
+        load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
+        img = load_image(canonical, max_size=load_max_size, **load_kwargs)
         if img is None:
             _record_working_copy_failure(db, photo, canonical)
             return "Could not load image", 500
@@ -18110,7 +18140,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         try:
             from image_edits import RecipeError, apply_recipe_to_loaded_image
-            from image_loader import RAW_EXTENSIONS, load_image
+            from image_loader import (
+                RAW_DECODE_PRESERVE_HIGHLIGHTS,
+                RAW_EXTENSIONS,
+                load_image,
+            )
             recipe_json = display_recipe
             vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
             folder_row = db.conn.execute(
@@ -18139,7 +18173,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     photo_id,
                 )
                 return "Could not load image", 500
-            img = load_image(canonical, max_size=size)
+            raw_decode = (
+                RAW_DECODE_PRESERVE_HIGHLIGHTS
+                if selected_ext in RAW_EXTENSIONS
+                else None
+            )
+            load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
+            img = load_image(canonical, max_size=size, **load_kwargs)
             if img is None:
                 _record_working_copy_failure(db, photo, canonical)
                 return "Could not load image", 500
@@ -18249,6 +18289,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return None
 
         if recipe:
+            from image_loader import (
+                RAW_DECODE_PRESERVE_HIGHLIGHTS,
+                RAW_EXTENSIONS,
+                load_image,
+            )
+
             folder = db.conn.execute(
                 "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
             ).fetchone()
@@ -18267,9 +18313,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 companion_source = _full_res_companion_path(
                     folder["path"], using_offline_cache,
                 )
-                if companion_source:
+                image_ext = os.path.splitext(image_path)[1].lower()
+                if companion_source and image_ext not in RAW_EXTENSIONS:
                     image_path = companion_source
-            from image_loader import RAW_EXTENSIONS, load_image
             resolved_ext = os.path.splitext(image_path)[1].lower()
             if (
                 trusted_wc_path is None
@@ -18288,7 +18334,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     photo_id,
                 )
                 return "Could not load image", 500
-            img = load_image(image_path, max_size=None)
+            raw_decode = (
+                RAW_DECODE_PRESERVE_HIGHLIGHTS
+                if resolved_ext in RAW_EXTENSIONS
+                else None
+            )
+            load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
+            img = load_image(image_path, max_size=None, **load_kwargs)
             if img is None:
                 _record_working_copy_failure(db, photo, image_path)
                 return "Could not load image", 500
@@ -18329,7 +18381,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             {photo["folder_id"]: folder["path"]},
         )
 
-        from image_loader import RAW_EXTENSIONS
+        from image_loader import (
+            RAW_DECODE_PRESERVE_HIGHLIGHTS,
+            RAW_EXTENSIONS,
+        )
         resolved_ext = os.path.splitext(image_path)[1].lower()
         if (
             (not using_offline_cache or resolved_ext in RAW_EXTENSIONS)
@@ -18351,19 +18406,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return send_file(image_path)
 
         # Extract full-res working copy (on-demand upgrade)
-        from image_loader import extract_working_copy, load_image
+        from image_loader import (
+            RAW_DECODE_PRESERVE_HIGHLIGHTS,
+            RAW_EXTENSIONS,
+            extract_working_copy,
+            load_image,
+        )
         wc_rel = f"working/{photo_id}.jpg"
         wc_abs = os.path.join(vireo_dir, wc_rel)
         quality = cfg.load().get("working_copy_quality", 92)
 
-        # Prefer companion JPEG as extraction source — avoids slow RAW decode.
-        # Only use it when we can confirm it is full-resolution: its pixel
-        # dimensions must be at least as large as the stored original
-        # dimensions.  If original dimensions are unknown (None) we cannot
-        # make that guarantee, so fall back to decoding from the RAW.
-        source_for_extraction = (
-            _full_res_companion_path(folder["path"], using_offline_cache) or image_path
+        # Prefer companion JPEG only for non-RAW sources. RAW primaries should
+        # be decoded through extract_working_copy's highlight-preserving RAW
+        # path rather than replaced with a camera-rendered JPEG.
+        companion_for_extraction = _full_res_companion_path(
+            folder["path"], using_offline_cache
         )
+        source_for_extraction = image_path
+        if resolved_ext not in RAW_EXTENSIONS and companion_for_extraction:
+            source_for_extraction = companion_for_extraction
 
         if extract_working_copy(source_for_extraction, wc_abs, max_size=0, quality=quality):
             # Update DB so future requests are fast; also backfill
@@ -18385,7 +18446,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return send_file(wc_abs, mimetype="image/jpeg")
 
         # Fallback: serve via load_image
-        img = load_image(image_path, max_size=None)
+        raw_decode = (
+            RAW_DECODE_PRESERVE_HIGHLIGHTS
+            if resolved_ext in RAW_EXTENSIONS
+            else None
+        )
+        load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
+        img = load_image(image_path, max_size=None, **load_kwargs)
         if img is None:
             _record_working_copy_failure(db, photo, image_path)
             return "Could not load image", 500

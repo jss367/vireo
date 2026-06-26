@@ -1881,14 +1881,10 @@ def test_edited_original_uses_trusted_working_copy_when_source_missing(
         assert img.size == (600, 800)
 
 
-def test_edited_original_prefers_full_res_companion_before_raw_decode(
+def test_edited_original_does_not_use_companion_after_raw_failure_marker(
     client_with_photo, monkeypatch,
 ):
-    import io
-    import os
-
     import image_loader
-    from PIL import Image
 
     app, db, photo_id = client_with_photo
     client = app.test_client()
@@ -1896,7 +1892,6 @@ def test_edited_original_prefers_full_res_companion_before_raw_decode(
         "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
         (photo_id,),
     ).fetchone()
-    companion_path = os.path.join(folder["path"], "test.jpg")
     db.conn.execute(
         """UPDATE photos
            SET filename='source.NEF', extension='.nef',
@@ -1918,18 +1913,14 @@ def test_edited_original_prefers_full_res_companion_before_raw_decode(
 
     def tracking_load_image(file_path, max_size=1024):
         loaded_paths.append(file_path)
-        if str(file_path).lower().endswith(".nef"):
-            raise AssertionError("edited original decoded RAW before companion")
         return original_load_image(file_path, max_size=max_size)
 
     monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
 
     rendered = client.get(f"/photos/{photo_id}/original")
 
-    assert rendered.status_code == 200
-    assert loaded_paths == [companion_path]
-    with Image.open(io.BytesIO(rendered.data)) as img:
-        assert img.size == (600, 800)
+    assert rendered.status_code == 500
+    assert loaded_paths == []
 
 
 def test_edited_original_cache_write_is_atomic(client_with_photo, monkeypatch):

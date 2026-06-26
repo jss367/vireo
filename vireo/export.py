@@ -9,7 +9,7 @@ import re
 import shutil
 
 from image_edits import apply_recipe_to_loaded_image
-from image_loader import load_image
+from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS, RAW_EXTENSIONS, load_image
 
 log = logging.getLogger(__name__)
 
@@ -275,7 +275,13 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
             load_max_size = (
                 None if recipe and recipe.get("crop") else (max_size or None)
             )
-            img = load_image(source_path, max_size=load_max_size)
+            raw_decode = (
+                RAW_DECODE_PRESERVE_HIGHLIGHTS
+                if recipe and os.path.splitext(source_path)[1].lower() in RAW_EXTENSIONS
+                else None
+            )
+            load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
+            img = load_image(source_path, max_size=load_max_size, **load_kwargs)
             if img is None:
                 errors.append(f"{photo['filename']}: failed to load image")
                 if progress_cb:
@@ -378,7 +384,7 @@ def _exif_orientation(exif_data):
 def _orientation_swaps_axes(orientation):
     if orientation is None or isinstance(orientation, bool):
         return False
-    if isinstance(orientation, (int, float)):
+    if isinstance(orientation, int | float):
         return int(orientation) in (5, 6, 7, 8)
     text = str(orientation).strip().lower()
     if not text:

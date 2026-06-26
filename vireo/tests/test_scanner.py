@@ -1536,8 +1536,8 @@ def test_scan_skips_working_copy_for_jpeg(tmp_path, monkeypatch):
     assert len(calls) == 0
 
 
-def test_scan_uses_companion_jpeg_for_working_copy(tmp_path, monkeypatch):
-    """When RAW+JPEG pair exists, working copy is extracted from the companion JPEG."""
+def test_scan_uses_raw_primary_for_raw_working_copy(tmp_path, monkeypatch):
+    """RAW working copies decode the RAW primary, not the companion JPEG."""
     import config as cfg
     import scanner
     from db import Database
@@ -1581,10 +1581,12 @@ def test_scan_uses_companion_jpeg_for_working_copy(tmp_path, monkeypatch):
     assert len(raw_photos) == 1
     assert raw_photos[0]["working_copy_path"] is not None
 
-    # Verify the companion JPEG was used as the source, not the RAW file
+    # Verify the RAW primary was used as the source, not the companion JPEG.
+    # Working copies are the edit-quality path, so they must preserve the RAW
+    # highlight headroom that a camera JPEG may have already clipped.
     assert len(sources_used) == 1
-    assert sources_used[0].endswith("IMG_001.jpg"), (
-        f"Expected companion JPEG as source, got: {sources_used[0]}"
+    assert sources_used[0].endswith("IMG_001.nef"), (
+        f"Expected RAW primary as source, got: {sources_used[0]}"
     )
 
 
