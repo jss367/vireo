@@ -343,6 +343,45 @@ def test_api_inat_submit_uses_edited_render(app_and_db):
         assert img.size == (40, 80)
 
 
+def test_inat_upload_handoff_meta_includes_math_version(app_and_db):
+    """The iNat upload render reuses inat-uploads/<id>.jpg only when its
+    cached metadata matches. That metadata must carry EDIT_MATH_VERSION so a
+    math bump (which changes per-pixel output but not recipe/source/mtime)
+    invalidates the stale render — otherwise unchanged recipes would keep
+    submitting the old hard-clipped JPEG to iNaturalist after a deploy."""
+    import json as _json
+
+    from image_edits import EDIT_MATH_VERSION
+
+    app, db, pid = app_and_db
+    import config as cfg
+    cfg.save({"inat_token": "fake-token"})
+
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id = p.folder_id WHERE p.id = ?",
+        (pid,),
+    ).fetchone()
+    Image.new("RGB", (80, 40), (220, 30, 20)).save(
+        os.path.join(folder["path"], "bird.jpg"),
+    )
+    db.set_photo_edit_recipe(pid, {"adjustments": {"exposure": 0.5}})
+
+    client = app.test_client()
+    with patch(
+        "inat.submit_observation",
+        return_value=(12345, "https://www.inaturalist.org/observations/12345"),
+    ):
+        resp = client.post("/api/inat/submit", json={"photo_id": pid})
+    assert resp.status_code == 200
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    meta_path = os.path.join(vireo_dir, "inat-uploads", f"{pid}.json")
+    assert os.path.exists(meta_path)
+    with open(meta_path, encoding="utf-8") as f:
+        meta = _json.load(f)
+    assert meta.get("edit_math_version") == EDIT_MATH_VERSION
+
+
 def test_api_inat_submit_uses_assigned_location_coords(app_and_db):
     app, db, pid = app_and_db
     import config as cfg

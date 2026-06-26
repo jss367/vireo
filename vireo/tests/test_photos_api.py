@@ -3747,6 +3747,372 @@ def test_legacy_migration_preserves_preview_max_size_zero(tmp_path, monkeypatch)
     assert not (preview_dir / "42_1920.jpg").exists()
 
 
+def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkeypatch):
+    """When EDIT_MATH_VERSION bumps, startup must purge cached renders for
+    photos that have a non-null edit recipe — keeping them would serve the
+    old tone-math bytes after the deploy that changed the math. Recipe-free
+    photos render identically across versions and must be left alone."""
+    import os
+
+    import config as cfg
+    from app import create_app
+    from db import Database
+    from image_edits import EDIT_MATH_VERSION
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({**cfg.DEFAULTS, "preview_max_size": 1920})
+
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    src_edited = photos_dir / "edited.jpg"
+    src_plain = photos_dir / "plain.jpg"
+    Image.new("RGB", (200, 150), (40, 90, 180)).save(str(src_edited), "JPEG", quality=85)
+    Image.new("RGB", (200, 150), (200, 90, 40)).save(str(src_plain), "JPEG", quality=85)
+
+    vireo_dir = tmp_path / "vireo"
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir(parents=True)
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(photos_dir), name="photos")
+    pid_edited = db.add_photo(
+        folder_id=fid, filename="edited.jpg", extension=".jpg",
+        file_size=os.path.getsize(src_edited),
+        file_mtime=os.path.getmtime(src_edited),
+        width=200, height=150,
+    )
+    pid_plain = db.add_photo(
+        folder_id=fid, filename="plain.jpg", extension=".jpg",
+        file_size=os.path.getsize(src_plain),
+        file_mtime=os.path.getmtime(src_plain),
+        width=200, height=150,
+    )
+    db.set_photo_edit_recipe(pid_edited, {"adjustments": {"exposure": 1.0}})
+
+    # Simulate a pre-version-bump deployment: cached renders exist on disk
+    # and in preview_cache, and the stored version lags behind the current.
+    edited_preview = preview_dir / f"{pid_edited}_1920.jpg"
+    plain_preview = preview_dir / f"{pid_plain}_1920.jpg"
+    edited_thumb = thumb_dir / f"{pid_edited}.jpg"
+    plain_thumb = thumb_dir / f"{pid_plain}.jpg"
+    edited_preview.write_bytes(b"\xff\xd8\xff\xe0" + b"o" * 1024)
+    plain_preview.write_bytes(b"\xff\xd8\xff\xe0" + b"p" * 1024)
+    edited_thumb.write_bytes(b"\xff\xd8\xff\xe0" + b"t" * 1024)
+    plain_thumb.write_bytes(b"\xff\xd8\xff\xe0" + b"u" * 1024)
+    db.preview_cache_insert(pid_edited, 1920, edited_preview.stat().st_size)
+    db.preview_cache_insert(pid_plain, 1920, plain_preview.stat().st_size)
+    db.conn.execute(
+        "UPDATE photos SET thumb_path = ? WHERE id = ?",
+        (f"{pid_edited}.jpg", pid_edited),
+    )
+    db.conn.execute(
+        "UPDATE photos SET thumb_path = ? WHERE id = ?",
+        (f"{pid_plain}.jpg", pid_plain),
+    )
+    db.set_meta("edit_math_version", str(EDIT_MATH_VERSION - 1))
+    db.conn.commit()
+
+    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+
+    # Edited photo: preview and thumb gone, thumb_path cleared, no row.
+    assert not edited_preview.exists()
+    assert not edited_thumb.exists()
+    assert db.preview_cache_get(pid_edited, 1920) is None
+    edited_row = db.conn.execute(
+        "SELECT thumb_path FROM photos WHERE id = ?", (pid_edited,),
+    ).fetchone()
+    assert edited_row["thumb_path"] is None
+
+    # Plain photo: cache survives because no recipe → output bytes unchanged.
+    assert plain_preview.exists()
+    assert plain_thumb.exists()
+    assert db.preview_cache_get(pid_plain, 1920) is not None
+    plain_row = db.conn.execute(
+        "SELECT thumb_path FROM photos WHERE id = ?", (pid_plain,),
+    ).fetchone()
+    assert plain_row["thumb_path"] == f"{pid_plain}.jpg"
+
+    # Version is bumped, so a second create_app is a no-op.
+    assert db.get_meta("edit_math_version") == str(EDIT_MATH_VERSION)
+    new_preview = preview_dir / f"{pid_edited}_1920.jpg"
+    new_preview.write_bytes(b"\xff\xd8\xff\xe0" + b"x" * 1024)
+    db.preview_cache_insert(pid_edited, 1920, new_preview.stat().st_size)
+    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+    assert new_preview.exists()
+    assert db.preview_cache_get(pid_edited, 1920) is not None
+
+
+def test_edit_math_version_migration_leaves_version_on_failed_purge(
+    tmp_path, monkeypatch,
+):
+    """If a cache unlink fails mid-migration (locked file, transient perm
+    error), we must NOT stamp the new version — otherwise the next boot
+    skips the migration and the stale render keeps being served. Leaving
+    the version old makes the migration self-retry on the next boot."""
+    import os
+
+    import app as app_module
+    import config as cfg
+    from app import create_app
+    from db import Database
+    from image_edits import EDIT_MATH_VERSION
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({**cfg.DEFAULTS, "preview_max_size": 1920})
+
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    src_edited = photos_dir / "edited.jpg"
+    Image.new("RGB", (200, 150), (40, 90, 180)).save(
+        str(src_edited), "JPEG", quality=85,
+    )
+
+    vireo_dir = tmp_path / "vireo"
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir(parents=True)
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(photos_dir), name="photos")
+    pid_edited = db.add_photo(
+        folder_id=fid, filename="edited.jpg", extension=".jpg",
+        file_size=os.path.getsize(src_edited),
+        file_mtime=os.path.getmtime(src_edited),
+        width=200, height=150,
+    )
+    db.set_photo_edit_recipe(pid_edited, {"adjustments": {"exposure": 1.0}})
+
+    edited_thumb = thumb_dir / f"{pid_edited}.jpg"
+    edited_thumb.write_bytes(b"\xff\xd8\xff\xe0" + b"t" * 1024)
+    db.conn.execute(
+        "UPDATE photos SET thumb_path = ? WHERE id = ?",
+        (f"{pid_edited}.jpg", pid_edited),
+    )
+    db.set_meta("edit_math_version", str(EDIT_MATH_VERSION - 1))
+    db.conn.commit()
+
+    original_remove = app_module.os.remove
+
+    def locked_remove(path):
+        if path == str(edited_thumb):
+            raise OSError("locked")
+        return original_remove(path)
+
+    monkeypatch.setattr(app_module.os, "remove", locked_remove)
+
+    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+
+    # The unlink failed, so the version must stay behind for a retry.
+    assert db.get_meta("edit_math_version") == str(EDIT_MATH_VERSION - 1)
+
+    # Once the file is unlockable, a later boot completes the migration.
+    monkeypatch.setattr(app_module.os, "remove", original_remove)
+    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+    assert not edited_thumb.exists()
+    assert db.get_meta("edit_math_version") == str(EDIT_MATH_VERSION)
+
+
+def test_edit_math_version_migration_survives_unreadable_preview_dir(
+    tmp_path, monkeypatch,
+):
+    """If preview_dir exists but is temporarily unreadable (locked network
+    volume, permission flap), os.listdir raises OSError; create_app must NOT
+    abort startup. Skip the orphan scan and leave the version old so the
+    migration self-retries — matching the unlink-error contract."""
+    import os
+    from types import SimpleNamespace
+
+    import app as app_module
+    from db import Database
+    from image_edits import EDIT_MATH_VERSION
+
+    vireo_dir = tmp_path / "vireo"
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir(parents=True)
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(tmp_path), name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="edited.jpg", extension=".jpg",
+        file_size=100, file_mtime=0.0, width=40, height=30,
+    )
+    db.set_photo_edit_recipe(pid, {"adjustments": {"exposure": 0.5}})
+    db.set_meta("edit_math_version", str(EDIT_MATH_VERSION - 1))
+    db.conn.commit()
+    db.conn.close()
+
+    real_listdir = app_module.os.listdir
+
+    def failing_listdir(path):
+        if os.path.abspath(path) == os.path.abspath(str(preview_dir)):
+            raise PermissionError(path)
+        return real_listdir(path)
+
+    monkeypatch.setattr(app_module.os, "listdir", failing_listdir)
+
+    fake_app = SimpleNamespace(
+        config={"THUMB_CACHE_DIR": str(thumb_dir), "DB_PATH": db_path},
+    )
+    # Must NOT raise — disposable cache problem can't take down startup.
+    app_module._migrate_edit_math_render_caches(fake_app)
+
+    db2 = Database(db_path)
+    try:
+        # Version stays old so the next boot retries the scan.
+        assert db2.get_meta("edit_math_version") == str(EDIT_MATH_VERSION - 1)
+    finally:
+        db2.conn.close()
+
+    # Once the dir becomes readable, a later boot completes the migration.
+    monkeypatch.setattr(app_module.os, "listdir", real_listdir)
+    app_module._migrate_edit_math_render_caches(fake_app)
+    db3 = Database(db_path)
+    try:
+        assert db3.get_meta("edit_math_version") == str(EDIT_MATH_VERSION)
+    finally:
+        db3.conn.close()
+
+
+def test_external_edit_handoff_meta_includes_math_version(client_with_photo):
+    """The external-editor handoff render reuses external-edits/<id>.jpg only
+    when its cached metadata matches. That metadata must carry
+    EDIT_MATH_VERSION so a math bump (which changes per-pixel output but not
+    recipe/source/mtime) invalidates the stale hard-clipped render."""
+    import json
+    import os
+
+    from image_edits import EDIT_MATH_VERSION
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    db.set_photo_edit_recipe(photo_id, {"adjustments": {"exposure": 0.5}})
+
+    resp = client.post(
+        "/api/photos/open-external",
+        json={"photo_ids": [photo_id], "editor_index": None},
+    )
+    # Open may fail (no editor configured) but the handoff render + meta
+    # are written before the editor launch.
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    meta_path = os.path.join(vireo_dir, "external-edits", f"{photo_id}.json")
+    assert os.path.exists(meta_path), resp.get_data(as_text=True)
+    with open(meta_path, encoding="utf-8") as f:
+        meta = json.load(f)
+    assert meta.get("edit_math_version") == EDIT_MATH_VERSION
+
+
+def test_edit_math_version_migration_scans_preview_dir_once(
+    tmp_path, monkeypatch,
+):
+    """The migration must scan preview_dir once, not once per edited photo.
+    With N edited photos and M preview files the old per-photo os.listdir
+    was O(N*M) and could stall startup on large libraries — guard against
+    a regression by counting calls."""
+    import os
+    from types import SimpleNamespace
+
+    import app as app_module
+    from db import Database
+    from image_edits import EDIT_MATH_VERSION
+
+    vireo_dir = tmp_path / "vireo"
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir(parents=True)
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(tmp_path), name="photos")
+
+    edited_pids = []
+    for i in range(5):
+        pid = db.add_photo(
+            folder_id=fid, filename=f"edited_{i}.jpg", extension=".jpg",
+            file_size=100, file_mtime=0.0, width=40, height=30,
+        )
+        db.set_photo_edit_recipe(
+            pid, {"adjustments": {"exposure": 0.2 * (i + 1)}},
+        )
+        edited_pids.append(pid)
+        # An untracked preview file (not in preview_cache) so the migration
+        # actually exercises the listdir-driven orphan sweep.
+        (preview_dir / f"{pid}_640.jpg").write_bytes(b"\xff\xd8\xff\xe0junk")
+
+    db.set_meta("edit_math_version", str(EDIT_MATH_VERSION - 1))
+    db.conn.commit()
+    db.conn.close()
+
+    real_listdir = app_module.os.listdir
+    calls = []
+
+    def counting_listdir(path):
+        if os.path.abspath(path) == os.path.abspath(str(preview_dir)):
+            calls.append(path)
+        return real_listdir(path)
+
+    monkeypatch.setattr(app_module.os, "listdir", counting_listdir)
+
+    fake_app = SimpleNamespace(
+        config={"THUMB_CACHE_DIR": str(thumb_dir), "DB_PATH": db_path},
+    )
+    app_module._migrate_edit_math_render_caches(fake_app)
+
+    # One scan total, regardless of how many edited photos there are.
+    assert len(calls) == 1, calls
+    # And the orphans were actually purged.
+    for pid in edited_pids:
+        assert not (preview_dir / f"{pid}_640.jpg").exists()
+    db2 = Database(db_path)
+    try:
+        assert db2.get_meta("edit_math_version") == str(EDIT_MATH_VERSION)
+    finally:
+        db2.conn.close()
+
+
+def test_edit_math_version_migration_is_noop_on_fresh_db(tmp_path, monkeypatch):
+    """A brand-new DB has no recipes and no stored version. The migration
+    must just stamp the current version so the next deploy bumps cleanly."""
+    import config as cfg
+    from app import create_app
+    from db import Database
+    from image_edits import EDIT_MATH_VERSION
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({**cfg.DEFAULTS, "preview_max_size": 1920})
+
+    vireo_dir = tmp_path / "vireo"
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+
+    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+
+    db = Database(db_path)
+    assert db.get_meta("edit_math_version") == str(EDIT_MATH_VERSION)
+
+
 def test_storage_clear_previews_resets_preview_cache(client_with_photo):
     """/api/storage/clear type=previews drops preview_cache rows so
     Settings "Current usage" doesn't report phantom bytes."""

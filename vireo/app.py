@@ -1325,6 +1325,175 @@ def _migrate_legacy_preview_cache(app):
             pass
 
 
+def _migrate_edit_math_render_caches(app):
+    """Invalidate rendered caches when the edit-math version has bumped.
+
+    Cached previews/thumbnails are keyed by ``(photo_id, size)`` only — the
+    edit recipe isn't part of the key. When the per-pixel rendering math in
+    ``image_edits`` / ``tone`` changes, the old bytes on disk are no longer
+    what we'd produce now, but a recipe-unchanged photo would otherwise keep
+    serving them until the user manually cleared the cache.
+
+    On each startup we compare ``db_meta["edit_math_version"]`` against
+    ``image_edits.EDIT_MATH_VERSION``. If it lags, we drop:
+
+      * every ``preview_cache`` row plus its on-disk JPEG
+      * every per-photo thumbnail file plus its ``photos.thumb_path``
+
+    for photos that have a non-null edit recipe (recipe-free photos render
+    identically across math versions and don't need re-rendering). Then we
+    write the new version so the migration is a no-op next boot.
+
+    On a fresh DB with no recipes, the walk does nothing and we still bump
+    the version so future deploys only act on real prior state.
+    """
+    from image_edits import EDIT_MATH_VERSION
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    thumb_dir = app.config["THUMB_CACHE_DIR"]
+    preview_dir = os.path.join(vireo_dir, "previews")
+    db = Database(app.config["DB_PATH"])
+    try:
+        stored = db.get_meta("edit_math_version")
+        try:
+            stored_version = int(stored) if stored is not None else 1
+        except (TypeError, ValueError):
+            stored_version = 1
+        if stored_version >= EDIT_MATH_VERSION:
+            return
+
+        rows = db.conn.execute(
+            "SELECT photo_id FROM photo_edit_recipes"
+        ).fetchall()
+        photo_ids = [row["photo_id"] for row in rows]
+
+        invalidated_previews = 0
+        invalidated_thumbs = 0
+        # If any unlink fails (locked file on Windows, transient permission
+        # error), we must NOT stamp the new version: a stale file/preview_cache
+        # row could still be served, and bumping the version would make the
+        # next boot skip the migration and never retry. Leaving the version
+        # behind makes the migration idempotent and self-retrying.
+        purge_failed = False
+
+        # Scan preview_dir once and group untracked preview files by photo id.
+        # The per-photo listdir would otherwise be O(N*M) (N edited photos x M
+        # preview files) and can spend minutes just rescanning the same
+        # directory on a large library before the server even starts.
+        edited_set = set(photo_ids)
+        untracked_previews_by_pid = {}
+        try:
+            preview_names = os.listdir(preview_dir)
+        except FileNotFoundError:
+            # Cache dir doesn't exist yet — nothing untracked to clean up.
+            preview_names = ()
+        except OSError:
+            # Permissions / locked network volume / other transient read
+            # failure: we can't see what's in there, so we don't know whether
+            # there are stale orphans to purge. Skip the scan but leave the
+            # version old so the next boot retries — matches the unlink-error
+            # contract instead of taking the app down for a disposable cache
+            # problem.
+            log.warning(
+                "Failed to list preview cache dir %s during edit-math "
+                "migration; leaving version at %s to retry next boot",
+                preview_dir, stored_version, exc_info=True,
+            )
+            preview_names = ()
+            purge_failed = True
+
+        for name in preview_names:
+            if not name.endswith(".jpg"):
+                continue
+            underscore = name.find("_")
+            if underscore <= 0:
+                continue
+            try:
+                file_pid = int(name[:underscore])
+            except ValueError:
+                continue
+            if file_pid in edited_set:
+                untracked_previews_by_pid.setdefault(file_pid, []).append(name)
+        for pid in photo_ids:
+            for row in db.conn.execute(
+                "SELECT size FROM preview_cache WHERE photo_id = ?", (pid,)
+            ).fetchall():
+                size_value = row["size"]
+                path = os.path.join(preview_dir, f"{pid}_{size_value}.jpg")
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except OSError:
+                    log.warning(
+                        "Failed to remove stale preview cache %s during "
+                        "edit-math migration", path, exc_info=True,
+                    )
+                    purge_failed = True
+                    continue
+                db.conn.execute(
+                    "DELETE FROM preview_cache WHERE photo_id=? AND size=?",
+                    (pid, size_value),
+                )
+                invalidated_previews += 1
+            for name in untracked_previews_by_pid.get(pid, ()):
+                path = os.path.join(preview_dir, name)
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except OSError:
+                    purge_failed = True
+            thumb_cache = os.path.join(thumb_dir, f"{pid}.jpg")
+            try:
+                if os.path.exists(thumb_cache):
+                    os.remove(thumb_cache)
+                    invalidated_thumbs += 1
+            except OSError:
+                log.warning(
+                    "Failed to remove stale thumbnail %s during "
+                    "edit-math migration", thumb_cache, exc_info=True,
+                )
+                purge_failed = True
+                continue
+            db.conn.execute(
+                "UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,),
+            )
+
+        if purge_failed:
+            # Commit the row deletions that did succeed, but leave the stored
+            # version unchanged so the next boot re-runs and retries the
+            # paths that couldn't be purged this time.
+            db.conn.commit()
+            log.warning(
+                "edit_math_version %s -> %s: some cache purges failed; "
+                "leaving version at %s so the migration retries next boot "
+                "(invalidated %d preview-cache entries, %d thumbnails so far)",
+                stored_version, EDIT_MATH_VERSION, stored_version,
+                invalidated_previews, invalidated_thumbs,
+            )
+            return
+
+        db.set_meta("edit_math_version", EDIT_MATH_VERSION, _commit=False)
+        db.conn.commit()
+
+        if photo_ids:
+            log.info(
+                "edit_math_version %s -> %s: invalidated %d preview-cache "
+                "entries and %d thumbnails across %d edited photos",
+                stored_version, EDIT_MATH_VERSION,
+                invalidated_previews, invalidated_thumbs, len(photo_ids),
+            )
+        else:
+            log.info(
+                "edit_math_version %s -> %s: no edited photos, nothing to "
+                "invalidate", stored_version, EDIT_MATH_VERSION,
+            )
+    finally:
+        try:
+            db.conn.close()
+        except Exception:
+            pass
+
+
 def _enforce_preview_cache_quota_at_startup(app):
     """Reconcile and evict at startup so prior runs / external deletes
     can't leave the table out of sync or over quota.
@@ -1404,6 +1573,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     app.config["API_TOKEN"] = api_token
 
     _migrate_legacy_preview_cache(app)
+    _migrate_edit_math_render_caches(app)
     _enforce_preview_cache_quota_at_startup(app)
 
     # Request timing middleware — logs slow requests and user actions
@@ -9069,7 +9239,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if not recipe:
                 return fallback_path, None
 
-            from image_edits import apply_recipe, recipe_to_json
+            from image_edits import (
+                EDIT_MATH_VERSION,
+                apply_recipe,
+                recipe_to_json,
+            )
             from image_loader import load_image
 
             source_path = _external_edit_recipe_source(
@@ -9084,10 +9258,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             meta_path = os.path.join(out_dir, f"{photo['id']}.json")
             source_mtime = os.path.getmtime(source_path)
             recipe_json = recipe_to_json(recipe) or ""
+            # Include the edit-math version so a math bump invalidates this
+            # handoff render: the JPEG is keyed by recipe/source/mtime, none
+            # of which change when only the per-pixel rendering math changes,
+            # so without this we'd keep handing editors the stale render.
             expected_meta = {
                 "recipe": recipe_json,
                 "source_path": source_path,
                 "source_mtime": source_mtime,
+                "edit_math_version": EDIT_MATH_VERSION,
             }
             try:
                 if os.path.isfile(out_path) and os.path.isfile(meta_path):
@@ -11264,7 +11443,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not recipe:
             return fallback_path, None
 
-        from image_edits import apply_recipe, recipe_to_json
+        from image_edits import EDIT_MATH_VERSION, apply_recipe, recipe_to_json
         from image_loader import load_image
 
         source_path = _inat_edit_recipe_source(photo, recipe, fallback_path)
@@ -11277,10 +11456,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         meta_path = os.path.join(out_dir, f"{photo['id']}.json")
         source_mtime = os.path.getmtime(source_path)
         recipe_json = recipe_to_json(recipe) or ""
+        # Include the edit-math version so a math bump invalidates this cached
+        # render — the JPEG is keyed by recipe/source/mtime, none of which
+        # change when only the per-pixel rendering math does, so without this
+        # we'd keep submitting stale renders to iNaturalist after a deploy.
         expected_meta = {
             "recipe": recipe_json,
             "source_path": source_path,
             "source_mtime": source_mtime,
+            "edit_math_version": EDIT_MATH_VERSION,
         }
         try:
             if os.path.isfile(out_path) and os.path.isfile(meta_path):

@@ -1,11 +1,13 @@
 import os
 import sys
 
+import numpy as np
 import pytest
 from PIL import Image
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
+import image_edits
 from image_edits import RecipeError, apply_recipe, normalize_recipe, recipe_to_json
 
 
@@ -128,6 +130,52 @@ def test_apply_recipe_adjusts_exposure_white_balance_contrast_and_saturation():
     assert max(r, g, b) > 100
 
 
+@pytest.mark.parametrize("mode", ["RGB", "RGBA"])
+def test_apply_recipe_tiling_matches_single_pass(mode, monkeypatch):
+    """A multi-tile image must be byte-identical to a whole-frame pass.
+
+    Shrinks the tile budget so a small test image spans many row tiles, then
+    compares against a single-pass reference computed directly through the tone
+    pipeline. Proves tiling does not change results.
+    """
+    from tone import apply_adjustments
+
+    width, height = 13, 97
+    rng = np.random.default_rng(1234)
+    channels = 4 if mode == "RGBA" else 3
+    src = rng.integers(0, 256, size=(height, width, channels), dtype=np.uint8)
+    img = Image.fromarray(src, mode)
+
+    recipe = {
+        "adjustments": {
+            "exposure": 1.3,
+            "contrast": 15,
+            "white_balance": {"temperature": 40, "tint": -20},
+            "saturation": 25,
+        }
+    }
+
+    # Force many tiles: at width 13, one row per tile.
+    monkeypatch.setattr(image_edits, "_ADJUST_TILE_PIXELS", width)
+    tiled = np.asarray(apply_recipe(img, recipe))
+
+    # Single whole-frame reference.
+    arr = src.astype(np.float32) / 255.0
+    ref_rgb = apply_adjustments(
+        arr[..., :3],
+        exposure=1.3,
+        white_balance={"temperature": 40, "tint": -20},
+        contrast=15,
+        saturation=25,
+    )
+    ref8 = np.clip(ref_rgb * 255.0 + 0.5, 0, 255).astype(np.uint8)
+    if channels == 4:
+        ref8 = np.concatenate([ref8, src[..., 3:4]], axis=-1)
+
+    assert tiled.shape == ref8.shape
+    assert np.array_equal(tiled, ref8)
+
+
 def test_apply_recipe_straightens_in_place():
     img = Image.new("RGB", (100, 60), "white")
     edited = apply_recipe(img, {"straighten": 3.5})
@@ -160,3 +208,27 @@ def test_apply_recipe_white_balance_preserves_palette_transparency():
 
     assert edited.mode == "RGBA"
     assert edited.getpixel((0, 0))[3] == 123
+
+
+def test_edit_math_version_template_constant_matches_python():
+    """The client-side `_VIREO_EDIT_MATH_VERSION` in `_navbar.html` is folded
+    into the `er` query param on every rendered URL so a math bump busts the
+    browser's cached thumbnail/preview bytes (server response is
+    `Cache-Control: public, max-age=86400`, so server purges alone are not
+    enough). The JS literal must stay in sync with `image_edits.EDIT_MATH_VERSION`
+    or the cache key drifts and stale renders survive deploys.
+    """
+    import re
+
+    navbar = os.path.join(
+        os.path.dirname(__file__), '..', 'templates', '_navbar.html',
+    )
+    with open(navbar, encoding='utf-8') as f:
+        src = f.read()
+    match = re.search(
+        r'var\s+_VIREO_EDIT_MATH_VERSION\s*=\s*([0-9]+)\s*;', src,
+    )
+    assert match, (
+        'could not find `var _VIREO_EDIT_MATH_VERSION = ...;` in _navbar.html'
+    )
+    assert int(match.group(1)) == image_edits.EDIT_MATH_VERSION
