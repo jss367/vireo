@@ -196,6 +196,11 @@ def recipe_to_json(recipe):
     return json.dumps(normalized, sort_keys=True, separators=(",", ":"))
 
 
+# Row-tile budget for the tone pass, in pixels. Bounds peak memory on
+# full-resolution originals/exports; overridable in tests to force many tiles.
+_ADJUST_TILE_PIXELS = 4_000_000
+
+
 def _apply_adjustments(img, adjustments):
     """Apply tonal adjustments to a PIL image via the linear tone pipeline.
 
@@ -217,19 +222,41 @@ def _apply_adjustments(img, adjustments):
     elif img.mode == "RGB" and "transparency" in img.info:
         img = img.convert("RGBA")
 
-    arr = np.asarray(img, dtype=np.float32) / 255.0
-    out = apply_adjustments(
-        arr[..., :3],
-        exposure=adjustments.get("exposure", 0.0),
-        white_balance=adjustments.get("white_balance"),
-        contrast=adjustments.get("contrast", 0.0),
-        saturation=adjustments.get("saturation", 0.0),
-    )
-    out8 = np.clip(out * 255.0 + 0.5, 0, 255).astype(np.uint8)
+    exposure = adjustments.get("exposure", 0.0)
+    white_balance = adjustments.get("white_balance")
+    contrast = adjustments.get("contrast", 0.0)
+    saturation = adjustments.get("saturation", 0.0)
+
+    src = np.asarray(img)  # uint8, view onto the PIL buffer (no copy)
+    height, width = src.shape[:2]
+    channels = src.shape[2]
+    out8 = np.empty((height, width, channels), dtype=np.uint8)
+
+    # Process in row blocks so peak memory stays bounded on full-resolution
+    # originals/exports (45MP+). The tone pass is strictly per-pixel, so tiling
+    # is numerically identical to a single whole-frame pass. ~4M pixels per tile
+    # keeps the transient float arrays to a few hundred MB.
+    rows_per_tile = max(1, _ADJUST_TILE_PIXELS // max(1, width))
+    for top in range(0, height, rows_per_tile):
+        bottom = min(top + rows_per_tile, height)
+        tile = src[top:bottom].astype(np.float32) / 255.0
+        adj = apply_adjustments(
+            tile[..., :3],
+            exposure=exposure,
+            white_balance=white_balance,
+            contrast=contrast,
+            saturation=saturation,
+        )
+        out8[top:bottom, :, :3] = np.clip(adj * 255.0 + 0.5, 0, 255).astype(
+            np.uint8
+        )
+        if channels == 4:
+            # Alpha passes through unchanged (round-trip uint8->float->uint8 is
+            # identity for 8-bit values).
+            out8[top:bottom, :, 3] = src[top:bottom, :, 3]
 
     if img.mode == "RGBA":
-        a8 = np.clip(arr[..., 3:4] * 255.0 + 0.5, 0, 255).astype(np.uint8)
-        return Image.fromarray(np.concatenate([out8, a8], axis=-1), "RGBA")
+        return Image.fromarray(out8, "RGBA")
     return Image.fromarray(out8, "RGB")
 
 
