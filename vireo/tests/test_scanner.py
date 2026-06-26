@@ -1590,6 +1590,62 @@ def test_scan_uses_raw_primary_for_raw_working_copy(tmp_path, monkeypatch):
     )
 
 
+def test_scan_falls_back_to_companion_when_raw_extraction_fails(
+    tmp_path, monkeypatch,
+):
+    """RAW+JPEG pairs still get a working copy from the companion when the
+    RAW decode itself fails (e.g. libraw cannot decode the RAW variant and
+    the embedded preview is unusable). Without the fallback the row would
+    be marked as a working-copy failure even though a full-size JPEG copy
+    is sitting right next to it.
+    """
+    import config as cfg
+    import scanner
+    from db import Database
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+
+    nef_file = photo_dir / "IMG_002.nef"
+    nef_file.write_bytes(b"fake raw data")
+    jpg_file = photo_dir / "IMG_002.jpg"
+    Image.new("RGB", (6000, 4000), color=(0, 255, 0)).save(str(jpg_file), "JPEG")
+
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths: {})
+
+    sources_used = []
+
+    def fake_extract(source, output, max_size=4096, quality=92):
+        sources_used.append(source)
+        # Simulate libraw failure on the RAW; succeed when called with the
+        # companion JPEG.
+        if source.endswith(".nef"):
+            return False
+        os.makedirs(os.path.dirname(output), exist_ok=True)
+        Image.new("RGB", (4096, 2731)).save(output, "JPEG")
+        return True
+
+    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+
+    db = Database(str(vireo_dir / "test.db"))
+    scanner.scan(str(photo_dir), db, vireo_dir=str(vireo_dir))
+
+    photos = db.get_photos(per_page=999999)
+    raw_photos = [p for p in photos if p["extension"] == ".nef"]
+    assert len(raw_photos) == 1
+    assert raw_photos[0]["working_copy_path"] is not None
+
+    # Both calls should have happened: RAW first (failed), then companion.
+    assert len(sources_used) == 2
+    assert sources_used[0].endswith("IMG_002.nef")
+    assert sources_used[1].endswith("IMG_002.jpg")
+
+
 # --- _extract_timestamp tests ---
 
 def test_extract_timestamp_subsec():

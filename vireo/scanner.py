@@ -850,24 +850,44 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
         wc_rel = f"working/{row['id']}.jpg"
         wc_abs = os.path.join(vireo_dir, wc_rel)
 
-        # Prefer companion JPEG for non-RAW primaries. For RAW primaries,
-        # working copies are the edit-quality source, so decode the RAW with
-        # image_loader's highlight-preserving settings instead of baking in
-        # a camera JPEG that may already have clipped highlights.
-        source = os.path.join(row["folder_path"], row["filename"])
-        failure_source = "source"
-        if (
-            os.path.splitext(row["filename"])[1].lower() not in RAW_EXTENSIONS
-            and row["companion_path"]
-        ):
-            companion = os.path.join(row["folder_path"], row["companion_path"])
-            if os.path.isfile(companion):
-                source = companion
-                failure_source = "companion"
+        # Working copies are the edit-quality source. For non-RAW primaries
+        # we still prefer the companion JPEG outright (fast path). For RAW
+        # primaries we decode the RAW with image_loader's highlight-preserving
+        # settings instead of baking in a camera JPEG that may already have
+        # clipped highlights — but if libraw cannot decode this RAW variant
+        # (and the embedded thumb is unusable too) we still fall back to the
+        # companion so an extractable JPEG copy isn't refused outright.
+        primary_path = os.path.join(row["folder_path"], row["filename"])
+        primary_is_raw = (
+            os.path.splitext(row["filename"])[1].lower() in RAW_EXTENSIONS
+        )
+        companion_path = None
+        if row["companion_path"]:
+            candidate = os.path.join(row["folder_path"], row["companion_path"])
+            if os.path.isfile(candidate):
+                companion_path = candidate
+
+        if not primary_is_raw and companion_path:
+            source = companion_path
+            failure_source = "companion"
+        else:
+            source = primary_path
+            failure_source = "source"
 
         # extract_working_copy is slow (RAW decode + JPEG encode); run it
         # before any DB write so no transaction is open while it runs.
         ok = extract_working_copy(source, wc_abs, max_size=wc_max_size, quality=wc_quality)
+        if not ok and primary_is_raw and companion_path:
+            log.info(
+                "RAW working-copy extraction failed for photo %s (%s); "
+                "falling back to companion JPEG %s",
+                row["id"], primary_path, companion_path,
+            )
+            source = companion_path
+            failure_source = "companion"
+            ok = extract_working_copy(
+                source, wc_abs, max_size=wc_max_size, quality=wc_quality,
+            )
         if ok:
             db.conn.execute(
                 "UPDATE photos SET working_copy_path=?,"
