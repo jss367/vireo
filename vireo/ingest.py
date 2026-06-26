@@ -527,27 +527,49 @@ def ingest(
     failed = 0
     copied_paths = []
     duplicate_folders: set[str] = set()
-    timestamps = _source_file_timestamps(files)
+    emitted = 0
 
-    for i, source_file in enumerate(files):
+    # Pass 1: hash each file and partition into duplicates vs. survivors.
+    # Timestamp resolution is deferred to Pass 2 so a duplicate-only
+    # re-import of a large card does not run the EXIF/ExifTool prepass on
+    # files we already have — the duplicate gate short-circuits first.
+    to_copy: list[tuple[Path, str]] = []
+    for source_file in files:
         try:
-            # Compute hash for duplicate detection
             file_hash = compute_file_hash(str(source_file))
+        except Exception as e:
+            log.warning("Failed to ingest %s: %s", source_file, e)
+            failed += 1
+            emitted += 1
+            if progress_callback:
+                progress_callback(emitted, total, source_file.name)
+            continue
 
-            if skip_duplicates and file_hash in known_hashes:
-                skipped_duplicate += 1
-                # Record every destination folder that holds a copy of
-                # this file, not just one. The pipeline uses this set
-                # verbatim as restrict_dirs, so if we only report one
-                # folder the others never get linked to the active
-                # workspace.
-                duplicate_folders.update(
-                    known_hash_folders.get(file_hash, ())
-                )
-                if progress_callback:
-                    progress_callback(i + 1, total, source_file.name)
-                continue
+        if skip_duplicates and file_hash in known_hashes:
+            skipped_duplicate += 1
+            # Record every destination folder that holds a copy of
+            # this file, not just one. The pipeline uses this set
+            # verbatim as restrict_dirs, so if we only report one
+            # folder the others never get linked to the active
+            # workspace.
+            duplicate_folders.update(
+                known_hash_folders.get(file_hash, ())
+            )
+            emitted += 1
+            if progress_callback:
+                progress_callback(emitted, total, source_file.name)
+            continue
 
+        to_copy.append((source_file, file_hash))
+
+    # Pass 2: resolve timestamps only for survivors and copy. Batching
+    # ExifTool across survivors keeps the fresh-card import fast for
+    # formats that lack lightweight EXIF (HEIC, video) without paying
+    # that cost for files the duplicate gate already rejected.
+    timestamps = _source_file_timestamps([s for s, _ in to_copy])
+
+    for source_file, file_hash in to_copy:
+        try:
             rel_folder = build_destination_path(
                 timestamps.get(source_file), folder_template
             )
@@ -564,8 +586,9 @@ def ingest(
                     skipped_duplicate += 1
                     known_hashes.add(file_hash)
                     duplicate_folders.add(str(dest_folder))
+                    emitted += 1
                     if progress_callback:
-                        progress_callback(i + 1, total, source_file.name)
+                        progress_callback(emitted, total, source_file.name)
                     continue
                 # Different file, same name — add numeric suffix
                 stem = dest_file.stem
@@ -584,8 +607,9 @@ def ingest(
             log.warning("Failed to ingest %s: %s", source_file, e)
             failed += 1
 
+        emitted += 1
         if progress_callback:
-            progress_callback(i + 1, total, source_file.name)
+            progress_callback(emitted, total, source_file.name)
 
     return {
         "copied": copied,

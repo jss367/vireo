@@ -381,6 +381,58 @@ def test_ingest_uses_metadata_dates_when_lightweight_exif_fails(
     assert not (dst / "2026" / "2026-03-30" / "a.jpg").exists()
 
 
+def test_ingest_skips_timestamp_resolution_for_duplicates(
+    tmp_path, monkeypatch
+):
+    """Duplicate-only re-imports must not trigger EXIF or ExifTool work."""
+    import ingest as ingest_module
+    import metadata as metadata_module
+    from scanner import compute_file_hash
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    files = ["a.jpg", "b.jpg"]
+    hashes = set()
+    for i, name in enumerate(files):
+        Image.new("RGB", (100, 100), color=(i * 80, 0, 0)).save(str(src / name))
+        hashes.add(compute_file_hash(str(src / name)))
+
+    exif_calls: list[str] = []
+    extract_calls: list[list[str]] = []
+
+    def tracking_read_exif(path):
+        exif_calls.append(path)
+        return None
+
+    def tracking_extract_metadata(paths, restricted_tags=None):
+        extract_calls.append(list(paths))
+        return {}
+
+    monkeypatch.setattr(ingest_module, "read_exif_timestamp", tracking_read_exif)
+    monkeypatch.setattr(
+        metadata_module, "extract_metadata", tracking_extract_metadata
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    result = ingest(
+        str(src),
+        str(dst),
+        db=db,
+        skip_duplicates=True,
+        extra_known_hashes=hashes,
+    )
+
+    assert result["copied"] == 0
+    assert result["skipped_duplicate"] == 2
+    # The duplicate gate short-circuits before any timestamp work runs,
+    # so neither the lightweight EXIF reader nor ExifTool is touched.
+    assert exif_calls == []
+    assert extract_calls == []
+
+
 def test_ingest_unsorted_fallback(tmp_path):
     """Files with no EXIF and no readable mtime go to unsorted/."""
     src = tmp_path / "sd_card"
