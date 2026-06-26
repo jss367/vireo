@@ -210,18 +210,31 @@ def _recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
             if os.path.exists(wc_path):
                 return wc_path
         return ""
+    # When the primary is RAW, prefer the RAW source so the caller can decode
+    # with highlight preservation rather than serving the camera's already-
+    # clipped companion JPEG. The companion remains a valid fallback when the
+    # RAW is known to fail extraction for this mtime — otherwise edited
+    # previews/exports for unsupported RAWs would 500 out even though a
+    # full-size companion JPEG is available.
+    primary_is_raw = (
+        os.path.splitext(photo["filename"])[1].lower() in _RAW_EXTENSIONS
+    )
     companion_path = photo["companion_path"]
-    if companion_path:
+    original = os.path.join(folder_path, photo["filename"])
+    allow_companion = not primary_is_raw or _has_current_working_copy_failure(
+        photo,
+        vireo_dir,
+        trust_existing_working_copy=False,
+        live_source_path=original,
+        folder_path=folder_path,
+    )
+    if companion_path and allow_companion:
         companion = os.path.join(folder_path, companion_path)
         if (
             os.path.exists(companion)
             and _path_satisfies_recipe_render(companion, photo, recipe, max_size)
         ):
             return companion
-    original = os.path.join(
-        folder_path,
-        photo["filename"],
-    )
     if not os.path.exists(original) and photo["working_copy_path"]:
         wc_path = os.path.join(vireo_dir, photo["working_copy_path"])
         if os.path.exists(wc_path):
@@ -1670,7 +1683,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         try:
             import config as cfg
             from image_edits import apply_recipe_to_loaded_image
-            from image_loader import load_image
+            from image_loader import (
+                RAW_DECODE_PRESERVE_HIGHLIGHTS,
+                load_image,
+            )
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(workspace_id)
@@ -1778,7 +1794,21 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     load_max_size = (
                         None if recipe and recipe.get("crop") else max_size
                     )
-                    img = load_image(canonical, max_size=load_max_size)
+                    # Match serve_preview's decode mode so warmed bytes equal
+                    # the on-demand render — without this, an edited RAW
+                    # preview written here would still come from the JPEG-first
+                    # path and overwrite serve_preview's highlight-preserving
+                    # cache on first warm.
+                    raw_decode = (
+                        RAW_DECODE_PRESERVE_HIGHLIGHTS
+                        if recipe
+                        and os.path.splitext(canonical)[1].lower() in _RAW_EXTENSIONS
+                        else None
+                    )
+                    load_kwargs = (
+                        {"raw_decode": raw_decode} if raw_decode else {}
+                    )
+                    img = load_image(canonical, max_size=load_max_size, **load_kwargs)
                     if img:
                         if recipe:
                             img = apply_recipe_to_loaded_image(

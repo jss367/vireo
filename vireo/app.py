@@ -1973,23 +1973,37 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if os.path.exists(wc_path):
                     return wc_path, True
             return "", False
+        # For RAW primaries, prefer the RAW source so the caller can decode it
+        # with highlight preservation rather than serving the camera's already-
+        # clipped companion JPEG. The companion remains a valid fallback when
+        # the RAW is known to fail extraction for this mtime — otherwise edited
+        # previews for unsupported RAWs would 500 out even when a full-size
+        # companion is available.
+        from image_loader import RAW_EXTENSIONS
+        primary_is_raw = (
+            os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+        )
         companion_path = photo["companion_path"]
-        if companion_path:
+        original_abs = os.path.join(folder_path, photo["filename"])
+        allow_companion = not primary_is_raw or _has_current_working_copy_failure(
+            photo,
+            vireo_dir,
+            trust_existing_working_copy=False,
+            live_source_path=original_abs,
+            folder_path=folder_path,
+        )
+        if companion_path and allow_companion:
             companion = os.path.join(folder_path, companion_path)
             if (
                 os.path.exists(companion)
                 and _path_satisfies_recipe_render(companion, photo, recipe, max_size)
             ):
                 return companion, True
-        original = os.path.join(
-            folder_path,
-            photo["filename"],
-        )
-        if not os.path.exists(original) and photo["working_copy_path"]:
+        if not os.path.exists(original_abs) and photo["working_copy_path"]:
             wc_path = os.path.join(vireo_dir, photo["working_copy_path"])
             if os.path.exists(wc_path):
                 return wc_path, True
-        return original, False
+        return original_abs, False
 
     _ACCELERATED_RUNTIME_PROVIDERS = {
         "ACLExecutionProvider",
@@ -9292,9 +9306,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             except (OSError, ValueError, TypeError):
                 pass
 
+            # Derive the decode mode from the primary photo's extension rather
+            # than source_path so a future change to source_path resolution
+            # (working copy, companion JPEG fallback, etc.) cannot silently
+            # bypass RAW_DECODE_PRESERVE_HIGHLIGHTS for a RAW primary.
             raw_decode = (
                 RAW_DECODE_PRESERVE_HIGHLIGHTS
-                if os.path.splitext(source_path)[1].lower() in RAW_EXTENSIONS
+                if os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
                 else None
             )
             load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
@@ -11508,9 +11526,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except (OSError, ValueError, TypeError):
             pass
 
+        # Derive the decode mode from the primary photo's extension rather
+        # than source_path so a future change to source_path resolution
+        # (working copy, companion JPEG fallback, etc.) cannot silently
+        # bypass RAW_DECODE_PRESERVE_HIGHLIGHTS for a RAW primary.
         raw_decode = (
             RAW_DECODE_PRESERVE_HIGHLIGHTS
-            if os.path.splitext(source_path)[1].lower() in RAW_EXTENSIONS
+            if os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
             else None
         )
         load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
@@ -13001,7 +13023,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
             import config as cfg
             from image_edits import apply_recipe_to_loaded_image
-            from image_loader import load_image
+            from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS, load_image
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
@@ -13096,7 +13118,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     load_max_size = (
                         None if recipe and recipe.get("crop") else max_size
                     )
-                    img = load_image(canonical, max_size=load_max_size)
+                    # Match serve_preview's decode mode so warmed bytes equal
+                    # the on-demand render — without this, an edited RAW
+                    # preview written here would still come from the JPEG-first
+                    # path and overwrite serve_preview's highlight-preserving
+                    # cache on first warm.
+                    raw_decode = (
+                        RAW_DECODE_PRESERVE_HIGHLIGHTS
+                        if recipe
+                        and os.path.splitext(canonical)[1].lower() in RAW_EXTENSIONS
+                        else None
+                    )
+                    load_kwargs = (
+                        {"raw_decode": raw_decode} if raw_decode else {}
+                    )
+                    img = load_image(canonical, max_size=load_max_size, **load_kwargs)
                     if img:
                         if recipe:
                             img = apply_recipe_to_loaded_image(
