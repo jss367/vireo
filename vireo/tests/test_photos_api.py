@@ -3849,6 +3849,110 @@ def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkey
     assert db.preview_cache_get(pid_edited, 1920) is not None
 
 
+def test_edit_math_version_migration_leaves_version_on_failed_purge(
+    tmp_path, monkeypatch,
+):
+    """If a cache unlink fails mid-migration (locked file, transient perm
+    error), we must NOT stamp the new version — otherwise the next boot
+    skips the migration and the stale render keeps being served. Leaving
+    the version old makes the migration self-retry on the next boot."""
+    import os
+
+    import app as app_module
+    import config as cfg
+    from app import create_app
+    from db import Database
+    from image_edits import EDIT_MATH_VERSION
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({**cfg.DEFAULTS, "preview_max_size": 1920})
+
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    src_edited = photos_dir / "edited.jpg"
+    Image.new("RGB", (200, 150), (40, 90, 180)).save(
+        str(src_edited), "JPEG", quality=85,
+    )
+
+    vireo_dir = tmp_path / "vireo"
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir(parents=True)
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(photos_dir), name="photos")
+    pid_edited = db.add_photo(
+        folder_id=fid, filename="edited.jpg", extension=".jpg",
+        file_size=os.path.getsize(src_edited),
+        file_mtime=os.path.getmtime(src_edited),
+        width=200, height=150,
+    )
+    db.set_photo_edit_recipe(pid_edited, {"adjustments": {"exposure": 1.0}})
+
+    edited_thumb = thumb_dir / f"{pid_edited}.jpg"
+    edited_thumb.write_bytes(b"\xff\xd8\xff\xe0" + b"t" * 1024)
+    db.conn.execute(
+        "UPDATE photos SET thumb_path = ? WHERE id = ?",
+        (f"{pid_edited}.jpg", pid_edited),
+    )
+    db.set_meta("edit_math_version", str(EDIT_MATH_VERSION - 1))
+    db.conn.commit()
+
+    original_remove = app_module.os.remove
+
+    def locked_remove(path):
+        if path == str(edited_thumb):
+            raise OSError("locked")
+        return original_remove(path)
+
+    monkeypatch.setattr(app_module.os, "remove", locked_remove)
+
+    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+
+    # The unlink failed, so the version must stay behind for a retry.
+    assert db.get_meta("edit_math_version") == str(EDIT_MATH_VERSION - 1)
+
+    # Once the file is unlockable, a later boot completes the migration.
+    monkeypatch.setattr(app_module.os, "remove", original_remove)
+    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+    assert not edited_thumb.exists()
+    assert db.get_meta("edit_math_version") == str(EDIT_MATH_VERSION)
+
+
+def test_external_edit_handoff_meta_includes_math_version(client_with_photo):
+    """The external-editor handoff render reuses external-edits/<id>.jpg only
+    when its cached metadata matches. That metadata must carry
+    EDIT_MATH_VERSION so a math bump (which changes per-pixel output but not
+    recipe/source/mtime) invalidates the stale hard-clipped render."""
+    import json
+    import os
+
+    from image_edits import EDIT_MATH_VERSION
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    db.set_photo_edit_recipe(photo_id, {"adjustments": {"exposure": 0.5}})
+
+    resp = client.post(
+        "/api/photos/open-external",
+        json={"photo_ids": [photo_id], "editor_index": None},
+    )
+    # Open may fail (no editor configured) but the handoff render + meta
+    # are written before the editor launch.
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    meta_path = os.path.join(vireo_dir, "external-edits", f"{photo_id}.json")
+    assert os.path.exists(meta_path), resp.get_data(as_text=True)
+    with open(meta_path, encoding="utf-8") as f:
+        meta = json.load(f)
+    assert meta.get("edit_math_version") == EDIT_MATH_VERSION
+
+
 def test_edit_math_version_migration_is_noop_on_fresh_db(tmp_path, monkeypatch):
     """A brand-new DB has no recipes and no stored version. The migration
     must just stamp the current version so the next deploy bumps cleanly."""

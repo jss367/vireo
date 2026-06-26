@@ -1369,6 +1369,12 @@ def _migrate_edit_math_render_caches(app):
 
         invalidated_previews = 0
         invalidated_thumbs = 0
+        # If any unlink fails (locked file on Windows, transient permission
+        # error), we must NOT stamp the new version: a stale file/preview_cache
+        # row could still be served, and bumping the version would make the
+        # next boot skip the migration and never retry. Leaving the version
+        # behind makes the migration idempotent and self-retrying.
+        purge_failed = False
         for pid in photo_ids:
             for row in db.conn.execute(
                 "SELECT size FROM preview_cache WHERE photo_id = ?", (pid,)
@@ -1383,6 +1389,7 @@ def _migrate_edit_math_render_caches(app):
                         "Failed to remove stale preview cache %s during "
                         "edit-math migration", path, exc_info=True,
                     )
+                    purge_failed = True
                     continue
                 db.conn.execute(
                     "DELETE FROM preview_cache WHERE photo_id=? AND size=?",
@@ -1395,7 +1402,7 @@ def _migrate_edit_math_render_caches(app):
                         try:
                             os.remove(os.path.join(preview_dir, name))
                         except OSError:
-                            pass
+                            purge_failed = True
             except FileNotFoundError:
                 pass
             thumb_cache = os.path.join(thumb_dir, f"{pid}.jpg")
@@ -1408,10 +1415,25 @@ def _migrate_edit_math_render_caches(app):
                     "Failed to remove stale thumbnail %s during "
                     "edit-math migration", thumb_cache, exc_info=True,
                 )
+                purge_failed = True
                 continue
             db.conn.execute(
                 "UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,),
             )
+
+        if purge_failed:
+            # Commit the row deletions that did succeed, but leave the stored
+            # version unchanged so the next boot re-runs and retries the
+            # paths that couldn't be purged this time.
+            db.conn.commit()
+            log.warning(
+                "edit_math_version %s -> %s: some cache purges failed; "
+                "leaving version at %s so the migration retries next boot "
+                "(invalidated %d preview-cache entries, %d thumbnails so far)",
+                stored_version, EDIT_MATH_VERSION, stored_version,
+                invalidated_previews, invalidated_thumbs,
+            )
+            return
 
         db.set_meta("edit_math_version", EDIT_MATH_VERSION, _commit=False)
         db.conn.commit()
@@ -9180,7 +9202,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if not recipe:
                 return fallback_path, None
 
-            from image_edits import apply_recipe, recipe_to_json
+            from image_edits import (
+                EDIT_MATH_VERSION,
+                apply_recipe,
+                recipe_to_json,
+            )
             from image_loader import load_image
 
             source_path = _external_edit_recipe_source(
@@ -9195,10 +9221,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             meta_path = os.path.join(out_dir, f"{photo['id']}.json")
             source_mtime = os.path.getmtime(source_path)
             recipe_json = recipe_to_json(recipe) or ""
+            # Include the edit-math version so a math bump invalidates this
+            # handoff render: the JPEG is keyed by recipe/source/mtime, none
+            # of which change when only the per-pixel rendering math changes,
+            # so without this we'd keep handing editors the stale render.
             expected_meta = {
                 "recipe": recipe_json,
                 "source_path": source_path,
                 "source_mtime": source_mtime,
+                "edit_math_version": EDIT_MATH_VERSION,
             }
             try:
                 if os.path.isfile(out_path) and os.path.isfile(meta_path):
