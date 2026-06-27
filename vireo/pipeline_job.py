@@ -1231,7 +1231,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         from local_processing import (
                             existing_archive_bytes,
                             format_bytes,
-                            non_duplicate_bytes,
+                            non_duplicate_files,
                             selected_source_files,
                             storage_plan,
                             total_file_bytes,
@@ -1396,14 +1396,20 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                         "WHERE file_hash IS NOT NULL"
                                     )
                                 }
-                                filtered_bytes = non_duplicate_bytes(
+                                filtered_files = non_duplicate_files(
                                     selected_files, known_hashes,
                                 )
+                                filtered_bytes = total_file_bytes(filtered_files)
                                 if filtered_bytes < source_bytes:
+                                    filtered_existing_bytes = existing_archive_bytes(
+                                        final_destination,
+                                        filtered_files,
+                                        params.folder_template,
+                                    )
                                     plan = storage_plan(
                                         params.destination, filtered_bytes,
                                         archive_parent=archive_space_path,
-                                        archive_existing_bytes=existing_bytes,
+                                        archive_existing_bytes=filtered_existing_bytes,
                                     )
                             result["local_processing"] = {
                                 **plan,

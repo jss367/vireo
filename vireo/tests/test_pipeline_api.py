@@ -1096,6 +1096,91 @@ def test_pipeline_local_processing_preflight_filters_duplicates(
     assert plan["source_bytes"] <= fresh_bytes, plan
 
 
+def test_pipeline_local_processing_recomputes_archive_credit_after_duplicate_filter(
+    setup, tmp_path, monkeypatch
+):
+    """Duplicate-filtered storage retries must recompute archive credit from
+    survivor files, not from skipped duplicates."""
+    app, db_path = setup
+
+    final_parent = tmp_path / "nas-filtered-credit"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+    final_dest.mkdir()
+
+    src = tmp_path / "card-filtered-credit"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(src / "dup.jpg")
+    Image.new("RGB", (16, 16), "red").save(src / "fresh.jpg")
+    shutil.copy2(src / "dup.jpg", final_dest / "dup.jpg")
+
+    from db import Database
+    from scanner import compute_file_hash
+    dup_hash = compute_file_hash(str(src / "dup.jpg"))
+
+    db = Database(db_path)
+    seed_folder = tmp_path / "seed-filtered-credit"
+    seed_folder.mkdir()
+    folder_id = db.add_folder(str(seed_folder))
+    ws_id = db._active_workspace_id
+    db.add_workspace_folder(ws_id, folder_id)
+    db.add_photo(
+        folder_id=folder_id, filename="dup.jpg", extension=".jpg",
+        file_size=10, file_mtime=1.0, file_hash=dup_hash,
+    )
+    db.close()
+
+    fresh_bytes = (src / "fresh.jpg").stat().st_size
+    dup_bytes = (src / "dup.jpg").stat().st_size
+    total_bytes = fresh_bytes + dup_bytes
+    reserve = 4
+    free = int(fresh_bytes * 2.5) + reserve + 1
+    assert free < int(total_bytes * 1.25 + fresh_bytes) + reserve
+
+    from collections import namedtuple
+    Usage = namedtuple("Usage", "total used free")
+
+    import local_processing
+    real_storage_plan = local_processing.storage_plan
+    storage_calls = []
+
+    def recording_storage_plan(staging_dir, source_bytes, **kwargs):
+        storage_calls.append({
+            "source_bytes": source_bytes,
+            "archive_existing_bytes": kwargs.get("archive_existing_bytes"),
+        })
+        return real_storage_plan(staging_dir, source_bytes, **kwargs)
+
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", reserve)
+    monkeypatch.setattr(local_processing, "storage_plan", recording_storage_plan)
+    monkeypatch.setattr(
+        local_processing.shutil, "disk_usage",
+        lambda path: Usage(total=free * 10, used=0, free=free),
+    )
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "skip_duplicates": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert job["status"] == "completed", job
+    assert len(storage_calls) >= 2
+    assert storage_calls[0]["source_bytes"] == total_bytes
+    assert storage_calls[0]["archive_existing_bytes"] == dup_bytes
+    assert storage_calls[-1]["source_bytes"] == fresh_bytes
+    assert storage_calls[-1]["archive_existing_bytes"] == 0
+
+
 def test_pipeline_local_processing_preflight_probes_existing_final_destination(
     setup, tmp_path, monkeypatch
 ):

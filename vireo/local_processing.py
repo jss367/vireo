@@ -120,21 +120,21 @@ def existing_archive_bytes(
     return total
 
 
-def non_duplicate_bytes(files: list[Path], known_hashes: set[str]) -> int:
-    """Sum bytes of ``files`` whose content hash isn't already known.
+def non_duplicate_files(files: list[Path], known_hashes: set[str]) -> list[Path]:
+    """Return files whose content hash isn't already known.
 
     Mirrors the duplicate gate ingest() applies with skip_duplicates=True so
-    the local-storage preflight estimate matches what ingest will actually
-    copy. ``known_hashes`` covers files already in the catalog; this also
-    tracks hashes seen earlier in ``files`` so intra-run duplicates (the
-    same card folder selected twice, or two source folders sharing a file)
-    are counted once — ingest() likewise copies the first occurrence and
-    skips later matches via its ``extra_known_hashes`` accumulator.
+    local-storage preflight decisions use the same source set that ingest
+    will actually copy. ``known_hashes`` covers files already in the catalog;
+    this also tracks hashes seen earlier in ``files`` so intra-run duplicates
+    (the same card folder selected twice, or two source folders sharing a
+    file) are counted once — ingest() likewise copies the first occurrence
+    and skips later matches via its ``extra_known_hashes`` accumulator.
     """
     from scanner import compute_file_hash
 
     seen = set(known_hashes)
-    total = 0
+    survivors = []
     for path in files:
         try:
             file_hash = compute_file_hash(str(path))
@@ -143,11 +143,22 @@ def non_duplicate_bytes(files: list[Path], known_hashes: set[str]) -> int:
         if file_hash in seen:
             continue
         try:
-            size = path.stat().st_size
+            path.stat()
         except OSError:
             continue
-        total += size
+        survivors.append(path)
         seen.add(file_hash)
+    return survivors
+
+
+def non_duplicate_bytes(files: list[Path], known_hashes: set[str]) -> int:
+    """Sum bytes of ``files`` whose content hash isn't already known."""
+    total = 0
+    for path in non_duplicate_files(files, known_hashes):
+        try:
+            total += path.stat().st_size
+        except OSError:
+            continue
     return total
 
 
