@@ -1401,6 +1401,18 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 )
                                 filtered_bytes = total_file_bytes(filtered_files)
                                 if filtered_bytes < source_bytes:
+                                    # Recompute the destination credit against
+                                    # the survivor set. The first existing_bytes
+                                    # call counts every selected file that's
+                                    # already at final_destination, including
+                                    # known duplicates ingest will SKIP. If a
+                                    # large skipped file is present at the
+                                    # destination and a smaller fresh file is
+                                    # not, that credit would cap to filtered_
+                                    # bytes and drive archive_delta to zero —
+                                    # passing the destination-space preflight
+                                    # for a run that still has to write the
+                                    # fresh file at the archive.
                                     filtered_existing_bytes = existing_archive_bytes(
                                         final_destination,
                                         filtered_files,

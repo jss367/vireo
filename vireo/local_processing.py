@@ -120,31 +120,37 @@ def existing_archive_bytes(
     return total
 
 
-def non_duplicate_files(files: list[Path], known_hashes: set[str]) -> list[Path]:
-    """Return files whose content hash isn't already known.
+def non_duplicate_files(
+    files: list[Path], known_hashes: set[str],
+) -> list[Path]:
+    """Return ``files`` minus any whose content hash is already known.
 
     Mirrors the duplicate gate ingest() applies with skip_duplicates=True so
-    local-storage preflight decisions use the same source set that ingest
-    will actually copy. ``known_hashes`` covers files already in the catalog;
-    this also tracks hashes seen earlier in ``files`` so intra-run duplicates
-    (the same card folder selected twice, or two source folders sharing a
-    file) are counted once — ingest() likewise copies the first occurrence
-    and skips later matches via its ``extra_known_hashes`` accumulator.
+    the local-storage preflight estimate matches what ingest will actually
+    copy. ``known_hashes`` covers files already in the catalog; this also
+    tracks hashes seen earlier in ``files`` so intra-run duplicates (the
+    same card folder selected twice, or two source folders sharing a file)
+    yield only the first occurrence — ingest() likewise copies the first and
+    skips later matches via its ``extra_known_hashes`` accumulator.
+
+    Returning the file list (not just a byte sum) lets callers feed the
+    survivor set back into ``existing_archive_bytes`` so the destination
+    credit on a duplicate-filtered retry reflects only files ingest will
+    actually copy. Crediting the destination for a large duplicate that
+    ingest will skip would zero out the archive delta and let the run pass
+    the destination-space preflight even when the fresh files still need
+    room at the archive.
     """
     from scanner import compute_file_hash
 
     seen = set(known_hashes)
-    survivors = []
+    survivors: list[Path] = []
     for path in files:
         try:
             file_hash = compute_file_hash(str(path))
         except OSError:
             continue
         if file_hash in seen:
-            continue
-        try:
-            path.stat()
-        except OSError:
             continue
         survivors.append(path)
         seen.add(file_hash)
@@ -153,13 +159,7 @@ def non_duplicate_files(files: list[Path], known_hashes: set[str]) -> list[Path]
 
 def non_duplicate_bytes(files: list[Path], known_hashes: set[str]) -> int:
     """Sum bytes of ``files`` whose content hash isn't already known."""
-    total = 0
-    for path in non_duplicate_files(files, known_hashes):
-        try:
-            total += path.stat().st_size
-        except OSError:
-            continue
-    return total
+    return total_file_bytes(non_duplicate_files(files, known_hashes))
 
 
 def estimate_required_bytes(source_bytes: int) -> int:

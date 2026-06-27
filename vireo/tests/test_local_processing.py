@@ -465,3 +465,125 @@ def test_non_duplicate_bytes_deduplicates_within_pass(tmp_path):
         local_processing.non_duplicate_bytes([fresh, fresh], set())
         == fresh.stat().st_size
     )
+
+
+def test_non_duplicate_files_returns_survivor_list(tmp_path):
+    """non_duplicate_files returns the file list ingest will actually copy,
+    not just a byte total. The pipeline preflight feeds that list back into
+    existing_archive_bytes so the destination credit on a duplicate-filtered
+    retry covers only the survivors — without it, a known-duplicate file
+    that's already at the destination would credit against the smaller
+    survivor byte total and zero out the archive delta even though the
+    fresh file still has to be written."""
+    from scanner import compute_file_hash
+
+    fresh = tmp_path / "fresh.jpg"
+    fresh.write_bytes(b"fresh-bytes-payload")
+    dup = tmp_path / "dup.jpg"
+    dup.write_bytes(b"already-imported-content")
+    other = tmp_path / "shared.jpg"
+    other.write_bytes(b"shared-bytes")
+    other_copy = tmp_path / "shared_copy.jpg"
+    other_copy.write_bytes(b"shared-bytes")  # intra-run duplicate of `other`
+
+    known = {compute_file_hash(str(dup))}
+    survivors = local_processing.non_duplicate_files(
+        [fresh, dup, other, other_copy], known,
+    )
+    assert survivors == [fresh, other]
+
+
+def test_storage_plan_recomputes_archive_credit_for_duplicate_filtered_set(
+    monkeypatch, tmp_path,
+):
+    """When skip_duplicates triggers the storage_plan retry, the existing-
+    archive credit must be recomputed against the survivor file list, not
+    reused from the full selection. Otherwise a large known-duplicate file
+    already at the destination would credit against the smaller filtered
+    byte count, drive archive_delta to zero, and pass the destination
+    preflight — even though the fresh survivor still has to be written at
+    the archive."""
+    from scanner import compute_file_hash
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    archive_parent = tmp_path / "nas"
+    archive_parent.mkdir()
+    final_destination = archive_parent / "Photos"
+    # Simulate a previous archive attempt: the large duplicate file is
+    # already laid down at the resume-credit-eligible relative path.
+    final_destination.mkdir()
+    big_dup = tmp_path / "big_dup.jpg"
+    big_dup.write_bytes(b"x" * 10_000)  # large duplicate (already cataloged)
+    (final_destination / big_dup.name).write_bytes(b"x" * 10_000)
+
+    fresh = tmp_path / "fresh.jpg"
+    fresh.write_bytes(b"y" * 100)  # small fresh file (no archive copy yet)
+
+    known = {compute_file_hash(str(big_dup))}
+    survivors = local_processing.non_duplicate_files([big_dup, fresh], known)
+    assert survivors == [fresh]
+
+    # The full-set credit (used by the first plan call) covers the big
+    # duplicate that's already at the destination.
+    full_credit = local_processing.existing_archive_bytes(
+        str(final_destination), [big_dup, fresh], folder_template="",
+    )
+    assert full_credit == 10_000
+
+    # The survivor-set credit must cover only `fresh`, which is NOT at the
+    # destination yet. Reusing full_credit on the retry would zero out the
+    # archive delta even though fresh still has to be written.
+    survivor_credit = local_processing.existing_archive_bytes(
+        str(final_destination), survivors, folder_template="",
+    )
+    assert survivor_credit == 0
+
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(
+        local_processing.shutil,
+        "disk_usage",
+        lambda path: Usage(total=10_000, used=0, free=10_000),
+    )
+
+    # Force staging and archive onto different fake devices so the
+    # destination-volume check actually runs (same_device skips it). The
+    # bug surfaces precisely when the archive lives on a separate volume
+    # whose free space the planner is responsible for checking.
+    real_stat = os.stat
+
+    def fake_stat(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if str(path).startswith(str(final_destination)):
+            return os.stat_result(
+                (result.st_mode, result.st_ino, 999) + tuple(result)[3:]
+            )
+        return result
+
+    monkeypatch.setattr(local_processing.os, "stat", fake_stat)
+
+    filtered_bytes = local_processing.total_file_bytes(survivors)
+    plan = local_processing.storage_plan(
+        str(staging),
+        filtered_bytes,
+        archive_parent=str(final_destination),
+        archive_existing_bytes=survivor_credit,
+        reserved_free_bytes=0,
+    )
+    assert plan["same_device"] is False
+    # archive_delta = filtered_bytes (100) - survivor_credit (0) = 100.
+    # Reusing full_credit (10_000) would have capped to filtered_bytes and
+    # driven archive_required_bytes to 0.
+    assert plan["archive_required_bytes"] == filtered_bytes
+
+    # Sanity check the bug we're guarding against: feeding the full-set
+    # credit (10_000) on the filtered retry zeroes out the archive delta,
+    # which is exactly what the pipeline_job retry path must NOT do.
+    buggy_plan = local_processing.storage_plan(
+        str(staging),
+        filtered_bytes,
+        archive_parent=str(final_destination),
+        archive_existing_bytes=full_credit,
+        reserved_free_bytes=0,
+    )
+    assert buggy_plan["archive_required_bytes"] == 0
