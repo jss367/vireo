@@ -16073,6 +16073,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("destination must be an absolute path")
         if local_processing and not destination:
             return json_error("local_processing requires a destination")
+        # Local processing only makes sense for import pipelines (source or
+        # sources). Collection pipelines set skip_scan and never run the
+        # ingest stage, so the staging folder is never created or indexed —
+        # the job would burn through every processing stage on the existing
+        # photos and then fail in archive_stage with "local staging folder
+        # was not indexed". Snapshot-scoped runs are likewise rejected: they
+        # also bypass ingest because the snapshot's existing files drive
+        # scan_roots directly. Fail fast so the user gets the actual reason.
+        if local_processing and not source and not sources:
+            return json_error(
+                "local_processing requires source or sources — it cannot be "
+                "combined with collection_id or source_snapshot_id"
+            )
 
         folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
         if destination and folder_template:

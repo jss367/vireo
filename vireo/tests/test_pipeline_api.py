@@ -199,6 +199,28 @@ def test_pipeline_local_processing_requires_destination(setup):
         shutil.rmtree(src, ignore_errors=True)
 
 
+def test_pipeline_local_processing_rejects_collection_id(setup, tmp_path):
+    # Collection pipelines set skip_scan and never run ingest, so the
+    # staging folder is never created/indexed. Without this rejection
+    # the job would burn through every processing stage and then fail
+    # at archive_stage with "local staging folder was not indexed".
+    app, _db_path = setup
+    dest = tmp_path / "archive"
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "collection_id": 1,
+            "destination": str(dest),
+            "local_processing": True,
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 400
+        err = resp.get_json()["error"].lower()
+        assert "local_processing" in err
+        assert "source" in err
+
+
 def test_pipeline_local_processing_archives_to_final_destination(
     setup, tmp_path, monkeypatch
 ):
