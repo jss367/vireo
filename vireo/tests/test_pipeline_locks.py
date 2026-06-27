@@ -13,6 +13,8 @@ from pipeline_locks import (
     acquire_gpu_if_session_uses_it,
     acquire_photo_mask,
     acquire_workspace_regroup,
+    release_archive_destination,
+    try_reserve_archive_destination,
 )
 
 
@@ -296,3 +298,81 @@ def test_photo_mask_lock_reentrant_keys_share_one_lock():
     lock1 = _photo_mask_lock_for_tests(7)
     lock2 = _photo_mask_lock_for_tests(7)
     assert lock1 is lock2
+
+
+def test_archive_destination_reserve_rejects_exact_match():
+    """Two pipelines targeting the same destination cannot both reserve."""
+    try:
+        assert try_reserve_archive_destination("/Photos/Shoot") is True
+        assert try_reserve_archive_destination("/Photos/Shoot") is False
+    finally:
+        release_archive_destination("/Photos/Shoot")
+
+
+def test_archive_destination_reserve_rejects_descendant():
+    """A child of an already-reserved root is rejected before processing starts.
+
+    Without this the parent run can create a tracked folder row that the
+    child later tries to archive into, leaving overlapping folder roots in
+    the catalog after the second job moves staging into the already-claimed
+    tree.
+    """
+    try:
+        assert try_reserve_archive_destination("/Photos/Shoot") is True
+        assert try_reserve_archive_destination("/Photos/Shoot/Subset") is False
+    finally:
+        release_archive_destination("/Photos/Shoot")
+
+
+def test_archive_destination_reserve_rejects_ancestor():
+    """A parent of an already-reserved leaf is rejected too.
+
+    Symmetry matters because either run can land first; once the leaf is
+    in flight, a second pipeline aiming at the enclosing root would later
+    have to reparent the in-flight subtree, which ``move_folder_path``
+    doesn't do.
+    """
+    try:
+        assert try_reserve_archive_destination("/Photos/Shoot/Subset") is True
+        assert try_reserve_archive_destination("/Photos/Shoot") is False
+    finally:
+        release_archive_destination("/Photos/Shoot/Subset")
+
+
+def test_archive_destination_reserve_allows_sibling_prefix_lookalike():
+    """``/Photos/Shoot`` and ``/Photos/ShootSubset`` are siblings, not nested.
+
+    A naive ``startswith`` overlap check would false-positive here and
+    block an unrelated archive. ``commonpath`` correctly returns
+    ``/Photos`` for both, which equals neither leaf.
+    """
+    try:
+        assert try_reserve_archive_destination("/Photos/Shoot") is True
+        assert try_reserve_archive_destination("/Photos/ShootSubset") is True
+    finally:
+        release_archive_destination("/Photos/Shoot")
+        release_archive_destination("/Photos/ShootSubset")
+
+
+def test_archive_destination_release_allows_reacquire():
+    """After release, the same destination (or a nested one) can be claimed."""
+    assert try_reserve_archive_destination("/Photos/Shoot") is True
+    release_archive_destination("/Photos/Shoot")
+    try:
+        # Same path is reusable.
+        assert try_reserve_archive_destination("/Photos/Shoot") is True
+        release_archive_destination("/Photos/Shoot")
+        # And a previously-blocked nested path is also reusable.
+        assert try_reserve_archive_destination("/Photos/Shoot/Subset") is True
+    finally:
+        release_archive_destination("/Photos/Shoot/Subset")
+
+
+def test_archive_destination_reserve_normalises_relative_paths():
+    """Relative and absolute spellings of the same target collide."""
+    abs_path = os.path.abspath("Photos/Shoot")
+    try:
+        assert try_reserve_archive_destination("Photos/Shoot") is True
+        assert try_reserve_archive_destination(abs_path) is False
+    finally:
+        release_archive_destination("Photos/Shoot")

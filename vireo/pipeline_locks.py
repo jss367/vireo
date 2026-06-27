@@ -204,19 +204,45 @@ def _normalize_archive_destination(path):
     return os.path.normpath(os.path.abspath(path))
 
 
+def _paths_overlap(a, b):
+    """Return True if ``a`` and ``b`` are equal or one descends from the other.
+
+    Both inputs must already be normalised absolute paths. Uses
+    ``os.path.commonpath`` so prefix-string traps like ``/Photos/Shoot`` vs
+    ``/Photos/ShootSubset`` don't false-positive as overlapping.
+    """
+    import os
+
+    if a == b:
+        return True
+    try:
+        common = os.path.commonpath([a, b])
+    except ValueError:
+        # Different drives (Windows) or one path isn't absolute. After
+        # normalisation that means the two can't possibly overlap.
+        return False
+    return common in (a, b)
+
+
 def try_reserve_archive_destination(path):
     """Claim ``path`` for an in-flight local-processing archive.
 
     Returns True on first claim, False if another running pipeline already
-    owns the same destination. Paths are normalised to absolute, so
-    ``/Photos/Shoot`` and ``./Photos/Shoot`` collide. Must be paired with
+    owns an overlapping destination — equal to ``path``, an ancestor of it,
+    or a descendant of it. Equal paths obviously collide; nested paths also
+    collide because ``move_folder`` would either create the parent's tracked
+    row inside its child's archive root, or move a parent into a destination
+    that the child has already claimed, leaving overlapping folder roots in
+    the catalog. Paths are normalised to absolute, so ``/Photos/Shoot`` and
+    ``./Photos/Shoot`` collide. Must be paired with
     ``release_archive_destination`` once the run terminates (success or
     failure) so retries and follow-on runs can re-acquire.
     """
     normalized = _normalize_archive_destination(path)
     with _ARCHIVE_DESTINATIONS_GUARD:
-        if normalized in _ARCHIVE_DESTINATIONS:
-            return False
+        for existing in _ARCHIVE_DESTINATIONS:
+            if _paths_overlap(existing, normalized):
+                return False
         _ARCHIVE_DESTINATIONS.add(normalized)
         return True
 
