@@ -282,6 +282,113 @@ def test_pipeline_local_processing_rejects_already_tracked_destination(
     assert "Vireo already manages" in error_text, job
 
 
+def test_pipeline_local_processing_creates_missing_archive_parent(
+    setup, tmp_path, monkeypatch
+):
+    """Regression: a nested archive destination whose parent doesn't yet
+    exist (e.g. /mnt/nas/NewShoot/Photos when NewShoot was never created
+    by the user) must be set up during the storage preflight, not left for
+    move_folder to discover after every processing step finishes. Without
+    the upfront makedirs the run would stage, process, and only fail at
+    the final move, leaving the staged copy stranded."""
+    app, db_path = setup
+
+    nonexistent_parent = tmp_path / "nas" / "NewShoot"
+    assert not nonexistent_parent.exists()
+    final_dest = nonexistent_parent / "Photos"
+
+    src = tmp_path / "card_parent"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(src / "shot.jpg")
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert job["status"] == "completed", job
+    assert (final_dest / "shot.jpg").is_file()
+    assert nonexistent_parent.is_dir()
+
+
+def test_pipeline_local_processing_skips_archive_when_previews_fail(
+    setup, tmp_path, monkeypatch
+):
+    """Regression: previews, extract_masks, eye_keypoints, regroup, and
+    miss can all fail without aborting the run, but run_pipeline_job
+    raises at the end whenever any stage status is "failed". If
+    archive_stage ran anyway, the staged folder would already be moved to
+    the user's archive root by the time that failure surfaced — publishing
+    a partial result from a job marked failed. Skip the archive when an
+    earlier stage failed and leave staging intact instead."""
+    app, db_path = setup
+
+    final_parent = tmp_path / "nas2"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+
+    src = tmp_path / "card_fail"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(src / "boom.jpg")
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    # Force previews_stage to fail without setting abort. The stage's
+    # outer try/except catches load_image() failures and marks the stage
+    # status "failed"; abort stays clear and the rest of the pipeline
+    # continues toward archive.
+    import image_loader
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("synthetic preview failure")
+
+    monkeypatch.setattr(image_loader, "load_image", boom)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job_id = resp.get_json()["job_id"]
+        job = wait_for_job_via_client(c, job_id)
+
+    # The job fails because previews_stage marked itself failed and
+    # run_pipeline_job re-raises at the end for any failed stage.
+    assert job["status"] == "failed", job
+
+    # archive must NOT publish files when an earlier stage failed.
+    assert not (final_dest / "boom.jpg").exists()
+
+    # Staging stays intact so the user can recover or retry.
+    staging_file = (
+        tmp_path / "staging" / job_id / "Photos" / "boom.jpg"
+    )
+    assert staging_file.is_file(), (
+        f"staging file should remain when archive is skipped, "
+        f"missing at {staging_file}"
+    )
+
+
 def test_pipeline_local_processing_preflight_filters_duplicates(
     setup, tmp_path, monkeypatch
 ):

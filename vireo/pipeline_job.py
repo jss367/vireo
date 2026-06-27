@@ -1149,6 +1149,28 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             )
                             return
 
+                        # Make sure the archive parent exists NOW. Otherwise
+                        # the pipeline would stage and process everything,
+                        # then fail at the final move_folder call when rsync
+                        # tries to write to a missing parent — leaving the
+                        # staged copy stranded under ~/.vireo/staging with no
+                        # archive at the final destination. Nested archive
+                        # targets like /mnt/nas/NewShoot/Photos are the
+                        # common case: the parent /mnt/nas/NewShoot may not
+                        # have been created yet by the user.
+                        archive_parent = os.path.dirname(
+                            os.path.normpath(final_destination),
+                        )
+                        try:
+                            os.makedirs(archive_parent, exist_ok=True)
+                        except OSError as exc:
+                            _bail_storage(
+                                f"Archive parent {archive_parent} could "
+                                f"not be created: {exc}. Check that the "
+                                "destination drive is mounted and writable."
+                            )
+                            return
+
                         os.makedirs(params.destination, exist_ok=True)
                         selected_files = selected_source_files(
                             sources,
@@ -4221,6 +4243,26 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             stages["archive"]["status"] = "skipped"
             runner.update_step(
                 job["id"], "archive", status="completed", summary="Skipped",
+            )
+            _update_stages(runner, job["id"], stages)
+            return
+        # Don't publish partial results: previews, extract_masks,
+        # eye_keypoints, regroup, and miss can all fail without setting
+        # abort, and run_pipeline_job marks the whole job failed at the
+        # end whenever any stage status is "failed". If we ran the archive
+        # in between, the staged folder would have already moved to
+        # final_destination by the time that failure was raised — leaving
+        # the user with a published archive whose pipeline never finished.
+        # Skip instead so staging stays intact and the failure is visible.
+        already_failed = [
+            name for name, s in stages.items() if s.get("status") == "failed"
+        ]
+        if already_failed:
+            stages["archive"]["status"] = "skipped"
+            runner.update_step(
+                job["id"], "archive",
+                status="completed",
+                summary=f"Skipped ({already_failed[0]} failed)",
             )
             _update_stages(runner, job["id"], stages)
             return
