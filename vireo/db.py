@@ -1633,10 +1633,35 @@ class Database:
         ).fetchall()
 
     def get_workspace_folder_roots(self, workspace_id):
-        """Return user-facing workspace roots, hiding covered descendants."""
+        """Return user-facing workspace roots, hiding covered descendants.
+
+        Each row carries ``workspace_photo_count``: the number of photos this
+        root contributes to the workspace, counting the whole subtree (the
+        root plus all of its descendant folders that are linked to this
+        workspace), not just photos sitting directly in the root. This matches
+        what the user actually sees in the workspace — visibility is scoped by
+        ``workspace_folders`` membership, so a descendant detached from the
+        workspace is correctly excluded. The ``folders.photo_count`` column is
+        a direct-only count and would read as a misleading "0 photos" for a
+        root whose images all live in subfolders.
+        """
         self._materialize_workspace_descendants(workspace_id)
         return self.conn.execute(
-            """SELECT f.* FROM folders f
+            """SELECT f.*, (
+                   SELECT COUNT(*)
+                   FROM photos p
+                   JOIN folders cf ON cf.id = p.folder_id
+                   JOIN workspace_folders cwf
+                     ON cwf.folder_id = cf.id
+                    AND cwf.workspace_id = wf.workspace_id
+                   WHERE cf.path = f.path
+                      OR substr(
+                           REPLACE(cf.path, '\\', '/'),
+                           1,
+                           length(RTRIM(REPLACE(f.path, '\\', '/'), '/') || '/')
+                         ) = RTRIM(REPLACE(f.path, '\\', '/'), '/') || '/'
+               ) AS workspace_photo_count
+               FROM folders f
                JOIN workspace_folders wf ON wf.folder_id = f.id
                WHERE wf.workspace_id = ? AND wf.is_root = 1
                ORDER BY f.path""",
