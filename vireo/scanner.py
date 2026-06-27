@@ -70,6 +70,60 @@ def _scaled_dimensions(width, height, max_size):
     return width, height
 
 
+def _exif_orientation_from_data(exif_data):
+    # Mirror of vireo.thumbnails._exif_orientation; kept local so the scanner
+    # doesn't take a runtime dependency on the request-path thumbnail module.
+    if not exif_data:
+        return None
+    if isinstance(exif_data, str):
+        try:
+            metadata = json.loads(exif_data)
+        except (TypeError, ValueError):
+            return None
+    elif isinstance(exif_data, dict):
+        metadata = exif_data
+    else:
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    for group in ("EXIF", "IFD0", "TIFF", "File"):
+        values = metadata.get(group)
+        if isinstance(values, dict) and "Orientation" in values:
+            return values["Orientation"]
+    return metadata.get("Orientation")
+
+
+def _orientation_swaps_axes(orientation):
+    if orientation is None or isinstance(orientation, bool):
+        return False
+    if isinstance(orientation, int | float):
+        return int(orientation) in (5, 6, 7, 8)
+    text = str(orientation).strip().lower()
+    if not text:
+        return False
+    try:
+        return int(text) in (5, 6, 7, 8)
+    except ValueError:
+        return "90" in text or "270" in text
+
+
+def _oriented_dimensions(width, height, exif_data):
+    """Return (width, height) rotated to match what extract_working_copy writes.
+
+    Stored ``width``/``height`` come straight from the sensor/file metadata,
+    so for portrait shots taken on a landscape sensor they're the unrotated
+    axes (e.g. 6000x4000 with EXIF Orientation 6). The request-path helpers
+    in thumbnails/app/export/pipeline normalize these to display orientation
+    before comparing against rendered pixels; scanner's RAW-undersize check
+    must do the same or it sees the orientation-normalized JPEG written by
+    ``extract_working_copy`` (4000x6000) as catastrophically undersized vs.
+    the raw 6000x4000 and falls back to the companion JPEG.
+    """
+    if _orientation_swaps_axes(_exif_orientation_from_data(exif_data)):
+        return height, width
+    return width, height
+
+
 def compute_file_hash(file_path, chunk_size=65536):
     """Compute SHA-256 hash of a file. Returns hex digest string."""
     h = hashlib.sha256()
@@ -836,7 +890,7 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
     rows = db.conn.execute(
         f"""
         SELECT p.id, p.filename, p.companion_path, p.working_copy_path,
-               p.extension, p.width, p.height, p.file_mtime,
+               p.extension, p.width, p.height, p.exif_data, p.file_mtime,
                f.path AS folder_path
           FROM photos p
           JOIN folders f ON f.id = p.folder_id
@@ -908,8 +962,15 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
             and row["width"]
             and row["height"]
         ):
+            # Stored width/height are the unrotated sensor axes; swap them
+            # before scaling so portrait files (e.g. 6000x4000 + Orientation 6)
+            # produce the same expected dimensions as the orientation-normalized
+            # JPEG that extract_working_copy actually writes.
+            oriented_w, oriented_h = _oriented_dimensions(
+                row["width"], row["height"], row["exif_data"],
+            )
             expected_w, expected_h = _scaled_dimensions(
-                row["width"], row["height"], wc_max_size,
+                oriented_w, oriented_h, wc_max_size,
             )
             try:
                 with Image.open(wc_abs) as _wc:

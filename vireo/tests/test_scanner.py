@@ -1720,6 +1720,85 @@ def test_scan_falls_back_when_raw_working_copy_short_edge_is_smaller(
         assert img.size == (4096, 2731)
 
 
+def test_scan_accepts_portrait_raw_working_copy_with_exif_orientation(
+    tmp_path, monkeypatch,
+):
+    """Stored width/height are the unrotated sensor axes, so a portrait shot
+    on a landscape sensor is e.g. 6000x4000 with EXIF Orientation 6.
+    ``extract_working_copy`` writes the orientation-normalized JPEG (4000x6000
+    scaled to 4096). The scanner's RAW-undersize check must apply the same
+    orientation swap that the request-path helpers use; otherwise it sees
+    4096-on-the-short-edge as catastrophically undersized vs. an expected
+    4096-on-the-long-edge and falls back to the companion JPEG, leaving
+    ``working_copy_failed_source='source'`` so edited renders bypass the
+    preserve-highlights RAW path for every portrait photo.
+    """
+    import config as cfg
+    import scanner
+    from db import Database
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+
+    nef_file = photo_dir / "IMG_005.nef"
+    nef_file.write_bytes(b"fake raw data")
+    jpg_file = photo_dir / "IMG_005.jpg"
+    # Companion JPEG written with sensor-axis dimensions; the orientation
+    # flag below is what tells consumers it should display as portrait.
+    Image.new("RGB", (6000, 4000), color=(255, 0, 255)).save(str(jpg_file), "JPEG")
+
+    portrait_meta = {
+        "File": {"ImageWidth": 6000, "ImageHeight": 4000},
+        "EXIF": {
+            "ImageWidth": 6000,
+            "ImageHeight": 4000,
+            "Orientation": 6,
+        },
+    }
+
+    def fake_metadata(paths):
+        return {str(p): portrait_meta for p in paths}
+
+    monkeypatch.setattr(scanner, "extract_metadata", fake_metadata)
+
+    sources_used = []
+
+    def fake_extract(source, output, max_size=4096, quality=92):
+        sources_used.append(source)
+        os.makedirs(os.path.dirname(output), exist_ok=True)
+        # libraw + image_loader normalize EXIF orientation: a 6000x4000 sensor
+        # readout with Orientation 6 is written as a portrait 4000x6000 JPEG,
+        # which here scales to 2731x4096 to fit max_size=4096.
+        Image.new("RGB", (2731, 4096)).save(output, "JPEG")
+        return True
+
+    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+
+    db = Database(str(vireo_dir / "test.db"))
+    scanner.scan(str(photo_dir), db, vireo_dir=str(vireo_dir))
+
+    # Only the RAW should have been extracted — no companion fallback.
+    assert len(sources_used) == 1, sources_used
+    assert sources_used[0].endswith("IMG_005.nef")
+
+    raw_row = db.conn.execute(
+        "SELECT working_copy_path, working_copy_failed_source"
+        " FROM photos WHERE extension = '.nef'"
+    ).fetchone()
+    assert raw_row is not None
+    assert raw_row["working_copy_path"] is not None
+    assert raw_row["working_copy_failed_source"] is None, (
+        "Portrait RAW with orientation-normalized working copy must not be "
+        "marked as a source failure; got "
+        f"{raw_row['working_copy_failed_source']!r}"
+    )
+
+
 def test_scan_marks_source_failure_when_raw_and_companion_both_fail(
     tmp_path, monkeypatch,
 ):
