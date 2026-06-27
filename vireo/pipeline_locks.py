@@ -185,3 +185,49 @@ def acquire_photo_mask(photo_id):
 
 def _photo_mask_lock_for_tests(photo_id):
     return acquire_photo_mask(photo_id)
+
+
+# In-flight archive destinations claimed by local-processing pipeline runs.
+# Two pipelines aimed at the same new ``final_destination`` can both pass the
+# DB-only overlap check before either one has created the folder row (jobs.py
+# allows up to SLOT_CAP=2 pipeline jobs concurrently), and the second would
+# only fail inside ``move_folder`` after staging and processing everything.
+# Reserving the destination up front rejects the duplicate run before any
+# expensive work starts.
+_ARCHIVE_DESTINATIONS: set = set()
+_ARCHIVE_DESTINATIONS_GUARD = threading.Lock()
+
+
+def _normalize_archive_destination(path):
+    import os
+
+    return os.path.normpath(os.path.abspath(path))
+
+
+def try_reserve_archive_destination(path):
+    """Claim ``path`` for an in-flight local-processing archive.
+
+    Returns True on first claim, False if another running pipeline already
+    owns the same destination. Paths are normalised to absolute, so
+    ``/Photos/Shoot`` and ``./Photos/Shoot`` collide. Must be paired with
+    ``release_archive_destination`` once the run terminates (success or
+    failure) so retries and follow-on runs can re-acquire.
+    """
+    normalized = _normalize_archive_destination(path)
+    with _ARCHIVE_DESTINATIONS_GUARD:
+        if normalized in _ARCHIVE_DESTINATIONS:
+            return False
+        _ARCHIVE_DESTINATIONS.add(normalized)
+        return True
+
+
+def release_archive_destination(path):
+    """Release a previously reserved archive destination."""
+    normalized = _normalize_archive_destination(path)
+    with _ARCHIVE_DESTINATIONS_GUARD:
+        _ARCHIVE_DESTINATIONS.discard(normalized)
+
+
+def _archive_destinations_for_tests():
+    with _ARCHIVE_DESTINATIONS_GUARD:
+        return set(_ARCHIVE_DESTINATIONS)
