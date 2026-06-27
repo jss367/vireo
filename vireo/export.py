@@ -290,20 +290,36 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
                 # demosaic the RAW; that preview can be much smaller than
                 # the full-size companion JPEG, so the export would
                 # quietly produce undersized bytes for unsupported RAW+JPEG
-                # files. Compare the loaded long edge to the source's
-                # expected dimensions (capped by ``load_max_size`` when
-                # set) and prefer the companion when the RAW result is
-                # smaller.
+                # files. Compare *both* loaded dimensions against the
+                # source's expected dimensions (capped by
+                # ``load_max_size`` when set) — a long-edge-only check
+                # accepts e.g. 6000x3376 embedded previews for 6000x4000
+                # photos, dropping short-edge content.
                 needs_companion = img is None
-                expected_long = 0
+                expected_w, expected_h = 0, 0
                 if img is not None:
                     orig_w, orig_h = _recipe_source_dimensions(photo, exif_data)
-                    expected_long = max(orig_w, orig_h)
-                    if load_max_size and (
-                        expected_long == 0 or expected_long > load_max_size
+                    expected_w, expected_h = orig_w, orig_h
+                    if (
+                        load_max_size
+                        and expected_w > 0
+                        and expected_h > 0
                     ):
-                        expected_long = load_max_size
-                    if expected_long > 0 and max(img.size) < expected_long:
+                        long_edge = max(expected_w, expected_h)
+                        if long_edge > load_max_size:
+                            scale = load_max_size / long_edge
+                            expected_w = round(expected_w * scale)
+                            expected_h = round(expected_h * scale)
+                    # Allow a 1px slack for rounding between RAW decoder
+                    # output and stored dimensions.
+                    if (
+                        expected_w > 0
+                        and expected_h > 0
+                        and (
+                            img.size[0] + 1 < expected_w
+                            or img.size[1] + 1 < expected_h
+                        )
+                    ):
                         needs_companion = True
                 if needs_companion:
                     companion_fallback = _companion_can_satisfy_export(
@@ -327,10 +343,10 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
                             else:
                                 log.info(
                                     "RAW decode fell back to undersized "
-                                    "embedded JPEG (%dx%d, expected %d on "
-                                    "long edge) for %s; using companion "
-                                    "JPEG instead",
-                                    img.size[0], img.size[1], expected_long,
+                                    "embedded JPEG (%dx%d, expected %dx%d) "
+                                    "for %s; using companion JPEG instead",
+                                    img.size[0], img.size[1],
+                                    expected_w, expected_h,
                                     photo["filename"],
                                 )
                                 img.close()

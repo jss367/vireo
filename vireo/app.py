@@ -9328,15 +9328,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             raw_decode = RAW_DECODE_PRESERVE_HIGHLIGHTS if primary_is_raw else None
             load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
             img = load_image(source_path, max_size=None, **load_kwargs)
-            if img is None and primary_is_raw:
+            needs_companion = False
+            if primary_is_raw:
+                if img is None:
+                    needs_companion = True
+                else:
+                    # libraw may return the embedded JPEG when it cannot
+                    # demosaic — that preview is typically much smaller
+                    # than the full-size companion JPEG, so the handoff
+                    # would apply the recipe to clipped pixels even when
+                    # a usable sidecar exists. Compare both oriented
+                    # dimensions (with 1px rounding slack) against the
+                    # photo's stored size and trigger the companion
+                    # fallback when the RAW result is undersized.
+                    orig_w, orig_h = _recipe_source_dimensions(photo)
+                    if orig_w > 0 and orig_h > 0 and (
+                        img.size[0] + 1 < orig_w
+                        or img.size[1] + 1 < orig_h
+                    ):
+                        needs_companion = True
+            if needs_companion:
                 # libraw can't decode this RAW (unsupported variant, corrupt
-                # sensor data, no usable embedded JPEG). Fall back to the
-                # full-size companion JPEG so Open External still works for
-                # RAW+JPEG pairs that have a usable handoff JPEG. Cache key
-                # stays on the RAW source so a future RAW replacement (mtime
-                # bump) re-tries the RAW; we accept that companion-only edits
-                # won't invalidate this render — matching the cache contract
-                # used elsewhere for RAW-primary photos.
+                # sensor data, no usable embedded JPEG) or only produced an
+                # undersized embedded preview. Fall back to the full-size
+                # companion JPEG so Open External still works for RAW+JPEG
+                # pairs that have a usable handoff JPEG. Cache key stays on
+                # the RAW source so a future RAW replacement (mtime bump)
+                # re-tries the RAW; we accept that companion-only edits
+                # won't invalidate this render — matching the cache
+                # contract used elsewhere for RAW-primary photos.
                 folder_path = folders.get(photo["folder_id"])
                 companion_path = photo["companion_path"]
                 if folder_path and companion_path:
@@ -9346,12 +9366,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         and os.path.abspath(companion_abs)
                         != os.path.abspath(source_path)
                     ):
-                        log.info(
-                            "External-edit RAW decode failed for photo %s; "
-                            "falling back to companion JPEG %s",
-                            photo["id"], companion_abs,
-                        )
-                        img = load_image(companion_abs, max_size=None)
+                        companion_img = load_image(companion_abs, max_size=None)
+                        if companion_img is not None and (
+                            img is None
+                            or max(companion_img.size) > max(img.size)
+                        ):
+                            if img is None:
+                                log.info(
+                                    "External-edit RAW decode failed for "
+                                    "photo %s; falling back to companion "
+                                    "JPEG %s",
+                                    photo["id"], companion_abs,
+                                )
+                            else:
+                                log.info(
+                                    "External-edit RAW decode fell back to "
+                                    "undersized embedded JPEG (%dx%d) for "
+                                    "photo %s; using companion JPEG %s",
+                                    img.size[0], img.size[1], photo["id"],
+                                    companion_abs,
+                                )
+                                img.close()
+                            img = companion_img
+                        elif companion_img is not None:
+                            companion_img.close()
             if img is None:
                 return None, f"{photo['filename']}: failed to load image"
             rendered = None
@@ -11577,7 +11615,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         raw_decode = RAW_DECODE_PRESERVE_HIGHLIGHTS if primary_is_raw else None
         load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
         img = load_image(source_path, max_size=None, **load_kwargs)
-        if img is None and primary_is_raw:
+        needs_companion = False
+        if primary_is_raw:
+            if img is None:
+                needs_companion = True
+            else:
+                # libraw may return the embedded JPEG when demosaic
+                # fails — see _external_edit_handoff_path for the same
+                # gate. Without this an unsupported RAW would upload
+                # clipped/undersized pixels to iNaturalist even when a
+                # usable sidecar JPEG exists.
+                orig_w, orig_h = _recipe_source_dimensions(photo)
+                if orig_w > 0 and orig_h > 0 and (
+                    img.size[0] + 1 < orig_w
+                    or img.size[1] + 1 < orig_h
+                ):
+                    needs_companion = True
+        if needs_companion:
             # Mirror _external_edit_handoff_path: libraw may fail to decode
             # this RAW variant, but the full-size companion JPEG can still
             # carry the recipe for iNaturalist. Without this fallback the
@@ -11593,12 +11647,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     and os.path.abspath(companion_abs)
                     != os.path.abspath(source_path)
                 ):
-                    log.info(
-                        "iNat upload RAW decode failed for photo %s; "
-                        "falling back to companion JPEG %s",
-                        photo["id"], companion_abs,
-                    )
-                    img = load_image(companion_abs, max_size=None)
+                    companion_img = load_image(companion_abs, max_size=None)
+                    if companion_img is not None and (
+                        img is None
+                        or max(companion_img.size) > max(img.size)
+                    ):
+                        if img is None:
+                            log.info(
+                                "iNat upload RAW decode failed for photo %s; "
+                                "falling back to companion JPEG %s",
+                                photo["id"], companion_abs,
+                            )
+                        else:
+                            log.info(
+                                "iNat upload RAW decode fell back to "
+                                "undersized embedded JPEG (%dx%d) for "
+                                "photo %s; using companion JPEG %s",
+                                img.size[0], img.size[1], photo["id"],
+                                companion_abs,
+                            )
+                            img.close()
+                        img = companion_img
+                    elif companion_img is not None:
+                        companion_img.close()
         if img is None:
             return None, f"{photo['filename']}: failed to load image"
         rendered = None

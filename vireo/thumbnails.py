@@ -181,11 +181,20 @@ def _recipe_source_path(photo, recipe, max_size, vireo_dir, folders):
 
 
 def _has_current_raw_failure(photo, source_path):
+    """Whether this RAW row carries an explicit `source` failure marker.
+
+    Only an explicit ``working_copy_failed_source == "source"`` marker
+    routes RAW thumbnails to the companion JPEG. Treating legacy NULL
+    markers the same way as an explicit source failure made thumbnail
+    selection diverge from preview/export, which use only the explicit
+    semantics (see ``_has_current_working_copy_failure`` in ``app.py``
+    and ``pipeline_job.py``).
+    """
     if os.path.splitext(source_path or "")[1].lower() not in RAW_EXTENSIONS:
         return False
     if os.path.splitext(_photo_value(photo, "filename") or "")[1].lower() not in RAW_EXTENSIONS:
         return False
-    if _photo_value(photo, "working_copy_failed_source") not in (None, "source"):
+    if _photo_value(photo, "working_copy_failed_source") != "source":
         return False
     failed_at = _photo_value(photo, "working_copy_failed_at")
     failed_mtime = _photo_value(photo, "working_copy_failed_mtime")

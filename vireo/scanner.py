@@ -899,8 +899,24 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
                 with _PILImage.open(wc_abs) as _wc:
                     wc_long = max(_wc.size)
             except Exception:
+                # PIL couldn't open the file: corrupt / truncated /
+                # unsupported. Treat as a failed extraction so the
+                # companion fallback below runs instead of caching an
+                # unreadable working copy.
+                log.info(
+                    "RAW working-copy extraction for photo %s produced "
+                    "an unreadable file %s; retrying from companion "
+                    "JPEG %s",
+                    row["id"], wc_abs, companion_path,
+                )
                 wc_long = 0
-            if expected_long > 0 and wc_long and wc_long < expected_long * 0.9:
+                ok = False
+            if (
+                ok
+                and expected_long > 0
+                and wc_long
+                and wc_long < expected_long * 0.9
+            ):
                 log.info(
                     "RAW working-copy extraction for photo %s produced "
                     "undersized result (%d, expected long edge %d); "

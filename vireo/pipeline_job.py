@@ -348,6 +348,56 @@ def _has_current_working_copy_failure(
     return age < _WORKING_COPY_FAILURE_RETRY_SECONDS
 
 
+def _retry_thumbnail_with_companion(
+    thread_db, generate_thumbnail, photo, photo_id, raw_source_path,
+    cache_dir, thumb_size, recipe, folder_path,
+):
+    """Mirror serve_thumb's RAW->companion fallback for pipeline jobs.
+
+    When ``generate_thumbnail`` fails on a RAW source, try the companion
+    JPEG before counting the photo as failed and record a source failure
+    marker so future ``_recipe_render_source`` calls route through the
+    companion. Returns the new thumbnail path on success or ``None`` if
+    no usable companion fallback was available.
+    """
+    if not photo or not folder_path:
+        return None
+    companion_rel = _photo_value(photo, "companion_path")
+    if not companion_rel:
+        return None
+    companion_abs = os.path.join(folder_path, companion_rel)
+    if (
+        not os.path.exists(companion_abs)
+        or os.path.abspath(companion_abs) == os.path.abspath(raw_source_path)
+    ):
+        return None
+    log.info(
+        "Pipeline thumbnail RAW decode failed for photo %s; "
+        "falling back to companion JPEG",
+        photo_id,
+    )
+    file_mtime = _photo_value(photo, "file_mtime")
+    if file_mtime is not None:
+        with contextlib.suppress(Exception):
+            thread_db.conn.execute(
+                "UPDATE photos SET"
+                " working_copy_failed_at=datetime('now'),"
+                " working_copy_failed_mtime=?,"
+                " working_copy_failed_source='source'"
+                " WHERE id=?",
+                (file_mtime, photo_id),
+            )
+            commit_with_retry(thread_db.conn)
+    recipe_kwargs = {"recipe": recipe} if recipe else {}
+    return generate_thumbnail(
+        photo_id,
+        companion_abs,
+        cache_dir,
+        size=thumb_size,
+        **recipe_kwargs,
+    )
+
+
 _CLASSIFIER_BUNDLE_FIELDS = (
     "clf", "model_type", "model_name", "model_str",
     "labels", "use_tol", "active_model", "labels_fingerprint",
@@ -1537,6 +1587,16 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         **recipe_kwargs,
                         **raw_decode_kwargs,
                     )
+                    if (
+                        result_path is None
+                        and detail_photo is not None
+                        and os.path.splitext(photo_path)[1].lower() in _RAW_EXTENSIONS
+                    ):
+                        result_path = _retry_thumbnail_with_companion(
+                            thread_db, generate_thumbnail, detail_photo,
+                            photo_id, photo_path, cache_dir, thumb_size,
+                            recipe, folders.get(detail_photo["folder_id"]),
+                        )
                     if result_path is None:
                         failed += 1
                     elif already_exists:
@@ -1631,6 +1691,19 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             **recipe_kwargs,
                             **raw_decode_kwargs,
                         )
+                        if (
+                            result_path is None
+                            and os.path.splitext(photo_path)[1].lower() in _RAW_EXTENSIONS
+                        ):
+                            # detail_photo is set when recipe is set;
+                            # otherwise fall back to the collection's
+                            # `photo` row which carries companion_path.
+                            fallback_photo = detail_photo or photo
+                            result_path = _retry_thumbnail_with_companion(
+                                thread_db, generate_thumbnail, fallback_photo,
+                                photo_id, photo_path, cache_dir, thumb_size,
+                                recipe, folder_path,
+                            )
                         if result_path is None:
                             failed += 1
                         elif already_exists:
