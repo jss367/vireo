@@ -1657,14 +1657,20 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             # stale. Includes the NULL → concrete transition for legacy
             # rows that predate hash tracking — we can't prove their
             # caches match current bytes, so safer to flush and
-            # regenerate. Also fires when a previously-hashed file is
-            # truncated to zero bytes: file_hash is None in that branch
-            # (empty files don't carry duplicate identity), so the plain
+            # regenerate. Also fires when a file is truncated to zero
+            # bytes: file_hash is None in that branch (empty files don't
+            # carry duplicate identity), so the plain
             # ``file_hash is not None`` guard would otherwise leave
             # thumbnails and working copies from the old bytes in place.
-            # Skips the empty → empty repair case (prev was already the
-            # empty SHA) because the bytes didn't actually change.
-            # Gated on ``row_already_existed`` so brand-new inserts
+            # The zero-byte clause covers BOTH non-empty → empty and
+            # legacy NULL → empty: a pre-hash row whose file is now
+            # truncated still has thumbnails rendered from its old
+            # non-empty bytes, and before this fix the previous code
+            # path (which stored the concrete empty SHA) would have
+            # invalidated it via the NULL → concrete branch. Skips the
+            # empty → empty repair case (prev was already the empty SHA)
+            # because the bytes didn't actually change. Gated on
+            # ``row_already_existed`` so brand-new inserts
             # (prev_file_hash is always NULL there) don't trigger
             # pointless UPDATE + commit round-trips on large initial
             # scans. Requires explicit vireo_dir; callers must pass it
@@ -1674,7 +1680,6 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 file_hash is not None and prev_file_hash != file_hash
             ) or (
                 file_size == 0
-                and prev_file_hash is not None
                 and prev_file_hash != EMPTY_FILE_SHA256
             )
             if (row_already_existed

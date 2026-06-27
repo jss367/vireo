@@ -2862,6 +2862,72 @@ def test_rescan_invalidates_caches_when_file_truncated_to_zero(tmp_path):
     )
 
 
+def test_rescan_invalidates_caches_on_null_to_empty_transition(tmp_path):
+    """Legacy/pre-hash rows have ``file_hash = NULL`` but may still carry
+    thumbnails or working copies rendered from their old non-empty bytes.
+    When such a file is later truncated to zero, the scanner clears
+    ``file_hash`` (the empty SHA must not collide as a duplicate
+    identity), so the prior ``prev_file_hash != file_hash`` guard alone
+    couldn't see the transition (None → None). Cache invalidation must
+    still fire in this case — otherwise the stale thumbnail rendered
+    from the original non-empty bytes survives forever.
+    """
+    from db import Database
+    from scanner import scan
+    from thumbnails import generate_thumbnail
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    img_path = os.path.join(root, "shot.jpg")
+    Image.new("RGB", (800, 600), color=(0, 255, 0)).save(img_path, "JPEG")
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    cache_dir = vireo_dir / "thumbnails"
+    cache_dir.mkdir()
+
+    db = Database(str(vireo_dir / "test.db"))
+    scan(root, db, vireo_dir=str(vireo_dir))
+    photo_id = db.get_photos(per_page=100)[0]["id"]
+
+    thumb_path = str(cache_dir / f"{photo_id}.jpg")
+    generate_thumbnail(photo_id, img_path, str(cache_dir))
+    assert os.path.exists(thumb_path)
+
+    # Simulate a legacy pre-hash row whose file_hash was never recorded.
+    # The actual on-disk bytes are still the original non-empty image,
+    # but the DB has no hash baseline to compare against.
+    db.conn.execute(
+        "UPDATE photos SET file_hash = NULL WHERE id = ?", (photo_id,),
+    )
+    db.conn.commit()
+
+    # Replace with a zero-byte file and force the incremental scan to
+    # reprocess by clearing the stored mtime.
+    os.truncate(img_path, 0)
+    db.conn.execute(
+        "UPDATE photos SET file_mtime = 0 WHERE id = ?", (photo_id,)
+    )
+    db.conn.commit()
+
+    scan(root, db, incremental=True, vireo_dir=str(vireo_dir),
+         thumb_cache_dir=str(cache_dir))
+
+    row = db.conn.execute(
+        "SELECT file_hash, file_size FROM photos WHERE id = ?", (photo_id,)
+    ).fetchone()
+    assert row["file_hash"] is None, (
+        "sanity: zero-byte file must not carry an empty-SHA duplicate identity"
+    )
+    assert row["file_size"] == 0
+
+    assert not os.path.exists(thumb_path), (
+        "NULL → empty transition must invalidate derived caches; "
+        "otherwise legacy rows keep the thumbnail rendered from their "
+        "old non-empty bytes after the source file is truncated."
+    )
+
+
 def test_rescan_regenerates_working_copy_when_file_content_changes(tmp_path):
     """When a large JPEG's content changes, re-scan must invalidate the stale
     working copy so the subsequent extraction reflects current pixels."""
