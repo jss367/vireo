@@ -140,6 +140,26 @@ retries when it contains the exact `[pr-agent-fix-ci:<number>]` marker the
 routine prompt asks the agent to write. Regular contributor commits with
 similar wording still route to the routine.
 
+Review-event de-noising. The `fix-comments` and `codex-review` jobs gate the
+routine on the `has-open-threads` composite action before firing. Codex
+re-reviews every commit and re-posts its still-open findings as fresh inline
+comments, and its review body is always the same stock template — so neither
+the body nor a comment count distinguishes a new finding from a re-stated one.
+Thread state does: the gate fires only when some review thread is unresolved,
+not outdated, and has a reviewer's comment as its latest entry (i.e. the author
+has not yet replied). Once the agent has replied to every open thread,
+subsequent Codex re-reviews no longer wake the routine. Top-level comments and
+`/claude-fix` route through `fix-comment-feedback`/`activate` and are not
+affected by this gate.
+
+`fix-comments` also fires when a trusted human reviewer leaves a non-empty
+review body, even if no inline review thread is open. This preserves the
+prior behavior for body-only reviews (e.g. a `commented` or `changes_requested`
+review whose feedback lives entirely in the review body). The body-firing
+check excludes the Codex connector bot because its body is always the stock
+template; Codex findings still route through inline comments and the thread
+gate.
+
 ## Limits and caveats
 
 - **Daily routine cap.** Each account has a daily limit on routine runs.
@@ -156,6 +176,14 @@ similar wording still route to the routine.
 - **Commit attribution.** Commits appear under the claude.ai account's
   connected GitHub identity, the same as when you push from a local
   checkout logged in as yourself.
+- **Review-thread gate is author-blind.** `has-open-threads` treats any
+  thread whose latest comment is from the PR author as "already answered". If
+  the PR author leaves an *inline review comment* asking the agent to do
+  something, the gate counts it as an author reply and the review event will
+  not fire the routine. Use a top-level comment, a review body, or
+  `/claude-fix` for author requests — those route through jobs or branches of
+  the guard the inline-thread check does not gate. The gate paginates through
+  all review threads, so large PRs are not truncated.
 
 ## Auto-Merge Details
 
