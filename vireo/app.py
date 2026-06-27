@@ -15282,6 +15282,39 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 recipe=recipe,
                 raw_decode=raw_decode,
             )
+            if (
+                not result
+                and os.path.splitext(source)[1].lower() in RAW_EXTENSIONS
+            ):
+                # libraw couldn't demosaic the RAW (unsupported variant,
+                # corrupt file, no usable embedded JPEG). Try the companion
+                # JPEG before 404'ing so a RAW+JPEG row whose RAW can't be
+                # decoded still gets a grid thumbnail — mirrors the
+                # companion fallback in serve_preview / serve_original.
+                companion_rel = photo["companion_path"]
+                if companion_rel:
+                    companion_abs = os.path.join(
+                        folder_row["path"], companion_rel,
+                    )
+                    if (
+                        os.path.exists(companion_abs)
+                        and companion_abs != source
+                    ):
+                        log.info(
+                            "Thumbnail self-heal RAW decode failed for "
+                            "photo %s; falling back to companion JPEG",
+                            photo_id,
+                        )
+                        _record_working_copy_failure(db, photo, source)
+                        result = generate_thumbnail(
+                            photo_id,
+                            companion_abs,
+                            thumb_dir,
+                            size=thumb_size,
+                            recipe=recipe,
+                        )
+                        if result:
+                            source = companion_abs
         except Exception:
             log.exception(
                 "Thumbnail self-heal failed for photo %s (source=%s)",
@@ -18198,6 +18231,54 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
         img = load_image(canonical, max_size=load_max_size, **load_kwargs)
+        if (
+            img is not None
+            and selected_ext in RAW_EXTENSIONS
+            and photo["width"]
+            and photo["height"]
+        ):
+            # _load_raw falls back to the embedded camera JPEG when libraw
+            # can't demosaic the sensor data, even in preserve-highlights
+            # mode. That preview is often a fraction of the sensor's full
+            # resolution, so a "successful" load can still be undersized
+            # relative to what the request asked for. If a full-size
+            # companion JPEG could satisfy the requested size, prefer it
+            # over caching a downscaled embedded preview that future hits
+            # would silently keep serving.
+            expected_long = max(int(photo["width"]), int(photo["height"]))
+            if load_max_size is not None:
+                expected_long = min(expected_long, load_max_size)
+            loaded_long = max(img.size)
+            if expected_long > 0 and loaded_long < expected_long * 0.9:
+                companion_rel = photo["companion_path"]
+                if companion_rel:
+                    companion_abs = os.path.join(folder_row["path"], companion_rel)
+                    if (
+                        os.path.exists(companion_abs)
+                        and companion_abs != canonical
+                    ):
+                        log.info(
+                            "RAW decode for photo %s preview at size=%s "
+                            "returned undersized embedded preview (%dx%d, "
+                            "expected long edge %d); falling back to "
+                            "companion JPEG",
+                            photo_id, size, img.size[0], img.size[1],
+                            expected_long,
+                        )
+                        img.close()
+                        companion_img = load_image(
+                            companion_abs, max_size=load_max_size,
+                        )
+                        if companion_img is not None:
+                            img = companion_img
+                            canonical = companion_abs
+                        else:
+                            # Companion unreadable — recover the embedded
+                            # preview rather than 500ing the request.
+                            img = load_image(
+                                canonical, max_size=load_max_size,
+                                **load_kwargs,
+                            )
         if img is None and selected_ext in RAW_EXTENSIONS:
             # libraw couldn't decode this RAW (unsupported variant, corrupt
             # file, no usable embedded JPEG). Try the companion JPEG before
