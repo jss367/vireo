@@ -2031,12 +2031,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # companion is available.
         companion_path = photo["companion_path"]
         original_abs = os.path.join(folder_path, photo["filename"])
-        allow_companion = not primary_is_raw or _has_current_working_copy_failure(
-            photo,
-            vireo_dir,
-            trust_existing_working_copy=False,
-            live_source_path=original_abs,
-            folder_path=folder_path,
+        allow_companion = (
+            not primary_is_raw
+            or not os.path.exists(original_abs)
+            or _has_current_working_copy_failure(
+                photo,
+                vireo_dir,
+                trust_existing_working_copy=False,
+                live_source_path=original_abs,
+                folder_path=folder_path,
+            )
         )
         if companion_path and allow_companion:
             companion = os.path.join(folder_path, companion_path)
