@@ -1853,6 +1853,68 @@ def test_cropped_thumbnail_uses_companion_before_raw_failure_marker(
         assert img.size == (267, 400)
 
 
+def test_thumbnail_falls_back_when_raw_short_edge_is_smaller(
+    client_with_photo, monkeypatch,
+):
+    """A RAW embedded preview with the requested long edge is still too small
+    when its short edge does not match the expected aspect. The thumbnail
+    self-heal path should reject it and retry the companion before caching.
+    """
+    import io
+    import os
+
+    import thumbnails
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    raw_path = os.path.join(folder["path"], "thumb.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(b"unsupported raw")
+    companion_path = os.path.join(folder["path"], "thumb.jpg")
+    Image.new("RGB", (6000, 4000), (40, 90, 180)).save(
+        companion_path, "JPEG", quality=85,
+    )
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='thumb.NEF', extension='.nef',
+               companion_path='thumb.jpg',
+               working_copy_path=NULL,
+               width=6000, height=4000,
+               working_copy_failed_at=NULL,
+               working_copy_failed_mtime=NULL,
+               working_copy_failed_source=NULL
+           WHERE id=?""",
+        (photo_id,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+
+    original_load_image = thumbnails.load_image
+    loaded_paths = []
+
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        loaded_paths.append(str(file_path))
+        if str(file_path).lower().endswith(".nef"):
+            # Long edge ties the requested thumbnail size (400), but a 3:2
+            # source should load as 400x267 before recipe application.
+            return Image.new("RGB", (400, 225), (200, 50, 50))
+        return original_load_image(file_path, max_size=max_size, **kwargs)
+
+    monkeypatch.setattr(thumbnails, "load_image", tracking_load_image)
+
+    rendered = client.get(f"/thumbnails/{photo_id}.jpg")
+
+    assert rendered.status_code == 200
+    assert loaded_paths == [raw_path, companion_path]
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (267, 400)
+
+
 def test_edited_original_uses_trusted_working_copy_when_source_missing(
     client_with_photo,
 ):

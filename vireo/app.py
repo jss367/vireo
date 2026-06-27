@@ -15447,6 +15447,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 and os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
                 else None
             )
+            min_source_size = None
+            if raw_decode and os.path.splitext(source)[1].lower() in RAW_EXTENSIONS:
+                load_max_size = None if recipe and recipe.get("crop") else thumb_size
+                min_source_size = _scaled_recipe_source_dimensions(
+                    photo, load_max_size,
+                )
             result = generate_thumbnail(
                 photo_id,
                 source,
@@ -15454,6 +15460,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 size=thumb_size,
                 recipe=recipe,
                 raw_decode=raw_decode,
+                min_source_size=min_source_size,
             )
             if (
                 not result

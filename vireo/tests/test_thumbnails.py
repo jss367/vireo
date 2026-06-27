@@ -317,6 +317,60 @@ def test_generate_all_retries_edited_raw_thumbnail_with_companion(
     assert row["working_copy_failed_source"] == "source"
 
 
+def test_generate_all_retries_when_raw_thumbnail_short_edge_is_smaller(
+    tmp_path, monkeypatch,
+):
+    import thumbnails
+    from db import Database
+
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    raw_path = photos_dir / "source.NEF"
+    raw_path.write_bytes(b"unsupported raw")
+    companion_path = photos_dir / "source.jpg"
+    Image.new("RGB", (6000, 4000), "green").save(companion_path, "JPEG")
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    db = Database(str(vireo_dir / "test.db"))
+    folder_id = db.add_folder(str(photos_dir), name="photos")
+    photo_id = db.add_photo(
+        folder_id,
+        "source.NEF",
+        ".nef",
+        file_size=raw_path.stat().st_size,
+        file_mtime=1234.0,
+        width=6000,
+        height=4000,
+    )
+    db.conn.execute(
+        "UPDATE photos SET companion_path='source.jpg' WHERE id=?",
+        (photo_id,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+
+    loaded_paths = []
+    original_load_image = thumbnails.load_image
+
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        loaded_paths.append(str(file_path))
+        if str(file_path).lower().endswith(".nef"):
+            return Image.new("RGB", (400, 225), "red")
+        return original_load_image(file_path, max_size=max_size, **kwargs)
+
+    monkeypatch.setattr(thumbnails, "load_image", tracking_load_image)
+
+    thumb_dir = vireo_dir / "thumbs"
+    result = thumbnails.generate_all(db, str(thumb_dir), vireo_dir=str(vireo_dir))
+
+    assert result["generated"] == 1
+    assert result["failed"] == 0
+    assert loaded_paths == [str(raw_path), str(companion_path)]
+    with Image.open(thumb_dir / f"{photo_id}.jpg") as img:
+        assert img.size == (267, 400)
+
+
 def test_generate_all_creates_missing(tmp_path):
     """generate_all generates thumbnails for photos without them."""
     from db import Database
@@ -387,7 +441,8 @@ def test_generate_all_does_not_record_thumb_path_on_failure(tmp_path, monkeypatc
 
     monkeypatch.setattr(
         thumbnails_mod, "generate_thumbnail",
-        lambda photo_id, src, cache_dir, size=400, quality=85, recipe=None: None,
+        lambda photo_id, src, cache_dir, size=400, quality=85,
+        recipe=None, **kwargs: None,
     )
 
     cache_dir = str(tmp_path / "thumbs")

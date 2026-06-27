@@ -319,6 +319,20 @@ def _thumb_raw_decode_kwargs(photo, recipe):
     return {"raw_decode": RAW_DECODE_PRESERVE_HIGHLIGHTS}
 
 
+def _thumb_min_source_size_kwargs(photo, recipe, thumb_size, source_path):
+    if not recipe or not photo:
+        return {}
+    filename = _photo_value(photo, "filename") or ""
+    if os.path.splitext(filename)[1].lower() not in _RAW_EXTENSIONS:
+        return {}
+    if os.path.splitext(source_path or "")[1].lower() not in _RAW_EXTENSIONS:
+        return {}
+    load_max_size = None if recipe.get("crop") else thumb_size
+    return {
+        "min_source_size": _scaled_recipe_source_dimensions(photo, load_max_size),
+    }
+
+
 def _has_current_working_copy_failure(
     photo, vireo_dir=None, trust_existing_working_copy=True,
     live_source_path=None, folder_path=None,
@@ -1603,6 +1617,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     # to _recipe_render_source cannot silently bypass
                     # RAW_DECODE_PRESERVE_HIGHLIGHTS for a RAW primary.
                     raw_decode_kwargs = _thumb_raw_decode_kwargs(detail_photo, recipe)
+                    min_size_kwargs = _thumb_min_source_size_kwargs(
+                        detail_photo, recipe, thumb_size, photo_path,
+                    )
                     result_path = generate_thumbnail(
                         photo_id,
                         photo_path,
@@ -1610,6 +1627,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         size=thumb_size,
                         **recipe_kwargs,
                         **raw_decode_kwargs,
+                        **min_size_kwargs,
                     )
                     if (
                         result_path is None
@@ -1707,6 +1725,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         raw_decode_kwargs = _thumb_raw_decode_kwargs(
                             detail_photo, recipe,
                         )
+                        min_size_kwargs = _thumb_min_source_size_kwargs(
+                            detail_photo, recipe, thumb_size, photo_path,
+                        )
                         result_path = generate_thumbnail(
                             photo_id,
                             photo_path,
@@ -1714,6 +1735,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             size=thumb_size,
                             **recipe_kwargs,
                             **raw_decode_kwargs,
+                            **min_size_kwargs,
                         )
                         if (
                             result_path is None

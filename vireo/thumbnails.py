@@ -90,6 +90,19 @@ def _recipe_source_dimensions(photo):
     return width, height
 
 
+def _scaled_recipe_source_dimensions(photo, max_size=None):
+    width, height = _recipe_source_dimensions(photo)
+    if width <= 0 or height <= 0:
+        return 0, 0
+    if max_size:
+        long_edge = max(width, height)
+        if long_edge > max_size:
+            scale = max_size / long_edge
+            width = round(width * scale)
+            height = round(height * scale)
+    return width, height
+
+
 def _image_size_after_exif_orientation(img):
     width, height = img.size
     orientation = None
@@ -263,7 +276,7 @@ def _retry_thumbnail_with_companion(
 
 def generate_thumbnail(
     photo_id, source_path, cache_dir, size=THUMB_SIZE, quality=85, recipe=None,
-    raw_decode=None,
+    raw_decode=None, min_source_size=None,
 ):
     """Generate a JPEG thumbnail for a photo.
 
@@ -280,6 +293,10 @@ def generate_thumbnail(
             edited RAW thumbnail so the demosaic matches the preview /
             export pipeline instead of falling back to the embedded
             camera JPEG's clipped highlights.
+        min_source_size: optional ``(width, height)`` for the image loaded
+            before applying ``recipe``. If the RAW loader falls back to an
+            embedded preview smaller than either axis, generation returns
+            ``None`` so callers can retry a full-size companion JPEG.
 
     Returns:
         path to the thumbnail file, or None on failure
@@ -295,6 +312,24 @@ def generate_thumbnail(
     if img is None:
         log.warning("Could not load image for thumbnail: %s", source_path)
         return None
+    if min_source_size:
+        expected_w, expected_h = min_source_size
+        if (
+            expected_w > 0
+            and expected_h > 0
+            and (
+                img.size[0] + 1 < expected_w
+                or img.size[1] + 1 < expected_h
+            )
+        ):
+            log.info(
+                "Thumbnail source for photo %s is undersized (%dx%d, "
+                "expected %dx%d): %s",
+                photo_id, img.size[0], img.size[1],
+                expected_w, expected_h, source_path,
+            )
+            img.close()
+            return None
     if recipe:
         from image_edits import apply_recipe_to_loaded_image
         img = apply_recipe_to_loaded_image(img, recipe, max_size=size)
@@ -398,12 +433,22 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
             source_photo["filename"]
         )[1].lower() in RAW_EXTENSIONS:
             raw_decode_kwargs["raw_decode"] = RAW_DECODE_PRESERVE_HIGHLIGHTS
+        min_source_size = None
+        if (
+            recipe
+            and os.path.splitext(source_path)[1].lower() in RAW_EXTENSIONS
+        ):
+            load_max_size = None if recipe.get("crop") else thumb_size
+            min_source_size = _scaled_recipe_source_dimensions(
+                source_photo, load_max_size,
+            )
         result_path = generate_thumbnail(
             photo["id"],
             source_path,
             cache_dir,
             size=thumb_size,
             quality=thumb_quality,
+            min_source_size=min_source_size,
             **recipe_kwargs,
             **raw_decode_kwargs,
         )
