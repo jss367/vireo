@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import filecmp
 import math
 import ntpath
 import os
 import shutil
 from pathlib import Path
 
-from ingest import discover_source_files
+from ingest import (
+    _source_file_timestamps,
+    build_destination_path,
+    discover_source_files,
+)
 
 GIB = 1024 ** 3
 DERIVED_OVERHEAD_RATIO = 0.25
@@ -70,31 +75,48 @@ def total_file_bytes(files: list[Path]) -> int:
     return total
 
 
-def existing_archive_bytes(path: str) -> int:
-    """Sum the bytes already present under ``path`` for resume calculations.
+def existing_archive_bytes(
+    path: str,
+    files: list[Path],
+    folder_template: str = "%Y/%Y-%m-%d",
+) -> int:
+    """Sum source bytes already present under ``path`` for resume calculations.
 
     When a previous archive attempt left a partial untracked
     ``final_destination``, ``move_folder(..., merge=True)`` rsyncs only the
-    files that aren't already there. The storage preflight can therefore
-    credit the bytes already on the archive volume against the required
-    space; otherwise a retry would be rejected for needing room for the
-    full source even though most of it is already published.
+    files that aren't already there. Credit only destination files that match
+    the selected sources at the same relative import path. Unrelated files in
+    an existing NAS folder do not reduce the bytes the archive will write.
     """
     try:
         if not os.path.isdir(path):
             return 0
     except OSError:
         return 0
+
+    timestamps = _source_file_timestamps(files)
     total = 0
-    try:
-        for root, _dirs, files in os.walk(path):
-            for name in files:
-                try:
-                    total += os.path.getsize(os.path.join(root, name))
-                except OSError:
-                    continue
-    except OSError:
-        return 0
+    credited: set[str] = set()
+    archive_root = Path(path)
+    for source_file in files:
+        try:
+            rel_folder = build_destination_path(
+                timestamps.get(source_file),
+                folder_template,
+            )
+            dest_file = archive_root / rel_folder / source_file.name
+            key = os.path.normcase(os.path.abspath(dest_file))
+            if key in credited or not dest_file.is_file():
+                continue
+            source_size = source_file.stat().st_size
+            if dest_file.stat().st_size != source_size:
+                continue
+            if not filecmp.cmp(source_file, dest_file, shallow=False):
+                continue
+            total += source_size
+            credited.add(key)
+        except OSError:
+            continue
     return total
 
 

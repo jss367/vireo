@@ -1363,7 +1363,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             # rsyncs only the missing files. Credit the bytes
                             # already published so the preflight doesn't
                             # reject a retry whose remaining delta would fit.
-                            existing_bytes = existing_archive_bytes(final_destination)
+                            existing_bytes = existing_archive_bytes(
+                                final_destination,
+                                selected_files,
+                                params.folder_template,
+                            )
                             plan = storage_plan(
                                 params.destination, source_bytes,
                                 archive_parent=archive_space_path,

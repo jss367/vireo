@@ -1187,14 +1187,16 @@ def test_pipeline_local_processing_credits_existing_archive_for_resume(
 
     src = tmp_path / "card-resume"
     src.mkdir()
-    Image.new("RGB", (16, 16), "red").save(src / "fresh.jpg")
+    source_file = src / "fresh.jpg"
+    Image.new("RGB", (16, 16), "red").save(source_file)
 
     final_parent = tmp_path / "archive-parent"
     final_parent.mkdir()
     final_dest = final_parent / "Archive"
     final_dest.mkdir()
-    # Seed the destination with a partial-archive file so the credit > 0.
-    (final_dest / "already-published.jpg").write_bytes(b"existing-payload")
+    # Seed the destination with the exact file that a previous archive
+    # attempt would have left behind so the resume credit is valid.
+    shutil.copy2(source_file, final_dest / "fresh.jpg")
 
     import local_processing
 
@@ -1222,8 +1224,54 @@ def test_pipeline_local_processing_credits_existing_archive_for_resume(
 
     assert credits, "storage_plan was not called"
     assert all(c is not None for c in credits)
-    # Credit equals the bytes already at the destination (one seeded file).
-    assert credits[0] == len(b"existing-payload")
+    # Credit equals the matching source bytes already at the destination.
+    assert credits[0] == source_file.stat().st_size
+    assert job["status"] == "completed", job
+
+
+def test_pipeline_local_processing_does_not_credit_unrelated_archive_content(
+    setup, tmp_path, monkeypatch
+):
+    """Existing destination bytes only count when they match selected source
+    files at the same archive-relative path."""
+    app, _db_path = setup
+
+    src = tmp_path / "card-unrelated"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "red").save(src / "fresh.jpg")
+
+    final_parent = tmp_path / "archive-parent"
+    final_parent.mkdir()
+    final_dest = final_parent / "Archive"
+    final_dest.mkdir()
+    (final_dest / "unrelated.jpg").write_bytes(b"existing-payload")
+
+    import local_processing
+
+    real_storage_plan = local_processing.storage_plan
+    credits: list = []
+
+    def recording_storage_plan(staging_dir, source_bytes, **kwargs):
+        credits.append(kwargs.get("archive_existing_bytes"))
+        return real_storage_plan(staging_dir, source_bytes, **kwargs)
+
+    monkeypatch.setattr(local_processing, "storage_plan", recording_storage_plan)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert credits, "storage_plan was not called"
+    assert credits[0] == 0
     assert job["status"] == "completed", job
 
 

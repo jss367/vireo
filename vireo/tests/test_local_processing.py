@@ -235,29 +235,70 @@ def test_storage_plan_same_device_batching_when_insufficient(
     assert plan["enough"] is False
 
 
-def test_existing_archive_bytes_sums_existing_directory(tmp_path):
-    """existing_archive_bytes() walks the destination so a partial archive
-    contributes a credit for the next preflight."""
+def test_existing_archive_bytes_sums_matching_source_files(tmp_path):
+    """existing_archive_bytes() credits only files that match the selected
+    source files at their archive-relative paths."""
+    src = tmp_path / "card"
+    src.mkdir()
+    first = src / "a.jpg"
+    first.write_bytes(b"x" * 100)
+    second = src / "b.jpg"
+    second.write_bytes(b"y" * 250)
+
     dest = tmp_path / "archive"
     dest.mkdir()
     (dest / "a.jpg").write_bytes(b"x" * 100)
-    nested = dest / "sub"
-    nested.mkdir()
-    (nested / "b.jpg").write_bytes(b"y" * 250)
+    (dest / "b.jpg").write_bytes(b"y" * 250)
+    (dest / "unrelated.jpg").write_bytes(b"z" * 500)
 
-    assert local_processing.existing_archive_bytes(str(dest)) == 350
+    assert local_processing.existing_archive_bytes(
+        str(dest),
+        [first, second],
+        folder_template="",
+    ) == 350
+
+
+def test_existing_archive_bytes_ignores_unmatched_or_different_files(tmp_path):
+    """Existing files must not reduce required archive space unless they are
+    exact matches for the source file at the path ingest would create."""
+    src = tmp_path / "card"
+    src.mkdir()
+    first = src / "a.jpg"
+    first.write_bytes(b"x" * 100)
+    same_size_different = src / "same-size.jpg"
+    same_size_different.write_bytes(b"source")
+
+    dest = tmp_path / "archive"
+    dest.mkdir()
+    (dest / "unrelated.jpg").write_bytes(b"x" * 100)
+    (dest / "same-size.jpg").write_bytes(b"target")
+
+    assert local_processing.existing_archive_bytes(
+        str(dest),
+        [first, same_size_different],
+        folder_template="",
+    ) == 0
 
 
 def test_existing_archive_bytes_returns_zero_for_missing_or_file(tmp_path):
     """Missing directories and regular files give no credit — the caller
     treats them as a fresh archive run."""
+    source = tmp_path / "source.jpg"
+    source.write_bytes(b"source")
+
     assert local_processing.existing_archive_bytes(
-        str(tmp_path / "does-not-exist")
+        str(tmp_path / "does-not-exist"),
+        [source],
+        folder_template="",
     ) == 0
 
     plain = tmp_path / "plain.txt"
     plain.write_bytes(b"hello")
-    assert local_processing.existing_archive_bytes(str(plain)) == 0
+    assert local_processing.existing_archive_bytes(
+        str(plain),
+        [source],
+        folder_template="",
+    ) == 0
 
 
 def test_storage_plan_credits_existing_archive_on_resume(monkeypatch, tmp_path):
