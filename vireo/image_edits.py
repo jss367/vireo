@@ -22,7 +22,8 @@ SCHEMA_VERSION = 1
 #   1 — original gamma-encoded sRGB multiply with hard clip at white.
 #   2 — linear-light pipeline with gated highlight shoulder.
 #   3 — expanded tone controls: highlights/shadows/whites/blacks/vibrance.
-EDIT_MATH_VERSION = 3
+#   4 — RAW edit renders demosaic with auto-bright off + highlight blending.
+EDIT_MATH_VERSION = 4
 
 _ADJUSTMENT_RANGES = {
     "exposure": (-5.0, 5.0),

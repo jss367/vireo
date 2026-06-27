@@ -1579,8 +1579,8 @@ def test_scan_skips_working_copy_for_jpeg(tmp_path, monkeypatch):
     assert len(calls) == 0
 
 
-def test_scan_uses_companion_jpeg_for_working_copy(tmp_path, monkeypatch):
-    """When RAW+JPEG pair exists, working copy is extracted from the companion JPEG."""
+def test_scan_uses_raw_primary_for_raw_working_copy(tmp_path, monkeypatch):
+    """RAW working copies decode the RAW primary, not the companion JPEG."""
     import config as cfg
     import scanner
     from db import Database
@@ -1624,10 +1624,323 @@ def test_scan_uses_companion_jpeg_for_working_copy(tmp_path, monkeypatch):
     assert len(raw_photos) == 1
     assert raw_photos[0]["working_copy_path"] is not None
 
-    # Verify the companion JPEG was used as the source, not the RAW file
+    # Verify the RAW primary was used as the source, not the companion JPEG.
+    # Working copies are the edit-quality path, so they must preserve the RAW
+    # highlight headroom that a camera JPEG may have already clipped.
     assert len(sources_used) == 1
-    assert sources_used[0].endswith("IMG_001.jpg"), (
-        f"Expected companion JPEG as source, got: {sources_used[0]}"
+    assert sources_used[0].endswith("IMG_001.nef"), (
+        f"Expected RAW primary as source, got: {sources_used[0]}"
+    )
+
+
+def test_scan_falls_back_to_companion_when_raw_extraction_fails(
+    tmp_path, monkeypatch,
+):
+    """RAW+JPEG pairs still get a working copy from the companion when the
+    RAW decode itself fails (e.g. libraw cannot decode the RAW variant and
+    the embedded preview is unusable). Without the fallback the row would
+    be marked as a working-copy failure even though a full-size JPEG copy
+    is sitting right next to it.
+    """
+    import config as cfg
+    import scanner
+    from db import Database
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+
+    nef_file = photo_dir / "IMG_002.nef"
+    nef_file.write_bytes(b"fake raw data")
+    jpg_file = photo_dir / "IMG_002.jpg"
+    Image.new("RGB", (6000, 4000), color=(0, 255, 0)).save(str(jpg_file), "JPEG")
+
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths: {})
+
+    sources_used = []
+
+    def fake_extract(source, output, max_size=4096, quality=92):
+        sources_used.append(source)
+        # Simulate libraw failure on the RAW; succeed when called with the
+        # companion JPEG.
+        if source.endswith(".nef"):
+            return False
+        os.makedirs(os.path.dirname(output), exist_ok=True)
+        Image.new("RGB", (4096, 2731)).save(output, "JPEG")
+        return True
+
+    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+
+    db = Database(str(vireo_dir / "test.db"))
+    scanner.scan(str(photo_dir), db, vireo_dir=str(vireo_dir))
+
+    photos = db.get_photos(per_page=999999)
+    raw_photos = [p for p in photos if p["extension"] == ".nef"]
+    assert len(raw_photos) == 1
+    assert raw_photos[0]["working_copy_path"] is not None
+
+    # Both calls should have happened: RAW first (failed), then companion.
+    assert len(sources_used) == 2
+    assert sources_used[0].endswith("IMG_002.nef")
+    assert sources_used[1].endswith("IMG_002.jpg")
+
+    # The companion-derived working copy is set, but the source failure marker
+    # must remain so _recipe_render_source still allows companion selection for
+    # edited RAW renders. Without this, _has_current_working_copy_failure
+    # returns False, allow_companion stays False for the RAW primary, and the
+    # render paths retry the unsupported RAW and 500.
+    raw_row = db.conn.execute(
+        "SELECT working_copy_path, working_copy_failed_source,"
+        " working_copy_failed_at, working_copy_failed_mtime, file_mtime"
+        " FROM photos WHERE extension = '.nef'"
+    ).fetchone()
+    assert raw_row["working_copy_path"] is not None
+    assert raw_row["working_copy_failed_source"] == "source"
+    assert raw_row["working_copy_failed_at"] is not None
+    assert float(raw_row["working_copy_failed_mtime"]) == float(raw_row["file_mtime"])
+
+
+def test_scan_falls_back_when_raw_working_copy_short_edge_is_smaller(
+    tmp_path, monkeypatch,
+):
+    """A RAW embedded preview can tie the expected long edge while missing
+    short-edge pixels. Scanner must compare both axes before accepting the
+    RAW-derived working copy, otherwise the companion fallback never runs.
+    """
+    import config as cfg
+    import scanner
+    from db import Database
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+
+    nef_file = photo_dir / "IMG_004.nef"
+    nef_file.write_bytes(b"fake raw data")
+    jpg_file = photo_dir / "IMG_004.jpg"
+    Image.new("RGB", (6000, 4000), color=(0, 255, 0)).save(str(jpg_file), "JPEG")
+
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths: {})
+
+    sources_used = []
+
+    def fake_extract(source, output, max_size=4096, quality=92):
+        sources_used.append(source)
+        os.makedirs(os.path.dirname(output), exist_ok=True)
+        if source.endswith(".nef"):
+            # Same expected long edge after scaling (4096), but short edge is
+            # too small for a 6000x4000 source scaled to 4096x2731.
+            Image.new("RGB", (4096, 2305)).save(output, "JPEG")
+        else:
+            Image.new("RGB", (4096, 2731)).save(output, "JPEG")
+        return True
+
+    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+
+    db = Database(str(vireo_dir / "test.db"))
+    scanner.scan(str(photo_dir), db, vireo_dir=str(vireo_dir))
+
+    assert len(sources_used) == 2
+    assert sources_used[0].endswith("IMG_004.nef")
+    assert sources_used[1].endswith("IMG_004.jpg")
+
+    raw_row = db.conn.execute(
+        "SELECT working_copy_path, working_copy_failed_source"
+        " FROM photos WHERE extension = '.nef'"
+    ).fetchone()
+    assert raw_row["working_copy_path"] is not None
+    assert raw_row["working_copy_failed_source"] == "source"
+
+    with Image.open(vireo_dir / raw_row["working_copy_path"]) as img:
+        assert img.size == (4096, 2731)
+
+
+def test_scan_accepts_near_full_raw_working_copy(tmp_path, monkeypatch):
+    """Tiny RAW active-area differences should not force companion fallback."""
+    import config as cfg
+    import scanner
+    from db import Database
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+
+    nef_file = photo_dir / "IMG_006.nef"
+    nef_file.write_bytes(b"fake raw data")
+    jpg_file = photo_dir / "IMG_006.jpg"
+    Image.new("RGB", (6000, 4000), color=(0, 255, 0)).save(str(jpg_file), "JPEG")
+
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths: {})
+
+    sources_used = []
+
+    def fake_extract(source, output, max_size=4096, quality=92):
+        sources_used.append(source)
+        os.makedirs(os.path.dirname(output), exist_ok=True)
+        # Expected scaled dimensions are 4096x2731. This is within 1% of
+        # the expected short edge and should be accepted as a RAW decode.
+        Image.new("RGB", (4096, 2705)).save(output, "JPEG")
+        return True
+
+    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+
+    db = Database(str(vireo_dir / "test.db"))
+    scanner.scan(str(photo_dir), db, vireo_dir=str(vireo_dir))
+
+    assert len(sources_used) == 1
+    assert sources_used[0].endswith("IMG_006.nef")
+
+    raw_row = db.conn.execute(
+        "SELECT working_copy_path, working_copy_failed_source"
+        " FROM photos WHERE extension = '.nef'"
+    ).fetchone()
+    assert raw_row["working_copy_path"] is not None
+    assert raw_row["working_copy_failed_source"] is None
+
+    with Image.open(vireo_dir / raw_row["working_copy_path"]) as img:
+        assert img.size == (4096, 2705)
+
+
+def test_scan_accepts_portrait_raw_working_copy_with_exif_orientation(
+    tmp_path, monkeypatch,
+):
+    """Stored width/height are the unrotated sensor axes, so a portrait shot
+    on a landscape sensor is e.g. 6000x4000 with EXIF Orientation 6.
+    ``extract_working_copy`` writes the orientation-normalized JPEG (4000x6000
+    scaled to 4096). The scanner's RAW-undersize check must apply the same
+    orientation swap that the request-path helpers use; otherwise it sees
+    4096-on-the-short-edge as catastrophically undersized vs. an expected
+    4096-on-the-long-edge and falls back to the companion JPEG, leaving
+    ``working_copy_failed_source='source'`` so edited renders bypass the
+    preserve-highlights RAW path for every portrait photo.
+    """
+    import config as cfg
+    import scanner
+    from db import Database
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+
+    nef_file = photo_dir / "IMG_005.nef"
+    nef_file.write_bytes(b"fake raw data")
+    jpg_file = photo_dir / "IMG_005.jpg"
+    # Companion JPEG written with sensor-axis dimensions; the orientation
+    # flag below is what tells consumers it should display as portrait.
+    Image.new("RGB", (6000, 4000), color=(255, 0, 255)).save(str(jpg_file), "JPEG")
+
+    portrait_meta = {
+        "File": {"ImageWidth": 6000, "ImageHeight": 4000},
+        "EXIF": {
+            "ImageWidth": 6000,
+            "ImageHeight": 4000,
+            "Orientation": 6,
+        },
+    }
+
+    def fake_metadata(paths):
+        return {str(p): portrait_meta for p in paths}
+
+    monkeypatch.setattr(scanner, "extract_metadata", fake_metadata)
+
+    sources_used = []
+
+    def fake_extract(source, output, max_size=4096, quality=92):
+        sources_used.append(source)
+        os.makedirs(os.path.dirname(output), exist_ok=True)
+        # libraw + image_loader normalize EXIF orientation: a 6000x4000 sensor
+        # readout with Orientation 6 is written as a portrait 4000x6000 JPEG,
+        # which here scales to 2731x4096 to fit max_size=4096.
+        Image.new("RGB", (2731, 4096)).save(output, "JPEG")
+        return True
+
+    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+
+    db = Database(str(vireo_dir / "test.db"))
+    scanner.scan(str(photo_dir), db, vireo_dir=str(vireo_dir))
+
+    # Only the RAW should have been extracted — no companion fallback.
+    assert len(sources_used) == 1, sources_used
+    assert sources_used[0].endswith("IMG_005.nef")
+
+    raw_row = db.conn.execute(
+        "SELECT working_copy_path, working_copy_failed_source"
+        " FROM photos WHERE extension = '.nef'"
+    ).fetchone()
+    assert raw_row is not None
+    assert raw_row["working_copy_path"] is not None
+    assert raw_row["working_copy_failed_source"] is None, (
+        "Portrait RAW with orientation-normalized working copy must not be "
+        "marked as a source failure; got "
+        f"{raw_row['working_copy_failed_source']!r}"
+    )
+
+
+def test_scan_marks_source_failure_when_raw_and_companion_both_fail(
+    tmp_path, monkeypatch,
+):
+    """When the RAW fails AND the companion fallback also fails, the failure
+    marker must stay 'source' so request paths
+    (_has_current_working_copy_failure) skip the slow RAW retry. Marking
+    'companion' here would silently un-shield request paths from the known
+    RAW failure: that helper explicitly ignores companion markers while both
+    files exist.
+    """
+    import config as cfg
+    import scanner
+    from db import Database
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+
+    nef_file = photo_dir / "IMG_003.nef"
+    nef_file.write_bytes(b"fake raw data")
+    jpg_file = photo_dir / "IMG_003.jpg"
+    Image.new("RGB", (6000, 4000), color=(0, 0, 255)).save(str(jpg_file), "JPEG")
+
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths: {})
+
+    def fake_extract(source, output, max_size=4096, quality=92):
+        # Both RAW and companion fail (e.g. RAW unsupported + companion
+        # write-locked or corrupt).
+        return False
+
+    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+
+    db = Database(str(vireo_dir / "test.db"))
+    scanner.scan(str(photo_dir), db, vireo_dir=str(vireo_dir))
+
+    raw_row = db.conn.execute(
+        "SELECT working_copy_path, working_copy_failed_source"
+        " FROM photos WHERE extension = '.nef'"
+    ).fetchone()
+    assert raw_row is not None
+    assert raw_row["working_copy_path"] is None
+    assert raw_row["working_copy_failed_source"] == "source", (
+        "RAW failure marker must remain 'source' so "
+        "_has_current_working_copy_failure honors it; got "
+        f"{raw_row['working_copy_failed_source']!r}"
     )
 
 

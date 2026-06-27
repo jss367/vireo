@@ -30,6 +30,7 @@ from db import (
     IncompatibleDatabaseError,
     commit_with_retry,
 )
+from exif_orientation import orientation_swaps_axes as _orientation_swaps_axes
 from flask import (
     Flask,
     Response,
@@ -1868,19 +1869,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return values["Orientation"]
         return metadata.get("Orientation")
 
-    def _orientation_swaps_axes(orientation):
-        if orientation is None or isinstance(orientation, bool):
-            return False
-        if isinstance(orientation, (int, float)):
-            return int(orientation) in (5, 6, 7, 8)
-        text = str(orientation).strip().lower()
-        if not text:
-            return False
-        try:
-            return int(text) in (5, 6, 7, 8)
-        except ValueError:
-            return "90" in text or "270" in text
-
     def _recipe_source_dimensions(photo):
         try:
             width = int(_photo_value(photo, "width") or 0)
@@ -1894,6 +1882,44 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ):
             return height, width
         return width, height
+
+    def _scaled_recipe_source_dimensions(photo, max_size=None):
+        width, height = _recipe_source_dimensions(photo)
+        if width <= 0 or height <= 0:
+            return 0, 0
+        if max_size:
+            long_edge = max(width, height)
+            if long_edge > max_size:
+                scale = max_size / long_edge
+                width = round(width * scale)
+                height = round(height * scale)
+        return width, height
+
+    def _image_is_smaller_than_expected(img, expected_w, expected_h):
+        return (
+            expected_w > 0
+            and expected_h > 0
+            and (
+                img.size[0] + 1 < expected_w
+                or img.size[1] + 1 < expected_h
+            )
+        )
+
+    def _companion_image_can_replace_raw_result(
+        companion_img, current_img, expected_w, expected_h,
+    ):
+        if companion_img is None:
+            return False
+        if expected_w > 0 and expected_h > 0:
+            return not _image_is_smaller_than_expected(
+                companion_img, expected_w, expected_h,
+            )
+        if current_img is None:
+            return True
+        return (
+            companion_img.size[0] >= current_img.size[0]
+            and companion_img.size[1] >= current_img.size[1]
+        )
 
     def _image_size_after_exif_orientation(img):
         width, height = img.size
@@ -1944,7 +1970,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return _rendered_recipe_long_edge(width, height, recipe) >= required_long
 
     def _recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
-        from image_loader import get_canonical_image_path
+        from image_loader import RAW_EXTENSIONS, get_canonical_image_path
 
         def _is_working_copy_path(path):
             wc_rel = photo["working_copy_path"]
@@ -1957,14 +1983,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             canonical = get_canonical_image_path(photo, vireo_dir, folders)
             return canonical, _is_working_copy_path(canonical)
 
-        canonical = get_canonical_image_path(photo, vireo_dir, folders)
-        if not recipe.get("crop") and _is_working_copy_path(canonical):
-            return canonical, True
+        primary_is_raw = (
+            os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+        )
 
-        if recipe.get("crop") and _working_copy_satisfies_recipe_render(
-            photo, recipe, max_size, vireo_dir,
-        ):
-            return canonical, _is_working_copy_path(canonical)
+        canonical = get_canonical_image_path(photo, vireo_dir, folders)
+        # For RAW primaries with a recipe, never short-circuit to the working
+        # copy: legacy working copies predate the highlight-preserving RAW
+        # decode and EDIT_MATH_VERSION's migration only purges preview/thumb
+        # caches, not working copies. Reusing one would apply the recipe to
+        # clipped bytes and bypass RAW_DECODE_PRESERVE_HIGHLIGHTS. Force the
+        # RAW path; the working copy is still the very last fallback below
+        # if the RAW file itself is missing.
+        if not primary_is_raw:
+            if not recipe.get("crop") and _is_working_copy_path(canonical):
+                return canonical, True
+
+            if recipe.get("crop") and _working_copy_satisfies_recipe_render(
+                photo, recipe, max_size, vireo_dir,
+            ):
+                return canonical, _is_working_copy_path(canonical)
 
         folder_path = folders.get(photo["folder_id"])
         if not folder_path:
@@ -1973,23 +2011,37 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if os.path.exists(wc_path):
                     return wc_path, True
             return "", False
+        # For RAW primaries, prefer the RAW source so the caller can decode it
+        # with highlight preservation rather than serving the camera's already-
+        # clipped companion JPEG. The companion remains a valid fallback when
+        # the RAW is known to fail extraction for this mtime — otherwise edited
+        # previews for unsupported RAWs would 500 out even when a full-size
+        # companion is available.
         companion_path = photo["companion_path"]
-        if companion_path:
+        original_abs = os.path.join(folder_path, photo["filename"])
+        allow_companion = (
+            not primary_is_raw
+            or not os.path.exists(original_abs)
+            or _has_current_working_copy_failure(
+                photo,
+                vireo_dir,
+                trust_existing_working_copy=False,
+                live_source_path=original_abs,
+                folder_path=folder_path,
+            )
+        )
+        if companion_path and allow_companion:
             companion = os.path.join(folder_path, companion_path)
             if (
                 os.path.exists(companion)
                 and _path_satisfies_recipe_render(companion, photo, recipe, max_size)
             ):
                 return companion, True
-        original = os.path.join(
-            folder_path,
-            photo["filename"],
-        )
-        if not os.path.exists(original) and photo["working_copy_path"]:
+        if not os.path.exists(original_abs) and photo["working_copy_path"]:
             wc_path = os.path.join(vireo_dir, photo["working_copy_path"])
             if os.path.exists(wc_path):
                 return wc_path, True
-        return original, False
+        return original_abs, False
 
     _ACCELERATED_RUNTIME_PROVIDERS = {
         "ACLExecutionProvider",
@@ -9199,14 +9251,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("No photos found", 404)
 
         def _external_edit_recipe_source(photo, recipe, fallback_path):
+            from image_loader import RAW_EXTENSIONS
+
+            primary_is_raw = (
+                os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+            )
+
             if recipe.get("crop"):
                 source_path, _using_working_copy = _recipe_render_source(
                     photo, recipe, 0, vireo_dir, folders,
                 )
                 return source_path or fallback_path
 
+            # For RAW primaries, skip the working-copy short-circuit while the
+            # RAW source is available: legacy working copies predate the
+            # highlight-preserving RAW decode and would feed the editor a
+            # clipped JPEG to apply the recipe to. If the RAW source is
+            # offline/missing, the working copy is the only local fallback.
             wc_rel = photo["working_copy_path"]
-            if wc_rel:
+            if wc_rel and (
+                not primary_is_raw or not os.path.exists(fallback_path)
+            ):
                 wc_path = (
                     wc_rel if os.path.isabs(wc_rel)
                     else os.path.join(vireo_dir, wc_rel)
@@ -9219,16 +9284,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
             folder_path = folders.get(photo["folder_id"])
             if folder_path:
-                companion_path = photo["companion_path"]
-                if companion_path:
-                    companion = os.path.join(folder_path, companion_path)
-                    if (
-                        os.path.exists(companion)
-                        and _path_satisfies_recipe_render(
-                            companion, photo, recipe, 0,
-                        )
-                    ):
-                        return companion
+                raw_source_available = os.path.exists(fallback_path)
+                # For RAW primaries, skip the companion JPEG while the RAW is
+                # available so edits render from the preserve-highlights decode.
+                # If the RAW volume is offline, a full-size sidecar is the best
+                # remaining local source.
+                if not primary_is_raw or not raw_source_available:
+                    companion_path = photo["companion_path"]
+                    if companion_path:
+                        companion = os.path.join(folder_path, companion_path)
+                        if (
+                            os.path.exists(companion)
+                            and _path_satisfies_recipe_render(
+                                companion, photo, recipe, 0,
+                            )
+                        ):
+                            return companion
                 original = os.path.join(folder_path, photo["filename"])
                 if os.path.exists(original):
                     return original
@@ -9244,7 +9315,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 apply_recipe,
                 recipe_to_json,
             )
-            from image_loader import load_image
+            from image_loader import (
+                RAW_DECODE_PRESERVE_HIGHLIGHTS,
+                RAW_EXTENSIONS,
+                load_image,
+            )
 
             source_path = _external_edit_recipe_source(
                 photo, recipe, fallback_path,
@@ -9277,7 +9352,89 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             except (OSError, ValueError, TypeError):
                 pass
 
-            img = load_image(source_path, max_size=None)
+            # Derive the decode mode from the primary photo's extension rather
+            # than source_path so a future change to source_path resolution
+            # (working copy, companion JPEG fallback, etc.) cannot silently
+            # bypass RAW_DECODE_PRESERVE_HIGHLIGHTS for a RAW primary.
+            primary_is_raw = (
+                os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+            )
+            raw_decode = RAW_DECODE_PRESERVE_HIGHLIGHTS if primary_is_raw else None
+            load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
+            img = load_image(source_path, max_size=None, **load_kwargs)
+            needs_companion = False
+            if primary_is_raw:
+                if img is None:
+                    needs_companion = True
+                else:
+                    # libraw may return the embedded JPEG when it cannot
+                    # demosaic — that preview is typically much smaller
+                    # than the full-size companion JPEG, so the handoff
+                    # would apply the recipe to clipped pixels even when
+                    # a usable sidecar exists. Compare both oriented
+                    # dimensions (with 1px rounding slack) against the
+                    # photo's stored size and trigger the companion
+                    # fallback when the RAW result is undersized.
+                    orig_w, orig_h = _recipe_source_dimensions(photo)
+                    if orig_w > 0 and orig_h > 0 and (
+                        img.size[0] + 1 < orig_w
+                        or img.size[1] + 1 < orig_h
+                    ):
+                        needs_companion = True
+            if needs_companion:
+                # libraw can't decode this RAW (unsupported variant, corrupt
+                # sensor data, no usable embedded JPEG) or only produced an
+                # undersized embedded preview. Fall back to the full-size
+                # companion JPEG so Open External still works for RAW+JPEG
+                # pairs that have a usable handoff JPEG. Cache key stays on
+                # the RAW source so a future RAW replacement (mtime bump)
+                # re-tries the RAW; we accept that companion-only edits
+                # won't invalidate this render — matching the cache
+                # contract used elsewhere for RAW-primary photos.
+                folder_path = folders.get(photo["folder_id"])
+                companion_path = photo["companion_path"]
+                if folder_path and companion_path:
+                    companion_abs = os.path.join(folder_path, companion_path)
+                    if (
+                        os.path.exists(companion_abs)
+                        and os.path.abspath(companion_abs)
+                        != os.path.abspath(source_path)
+                    ):
+                        companion_img = load_image(companion_abs, max_size=None)
+                        # Prefer companion when it covers img on both axes —
+                        # a long-edge-only check misses cases like a
+                        # 6000x3376 embedded preview "tying" a 6000x4000
+                        # sidecar and losing the short-edge content.
+                        if companion_img is not None and (
+                            img is None
+                            or (
+                                companion_img.size[0] >= img.size[0]
+                                and companion_img.size[1] >= img.size[1]
+                                and companion_img.size != img.size
+                            )
+                        ):
+                            if img is None:
+                                log.info(
+                                    "External-edit RAW decode failed for "
+                                    "photo %s; falling back to companion "
+                                    "JPEG %s",
+                                    photo["id"], companion_abs,
+                                )
+                            else:
+                                log.info(
+                                    "External-edit RAW decode fell back to "
+                                    "undersized embedded JPEG (%dx%d) for "
+                                    "photo %s; using companion JPEG %s "
+                                    "(%dx%d)",
+                                    img.size[0], img.size[1], photo["id"],
+                                    companion_abs,
+                                    companion_img.size[0],
+                                    companion_img.size[1],
+                                )
+                                img.close()
+                            img = companion_img
+                        elif companion_img is not None:
+                            companion_img.close()
             if img is None:
                 return None, f"{photo['filename']}: failed to load image"
             rendered = None
@@ -11416,16 +11573,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return jsonify(result)
 
     def _inat_edit_recipe_source(photo, recipe, fallback_path):
+        from image_loader import RAW_EXTENSIONS
+
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
         folders = {photo["folder_id"]: photo["folder_path"]}
+        primary_is_raw = (
+            os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+        )
         if recipe.get("crop"):
             source_path, _using_working_copy = _recipe_render_source(
                 photo, recipe, 0, vireo_dir, folders,
             )
             return source_path or fallback_path
 
+        # For RAW primaries, skip the working-copy short-circuit while the
+        # RAW source is available: legacy working copies predate the
+        # highlight-preserving RAW decode and would feed iNat a clipped JPEG
+        # to apply the recipe to. If the RAW source is offline/missing, the
+        # working copy is the only local fallback.
         wc_rel = photo["working_copy_path"]
-        if wc_rel:
+        if wc_rel and (
+            not primary_is_raw or not os.path.exists(fallback_path)
+        ):
             wc_path = (
                 wc_rel if os.path.isabs(wc_rel)
                 else os.path.join(vireo_dir, wc_rel)
@@ -11437,7 +11606,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return wc_path
 
         companion_path = photo["companion_path"]
-        if companion_path:
+        raw_source_available = os.path.exists(fallback_path)
+        # RAW primaries are decoded with RAW_DECODE_PRESERVE_HIGHLIGHTS later;
+        # only use the clipped camera JPEG when the RAW source is offline.
+        if companion_path and (not primary_is_raw or not raw_source_available):
             companion = os.path.join(photo["folder_path"], companion_path)
             if (
                 os.path.exists(companion)
@@ -11455,7 +11627,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return fallback_path, None
 
         from image_edits import EDIT_MATH_VERSION, apply_recipe, recipe_to_json
-        from image_loader import load_image
+        from image_loader import (
+            RAW_DECODE_PRESERVE_HIGHLIGHTS,
+            RAW_EXTENSIONS,
+            load_image,
+        )
 
         source_path = _inat_edit_recipe_source(photo, recipe, fallback_path)
         if not source_path or not os.path.isfile(source_path):
@@ -11486,7 +11662,81 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except (OSError, ValueError, TypeError):
             pass
 
-        img = load_image(source_path, max_size=None)
+        # Derive the decode mode from the primary photo's extension rather
+        # than source_path so a future change to source_path resolution
+        # (working copy, companion JPEG fallback, etc.) cannot silently
+        # bypass RAW_DECODE_PRESERVE_HIGHLIGHTS for a RAW primary.
+        primary_is_raw = (
+            os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+        )
+        raw_decode = RAW_DECODE_PRESERVE_HIGHLIGHTS if primary_is_raw else None
+        load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
+        img = load_image(source_path, max_size=None, **load_kwargs)
+        needs_companion = False
+        if primary_is_raw:
+            if img is None:
+                needs_companion = True
+            else:
+                # libraw may return the embedded JPEG when demosaic
+                # fails — see _external_edit_handoff_path for the same
+                # gate. Without this an unsupported RAW would upload
+                # clipped/undersized pixels to iNaturalist even when a
+                # usable sidecar JPEG exists.
+                orig_w, orig_h = _recipe_source_dimensions(photo)
+                if orig_w > 0 and orig_h > 0 and (
+                    img.size[0] + 1 < orig_w
+                    or img.size[1] + 1 < orig_h
+                ):
+                    needs_companion = True
+        if needs_companion:
+            # Mirror _external_edit_handoff_path: libraw may fail to decode
+            # this RAW variant, but the full-size companion JPEG can still
+            # carry the recipe for iNaturalist. Without this fallback the
+            # upload silently fails for RAW+JPEG pairs whose RAW is
+            # unsupported. Cache key stays on the RAW source — see comment
+            # in _external_edit_handoff_path for the contract trade-off.
+            companion_path = photo["companion_path"]
+            folder_path = photo["folder_path"]
+            if folder_path and companion_path:
+                companion_abs = os.path.join(folder_path, companion_path)
+                if (
+                    os.path.exists(companion_abs)
+                    and os.path.abspath(companion_abs)
+                    != os.path.abspath(source_path)
+                ):
+                    companion_img = load_image(companion_abs, max_size=None)
+                    # Prefer companion when it covers img on both axes — a
+                    # long-edge-only check misses cases like a 6000x3376
+                    # embedded preview "tying" a 6000x4000 sidecar and
+                    # losing the short-edge content.
+                    if companion_img is not None and (
+                        img is None
+                        or (
+                            companion_img.size[0] >= img.size[0]
+                            and companion_img.size[1] >= img.size[1]
+                            and companion_img.size != img.size
+                        )
+                    ):
+                        if img is None:
+                            log.info(
+                                "iNat upload RAW decode failed for photo %s; "
+                                "falling back to companion JPEG %s",
+                                photo["id"], companion_abs,
+                            )
+                        else:
+                            log.info(
+                                "iNat upload RAW decode fell back to "
+                                "undersized embedded JPEG (%dx%d) for "
+                                "photo %s; using companion JPEG %s (%dx%d)",
+                                img.size[0], img.size[1], photo["id"],
+                                companion_abs,
+                                companion_img.size[0],
+                                companion_img.size[1],
+                            )
+                            img.close()
+                        img = companion_img
+                    elif companion_img is not None:
+                        companion_img.close()
         if img is None:
             return None, f"{photo['filename']}: failed to load image"
         rendered = None
@@ -11550,7 +11800,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         photo_path = os.path.join(photo["folder_path"], photo["filename"])
         if not os.path.isfile(photo_path):
-            return json_error("Photo file not found on disk", 404)
+            recipe = db.get_photo_edit_recipe(photo_id)
+            wc_rel = photo["working_copy_path"]
+            wc_abs = (
+                wc_rel if wc_rel and os.path.isabs(wc_rel)
+                else os.path.join(
+                    os.path.dirname(app.config["THUMB_CACHE_DIR"]), wc_rel,
+                )
+                if wc_rel else None
+            )
+            companion_abs = (
+                os.path.join(photo["folder_path"], photo["companion_path"])
+                if photo["companion_path"] else None
+            )
+            if not (
+                recipe
+                and (
+                    (wc_abs and os.path.isfile(wc_abs))
+                    or (companion_abs and os.path.isfile(companion_abs))
+                )
+            ):
+                return json_error("Photo file not found on disk", 404)
 
         upload_path, upload_error = _inat_upload_photo_path(db, photo, photo_path)
         if upload_error:
@@ -12973,7 +13243,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
             import config as cfg
             from image_edits import apply_recipe_to_loaded_image
-            from image_loader import load_image
+            from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS, load_image
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
@@ -13068,7 +13338,107 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     load_max_size = (
                         None if recipe and recipe.get("crop") else max_size
                     )
-                    img = load_image(canonical, max_size=load_max_size)
+                    # Match serve_preview's decode mode so warmed bytes equal
+                    # the on-demand render — without this, an edited RAW
+                    # preview written here would still come from the JPEG-first
+                    # path and overwrite serve_preview's highlight-preserving
+                    # cache on first warm.
+                    raw_decode = (
+                        RAW_DECODE_PRESERVE_HIGHLIGHTS
+                        if recipe
+                        and os.path.splitext(canonical)[1].lower() in RAW_EXTENSIONS
+                        else None
+                    )
+                    load_kwargs = (
+                        {"raw_decode": raw_decode} if raw_decode else {}
+                    )
+                    img = load_image(canonical, max_size=load_max_size, **load_kwargs)
+                    if (
+                        img is not None
+                        and os.path.splitext(canonical)[1].lower() in RAW_EXTENSIONS
+                        and detail_photo["width"]
+                        and detail_photo["height"]
+                    ):
+                        # _load_raw falls back to an embedded JPEG when
+                        # libraw can't demosaic; that preview is often a
+                        # fraction of sensor resolution, so a non-None load
+                        # can still be undersized. Mirror serve_preview's
+                        # cache-miss undersized check so we don't bake an
+                        # embedded preview into the tracked warmed cache.
+                        expected_w, expected_h = _scaled_recipe_source_dimensions(
+                            detail_photo, load_max_size,
+                        )
+                        if _image_is_smaller_than_expected(
+                            img, expected_w, expected_h,
+                        ):
+                            companion_rel = detail_photo["companion_path"]
+                            folder_path = folders.get(
+                                detail_photo["folder_id"]
+                            )
+                            if companion_rel and folder_path:
+                                companion_abs = os.path.join(
+                                    folder_path, companion_rel,
+                                )
+                                if (
+                                    os.path.exists(companion_abs)
+                                    and companion_abs != canonical
+                                ):
+                                    companion_img = load_image(
+                                        companion_abs,
+                                        max_size=load_max_size,
+                                    )
+                                    if _companion_image_can_replace_raw_result(
+                                        companion_img, img,
+                                        expected_w, expected_h,
+                                    ):
+                                        log.info(
+                                            "RAW decode for photo %s preview "
+                                            "warmup at size=%s returned "
+                                            "undersized embedded preview "
+                                            "(%dx%d, expected %dx%d); "
+                                            "falling back to companion JPEG",
+                                            detail_photo["id"], max_size,
+                                            img.size[0], img.size[1],
+                                            expected_w, expected_h,
+                                        )
+                                        img.close()
+                                        img = companion_img
+                                        canonical = companion_abs
+                                    elif companion_img is not None:
+                                        companion_img.close()
+                    if (
+                        img is None
+                        and os.path.splitext(canonical)[1].lower() in RAW_EXTENSIONS
+                    ):
+                        # Mirror serve_preview's cache-miss fallback: libraw
+                        # couldn't decode this RAW (unsupported variant, etc.),
+                        # so try the companion JPEG before leaving the cache
+                        # cold. Record the source failure so future
+                        # _recipe_render_source calls (preview, edit-preview,
+                        # original) select the companion directly instead of
+                        # retrying the failed RAW.
+                        companion_rel = detail_photo["companion_path"]
+                        folder_path = folders.get(detail_photo["folder_id"])
+                        if companion_rel and folder_path:
+                            companion_abs = os.path.join(folder_path, companion_rel)
+                            if (
+                                os.path.exists(companion_abs)
+                                and companion_abs != canonical
+                            ):
+                                log.info(
+                                    "RAW decode failed for photo %s preview "
+                                    "warmup at size=%s; falling back to "
+                                    "companion JPEG",
+                                    detail_photo["id"], max_size,
+                                )
+                                _record_working_copy_failure(
+                                    thread_db, detail_photo, canonical,
+                                )
+                                img = load_image(
+                                    companion_abs, max_size=load_max_size,
+                                )
+                                if img is not None:
+                                    canonical = companion_abs
                     if img:
                         if recipe:
                             img = apply_recipe_to_loaded_image(
@@ -15101,13 +15471,68 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     photo_id,
                 )
                 return "", 404
+            # Derive the decode mode from the primary photo's extension
+            # rather than source so a future change to render-source
+            # resolution cannot silently bypass RAW_DECODE_PRESERVE_HIGHLIGHTS
+            # for a RAW primary. Without this, EDIT_MATH_VERSION's cache
+            # purge regenerates edited-RAW thumbnails through the default
+            # JPEG-first decode and grid thumbnails diverge from previews
+            # / exports (which preserve highlights).
+            from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS, RAW_EXTENSIONS
+            raw_decode = (
+                RAW_DECODE_PRESERVE_HIGHLIGHTS
+                if recipe
+                and os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+                else None
+            )
+            min_source_size = None
+            if raw_decode and os.path.splitext(source)[1].lower() in RAW_EXTENSIONS:
+                load_max_size = None if recipe and recipe.get("crop") else thumb_size
+                min_source_size = _scaled_recipe_source_dimensions(
+                    photo, load_max_size,
+                )
             result = generate_thumbnail(
                 photo_id,
                 source,
                 thumb_dir,
                 size=thumb_size,
                 recipe=recipe,
+                raw_decode=raw_decode,
+                min_source_size=min_source_size,
             )
+            if (
+                not result
+                and os.path.splitext(source)[1].lower() in RAW_EXTENSIONS
+            ):
+                # libraw couldn't demosaic the RAW (unsupported variant,
+                # corrupt file, no usable embedded JPEG). Try the companion
+                # JPEG before 404'ing so a RAW+JPEG row whose RAW can't be
+                # decoded still gets a grid thumbnail — mirrors the
+                # companion fallback in serve_preview / serve_original.
+                companion_rel = photo["companion_path"]
+                if companion_rel:
+                    companion_abs = os.path.join(
+                        folder_row["path"], companion_rel,
+                    )
+                    if (
+                        os.path.exists(companion_abs)
+                        and companion_abs != source
+                    ):
+                        log.info(
+                            "Thumbnail self-heal RAW decode failed for "
+                            "photo %s; falling back to companion JPEG",
+                            photo_id,
+                        )
+                        _record_working_copy_failure(db, photo, source)
+                        result = generate_thumbnail(
+                            photo_id,
+                            companion_abs,
+                            thumb_dir,
+                            size=thumb_size,
+                            recipe=recipe,
+                        )
+                        if result:
+                            source = companion_abs
         except Exception:
             log.exception(
                 "Thumbnail self-heal failed for photo %s (source=%s)",
@@ -17982,7 +18407,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return Response(data, mimetype="image/jpeg")
 
         # Cache miss: generate, insert, evict-if-over-quota, serve.
-        from image_loader import RAW_EXTENSIONS, load_image
+        from image_loader import (
+            RAW_DECODE_PRESERVE_HIGHLIGHTS,
+            RAW_EXTENSIONS,
+            load_image,
+        )
 
         folder_row = db.conn.execute(
             "SELECT id, path FROM folders WHERE id=?", (photo["folder_id"],)
@@ -18013,7 +18442,78 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
             return "Could not load image", 500
         load_max_size = None if recipe and recipe.get("crop") else size
-        img = load_image(canonical, max_size=load_max_size)
+        raw_decode = (
+            RAW_DECODE_PRESERVE_HIGHLIGHTS
+            if recipe and selected_ext in RAW_EXTENSIONS
+            else None
+        )
+        load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
+        img = load_image(canonical, max_size=load_max_size, **load_kwargs)
+        if (
+            img is not None
+            and selected_ext in RAW_EXTENSIONS
+            and photo["width"]
+            and photo["height"]
+        ):
+            # _load_raw falls back to the embedded camera JPEG when libraw
+            # can't demosaic the sensor data, even in preserve-highlights
+            # mode. That preview is often a fraction of the sensor's full
+            # resolution, so a "successful" load can still be undersized
+            # relative to what the request asked for. If a full-size
+            # companion JPEG could satisfy the requested size, prefer it
+            # over caching a downscaled embedded preview that future hits
+            # would silently keep serving.
+            expected_w, expected_h = _scaled_recipe_source_dimensions(
+                photo, load_max_size,
+            )
+            if _image_is_smaller_than_expected(img, expected_w, expected_h):
+                companion_rel = photo["companion_path"]
+                if companion_rel:
+                    companion_abs = os.path.join(folder_row["path"], companion_rel)
+                    if (
+                        os.path.exists(companion_abs)
+                        and companion_abs != canonical
+                    ):
+                        companion_img = load_image(
+                            companion_abs, max_size=load_max_size,
+                        )
+                        if _companion_image_can_replace_raw_result(
+                            companion_img, img, expected_w, expected_h,
+                        ):
+                            log.info(
+                                "RAW decode for photo %s preview at size=%s "
+                                "returned undersized embedded preview (%dx%d, "
+                                "expected %dx%d); falling back to "
+                                "companion JPEG",
+                                photo_id, size, img.size[0], img.size[1],
+                                expected_w, expected_h,
+                            )
+                            img.close()
+                            img = companion_img
+                            canonical = companion_abs
+                        elif companion_img is not None:
+                            companion_img.close()
+        if img is None and selected_ext in RAW_EXTENSIONS:
+            # libraw couldn't decode this RAW (unsupported variant, corrupt
+            # file, no usable embedded JPEG). Try the companion JPEG before
+            # 500ing so a sidecar that can satisfy the preview isn't refused
+            # — mirrors the fallback in serve_original_photo's edited path.
+            companion_rel = photo["companion_path"]
+            if companion_rel:
+                companion_abs = os.path.join(folder_row["path"], companion_rel)
+                if (
+                    os.path.exists(companion_abs)
+                    and companion_abs != canonical
+                ):
+                    log.info(
+                        "RAW decode failed for photo %s preview at size=%s; "
+                        "falling back to companion JPEG",
+                        photo_id, size,
+                    )
+                    _record_working_copy_failure(db, photo, canonical)
+                    img = load_image(companion_abs, max_size=load_max_size)
+                    if img is not None:
+                        canonical = companion_abs
         if img is None:
             _record_working_copy_failure(db, photo, canonical)
             return "Could not load image", 500
@@ -18116,12 +18616,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             recipe = db.get_photo_edit_recipe(photo_id) or {}
         if not isinstance(recipe, dict):
             return "Invalid recipe", 400
-        display_recipe = dict(recipe)
-        display_recipe.pop("crop", None)
 
         try:
-            from image_edits import RecipeError, apply_recipe_to_loaded_image
-            from image_loader import RAW_EXTENSIONS, load_image
+            from image_edits import (
+                RecipeError,
+                apply_recipe_to_loaded_image,
+                normalize_recipe,
+            )
+            from image_loader import (
+                RAW_DECODE_PRESERVE_HIGHLIGHTS,
+                RAW_EXTENSIONS,
+                load_image,
+            )
+            recipe = normalize_recipe(recipe) or {}
+            display_recipe = dict(recipe)
+            display_recipe.pop("crop", None)
             recipe_json = display_recipe
             vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
             folder_row = db.conn.execute(
@@ -18129,8 +18638,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ).fetchone()
             if not folder_row:
                 return "Not found", 404
+            # Resolve the source with the actual recipe (not None) so
+            # _recipe_render_source applies its RAW-primary gating: a RAW
+            # photo with a legacy JPEG working copy must use the RAW source
+            # here too, so the in-progress edit preview matches the saved
+            # preview/export bytes from the highlight-preserving decode.
             canonical, using_working_copy = _recipe_render_source(
-                photo, None, size, vireo_dir, {folder_row["id"]: folder_row["path"]},
+                photo, recipe, size, vireo_dir,
+                {folder_row["id"]: folder_row["path"]},
             )
             selected_ext = os.path.splitext(canonical)[1].lower()
             if (
@@ -18150,7 +18665,77 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     photo_id,
                 )
                 return "Could not load image", 500
-            img = load_image(canonical, max_size=size)
+            raw_decode = (
+                RAW_DECODE_PRESERVE_HIGHLIGHTS
+                if selected_ext in RAW_EXTENSIONS
+                else None
+            )
+            load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
+            img = load_image(canonical, max_size=size, **load_kwargs)
+            if (
+                img is not None
+                and selected_ext in RAW_EXTENSIONS
+                and photo["width"]
+                and photo["height"]
+            ):
+                # _load_raw falls back to an embedded camera JPEG when libraw
+                # can't demosaic; that preview is often a fraction of sensor
+                # resolution, so non-None can still be undersized. Mirror
+                # serve_preview's cache-miss undersized check so the
+                # in-progress editor doesn't render against a clipped
+                # downscaled preview when a full-size companion JPEG is
+                # sitting next to the RAW.
+                expected_w, expected_h = _scaled_recipe_source_dimensions(
+                    photo, size,
+                )
+                if _image_is_smaller_than_expected(img, expected_w, expected_h):
+                    companion_rel = photo["companion_path"]
+                    if companion_rel:
+                        companion_abs = os.path.join(
+                            folder_row["path"], companion_rel,
+                        )
+                        if (
+                            os.path.exists(companion_abs)
+                            and companion_abs != canonical
+                        ):
+                            companion_img = load_image(
+                                companion_abs, max_size=size,
+                            )
+                            if _companion_image_can_replace_raw_result(
+                                companion_img, img, expected_w, expected_h,
+                            ):
+                                log.info(
+                                    "RAW decode for photo %s edit-preview "
+                                    "returned undersized embedded preview "
+                                    "(%dx%d, expected %dx%d); falling "
+                                    "back to companion JPEG",
+                                    photo_id, img.size[0], img.size[1],
+                                    expected_w, expected_h,
+                                )
+                                img.close()
+                                img = companion_img
+                                canonical = companion_abs
+                            elif companion_img is not None:
+                                companion_img.close()
+            if img is None and selected_ext in RAW_EXTENSIONS:
+                # Same companion fallback as serve_preview's cache-miss
+                # path: an unsupported RAW shouldn't kill the in-progress
+                # edit preview when a usable companion JPEG sits next to it.
+                companion_rel = photo["companion_path"]
+                if companion_rel:
+                    companion_abs = os.path.join(folder_row["path"], companion_rel)
+                    if (
+                        os.path.exists(companion_abs)
+                        and companion_abs != canonical
+                    ):
+                        log.info(
+                            "RAW decode failed for photo %s edit-preview; "
+                            "falling back to companion JPEG", photo_id,
+                        )
+                        _record_working_copy_failure(db, photo, canonical)
+                        img = load_image(companion_abs, max_size=size)
+                        if img is not None:
+                            canonical = companion_abs
             if img is None:
                 _record_working_copy_failure(db, photo, canonical)
                 return "Could not load image", 500
@@ -18260,12 +18845,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return None
 
         if recipe:
+            from image_loader import (
+                RAW_DECODE_PRESERVE_HIGHLIGHTS,
+                RAW_EXTENSIONS,
+                load_image,
+            )
+
             folder = db.conn.execute(
                 "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
             ).fetchone()
             if not folder:
                 return "Not found", 404
-            image_path = trusted_wc_path
+            # For edited RAW primaries, a "trusted" working copy can still
+            # predate the highlight-preserving RAW decode (the migration
+            # purges previews and thumbnails but not working copies). Force
+            # the RAW path so the recipe runs over preserve-highlights bytes,
+            # not the older clipped-JPEG working copy.
+            primary_is_raw = (
+                os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+            )
+            image_path = None if primary_is_raw else trusted_wc_path
             using_offline_cache = False
             if image_path is None:
                 from offline_cache import resolve_original_path
@@ -18278,12 +18877,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 companion_source = _full_res_companion_path(
                     folder["path"], using_offline_cache,
                 )
-                if companion_source:
+                image_ext = os.path.splitext(image_path)[1].lower()
+                if (
+                    primary_is_raw
+                    and trusted_wc_path
+                    and not os.path.exists(image_path)
+                ):
+                    image_path = trusted_wc_path
+                elif companion_source and image_ext not in RAW_EXTENSIONS:
                     image_path = companion_source
-            from image_loader import RAW_EXTENSIONS, load_image
+                elif (
+                    primary_is_raw
+                    and companion_source
+                    and _has_current_working_copy_failure(
+                        photo,
+                        vireo_dir,
+                        trust_existing_working_copy=False,
+                        live_source_path=image_path,
+                        folder_path=folder["path"],
+                    )
+                ):
+                    # Mirror _recipe_render_source: when scanner has marked
+                    # this RAW as failed for the current mtime, route the
+                    # edited render through the companion JPEG so a previous
+                    # request that already succeeded via the companion
+                    # fallback isn't shadowed by the pre-load guard below.
+                    image_path = companion_source
             resolved_ext = os.path.splitext(image_path)[1].lower()
             if (
-                trusted_wc_path is None
+                (primary_is_raw or trusted_wc_path is None)
                 and resolved_ext in RAW_EXTENSIONS
                 and _has_current_working_copy_failure(
                     photo,
@@ -18299,7 +18921,80 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     photo_id,
                 )
                 return "Could not load image", 500
-            img = load_image(image_path, max_size=None)
+            raw_decode = (
+                RAW_DECODE_PRESERVE_HIGHLIGHTS
+                if resolved_ext in RAW_EXTENSIONS
+                else None
+            )
+            load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
+            img = load_image(image_path, max_size=None, **load_kwargs)
+            if (
+                img is not None
+                and resolved_ext in RAW_EXTENSIONS
+                and photo["width"]
+                and photo["height"]
+            ):
+                # _load_raw falls back to the embedded JPEG even in
+                # preserve-highlights mode when libraw can't demosaic the
+                # sensor data, so a successful load can still be the small
+                # camera preview rather than full-resolution pixels. For
+                # 1:1 edited views that's the wrong file to cache — try
+                # the full-size companion before saving an undersized
+                # originals/<id>.jpg.
+                expected_w, expected_h = _scaled_recipe_source_dimensions(photo)
+                if _image_is_smaller_than_expected(img, expected_w, expected_h):
+                    companion_fallback = _full_res_companion_path(
+                        folder["path"], using_offline_cache,
+                    )
+                    if companion_fallback and companion_fallback != image_path:
+                        companion_img = load_image(
+                            companion_fallback, max_size=None,
+                        )
+                        if _companion_image_can_replace_raw_result(
+                            companion_img, img, expected_w, expected_h,
+                        ):
+                            log.info(
+                                "RAW decode for photo %s edited original "
+                                "returned undersized embedded preview "
+                                "(%dx%d, expected %dx%d); falling back to "
+                                "companion JPEG",
+                                photo_id, img.size[0], img.size[1],
+                                expected_w, expected_h,
+                            )
+                            img.close()
+                            img = companion_img
+                            image_path = companion_fallback
+                        elif companion_img is not None:
+                            companion_img.close()
+            if img is None and resolved_ext in RAW_EXTENSIONS:
+                # RAW couldn't decode (unsupported variant, no embedded JPEG).
+                # Fall back to the full-resolution companion JPEG when one
+                # exists so an unsupported-RAW edit doesn't 500 with a usable
+                # sidecar sitting next to the RAW. When the companion rescues
+                # the render, record the RAW source-failure marker so the
+                # next request's RAW-failure routing branch above sends the
+                # render directly through the companion instead of paying
+                # for the same failing decode every hit. The pre-load guard
+                # at line ~18896 won't shadow it because that routing branch
+                # rewrites image_path to the companion before the guard runs.
+                companion_fallback = _full_res_companion_path(
+                    folder["path"], using_offline_cache,
+                )
+                raw_source_path = image_path
+                if companion_fallback and companion_fallback != image_path:
+                    log.info(
+                        "RAW decode failed for photo %s edited original; "
+                        "falling back to companion JPEG", photo_id,
+                    )
+                    img = load_image(companion_fallback, max_size=None)
+                    if img is not None:
+                        image_path = companion_fallback
+                        _record_working_copy_failure(db, photo, raw_source_path)
+                    else:
+                        # Companion also failed — record the marker so repeated
+                        # requests fail fast instead of retrying both sources
+                        # on every hit.
+                        _record_working_copy_failure(db, photo, raw_source_path)
             if img is None:
                 _record_working_copy_failure(db, photo, image_path)
                 return "Could not load image", 500
@@ -18340,21 +19035,41 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             {photo["folder_id"]: folder["path"]},
         )
 
-        from image_loader import RAW_EXTENSIONS
+        from image_loader import (
+            RAW_DECODE_PRESERVE_HIGHLIGHTS,
+            RAW_EXTENSIONS,
+        )
         resolved_ext = os.path.splitext(image_path)[1].lower()
-        if (
+        companion_for_extraction = _full_res_companion_path(
+            folder["path"], using_offline_cache
+        )
+        has_current_raw_failure = (
             (not using_offline_cache or resolved_ext in RAW_EXTENSIONS)
             and _has_current_working_copy_failure(
                 photo, vireo_dir, trust_existing_working_copy=False,
                 live_source_path=image_path, folder_path=folder["path"],
             )
-        ):
-            log.info(
-                "Skipping original-image extraction for photo %s; RAW working-copy "
-                "extraction already failed for current source mtime",
-                photo_id,
-            )
-            return "Could not load image", 500
+        )
+        if has_current_raw_failure:
+            if (
+                resolved_ext in RAW_EXTENSIONS
+                and companion_for_extraction
+                and companion_for_extraction != image_path
+            ):
+                log.info(
+                    "RAW working-copy extraction already failed for photo %s; "
+                    "serving full-size companion JPEG %s for original",
+                    photo_id, companion_for_extraction,
+                )
+                image_path = companion_for_extraction
+                resolved_ext = os.path.splitext(image_path)[1].lower()
+            else:
+                log.info(
+                    "Skipping original-image extraction for photo %s; RAW working-copy "
+                    "extraction already failed for current source mtime",
+                    photo_id,
+                )
+                return "Could not load image", 500
 
         # For browser-native formats without a working copy, serve directly
         ext = resolved_ext
@@ -18362,23 +19077,95 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return send_file(image_path)
 
         # Extract full-res working copy (on-demand upgrade)
-        from image_loader import extract_working_copy, load_image
+        from image_loader import (
+            RAW_DECODE_PRESERVE_HIGHLIGHTS,
+            RAW_EXTENSIONS,
+            extract_working_copy,
+            load_image,
+        )
         wc_rel = f"working/{photo_id}.jpg"
         wc_abs = os.path.join(vireo_dir, wc_rel)
         quality = cfg.load().get("working_copy_quality", 92)
 
-        # Prefer companion JPEG as extraction source — avoids slow RAW decode.
-        # Only use it when we can confirm it is full-resolution: its pixel
-        # dimensions must be at least as large as the stored original
-        # dimensions.  If original dimensions are unknown (None) we cannot
-        # make that guarantee, so fall back to decoding from the RAW.
-        source_for_extraction = (
-            _full_res_companion_path(folder["path"], using_offline_cache) or image_path
-        )
+        # Prefer companion JPEG only for non-RAW sources. RAW primaries should
+        # be decoded through extract_working_copy's highlight-preserving RAW
+        # path rather than replaced with a camera-rendered JPEG.
+        source_for_extraction = image_path
+        if resolved_ext not in RAW_EXTENSIONS and companion_for_extraction:
+            source_for_extraction = companion_for_extraction
 
         if extract_working_copy(source_for_extraction, wc_abs, max_size=0, quality=quality):
             # Update DB so future requests are fast; also backfill
             # dimensions if missing so the full-res shortcut works next time
+            from PIL import Image as _PILImage
+            with _PILImage.open(wc_abs) as upgraded:
+                uw, uh = upgraded.size
+            # For RAW sources, extract_working_copy can succeed via the
+            # embedded JPEG fallback when libraw can't demosaic the file.
+            # That preview is often a fraction of the sensor's full
+            # resolution, so persisting it as the working copy would
+            # silently downgrade /original for every later request. Try
+            # the companion JPEG instead when one can satisfy the full
+            # size before recording this wc.
+            if (
+                resolved_ext in RAW_EXTENSIONS
+                and companion_for_extraction
+                and companion_for_extraction != source_for_extraction
+                and photo["width"]
+                and photo["height"]
+            ):
+                expected_w, expected_h = _scaled_recipe_source_dimensions(photo)
+                if (
+                    expected_w > 0
+                    and expected_h > 0
+                    and (
+                        uw + 1 < expected_w
+                        or uh + 1 < expected_h
+                    )
+                ):
+                    log.info(
+                        "RAW working copy for photo %s is undersized "
+                        "(%dx%d, expected %dx%d); re-extracting "
+                        "from companion JPEG",
+                        photo_id, uw, uh, expected_w, expected_h,
+                    )
+                    if extract_working_copy(
+                        companion_for_extraction, wc_abs,
+                        max_size=0, quality=quality,
+                    ):
+                        with _PILImage.open(wc_abs) as upgraded:
+                            uw, uh = upgraded.size
+                    else:
+                        log.warning(
+                            "Companion re-extraction failed for photo %s; "
+                            "keeping undersized RAW working copy", photo_id,
+                        )
+            updates = ["working_copy_path=?"]
+            params = [wc_rel]
+            if not photo["width"] or not photo["height"]:
+                updates.extend(["width=?", "height=?"])
+                params.extend([uw, uh])
+            params.append(photo_id)
+            db.conn.execute(
+                f"UPDATE photos SET {', '.join(updates)} WHERE id=?",
+                params,
+            )
+            db.conn.commit()
+            return send_file(wc_abs, mimetype="image/jpeg")
+
+        # extract_working_copy failed on a RAW source: try the full-res
+        # companion JPEG as a fallback before giving up. This catches
+        # unsupported RAW variants (libraw can't demosaic, no usable
+        # embedded JPEG) on RAW+JPEG rows — without it, a usable sidecar
+        # JPEG would be ignored and the request would 500.
+        if (
+            resolved_ext in RAW_EXTENSIONS
+            and companion_for_extraction
+            and companion_for_extraction != source_for_extraction
+            and extract_working_copy(
+                companion_for_extraction, wc_abs, max_size=0, quality=quality,
+            )
+        ):
             from PIL import Image as _PILImage
             with _PILImage.open(wc_abs) as upgraded:
                 uw, uh = upgraded.size
@@ -18393,10 +19180,64 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 params,
             )
             db.conn.commit()
+            log.info(
+                "RAW extraction failed for photo %s original; served "
+                "companion JPEG instead", photo_id,
+            )
             return send_file(wc_abs, mimetype="image/jpeg")
 
         # Fallback: serve via load_image
-        img = load_image(image_path, max_size=None)
+        raw_decode = (
+            RAW_DECODE_PRESERVE_HIGHLIGHTS
+            if resolved_ext in RAW_EXTENSIONS
+            else None
+        )
+        load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
+        img = load_image(image_path, max_size=None, **load_kwargs)
+        if (
+            img is not None
+            and resolved_ext in RAW_EXTENSIONS
+            and companion_for_extraction
+            and companion_for_extraction != image_path
+            and photo["width"]
+            and photo["height"]
+        ):
+            # Same undersized-embedded-JPEG guard as the working-copy path
+            # above: if rawpy.postprocess fell back to a small embedded
+            # preview, prefer the full-size companion JPEG before caching.
+            expected_w, expected_h = _scaled_recipe_source_dimensions(photo)
+            if _image_is_smaller_than_expected(img, expected_w, expected_h):
+                companion_img = load_image(
+                    companion_for_extraction, max_size=None,
+                )
+                if _companion_image_can_replace_raw_result(
+                    companion_img, img, expected_w, expected_h,
+                ):
+                    log.info(
+                        "RAW decode for photo %s original returned "
+                        "undersized embedded preview (%dx%d, expected "
+                        "%dx%d); falling back to companion JPEG",
+                        photo_id, img.size[0], img.size[1],
+                        expected_w, expected_h,
+                    )
+                    img.close()
+                    img = companion_img
+                    image_path = companion_for_extraction
+                elif companion_img is not None:
+                    companion_img.close()
+        if (
+            img is None
+            and resolved_ext in RAW_EXTENSIONS
+            and companion_for_extraction
+            and companion_for_extraction != image_path
+        ):
+            log.info(
+                "RAW decode failed for photo %s original; falling back to "
+                "companion JPEG", photo_id,
+            )
+            img = load_image(companion_for_extraction, max_size=None)
+            if img is not None:
+                image_path = companion_for_extraction
         if img is None:
             _record_working_copy_failure(db, photo, image_path)
             return "Could not load image", 500

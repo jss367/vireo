@@ -15,6 +15,7 @@ from pathlib import Path
 
 import imagehash
 from db import commit_with_retry
+from exif_orientation import orientation_swaps_axes as _orientation_swaps_axes
 from image_loader import (
     RAW_EXTENSIONS,
     SUPPORTED_EXTENSIONS,
@@ -52,6 +53,63 @@ _SCAN_MP_METHOD = (
 # (the WaitForMultipleObjects handle limit). Clamp on Windows so scans
 # don't fail on high-core-count machines or misconfigured scan_workers.
 _WINDOWS_MAX_WORKERS = 61
+
+
+def _scaled_dimensions(width, height, max_size):
+    try:
+        width = int(width or 0)
+        height = int(height or 0)
+    except (TypeError, ValueError):
+        return 0, 0
+    if width <= 0 or height <= 0:
+        return 0, 0
+    if max_size and max_size > 0:
+        long_edge = max(width, height)
+        if long_edge > max_size:
+            scale = max_size / long_edge
+            width = round(width * scale)
+            height = round(height * scale)
+    return width, height
+
+
+def _exif_orientation_from_data(exif_data):
+    # Mirror of vireo.thumbnails._exif_orientation; kept local so the scanner
+    # doesn't take a runtime dependency on the request-path thumbnail module.
+    if not exif_data:
+        return None
+    if isinstance(exif_data, str):
+        try:
+            metadata = json.loads(exif_data)
+        except (TypeError, ValueError):
+            return None
+    elif isinstance(exif_data, dict):
+        metadata = exif_data
+    else:
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    for group in ("EXIF", "IFD0", "TIFF", "File"):
+        values = metadata.get(group)
+        if isinstance(values, dict) and "Orientation" in values:
+            return values["Orientation"]
+    return metadata.get("Orientation")
+
+
+def _oriented_dimensions(width, height, exif_data):
+    """Return (width, height) rotated to match what extract_working_copy writes.
+
+    Stored ``width``/``height`` come straight from the sensor/file metadata,
+    so for portrait shots taken on a landscape sensor they're the unrotated
+    axes (e.g. 6000x4000 with EXIF Orientation 6). The request-path helpers
+    in thumbnails/app/export/pipeline normalize these to display orientation
+    before comparing against rendered pixels; scanner's RAW-undersize check
+    must do the same or it sees the orientation-normalized JPEG written by
+    ``extract_working_copy`` (4000x6000) as catastrophically undersized vs.
+    the raw 6000x4000 and falls back to the companion JPEG.
+    """
+    if _orientation_swaps_axes(_exif_orientation_from_data(exif_data)):
+        return height, width
+    return width, height
 
 
 def compute_file_hash(file_path, chunk_size=65536):
@@ -820,7 +878,7 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
     rows = db.conn.execute(
         f"""
         SELECT p.id, p.filename, p.companion_path, p.working_copy_path,
-               p.extension, p.width, p.height, p.file_mtime,
+               p.extension, p.width, p.height, p.exif_data, p.file_mtime,
                f.path AS folder_path
           FROM photos p
           JOIN folders f ON f.id = p.folder_id
@@ -851,27 +909,131 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
         wc_rel = f"working/{row['id']}.jpg"
         wc_abs = os.path.join(vireo_dir, wc_rel)
 
-        # Prefer companion JPEG if available
-        source = os.path.join(row["folder_path"], row["filename"])
-        failure_source = "source"
+        # Working copies are the edit-quality source. For non-RAW primaries
+        # we still prefer the companion JPEG outright (fast path). For RAW
+        # primaries we decode the RAW with image_loader's highlight-preserving
+        # settings instead of baking in a camera JPEG that may already have
+        # clipped highlights — but if libraw cannot decode this RAW variant
+        # (and the embedded thumb is unusable too) we still fall back to the
+        # companion so an extractable JPEG copy isn't refused outright.
+        primary_path = os.path.join(row["folder_path"], row["filename"])
+        primary_is_raw = (
+            os.path.splitext(row["filename"])[1].lower() in RAW_EXTENSIONS
+        )
+        companion_path = None
         if row["companion_path"]:
-            companion = os.path.join(row["folder_path"], row["companion_path"])
-            if os.path.isfile(companion):
-                source = companion
-                failure_source = "companion"
+            candidate = os.path.join(row["folder_path"], row["companion_path"])
+            if os.path.isfile(candidate):
+                companion_path = candidate
+
+        if not primary_is_raw and companion_path:
+            source = companion_path
+            failure_source = "companion"
+        else:
+            source = primary_path
+            failure_source = "source"
 
         # extract_working_copy is slow (RAW decode + JPEG encode); run it
         # before any DB write so no transaction is open while it runs.
         ok = extract_working_copy(source, wc_abs, max_size=wc_max_size, quality=wc_quality)
-        if ok:
-            db.conn.execute(
-                "UPDATE photos SET working_copy_path=?,"
-                " working_copy_failed_at=NULL,"
-                " working_copy_failed_mtime=NULL,"
-                " working_copy_failed_source=NULL"
-                " WHERE id=?",
-                (wc_rel, row["id"]),
+        raw_failed_then_companion = False
+        # libraw returns an embedded JPEG when it can't demosaic a RAW; that
+        # preview is often a fraction of sensor resolution, so ok=True here
+        # can still produce an undersized working copy. Treat a substantially
+        # undersized RAW extraction the same as a hard failure so the
+        # companion-fallback branch below replaces it instead of caching the
+        # downscaled preview.
+        if (
+            ok
+            and primary_is_raw
+            and companion_path
+            and row["width"]
+            and row["height"]
+        ):
+            # Stored width/height are the unrotated sensor axes; swap them
+            # before scaling so portrait files (e.g. 6000x4000 + Orientation 6)
+            # produce the same expected dimensions as the orientation-normalized
+            # JPEG that extract_working_copy actually writes.
+            oriented_w, oriented_h = _oriented_dimensions(
+                row["width"], row["height"], row["exif_data"],
             )
+            expected_w, expected_h = _scaled_dimensions(
+                oriented_w, oriented_h, wc_max_size,
+            )
+            try:
+                with Image.open(wc_abs) as _wc:
+                    wc_w, wc_h = _wc.size
+            except Exception:
+                # PIL couldn't open the file: corrupt / truncated /
+                # unsupported. Treat as a failed extraction so the
+                # companion fallback below runs instead of caching an
+                # unreadable working copy.
+                log.info(
+                    "RAW working-copy extraction for photo %s produced "
+                    "an unreadable file %s; retrying from companion "
+                    "JPEG %s",
+                    row["id"], wc_abs, companion_path,
+                )
+                wc_w = wc_h = 0
+                ok = False
+            if (
+                ok
+                and expected_w > 0
+                and expected_h > 0
+                and (
+                    wc_w < expected_w * 0.99
+                    or wc_h < expected_h * 0.99
+                )
+            ):
+                log.info(
+                    "RAW working-copy extraction for photo %s produced "
+                    "undersized result (%dx%d, expected %dx%d); "
+                    "retrying from companion JPEG %s",
+                    row["id"], wc_w, wc_h, expected_w, expected_h,
+                    companion_path,
+                )
+                ok = False
+        if not ok and primary_is_raw and companion_path:
+            log.info(
+                "RAW working-copy extraction failed for photo %s (%s); "
+                "falling back to companion JPEG %s",
+                row["id"], primary_path, companion_path,
+            )
+            source = companion_path
+            # Keep failure_source = "source": the RAW already failed, and
+            # _has_current_working_copy_failure ignores "companion" markers
+            # while both files exist — overwriting here would silently
+            # un-shield request paths from the known RAW failure if the
+            # companion extraction also fails.
+            ok = extract_working_copy(
+                source, wc_abs, max_size=wc_max_size, quality=wc_quality,
+            )
+            raw_failed_then_companion = ok
+        if ok:
+            if raw_failed_then_companion:
+                # The companion-derived working copy is usable, but request
+                # paths still need to know the RAW itself failed: edited RAW
+                # render paths (preview/edit-preview/original/export) gate
+                # companion selection in _recipe_render_source on a present
+                # "source" failure marker. Clearing it here would push those
+                # paths back through the unsupported RAW decode and 500.
+                db.conn.execute(
+                    "UPDATE photos SET working_copy_path=?,"
+                    " working_copy_failed_at=datetime('now'),"
+                    " working_copy_failed_mtime=?,"
+                    " working_copy_failed_source='source'"
+                    " WHERE id=?",
+                    (wc_rel, row["file_mtime"], row["id"]),
+                )
+            else:
+                db.conn.execute(
+                    "UPDATE photos SET working_copy_path=?,"
+                    " working_copy_failed_at=NULL,"
+                    " working_copy_failed_mtime=NULL,"
+                    " working_copy_failed_source=NULL"
+                    " WHERE id=?",
+                    (wc_rel, row["id"]),
+                )
         else:
             # Mark failure gated on current file_mtime so a future content
             # change (mtime bump) clears the gate and we retry. The

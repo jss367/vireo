@@ -6,15 +6,19 @@ Performance notes:
 - PIL resize and JPEG encode are negligible (<0.15s)
 - libraw (via rawpy) is already C — Rust/numba won't help here
 
-RAW strategy (JPEG-first):
+RAW strategy:
 - Modern cameras embed a full-resolution JPEG in the RAW file (the same image
   the camera would produce in RAW+JPEG mode). For a photo organizer, that's
   both faster to decode and sufficient in quality.
 - It also works for RAW variants libraw cannot decode. Example: Nikon Z 8
   "High Efficiency*" (HE*) files use TicoRAW compression that libraw 0.22
   cannot decode. The embedded JPEG is our only path for those files.
-- We prefer the embedded JPEG whenever it meets the requested size, and
-  fall back to it when demosaic-based decode raises.
+- Browsing paths use the JPEG-first strategy: prefer the embedded JPEG whenever
+  it meets the requested size, and fall back to it when demosaic-based decode
+  raises.
+- Edit-quality working copies use RAW_DECODE_PRESERVE_HIGHLIGHTS: demosaic the
+  RAW with auto-bright disabled and highlight blending enabled, falling back to
+  the embedded JPEG only when libraw cannot decode the file.
 """
 
 import io
@@ -29,6 +33,9 @@ log = logging.getLogger(__name__)
 RAW_EXTENSIONS = {".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp", ".webp"}
 SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | RAW_EXTENSIONS
+RAW_DECODE_JPEG_FIRST = "jpeg_first"
+RAW_DECODE_PRESERVE_HIGHLIGHTS = "preserve_highlights"
+_RAW_DECODE_MODES = {RAW_DECODE_JPEG_FIRST, RAW_DECODE_PRESERVE_HIGHLIGHTS}
 
 # macOS "package" directories that hold OTHER apps' managed data. Walking
 # into them triggers Sequoia's "<app> would like to access data from other
@@ -338,12 +345,13 @@ def safe_scan_walk(top, onerror=None):
         yield from safe_scan_walk(os.path.join(top, subdir), onerror=onerror)
 
 
-def load_image(file_path, max_size=1024):
+def load_image(file_path, max_size=1024, raw_decode=RAW_DECODE_JPEG_FIRST):
     """Load an image file and return a PIL Image, resized to max_size.
 
     Supports JPEG, PNG, TIFF, and RAW formats (NEF, CR2, ARW, etc.).
-    For RAW files, prefers the embedded full-res JPEG preview when it meets
-    the requested size; falls back to demosaic-based decode otherwise.
+    For RAW files, ``raw_decode`` controls whether browsing gets the fast
+    JPEG-first path or edit-quality renders demosaic the RAW with highlight
+    preservation settings before falling back to an embedded JPEG.
     Returns None if the file cannot be loaded.
 
     For RAW files we retry once on transient libraw I/O errors. NAS volumes
@@ -355,6 +363,8 @@ def load_image(file_path, max_size=1024):
     Args:
         file_path: Path to the image file
         max_size: Maximum dimension (longest side). None or 0 for full resolution.
+        raw_decode: RAW_DECODE_JPEG_FIRST (default) or
+            RAW_DECODE_PRESERVE_HIGHLIGHTS.
 
     Returns:
         PIL.Image.Image or None
@@ -364,10 +374,12 @@ def load_image(file_path, max_size=1024):
 
     if ext not in SUPPORTED_EXTENSIONS:
         return None
+    if raw_decode not in _RAW_DECODE_MODES:
+        raise ValueError(f"raw_decode must be one of: {', '.join(sorted(_RAW_DECODE_MODES))}")
 
     try:
         if ext in RAW_EXTENSIONS:
-            img = _load_raw_with_retry(path, max_size)
+            img = _load_raw_with_retry(path, max_size, raw_decode=raw_decode)
         else:
             with Image.open(str(path)) as opened:
                 img = ImageOps.exif_transpose(opened)
@@ -385,7 +397,7 @@ def load_image(file_path, max_size=1024):
         return None
 
 
-def _load_raw_with_retry(path, max_size):
+def _load_raw_with_retry(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
     """Wrap _load_raw with a single retry on transient libraw I/O errors.
 
     Only retries on LibRawIOError — other libraw errors (UnsupportedFormat,
@@ -394,7 +406,7 @@ def _load_raw_with_retry(path, max_size):
     contention-related and resolve immediately.
     """
     try:
-        return _load_raw(path, max_size)
+        return _load_raw(path, max_size, raw_decode=raw_decode)
     except Exception as e:
         # Identify libraw I/O errors by class name so we don't have to
         # import rawpy at module scope (it's only present when a RAW
@@ -402,7 +414,7 @@ def _load_raw_with_retry(path, max_size):
         if type(e).__name__ != "LibRawIOError":
             raise
         log.info("Transient libraw I/O error on %s; retrying once", path)
-        return _load_raw(path, max_size)
+        return _load_raw(path, max_size, raw_decode=raw_decode)
 
 
 def _load_standard(path, max_size):
@@ -509,7 +521,11 @@ def extract_working_copy(source_path, output_path, max_size=4096, quality=92):
         True on success, False on failure
     """
     try:
-        img = load_image(source_path, max_size=max_size or None)
+        img = load_image(
+            source_path,
+            max_size=max_size or None,
+            raw_decode=RAW_DECODE_PRESERVE_HIGHLIGHTS,
+        )
         if img is None:
             return False
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -521,13 +537,18 @@ def extract_working_copy(source_path, output_path, max_size=4096, quality=92):
         return False
 
 
-def _load_raw(path, max_size):
-    """Load a RAW file using JPEG-first strategy.
+def _load_raw(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
+    """Load a RAW file using the requested decode strategy.
 
-    1. Try the embedded JPEG preview; use it if it's big enough for max_size.
-    2. Otherwise demosaic via rawpy.postprocess().
-    3. If postprocess raises (e.g. libraw 0.22 can't decode Nikon HE*/TicoRAW),
-       fall back to the embedded JPEG even if smaller than max_size.
+    JPEG-first:
+      1. Try the embedded JPEG preview; use it if it's big enough for max_size.
+      2. Otherwise demosaic via rawpy.postprocess().
+      3. If postprocess raises (e.g. libraw 0.22 can't decode Nikon HE*/TicoRAW),
+         fall back to the embedded JPEG even if smaller than max_size.
+
+    Preserve-highlights:
+      1. Demosaic the RAW with auto-bright disabled and highlight blending on.
+      2. Fall back to the embedded JPEG only if libraw cannot decode the RAW.
     """
     import rawpy
 
@@ -536,14 +557,23 @@ def _load_raw(path, max_size):
 
         # JPEG-first: if the embedded preview is large enough for the request,
         # use it and skip the slower RAW decode entirely.
-        if (embedded is not None and max_size and max_size > 0
-                and max(embedded.size) >= max_size):
+        if (
+            raw_decode == RAW_DECODE_JPEG_FIRST
+            and embedded is not None
+            and max_size
+            and max_size > 0
+            and max(embedded.size) >= max_size
+        ):
             return embedded
 
         # Otherwise demosaic the sensor data, falling back to the embedded
         # JPEG if libraw can't decode this RAW variant.
         try:
-            return _postprocess_raw(raw, max_size)
+            return _postprocess_raw(
+                raw,
+                max_size,
+                preserve_highlights=raw_decode == RAW_DECODE_PRESERVE_HIGHLIGHTS,
+            )
         except Exception as e:
             if embedded is not None:
                 # Only claim "full camera output" when the embedded JPEG
@@ -592,17 +622,27 @@ def _extract_embedded_jpeg(raw):
         return None
 
 
-def _postprocess_raw(raw, max_size):
+def _postprocess_raw(raw, max_size, preserve_highlights=False):
     """Demosaic raw sensor data into a PIL Image.
 
     Uses half-size decode when the target fits, which is ~3x faster and still
     produces ~4000x2700 for a 45MP sensor.
     """
+    import rawpy
+
     use_half = False
     if max_size and max_size > 0:
         sensor_long = max(raw.sizes.width, raw.sizes.height)
         half_long = sensor_long // 2
         if max_size <= half_long:
             use_half = True
-    rgb = raw.postprocess(half_size=use_half)
+    kwargs = {"half_size": use_half}
+    if preserve_highlights:
+        kwargs.update({
+            "use_camera_wb": True,
+            "no_auto_bright": True,
+            "bright": 1.0,
+            "highlight_mode": rawpy.HighlightMode.Blend,
+        })
+    rgb = raw.postprocess(**kwargs)
     return Image.fromarray(rgb)
