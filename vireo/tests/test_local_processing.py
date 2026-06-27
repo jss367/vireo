@@ -342,6 +342,49 @@ def test_conflicting_archive_paths_skips_known_duplicates(tmp_path):
     ) == []
 
 
+def test_conflicting_archive_paths_tracks_survivor_hashes(tmp_path):
+    """When skip_duplicates is enabled and the selected sources contain the
+    same bytes twice (for example the same card folder selected twice),
+    ingest() copies the first occurrence, adds its hash to the known-hash
+    set, and skips later same-hash sources before staging. The preflight
+    must mirror that: a later same-hash source that happens to map to an
+    existing different archive path must not be reported as a conflict,
+    because ingest will skip it before staging.
+
+    The earlier survivor's archive path is missing in this scenario, so
+    the earlier branch never hashes it. The function must therefore fold
+    earlier survivors' hashes into ``seen_hashes`` lazily before checking
+    a later same-hash source against an existing archive collision."""
+    src = tmp_path / "card"
+    src.mkdir()
+    # Two source files with identical bytes (same content hash) but
+    # different names so they map to different archive paths.
+    first = src / "first.jpg"
+    first.write_bytes(b"identical-content")
+    second = src / "second.jpg"
+    second.write_bytes(b"identical-content")
+
+    dest = tmp_path / "archive"
+    dest.mkdir()
+    # The first source's archive path is missing (no conflict — survivor),
+    # so the function never hashes it in the simple branch. The second
+    # source's archive path collides with an unrelated file. Without the
+    # survivor-hash fix, the function would hash `second`, find its hash
+    # missing from seen_hashes (since `first` was never hashed), and
+    # falsely report a conflict — even though ingest would skip `second`
+    # as an intra-batch duplicate of `first`.
+    (dest / "second.jpg").write_bytes(b"unrelated-content")
+
+    # Empty known_hashes (skip_duplicates on, no catalog matches) is
+    # enough to enable the survivor-tracking branch.
+    assert local_processing.conflicting_archive_paths(
+        str(dest),
+        [first, second],
+        folder_template="",
+        known_hashes=set(),
+    ) == []
+
+
 def test_conflicting_archive_paths_mirrors_ingest_filename_suffix(tmp_path):
     """Two sources that share an import folder and filename but differ in
     content are staged as ``name.ext`` and ``name_1.ext``. The preflight
@@ -383,6 +426,39 @@ def test_conflicting_archive_paths_mirrors_ingest_filename_suffix(tmp_path):
         [first, second],
         folder_template="",
     ) == [str(dest / "frame_1.jpg")]
+
+
+def test_existing_archive_bytes_credits_suffixed_resumes(tmp_path):
+    """When two selected files share a basename in the same import folder,
+    ingest() stages the first as ``name.ext`` and the second as
+    ``name_1.ext``. A previous partial archive that already contains both
+    suffixed variants must credit both source files' bytes — otherwise the
+    second source (whose dest path collides with the first's credit) earns
+    zero credit and the retry can be batching-rejected even though the
+    delta would fit."""
+    src = tmp_path / "card"
+    src.mkdir()
+    # Two source files with the same basename but in different subfolders,
+    # so both map to the same archive folder under folder_template="".
+    first = src / "a" / "frame.jpg"
+    first.parent.mkdir()
+    first.write_bytes(b"first-content")
+    second = src / "b" / "frame.jpg"
+    second.parent.mkdir()
+    second.write_bytes(b"second-content-longer")
+
+    dest = tmp_path / "archive"
+    dest.mkdir()
+    # A partial prior archive run already staged both files at their
+    # ingest-assigned paths. The retry must credit both.
+    (dest / "frame.jpg").write_bytes(b"first-content")
+    (dest / "frame_1.jpg").write_bytes(b"second-content-longer")
+
+    assert local_processing.existing_archive_bytes(
+        str(dest),
+        [first, second],
+        folder_template="",
+    ) == len(b"first-content") + len(b"second-content-longer")
 
 
 def test_existing_archive_bytes_returns_zero_for_missing_or_file(tmp_path):

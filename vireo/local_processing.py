@@ -75,17 +75,19 @@ def total_file_bytes(files: list[Path]) -> int:
     return total
 
 
-def _archive_destination_for_source(
-    archive_root: Path,
-    source_file: Path,
-    timestamps: dict[Path, object],
-    folder_template: str,
-) -> Path:
-    rel_folder = build_destination_path(
-        timestamps.get(source_file),
-        folder_template,
-    )
-    return archive_root / rel_folder / source_file.name
+def _suffix_against(folder_taken: set[str], name: str) -> str:
+    """Pick the next free slot for ``name`` given the per-folder set
+    ``folder_taken``. Mirrors ingest()'s name-collision rule: the first
+    source claims the unsuffixed name, then ``name_1.ext``, ``name_2.ext``,
+    and so on for subsequent collisions in the same archive folder.
+    """
+    if name not in folder_taken:
+        return name
+    stem, suffix_ext = os.path.splitext(name)
+    counter = 1
+    while f"{stem}_{counter}{suffix_ext}" in folder_taken:
+        counter += 1
+    return f"{stem}_{counter}{suffix_ext}"
 
 
 def conflicting_archive_paths(
@@ -117,6 +119,16 @@ def conflicting_archive_paths(
       preflight tracks per-folder occupied names so the existing archive's
       same-name file is only compared to the first survivor's content,
       not also (incorrectly) to the second survivor's.
+    * When ``known_hashes`` is in use, the hashes of earlier survivors are
+      folded into ``seen_hashes`` before a later source's conflict check.
+      Mirrors ingest()'s ``extra_known_hashes`` accumulator so the same
+      card/folder selected twice still recognises the second occurrence as
+      an intra-batch duplicate that ingest would skip — without that, a
+      later same-hash source whose archive path collides with an unrelated
+      file would be reported as a fresh conflict and the run would abort.
+      Survivor hashes are computed lazily, only when an actual conflict
+      needs resolving, so the common no-overlap case still pays no hash
+      cost.
     """
     try:
         if not os.path.isdir(path):
@@ -133,6 +145,24 @@ def conflicting_archive_paths(
     # Per-archive-subfolder name slots already claimed by earlier survivors
     # in this iteration. Mirrors the per-batch staging tree ingest builds.
     occupied: dict[str, set[str]] = {}
+    # Survivors (sources that ingest would stage) whose hash hasn't been
+    # computed yet. When ``seen_hashes`` is in use and a later source hits
+    # a same-path conflict that needs hash resolution, these get hashed
+    # first so ``seen_hashes`` matches ingest()'s known-hash set at that
+    # point in the source iteration. Stays empty when ``known_hashes`` is
+    # ``None``, so callers without skip_duplicates pay no extra cost.
+    pending_survivor_hashes: list[Path] = []
+
+    def _flush_pending() -> None:
+        if seen_hashes is None or not pending_survivor_hashes:
+            return
+        from scanner import compute_file_hash
+        while pending_survivor_hashes:
+            survivor = pending_survivor_hashes.pop(0)
+            try:
+                seen_hashes.add(compute_file_hash(str(survivor)))
+            except OSError:
+                continue
 
     for source_file in files:
         try:
@@ -144,17 +174,13 @@ def conflicting_archive_paths(
             folder_key = os.path.normcase(os.path.abspath(dest_folder))
             folder_taken = occupied.setdefault(folder_key, set())
 
-            chosen_name = source_file.name
-            if chosen_name in folder_taken:
-                stem, suffix_ext = os.path.splitext(source_file.name)
-                counter = 1
-                while f"{stem}_{counter}{suffix_ext}" in folder_taken:
-                    counter += 1
-                chosen_name = f"{stem}_{counter}{suffix_ext}"
+            chosen_name = _suffix_against(folder_taken, source_file.name)
 
             dest_file = dest_folder / chosen_name
             if not dest_file.exists():
                 folder_taken.add(chosen_name)
+                if seen_hashes is not None:
+                    pending_survivor_hashes.append(source_file)
                 continue
 
             if dest_file.is_file():
@@ -164,6 +190,8 @@ def conflicting_archive_paths(
                     and filecmp.cmp(source_file, dest_file, shallow=False)
                 ):
                     folder_taken.add(chosen_name)
+                    if seen_hashes is not None:
+                        pending_survivor_hashes.append(source_file)
                     continue
 
             # Same-path archive file with different content. If ingest
@@ -172,6 +200,10 @@ def conflicting_archive_paths(
             # rejecting the run. Hashing is deferred to this branch so
             # the common no-overlap case stays cheap.
             if seen_hashes is not None:
+                # Bring ``seen_hashes`` up to date with every earlier
+                # survivor's hash before checking the current source,
+                # mirroring ingest()'s known-hash accumulator order.
+                _flush_pending()
                 from scanner import compute_file_hash
                 try:
                     file_hash = compute_file_hash(str(source_file))
@@ -205,6 +237,15 @@ def existing_archive_bytes(
     files that aren't already there. Credit only destination files that match
     the selected sources at the same relative import path. Unrelated files in
     an existing NAS folder do not reduce the bytes the archive will write.
+
+    When two selected files land in the same archive folder under the same
+    basename, ingest() stages the first as ``name.ext`` and the second as
+    ``name_1.ext``. A previous partial archive that already contains the
+    suffixed file from a prior interrupted run must still earn resume credit
+    for the second source — without mirroring ingest's suffix logic the
+    second source always points back at the first's already-credited
+    unsuffixed slot and the run can be batching-rejected even though the
+    delta would fit.
     """
     try:
         if not os.path.isdir(path):
@@ -216,14 +257,23 @@ def existing_archive_bytes(
     total = 0
     credited: set[str] = set()
     archive_root = Path(path)
+    # Per-archive-subfolder slots claimed by earlier sources in this
+    # iteration. Mirrors the same per-folder accounting in
+    # ``conflicting_archive_paths`` so both preflight checks agree on
+    # which archive path a same-basename second source maps to.
+    occupied: dict[str, set[str]] = {}
     for source_file in files:
         try:
-            dest_file = _archive_destination_for_source(
-                archive_root,
-                source_file,
-                timestamps,
+            rel_folder = build_destination_path(
+                timestamps.get(source_file),
                 folder_template,
             )
+            dest_folder = archive_root / rel_folder
+            folder_key = os.path.normcase(os.path.abspath(dest_folder))
+            folder_taken = occupied.setdefault(folder_key, set())
+            chosen_name = _suffix_against(folder_taken, source_file.name)
+            folder_taken.add(chosen_name)
+            dest_file = dest_folder / chosen_name
             key = os.path.normcase(os.path.abspath(dest_file))
             if key in credited or not dest_file.is_file():
                 continue
