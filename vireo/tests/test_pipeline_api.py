@@ -1360,6 +1360,69 @@ def test_pipeline_local_processing_rejects_archive_path_conflicts(
     assert "different files at the same import paths" in error_text
 
 
+def test_pipeline_local_processing_conflict_preflight_skips_known_duplicates(
+    setup, tmp_path, monkeypatch
+):
+    """A source whose hash is already in the catalog is skipped by ingest
+    before staging, so a same-name different-content file at the archive
+    must not cause the preflight to abort the run."""
+    app, db_path = setup
+
+    src = tmp_path / "card-dup-conflict"
+    src.mkdir()
+    dup_path = src / "dup.jpg"
+    Image.new("RGB", (16, 16), "white").save(dup_path)
+    fresh_path = src / "fresh.jpg"
+    Image.new("RGB", (16, 16), "red").save(fresh_path)
+
+    from db import Database
+    from scanner import compute_file_hash
+
+    dup_hash = compute_file_hash(str(dup_path))
+
+    db = Database(db_path)
+    seed_folder = tmp_path / "seed"
+    seed_folder.mkdir()
+    folder_id = db.add_folder(str(seed_folder))
+    ws_id = db._active_workspace_id
+    db.add_workspace_folder(ws_id, folder_id)
+    db.add_photo(
+        folder_id=folder_id, filename="dup.jpg", extension=".jpg",
+        file_size=10, file_mtime=1.0, file_hash=dup_hash,
+    )
+    db.close()
+
+    final_parent = tmp_path / "archive-parent"
+    final_parent.mkdir()
+    final_dest = final_parent / "Archive"
+    final_dest.mkdir()
+    # Same archive-relative path as the dup source, different content.
+    # Without the duplicate filter the preflight would reject this run.
+    (final_dest / "dup.jpg").write_bytes(b"different existing bytes")
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "skip_duplicates": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    error_text = (job.get("error") or "") + str(job.get("result", ""))
+    assert "different files at the same import paths" not in error_text
+    assert job["status"] == "completed", job
+
+
 def test_pipeline_local_processing_credits_existing_archive_for_resume(
     setup, tmp_path, monkeypatch
 ):

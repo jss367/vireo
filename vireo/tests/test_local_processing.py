@@ -304,6 +304,87 @@ def test_conflicting_archive_paths_reports_different_existing_files(tmp_path):
     ) == [str(dest / "conflict.jpg")]
 
 
+def test_conflicting_archive_paths_skips_known_duplicates(tmp_path):
+    """When skip_duplicates would skip a source whose hash is already in the
+    catalog, that source never reaches staging and so cannot conflict at
+    archive time. Passing the catalog hash set lets the preflight mirror
+    that behavior instead of falsely aborting the run."""
+    from scanner import compute_file_hash
+
+    src = tmp_path / "card"
+    src.mkdir()
+    already_imported = src / "imported.jpg"
+    already_imported.write_bytes(b"source-bytes")
+    fresh = src / "fresh.jpg"
+    fresh.write_bytes(b"new-bytes")
+
+    dest = tmp_path / "archive"
+    dest.mkdir()
+    # The archive already has a different file at the duplicate source's
+    # path. Without the duplicate filter, the preflight would flag this.
+    (dest / "imported.jpg").write_bytes(b"unrelated-target")
+
+    # Without known_hashes: imported.jpg is reported as a conflict.
+    assert local_processing.conflicting_archive_paths(
+        str(dest),
+        [already_imported, fresh],
+        folder_template="",
+    ) == [str(dest / "imported.jpg")]
+
+    # With imported.jpg's hash in the catalog: ingest will skip it, so
+    # the preflight no longer reports the (irrelevant) archive collision.
+    known = {compute_file_hash(str(already_imported))}
+    assert local_processing.conflicting_archive_paths(
+        str(dest),
+        [already_imported, fresh],
+        folder_template="",
+        known_hashes=known,
+    ) == []
+
+
+def test_conflicting_archive_paths_mirrors_ingest_filename_suffix(tmp_path):
+    """Two sources that share an import folder and filename but differ in
+    content are staged as ``name.ext`` and ``name_1.ext``. The preflight
+    must compare the second source against the suffixed archive path —
+    not also against the unsuffixed one — otherwise a resume where the
+    archive already contains the first exact match incorrectly rejects
+    the second source as a conflict."""
+    src = tmp_path / "card"
+    src.mkdir()
+    first = src / "subdir-a" / "frame.jpg"
+    first.parent.mkdir()
+    first.write_bytes(b"first-content")
+    # Same basename as `first` but in a different source subfolder, so
+    # both map to the same archive-relative path under folder_template="".
+    second = src / "subdir-b" / "frame.jpg"
+    second.parent.mkdir()
+    second.write_bytes(b"second-content")
+
+    dest = tmp_path / "archive"
+    dest.mkdir()
+    # The archive already contains the first source verbatim — the
+    # second source would be staged under the suffixed name, and no
+    # `frame_1.jpg` exists at the archive, so the run must not abort.
+    (dest / "frame.jpg").write_bytes(b"first-content")
+
+    assert local_processing.conflicting_archive_paths(
+        str(dest),
+        [first, second],
+        folder_template="",
+    ) == []
+
+    # If the archive also has the suffixed slot taken by a different
+    # file, the second source genuinely conflicts there and must be
+    # reported — confirming the suffix tracking still surfaces real
+    # archive collisions.
+    (dest / "frame_1.jpg").write_bytes(b"unrelated")
+    assert local_processing.conflicting_archive_paths(
+        str(dest),
+        [first, second],
+        folder_template="",
+    ) == [str(dest / "frame_1.jpg")]
+
+
 def test_existing_archive_bytes_returns_zero_for_missing_or_file(tmp_path):
     """Missing directories and regular files give no credit — the caller
     treats them as a fresh archive run."""

@@ -1121,10 +1121,28 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 recursive=params.recursive,
                                 exclude_paths=params.exclude_paths,
                             )
+                            # When skip_duplicates is on, ingest() will skip
+                            # sources whose content hash is already in the
+                            # catalog before they ever reach staging. Pass
+                            # those known hashes to the conflict preflight so
+                            # a duplicate-source that happens to share an
+                            # archive path with an unrelated file does not
+                            # falsely abort the run — ingest will not copy
+                            # it, so it cannot conflict at archive time.
+                            catalog_hashes: set[str] | None = None
+                            if params.skip_duplicates:
+                                catalog_hashes = {
+                                    row["file_hash"]
+                                    for row in thread_db.conn.execute(
+                                        "SELECT file_hash FROM photos "
+                                        "WHERE file_hash IS NOT NULL"
+                                    )
+                                }
                             archive_conflicts = conflicting_archive_paths(
                                 final_destination,
                                 selected_files,
                                 params.folder_template,
+                                known_hashes=catalog_hashes,
                             )
                             if archive_conflicts:
                                 examples = ", ".join(archive_conflicts[:3])
@@ -1174,12 +1192,15 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 and params.skip_duplicates
                                 and selected_files
                             ):
-                                known_hashes = {
-                                    row["file_hash"] for row in thread_db.conn.execute(
-                                        "SELECT file_hash FROM photos "
-                                        "WHERE file_hash IS NOT NULL"
-                                    )
-                                }
+                                # ``catalog_hashes`` was already fetched
+                                # above for the conflict preflight when
+                                # skip_duplicates is on; reuse it instead
+                                # of re-querying the photos table.
+                                known_hashes = (
+                                    catalog_hashes
+                                    if catalog_hashes is not None
+                                    else set()
+                                )
                                 filtered_files = non_duplicate_files(
                                     selected_files, known_hashes,
                                 )

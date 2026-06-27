@@ -92,12 +92,31 @@ def conflicting_archive_paths(
     path: str,
     files: list[Path],
     folder_template: str = "%Y/%Y-%m-%d",
+    *,
+    known_hashes: set[str] | None = None,
 ) -> list[str]:
     """Return existing archive paths that would block merge-mode archive.
 
     ``move_folder(..., merge=True)`` refuses same-relative-path files whose
     contents differ. Detect those conflicts before the expensive staging and
     processing work begins.
+
+    The check mirrors ``ingest()``'s staging behavior so it only flags real
+    archive conflicts:
+
+    * When ``known_hashes`` is provided, sources whose content hash is
+      already known to the catalog are treated as ingest skips — they never
+      reach staging, so they cannot conflict at the final archive step.
+      Callers normally pass the catalog hash set when ``skip_duplicates``
+      is enabled. Hashing only happens for sources whose unsuffixed
+      archive path has a same-name collision; common imports with no
+      archive overlap pay no extra hash cost.
+    * When two surviving sources land in the same archive subfolder under
+      the same filename, ingest stages the first at the unsuffixed name
+      and the second under ``name_1.ext`` (then ``name_2.ext`` ...). The
+      preflight tracks per-folder occupied names so the existing archive's
+      same-name file is only compared to the first survivor's content,
+      not also (incorrectly) to the second survivor's.
     """
     try:
         if not os.path.isdir(path):
@@ -108,24 +127,67 @@ def conflicting_archive_paths(
     timestamps = _source_file_timestamps(files)
     archive_root = Path(path)
     conflicts: set[str] = set()
+    seen_hashes: set[str] | None = (
+        set(known_hashes) if known_hashes is not None else None
+    )
+    # Per-archive-subfolder name slots already claimed by earlier survivors
+    # in this iteration. Mirrors the per-batch staging tree ingest builds.
+    occupied: dict[str, set[str]] = {}
+
     for source_file in files:
         try:
-            dest_file = _archive_destination_for_source(
-                archive_root,
-                source_file,
-                timestamps,
+            rel_folder = build_destination_path(
+                timestamps.get(source_file),
                 folder_template,
             )
+            dest_folder = archive_root / rel_folder
+            folder_key = os.path.normcase(os.path.abspath(dest_folder))
+            folder_taken = occupied.setdefault(folder_key, set())
+
+            chosen_name = source_file.name
+            if chosen_name in folder_taken:
+                stem, suffix_ext = os.path.splitext(source_file.name)
+                counter = 1
+                while f"{stem}_{counter}{suffix_ext}" in folder_taken:
+                    counter += 1
+                chosen_name = f"{stem}_{counter}{suffix_ext}"
+
+            dest_file = dest_folder / chosen_name
             if not dest_file.exists():
+                folder_taken.add(chosen_name)
                 continue
+
             if dest_file.is_file():
                 source_size = source_file.stat().st_size
                 if (
                     dest_file.stat().st_size == source_size
                     and filecmp.cmp(source_file, dest_file, shallow=False)
                 ):
+                    folder_taken.add(chosen_name)
                     continue
+
+            # Same-path archive file with different content. If ingest
+            # would skip this source as a known duplicate, it never
+            # reaches staging and so cannot conflict — confirm before
+            # rejecting the run. Hashing is deferred to this branch so
+            # the common no-overlap case stays cheap.
+            if seen_hashes is not None:
+                from scanner import compute_file_hash
+                try:
+                    file_hash = compute_file_hash(str(source_file))
+                except OSError:
+                    continue
+                if file_hash in seen_hashes:
+                    # ingest's skip_duplicates branch drops this source
+                    # before staging; do not claim a slot either.
+                    continue
+                # Track the hash so a same-hash sibling later in
+                # ``files`` is treated as an intra-batch duplicate too,
+                # the way ingest()'s pass-2 ``known_hashes`` set does.
+                seen_hashes.add(file_hash)
+
             conflicts.add(str(dest_file))
+            folder_taken.add(chosen_name)
         except OSError:
             continue
     return sorted(conflicts)
