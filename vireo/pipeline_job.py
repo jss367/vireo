@@ -1133,8 +1133,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 if os.path.exists(final_destination)
                                 else archive_parent
                             )
-                            missing_mount_root = _missing_archive_mount_root(
-                                archive_parent,
+                            missing_mount_root = (
+                                _missing_archive_mount_root(final_destination)
+                                or _missing_archive_mount_root(archive_parent)
                             )
                             if missing_mount_root:
                                 _bail_storage(

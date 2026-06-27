@@ -474,8 +474,7 @@ def test_pipeline_local_processing_rejects_missing_archive_mount_root(
     missing mount root and accidentally archive onto the local disk."""
     app, _db_path = setup
 
-    missing_mount = tmp_path / "missing_mount"
-    final_dest = missing_mount / "Shoot" / "Photos"
+    final_dest = tmp_path / "missing_mount"
 
     src = tmp_path / "card_mount"
     src.mkdir()
@@ -488,7 +487,7 @@ def test_pipeline_local_processing_rejects_missing_archive_mount_root(
     monkeypatch.setattr(
         pipeline_job,
         "_missing_archive_mount_root",
-        lambda _path: str(missing_mount),
+        lambda path: str(final_dest) if path == str(final_dest) else None,
     )
 
     with app.test_client() as c:
@@ -507,9 +506,9 @@ def test_pipeline_local_processing_rejects_missing_archive_mount_root(
     assert job["status"] == "failed", job
     errors = job.get("result", {}).get("errors", [])
     assert any(
-        f"Archive mount root {missing_mount}" in error for error in errors
+        f"Archive mount root {final_dest}" in error for error in errors
     ), job
-    assert not missing_mount.exists()
+    assert not final_dest.exists()
 
 
 def test_pipeline_local_processing_skips_archive_when_previews_fail(
