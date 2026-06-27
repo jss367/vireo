@@ -505,8 +505,10 @@ def test_pipeline_local_processing_rejects_missing_archive_mount_root(
         job = wait_for_job_via_client(c, resp.get_json()["job_id"])
 
     assert job["status"] == "failed", job
-    error_text = (job.get("error") or "") + str(job.get("result", ""))
-    assert f"Archive mount root {missing_mount}" in error_text
+    errors = job.get("result", {}).get("errors", [])
+    assert any(
+        f"Archive mount root {missing_mount}" in error for error in errors
+    ), job
     assert not missing_mount.exists()
 
 
