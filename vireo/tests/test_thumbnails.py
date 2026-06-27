@@ -99,6 +99,7 @@ def test_recipe_source_path_uses_exif_oriented_dimensions(tmp_path):
     import json
 
     import pipeline_job
+    import render_source
     import thumbnails
 
     folder = tmp_path / "photos"
@@ -125,6 +126,8 @@ def test_recipe_source_path_uses_exif_oriented_dimensions(tmp_path):
     folders = {10: str(folder)}
     recipe = {"crop": {"x": 0.0, "y": 0.0, "w": 0.5, "h": 1.0}}
 
+    # thumbnails / pipeline source selection both delegate to the shared
+    # resolver, which returns just the path here.
     assert thumbnails._recipe_source_path(
         photo, recipe, 500, str(vireo_dir), folders,
     ) == str(original)
@@ -137,10 +140,8 @@ def test_recipe_source_path_uses_exif_oriented_dimensions(tmp_path):
     oriented_working = working_dir / "2.jpg"
     Image.new("RGB", (600, 400), color="blue").save(oriented_working, exif=exif)
 
-    assert thumbnails._path_satisfies_recipe_render(
-        str(oriented_working), photo, recipe, 500,
-    )
-    assert pipeline_job._path_satisfies_recipe_render(
+    # Orientation-aware render-size check lives in render_source now.
+    assert render_source.path_satisfies_recipe_render(
         str(oriented_working), photo, recipe, 500,
     )
 
@@ -242,8 +243,11 @@ def test_generate_all_routes_through_canonical_helper(tmp_path, monkeypatch):
         width=200, height=150,
     )
 
+    # Source resolution routes through render_source (shared by thumbnails,
+    # app, pipeline and export); patch it there.
+    import render_source
     mock_helper = MagicMock(return_value=str(src))
-    monkeypatch.setattr(thumbnails, "get_canonical_image_path", mock_helper)
+    monkeypatch.setattr(render_source, "get_canonical_image_path", mock_helper)
 
     thumb_dir = vireo_dir / "thumbs"
     thumbnails.generate_all(db, str(thumb_dir), vireo_dir=str(vireo_dir))

@@ -18,11 +18,9 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
 
 import numpy as np
 from db import Database, commit_with_retry
-from exif_orientation import orientation_swaps_axes as _orientation_swaps_axes
 from model_cache import get_default_cache
 from pipeline_locks import (
     acquire_photo_mask,
@@ -30,11 +28,28 @@ from pipeline_locks import (
     release_archive_destination,
     try_reserve_archive_destination,
 )
+from render_source import (
+    companion_image_can_replace_raw_result as _companion_image_can_replace_raw_result,
+)
+from render_source import (
+    has_current_working_copy_failure as _has_current_working_copy_failure,
+)
+from render_source import (
+    image_is_smaller_than_expected as _image_is_smaller_than_expected,
+)
+from render_source import (
+    photo_value as _photo_value,
+)
+from render_source import (
+    recipe_render_source,
+)
+from render_source import (
+    scaled_recipe_source_dimensions as _scaled_recipe_source_dimensions,
+)
 
 log = logging.getLogger(__name__)
 
 _SENTINEL = object()  # unique end-of-stream marker
-_EXIF_ORIENTATION_TAG = 274
 
 
 @dataclass
@@ -74,210 +89,13 @@ def _should_abort(abort_event):
     return abort_event.is_set()
 
 
-def _rendered_recipe_long_edge(width, height, recipe):
-    rotation = (recipe or {}).get("rotation", 0)
-    if rotation in (90, 270):
-        width, height = height, width
-    crop = (recipe or {}).get("crop") if recipe else None
-    if crop:
-        return max(float(crop["w"]) * width, float(crop["h"]) * height)
-    return max(width, height)
-
-
-def _photo_value(photo, key):
-    try:
-        return photo[key]
-    except (KeyError, IndexError, TypeError):
-        if hasattr(photo, "get"):
-            return photo.get(key)
-    return None
-
-
-def _exif_orientation(exif_data):
-    if not exif_data:
-        return None
-    if isinstance(exif_data, str):
-        try:
-            metadata = json.loads(exif_data)
-        except (TypeError, ValueError):
-            return None
-    elif isinstance(exif_data, dict):
-        metadata = exif_data
-    else:
-        return None
-    if not isinstance(metadata, dict):
-        return None
-    for group in ("EXIF", "IFD0", "TIFF", "File"):
-        values = metadata.get(group)
-        if isinstance(values, dict) and "Orientation" in values:
-            return values["Orientation"]
-    return metadata.get("Orientation")
-
-
-def _recipe_source_dimensions(photo):
-    try:
-        width = int(_photo_value(photo, "width") or 0)
-        height = int(_photo_value(photo, "height") or 0)
-    except (TypeError, ValueError):
-        return 0, 0
-    if (
-        width > 0
-        and height > 0
-        and _orientation_swaps_axes(_exif_orientation(_photo_value(photo, "exif_data")))
-    ):
-        return height, width
-    return width, height
-
-
-def _scaled_recipe_source_dimensions(photo, max_size=None):
-    width, height = _recipe_source_dimensions(photo)
-    if width <= 0 or height <= 0:
-        return 0, 0
-    if max_size:
-        long_edge = max(width, height)
-        if long_edge > max_size:
-            scale = max_size / long_edge
-            width = round(width * scale)
-            height = round(height * scale)
-    return width, height
-
-
-def _image_is_smaller_than_expected(img, expected_w, expected_h):
-    return (
-        expected_w > 0
-        and expected_h > 0
-        and (
-            img.size[0] + 1 < expected_w
-            or img.size[1] + 1 < expected_h
-        )
-    )
-
-
-def _companion_image_can_replace_raw_result(
-    companion_img, current_img, expected_w, expected_h,
-):
-    if companion_img is None:
-        return False
-    if expected_w > 0 and expected_h > 0:
-        return not _image_is_smaller_than_expected(
-            companion_img, expected_w, expected_h,
-        )
-    if current_img is None:
-        return True
-    return (
-        companion_img.size[0] >= current_img.size[0]
-        and companion_img.size[1] >= current_img.size[1]
-    )
-
-
-def _image_size_after_exif_orientation(img):
-    width, height = img.size
-    orientation = None
-    with contextlib.suppress(Exception):
-        orientation = img.getexif().get(_EXIF_ORIENTATION_TAG)
-    if _orientation_swaps_axes(orientation):
-        return height, width
-    return width, height
-
-
-def _working_copy_satisfies_recipe_render(photo, recipe, max_size, vireo_dir):
-    if not recipe or not recipe.get("crop"):
-        return True
-    wc_rel = photo["working_copy_path"]
-    if not wc_rel:
-        return False
-    wc_path = os.path.join(vireo_dir, wc_rel)
-    if not os.path.exists(wc_path):
-        return False
-    try:
-        from PIL import Image as _PILImage
-        with _PILImage.open(wc_path) as wc_img:
-            wc_w, wc_h = _image_size_after_exif_orientation(wc_img)
-    except Exception:
-        return False
-    original_w, original_h = _recipe_source_dimensions(photo)
-    if original_w <= 0 or original_h <= 0:
-        return False
-    original_render_long = _rendered_recipe_long_edge(original_w, original_h, recipe)
-    required_long = min(max_size, original_render_long) if max_size else original_render_long
-    wc_render_long = _rendered_recipe_long_edge(wc_w, wc_h, recipe)
-    return wc_render_long >= required_long
-
-
-def _path_satisfies_recipe_render(path, photo, recipe, max_size):
-    original_w, original_h = _recipe_source_dimensions(photo)
-    if original_w <= 0 or original_h <= 0:
-        return False
-    try:
-        from PIL import Image as _PILImage
-        with _PILImage.open(path) as img:
-            width, height = _image_size_after_exif_orientation(img)
-    except Exception:
-        return False
-    original_render_long = _rendered_recipe_long_edge(
-        original_w, original_h, recipe,
-    )
-    required_long = min(max_size, original_render_long) if max_size else original_render_long
-    return _rendered_recipe_long_edge(width, height, recipe) >= required_long
-
-
 def _recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
-    from image_loader import get_canonical_image_path
+    """Thin wrapper around the shared resolver, returning just the path.
 
-    if not recipe:
-        return get_canonical_image_path(photo, vireo_dir, folders)
-    primary_is_raw = (
-        os.path.splitext(photo["filename"])[1].lower() in _RAW_EXTENSIONS
-    )
-    canonical = get_canonical_image_path(photo, vireo_dir, folders)
-    wc_rel = photo["working_copy_path"]
-    # For RAW primaries with a recipe, never short-circuit to the working
-    # copy: legacy working copies predate the highlight-preserving RAW
-    # decode, and EDIT_MATH_VERSION's migration only purges preview/thumb
-    # caches, not working copies. Reusing one would apply the recipe to
-    # clipped bytes and bypass RAW_DECODE_PRESERVE_HIGHLIGHTS.
-    if not primary_is_raw:
-        if not recipe.get("crop") and canonical and wc_rel:
-            wc_path = wc_rel if os.path.isabs(wc_rel) else os.path.join(vireo_dir, wc_rel)
-            if os.path.abspath(canonical) == os.path.abspath(wc_path):
-                return canonical
-        if recipe.get("crop") and _working_copy_satisfies_recipe_render(
-            photo, recipe, max_size, vireo_dir,
-        ):
-            return canonical
-
-    folder_path = folders.get(photo["folder_id"])
-    if not folder_path:
-        if photo["working_copy_path"]:
-            wc_path = os.path.join(vireo_dir, photo["working_copy_path"])
-            if os.path.exists(wc_path):
-                return wc_path
-        return ""
-    # When the primary is RAW, prefer the RAW source so the caller can decode
-    # with highlight preservation rather than serving the camera's already-
-    # clipped companion JPEG. The companion remains a valid fallback when the
-    # RAW is known to fail extraction for this mtime.
-    companion_path = photo["companion_path"]
-    original = os.path.join(folder_path, photo["filename"])
-    allow_companion = not primary_is_raw or _has_current_working_copy_failure(
-        photo,
-        vireo_dir,
-        trust_existing_working_copy=False,
-        live_source_path=original,
-        folder_path=folder_path,
-    )
-    if companion_path and allow_companion:
-        companion = os.path.join(folder_path, companion_path)
-        if (
-            os.path.exists(companion)
-            and _path_satisfies_recipe_render(companion, photo, recipe, max_size)
-        ):
-            return companion
-    if not os.path.exists(original) and photo["working_copy_path"]:
-        wc_path = os.path.join(vireo_dir, photo["working_copy_path"])
-        if os.path.exists(wc_path):
-            return wc_path
-    return original
+    Pipeline callers don't need the ``using_working_copy`` flag, so the second
+    element of :func:`render_source.recipe_render_source` is dropped.
+    """
+    return recipe_render_source(photo, recipe, max_size, vireo_dir, folders)[0]
 
 
 def _incomplete_model_message(model_name, is_custom=False):
@@ -304,7 +122,6 @@ def _looks_like_missing_external_data(err):
 
 
 _RAW_EXTENSIONS = (".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf")
-_WORKING_COPY_FAILURE_RETRY_SECONDS = 24 * 60 * 60
 
 
 def _thumb_raw_decode_kwargs(photo, recipe):
@@ -330,59 +147,6 @@ def _thumb_min_source_size_kwargs(photo, recipe, thumb_size, source_path):
     return {
         "min_source_size": _scaled_recipe_source_dimensions(photo, load_max_size),
     }
-
-
-def _has_current_working_copy_failure(
-    photo, vireo_dir=None, trust_existing_working_copy=True,
-    live_source_path=None, folder_path=None,
-):
-    working_copy_path = _photo_value(photo, "working_copy_path")
-    if working_copy_path and trust_existing_working_copy:
-        if not vireo_dir:
-            return False
-        wc_abs = (
-            working_copy_path if os.path.isabs(working_copy_path)
-            else os.path.join(vireo_dir, working_copy_path)
-        )
-        if os.path.exists(wc_abs):
-            return False
-
-    filename = _photo_value(photo, "filename") or ""
-    if os.path.splitext(filename)[1].lower() not in _RAW_EXTENSIONS:
-        return False
-
-    companion_path = _photo_value(photo, "companion_path")
-    if companion_path and live_source_path and folder_path:
-        companion_abs = os.path.join(folder_path, companion_path)
-        failed_source = _photo_value(photo, "working_copy_failed_source")
-        if (
-            failed_source != "source"
-            and os.path.exists(live_source_path)
-            and os.path.exists(companion_abs)
-        ):
-            return False
-
-    failed_at = _photo_value(photo, "working_copy_failed_at")
-    failed_mtime = _photo_value(photo, "working_copy_failed_mtime")
-    file_mtime = _photo_value(photo, "file_mtime")
-    if not failed_at or failed_mtime is None or file_mtime is None:
-        return False
-    try:
-        if float(failed_mtime) != float(file_mtime):
-            return False
-    except (TypeError, ValueError):
-        return False
-    try:
-        failed_s = str(failed_at).strip()
-        if failed_s.endswith("Z"):
-            failed_s = failed_s[:-1] + "+00:00"
-        failed_dt = datetime.fromisoformat(failed_s)
-        if failed_dt.tzinfo is None:
-            failed_dt = failed_dt.replace(tzinfo=UTC)
-    except (TypeError, ValueError):
-        return False
-    age = (datetime.now(UTC) - failed_dt.astimezone(UTC)).total_seconds()
-    return age < _WORKING_COPY_FAILURE_RETRY_SECONDS
 
 
 def _retry_thumbnail_with_companion(
