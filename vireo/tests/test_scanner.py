@@ -1720,6 +1720,56 @@ def test_scan_falls_back_when_raw_working_copy_short_edge_is_smaller(
         assert img.size == (4096, 2731)
 
 
+def test_scan_accepts_near_full_raw_working_copy(tmp_path, monkeypatch):
+    """Tiny RAW active-area differences should not force companion fallback."""
+    import config as cfg
+    import scanner
+    from db import Database
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+
+    nef_file = photo_dir / "IMG_006.nef"
+    nef_file.write_bytes(b"fake raw data")
+    jpg_file = photo_dir / "IMG_006.jpg"
+    Image.new("RGB", (6000, 4000), color=(0, 255, 0)).save(str(jpg_file), "JPEG")
+
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths: {})
+
+    sources_used = []
+
+    def fake_extract(source, output, max_size=4096, quality=92):
+        sources_used.append(source)
+        os.makedirs(os.path.dirname(output), exist_ok=True)
+        # Expected scaled dimensions are 4096x2731. This is within 1% of
+        # the expected short edge and should be accepted as a RAW decode.
+        Image.new("RGB", (4096, 2705)).save(output, "JPEG")
+        return True
+
+    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+
+    db = Database(str(vireo_dir / "test.db"))
+    scanner.scan(str(photo_dir), db, vireo_dir=str(vireo_dir))
+
+    assert len(sources_used) == 1
+    assert sources_used[0].endswith("IMG_006.nef")
+
+    raw_row = db.conn.execute(
+        "SELECT working_copy_path, working_copy_failed_source"
+        " FROM photos WHERE extension = '.nef'"
+    ).fetchone()
+    assert raw_row["working_copy_path"] is not None
+    assert raw_row["working_copy_failed_source"] is None
+
+    with Image.open(vireo_dir / raw_row["working_copy_path"]) as img:
+        assert img.size == (4096, 2705)
+
+
 def test_scan_accepts_portrait_raw_working_copy_with_exif_orientation(
     tmp_path, monkeypatch,
 ):

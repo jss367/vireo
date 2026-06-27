@@ -650,6 +650,58 @@ def test_export_falls_back_to_companion_when_raw_short_edge_is_smaller(
         assert img.size == (3000, 2000)
 
 
+def test_export_rejects_reduced_companion_when_raw_decode_fails(
+    export_env, monkeypatch,
+):
+    """A reduced/aspect-cropped sidecar must not satisfy RAW fallback export."""
+    import export as export_module
+
+    env = export_env
+    db = env["db"]
+    raw_path = env["src"] / "source.NEF"
+    raw_path.write_bytes(b"\x00")
+    Image.new("RGB", (6000, 3376), color="green").save(
+        env["src"] / "source.jpg", "JPEG", quality=95,
+    )
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path='source.jpg',
+               working_copy_path=NULL,
+               width=6000, height=4000
+           WHERE id=?""",
+        (env["p1"],),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(env["p1"], {"rotation": 0})
+
+    load_calls = []
+
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        load_calls.append(str(file_path))
+        if str(file_path).lower().endswith(".nef"):
+            return None
+        return Image.new("RGB", (3000, 1688), color="green")
+
+    monkeypatch.setattr(export_module, "load_image", tracking_load_image)
+
+    result = export_photos(
+        db=db,
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={
+            "naming_template": "{original}",
+            "max_size": 3000,
+        },
+    )
+
+    assert result["exported"] == 0
+    assert result["errors"] == ["source.NEF: failed to load image"]
+    assert len(load_calls) == 1
+    assert load_calls[0].lower().endswith(".nef")
+
+
 def test_export_keeps_raw_when_decode_succeeds_at_full_size(
     export_env, monkeypatch,
 ):

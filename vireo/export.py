@@ -500,14 +500,32 @@ def _image_size_after_exif_orientation(img):
     return width, height
 
 
-def _recipe_result_long_edge(width, height, recipe):
-    """Return the rendered long edge after right-angle rotation and crop."""
+def _recipe_result_dimensions(width, height, recipe):
+    """Return rendered dimensions after right-angle rotation and crop."""
     rotation = (recipe or {}).get("rotation", 0)
     if rotation in (90, 270):
         width, height = height, width
     crop = (recipe or {}).get("crop") if recipe else None
     if crop:
-        return max(float(crop["w"]) * width, float(crop["h"]) * height)
+        width = float(crop["w"]) * width
+        height = float(crop["h"]) * height
+    return width, height
+
+
+def _scale_dimensions_to_max(width, height, max_size):
+    if max_size is None:
+        return width, height
+    long_edge = max(width, height)
+    if long_edge > max_size:
+        scale = max_size / long_edge
+        width = round(width * scale)
+        height = round(height * scale)
+    return width, height
+
+
+def _recipe_result_long_edge(width, height, recipe):
+    """Return the rendered long edge after right-angle rotation and crop."""
+    width, height = _recipe_result_dimensions(width, height, recipe)
     return max(width, height)
 
 
@@ -858,10 +876,19 @@ def _companion_can_satisfy_export(
     original_w, original_h = _recipe_source_dimensions(photo, exif_data)
     if original_w <= 0 or original_h <= 0:
         return None
-    required_long = _recipe_result_long_edge(original_w, original_h, recipe)
-    if max_size is not None:
-        required_long = min(max_size, required_long)
-    if _recipe_result_long_edge(comp_w, comp_h, recipe) >= required_long:
+    required_w, required_h = _recipe_result_dimensions(
+        original_w, original_h, recipe,
+    )
+    comp_render_w, comp_render_h = _recipe_result_dimensions(
+        comp_w, comp_h, recipe,
+    )
+    required_w, required_h = _scale_dimensions_to_max(
+        required_w, required_h, max_size,
+    )
+    comp_render_w, comp_render_h = _scale_dimensions_to_max(
+        comp_render_w, comp_render_h, max_size,
+    )
+    if comp_render_w + 1 >= required_w and comp_render_h + 1 >= required_h:
         return companion
     return None
 

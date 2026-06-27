@@ -993,8 +993,8 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
                 and expected_w > 0
                 and expected_h > 0
                 and (
-                    wc_w + 1 < expected_w
-                    or wc_h + 1 < expected_h
+                    wc_w < expected_w * 0.99
+                    or wc_h < expected_h * 0.99
                 )
             ):
                 log.info(
