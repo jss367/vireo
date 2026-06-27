@@ -607,6 +607,31 @@ def ingest(
 
             # Handle filename collision (different file, same name)
             if dest_file.exists():
+                # Zero-byte ↔ zero-byte at the same destination path IS
+                # the same file (every empty file is bit-identical to
+                # every other), but pass 1 cleared ``file_hash`` to
+                # ``None`` for zero-byte sources so EMPTY_FILE_SHA256
+                # doesn't carry duplicate identity. The hash-based
+                # exact-match branch below therefore can't recognise
+                # this collision, and a ``skip_duplicates`` retry of an
+                # interrupted card import would otherwise fall through
+                # to the numeric-suffix branch and start creating
+                # ``name_1.ext``, ``name_2.ext`` placeholder copies of
+                # the same empty file forever. ``known_hashes`` /
+                # ``batch_dest_folders`` are deliberately NOT updated —
+                # zero-byte files are kept out of the duplicate-identity
+                # index everywhere else, and this skip mirrors that.
+                src_is_empty = (
+                    file_hash is None
+                    and source_file.stat().st_size == 0
+                )
+                if src_is_empty and dest_file.stat().st_size == 0:
+                    skipped_duplicate += 1
+                    duplicate_folders.add(str(dest_folder))
+                    emitted += 1
+                    if progress_callback:
+                        progress_callback(emitted, total, source_file.name)
+                    continue
                 dest_hash = compute_file_hash(str(dest_file))
                 if file_hash is not None and file_hash == dest_hash:
                     # Exact same file already there

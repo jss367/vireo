@@ -558,6 +558,61 @@ def test_accept_current_hash_clears_flag(tmp_path):
     assert stats['ok'] == 1 and stats['modified'] == 0
 
 
+def test_accept_current_hash_does_not_store_empty_sha_for_zero_byte_file(tmp_path):
+    """Accepting a flagged zero-byte file must NOT write EMPTY_FILE_SHA256
+    back into ``photos.file_hash``.
+
+    A photo that legitimately had bytes (and a real hash) gets truncated
+    to zero on disk; verify_hashes() flags it modified/corrupt because
+    the recomputed empty SHA doesn't match the stored hash. If the user
+    accepts the current state as the new truth, the prior code path
+    would store ``EMPTY_FILE_SHA256`` as the baseline, re-introducing
+    the exact duplicate identity this PR removes — every accepted empty
+    file would resurface as duplicate-of-every-other-empty-file.
+    """
+    from audit import accept_current_hash
+    from db import Database
+    from scanner import EMPTY_FILE_SHA256
+
+    root = tmp_path / "photos"
+    root.mkdir()
+    path = root / "DSC_0001.NEF"
+    # Legitimate prior content that produced a real hash.
+    path.write_bytes(b"original raw bytes")
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(root), name="photos")
+    pid = db.add_photo(
+        folder_id=folder_id,
+        filename=path.name,
+        extension=path.suffix.lower(),
+        file_size=path.stat().st_size,
+        file_mtime=path.stat().st_mtime,
+        file_hash="deadbeef" * 8,
+    )
+    # Now the file is truncated to zero bytes externally and the user
+    # decides to accept the new state.
+    path.write_bytes(b"")
+    db.conn.execute(
+        "UPDATE photos SET hash_status = 'modified' WHERE id = ?", (pid,)
+    )
+    db.conn.commit()
+
+    accepted = accept_current_hash(db, [pid])
+
+    assert accepted == 1
+    row = db.conn.execute(
+        "SELECT file_hash, hash_status FROM photos WHERE id = ?", (pid,)
+    ).fetchone()
+    assert row["file_hash"] is None, (
+        "accept_current_hash must clear file_hash for zero-byte files; "
+        f"got {row['file_hash']!r} which is the empty-file SHA "
+        f"({EMPTY_FILE_SHA256!r})" if row["file_hash"] == EMPTY_FILE_SHA256
+        else f"accept_current_hash left a stale baseline: {row['file_hash']!r}"
+    )
+    assert row["hash_status"] == "ok"
+
+
 def test_rescan_resets_hash_coverage_after_external_edit(tmp_path):
     """When a rescan replaces the stored baseline hash, the verification
     markers must be cleared: 'checked' means THIS baseline was verified,

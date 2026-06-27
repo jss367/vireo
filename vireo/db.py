@@ -2212,14 +2212,28 @@ class Database:
         }
 
     def update_photo_hash_check(self, photo_id, status, file_hash=None,
-                                commit=True):
+                                commit=True, clear_file_hash=False):
         """Record a hash-verification verdict for one photo.
 
         When ``file_hash`` is given the stored baseline is replaced too
         (first-time baselining, or the user accepting an external edit).
+        Set ``clear_file_hash=True`` to explicitly NULL the stored hash:
+        used for zero-byte files so ``EMPTY_FILE_SHA256`` never lands in
+        the ``file_hash`` column (it would otherwise collide as an exact
+        duplicate of every other empty placeholder).
         """
+        if clear_file_hash and file_hash is not None:
+            raise ValueError(
+                "clear_file_hash and file_hash are mutually exclusive"
+            )
         now = datetime.now().isoformat()
-        if file_hash is not None:
+        if clear_file_hash:
+            self.conn.execute(
+                "UPDATE photos SET hash_status = ?, hash_checked_at = ?, "
+                "file_hash = NULL WHERE id = ?",
+                (status, now, photo_id),
+            )
+        elif file_hash is not None:
             self.conn.execute(
                 "UPDATE photos SET hash_status = ?, hash_checked_at = ?, "
                 "file_hash = ? WHERE id = ?",
