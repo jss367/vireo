@@ -533,6 +533,23 @@ def test_move_folder_merge_refuses_tracked_descendant(move_env):
     assert (env["src"] / "bird1.jpg").exists()
 
 
+def test_move_folder_refuses_destination_inside_tracked_ancestor(move_env):
+    """Moving into a subfolder of a tracked root would create overlapping roots."""
+    from move import move_folder
+
+    env = move_env
+    destination = env["dst"] / "Archive"
+
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(destination)
+    )
+
+    assert result["moved"] == 0
+    assert any("inside a folder Vireo already manages" in e for e in result["errors"])
+    assert (env["src"] / "bird1.jpg").exists()
+    assert not destination.exists()
+
+
 def test_move_folder_refuses_missing_tracked_destination_before_copy(move_env):
     """A stale tracked destination row must block the move even when the
     resolved destination does not currently exist on disk."""

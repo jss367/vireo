@@ -1322,6 +1322,15 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             archive_parent = os.path.dirname(
                                 os.path.normpath(final_destination),
                             )
+                            if (
+                                os.path.exists(final_destination)
+                                and not os.path.isdir(final_destination)
+                            ):
+                                _bail_storage(
+                                    f"Archive destination {final_destination} "
+                                    "already exists and is not a directory."
+                                )
+                                return
                             # Existing archive roots can be mounted volumes; new
                             # archive leaves have to probe the existing parent.
                             archive_space_path = (

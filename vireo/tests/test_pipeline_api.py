@@ -1142,6 +1142,41 @@ def test_pipeline_local_processing_preflight_probes_existing_final_destination(
     assert set(archive_paths) == {str(final_dest)}
 
 
+def test_pipeline_local_processing_rejects_existing_file_archive_destination(
+    setup, tmp_path, monkeypatch
+):
+    app, _db_path = setup
+
+    src = tmp_path / "card5"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "green").save(src / "fresh.jpg")
+
+    final_dest = tmp_path / "Archive"
+    final_dest.write_text("not a directory")
+
+    import local_processing
+
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert job["status"] == "failed", job
+    error_text = (job.get("error") or "") + str(job.get("result", ""))
+    assert "not a directory" in error_text
+
+
 def test_import_full_scan_only_returns_job_id(setup):
     """copy=false skips ingest, just scans the source folder."""
     app, db_path = setup

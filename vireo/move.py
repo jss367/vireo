@@ -1540,6 +1540,12 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             f"({tracked['path']}). Merging into or around a tracked folder "
             f"isn't supported."
         ]}
+    ancestor = _tracked_destination_ancestor(db, folder_id, overlap_check_path)
+    if ancestor:
+        return {"moved": 0, "errors": [
+            f"Destination is inside a folder Vireo already manages "
+            f"({ancestor['path']}). Pick an untracked archive destination."
+        ]}
 
     if remote:
         probe = _remote_dir_exists(remote, transfer_dest)

@@ -4,6 +4,8 @@ import sys
 import threading
 import time
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -390,7 +392,10 @@ def test_archive_destination_reserve_rejects_symlinked_alias(tmp_path):
     real_target = tmp_path / "real_dest"
     real_target.mkdir()
     symlink = tmp_path / "link_dest"
-    symlink.symlink_to(real_target)
+    try:
+        symlink.symlink_to(real_target)
+    except OSError as exc:
+        pytest.skip(f"symlinks not supported on this filesystem: {exc}")
 
     real_child = str(real_target / "Shoot")
     aliased_child = str(symlink / "Shoot")
