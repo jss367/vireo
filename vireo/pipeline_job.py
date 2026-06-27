@@ -1322,6 +1322,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             archive_parent = os.path.dirname(
                                 os.path.normpath(final_destination),
                             )
+                            # Existing archive roots can be mounted volumes; new
+                            # archive leaves have to probe the existing parent.
+                            archive_space_path = (
+                                final_destination
+                                if os.path.exists(final_destination)
+                                else archive_parent
+                            )
                             try:
                                 os.makedirs(archive_parent, exist_ok=True)
                             except OSError as exc:
@@ -1342,7 +1349,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             source_bytes = total_file_bytes(selected_files)
                             plan = storage_plan(
                                 params.destination, source_bytes,
-                                archive_parent=archive_parent,
+                                archive_parent=archive_space_path,
                             )
                             # When skip_duplicates is on, ingest() will hash and
                             # skip files whose hash is already in the catalog
@@ -1373,7 +1380,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 if filtered_bytes < source_bytes:
                                     plan = storage_plan(
                                         params.destination, filtered_bytes,
-                                        archive_parent=archive_parent,
+                                        archive_parent=archive_space_path,
                                     )
                             result["local_processing"] = {
                                 **plan,

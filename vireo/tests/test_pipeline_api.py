@@ -1096,6 +1096,52 @@ def test_pipeline_local_processing_preflight_filters_duplicates(
     assert plan["source_bytes"] <= fresh_bytes, plan
 
 
+def test_pipeline_local_processing_preflight_probes_existing_final_destination(
+    setup, tmp_path, monkeypatch
+):
+    """Existing archive folders may be mount roots and must be probed directly."""
+    app, _db_path = setup
+
+    src = tmp_path / "card4"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "blue").save(src / "fresh.jpg")
+
+    final_parent = tmp_path / "Volumes"
+    final_parent.mkdir()
+    final_dest = final_parent / "Archive"
+    final_dest.mkdir()
+
+    import local_processing
+
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+    real_storage_plan = local_processing.storage_plan
+    archive_paths = []
+
+    def recording_storage_plan(staging_dir, source_bytes, **kwargs):
+        archive_paths.append(kwargs.get("archive_parent"))
+        return real_storage_plan(staging_dir, source_bytes, **kwargs)
+
+    monkeypatch.setattr(local_processing, "storage_plan", recording_storage_plan)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert job["status"] == "completed", job
+    assert archive_paths
+    assert set(archive_paths) == {str(final_dest)}
+
+
 def test_import_full_scan_only_returns_job_id(setup):
     """copy=false skips ingest, just scans the source folder."""
     app, db_path = setup
