@@ -1325,16 +1325,13 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                         (existing["timestamp"] is None or dims_suspect)
                         and existing["id"] not in exif_extracted
                     )
-                    if "file_hash" in existing.keys():
-                        existing_file_hash = existing["file_hash"]
-                    else:
-                        hash_row = db.conn.execute(
-                            "SELECT file_hash FROM photos WHERE id = ?",
-                            (existing["id"],),
-                        ).fetchone()
-                        existing_file_hash = (
-                            hash_row["file_hash"] if hash_row else None
-                        )
+                    hash_row = db.conn.execute(
+                        "SELECT file_hash FROM photos WHERE id = ?",
+                        (existing["id"],),
+                    ).fetchone()
+                    existing_file_hash = (
+                        hash_row["file_hash"] if hash_row else None
+                    )
                     empty_hash_needs_repair = (
                         existing["file_size"] == 0
                         and existing_file_hash == EMPTY_FILE_SHA256
