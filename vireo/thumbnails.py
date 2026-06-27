@@ -1,183 +1,38 @@
 """Generate and manage local thumbnail cache for the photo browser."""
 
 import contextlib
-import json
 import logging
 import os
 import tempfile
 from datetime import UTC, datetime
 
-from exif_orientation import orientation_swaps_axes as _orientation_swaps_axes
 from image_loader import (
     RAW_DECODE_PRESERVE_HIGHLIGHTS,
     RAW_EXTENSIONS,
-    get_canonical_image_path,
     load_image,
+)
+from render_source import (
+    image_is_smaller_than_expected,
+    recipe_render_source,
+)
+from render_source import (
+    photo_value as _photo_value,
+)
+from render_source import (
+    scaled_recipe_source_dimensions as _scaled_recipe_source_dimensions,
 )
 
 log = logging.getLogger(__name__)
 
 DEFAULT_CACHE_DIR = os.path.expanduser("~/.vireo/thumbnails")
 THUMB_SIZE = 400
-_EXIF_ORIENTATION_TAG = 274
-
-
-def _rendered_recipe_long_edge(width, height, recipe):
-    rotation = (recipe or {}).get("rotation", 0)
-    if rotation in (90, 270):
-        width, height = height, width
-    crop = (recipe or {}).get("crop") if recipe else None
-    if crop:
-        return max(float(crop["w"]) * width, float(crop["h"]) * height)
-    return max(width, height)
-
-
-def _photo_value(photo, key):
-    try:
-        return photo[key]
-    except (KeyError, IndexError, TypeError):
-        if hasattr(photo, "get"):
-            return photo.get(key)
-    return None
-
-
-def _exif_orientation(exif_data):
-    if not exif_data:
-        return None
-    if isinstance(exif_data, str):
-        try:
-            metadata = json.loads(exif_data)
-        except (TypeError, ValueError):
-            return None
-    elif isinstance(exif_data, dict):
-        metadata = exif_data
-    else:
-        return None
-    if not isinstance(metadata, dict):
-        return None
-    for group in ("EXIF", "IFD0", "TIFF", "File"):
-        values = metadata.get(group)
-        if isinstance(values, dict) and "Orientation" in values:
-            return values["Orientation"]
-    return metadata.get("Orientation")
-
-
-def _recipe_source_dimensions(photo):
-    try:
-        width = int(_photo_value(photo, "width") or 0)
-        height = int(_photo_value(photo, "height") or 0)
-    except (TypeError, ValueError):
-        return 0, 0
-    if (
-        width > 0
-        and height > 0
-        and _orientation_swaps_axes(_exif_orientation(_photo_value(photo, "exif_data")))
-    ):
-        return height, width
-    return width, height
-
-
-def _scaled_recipe_source_dimensions(photo, max_size=None):
-    width, height = _recipe_source_dimensions(photo)
-    if width <= 0 or height <= 0:
-        return 0, 0
-    if max_size:
-        long_edge = max(width, height)
-        if long_edge > max_size:
-            scale = max_size / long_edge
-            width = round(width * scale)
-            height = round(height * scale)
-    return width, height
-
-
-def _image_size_after_exif_orientation(img):
-    width, height = img.size
-    orientation = None
-    with contextlib.suppress(Exception):
-        orientation = img.getexif().get(_EXIF_ORIENTATION_TAG)
-    if _orientation_swaps_axes(orientation):
-        return height, width
-    return width, height
-
-
-def _path_satisfies_recipe_render(path, photo, recipe, max_size):
-    original_w, original_h = _recipe_source_dimensions(photo)
-    if original_w <= 0 or original_h <= 0:
-        return False
-    try:
-        from PIL import Image as _PILImage
-        with _PILImage.open(path) as img:
-            width, height = _image_size_after_exif_orientation(img)
-    except Exception:
-        return False
-    original_render_long = _rendered_recipe_long_edge(
-        original_w, original_h, recipe,
-    )
-    required_long = min(max_size, original_render_long) if max_size else original_render_long
-    return _rendered_recipe_long_edge(width, height, recipe) >= required_long
-
-
 def _recipe_source_path(photo, recipe, max_size, vireo_dir, folders):
-    if not vireo_dir or not recipe:
-        if vireo_dir:
-            return get_canonical_image_path(photo, vireo_dir, folders)
-        return os.path.join(folders.get(photo["folder_id"], ""), photo["filename"])
+    """Thin wrapper around the shared resolver, returning just the path.
 
-    primary_is_raw = (
-        os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
-    )
-
-    canonical = get_canonical_image_path(photo, vireo_dir, folders)
-    wc_rel = photo["working_copy_path"]
-    # For RAW primaries with a recipe, never short-circuit to the JPEG
-    # working copy or companion: legacy working copies predate the
-    # highlight-preserving RAW decode (EDIT_MATH_VERSION's purge only
-    # touches preview/thumb caches, not working copies). Reusing them
-    # here would feed the recipe a clipped JPEG and silently bypass
-    # generate_thumbnail's RAW_DECODE_PRESERVE_HIGHLIGHTS request — the
-    # raw_decode kwarg is a no-op when load_image gets a JPEG path.
-    if not primary_is_raw:
-        if not recipe.get("crop") and canonical and wc_rel:
-            wc_path = wc_rel if os.path.isabs(wc_rel) else os.path.join(vireo_dir, wc_rel)
-            if os.path.abspath(canonical) == os.path.abspath(wc_path):
-                return canonical
-        if recipe.get("crop") and wc_rel:
-            wc_path = os.path.join(vireo_dir, wc_rel)
-            if (
-                os.path.exists(wc_path)
-                and _path_satisfies_recipe_render(wc_path, photo, recipe, max_size)
-            ):
-                return canonical
-
-    folder_path = folders.get(photo["folder_id"])
-    if not folder_path:
-        if wc_rel:
-            wc_path = os.path.join(vireo_dir, wc_rel)
-            if os.path.exists(wc_path):
-                return wc_path
-        return ""
-    companion_path = photo["companion_path"]
-    original = os.path.join(folder_path, photo["filename"])
-    # Allow the companion JPEG only for non-RAW primaries, OR for RAW
-    # primaries whose RAW is known to fail for the current source mtime —
-    # mirrors the gate in app/pipeline _recipe_render_source so edited
-    # RAW thumbnails decode the highlight-preserving RAW unless we've
-    # already proven it can't be demosaiced.
-    allow_companion = not primary_is_raw or _has_current_raw_failure(
-        photo, original,
-    )
-    if companion_path and allow_companion:
-        companion = os.path.join(folder_path, companion_path)
-        if (
-            os.path.exists(companion)
-            and _path_satisfies_recipe_render(companion, photo, recipe, max_size)
-        ):
-            return companion
-    if not os.path.exists(original) and wc_rel:
-        wc_path = os.path.join(vireo_dir, wc_rel)
-        if os.path.exists(wc_path):
-            return wc_path
-    return original
+    Thumbnail callers don't need the ``using_working_copy`` flag, so the
+    second element of :func:`render_source.recipe_render_source` is dropped.
+    """
+    return recipe_render_source(photo, recipe, max_size, vireo_dir, folders)[0]
 
 
 def _has_current_raw_failure(photo, source_path):
@@ -301,14 +156,7 @@ def generate_thumbnail(
         return None
     if min_source_size:
         expected_w, expected_h = min_source_size
-        if (
-            expected_w > 0
-            and expected_h > 0
-            and (
-                img.size[0] + 1 < expected_w
-                or img.size[1] + 1 < expected_h
-            )
-        ):
+        if image_is_smaller_than_expected(img, expected_w, expected_h):
             log.info(
                 "Thumbnail source for photo %s is undersized (%dx%d, "
                 "expected %dx%d): %s",

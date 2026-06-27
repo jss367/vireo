@@ -1,22 +1,30 @@
 """Photo export with resize, quality control, and template-based naming."""
 
-import contextlib
 import hashlib
-import json
 import logging
 import os
 import re
 import shutil
 
-from exif_orientation import orientation_swaps_axes as _orientation_swaps_axes
 from image_edits import apply_recipe_to_loaded_image
 from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS, RAW_EXTENSIONS, load_image
+from render_source import (
+    companion_image_can_replace_raw_result,
+    image_is_smaller_than_expected,
+    rendered_recipe_long_edge,
+    scaled_recipe_source_dimensions,
+)
+from render_source import (
+    image_size_after_exif_orientation as _image_size_after_exif_orientation,
+)
+from render_source import (
+    recipe_source_dimensions as _recipe_source_dimensions,
+)
 
 log = logging.getLogger(__name__)
 
 # Characters not allowed in filenames (covers Windows + macOS + Linux)
 _UNSAFE_RE = re.compile(r'[<>:"/|?*\\]')
-_EXIF_ORIENTATION_TAG = 274
 _OUTPUT_FORMATS = {
     "jpg": {"extension": "jpg", "pil_format": "JPEG", "quality": True},
     "jpeg": {"extension": "jpg", "pil_format": "JPEG", "quality": True},
@@ -311,28 +319,10 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
                 needs_companion = img is None
                 expected_w, expected_h = 0, 0
                 if img is not None:
-                    orig_w, orig_h = _recipe_source_dimensions(photo, exif_data)
-                    expected_w, expected_h = orig_w, orig_h
-                    if (
-                        load_max_size
-                        and expected_w > 0
-                        and expected_h > 0
-                    ):
-                        long_edge = max(expected_w, expected_h)
-                        if long_edge > load_max_size:
-                            scale = load_max_size / long_edge
-                            expected_w = round(expected_w * scale)
-                            expected_h = round(expected_h * scale)
-                    # Allow a 1px slack for rounding between RAW decoder
-                    # output and stored dimensions.
-                    if (
-                        expected_w > 0
-                        and expected_h > 0
-                        and (
-                            img.size[0] + 1 < expected_w
-                            or img.size[1] + 1 < expected_h
-                        )
-                    ):
+                    expected_w, expected_h = scaled_recipe_source_dimensions(
+                        photo, load_max_size, exif_data,
+                    )
+                    if image_is_smaller_than_expected(img, expected_w, expected_h):
                         needs_companion = True
                 if needs_companion:
                     companion_fallback = _companion_can_satisfy_export(
@@ -348,13 +338,8 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
                         # like a 6000x3376 embedded preview "tying" a
                         # 6000x4000 sidecar and losing the short-edge
                         # content.
-                        if companion_img is not None and (
-                            img is None
-                            or (
-                                companion_img.size[0] >= img.size[0]
-                                and companion_img.size[1] >= img.size[1]
-                                and companion_img.size != img.size
-                            )
+                        if companion_image_can_replace_raw_result(
+                            companion_img, img, expected_w, expected_h,
                         ):
                             if img is None:
                                 log.info(
@@ -444,49 +429,6 @@ def _get_photo_exif_data(db, photo_ids):
     return out
 
 
-def _recipe_source_dimensions(photo, exif_data=None):
-    """Return original dimensions as load_image sees them after EXIF transpose."""
-    try:
-        width = int(photo["width"] or 0)
-        height = int(photo["height"] or 0)
-    except (KeyError, IndexError, TypeError, ValueError):
-        return 0, 0
-    if width > 0 and height > 0 and _orientation_swaps_axes(_exif_orientation(exif_data)):
-        return height, width
-    return width, height
-
-
-def _exif_orientation(exif_data):
-    if not exif_data:
-        return None
-    if isinstance(exif_data, str):
-        try:
-            metadata = json.loads(exif_data)
-        except (TypeError, ValueError):
-            return None
-    elif isinstance(exif_data, dict):
-        metadata = exif_data
-    else:
-        return None
-    if not isinstance(metadata, dict):
-        return None
-    for group in ("EXIF", "IFD0", "TIFF", "File"):
-        values = metadata.get(group)
-        if isinstance(values, dict) and "Orientation" in values:
-            return values["Orientation"]
-    return metadata.get("Orientation")
-
-
-def _image_size_after_exif_orientation(img):
-    width, height = img.size
-    orientation = None
-    with contextlib.suppress(Exception):
-        orientation = img.getexif().get(_EXIF_ORIENTATION_TAG)
-    if _orientation_swaps_axes(orientation):
-        return height, width
-    return width, height
-
-
 def _recipe_result_dimensions(width, height, recipe):
     """Return rendered dimensions after right-angle rotation and crop."""
     rotation = (recipe or {}).get("rotation", 0)
@@ -512,8 +454,7 @@ def _scale_dimensions_to_max(width, height, max_size):
 
 def _recipe_result_long_edge(width, height, recipe):
     """Return the rendered long edge after right-angle rotation and crop."""
-    width, height = _recipe_result_dimensions(width, height, recipe)
-    return max(width, height)
+    return rendered_recipe_long_edge(width, height, recipe)
 
 
 def _developed_can_satisfy_size(dev_path, photo, max_size, recipe=None, exif_data=None):

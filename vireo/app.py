@@ -30,7 +30,6 @@ from db import (
     IncompatibleDatabaseError,
     commit_with_retry,
 )
-from exif_orientation import orientation_swaps_axes as _orientation_swaps_axes
 from flask import (
     Flask,
     Response,
@@ -50,11 +49,32 @@ from preview_cache import (
 from preview_cache import (
     reconcile_preview_cache,
 )
+from render_source import (
+    companion_image_can_replace_raw_result as _companion_image_can_replace_raw_result,
+)
+from render_source import (
+    has_current_working_copy_failure as _has_current_working_copy_failure,
+)
+from render_source import (
+    image_is_smaller_than_expected as _image_is_smaller_than_expected,
+)
+from render_source import path_satisfies_recipe_render as _path_satisfies_recipe_render
+from render_source import (
+    recipe_render_source as _recipe_render_source,
+)
+from render_source import (
+    recipe_source_dimensions as _recipe_source_dimensions,
+)
+from render_source import (
+    record_working_copy_failure as _record_working_copy_failure,
+)
+from render_source import (
+    scaled_recipe_source_dimensions as _scaled_recipe_source_dimensions,
+)
 from werkzeug.exceptions import BadRequest
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
-_EXIF_ORIENTATION_TAG = 274
 
 # Serializes Windows SetErrorMode calls. SetErrorMode is process-wide, so
 # concurrent /api/volumes requests could otherwise interleave save/restore
@@ -442,7 +462,6 @@ def _collect_highlight_buckets(
 # SQLite versions. Sized below 999 to leave headroom for additional bound
 # parameters in joined statements.
 _SQL_PARAM_CHUNK = 900
-_WORKING_COPY_FAILURE_RETRY_SECONDS = 24 * 60 * 60
 
 
 def _chunked(seq, size=_SQL_PARAM_CHUNK):
@@ -787,147 +806,6 @@ def _build_best_batch_response(db, seed_photo_id, rows):
         "alternate_ids": alternate_ids,
         "suggested_reject_ids": reject_ids,
     }, None
-
-
-def _has_current_working_copy_failure(
-    photo, vireo_dir=None, trust_existing_working_copy=True,
-    live_source_path=None, folder_path=None,
-):
-    """Return True when this RAW already failed working-copy extraction.
-
-    Missing thumbnail/preview requests normally self-heal by decoding the
-    source. For RAW rows whose working-copy extraction already failed at the
-    same source mtime, retrying that decode in a request thread can block the
-    UI for minutes and then fail the same way. A present working copy is still
-    authoritative for thumbnail/preview routes, but callers that have already
-    rejected that copy as insufficient can opt into honoring the marker anyway.
-    A stale ``working_copy_path`` whose file was deleted should not bypass a
-    fresh failure marker. If a RAW+JPEG companion pair has a companion-source
-    marker while both the companion and RAW source are currently available, allow
-    request paths to try the RAW: scanner.py prefers companions for working-copy
-    extraction, so that marker may not describe a RAW failure. Match scanner.py's
-    stale-failure contract: a file replacement changes ``file_mtime`` and
-    failures older than 24 hours are allowed to retry.
-    """
-    def _get(key):
-        try:
-            return photo[key]
-        except (KeyError, IndexError, TypeError):
-            return None
-
-    working_copy_path = _get("working_copy_path")
-    if working_copy_path and trust_existing_working_copy:
-        if not vireo_dir:
-            return False
-        wc_abs = (
-            working_copy_path if os.path.isabs(working_copy_path)
-            else os.path.join(vireo_dir, working_copy_path)
-        )
-        if os.path.exists(wc_abs):
-            return False
-
-    filename = _get("filename") or ""
-    try:
-        from image_loader import RAW_EXTENSIONS
-    except Exception:
-        RAW_EXTENSIONS = {
-            ".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf",
-        }
-    if os.path.splitext(filename)[1].lower() not in RAW_EXTENSIONS:
-        return False
-
-    companion_path = _get("companion_path")
-    if companion_path and live_source_path and folder_path:
-        companion_abs = os.path.join(folder_path, companion_path)
-        failed_source = _get("working_copy_failed_source")
-        if (
-            failed_source != "source"
-            and os.path.exists(live_source_path)
-            and os.path.exists(companion_abs)
-        ):
-            return False
-
-    failed_at = _get("working_copy_failed_at")
-    failed_mtime = _get("working_copy_failed_mtime")
-    file_mtime = _get("file_mtime")
-    if not failed_at or failed_mtime is None or file_mtime is None:
-        return False
-    try:
-        if float(failed_mtime) != float(file_mtime):
-            return False
-    except (TypeError, ValueError):
-        return False
-    try:
-        failed_s = str(failed_at).strip()
-        if failed_s.endswith("Z"):
-            failed_s = failed_s[:-1] + "+00:00"
-        failed_dt = datetime.fromisoformat(failed_s)
-        if failed_dt.tzinfo is None:
-            failed_dt = failed_dt.replace(tzinfo=UTC)
-    except (TypeError, ValueError):
-        return False
-    age = (datetime.now(UTC) - failed_dt.astimezone(UTC)).total_seconds()
-    return age < _WORKING_COPY_FAILURE_RETRY_SECONDS
-
-
-def _record_working_copy_failure(db, photo, source_path=None):
-    """Persist a RAW extraction failure marker after a request-time retry.
-
-    When ``_has_current_working_copy_failure`` returns False because the stored
-    marker is older than ``_WORKING_COPY_FAILURE_RETRY_SECONDS``, the request
-    paths are allowed to retry the slow RAW decode. If that retry still fails,
-    we refresh ``working_copy_failed_at``/``working_copy_failed_mtime`` so the
-    next thumbnail/preview/original request fails fast again instead of
-    repeating the expensive decode until the scanner runs. Mirrors the SQL the
-    scanner writes on failure (scanner.py around the working-copy backfill).
-    No-op for non-RAW rows, rows without a recorded ``file_mtime``/``id``,
-    source paths that are currently unavailable/offline, or source paths that
-    aren't the original RAW (e.g. a corrupt working-copy JPEG returned by
-    ``get_canonical_image_path``) — a non-RAW decode failure isn't a RAW
-    extraction failure and must not stamp the RAW marker. Request-time RAW
-    failures are recorded with ``working_copy_failed_source='source'`` so
-    companion-source bypasses do not ignore fresh RAW failures.
-    """
-    def _get(key):
-        try:
-            return photo[key]
-        except (KeyError, IndexError, TypeError):
-            return None
-
-    filename = _get("filename") or ""
-    try:
-        from image_loader import RAW_EXTENSIONS
-    except Exception:
-        RAW_EXTENSIONS = {
-            ".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf",
-        }
-    if os.path.splitext(filename)[1].lower() not in RAW_EXTENSIONS:
-        return
-    if source_path is not None:
-        if os.path.splitext(source_path)[1].lower() not in RAW_EXTENSIONS:
-            return
-        if not os.path.exists(source_path):
-            return
-
-    file_mtime = _get("file_mtime")
-    photo_id = _get("id")
-    if file_mtime is None or photo_id is None:
-        return
-
-    try:
-        db.conn.execute(
-            "UPDATE photos SET working_copy_failed_at=datetime('now'),"
-            " working_copy_failed_mtime=?,"
-            " working_copy_failed_source='source'"
-            " WHERE id=?",
-            (file_mtime, photo_id),
-        )
-        db.conn.commit()
-    except Exception:
-        log.debug(
-            "Could not refresh working_copy_failed marker for photo %s",
-            photo_id, exc_info=True,
-        )
 
 
 def _file_manager_labels():
@@ -1831,217 +1709,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             workspace_id=db._ws_id(), _commit=False,
         )
         db.conn.commit()
-
-    def _rendered_recipe_long_edge(width, height, recipe):
-        rotation = (recipe or {}).get("rotation", 0)
-        if rotation in (90, 270):
-            width, height = height, width
-        crop = (recipe or {}).get("crop") if recipe else None
-        if crop:
-            return max(float(crop["w"]) * width, float(crop["h"]) * height)
-        return max(width, height)
-
-    def _photo_value(photo, key):
-        try:
-            return photo[key]
-        except (KeyError, IndexError, TypeError):
-            if hasattr(photo, "get"):
-                return photo.get(key)
-        return None
-
-    def _exif_orientation(exif_data):
-        if not exif_data:
-            return None
-        if isinstance(exif_data, str):
-            try:
-                metadata = json.loads(exif_data)
-            except (TypeError, ValueError):
-                return None
-        elif isinstance(exif_data, dict):
-            metadata = exif_data
-        else:
-            return None
-        if not isinstance(metadata, dict):
-            return None
-        for group in ("EXIF", "IFD0", "TIFF", "File"):
-            values = metadata.get(group)
-            if isinstance(values, dict) and "Orientation" in values:
-                return values["Orientation"]
-        return metadata.get("Orientation")
-
-    def _recipe_source_dimensions(photo):
-        try:
-            width = int(_photo_value(photo, "width") or 0)
-            height = int(_photo_value(photo, "height") or 0)
-        except (TypeError, ValueError):
-            return 0, 0
-        if (
-            width > 0
-            and height > 0
-            and _orientation_swaps_axes(_exif_orientation(_photo_value(photo, "exif_data")))
-        ):
-            return height, width
-        return width, height
-
-    def _scaled_recipe_source_dimensions(photo, max_size=None):
-        width, height = _recipe_source_dimensions(photo)
-        if width <= 0 or height <= 0:
-            return 0, 0
-        if max_size:
-            long_edge = max(width, height)
-            if long_edge > max_size:
-                scale = max_size / long_edge
-                width = round(width * scale)
-                height = round(height * scale)
-        return width, height
-
-    def _image_is_smaller_than_expected(img, expected_w, expected_h):
-        return (
-            expected_w > 0
-            and expected_h > 0
-            and (
-                img.size[0] + 1 < expected_w
-                or img.size[1] + 1 < expected_h
-            )
-        )
-
-    def _companion_image_can_replace_raw_result(
-        companion_img, current_img, expected_w, expected_h,
-    ):
-        if companion_img is None:
-            return False
-        if expected_w > 0 and expected_h > 0:
-            return not _image_is_smaller_than_expected(
-                companion_img, expected_w, expected_h,
-            )
-        if current_img is None:
-            return True
-        return (
-            companion_img.size[0] >= current_img.size[0]
-            and companion_img.size[1] >= current_img.size[1]
-        )
-
-    def _image_size_after_exif_orientation(img):
-        width, height = img.size
-        orientation = None
-        with contextlib.suppress(Exception):
-            orientation = img.getexif().get(_EXIF_ORIENTATION_TAG)
-        if _orientation_swaps_axes(orientation):
-            return height, width
-        return width, height
-
-    def _working_copy_satisfies_recipe_render(photo, recipe, max_size, vireo_dir):
-        if not recipe or not recipe.get("crop"):
-            return True
-        wc_rel = photo["working_copy_path"]
-        if not wc_rel:
-            return False
-        wc_path = os.path.join(vireo_dir, wc_rel)
-        if not os.path.exists(wc_path):
-            return False
-        try:
-            from PIL import Image as _PILImage
-            with _PILImage.open(wc_path) as wc_img:
-                wc_w, wc_h = _image_size_after_exif_orientation(wc_img)
-        except Exception:
-            return False
-        original_w, original_h = _recipe_source_dimensions(photo)
-        if original_w <= 0 or original_h <= 0:
-            return False
-        original_render_long = _rendered_recipe_long_edge(original_w, original_h, recipe)
-        required_long = min(max_size, original_render_long) if max_size else original_render_long
-        wc_render_long = _rendered_recipe_long_edge(wc_w, wc_h, recipe)
-        return wc_render_long >= required_long
-
-    def _path_satisfies_recipe_render(path, photo, recipe, max_size):
-        original_w, original_h = _recipe_source_dimensions(photo)
-        if original_w <= 0 or original_h <= 0:
-            return False
-        try:
-            from PIL import Image as _PILImage
-            with _PILImage.open(path) as img:
-                width, height = _image_size_after_exif_orientation(img)
-        except Exception:
-            return False
-        original_render_long = _rendered_recipe_long_edge(
-            original_w, original_h, recipe,
-        )
-        required_long = min(max_size, original_render_long) if max_size else original_render_long
-        return _rendered_recipe_long_edge(width, height, recipe) >= required_long
-
-    def _recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
-        from image_loader import RAW_EXTENSIONS, get_canonical_image_path
-
-        def _is_working_copy_path(path):
-            wc_rel = photo["working_copy_path"]
-            if not path or not wc_rel:
-                return False
-            wc_path = wc_rel if os.path.isabs(wc_rel) else os.path.join(vireo_dir, wc_rel)
-            return os.path.abspath(path) == os.path.abspath(wc_path)
-
-        if not recipe:
-            canonical = get_canonical_image_path(photo, vireo_dir, folders)
-            return canonical, _is_working_copy_path(canonical)
-
-        primary_is_raw = (
-            os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
-        )
-
-        canonical = get_canonical_image_path(photo, vireo_dir, folders)
-        # For RAW primaries with a recipe, never short-circuit to the working
-        # copy: legacy working copies predate the highlight-preserving RAW
-        # decode and EDIT_MATH_VERSION's migration only purges preview/thumb
-        # caches, not working copies. Reusing one would apply the recipe to
-        # clipped bytes and bypass RAW_DECODE_PRESERVE_HIGHLIGHTS. Force the
-        # RAW path; the working copy is still the very last fallback below
-        # if the RAW file itself is missing.
-        if not primary_is_raw:
-            if not recipe.get("crop") and _is_working_copy_path(canonical):
-                return canonical, True
-
-            if recipe.get("crop") and _working_copy_satisfies_recipe_render(
-                photo, recipe, max_size, vireo_dir,
-            ):
-                return canonical, _is_working_copy_path(canonical)
-
-        folder_path = folders.get(photo["folder_id"])
-        if not folder_path:
-            if photo["working_copy_path"]:
-                wc_path = os.path.join(vireo_dir, photo["working_copy_path"])
-                if os.path.exists(wc_path):
-                    return wc_path, True
-            return "", False
-        # For RAW primaries, prefer the RAW source so the caller can decode it
-        # with highlight preservation rather than serving the camera's already-
-        # clipped companion JPEG. The companion remains a valid fallback when
-        # the RAW is known to fail extraction for this mtime — otherwise edited
-        # previews for unsupported RAWs would 500 out even when a full-size
-        # companion is available.
-        companion_path = photo["companion_path"]
-        original_abs = os.path.join(folder_path, photo["filename"])
-        allow_companion = (
-            not primary_is_raw
-            or not os.path.exists(original_abs)
-            or _has_current_working_copy_failure(
-                photo,
-                vireo_dir,
-                trust_existing_working_copy=False,
-                live_source_path=original_abs,
-                folder_path=folder_path,
-            )
-        )
-        if companion_path and allow_companion:
-            companion = os.path.join(folder_path, companion_path)
-            if (
-                os.path.exists(companion)
-                and _path_satisfies_recipe_render(companion, photo, recipe, max_size)
-            ):
-                return companion, True
-        if not os.path.exists(original_abs) and photo["working_copy_path"]:
-            wc_path = os.path.join(vireo_dir, photo["working_copy_path"])
-            if os.path.exists(wc_path):
-                return wc_path, True
-        return original_abs, False
 
     _ACCELERATED_RUNTIME_PROVIDERS = {
         "ACLExecutionProvider",
@@ -9362,25 +9029,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             raw_decode = RAW_DECODE_PRESERVE_HIGHLIGHTS if primary_is_raw else None
             load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
             img = load_image(source_path, max_size=None, **load_kwargs)
+            expected_w, expected_h = 0, 0
             needs_companion = False
             if primary_is_raw:
-                if img is None:
-                    needs_companion = True
-                else:
-                    # libraw may return the embedded JPEG when it cannot
-                    # demosaic — that preview is typically much smaller
-                    # than the full-size companion JPEG, so the handoff
-                    # would apply the recipe to clipped pixels even when
-                    # a usable sidecar exists. Compare both oriented
-                    # dimensions (with 1px rounding slack) against the
-                    # photo's stored size and trigger the companion
-                    # fallback when the RAW result is undersized.
-                    orig_w, orig_h = _recipe_source_dimensions(photo)
-                    if orig_w > 0 and orig_h > 0 and (
-                        img.size[0] + 1 < orig_w
-                        or img.size[1] + 1 < orig_h
-                    ):
-                        needs_companion = True
+                # libraw may return the embedded JPEG when it cannot
+                # demosaic — that preview is typically much smaller than the
+                # full-size companion JPEG, so the handoff would apply the
+                # recipe to clipped pixels even when a usable sidecar exists.
+                # Trigger the companion fallback when the RAW failed outright
+                # or came back undersized (both axes checked, shared helper).
+                expected_w, expected_h = _recipe_source_dimensions(photo)
+                needs_companion = img is None or _image_is_smaller_than_expected(
+                    img, expected_w, expected_h,
+                )
             if needs_companion:
                 # libraw can't decode this RAW (unsupported variant, corrupt
                 # sensor data, no usable embedded JPEG) or only produced an
@@ -9401,17 +9062,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         != os.path.abspath(source_path)
                     ):
                         companion_img = load_image(companion_abs, max_size=None)
-                        # Prefer companion when it covers img on both axes —
-                        # a long-edge-only check misses cases like a
-                        # 6000x3376 embedded preview "tying" a 6000x4000
+                        # Prefer companion when it covers the expected size on
+                        # both axes — a long-edge-only check misses cases like
+                        # a 6000x3376 embedded preview "tying" a 6000x4000
                         # sidecar and losing the short-edge content.
-                        if companion_img is not None and (
-                            img is None
-                            or (
-                                companion_img.size[0] >= img.size[0]
-                                and companion_img.size[1] >= img.size[1]
-                                and companion_img.size != img.size
-                            )
+                        if _companion_image_can_replace_raw_result(
+                            companion_img, img, expected_w, expected_h,
                         ):
                             if img is None:
                                 log.info(
@@ -11672,22 +11328,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         raw_decode = RAW_DECODE_PRESERVE_HIGHLIGHTS if primary_is_raw else None
         load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
         img = load_image(source_path, max_size=None, **load_kwargs)
+        expected_w, expected_h = 0, 0
         needs_companion = False
         if primary_is_raw:
-            if img is None:
-                needs_companion = True
-            else:
-                # libraw may return the embedded JPEG when demosaic
-                # fails — see _external_edit_handoff_path for the same
-                # gate. Without this an unsupported RAW would upload
-                # clipped/undersized pixels to iNaturalist even when a
-                # usable sidecar JPEG exists.
-                orig_w, orig_h = _recipe_source_dimensions(photo)
-                if orig_w > 0 and orig_h > 0 and (
-                    img.size[0] + 1 < orig_w
-                    or img.size[1] + 1 < orig_h
-                ):
-                    needs_companion = True
+            # libraw may return the embedded JPEG when demosaic fails — see
+            # _external_edit_handoff_path for the same gate. Without this an
+            # unsupported RAW would upload clipped/undersized pixels to
+            # iNaturalist even when a usable sidecar JPEG exists. Both axes
+            # checked via the shared helper.
+            expected_w, expected_h = _recipe_source_dimensions(photo)
+            needs_companion = img is None or _image_is_smaller_than_expected(
+                img, expected_w, expected_h,
+            )
         if needs_companion:
             # Mirror _external_edit_handoff_path: libraw may fail to decode
             # this RAW variant, but the full-size companion JPEG can still
@@ -11705,17 +11357,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     != os.path.abspath(source_path)
                 ):
                     companion_img = load_image(companion_abs, max_size=None)
-                    # Prefer companion when it covers img on both axes — a
-                    # long-edge-only check misses cases like a 6000x3376
-                    # embedded preview "tying" a 6000x4000 sidecar and
-                    # losing the short-edge content.
-                    if companion_img is not None and (
-                        img is None
-                        or (
-                            companion_img.size[0] >= img.size[0]
-                            and companion_img.size[1] >= img.size[1]
-                            and companion_img.size != img.size
-                        )
+                    # Prefer companion when it covers the expected size on
+                    # both axes — a long-edge-only check misses cases like a
+                    # 6000x3376 embedded preview "tying" a 6000x4000 sidecar
+                    # and losing the short-edge content.
+                    if _companion_image_can_replace_raw_result(
+                        companion_img, img, expected_w, expected_h,
                     ):
                         if img is None:
                             log.info(
