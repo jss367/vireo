@@ -1174,12 +1174,17 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
 
     # Build existing photo lookup for incremental mode
     existing_photos = {}
+    existing_file_hashes = {}
     exif_extracted = set()  # photo IDs where ExifTool has already run
     if incremental:
         all_photos = db.get_photos(per_page=999999)
         for p in all_photos:
             # Key by folder_id + filename won't work easily, so use a second lookup
             existing_photos[p["id"]] = p
+        existing_file_hashes = {
+            row["id"]: row["file_hash"]
+            for row in db.conn.execute("SELECT id, file_hash FROM photos")
+        }
         # Build a path-based lookup: we need folder path + filename
         existing_by_path = {}
         folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
@@ -1325,13 +1330,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                         (existing["timestamp"] is None or dims_suspect)
                         and existing["id"] not in exif_extracted
                     )
-                    hash_row = db.conn.execute(
-                        "SELECT file_hash FROM photos WHERE id = ?",
-                        (existing["id"],),
-                    ).fetchone()
-                    existing_file_hash = (
-                        hash_row["file_hash"] if hash_row else None
-                    )
+                    existing_file_hash = existing_file_hashes.get(existing["id"])
                     empty_hash_needs_repair = (
                         existing["file_size"] == 0
                         and existing_file_hash == EMPTY_FILE_SHA256
