@@ -260,6 +260,10 @@ def test_conftest_autouse_fixture_restores_cfg_path(tmp_path):
             )
     """))
 
+    # Isolate the sub-pytest from the parent's env: drop any inherited
+    # PYTEST_ADDOPTS/PYTEST_CURRENT_TEST and route TMP/TEMP into a fresh
+    # subdir so the nested pytest's own tmp_path_factory doesn't see the
+    # parent's shared Temp tree.
     child_tmp = tmp_path / "subpytest-tmp"
     child_tmp.mkdir()
     child_env = os.environ.copy()
@@ -268,9 +272,20 @@ def test_conftest_autouse_fixture_restores_cfg_path(tmp_path):
     child_env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
     child_env["TMP"] = str(child_tmp)
     child_env["TEMP"] = str(child_tmp)
+    # ``--rootdir`` + ``--confcutdir`` pin the sub-pytest's collection scope
+    # to ``sub_dir``. Without them, pytest walks ``argpath.parents`` up to the
+    # drive root, and on Windows runners the parent walk through the shared
+    # ``Temp\`` directory triggers ``Session._collect_path`` to iterate sibling
+    # entries — when a sibling like ``Temp\firefox`` (left by an unrelated
+    # process) is removed between scandir and pytest's Windows
+    # ``samefile_nofollow`` lstat, collection dies with a spurious
+    # ``FileNotFoundError`` and this test fails for reasons unrelated to the
+    # autouse fixture under test. The TMP/TEMP override above doesn't help
+    # here because ``sub_dir`` still lives under the parent's Temp.
     result = subprocess.run(
         [sys.executable, "-m", "pytest", str(sub_dir), "-q",
-         "-p", "no:cacheprovider", "-p", "no:xdist", "--no-header"],
+         "-p", "no:cacheprovider", "-p", "no:xdist", "--no-header",
+         "--rootdir", str(sub_dir), "--confcutdir", str(sub_dir)],
         capture_output=True, text=True, timeout=60, env=child_env,
     )
     assert result.returncode == 0, (
