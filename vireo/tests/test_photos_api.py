@@ -2073,6 +2073,68 @@ def test_edited_original_uses_companion_after_raw_failure_marker(
     assert loaded_paths[0].lower().endswith(".jpg")
 
 
+def test_edited_original_records_raw_marker_when_companion_rescues_decode(
+    client_with_photo, monkeypatch,
+):
+    """When the RAW decode fails on an edited RAW+JPEG with no current
+    failure marker, the companion-fallback path must stamp
+    working_copy_failed_source='source' so the next request routes
+    directly through the companion via the marker-aware branch instead
+    of retrying the slow failing RAW decode each hit."""
+    import os
+
+    import app as app_module
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    raw_path = os.path.join(folder["path"], "unsupported.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(b"\x00")
+    companion_path = os.path.join(folder["path"], "unsupported.JPG")
+    Image.new("RGB", (800, 600), (40, 80, 120)).save(companion_path, "JPEG")
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='unsupported.NEF', extension='.nef',
+               companion_path='unsupported.JPG',
+               working_copy_path=NULL,
+               working_copy_failed_at=NULL,
+               working_copy_failed_mtime=NULL,
+               working_copy_failed_source=NULL,
+               width=800, height=600,
+               file_mtime=1234.0
+           WHERE id=?""",
+        (photo_id,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+
+    def fake_load_image(file_path, max_size=1024, **kwargs):
+        if str(file_path).lower().endswith(".nef"):
+            return None
+        return Image.new("RGB", (800, 600), (40, 80, 120))
+
+    monkeypatch.setattr(image_loader, "load_image", fake_load_image)
+    if hasattr(app_module, "load_image"):
+        monkeypatch.setattr(app_module, "load_image", fake_load_image, raising=False)
+
+    resp = client.get(f"/photos/{photo_id}/original")
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+
+    row = db.conn.execute(
+        "SELECT working_copy_failed_source, working_copy_failed_mtime"
+        " FROM photos WHERE id=?",
+        (photo_id,),
+    ).fetchone()
+    assert row["working_copy_failed_source"] == "source"
+    assert row["working_copy_failed_mtime"] == 1234.0
+
+
 def test_edited_original_decodes_raw_with_highlight_preservation(
     client_with_photo, monkeypatch,
 ):

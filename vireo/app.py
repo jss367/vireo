@@ -18959,16 +18959,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # RAW couldn't decode (unsupported variant, no embedded JPEG).
                 # Fall back to the full-resolution companion JPEG when one
                 # exists so an unsupported-RAW edit doesn't 500 with a usable
-                # sidecar sitting next to the RAW. Do NOT record a blocking
-                # RAW source-failure marker here when the companion rescues
-                # the render: the marker would make the next request's
-                # pre-load guard above return 500 even though companion
-                # rendering just worked. We accept the cost of retrying the
-                # failing RAW once per request in exchange for never hiding
-                # a usable photo behind a stale marker.
+                # sidecar sitting next to the RAW. When the companion rescues
+                # the render, record the RAW source-failure marker so the
+                # next request's RAW-failure routing branch above sends the
+                # render directly through the companion instead of paying
+                # for the same failing decode every hit. The pre-load guard
+                # at line ~18896 won't shadow it because that routing branch
+                # rewrites image_path to the companion before the guard runs.
                 companion_fallback = _full_res_companion_path(
                     folder["path"], using_offline_cache,
                 )
+                raw_source_path = image_path
                 if companion_fallback and companion_fallback != image_path:
                     log.info(
                         "RAW decode failed for photo %s edited original; "
@@ -18977,11 +18978,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     img = load_image(companion_fallback, max_size=None)
                     if img is not None:
                         image_path = companion_fallback
+                        _record_working_copy_failure(db, photo, raw_source_path)
                     else:
-                        # Companion also failed — now we record the marker so
-                        # repeated requests fail fast instead of retrying both
-                        # sources on every hit.
-                        _record_working_copy_failure(db, photo, image_path)
+                        # Companion also failed — record the marker so repeated
+                        # requests fail fast instead of retrying both sources
+                        # on every hit.
+                        _record_working_copy_failure(db, photo, raw_source_path)
             if img is None:
                 _record_working_copy_failure(db, photo, image_path)
                 return "Could not load image", 500
