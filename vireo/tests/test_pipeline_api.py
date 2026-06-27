@@ -218,7 +218,36 @@ def test_pipeline_local_processing_rejects_collection_id(setup, tmp_path):
         assert resp.status_code == 400
         err = resp.get_json()["error"].lower()
         assert "local_processing" in err
-        assert "source" in err
+        assert "collection_id" in err
+
+
+def test_pipeline_local_processing_rejects_collection_id_with_stale_sources(
+    setup, tmp_path,
+):
+    # run_pipeline_job sets skip_scan = collection_id is not None, so a
+    # request that mixes collection_id with a stale source/sources field
+    # still skips ingest — the staging folder never gets created or
+    # indexed and archive_stage fails with "local staging folder was not
+    # indexed". The API guard must reject collection_id outright when
+    # local_processing is on, not just the no-source case.
+    app, _db_path = setup
+    src = tmp_path / "card"
+    src.mkdir()
+    dest = tmp_path / "archive"
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "collection_id": 1,
+            "sources": [str(src)],
+            "destination": str(dest),
+            "local_processing": True,
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 400
+        err = resp.get_json()["error"].lower()
+        assert "local_processing" in err
+        assert "collection_id" in err
 
 
 def test_pipeline_local_processing_archives_to_final_destination(

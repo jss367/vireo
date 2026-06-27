@@ -16080,11 +16080,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # photos and then fail in archive_stage with "local staging folder
         # was not indexed". Snapshot-scoped runs are likewise rejected: they
         # also bypass ingest because the snapshot's existing files drive
-        # scan_roots directly. Fail fast so the user gets the actual reason.
+        # scan_roots directly. Reject whenever collection_id or
+        # source_snapshot_id is set — a stale source/sources field in the
+        # same request must not slip past, because run_pipeline_job keys
+        # skip_scan off collection_id alone and would still skip ingest.
+        if local_processing and (
+            collection_id is not None or source_snapshot_id is not None
+        ):
+            return json_error(
+                "local_processing cannot be combined with collection_id or "
+                "source_snapshot_id — it requires source or sources"
+            )
         if local_processing and not source and not sources:
             return json_error(
-                "local_processing requires source or sources — it cannot be "
-                "combined with collection_id or source_snapshot_id"
+                "local_processing requires source or sources"
             )
 
         folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
