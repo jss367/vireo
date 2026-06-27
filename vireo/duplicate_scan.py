@@ -8,6 +8,8 @@ import os
 from duplicate_buckets import bucket_unresolved_proposals
 from duplicates import DupCandidate, resolve_duplicates
 
+_EMPTY_FILE_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
 # SQLite's legacy ``SQLITE_MAX_VARIABLE_NUMBER`` cap is 999 on older builds.
 # An auto-resolved group can exceed that when many `-2` copies of one
 # file accumulate over repeated scans, so any single-statement IN-clause
@@ -80,6 +82,14 @@ def _attach_edit_recipes(db, proposals):
     return proposals
 
 
+def _is_empty_file_group(file_hash, infos):
+    return (
+        file_hash == _EMPTY_FILE_SHA256
+        and infos
+        and all((info.get("file_size") or 0) == 0 for info in infos)
+    )
+
+
 def _build_unresolved_proposal(db, group):
     """Return a proposal dict for an unresolved group, or None on race."""
     rows = _fetch_photo_rows(
@@ -107,12 +117,16 @@ def _build_unresolved_proposal(db, group):
         linfo["reason"] = reason
         losers.append(linfo)
     all_missing = not any(info["exists"] for info in info_by_id.values())
+    empty_file_group = _is_empty_file_group(
+        group["file_hash"], info_by_id.values(),
+    )
     return {
         "file_hash": group["file_hash"],
         "status": "unresolved",
         "winner": info_by_id[winner_id],
         "losers": losers,
         "all_missing": all_missing,
+        "empty_file_group": empty_file_group,
     }
 
 
@@ -173,12 +187,19 @@ def _build_resolved_proposal(db, group):
         linfo["rejected"] = True
         losers.append(linfo)
     all_missing = not any(info["exists"] for info in info_by_id.values())
+    empty_file_group = _is_empty_file_group(
+        group["file_hash"], info_by_id.values(),
+    )
+    if empty_file_group:
+        for loser in losers:
+            loser["reason"] = "empty file"
     return {
         "file_hash": group["file_hash"],
         "status": "resolved",
         "winner": info_by_id[kept[0]["id"]],
         "losers": losers,
         "all_missing": all_missing,
+        "empty_file_group": empty_file_group,
     }
 
 

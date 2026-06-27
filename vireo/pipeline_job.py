@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 
 import numpy as np
 from db import Database, commit_with_retry
+from exif_orientation import orientation_swaps_axes as _orientation_swaps_axes
 from model_cache import get_default_cache
 from pipeline_locks import (
     acquire_photo_mask,
@@ -113,20 +114,6 @@ def _exif_orientation(exif_data):
     return metadata.get("Orientation")
 
 
-def _orientation_swaps_axes(orientation):
-    if orientation is None or isinstance(orientation, bool):
-        return False
-    if isinstance(orientation, (int, float)):
-        return int(orientation) in (5, 6, 7, 8)
-    text = str(orientation).strip().lower()
-    if not text:
-        return False
-    try:
-        return int(text) in (5, 6, 7, 8)
-    except ValueError:
-        return "90" in text or "270" in text
-
-
 def _recipe_source_dimensions(photo):
     try:
         width = int(_photo_value(photo, "width") or 0)
@@ -140,6 +127,47 @@ def _recipe_source_dimensions(photo):
     ):
         return height, width
     return width, height
+
+
+def _scaled_recipe_source_dimensions(photo, max_size=None):
+    width, height = _recipe_source_dimensions(photo)
+    if width <= 0 or height <= 0:
+        return 0, 0
+    if max_size:
+        long_edge = max(width, height)
+        if long_edge > max_size:
+            scale = max_size / long_edge
+            width = round(width * scale)
+            height = round(height * scale)
+    return width, height
+
+
+def _image_is_smaller_than_expected(img, expected_w, expected_h):
+    return (
+        expected_w > 0
+        and expected_h > 0
+        and (
+            img.size[0] + 1 < expected_w
+            or img.size[1] + 1 < expected_h
+        )
+    )
+
+
+def _companion_image_can_replace_raw_result(
+    companion_img, current_img, expected_w, expected_h,
+):
+    if companion_img is None:
+        return False
+    if expected_w > 0 and expected_h > 0:
+        return not _image_is_smaller_than_expected(
+            companion_img, expected_w, expected_h,
+        )
+    if current_img is None:
+        return True
+    return (
+        companion_img.size[0] >= current_img.size[0]
+        and companion_img.size[1] >= current_img.size[1]
+    )
 
 
 def _image_size_after_exif_orientation(img):
@@ -198,16 +226,25 @@ def _recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
 
     if not recipe:
         return get_canonical_image_path(photo, vireo_dir, folders)
+    primary_is_raw = (
+        os.path.splitext(photo["filename"])[1].lower() in _RAW_EXTENSIONS
+    )
     canonical = get_canonical_image_path(photo, vireo_dir, folders)
     wc_rel = photo["working_copy_path"]
-    if not recipe.get("crop") and canonical and wc_rel:
-        wc_path = wc_rel if os.path.isabs(wc_rel) else os.path.join(vireo_dir, wc_rel)
-        if os.path.abspath(canonical) == os.path.abspath(wc_path):
+    # For RAW primaries with a recipe, never short-circuit to the working
+    # copy: legacy working copies predate the highlight-preserving RAW
+    # decode, and EDIT_MATH_VERSION's migration only purges preview/thumb
+    # caches, not working copies. Reusing one would apply the recipe to
+    # clipped bytes and bypass RAW_DECODE_PRESERVE_HIGHLIGHTS.
+    if not primary_is_raw:
+        if not recipe.get("crop") and canonical and wc_rel:
+            wc_path = wc_rel if os.path.isabs(wc_rel) else os.path.join(vireo_dir, wc_rel)
+            if os.path.abspath(canonical) == os.path.abspath(wc_path):
+                return canonical
+        if recipe.get("crop") and _working_copy_satisfies_recipe_render(
+            photo, recipe, max_size, vireo_dir,
+        ):
             return canonical
-    if recipe.get("crop") and _working_copy_satisfies_recipe_render(
-        photo, recipe, max_size, vireo_dir,
-    ):
-        return canonical
 
     folder_path = folders.get(photo["folder_id"])
     if not folder_path:
@@ -216,18 +253,26 @@ def _recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
             if os.path.exists(wc_path):
                 return wc_path
         return ""
+    # When the primary is RAW, prefer the RAW source so the caller can decode
+    # with highlight preservation rather than serving the camera's already-
+    # clipped companion JPEG. The companion remains a valid fallback when the
+    # RAW is known to fail extraction for this mtime.
     companion_path = photo["companion_path"]
-    if companion_path:
+    original = os.path.join(folder_path, photo["filename"])
+    allow_companion = not primary_is_raw or _has_current_working_copy_failure(
+        photo,
+        vireo_dir,
+        trust_existing_working_copy=False,
+        live_source_path=original,
+        folder_path=folder_path,
+    )
+    if companion_path and allow_companion:
         companion = os.path.join(folder_path, companion_path)
         if (
             os.path.exists(companion)
             and _path_satisfies_recipe_render(companion, photo, recipe, max_size)
         ):
             return companion
-    original = os.path.join(
-        folder_path,
-        photo["filename"],
-    )
     if not os.path.exists(original) and photo["working_copy_path"]:
         wc_path = os.path.join(vireo_dir, photo["working_copy_path"])
         if os.path.exists(wc_path):
@@ -260,6 +305,31 @@ def _looks_like_missing_external_data(err):
 
 _RAW_EXTENSIONS = (".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf")
 _WORKING_COPY_FAILURE_RETRY_SECONDS = 24 * 60 * 60
+
+
+def _thumb_raw_decode_kwargs(photo, recipe):
+    """Return raw_decode kwargs for generate_thumbnail."""
+    if not recipe or not photo:
+        return {}
+    filename = _photo_value(photo, "filename") or ""
+    if os.path.splitext(filename)[1].lower() not in _RAW_EXTENSIONS:
+        return {}
+    from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS
+    return {"raw_decode": RAW_DECODE_PRESERVE_HIGHLIGHTS}
+
+
+def _thumb_min_source_size_kwargs(photo, recipe, thumb_size, source_path):
+    if not recipe or not photo:
+        return {}
+    filename = _photo_value(photo, "filename") or ""
+    if os.path.splitext(filename)[1].lower() not in _RAW_EXTENSIONS:
+        return {}
+    if os.path.splitext(source_path or "")[1].lower() not in _RAW_EXTENSIONS:
+        return {}
+    load_max_size = None if recipe.get("crop") else thumb_size
+    return {
+        "min_source_size": _scaled_recipe_source_dimensions(photo, load_max_size),
+    }
 
 
 def _has_current_working_copy_failure(
@@ -313,6 +383,49 @@ def _has_current_working_copy_failure(
         return False
     age = (datetime.now(UTC) - failed_dt.astimezone(UTC)).total_seconds()
     return age < _WORKING_COPY_FAILURE_RETRY_SECONDS
+
+
+def _retry_thumbnail_with_companion(
+    thread_db, generate_thumbnail, photo, photo_id, raw_source_path,
+    cache_dir, thumb_size, recipe, folder_path,
+):
+    """Mirror serve_thumb's RAW->companion fallback for pipeline jobs."""
+    if not photo or not folder_path:
+        return None
+    companion_rel = _photo_value(photo, "companion_path")
+    if not companion_rel:
+        return None
+    companion_abs = os.path.join(folder_path, companion_rel)
+    if (
+        not os.path.exists(companion_abs)
+        or os.path.abspath(companion_abs) == os.path.abspath(raw_source_path)
+    ):
+        return None
+    log.info(
+        "Pipeline thumbnail RAW decode failed for photo %s; "
+        "falling back to companion JPEG",
+        photo_id,
+    )
+    file_mtime = _photo_value(photo, "file_mtime")
+    if file_mtime is not None:
+        with contextlib.suppress(Exception):
+            thread_db.conn.execute(
+                "UPDATE photos SET"
+                " working_copy_failed_at=datetime('now'),"
+                " working_copy_failed_mtime=?,"
+                " working_copy_failed_source='source'"
+                " WHERE id=?",
+                (file_mtime, photo_id),
+            )
+            commit_with_retry(thread_db.conn)
+    recipe_kwargs = {"recipe": recipe} if recipe else {}
+    return generate_thumbnail(
+        photo_id,
+        companion_abs,
+        cache_dir,
+        size=thumb_size,
+        **recipe_kwargs,
+    )
 
 
 _CLASSIFIER_BUNDLE_FIELDS = (
@@ -1754,13 +1867,31 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     skipped += 1
                                     continue
                         recipe_kwargs = {"recipe": recipe} if recipe else {}
+                        raw_decode_kwargs = _thumb_raw_decode_kwargs(
+                            detail_photo, recipe,
+                        )
+                        min_size_kwargs = _thumb_min_source_size_kwargs(
+                            detail_photo, recipe, thumb_size, photo_path,
+                        )
                         result_path = generate_thumbnail(
                             photo_id,
                             photo_path,
                             cache_dir,
                             size=thumb_size,
                             **recipe_kwargs,
+                            **raw_decode_kwargs,
+                            **min_size_kwargs,
                         )
+                        if (
+                            result_path is None
+                            and detail_photo is not None
+                            and os.path.splitext(photo_path)[1].lower() in _RAW_EXTENSIONS
+                        ):
+                            result_path = _retry_thumbnail_with_companion(
+                                thread_db, generate_thumbnail, detail_photo,
+                                photo_id, photo_path, cache_dir, thumb_size,
+                                recipe, folders.get(detail_photo["folder_id"]),
+                            )
                         if result_path is None:
                             failed += 1
                         elif already_exists:
@@ -1839,13 +1970,31 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     skipped += 1
                                     continue
                             recipe_kwargs = {"recipe": recipe} if recipe else {}
+                            raw_decode_kwargs = _thumb_raw_decode_kwargs(
+                                detail_photo, recipe,
+                            )
+                            min_size_kwargs = _thumb_min_source_size_kwargs(
+                                detail_photo, recipe, thumb_size, photo_path,
+                            )
                             result_path = generate_thumbnail(
                                 photo_id,
                                 photo_path,
                                 cache_dir,
                                 size=thumb_size,
                                 **recipe_kwargs,
+                                **raw_decode_kwargs,
+                                **min_size_kwargs,
                             )
+                            if (
+                                result_path is None
+                                and os.path.splitext(photo_path)[1].lower() in _RAW_EXTENSIONS
+                            ):
+                                fallback_photo = detail_photo or photo
+                                result_path = _retry_thumbnail_with_companion(
+                                    thread_db, generate_thumbnail, fallback_photo,
+                                    photo_id, photo_path, cache_dir, thumb_size,
+                                    recipe, folder_path,
+                                )
                             if result_path is None:
                                 failed += 1
                             elif already_exists:
@@ -1939,7 +2088,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             try:
                 import config as cfg
                 from image_edits import apply_recipe_to_loaded_image
-                from image_loader import load_image
+                from image_loader import (
+                    RAW_DECODE_PRESERVE_HIGHLIGHTS,
+                    load_image,
+                )
 
                 thread_db = Database(db_path)
                 thread_db.set_active_workspace(workspace_id)
@@ -2047,7 +2199,99 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         load_max_size = (
                             None if recipe and recipe.get("crop") else max_size
                         )
-                        img = load_image(canonical, max_size=load_max_size)
+                        raw_decode = (
+                            RAW_DECODE_PRESERVE_HIGHLIGHTS
+                            if recipe
+                            and os.path.splitext(canonical)[1].lower() in _RAW_EXTENSIONS
+                            else None
+                        )
+                        load_kwargs = (
+                            {"raw_decode": raw_decode} if raw_decode else {}
+                        )
+                        img = load_image(canonical, max_size=load_max_size, **load_kwargs)
+                        if (
+                            img is not None
+                            and os.path.splitext(canonical)[1].lower() in _RAW_EXTENSIONS
+                            and detail_photo["width"]
+                            and detail_photo["height"]
+                        ):
+                            expected_w, expected_h = _scaled_recipe_source_dimensions(
+                                detail_photo, load_max_size,
+                            )
+                            if _image_is_smaller_than_expected(
+                                img, expected_w, expected_h,
+                            ):
+                                companion_rel = detail_photo["companion_path"]
+                                folder_path = folders.get(
+                                    detail_photo["folder_id"]
+                                )
+                                if companion_rel and folder_path:
+                                    companion_abs = os.path.join(
+                                        folder_path, companion_rel,
+                                    )
+                                    if (
+                                        os.path.exists(companion_abs)
+                                        and companion_abs != canonical
+                                    ):
+                                        companion_img = load_image(
+                                            companion_abs,
+                                            max_size=load_max_size,
+                                        )
+                                        if _companion_image_can_replace_raw_result(
+                                            companion_img, img,
+                                            expected_w, expected_h,
+                                        ):
+                                            log.info(
+                                                "RAW decode for photo %s "
+                                                "pipeline preview at size=%s "
+                                                "returned undersized embedded "
+                                                "preview (%dx%d, expected "
+                                                "%dx%d); falling back to "
+                                                "companion JPEG",
+                                                detail_photo["id"], max_size,
+                                                img.size[0], img.size[1],
+                                                expected_w, expected_h,
+                                            )
+                                            img.close()
+                                            img = companion_img
+                                            canonical = companion_abs
+                                        elif companion_img is not None:
+                                            companion_img.close()
+                        if (
+                            img is None
+                            and os.path.splitext(canonical)[1].lower() in _RAW_EXTENSIONS
+                        ):
+                            companion_rel = detail_photo["companion_path"]
+                            folder_path = folders.get(detail_photo["folder_id"])
+                            if companion_rel and folder_path:
+                                companion_abs = os.path.join(folder_path, companion_rel)
+                                if (
+                                    os.path.exists(companion_abs)
+                                    and companion_abs != canonical
+                                ):
+                                    log.info(
+                                        "RAW decode failed for photo %s pipeline "
+                                        "preview at size=%s; falling back to "
+                                        "companion JPEG",
+                                        detail_photo["id"], max_size,
+                                    )
+                                    file_mtime = detail_photo["file_mtime"]
+                                    if file_mtime is not None:
+                                        with contextlib.suppress(Exception):
+                                            thread_db.conn.execute(
+                                                "UPDATE photos SET"
+                                                " working_copy_failed_at=datetime('now'),"
+                                                " working_copy_failed_mtime=?,"
+                                                " working_copy_failed_source='source'"
+                                                " WHERE id=?",
+                                                (file_mtime, detail_photo["id"]),
+                                            )
+                                            commit_with_retry(thread_db.conn)
+                                    img = load_image(
+                                        companion_abs, max_size=load_max_size,
+                                    )
+                                    if img is not None:
+                                        canonical = companion_abs
                         if img:
                             if recipe:
                                 img = apply_recipe_to_loaded_image(

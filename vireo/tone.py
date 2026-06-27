@@ -20,11 +20,13 @@ flat white. This pipeline therefore:
   4. re-encodes linear -> sRGB,
   5. applies the display-referred ops (range controls, contrast, color) in sRGB.
 
-Data ceiling: this operates on whatever 8-bit source it is handed. It produces
-a pleasing rolloff but cannot *recover* highlights that were already clipped
-upstream (e.g. in a camera JPEG or an auto-brightened RAW decode). Recovering
-real highlight detail requires decoding RAW to linear with auto-bright off
-(a separate, larger change).
+Data ceiling: this operates on whatever RGB source it is handed. JPEGs and
+legacy working copies are still 8-bit and cannot *recover* highlights that were
+already clipped upstream. New RAW working copies and edited RAW renders ask
+``image_loader`` to demosaic with auto-bright disabled and highlight blending
+enabled before quantizing to the JPEG working/render cache. That preserves more
+RAW highlight headroom for this tone curve, but it is still not a full
+scene-linear 16-bit editing pipeline.
 
 Keep-in-sync contract (Tier 3 / live preview)
 ---------------------------------------------

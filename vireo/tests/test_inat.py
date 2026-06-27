@@ -343,6 +343,117 @@ def test_api_inat_submit_uses_edited_render(app_and_db):
         assert img.size == (40, 80)
 
 
+def test_api_inat_submit_uses_working_copy_when_raw_source_missing(app_and_db):
+    app, db, pid = app_and_db
+    import config as cfg
+    cfg.save({"inat_token": "fake-token"})
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_rel = f"working/{pid}.jpg"
+    Image.new("RGB", (80, 40), (220, 30, 20)).save(
+        os.path.join(vireo_dir, wc_rel), "JPEG",
+    )
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='offline.NEF', extension='.nef',
+               working_copy_path=?,
+               width=80, height=40
+           WHERE id=?""",
+        (wc_rel, pid),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(pid, {"rotation": 90})
+
+    client = app.test_client()
+    with patch(
+        "inat.submit_observation",
+        return_value=(12345, "https://www.inaturalist.org/observations/12345"),
+    ) as mock_submit:
+        resp = client.post("/api/inat/submit", json={"photo_id": pid})
+
+    assert resp.status_code == 200
+    upload_path = mock_submit.call_args.kwargs["photo_path"]
+    assert os.path.basename(os.path.dirname(upload_path)) == "inat-uploads"
+    with Image.open(upload_path) as img:
+        assert img.size == (40, 80)
+
+
+def test_api_inat_submit_uses_companion_when_raw_source_missing(app_and_db):
+    app, db, pid = app_and_db
+    import config as cfg
+    cfg.save({"inat_token": "fake-token"})
+
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id = p.folder_id WHERE p.id = ?",
+        (pid,),
+    ).fetchone()
+    companion_path = os.path.join(folder["path"], "bird.jpg")
+    Image.new("RGB", (80, 40), (220, 30, 20)).save(companion_path)
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='offline.NEF', extension='.nef',
+               working_copy_path=NULL,
+               companion_path='bird.jpg',
+               width=80, height=40
+           WHERE id=?""",
+        (pid,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(pid, {"rotation": 90})
+
+    client = app.test_client()
+    with patch(
+        "inat.submit_observation",
+        return_value=(12345, "https://www.inaturalist.org/observations/12345"),
+    ) as mock_submit:
+        resp = client.post("/api/inat/submit", json={"photo_id": pid})
+
+    assert resp.status_code == 200, resp.get_json()
+    upload_path = mock_submit.call_args.kwargs["photo_path"]
+    assert os.path.basename(os.path.dirname(upload_path)) == "inat-uploads"
+    with Image.open(upload_path) as img:
+        assert img.size == (40, 80)
+
+
+def test_api_inat_submit_uses_companion_for_cropped_raw_source_missing(app_and_db):
+    app, db, pid = app_and_db
+    import config as cfg
+    cfg.save({"inat_token": "fake-token"})
+
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id = p.folder_id WHERE p.id = ?",
+        (pid,),
+    ).fetchone()
+    companion_path = os.path.join(folder["path"], "bird.jpg")
+    Image.new("RGB", (80, 40), (220, 30, 20)).save(companion_path)
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='offline.NEF', extension='.nef',
+               working_copy_path=NULL,
+               companion_path='bird.jpg',
+               width=80, height=40
+           WHERE id=?""",
+        (pid,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(pid, {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}})
+
+    client = app.test_client()
+    with patch(
+        "inat.submit_observation",
+        return_value=(12345, "https://www.inaturalist.org/observations/12345"),
+    ) as mock_submit:
+        resp = client.post("/api/inat/submit", json={"photo_id": pid})
+
+    assert resp.status_code == 200, resp.get_json()
+    upload_path = mock_submit.call_args.kwargs["photo_path"]
+    assert os.path.basename(os.path.dirname(upload_path)) == "inat-uploads"
+    with Image.open(upload_path) as img:
+        assert img.size == (40, 40)
+
+
 def test_inat_upload_handoff_meta_includes_math_version(app_and_db):
     """The iNat upload render reuses inat-uploads/<id>.jpg only when its
     cached metadata matches. That metadata must carry EDIT_MATH_VERSION so a

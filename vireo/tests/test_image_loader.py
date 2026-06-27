@@ -44,6 +44,7 @@ class _FakeRaw:
         self._postprocess_size = postprocess_size
         self.sizes = SimpleNamespace(width=sensor_size[0], height=sensor_size[1])
         self.postprocess_calls = 0
+        self.postprocess_kwargs = []
 
     def __enter__(self):
         return self
@@ -58,8 +59,9 @@ class _FakeRaw:
         return SimpleNamespace(format=rawpy.ThumbFormat.JPEG,
                                data=self._embedded_jpeg)
 
-    def postprocess(self, half_size=False):
+    def postprocess(self, half_size=False, **kwargs):
         self.postprocess_calls += 1
+        self.postprocess_kwargs.append({"half_size": half_size, **kwargs})
         if self._postprocess_error is not None:
             raise self._postprocess_error
         import numpy as np
@@ -139,6 +141,36 @@ def test_raw_uses_embedded_jpeg_when_large_enough(tmp_path, monkeypatch):
     assert max(result.size) == 1920  # downscaled from 4000
     assert result.size == (1920, 960)
     assert fake.postprocess_calls == 0, "postprocess should be skipped"
+
+
+def test_raw_preserve_highlights_mode_bypasses_embedded_jpeg(tmp_path, monkeypatch):
+    """Edit-quality RAW loads demosaic instead of using camera-rendered JPEGs."""
+    import rawpy
+    from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS, load_image
+
+    nef = tmp_path / "test.nef"
+    nef.write_bytes(b"fake NEF content")
+
+    fake = _install_fake_raw(monkeypatch, _FakeRaw(
+        embedded_jpeg=_jpeg_bytes((4000, 2000)),
+        postprocess_size=(6000, 4000),
+    ))
+
+    result = load_image(
+        str(nef),
+        max_size=1920,
+        raw_decode=RAW_DECODE_PRESERVE_HIGHLIGHTS,
+    )
+
+    assert result is not None
+    assert fake.postprocess_calls == 1
+    assert max(result.size) == 1920
+    kwargs = fake.postprocess_kwargs[-1]
+    assert kwargs["half_size"] is True
+    assert kwargs["use_camera_wb"] is True
+    assert kwargs["no_auto_bright"] is True
+    assert kwargs["bright"] == 1.0
+    assert kwargs["highlight_mode"] == rawpy.HighlightMode.Blend
 
 
 def test_raw_falls_back_to_embedded_on_postprocess_failure(tmp_path, monkeypatch):
@@ -242,6 +274,31 @@ def test_raw_uses_postprocess_when_embedded_too_small(tmp_path, monkeypatch):
     assert max(result.size) == 2048  # downscaled from postprocess output
 
 
+def test_raw_preserve_highlights_falls_back_to_embedded_on_decode_failure(
+    tmp_path, monkeypatch
+):
+    """Unsupported RAWs still use embedded JPEG fallback in edit-quality mode."""
+    import rawpy
+    from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS, load_image
+
+    nef = tmp_path / "test.nef"
+    nef.write_bytes(b"fake NEF content")
+
+    _install_fake_raw(monkeypatch, _FakeRaw(
+        embedded_jpeg=_jpeg_bytes((1600, 1067)),
+        postprocess_error=rawpy.LibRawFileUnsupportedError(b'unsupported'),
+    ))
+
+    result = load_image(
+        str(nef),
+        max_size=2048,
+        raw_decode=RAW_DECODE_PRESERVE_HIGHLIGHTS,
+    )
+
+    assert result is not None
+    assert max(result.size) == 1600
+
+
 def test_raw_returns_none_when_no_embedded_and_postprocess_fails(tmp_path, monkeypatch):
     """No embedded JPEG and postprocess fails → return None (current contract)."""
     import rawpy
@@ -330,6 +387,42 @@ def test_extract_working_copy_full_resolution(tmp_path):
     assert result is True
     out_img = Image.open(str(output))
     assert out_img.size == (6000, 4000)
+
+
+def test_extract_working_copy_uses_highlight_preserving_raw_decode(
+    tmp_path, monkeypatch
+):
+    """Working-copy extraction is the edit-quality path for RAW sources."""
+    import image_loader
+    from PIL import Image
+
+    calls = []
+
+    def fake_load_image(source_path, max_size=1024, raw_decode=None):
+        calls.append({
+            "source_path": source_path,
+            "max_size": max_size,
+            "raw_decode": raw_decode,
+        })
+        return Image.new("RGB", (100, 50), color="white")
+
+    monkeypatch.setattr(image_loader, "load_image", fake_load_image)
+
+    output = tmp_path / "working" / "42.jpg"
+    result = image_loader.extract_working_copy(
+        str(tmp_path / "photo.nef"),
+        str(output),
+        max_size=4096,
+        quality=92,
+    )
+
+    assert result is True
+    assert output.exists()
+    assert calls == [{
+        "source_path": str(tmp_path / "photo.nef"),
+        "max_size": 4096,
+        "raw_decode": image_loader.RAW_DECODE_PRESERVE_HIGHLIGHTS,
+    }]
 
 
 def test_extract_working_copy_missing_source_returns_false(tmp_path):

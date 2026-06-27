@@ -7,7 +7,13 @@ import os
 import tempfile
 from datetime import UTC, datetime
 
-from image_loader import RAW_EXTENSIONS, get_canonical_image_path, load_image
+from exif_orientation import orientation_swaps_axes as _orientation_swaps_axes
+from image_loader import (
+    RAW_DECODE_PRESERVE_HIGHLIGHTS,
+    RAW_EXTENSIONS,
+    get_canonical_image_path,
+    load_image,
+)
 
 log = logging.getLogger(__name__)
 
@@ -56,20 +62,6 @@ def _exif_orientation(exif_data):
     return metadata.get("Orientation")
 
 
-def _orientation_swaps_axes(orientation):
-    if orientation is None or isinstance(orientation, bool):
-        return False
-    if isinstance(orientation, (int, float)):
-        return int(orientation) in (5, 6, 7, 8)
-    text = str(orientation).strip().lower()
-    if not text:
-        return False
-    try:
-        return int(text) in (5, 6, 7, 8)
-    except ValueError:
-        return "90" in text or "270" in text
-
-
 def _recipe_source_dimensions(photo):
     try:
         width = int(_photo_value(photo, "width") or 0)
@@ -82,6 +74,19 @@ def _recipe_source_dimensions(photo):
         and _orientation_swaps_axes(_exif_orientation(_photo_value(photo, "exif_data")))
     ):
         return height, width
+    return width, height
+
+
+def _scaled_recipe_source_dimensions(photo, max_size=None):
+    width, height = _recipe_source_dimensions(photo)
+    if width <= 0 or height <= 0:
+        return 0, 0
+    if max_size:
+        long_edge = max(width, height)
+        if long_edge > max_size:
+            scale = max_size / long_edge
+            width = round(width * scale)
+            height = round(height * scale)
     return width, height
 
 
@@ -118,19 +123,31 @@ def _recipe_source_path(photo, recipe, max_size, vireo_dir, folders):
             return get_canonical_image_path(photo, vireo_dir, folders)
         return os.path.join(folders.get(photo["folder_id"], ""), photo["filename"])
 
+    primary_is_raw = (
+        os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+    )
+
     canonical = get_canonical_image_path(photo, vireo_dir, folders)
     wc_rel = photo["working_copy_path"]
-    if not recipe.get("crop") and canonical and wc_rel:
-        wc_path = wc_rel if os.path.isabs(wc_rel) else os.path.join(vireo_dir, wc_rel)
-        if os.path.abspath(canonical) == os.path.abspath(wc_path):
-            return canonical
-    if recipe.get("crop") and wc_rel:
-        wc_path = os.path.join(vireo_dir, wc_rel)
-        if (
-            os.path.exists(wc_path)
-            and _path_satisfies_recipe_render(wc_path, photo, recipe, max_size)
-        ):
-            return canonical
+    # For RAW primaries with a recipe, never short-circuit to the JPEG
+    # working copy or companion: legacy working copies predate the
+    # highlight-preserving RAW decode (EDIT_MATH_VERSION's purge only
+    # touches preview/thumb caches, not working copies). Reusing them
+    # here would feed the recipe a clipped JPEG and silently bypass
+    # generate_thumbnail's RAW_DECODE_PRESERVE_HIGHLIGHTS request — the
+    # raw_decode kwarg is a no-op when load_image gets a JPEG path.
+    if not primary_is_raw:
+        if not recipe.get("crop") and canonical and wc_rel:
+            wc_path = wc_rel if os.path.isabs(wc_rel) else os.path.join(vireo_dir, wc_rel)
+            if os.path.abspath(canonical) == os.path.abspath(wc_path):
+                return canonical
+        if recipe.get("crop") and wc_rel:
+            wc_path = os.path.join(vireo_dir, wc_rel)
+            if (
+                os.path.exists(wc_path)
+                and _path_satisfies_recipe_render(wc_path, photo, recipe, max_size)
+            ):
+                return canonical
 
     folder_path = folders.get(photo["folder_id"])
     if not folder_path:
@@ -140,14 +157,22 @@ def _recipe_source_path(photo, recipe, max_size, vireo_dir, folders):
                 return wc_path
         return ""
     companion_path = photo["companion_path"]
-    if companion_path:
+    original = os.path.join(folder_path, photo["filename"])
+    # Allow the companion JPEG only for non-RAW primaries, OR for RAW
+    # primaries whose RAW is known to fail for the current source mtime —
+    # mirrors the gate in app/pipeline _recipe_render_source so edited
+    # RAW thumbnails decode the highlight-preserving RAW unless we've
+    # already proven it can't be demosaiced.
+    allow_companion = not primary_is_raw or _has_current_raw_failure(
+        photo, original,
+    )
+    if companion_path and allow_companion:
         companion = os.path.join(folder_path, companion_path)
         if (
             os.path.exists(companion)
             and _path_satisfies_recipe_render(companion, photo, recipe, max_size)
         ):
             return companion
-    original = os.path.join(folder_path, photo["filename"])
     if not os.path.exists(original) and wc_rel:
         wc_path = os.path.join(vireo_dir, wc_rel)
         if os.path.exists(wc_path):
@@ -156,11 +181,20 @@ def _recipe_source_path(photo, recipe, max_size, vireo_dir, folders):
 
 
 def _has_current_raw_failure(photo, source_path):
+    """Whether this RAW row carries an explicit `source` failure marker.
+
+    Only an explicit ``working_copy_failed_source == "source"`` marker
+    routes RAW thumbnails to the companion JPEG. Treating legacy NULL
+    markers the same way as an explicit source failure made thumbnail
+    selection diverge from preview/export, which use only the explicit
+    semantics (see ``_has_current_working_copy_failure`` in ``app.py``
+    and ``pipeline_job.py``).
+    """
     if os.path.splitext(source_path or "")[1].lower() not in RAW_EXTENSIONS:
         return False
     if os.path.splitext(_photo_value(photo, "filename") or "")[1].lower() not in RAW_EXTENSIONS:
         return False
-    if _photo_value(photo, "working_copy_failed_source") not in (None, "source"):
+    if _photo_value(photo, "working_copy_failed_source") != "source":
         return False
     failed_at = _photo_value(photo, "working_copy_failed_at")
     failed_mtime = _photo_value(photo, "working_copy_failed_mtime")
@@ -185,8 +219,51 @@ def _has_current_raw_failure(photo, source_path):
     return age < 24 * 60 * 60
 
 
+def _retry_thumbnail_with_companion(
+    db, photo, source_path, cache_dir, size, quality, recipe, folder_path,
+):
+    if not photo or not folder_path:
+        return None
+    companion_rel = _photo_value(photo, "companion_path")
+    if not companion_rel:
+        return None
+    companion_abs = os.path.join(folder_path, companion_rel)
+    if (
+        not os.path.exists(companion_abs)
+        or os.path.abspath(companion_abs) == os.path.abspath(source_path)
+    ):
+        return None
+    photo_id = _photo_value(photo, "id")
+    log.info(
+        "Thumbnail RAW decode failed for photo %s; falling back to companion JPEG",
+        photo_id,
+    )
+    file_mtime = _photo_value(photo, "file_mtime")
+    if file_mtime is not None and photo_id is not None and hasattr(db, "conn"):
+        with contextlib.suppress(Exception):
+            db.conn.execute(
+                "UPDATE photos SET"
+                " working_copy_failed_at=datetime('now'),"
+                " working_copy_failed_mtime=?,"
+                " working_copy_failed_source='source'"
+                " WHERE id=?",
+                (file_mtime, photo_id),
+            )
+            db.conn.commit()
+    recipe_kwargs = {"recipe": recipe} if recipe else {}
+    return generate_thumbnail(
+        photo_id,
+        companion_abs,
+        cache_dir,
+        size=size,
+        quality=quality,
+        **recipe_kwargs,
+    )
+
+
 def generate_thumbnail(
     photo_id, source_path, cache_dir, size=THUMB_SIZE, quality=85, recipe=None,
+    raw_decode=None, min_source_size=None,
 ):
     """Generate a JPEG thumbnail for a photo.
 
@@ -196,6 +273,17 @@ def generate_thumbnail(
         cache_dir: directory to store thumbnails
         size: max dimension in pixels
         quality: JPEG quality (1-95)
+        raw_decode: optional RAW decode mode forwarded to ``load_image``.
+            Defaults to ``None``, which uses ``load_image``'s default
+            (RAW_DECODE_JPEG_FIRST). Pass
+            ``RAW_DECODE_PRESERVE_HIGHLIGHTS`` when regenerating an
+            edited RAW thumbnail so the demosaic matches the preview /
+            export pipeline instead of falling back to the embedded
+            camera JPEG's clipped highlights.
+        min_source_size: optional ``(width, height)`` for the image loaded
+            before applying ``recipe``. If the RAW loader falls back to an
+            embedded preview smaller than either axis, generation returns
+            ``None`` so callers can retry a full-size companion JPEG.
 
     Returns:
         path to the thumbnail file, or None on failure
@@ -206,10 +294,29 @@ def generate_thumbnail(
         return thumb_path
 
     load_max_size = None if recipe and recipe.get("crop") else size
-    img = load_image(source_path, max_size=load_max_size)
+    load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
+    img = load_image(source_path, max_size=load_max_size, **load_kwargs)
     if img is None:
         log.warning("Could not load image for thumbnail: %s", source_path)
         return None
+    if min_source_size:
+        expected_w, expected_h = min_source_size
+        if (
+            expected_w > 0
+            and expected_h > 0
+            and (
+                img.size[0] + 1 < expected_w
+                or img.size[1] + 1 < expected_h
+            )
+        ):
+            log.info(
+                "Thumbnail source for photo %s is undersized (%dx%d, "
+                "expected %dx%d): %s",
+                photo_id, img.size[0], img.size[1],
+                expected_w, expected_h, source_path,
+            )
+            img.close()
+            return None
     if recipe:
         from image_edits import apply_recipe_to_loaded_image
         img = apply_recipe_to_loaded_image(img, recipe, max_size=size)
@@ -304,14 +411,50 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
         # iterations and avoid blocking concurrent jobs (a parallel scan's
         # add_photo INSERT) past the 30s busy_timeout.
         recipe_kwargs = {"recipe": recipe} if recipe else {}
-        if generate_thumbnail(
+        # Derive the decode mode from the primary photo's extension so
+        # edited RAWs that fall through to the original source path are
+        # demosaiced with highlight preservation, matching the preview /
+        # export pipeline rather than the default JPEG-first decode.
+        raw_decode_kwargs = {}
+        if recipe and os.path.splitext(
+            source_photo["filename"]
+        )[1].lower() in RAW_EXTENSIONS:
+            raw_decode_kwargs["raw_decode"] = RAW_DECODE_PRESERVE_HIGHLIGHTS
+        min_source_size = None
+        if (
+            recipe
+            and os.path.splitext(source_path)[1].lower() in RAW_EXTENSIONS
+        ):
+            load_max_size = None if recipe.get("crop") else thumb_size
+            min_source_size = _scaled_recipe_source_dimensions(
+                source_photo, load_max_size,
+            )
+        result_path = generate_thumbnail(
             photo["id"],
             source_path,
             cache_dir,
             size=thumb_size,
             quality=thumb_quality,
+            min_source_size=min_source_size,
             **recipe_kwargs,
-        ) is not None:
+            **raw_decode_kwargs,
+        )
+        if (
+            result_path is None
+            and recipe
+            and os.path.splitext(source_path)[1].lower() in RAW_EXTENSIONS
+        ):
+            result_path = _retry_thumbnail_with_companion(
+                db,
+                source_photo,
+                source_path,
+                cache_dir,
+                thumb_size,
+                thumb_quality,
+                recipe,
+                folders.get(source_photo["folder_id"]),
+            )
+        if result_path is not None:
             generated += 1
             # Record on-disk presence in the photos table so the dashboard's
             # coverage query (`thumb_path IS NOT NULL`) reflects this run.

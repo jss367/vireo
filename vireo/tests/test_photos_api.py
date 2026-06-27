@@ -1450,6 +1450,35 @@ def test_edit_preview_renders_uncommitted_recipe_without_storing(client_with_pho
         assert img.size == (600, 800)
 
 
+def test_edit_preview_returns_400_for_malformed_crop(client_with_photo):
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_rel = f"working/{photo_id}.jpg"
+    Image.new("RGB", (800, 600), (180, 90, 40)).save(
+        os.path.join(vireo_dir, wc_rel), "JPEG", quality=85,
+    )
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=? WHERE id=?",
+        (wc_rel, photo_id),
+    )
+    db.conn.commit()
+
+    rendered = app.test_client().get(
+        f"/photos/{photo_id}/edit-preview",
+        query_string={
+            "size": "1920",
+            "recipe": '{"crop":{"x":0}}',
+        },
+    )
+
+    assert rendered.status_code == 400
+    assert "crop must include" in rendered.get_data(as_text=True)
+
+
 def test_edit_preview_skips_recent_failed_raw_before_decode(
     client_with_photo, monkeypatch,
 ):
@@ -1824,21 +1853,93 @@ def test_cropped_thumbnail_uses_companion_before_raw_failure_marker(
         photo_id,
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
     )
+    from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS
     original_load_image = thumbnails.load_image
-    loaded_paths = []
+    loaded = []
 
-    def tracking_load_image(file_path, max_size=1024):
-        loaded_paths.append(file_path)
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        loaded.append((file_path, kwargs))
         if str(file_path).lower().endswith(".nef"):
             raise AssertionError("thumbnail retried RAW before companion")
-        return original_load_image(file_path, max_size=max_size)
+        return original_load_image(file_path, max_size=max_size, **kwargs)
 
     monkeypatch.setattr(thumbnails, "load_image", tracking_load_image)
 
     rendered = client.get(f"/thumbnails/{photo_id}.jpg")
 
     assert rendered.status_code == 200
+    loaded_paths = [path for path, _ in loaded]
     assert loaded_paths == [companion_path]
+    # Even though the resolved source is the companion JPEG, the
+    # thumbnail self-heal must request RAW_DECODE_PRESERVE_HIGHLIGHTS so
+    # the call would demosaic the RAW with highlight preservation if
+    # _recipe_render_source had returned the RAW path instead. Keying
+    # the decode mode off the photo's primary extension (not the
+    # resolved source) keeps thumbnails in sync with previews/exports.
+    _, loaded_kwargs = loaded[0]
+    assert loaded_kwargs.get("raw_decode") == RAW_DECODE_PRESERVE_HIGHLIGHTS
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (267, 400)
+
+
+def test_thumbnail_falls_back_when_raw_short_edge_is_smaller(
+    client_with_photo, monkeypatch,
+):
+    """A RAW embedded preview with the requested long edge is still too small
+    when its short edge does not match the expected aspect. The thumbnail
+    self-heal path should reject it and retry the companion before caching.
+    """
+    import io
+    import os
+
+    import thumbnails
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    raw_path = os.path.join(folder["path"], "thumb.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(b"unsupported raw")
+    companion_path = os.path.join(folder["path"], "thumb.jpg")
+    Image.new("RGB", (6000, 4000), (40, 90, 180)).save(
+        companion_path, "JPEG", quality=85,
+    )
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='thumb.NEF', extension='.nef',
+               companion_path='thumb.jpg',
+               working_copy_path=NULL,
+               width=6000, height=4000,
+               working_copy_failed_at=NULL,
+               working_copy_failed_mtime=NULL,
+               working_copy_failed_source=NULL
+           WHERE id=?""",
+        (photo_id,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+
+    original_load_image = thumbnails.load_image
+    loaded_paths = []
+
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        loaded_paths.append(str(file_path))
+        if str(file_path).lower().endswith(".nef"):
+            # Long edge ties the requested thumbnail size (400), but a 3:2
+            # source should load as 400x267 before recipe application.
+            return Image.new("RGB", (400, 225), (200, 50, 50))
+        return original_load_image(file_path, max_size=max_size, **kwargs)
+
+    monkeypatch.setattr(thumbnails, "load_image", tracking_load_image)
+
+    rendered = client.get(f"/thumbnails/{photo_id}.jpg")
+
+    assert rendered.status_code == 200
+    assert loaded_paths == [raw_path, companion_path]
     with Image.open(io.BytesIO(rendered.data)) as img:
         assert img.size == (267, 400)
 
@@ -1881,14 +1982,57 @@ def test_edited_original_uses_trusted_working_copy_when_source_missing(
         assert img.size == (600, 800)
 
 
-def test_edited_original_prefers_full_res_companion_before_raw_decode(
-    client_with_photo, monkeypatch,
+def test_edited_raw_original_uses_trusted_working_copy_when_source_missing(
+    client_with_photo,
 ):
     import io
     import os
 
-    import image_loader
     from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_rel = f"working/{photo_id}.jpg"
+    Image.new("RGB", (800, 600), (30, 120, 200)).save(
+        os.path.join(vireo_dir, wc_rel), "JPEG",
+    )
+    folder = db.conn.execute(
+        "SELECT f.path, p.filename FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    os.remove(os.path.join(folder["path"], folder["filename"]))
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='offline.NEF', extension='.nef',
+               working_copy_path=?,
+               companion_path=NULL,
+               width=800, height=600
+           WHERE id=?""",
+        (wc_rel, photo_id),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+
+    rendered = client.get(f"/photos/{photo_id}/original")
+
+    assert rendered.status_code == 200, rendered.get_data(as_text=True)
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (600, 800)
+
+
+def test_edited_original_uses_companion_after_raw_failure_marker(
+    client_with_photo, monkeypatch,
+):
+    """When the scanner has marked the RAW as failed for the current mtime,
+    the edited original endpoint must route through the full-resolution
+    companion JPEG instead of returning 500. Otherwise the same photo
+    that already rendered via the companion fallback once would stop
+    serving on every subsequent request until the marker expires —
+    exactly what _recipe_render_source already prevents for previews."""
+    import image_loader
 
     app, db, photo_id = client_with_photo
     client = app.test_client()
@@ -1896,7 +2040,6 @@ def test_edited_original_prefers_full_res_companion_before_raw_decode(
         "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
         (photo_id,),
     ).fetchone()
-    companion_path = os.path.join(folder["path"], "test.jpg")
     db.conn.execute(
         """UPDATE photos
            SET filename='source.NEF', extension='.nef',
@@ -1916,18 +2059,140 @@ def test_edited_original_prefers_full_res_companion_before_raw_decode(
     original_load_image = image_loader.load_image
     loaded_paths = []
 
-    def tracking_load_image(file_path, max_size=1024):
-        loaded_paths.append(file_path)
-        if str(file_path).lower().endswith(".nef"):
-            raise AssertionError("edited original decoded RAW before companion")
-        return original_load_image(file_path, max_size=max_size)
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        loaded_paths.append(str(file_path))
+        return original_load_image(file_path, max_size=max_size, **kwargs)
 
     monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
 
     rendered = client.get(f"/photos/{photo_id}/original")
 
-    assert rendered.status_code == 200
-    assert loaded_paths == [companion_path]
+    assert rendered.status_code == 200, rendered.data
+    # The endpoint must skip the failed RAW and load the companion JPEG.
+    assert len(loaded_paths) == 1
+    assert loaded_paths[0].lower().endswith(".jpg")
+
+
+def test_edited_original_records_raw_marker_when_companion_rescues_decode(
+    client_with_photo, monkeypatch,
+):
+    """When the RAW decode fails on an edited RAW+JPEG with no current
+    failure marker, the companion-fallback path must stamp
+    working_copy_failed_source='source' so the next request routes
+    directly through the companion via the marker-aware branch instead
+    of retrying the slow failing RAW decode each hit."""
+    import os
+
+    import app as app_module
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    raw_path = os.path.join(folder["path"], "unsupported.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(b"\x00")
+    companion_path = os.path.join(folder["path"], "unsupported.JPG")
+    Image.new("RGB", (800, 600), (40, 80, 120)).save(companion_path, "JPEG")
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='unsupported.NEF', extension='.nef',
+               companion_path='unsupported.JPG',
+               working_copy_path=NULL,
+               working_copy_failed_at=NULL,
+               working_copy_failed_mtime=NULL,
+               working_copy_failed_source=NULL,
+               width=800, height=600,
+               file_mtime=1234.0
+           WHERE id=?""",
+        (photo_id,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+
+    def fake_load_image(file_path, max_size=1024, **kwargs):
+        if str(file_path).lower().endswith(".nef"):
+            return None
+        return Image.new("RGB", (800, 600), (40, 80, 120))
+
+    monkeypatch.setattr(image_loader, "load_image", fake_load_image)
+    if hasattr(app_module, "load_image"):
+        monkeypatch.setattr(app_module, "load_image", fake_load_image, raising=False)
+
+    resp = client.get(f"/photos/{photo_id}/original")
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+
+    row = db.conn.execute(
+        "SELECT working_copy_failed_source, working_copy_failed_mtime"
+        " FROM photos WHERE id=?",
+        (photo_id,),
+    ).fetchone()
+    assert row["working_copy_failed_source"] == "source"
+    assert row["working_copy_failed_mtime"] == 1234.0
+
+
+def test_edited_original_decodes_raw_with_highlight_preservation(
+    client_with_photo, monkeypatch,
+):
+    """Edited RAW+JPEG originals must decode the RAW, not substitute the JPEG.
+
+    The companion JPEG is the camera-baked render with highlights already
+    clipped; substituting it bypasses RAW_DECODE_PRESERVE_HIGHLIGHTS and applies
+    the user's edits to clipped data.
+    """
+    import io
+    import os
+
+    import app as app_module
+    import image_loader
+    from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    raw_path = os.path.join(folder["path"], "source.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(b"\x00")
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path='test.jpg',
+               working_copy_path=NULL,
+               width=800, height=600,
+               file_mtime=1234.0
+           WHERE id=?""",
+        (photo_id,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+
+    load_calls = []
+
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        load_calls.append((str(file_path), kwargs))
+        return Image.new("RGB", (800, 600), color="red")
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+    if hasattr(app_module, "load_image"):
+        monkeypatch.setattr(app_module, "load_image", tracking_load_image)
+
+    rendered = client.get(f"/photos/{photo_id}/original")
+
+    assert rendered.status_code == 200, rendered.data
+    assert len(load_calls) == 1
+    loaded_path, loaded_kwargs = load_calls[0]
+    assert loaded_path.lower().endswith(".nef"), (
+        f"endpoint should load RAW primary, got {loaded_path!r}"
+    )
+    assert loaded_kwargs.get("raw_decode") == RAW_DECODE_PRESERVE_HIGHLIGHTS
     with Image.open(io.BytesIO(rendered.data)) as img:
         assert img.size == (600, 800)
 
@@ -2549,7 +2814,10 @@ def test_preview_honors_raw_marker_after_companion_bypass_retry_fails(
 
     assert first.status_code == 500
     assert second.status_code == 500
-    assert calls["count"] == 1
+    # First request: RAW load fails → companion fallback attempted → also
+    # fails → source marker stamped. Second request: the source marker
+    # short-circuits before any load_image call.
+    assert calls["count"] == 2
     row = db.conn.execute(
         """SELECT working_copy_failed_mtime, working_copy_failed_source
            FROM photos WHERE id=?""",
@@ -2730,6 +2998,203 @@ def test_preview_does_not_refresh_failure_marker_when_working_copy_jpeg_is_corru
     assert row["age_seconds"] is not None and row["age_seconds"] > 24 * 60 * 60
 
 
+def test_preview_falls_back_to_companion_on_first_raw_decode_failure(
+    client_with_photo, monkeypatch,
+):
+    """When an edited RAW+JPEG preview has no failure marker yet,
+    ``_recipe_render_source`` returns the RAW for highlight-preserving
+    decode. If libraw can't decode that RAW, the preview must try the
+    companion JPEG before 500ing — otherwise an unsupported RAW edit fails
+    even though a usable sidecar exists. Mirrors
+    serve_original_photo's edited-path companion fallback.
+    """
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+
+    raw_path = os.path.join(folder["path"], "bad.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(b"unsupported raw")
+    companion_abs = os.path.join(folder["path"], "bad.jpg")
+    Image.new("RGB", (1600, 1200), (40, 90, 180)).save(
+        companion_abs, "JPEG", quality=85,
+    )
+
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               companion_path='bad.jpg',
+               working_copy_path=NULL,
+               width=1600, height=1200,
+               working_copy_failed_at=NULL,
+               working_copy_failed_mtime=NULL,
+               working_copy_failed_source=NULL
+           WHERE id=?""",
+        (photo_id,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+
+    original_load_image = image_loader.load_image
+    loaded_paths = []
+
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        loaded_paths.append(file_path)
+        if str(file_path).lower().endswith(".nef"):
+            return None
+        return original_load_image(file_path, max_size=max_size, **kwargs)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert resp.mimetype == "image/jpeg"
+    # RAW first (preserve-highlights), then companion as fallback.
+    assert len(loaded_paths) == 2
+    assert str(loaded_paths[0]).lower().endswith(".nef")
+    assert str(loaded_paths[1]) == companion_abs
+
+    # The failed RAW decode must stamp the source marker so subsequent
+    # requests skip the slow RAW retry and _recipe_render_source selects
+    # the companion directly.
+    row = db.conn.execute(
+        "SELECT working_copy_failed_source FROM photos WHERE id=?",
+        (photo_id,),
+    ).fetchone()
+    assert row["working_copy_failed_source"] == "source"
+
+
+def test_preview_falls_back_to_companion_when_raw_short_edge_is_smaller(
+    client_with_photo, monkeypatch,
+):
+    """Preview caching must compare both RAW result axes before accepting it."""
+    import io
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+
+    raw_path = os.path.join(folder["path"], "wide.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(b"unsupported raw")
+    companion_abs = os.path.join(folder["path"], "wide.jpg")
+    Image.new("RGB", (6000, 4000), (40, 90, 180)).save(
+        companion_abs, "JPEG", quality=85,
+    )
+
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='wide.NEF', extension='.nef',
+               companion_path='wide.jpg',
+               working_copy_path=NULL,
+               width=6000, height=4000,
+               working_copy_failed_at=NULL,
+               working_copy_failed_mtime=NULL,
+               working_copy_failed_source=NULL
+           WHERE id=?""",
+        (photo_id,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(photo_id, {"rotation": 0})
+
+    original_load_image = image_loader.load_image
+    loaded_paths = []
+
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        loaded_paths.append(str(file_path))
+        if str(file_path).lower().endswith(".nef"):
+            # Same requested long edge as the 1920px preview, but the expected
+            # 3:2 short edge is 1280. A long-edge-only check would accept this.
+            return Image.new("RGB", (1920, 1080), (200, 50, 50))
+        return original_load_image(file_path, max_size=max_size, **kwargs)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert loaded_paths[0] == raw_path
+    assert loaded_paths[1] == companion_abs
+    with Image.open(io.BytesIO(resp.data)) as img:
+        assert img.size == (1920, 1280)
+
+
+def test_preview_keeps_raw_result_when_companion_is_smaller(
+    client_with_photo, monkeypatch,
+):
+    """Do not replace an undersized RAW preview with a still-smaller sidecar."""
+    import io
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+
+    raw_path = os.path.join(folder["path"], "wide.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(b"unsupported raw")
+    companion_abs = os.path.join(folder["path"], "wide-small.jpg")
+    Image.new("RGB", (1000, 667), (40, 90, 180)).save(
+        companion_abs, "JPEG", quality=85,
+    )
+
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='wide.NEF', extension='.nef',
+               companion_path='wide-small.jpg',
+               working_copy_path=NULL,
+               width=6000, height=4000,
+               working_copy_failed_at=NULL,
+               working_copy_failed_mtime=NULL,
+               working_copy_failed_source=NULL
+           WHERE id=?""",
+        (photo_id,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(photo_id, {"rotation": 0})
+
+    original_load_image = image_loader.load_image
+    loaded_paths = []
+
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        loaded_paths.append(str(file_path))
+        if str(file_path).lower().endswith(".nef"):
+            return Image.new("RGB", (1920, 1080), (200, 50, 50))
+        return original_load_image(file_path, max_size=max_size, **kwargs)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert loaded_paths[0] == raw_path
+    assert loaded_paths[1] == companion_abs
+    with Image.open(io.BytesIO(resp.data)) as img:
+        assert img.size == (1920, 1080)
+
+
 def test_original_skips_recent_failed_raw_working_copy(
     client_with_photo, monkeypatch,
 ):
@@ -2859,6 +3324,78 @@ def test_original_skips_recent_failed_raw_after_rejecting_small_working_copy(
     assert called["extract"] is False
 
 
+def test_original_uses_companion_after_raw_marker_and_small_working_copy(
+    client_with_photo, monkeypatch,
+):
+    """A source RAW failure marker should not block a full-size sidecar.
+
+    Scanner can preserve ``working_copy_failed_source='source'`` after creating
+    a capped companion working copy. When /original rejects that capped working
+    copy, it must upgrade from the sidecar instead of failing fast on the RAW
+    marker before companion fallback is considered.
+    """
+    import io
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    folder_path = folder["path"]
+
+    raw_path = os.path.join(folder_path, "marked.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(b"unsupported raw")
+    companion_path = os.path.join(folder_path, "marked.JPG")
+    Image.new("RGB", (6000, 4000), (90, 140, 180)).save(
+        companion_path, "JPEG", quality=85,
+    )
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    capped_wc_rel = f"working/{photo_id}.jpg"
+    Image.new("RGB", (1000, 667), (20, 40, 60)).save(
+        os.path.join(vireo_dir, capped_wc_rel), "JPEG", quality=85,
+    )
+
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='marked.NEF', extension='.nef',
+               companion_path='marked.JPG',
+               working_copy_path=?,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=file_mtime,
+               working_copy_failed_source='source',
+               width=6000, height=4000
+           WHERE id=?""",
+        (capped_wc_rel, photo_id),
+    )
+    db.conn.commit()
+
+    real_extract = image_loader.extract_working_copy
+    extracted_sources = []
+
+    def tracking_extract(source, output, *args, **kwargs):
+        extracted_sources.append(str(source))
+        if str(source).lower().endswith(".nef"):
+            raise AssertionError("original route retried source-failed RAW")
+        return real_extract(source, output, *args, **kwargs)
+
+    monkeypatch.setattr(image_loader, "extract_working_copy", tracking_extract)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/original")
+
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert extracted_sources == [companion_path]
+    with Image.open(io.BytesIO(resp.data)) as img:
+        assert img.size == (6000, 4000)
+
+
 def test_original_refreshes_failure_marker_when_stale_retry_fails(
     client_with_photo, monkeypatch,
 ):
@@ -2905,6 +3442,220 @@ def test_original_refreshes_failure_marker_when_stale_retry_fails(
     ).fetchone()
     assert row["working_copy_failed_mtime"] == file_mtime
     assert row["age_seconds"] is not None and row["age_seconds"] < 60
+
+
+def test_original_falls_back_to_companion_when_raw_extraction_fails(
+    client_with_photo, monkeypatch,
+):
+    """For a RAW+JPEG row whose RAW libraw can't decode, /photos/<id>/original
+    must use the full-size companion JPEG instead of returning 500.
+    _full_res_companion_path() already confirms a usable sidecar; bailing out
+    when the RAW alone fails throws away a request the system can satisfy.
+    """
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    folder_row = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    folder_path = folder_row["path"]
+
+    # Replace the JPEG with a RAW+JPEG pair so the row looks like RAW+companion.
+    raw_path = os.path.join(folder_path, "bad.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(b"unsupported raw")
+    companion_path = os.path.join(folder_path, "bad.JPG")
+    Image.new("RGB", (1600, 1200), (90, 140, 180)).save(
+        companion_path, "JPEG", quality=85,
+    )
+
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               companion_path=?,
+               working_copy_path=NULL,
+               working_copy_failed_at=NULL,
+               working_copy_failed_mtime=NULL,
+               working_copy_failed_source=NULL
+           WHERE id=?""",
+        ("bad.JPG", photo_id),
+    )
+    db.conn.commit()
+
+    real_extract = image_loader.extract_working_copy
+
+    def extract_only_companion(source, output, *args, **kwargs):
+        if source.lower().endswith(".nef"):
+            return False
+        return real_extract(source, output, *args, **kwargs)
+
+    monkeypatch.setattr(image_loader, "extract_working_copy", extract_only_companion)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/original")
+
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert resp.mimetype == "image/jpeg"
+
+
+def test_original_uses_companion_when_raw_extract_returns_undersized(
+    client_with_photo, monkeypatch,
+):
+    """``extract_working_copy`` returns True even when ``_load_raw`` falls
+    back to a small embedded JPEG, so a successful extract can still
+    produce a working copy that's a fraction of the sensor's full
+    resolution. /photos/<id>/original must detect that fallback and
+    re-extract from the companion JPEG before caching it as the
+    working copy — otherwise every later 1:1 request silently serves
+    the downscaled preview even though a full-size sidecar exists.
+    """
+    import io
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    folder_row = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    folder_path = folder_row["path"]
+
+    raw_path = os.path.join(folder_path, "source.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(b"unsupported raw")
+    companion_path = os.path.join(folder_path, "source.JPG")
+    Image.new("RGB", (6000, 4000), (90, 140, 180)).save(
+        companion_path, "JPEG", quality=85,
+    )
+
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path='source.JPG',
+               working_copy_path=NULL,
+               working_copy_failed_at=NULL,
+               working_copy_failed_mtime=NULL,
+               working_copy_failed_source=NULL,
+               width=6000, height=4000
+           WHERE id=?""",
+        (photo_id,),
+    )
+    db.conn.commit()
+
+    real_extract = image_loader.extract_working_copy
+    extract_calls = []
+
+    def extract_with_size_fallback(source, output, *args, **kwargs):
+        extract_calls.append(str(source))
+        if str(source).lower().endswith(".nef"):
+            # Stand in for `_load_raw` returning the embedded JPEG when
+            # libraw can't demosaic the RAW: write an undersized JPEG
+            # and return True (matches the current contract).
+            os.makedirs(os.path.dirname(output), exist_ok=True)
+            Image.new("RGB", (1600, 1067), (200, 50, 50)).save(
+                output, "JPEG", quality=85,
+            )
+            return True
+        return real_extract(source, output, *args, **kwargs)
+
+    monkeypatch.setattr(image_loader, "extract_working_copy", extract_with_size_fallback)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/original")
+
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert resp.mimetype == "image/jpeg"
+    # Both sources must be tried — RAW first, then companion after the
+    # undersized output is detected.
+    assert len(extract_calls) == 2
+    assert extract_calls[0].lower().endswith(".nef")
+    assert extract_calls[1].lower().endswith(".jpg")
+    # The persisted working copy must be the full-size companion render.
+    with Image.open(io.BytesIO(resp.data)) as img:
+        assert max(img.size) >= 5400
+
+
+def test_edited_original_uses_companion_when_raw_returns_undersized(
+    client_with_photo, monkeypatch,
+):
+    """For edited RAW originals, ``load_image`` can return a small
+    embedded JPEG when ``rawpy.postprocess`` fails — the
+    ``preserve_highlights`` mode still falls back to the embedded
+    thumb. The endpoint must compare the loaded dimensions against
+    the photo's stored full-resolution dimensions and try the
+    companion JPEG before caching an undersized originals/<id>.jpg.
+    """
+    import io
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    folder_row = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    folder_path = folder_row["path"]
+
+    raw_path = os.path.join(folder_path, "edit.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(b"unsupported raw")
+    companion_path = os.path.join(folder_path, "edit.JPG")
+    Image.new("RGB", (6000, 4000), (90, 140, 180)).save(
+        companion_path, "JPEG", quality=85,
+    )
+
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='edit.NEF', extension='.nef',
+               companion_path='edit.JPG',
+               working_copy_path=NULL,
+               working_copy_failed_at=NULL,
+               working_copy_failed_mtime=NULL,
+               working_copy_failed_source=NULL,
+               width=6000, height=4000
+           WHERE id=?""",
+        (photo_id,),
+    )
+    db.conn.commit()
+    # An edit recipe routes the request through the highlight-preserving
+    # decode path that the new size-validation guards.
+    db.set_photo_edit_recipe(photo_id, {"rotation": 0})
+
+    load_calls = []
+
+    def fake_load_image(file_path, max_size=1024, **kwargs):
+        load_calls.append((str(file_path), kwargs))
+        if str(file_path).lower().endswith(".nef"):
+            # Stand in for `_load_raw` returning an undersized embedded
+            # preview when libraw can't demosaic the sensor data.
+            return Image.new("RGB", (1600, 1067), (200, 50, 50))
+        return Image.new("RGB", (6000, 4000), (90, 140, 180))
+
+    monkeypatch.setattr(image_loader, "load_image", fake_load_image)
+    # The endpoint imports load_image into the local module namespace too.
+    import app as app_module
+    monkeypatch.setattr(app_module, "load_image", fake_load_image, raising=False)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/original")
+
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    # The RAW was attempted first, then the companion JPEG after the
+    # undersized result was detected.
+    paths = [str(p[0]).lower() for p in load_calls]
+    assert any(p.endswith(".nef") for p in paths)
+    assert any(p.endswith(".jpg") for p in paths)
+    # The cached original must be the full-size companion render.
+    with Image.open(io.BytesIO(resp.data)) as img:
+        assert max(img.size) >= 5400
 
 
 def test_eviction_removes_oldest_files_when_over_quota(tmp_path, monkeypatch):

@@ -8,8 +8,9 @@ import os
 import re
 import shutil
 
+from exif_orientation import orientation_swaps_axes as _orientation_swaps_axes
 from image_edits import apply_recipe_to_loaded_image
-from image_loader import load_image
+from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS, RAW_EXTENSIONS, load_image
 
 log = logging.getLogger(__name__)
 
@@ -205,12 +206,24 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
                 break
         if not source_path:
             use_wc = _working_copy_can_satisfy_export(
-                photo, recipe, max_size, wc_max, vireo_dir, exif_data=exif_data
+                photo, recipe, max_size, wc_max, vireo_dir,
+                exif_data=exif_data, folder_path=folder_path,
             )
             source_path = None
             if not use_wc:
+                primary_path = (
+                    os.path.join(folder_path, photo["filename"])
+                    if folder_path else ""
+                )
+                primary_is_raw = (
+                    os.path.splitext(photo["filename"])[1].lower()
+                    in RAW_EXTENSIONS
+                )
                 source_path = _companion_can_satisfy_export(
-                    photo, folder_path, recipe, max_size, exif_data=exif_data
+                    photo, folder_path, recipe, max_size, exif_data=exif_data,
+                    skip_raw_primary=(
+                        not primary_is_raw or os.path.isfile(primary_path)
+                    ),
                 )
             if not source_path:
                 source_path = _resolve_source(
@@ -275,7 +288,96 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
             load_max_size = (
                 None if recipe and recipe.get("crop") else (max_size or None)
             )
-            img = load_image(source_path, max_size=load_max_size)
+            source_is_raw = (
+                os.path.splitext(source_path)[1].lower() in RAW_EXTENSIONS
+            )
+            raw_decode = (
+                RAW_DECODE_PRESERVE_HIGHLIGHTS if recipe and source_is_raw else None
+            )
+            load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
+            img = load_image(source_path, max_size=load_max_size, **load_kwargs)
+            if source_is_raw:
+                # RAW decode either failed outright (`img is None`) or
+                # silently fell back to the embedded JPEG. ``_load_raw``
+                # returns ``raw.extract_thumb()`` when libraw cannot
+                # demosaic the RAW; that preview can be much smaller than
+                # the full-size companion JPEG, so the export would
+                # quietly produce undersized bytes for unsupported RAW+JPEG
+                # files. Compare *both* loaded dimensions against the
+                # source's expected dimensions (capped by
+                # ``load_max_size`` when set) — a long-edge-only check
+                # accepts e.g. 6000x3376 embedded previews for 6000x4000
+                # photos, dropping short-edge content.
+                needs_companion = img is None
+                expected_w, expected_h = 0, 0
+                if img is not None:
+                    orig_w, orig_h = _recipe_source_dimensions(photo, exif_data)
+                    expected_w, expected_h = orig_w, orig_h
+                    if (
+                        load_max_size
+                        and expected_w > 0
+                        and expected_h > 0
+                    ):
+                        long_edge = max(expected_w, expected_h)
+                        if long_edge > load_max_size:
+                            scale = load_max_size / long_edge
+                            expected_w = round(expected_w * scale)
+                            expected_h = round(expected_h * scale)
+                    # Allow a 1px slack for rounding between RAW decoder
+                    # output and stored dimensions.
+                    if (
+                        expected_w > 0
+                        and expected_h > 0
+                        and (
+                            img.size[0] + 1 < expected_w
+                            or img.size[1] + 1 < expected_h
+                        )
+                    ):
+                        needs_companion = True
+                if needs_companion:
+                    companion_fallback = _companion_can_satisfy_export(
+                        photo, folder_path, recipe, max_size,
+                        exif_data=exif_data, skip_raw_primary=False,
+                    )
+                    if companion_fallback:
+                        companion_img = load_image(
+                            companion_fallback, max_size=load_max_size,
+                        )
+                        # Prefer companion when it covers img on both
+                        # axes — a long-edge-only check misses cases
+                        # like a 6000x3376 embedded preview "tying" a
+                        # 6000x4000 sidecar and losing the short-edge
+                        # content.
+                        if companion_img is not None and (
+                            img is None
+                            or (
+                                companion_img.size[0] >= img.size[0]
+                                and companion_img.size[1] >= img.size[1]
+                                and companion_img.size != img.size
+                            )
+                        ):
+                            if img is None:
+                                log.info(
+                                    "RAW decode failed for %s; falling back "
+                                    "to companion JPEG",
+                                    photo["filename"],
+                                )
+                            else:
+                                log.info(
+                                    "RAW decode fell back to undersized "
+                                    "embedded JPEG (%dx%d, expected %dx%d) "
+                                    "for %s; using companion JPEG (%dx%d) "
+                                    "instead",
+                                    img.size[0], img.size[1],
+                                    expected_w, expected_h,
+                                    photo["filename"],
+                                    companion_img.size[0],
+                                    companion_img.size[1],
+                                )
+                                img.close()
+                            img = companion_img
+                        elif companion_img is not None:
+                            companion_img.close()
             if img is None:
                 errors.append(f"{photo['filename']}: failed to load image")
                 if progress_cb:
@@ -375,20 +477,6 @@ def _exif_orientation(exif_data):
     return metadata.get("Orientation")
 
 
-def _orientation_swaps_axes(orientation):
-    if orientation is None or isinstance(orientation, bool):
-        return False
-    if isinstance(orientation, (int, float)):
-        return int(orientation) in (5, 6, 7, 8)
-    text = str(orientation).strip().lower()
-    if not text:
-        return False
-    try:
-        return int(text) in (5, 6, 7, 8)
-    except ValueError:
-        return "90" in text or "270" in text
-
-
 def _image_size_after_exif_orientation(img):
     width, height = img.size
     orientation = None
@@ -399,14 +487,32 @@ def _image_size_after_exif_orientation(img):
     return width, height
 
 
-def _recipe_result_long_edge(width, height, recipe):
-    """Return the rendered long edge after right-angle rotation and crop."""
+def _recipe_result_dimensions(width, height, recipe):
+    """Return rendered dimensions after right-angle rotation and crop."""
     rotation = (recipe or {}).get("rotation", 0)
     if rotation in (90, 270):
         width, height = height, width
     crop = (recipe or {}).get("crop") if recipe else None
     if crop:
-        return max(float(crop["w"]) * width, float(crop["h"]) * height)
+        width = float(crop["w"]) * width
+        height = float(crop["h"]) * height
+    return width, height
+
+
+def _scale_dimensions_to_max(width, height, max_size):
+    if max_size is None:
+        return width, height
+    long_edge = max(width, height)
+    if long_edge > max_size:
+        scale = max_size / long_edge
+        width = round(width * scale)
+        height = round(height * scale)
+    return width, height
+
+
+def _recipe_result_long_edge(width, height, recipe):
+    """Return the rendered long edge after right-angle rotation and crop."""
+    width, height = _recipe_result_dimensions(width, height, recipe)
     return max(width, height)
 
 
@@ -664,12 +770,27 @@ def _find_developed_output(
 
 
 def _working_copy_can_satisfy_export(
-    photo, recipe, max_size, wc_max, vireo_dir, exif_data=None
+    photo, recipe, max_size, wc_max, vireo_dir, exif_data=None, folder_path=None
 ):
     """Return True when the working copy can preserve requested export pixels."""
     if not max_size or max_size <= 0:
         return False
     if max_size > wc_max:
+        return False
+    # For RAW primaries with an edit recipe, the working copy is unreliable
+    # while the RAW source is available: libraries built before the
+    # highlight-preserving RAW decode landed carry working copies derived
+    # from clipped sources (camera JPEG or the JPEG-first RAW path), and
+    # EDIT_MATH_VERSION purges previews/thumbnails but not working copies.
+    # Reusing such a copy would silently apply the recipe to clipped bytes.
+    # If the RAW source is offline/missing, though, the working copy is the
+    # only local fallback for resized exports.
+    if (
+        recipe
+        and os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+        and folder_path
+        and os.path.exists(os.path.join(folder_path, photo["filename"]))
+    ):
         return False
     wc_rel = photo["working_copy_path"]
     if not wc_rel:
@@ -707,9 +828,24 @@ def _working_copy_can_satisfy_export(
     return wc_render_long >= required_long
 
 
-def _companion_can_satisfy_export(photo, folder_path, recipe, max_size, exif_data=None):
-    """Return a full-resolution companion path when it can satisfy edited export."""
+def _companion_can_satisfy_export(
+    photo, folder_path, recipe, max_size, exif_data=None,
+    *, skip_raw_primary=True,
+):
+    """Return a full-resolution companion path when it can satisfy edited export.
+
+    By default RAW primaries are skipped so the export decodes the RAW with
+    ``RAW_DECODE_PRESERVE_HIGHLIGHTS`` instead of the camera JPEG (whose
+    highlights are already clipped). Pass ``skip_raw_primary=False`` to get
+    the companion path as a fallback when the RAW decode itself fails — a
+    rendered camera JPEG is still better than a failed export.
+    """
     if not recipe:
+        return None
+    if (
+        skip_raw_primary
+        and os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+    ):
         return None
     companion_rel = photo["companion_path"]
     if not companion_rel or not folder_path:
@@ -727,10 +863,19 @@ def _companion_can_satisfy_export(photo, folder_path, recipe, max_size, exif_dat
     original_w, original_h = _recipe_source_dimensions(photo, exif_data)
     if original_w <= 0 or original_h <= 0:
         return None
-    required_long = _recipe_result_long_edge(original_w, original_h, recipe)
-    if max_size is not None:
-        required_long = min(max_size, required_long)
-    if _recipe_result_long_edge(comp_w, comp_h, recipe) >= required_long:
+    required_w, required_h = _recipe_result_dimensions(
+        original_w, original_h, recipe,
+    )
+    comp_render_w, comp_render_h = _recipe_result_dimensions(
+        comp_w, comp_h, recipe,
+    )
+    required_w, required_h = _scale_dimensions_to_max(
+        required_w, required_h, max_size,
+    )
+    comp_render_w, comp_render_h = _scale_dimensions_to_max(
+        comp_render_w, comp_render_h, max_size,
+    )
+    if comp_render_w + 1 >= required_w and comp_render_h + 1 >= required_h:
         return companion
     return None
 

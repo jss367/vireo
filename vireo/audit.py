@@ -343,7 +343,7 @@ def verify_hashes(db, progress_cb=None, should_cancel=None):
     Returns stats dict: {checked, ok, baselined, modified, corrupt,
     unreadable, missing, cancelled}
     """
-    from scanner import compute_file_hash
+    from scanner import EMPTY_FILE_SHA256, compute_file_hash
 
     photos = db.get_integrity_photos()
     total = len(photos)
@@ -375,8 +375,16 @@ def verify_hashes(db, progress_cb=None, should_cancel=None):
 
         stats["checked"] += 1
         if not photo["file_hash"]:
-            db.update_photo_hash_check(photo["id"], "ok", file_hash=actual,
-                                       commit=False)
+            # Zero-byte placeholders must NOT have the empty SHA baselined
+            # back in: scanner.py deliberately clears file_hash for empty
+            # files so they don't collide as exact duplicates of every
+            # other zero-byte image in the archive. Mark the row "ok"
+            # without writing file_hash so its NULL state survives audits.
+            if actual == EMPTY_FILE_SHA256:
+                db.update_photo_hash_check(photo["id"], "ok", commit=False)
+            else:
+                db.update_photo_hash_check(photo["id"], "ok", file_hash=actual,
+                                           commit=False)
             stats["baselined"] += 1
         elif actual == photo["file_hash"]:
             db.update_photo_hash_check(photo["id"], "ok", commit=False)
@@ -451,7 +459,7 @@ def accept_current_hash(db, photo_ids):
 
     Returns the number of photos updated.
     """
-    from scanner import compute_file_hash
+    from scanner import EMPTY_FILE_SHA256, compute_file_hash
 
     folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
     accepted = 0
@@ -466,7 +474,22 @@ def accept_current_hash(db, photo_ids):
         except OSError:
             log.warning("Cannot accept hash for unreadable file %s", path)
             continue
-        db.update_photo_hash_check(pid, "ok", file_hash=new_hash)
+        # Zero-byte placeholders must NOT land EMPTY_FILE_SHA256 in
+        # photos.file_hash — mirrors the scanner / verify_hashes rule.
+        # Without this, accepting a flagged zero-byte file reintroduces
+        # the very duplicate identity the rest of the system tries to
+        # keep out, so every empty placeholder would resurface as
+        # exact-duplicate-of-every-other-empty-file until a rescan
+        # repaired it. Clearing the column also drops any pre-truncation
+        # hash that was the original cause of the modified/corrupt flag.
+        try:
+            file_size = os.path.getsize(path)
+        except OSError:
+            file_size = None
+        if new_hash == EMPTY_FILE_SHA256 and file_size == 0:
+            db.update_photo_hash_check(pid, "ok", clear_file_hash=True)
+        else:
+            db.update_photo_hash_check(pid, "ok", file_hash=new_hash)
         accepted += 1
     log.info("Accepted current hash for %d photos", accepted)
     return accepted
