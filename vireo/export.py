@@ -330,9 +330,18 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
                         companion_img = load_image(
                             companion_fallback, max_size=load_max_size,
                         )
+                        # Prefer companion when it covers img on both
+                        # axes — a long-edge-only check misses cases
+                        # like a 6000x3376 embedded preview "tying" a
+                        # 6000x4000 sidecar and losing the short-edge
+                        # content.
                         if companion_img is not None and (
                             img is None
-                            or max(companion_img.size) > max(img.size)
+                            or (
+                                companion_img.size[0] >= img.size[0]
+                                and companion_img.size[1] >= img.size[1]
+                                and companion_img.size != img.size
+                            )
                         ):
                             if img is None:
                                 log.info(
@@ -344,10 +353,13 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
                                 log.info(
                                     "RAW decode fell back to undersized "
                                     "embedded JPEG (%dx%d, expected %dx%d) "
-                                    "for %s; using companion JPEG instead",
+                                    "for %s; using companion JPEG (%dx%d) "
+                                    "instead",
                                     img.size[0], img.size[1],
                                     expected_w, expected_h,
                                     photo["filename"],
+                                    companion_img.size[0],
+                                    companion_img.size[1],
                                 )
                                 img.close()
                             img = companion_img

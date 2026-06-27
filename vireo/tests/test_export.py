@@ -470,6 +470,74 @@ def test_export_falls_back_to_companion_when_raw_returns_undersized_image(
         assert img.size == (3000, 2000)
 
 
+def test_export_falls_back_to_companion_when_raw_short_edge_is_smaller(
+    export_env, monkeypatch,
+):
+    """Companion replaces RAW even when long edges tie.
+
+    Codex's regression case: a 6000x3376 embedded preview for a 6000x4000
+    RAW has the same long edge as the companion JPEG. A long-edge-only
+    swap gate (``max(companion.size) > max(img.size)``) would keep the
+    embedded preview and crop from pixels missing short-edge content. The
+    swap must compare both axes.
+    """
+    import export as export_module
+
+    env = export_env
+    db = env["db"]
+    raw_path = env["src"] / "source.NEF"
+    raw_path.write_bytes(b"\x00")
+    Image.new("RGB", (6000, 4000), color="green").save(
+        str(env["src"] / "bird1.jpg"), "JPEG", quality=85,
+    )
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path='bird1.jpg',
+               working_copy_path=NULL,
+               width=6000, height=4000
+           WHERE id=?""",
+        (env["p1"],),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        env["p1"],
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
+    )
+
+    load_calls = []
+
+    def fake_load_image(file_path, max_size=1024, **kwargs):
+        load_calls.append((str(file_path), kwargs))
+        if str(file_path).lower().endswith(".nef"):
+            # Long edge ties the companion (6000), but the short edge
+            # falls short of the 4000 sensor height.
+            return Image.new("RGB", (6000, 3376), color="red")
+        return Image.new("RGB", (6000, 4000), color="green")
+
+    monkeypatch.setattr(export_module, "load_image", fake_load_image)
+
+    result = export_photos(
+        db=db,
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}"},
+    )
+
+    assert result["exported"] == 1
+    assert result["errors"] == []
+    # Both loads happen and the companion wins despite the long-edge tie.
+    assert len(load_calls) == 2
+    assert load_calls[0][0].lower().endswith(".nef")
+    assert load_calls[1][0].lower().endswith(".jpg")
+    with Image.open(os.path.join(env["dest"], "source.jpg")) as img:
+        # 50% crop of full-size companion (6000x4000 -> 3000x2000), not
+        # the undersized embedded preview's crop (6000x3376 -> 3000x1688)
+        # that a long-edge-only gate would have kept.
+        assert img.size == (3000, 2000)
+
+
 def test_export_keeps_raw_when_decode_succeeds_at_full_size(
     export_env, monkeypatch,
 ):

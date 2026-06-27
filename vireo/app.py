@@ -9367,9 +9367,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         != os.path.abspath(source_path)
                     ):
                         companion_img = load_image(companion_abs, max_size=None)
+                        # Prefer companion when it covers img on both axes —
+                        # a long-edge-only check misses cases like a
+                        # 6000x3376 embedded preview "tying" a 6000x4000
+                        # sidecar and losing the short-edge content.
                         if companion_img is not None and (
                             img is None
-                            or max(companion_img.size) > max(img.size)
+                            or (
+                                companion_img.size[0] >= img.size[0]
+                                and companion_img.size[1] >= img.size[1]
+                                and companion_img.size != img.size
+                            )
                         ):
                             if img is None:
                                 log.info(
@@ -9382,9 +9390,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                 log.info(
                                     "External-edit RAW decode fell back to "
                                     "undersized embedded JPEG (%dx%d) for "
-                                    "photo %s; using companion JPEG %s",
+                                    "photo %s; using companion JPEG %s "
+                                    "(%dx%d)",
                                     img.size[0], img.size[1], photo["id"],
                                     companion_abs,
+                                    companion_img.size[0],
+                                    companion_img.size[1],
                                 )
                                 img.close()
                             img = companion_img
@@ -11648,9 +11659,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     != os.path.abspath(source_path)
                 ):
                     companion_img = load_image(companion_abs, max_size=None)
+                    # Prefer companion when it covers img on both axes — a
+                    # long-edge-only check misses cases like a 6000x3376
+                    # embedded preview "tying" a 6000x4000 sidecar and
+                    # losing the short-edge content.
                     if companion_img is not None and (
                         img is None
-                        or max(companion_img.size) > max(img.size)
+                        or (
+                            companion_img.size[0] >= img.size[0]
+                            and companion_img.size[1] >= img.size[1]
+                            and companion_img.size != img.size
+                        )
                     ):
                         if img is None:
                             log.info(
@@ -11662,9 +11681,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             log.info(
                                 "iNat upload RAW decode fell back to "
                                 "undersized embedded JPEG (%dx%d) for "
-                                "photo %s; using companion JPEG %s",
+                                "photo %s; using companion JPEG %s (%dx%d)",
                                 img.size[0], img.size[1], photo["id"],
                                 companion_abs,
+                                companion_img.size[0],
+                                companion_img.size[1],
                             )
                             img.close()
                         img = companion_img
