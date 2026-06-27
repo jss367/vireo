@@ -2801,6 +2801,64 @@ def test_rescan_invalidates_when_prev_file_hash_was_null(tmp_path):
     )
 
 
+def test_rescan_invalidates_caches_when_file_truncated_to_zero(tmp_path):
+    """Truncating a previously-hashed photo to zero bytes is a content
+    change — derived thumbnails and working copies were rendered from
+    the old non-empty bytes and no longer match what's on disk. The
+    zero-byte branch clears ``file_hash`` (so the empty SHA never
+    becomes a duplicate identity) which must NOT bypass the
+    invalidation: otherwise the old thumbnail and working copy stay
+    cached forever, even though the source file is empty.
+    """
+    from db import Database
+    from scanner import scan
+    from thumbnails import generate_thumbnail
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    img_path = os.path.join(root, "shot.jpg")
+    Image.new("RGB", (800, 600), color=(255, 0, 0)).save(img_path, "JPEG")
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    cache_dir = vireo_dir / "thumbnails"
+    cache_dir.mkdir()
+
+    db = Database(str(vireo_dir / "test.db"))
+    scan(root, db, vireo_dir=str(vireo_dir))
+    photo_id = db.get_photos(per_page=100)[0]["id"]
+
+    thumb_path = str(cache_dir / f"{photo_id}.jpg")
+    generate_thumbnail(photo_id, img_path, str(cache_dir))
+    assert os.path.exists(thumb_path)
+
+    # Replace with a zero-byte file. Bump mtime backwards so the
+    # incremental scan actually reprocesses the row instead of taking
+    # the file_unchanged fast path.
+    os.truncate(img_path, 0)
+    db.conn.execute(
+        "UPDATE photos SET file_mtime = 0 WHERE id = ?", (photo_id,)
+    )
+    db.conn.commit()
+
+    scan(root, db, incremental=True, vireo_dir=str(vireo_dir),
+         thumb_cache_dir=str(cache_dir))
+
+    new_hash = db.conn.execute(
+        "SELECT file_hash, file_size FROM photos WHERE id = ?", (photo_id,)
+    ).fetchone()
+    assert new_hash["file_hash"] is None, (
+        "sanity: zero-byte file must not carry an empty-SHA duplicate identity"
+    )
+    assert new_hash["file_size"] == 0
+
+    assert not os.path.exists(thumb_path), (
+        "Invalidation must fire on the truncate-to-zero transition; "
+        "otherwise the thumbnail rendered from the original (non-empty) "
+        "bytes stays cached even though the source file is now empty."
+    )
+
+
 def test_rescan_regenerates_working_copy_when_file_content_changes(tmp_path):
     """When a large JPEG's content changes, re-scan must invalidate the stale
     working copy so the subsequent extraction reflects current pixels."""

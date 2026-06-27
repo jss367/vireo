@@ -158,3 +158,50 @@ def test_check_duplicates_missing_file_skipped(app_and_db, tmp_path):
     done = [e for e in events if e.get("done")]
     assert len(done) == 1
     assert done[0]["checked"] == 2  # Both counted as checked
+
+
+def test_check_duplicates_zero_byte_file_does_not_swallow_pending_batch(
+    app_and_db, tmp_path
+):
+    """A zero-byte path at end-of-list (or on a BATCH_SIZE boundary) must
+    not eat already-queued ``batch_duplicates``. The pipeline UI only
+    learns about duplicates from emitted ``data.duplicates`` events; if
+    the end-of-list yield is skipped, ``duplicate_count`` reports the
+    duplicate but the UI never deselects it.
+    """
+    app, db, fid = app_and_db
+
+    library_dir = tmp_path / "library"
+    library_dir.mkdir(exist_ok=True)
+    img = Image.new("RGB", (50, 50), color="red")
+    img.save(str(library_dir / "existing.jpg"))
+
+    from scanner import scan
+    scan(str(library_dir), db)
+
+    source = tmp_path / "source"
+    source.mkdir()
+    img.save(str(source / "duplicate.jpg"))  # Will match the library hash.
+    (source / "empty.NEF").write_bytes(b"")
+
+    client = app.test_client()
+    # Order matters: empty file is LAST, so the only opportunity to emit
+    # the queued duplicate is the ``checked == total`` branch.
+    resp = client.post("/api/import/check-duplicates", json={
+        "paths": [str(source / "duplicate.jpg"), str(source / "empty.NEF")],
+    })
+
+    events = parse_sse_events(resp.data)
+    done = [e for e in events if e.get("done")]
+    assert len(done) == 1
+    assert done[0]["duplicate_count"] == 1
+
+    all_duplicates = []
+    for e in events:
+        if "duplicates" in e:
+            all_duplicates.extend(e["duplicates"])
+    assert str(source / "duplicate.jpg") in all_duplicates, (
+        "Zero-byte trailing path must not skip the final batch emit; "
+        "the duplicate.jpg path needs to surface in a data.duplicates "
+        "event so the import UI can deselect it."
+    )

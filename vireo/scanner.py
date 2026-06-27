@@ -1651,15 +1651,28 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             # stale. Includes the NULL → concrete transition for legacy
             # rows that predate hash tracking — we can't prove their
             # caches match current bytes, so safer to flush and
-            # regenerate. Gated on ``row_already_existed`` so brand-new
-            # inserts (prev_file_hash is always NULL there) don't
-            # trigger pointless UPDATE + commit round-trips on large
-            # initial scans. Requires explicit vireo_dir; callers must
-            # pass it (scan can't guess because --db and --thumb-dir
-            # are independently configurable).
+            # regenerate. Also fires when a previously-hashed file is
+            # truncated to zero bytes: file_hash is None in that branch
+            # (empty files don't carry duplicate identity), so the plain
+            # ``file_hash is not None`` guard would otherwise leave
+            # thumbnails and working copies from the old bytes in place.
+            # Skips the empty → empty repair case (prev was already the
+            # empty SHA) because the bytes didn't actually change.
+            # Gated on ``row_already_existed`` so brand-new inserts
+            # (prev_file_hash is always NULL there) don't trigger
+            # pointless UPDATE + commit round-trips on large initial
+            # scans. Requires explicit vireo_dir; callers must pass it
+            # (scan can't guess because --db and --thumb-dir are
+            # independently configurable).
+            content_identity_changed = (
+                file_hash is not None and prev_file_hash != file_hash
+            ) or (
+                file_size == 0
+                and prev_file_hash is not None
+                and prev_file_hash != EMPTY_FILE_SHA256
+            )
             if (row_already_existed
-                    and file_hash is not None
-                    and prev_file_hash != file_hash
+                    and content_identity_changed
                     and vireo_dir):
                 _invalidate_derived_caches(
                     db, vireo_dir, photo_id, thumb_cache_dir=thumb_cache_dir,
