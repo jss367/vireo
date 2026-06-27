@@ -343,7 +343,7 @@ def verify_hashes(db, progress_cb=None, should_cancel=None):
     Returns stats dict: {checked, ok, baselined, modified, corrupt,
     unreadable, missing, cancelled}
     """
-    from scanner import compute_file_hash
+    from scanner import EMPTY_FILE_SHA256, compute_file_hash
 
     photos = db.get_integrity_photos()
     total = len(photos)
@@ -375,8 +375,16 @@ def verify_hashes(db, progress_cb=None, should_cancel=None):
 
         stats["checked"] += 1
         if not photo["file_hash"]:
-            db.update_photo_hash_check(photo["id"], "ok", file_hash=actual,
-                                       commit=False)
+            # Zero-byte placeholders must NOT have the empty SHA baselined
+            # back in: scanner.py deliberately clears file_hash for empty
+            # files so they don't collide as exact duplicates of every
+            # other zero-byte image in the archive. Mark the row "ok"
+            # without writing file_hash so its NULL state survives audits.
+            if actual == EMPTY_FILE_SHA256:
+                db.update_photo_hash_check(photo["id"], "ok", commit=False)
+            else:
+                db.update_photo_hash_check(photo["id"], "ok", file_hash=actual,
+                                           commit=False)
             stats["baselined"] += 1
         elif actual == photo["file_hash"]:
             db.update_photo_hash_check(photo["id"], "ok", commit=False)

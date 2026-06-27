@@ -340,9 +340,12 @@ def test_scan_zero_byte_images_are_not_duplicate_photos(tmp_path):
     assert all(r["flag"] != "rejected" for r in rows)
 
     # Historical repair: older scans stored the SHA-256 of empty bytes, which
-    # made unrelated empty files look like exact duplicates and auto-rejected
-    # all but one. A rescan should clear that duplicate identity and undo only
-    # those empty-hash auto-rejections.
+    # made unrelated empty files look like exact duplicates. A rescan should
+    # clear that duplicate identity. The ``flag`` column is left as-is
+    # because a 'rejected' value could come from the user (Browse / culling)
+    # just as easily as from past duplicate auto-resolution — silently
+    # un-rejecting a manually rejected placeholder would be worse than
+    # leaving it; the duplicates page calls out empty groups for review.
     db.conn.execute(
         "UPDATE photos SET file_hash = ?, flag = 'rejected'",
         (EMPTY_FILE_SHA256,),
@@ -355,7 +358,7 @@ def test_scan_zero_byte_images_are_not_duplicate_photos(tmp_path):
         "SELECT file_hash, flag FROM photos ORDER BY filename"
     ).fetchall()
     assert all(r["file_hash"] is None for r in repaired)
-    assert all(r["flag"] == "none" for r in repaired)
+    assert all(r["flag"] == "rejected" for r in repaired)
 
 
 def test_scan_cancel_check_aborts_before_discovery(tmp_path):

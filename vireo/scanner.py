@@ -1606,8 +1606,15 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 if row_already_existed and prev_file_hash is not None:
                     updates.append("hash_checked_at=NULL")
                     updates.append("hash_status=NULL")
-                if row_already_existed and prev_file_hash == EMPTY_FILE_SHA256:
-                    updates.append("flag=CASE WHEN flag='rejected' THEN 'none' ELSE flag END")
+                # Historical rows where the empty SHA leaked in are repaired
+                # here by clearing file_hash above. We deliberately leave the
+                # ``flag`` column untouched: a 'rejected' value could come
+                # from the user (Browse / culling) just as easily as from
+                # past duplicate auto-resolution, and we have no marker that
+                # distinguishes them. Silently un-rejecting a user's
+                # placeholder would be worse than leaving it as-is; the
+                # duplicates page already flags empty-byte groups for
+                # manual review.
             if file_meta and extract_full_metadata:
                 updates.append("exif_data=?")
                 update_params.append(json.dumps(file_meta))

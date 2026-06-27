@@ -422,6 +422,48 @@ def test_verify_hashes_ok_and_baseline(tmp_path):
     assert runs['integrity']['problem_count'] == 0
 
 
+def test_verify_hashes_does_not_baseline_empty_files_back_to_empty_hash(tmp_path):
+    """Zero-byte placeholders that scanner cleared to file_hash=NULL must
+    stay NULL after a Verify Hashes run — otherwise the audit would
+    silently re-introduce ``EMPTY_FILE_SHA256`` and resurrect every empty
+    file as duplicate-of-every-other-empty-file in the duplicates view.
+    """
+    from audit import verify_hashes
+    from db import Database
+    from scanner import EMPTY_FILE_SHA256
+
+    root = tmp_path / "photos"
+    root.mkdir()
+    empty_path = root / "DSC_0001.NEF"
+    empty_path.write_bytes(b"")
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(root), name="photos")
+    db.add_photo(
+        folder_id=folder_id,
+        filename=empty_path.name,
+        extension=empty_path.suffix.lower(),
+        file_size=0,
+        file_mtime=os.path.getmtime(empty_path),
+    )
+
+    stats = verify_hashes(db)
+
+    assert stats["baselined"] == 1
+    row = db.conn.execute(
+        "SELECT file_hash, hash_status FROM photos WHERE filename = ?",
+        (empty_path.name,),
+    ).fetchone()
+    assert row["file_hash"] is None, (
+        "verify_hashes must not write EMPTY_FILE_SHA256 onto a zero-byte row"
+    )
+    assert row["hash_status"] == "ok"
+    # Sanity: confirm the constant we're guarding against is what hashing
+    # an empty file actually returns.
+    import hashlib
+    assert hashlib.sha256(b"").hexdigest() == EMPTY_FILE_SHA256
+
+
 def test_verify_hashes_flags_corruption_when_mtime_unchanged(tmp_path):
     """Content change with the original mtime is the bit-rot signature."""
     from audit import verify_hashes
