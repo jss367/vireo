@@ -7,6 +7,7 @@ import os
 import tempfile
 from datetime import UTC, datetime
 
+from exif_orientation import orientation_swaps_axes as _orientation_swaps_axes
 from image_loader import (
     RAW_DECODE_PRESERVE_HIGHLIGHTS,
     RAW_EXTENSIONS,
@@ -59,20 +60,6 @@ def _exif_orientation(exif_data):
         if isinstance(values, dict) and "Orientation" in values:
             return values["Orientation"]
     return metadata.get("Orientation")
-
-
-def _orientation_swaps_axes(orientation):
-    if orientation is None or isinstance(orientation, bool):
-        return False
-    if isinstance(orientation, int | float):
-        return int(orientation) in (5, 6, 7, 8)
-    text = str(orientation).strip().lower()
-    if not text:
-        return False
-    try:
-        return int(text) in (5, 6, 7, 8)
-    except ValueError:
-        return "90" in text or "270" in text
 
 
 def _recipe_source_dimensions(photo):
