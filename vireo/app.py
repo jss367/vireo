@@ -14080,10 +14080,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     result["ok"] = False
                     result["summary"] = f"Move failed — {errors[0]}"
                 else:
+                    cleanup_error = result.get("cleanup_error")
                     result["ok"] = True
                     result["summary"] = (
                         f"Moved {moved} photo{'s' if moved != 1 else ''}"
                         + (f", {len(errors)} error(s)" if errors else "")
+                        + (
+                            f"; cleanup failed: {cleanup_error}"
+                            if cleanup_error else ""
+                        )
                     )
             return result
 
@@ -16450,6 +16455,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("destination must be an absolute path")
         if local_processing and not destination:
             return json_error("local_processing requires a destination")
+        if local_processing and destination:
+            from local_processing import final_destination_name
+
+            try:
+                final_destination_name(destination)
+            except ValueError:
+                return json_error(
+                    "local_processing destination cannot be a filesystem root"
+                )
         # Local processing only makes sense for import pipelines (source or
         # sources). Collection pipelines set skip_scan and never run the
         # ingest stage, so the staging folder is never created or indexed —

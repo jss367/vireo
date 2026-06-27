@@ -199,6 +199,26 @@ def test_pipeline_local_processing_requires_destination(setup):
         shutil.rmtree(src, ignore_errors=True)
 
 
+def test_pipeline_local_processing_rejects_filesystem_root_destination(
+    setup, tmp_path
+):
+    app, _db_path = setup
+    src = tmp_path / "card"
+    src.mkdir()
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": os.path.abspath(os.sep),
+            "local_processing": True,
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 400
+        assert "filesystem root" in resp.get_json()["error"].lower()
+
+
 def test_pipeline_local_processing_rejects_collection_id(setup, tmp_path):
     # Collection pipelines set skip_scan and never run ingest, so the
     # staging folder is never created/indexed. Without this rejection

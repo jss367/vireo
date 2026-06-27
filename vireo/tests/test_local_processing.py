@@ -2,6 +2,7 @@ import os
 from collections import namedtuple
 
 import local_processing
+import pytest
 
 Usage = namedtuple("Usage", "total used free")
 
@@ -12,6 +13,14 @@ def test_staging_root_uses_final_destination_basename(tmp_path):
     )
 
     assert root == os.path.join(str(tmp_path), "staging", "pipeline-123", "Photos")
+
+
+def test_staging_root_rejects_filesystem_root(tmp_path):
+    with pytest.raises(ValueError, match="filesystem root"):
+        local_processing.staging_root(str(tmp_path), "pipeline-123", os.sep)
+
+    with pytest.raises(ValueError, match="filesystem root"):
+        local_processing.staging_root(str(tmp_path), "pipeline-123", "C:\\")
 
 
 def test_storage_plan_reports_enough_space(monkeypatch, tmp_path):

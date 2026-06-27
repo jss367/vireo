@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import ntpath
 import os
 import shutil
 from pathlib import Path
@@ -15,6 +16,22 @@ MIN_DERIVED_OVERHEAD_BYTES = 5 * GIB
 RESERVED_FREE_BYTES = 10 * GIB
 
 
+def final_destination_name(final_destination: str) -> str:
+    """Return the folder name that must land exactly at ``final_destination``."""
+    nt_normalized = ntpath.normpath(final_destination)
+    nt_drive, nt_tail = ntpath.splitdrive(nt_normalized)
+    if nt_drive:
+        final_name = ntpath.basename(nt_normalized)
+        if not final_name or nt_tail in ("", "\\", "/"):
+            raise ValueError("final_destination must not be a filesystem root")
+        return final_name
+
+    final_name = os.path.basename(os.path.normpath(final_destination))
+    if not final_name:
+        raise ValueError("final_destination must not be a filesystem root")
+    return final_name
+
+
 def staging_root(vireo_dir: str, job_id: str, final_destination: str) -> str:
     """Return the local root whose move target is ``final_destination``.
 
@@ -23,7 +40,7 @@ def staging_root(vireo_dir: str, job_id: str, final_destination: str) -> str:
     the final destination's basename lets the verified archive step land at
     exactly the user-selected path.
     """
-    final_name = os.path.basename(os.path.normpath(final_destination)) or "archive"
+    final_name = final_destination_name(final_destination)
     return str(Path(vireo_dir) / "staging" / job_id / final_name)
 
 

@@ -170,6 +170,56 @@ def test_move_folder_failed_move_recorded_as_failed(app_and_db, tmp_path):
     assert row["error_count"] >= 1
 
 
+def test_move_folder_job_surfaces_post_commit_cleanup_warning(
+    app_and_db, tmp_path, monkeypatch
+):
+    import move as move_mod
+    from wait import wait_for_job_via_client
+
+    app, db = app_and_db
+    src = tmp_path / "cleanup_src"
+    src.mkdir()
+    (src / "bird.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 20)
+    fid = db.add_folder(str(src), name="cleanup_src")
+    db.add_photo(
+        folder_id=fid,
+        filename="bird.jpg",
+        extension=".jpg",
+        file_size=22,
+        file_mtime=1.0,
+    )
+    dst = tmp_path / "cleanup_dst"
+    dst.mkdir()
+
+    real_rmtree = move_mod.shutil.rmtree
+
+    def cleanup_fails(path, *args, **kwargs):
+        if os.fspath(path) == str(src):
+            raise OSError("permission denied")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(move_mod.shutil, "rmtree", cleanup_fails)
+
+    client = app.test_client()
+    resp = client.post("/api/jobs/move-folder", json={
+        "folder_id": fid,
+        "destination": str(dst),
+    })
+    assert resp.status_code == 200
+
+    job = wait_for_job_via_client(
+        client, resp.get_json()["job_id"], wait_for_history=True
+    )
+
+    assert job["status"] == "completed", job
+    result = job["result"]
+    assert result["ok"] is True
+    assert result["errors"] == []
+    assert "cleanup_error" in result
+    assert "cleanup failed" in result["summary"]
+    assert "permission denied" in result["summary"]
+
+
 def test_move_folder_merge_param_accepted(app_and_db, tmp_path):
     """POST /api/jobs/move-folder accepts merge=true and starts a job."""
     app, db = app_and_db
