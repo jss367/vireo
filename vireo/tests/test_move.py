@@ -541,7 +541,10 @@ def test_move_folder_refuses_destination_inside_tracked_ancestor(move_env):
     destination = env["dst"] / "Archive"
 
     result = move_folder(
-        db=env["db"], folder_id=env["fid_src"], destination=str(destination)
+        db=env["db"],
+        folder_id=env["fid_src"],
+        destination=str(destination),
+        reject_tracked_ancestor=True,
     )
 
     assert result["moved"] == 0

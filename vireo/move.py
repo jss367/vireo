@@ -1370,7 +1370,7 @@ def move_photos(db, photo_ids, destination, progress_cb=None):
 
 
 def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
-                merge=False, remote=None):
+                merge=False, remote=None, reject_tracked_ancestor=False):
     """Move an entire folder (and subfolders) to a destination.
 
     The folder is placed inside the destination, preserving its name.
@@ -1409,6 +1409,12 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             path; the catalog is repointed at the mount path once the move
             succeeds, so the photos stay in the library and resolve whenever
             the NAS is mounted.
+        reject_tracked_ancestor: when True, also reject a destination inside
+            another tracked folder. Normal user-initiated moves can validly
+            move into a tracked destination parent; local-processing archive
+            commits opt into this stricter guard because they create a new
+            top-level archive root and cannot be reparented under the
+            existing catalog row.
 
     Returns dict with keys: moved (int), errors (list of str). When the
     catalog has already been repointed at the new destination but deleting
@@ -1540,12 +1546,13 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             f"({tracked['path']}). Merging into or around a tracked folder "
             f"isn't supported."
         ]}
-    ancestor = _tracked_destination_ancestor(db, folder_id, overlap_check_path)
-    if ancestor:
-        return {"moved": 0, "errors": [
-            f"Destination is inside a folder Vireo already manages "
-            f"({ancestor['path']}). Pick an untracked archive destination."
-        ]}
+    if reject_tracked_ancestor:
+        ancestor = _tracked_destination_ancestor(db, folder_id, overlap_check_path)
+        if ancestor:
+            return {"moved": 0, "errors": [
+                f"Destination is inside a folder Vireo already manages "
+                f"({ancestor['path']}). Pick an untracked archive destination."
+            ]}
 
     if remote:
         probe = _remote_dir_exists(remote, transfer_dest)

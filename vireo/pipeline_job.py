@@ -4734,6 +4734,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     progress_cb=archive_cb,
                     developed_dir=developed_dir,
                     merge=True,
+                    reject_tracked_ancestor=True,
                 )
                 if move_result.get("errors"):
                     raise RuntimeError("; ".join(move_result["errors"]))
