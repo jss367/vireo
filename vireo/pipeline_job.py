@@ -4441,6 +4441,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 # abandoned staging photo IDs would treat the stale cache file
                 # as a valid thumbnail and skip regenerating it.
                 try:
+                    from pipeline import _results_cache_path
                     from preview_cache import (
                         cleanup_cached_files_for_deleted_photos,
                     )
@@ -4457,6 +4458,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             effective_thumb_cache_dir,
                             result.get("files", []),
                         )
+                        thread_db.set_workspace_group_state(
+                            workspace_id=workspace_id,
+                            fingerprint=None,
+                            when_ts=None,
+                        )
+                        with contextlib.suppress(OSError):
+                            os.unlink(
+                                _results_cache_path(
+                                    os.path.dirname(db_path), workspace_id,
+                                )
+                            )
                 except Exception:
                     log.exception(
                         "Failed to deindex local staging folder on archive skip",

@@ -481,6 +481,28 @@ def test_pipeline_local_processing_skips_archive_when_previews_fail(
 
     monkeypatch.setattr(image_loader, "load_image", boom)
 
+    import json
+
+    from db import Database
+    from pipeline import _results_cache_path
+
+    seed_db = Database(db_path)
+    ws_id = seed_db._active_workspace_id
+    seed_db.set_workspace_group_state(
+        ws_id, fingerprint="stale-group-fingerprint", when_ts=1714579200,
+    )
+    seed_db.close()
+    cache_path = _results_cache_path(os.path.dirname(db_path), ws_id)
+    with open(cache_path, "w") as f:
+        json.dump(
+            {
+                "photos": [{"id": 999999}],
+                "encounters": [],
+                "summary": {},
+            },
+            f,
+        )
+
     with app.test_client() as c:
         resp = c.post("/api/jobs/pipeline", json={
             "sources": [str(src)],
@@ -515,7 +537,6 @@ def test_pipeline_local_processing_skips_archive_when_previews_fail(
     # catalog. Otherwise ingest()'s known-hash skip would treat a retry's
     # files as duplicates and stage nothing, letting the next archive
     # publish an empty destination.
-    from db import Database
     check_db = Database(db_path)
     staging_dir = str(staging_file.parent)
     folder_row = check_db.conn.execute(
@@ -535,6 +556,17 @@ def test_pipeline_local_processing_skips_archive_when_previews_fail(
         "no photo rows should remain under the abandoned staging tree, "
         f"got {len(photo_rows)}"
     )
+    assert not os.path.exists(cache_path), (
+        "abandoning staged rows must remove the grouping cache, otherwise "
+        "pipeline review can render deleted photo IDs"
+    )
+    ws_row = check_db.conn.execute(
+        "SELECT last_grouped_at, last_group_fingerprint "
+        "FROM workspaces WHERE id = ?",
+        (ws_id,),
+    ).fetchone()
+    assert ws_row["last_grouped_at"] is None
+    assert ws_row["last_group_fingerprint"] is None
     check_db.close()
 
 
