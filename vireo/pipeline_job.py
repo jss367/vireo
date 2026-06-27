@@ -4608,11 +4608,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         f"{moved} photos archived "
                         f"(staging cleanup failed: {cleanup_error})"
                     )
-                    errors.append(
-                        f"[archive] Warning: staging cleanup failed after "
-                        f"commit — leftover files in {params.destination}: "
-                        f"{cleanup_error}"
-                    )
                 else:
                     summary = f"{moved} photos archived"
                 runner.update_step(

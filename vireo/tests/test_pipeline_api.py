@@ -1073,6 +1073,7 @@ def test_pipeline_local_processing_post_commit_cleanup_error_reports_completed(
     archive_result = job["result"]["archive"]
     assert archive_result["final_destination"] == str(final_dest)
     assert "cleanup_error" in archive_result
+    assert job["result"]["errors"] == []
 
 
 def test_pipeline_local_processing_deindexes_staging_on_cancel_after_scan(
