@@ -1450,6 +1450,35 @@ def test_edit_preview_renders_uncommitted_recipe_without_storing(client_with_pho
         assert img.size == (600, 800)
 
 
+def test_edit_preview_returns_400_for_malformed_crop(client_with_photo):
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_rel = f"working/{photo_id}.jpg"
+    Image.new("RGB", (800, 600), (180, 90, 40)).save(
+        os.path.join(vireo_dir, wc_rel), "JPEG", quality=85,
+    )
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=? WHERE id=?",
+        (wc_rel, photo_id),
+    )
+    db.conn.commit()
+
+    rendered = app.test_client().get(
+        f"/photos/{photo_id}/edit-preview",
+        query_string={
+            "size": "1920",
+            "recipe": '{"crop":{"x":0}}',
+        },
+    )
+
+    assert rendered.status_code == 400
+    assert "crop must include" in rendered.get_data(as_text=True)
+
+
 def test_edit_preview_skips_recent_failed_raw_before_decode(
     client_with_photo, monkeypatch,
 ):

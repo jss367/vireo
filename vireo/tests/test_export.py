@@ -364,6 +364,46 @@ def test_export_edited_raw_uses_working_copy_when_source_missing(export_env):
         assert img.size == (300, 400)
 
 
+def test_export_edited_raw_uses_working_copy_when_folder_missing(export_env):
+    """Missing-folder RAW exports may still use a sufficient local working copy."""
+    env = export_env
+    db = env["db"]
+    working_dir = os.path.join(env["vireo_dir"], "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_rel = f"working/{env['p1']}.jpg"
+    Image.new("RGB", (800, 600), color="red").save(
+        os.path.join(env["vireo_dir"], wc_rel), "JPEG", quality=95,
+    )
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='offline.NEF', extension='.nef',
+               working_copy_path=?,
+               companion_path=NULL,
+               width=800, height=600
+           WHERE id=?""",
+        (wc_rel, env["p1"]),
+    )
+    db.conn.execute("UPDATE folders SET status='missing' WHERE id=?", (env["fid"],))
+    db.conn.commit()
+    db.set_photo_edit_recipe(env["p1"], {"rotation": 90})
+
+    result = export_photos(
+        db=db,
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={
+            "naming_template": "{original}",
+            "max_size": 400,
+        },
+    )
+
+    assert result["exported"] == 1
+    assert result["errors"] == []
+    with Image.open(os.path.join(env["dest"], "offline.jpg")) as img:
+        assert img.size == (300, 400)
+
+
 def test_export_edited_raw_uses_companion_when_source_missing(export_env):
     """Offline edited RAW+JPEG exports may use a full-size companion."""
     env = export_env

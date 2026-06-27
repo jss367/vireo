@@ -780,12 +780,13 @@ def _working_copy_can_satisfy_export(
     # Reusing such a copy would silently apply the recipe to clipped bytes.
     # If the RAW source is offline/missing, though, the working copy is the
     # only local fallback for resized exports.
-    if recipe and os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS:
-        if not folder_path:
-            return False
-        original = os.path.join(folder_path, photo["filename"])
-        if os.path.exists(original):
-            return False
+    if (
+        recipe
+        and os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+        and folder_path
+        and os.path.exists(os.path.join(folder_path, photo["filename"]))
+    ):
+        return False
     wc_rel = photo["working_copy_path"]
     if not wc_rel:
         return False

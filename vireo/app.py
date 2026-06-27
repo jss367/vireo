@@ -18613,16 +18613,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             recipe = db.get_photo_edit_recipe(photo_id) or {}
         if not isinstance(recipe, dict):
             return "Invalid recipe", 400
-        display_recipe = dict(recipe)
-        display_recipe.pop("crop", None)
 
         try:
-            from image_edits import RecipeError, apply_recipe_to_loaded_image
+            from image_edits import (
+                RecipeError,
+                apply_recipe_to_loaded_image,
+                normalize_recipe,
+            )
             from image_loader import (
                 RAW_DECODE_PRESERVE_HIGHLIGHTS,
                 RAW_EXTENSIONS,
                 load_image,
             )
+            recipe = normalize_recipe(recipe) or {}
+            display_recipe = dict(recipe)
+            display_recipe.pop("crop", None)
             recipe_json = display_recipe
             vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
             folder_row = db.conn.execute(
