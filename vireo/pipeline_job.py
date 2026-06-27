@@ -1386,6 +1386,30 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             error=msg,
                             summary=summary,
                         )
+                        # Stop the run here. Without abort, scanner/previews/
+                        # classify/regroup would all execute against the
+                        # partial subset ingest did manage to copy — regroup
+                        # in particular overwrites the workspace pipeline
+                        # results with photo IDs that archive_stage's
+                        # deindex_staging is then going to delete, leaving
+                        # the workspace pointing at rows that no longer
+                        # exist. archive_stage already gates on abort and
+                        # any earlier-stage failure, so this also publishes
+                        # nothing. Finalize the remaining step rows as
+                        # skipped so the SSE clients don't see perpetually
+                        # pending stages.
+                        abort.set()
+                        stages["scan"]["status"] = "skipped"
+                        runner.update_step(
+                            job["id"], "scan",
+                            status="completed",
+                            summary="Skipped (ingest failed)",
+                        )
+                        _update_stages(runner, job["id"], stages)
+                        # The finally clause at the bottom of scanner_stage
+                        # puts the sentinel on scan_to_thumb so the
+                        # thumbnail consumer drains and exits.
+                        return
                     else:
                         stages["ingest"]["status"] = "completed"
                         runner.update_step(

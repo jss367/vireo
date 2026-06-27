@@ -675,6 +675,90 @@ def test_pipeline_local_processing_fails_ingest_when_files_fail_to_copy(
     assert (staging_root / "good.jpg").is_file()
 
 
+def test_pipeline_local_processing_ingest_failure_short_circuits_pipeline(
+    setup, tmp_path, monkeypatch
+):
+    """Regression: a fatal local-processing ingest failure marked the
+    ingest step "failed" but left ``abort`` clear, so scanner_stage went
+    on to scan the partial staging tree and previews/classify/regroup
+    ran on the photos that did copy. In a normal pipeline run with
+    regroup enabled, that overwrote the workspace pipeline results with
+    photo IDs that archive_stage then deindexed during staging cleanup —
+    the workspace was left pointing at rows that no longer existed,
+    after spending hours processing a partial import. A fatal ingest
+    failure must set ``abort`` so every downstream stage short-circuits.
+    """
+    app, _db_path = setup
+
+    final_parent = tmp_path / "nas_short_circuit"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+
+    src = tmp_path / "card_short_circuit"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(src / "good.jpg")
+    Image.new("RGB", (16, 16), "red").save(src / "bad.jpg")
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    # ingest() catches per-file copy errors and continues — bad.jpg will
+    # bump ``failed`` while good.jpg still lands in staging.
+    import ingest as ingest_mod
+
+    real_copy2 = ingest_mod.shutil.copy2
+
+    def flaky_copy2(src_path, dest_path, *args, **kwargs):
+        if os.path.basename(str(src_path)) == "bad.jpg":
+            raise OSError("synthetic copy failure")
+        return real_copy2(src_path, dest_path, *args, **kwargs)
+
+    monkeypatch.setattr(ingest_mod.shutil, "copy2", flaky_copy2)
+
+    # Track whether scanner.scan ever ran. If the abort propagation in
+    # the ingest-failure branch is wired correctly the scan stage is
+    # marked skipped without calling do_scan; if it ever fires we know
+    # the scanner/previews/classify/regroup chain executed against the
+    # partial copy.
+    import scanner as scanner_mod
+    scan_calls: list[str] = []
+    real_scan = scanner_mod.scan
+
+    def tracking_scan(root, *args, **kwargs):
+        scan_calls.append(str(root))
+        return real_scan(root, *args, **kwargs)
+
+    with patch.object(scanner_mod, "scan", tracking_scan):
+        with app.test_client() as c:
+            # Deliberately leave skip_regroup unset so a regression here
+            # would actually run the regroup stage against the partial
+            # subset.
+            resp = c.post("/api/jobs/pipeline", json={
+                "sources": [str(src)],
+                "destination": str(final_dest),
+                "local_processing": True,
+                "folder_template": "",
+                "skip_classify": True,
+                "skip_extract_masks": True,
+            })
+            assert resp.status_code == 200
+            job_id = resp.get_json()["job_id"]
+            job = wait_for_job_via_client(c, job_id)
+
+    assert job["status"] == "failed", job
+    assert not scan_calls, (
+        "scanner.scan must not be called after a fatal local-processing "
+        f"ingest failure; called with {scan_calls!r}"
+    )
+    # Nothing publishes at the destination.
+    assert not (final_dest / "good.jpg").exists()
+    # Staging stays intact for recovery.
+    staging_root = tmp_path / "staging" / job_id / "Photos"
+    assert staging_root.is_dir(), staging_root
+    assert (staging_root / "good.jpg").is_file()
+
+
 def test_pipeline_local_processing_completes_when_cancel_during_archive(
     setup, tmp_path, monkeypatch
 ):
