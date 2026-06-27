@@ -9255,11 +9255,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 )
                 return source_path or fallback_path
 
-            # For RAW primaries, skip the working-copy short-circuit: legacy
-            # working copies predate the highlight-preserving RAW decode and
-            # would feed the editor a clipped JPEG to apply the recipe to.
+            # For RAW primaries, skip the working-copy short-circuit while the
+            # RAW source is available: legacy working copies predate the
+            # highlight-preserving RAW decode and would feed the editor a
+            # clipped JPEG to apply the recipe to. If the RAW source is
+            # offline/missing, the working copy is the only local fallback.
             wc_rel = photo["working_copy_path"]
-            if wc_rel and not primary_is_raw:
+            if wc_rel and (
+                not primary_is_raw or not os.path.exists(fallback_path)
+            ):
                 wc_path = (
                     wc_rel if os.path.isabs(wc_rel)
                     else os.path.join(vireo_dir, wc_rel)
@@ -11563,11 +11567,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
             return source_path or fallback_path
 
-        # For RAW primaries, skip the working-copy short-circuit: legacy
-        # working copies predate the highlight-preserving RAW decode and
-        # would feed iNat a clipped JPEG to apply the recipe to.
+        # For RAW primaries, skip the working-copy short-circuit while the
+        # RAW source is available: legacy working copies predate the
+        # highlight-preserving RAW decode and would feed iNat a clipped JPEG
+        # to apply the recipe to. If the RAW source is offline/missing, the
+        # working copy is the only local fallback.
         wc_rel = photo["working_copy_path"]
-        if wc_rel and not primary_is_raw:
+        if wc_rel and (
+            not primary_is_raw or not os.path.exists(fallback_path)
+        ):
             wc_path = (
                 wc_rel if os.path.isabs(wc_rel)
                 else os.path.join(vireo_dir, wc_rel)
@@ -11776,7 +11784,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         photo_path = os.path.join(photo["folder_path"], photo["filename"])
         if not os.path.isfile(photo_path):
-            return json_error("Photo file not found on disk", 404)
+            recipe = db.get_photo_edit_recipe(photo_id)
+            wc_rel = photo["working_copy_path"]
+            wc_abs = (
+                wc_rel if wc_rel and os.path.isabs(wc_rel)
+                else os.path.join(
+                    os.path.dirname(app.config["THUMB_CACHE_DIR"]), wc_rel,
+                )
+                if wc_rel else None
+            )
+            if not (recipe and wc_abs and os.path.isfile(wc_abs)):
+                return json_error("Photo file not found on disk", 404)
 
         upload_path, upload_error = _inat_upload_photo_path(db, photo, photo_path)
         if upload_error:
@@ -18838,7 +18856,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     folder["path"], using_offline_cache,
                 )
                 image_ext = os.path.splitext(image_path)[1].lower()
-                if companion_source and image_ext not in RAW_EXTENSIONS:
+                if (
+                    primary_is_raw
+                    and trusted_wc_path
+                    and not os.path.exists(image_path)
+                ):
+                    image_path = trusted_wc_path
+                elif companion_source and image_ext not in RAW_EXTENSIONS:
                     image_path = companion_source
                 elif (
                     primary_is_raw

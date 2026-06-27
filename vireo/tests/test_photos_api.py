@@ -1953,6 +1953,47 @@ def test_edited_original_uses_trusted_working_copy_when_source_missing(
         assert img.size == (600, 800)
 
 
+def test_edited_raw_original_uses_trusted_working_copy_when_source_missing(
+    client_with_photo,
+):
+    import io
+    import os
+
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_rel = f"working/{photo_id}.jpg"
+    Image.new("RGB", (800, 600), (30, 120, 200)).save(
+        os.path.join(vireo_dir, wc_rel), "JPEG",
+    )
+    folder = db.conn.execute(
+        "SELECT f.path, p.filename FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    os.remove(os.path.join(folder["path"], folder["filename"]))
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='offline.NEF', extension='.nef',
+               working_copy_path=?,
+               companion_path=NULL,
+               width=800, height=600
+           WHERE id=?""",
+        (wc_rel, photo_id),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+
+    rendered = client.get(f"/photos/{photo_id}/original")
+
+    assert rendered.status_code == 200, rendered.get_data(as_text=True)
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (600, 800)
+
+
 def test_edited_original_uses_companion_after_raw_failure_marker(
     client_with_photo, monkeypatch,
 ):

@@ -149,6 +149,45 @@ def test_open_external_edit_recipe_avoids_capped_working_copy(
         assert img.size == (600, 800)
 
 
+def test_open_external_uses_working_copy_when_raw_source_missing(
+    client_with_photo, monkeypatch,
+):
+    """RAW-first handoff should still work when the RAW volume is offline."""
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    working_path = os.path.join(working_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (800, 600), (10, 20, 30)).save(working_path, "JPEG")
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='offline.NEF', extension='.nef',
+               working_copy_path=?,
+               width=800, height=600
+           WHERE id=?""",
+        (f"working/{photo_id}.jpg", photo_id),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    client.post('/api/config',
+                data=json.dumps({"external_editor": "/usr/bin/gimp"}),
+                content_type='application/json')
+    launched = _patch_launchers(monkeypatch)
+
+    resp = client.post('/api/photos/open-external',
+                       data=json.dumps({"photo_ids": [photo_id]}),
+                       content_type='application/json')
+
+    assert resp.status_code == 200, resp.get_json()
+    opened_path = launched[0][1][1]
+    assert os.path.basename(os.path.dirname(opened_path)) == "external-edits"
+    with Image.open(opened_path) as img:
+        assert img.size == (600, 800)
+
+
 def test_open_external_falls_back_to_companion_when_raw_decode_fails(
     app_and_db, monkeypatch, tmp_path,
 ):
