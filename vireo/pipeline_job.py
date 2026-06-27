@@ -1179,7 +1179,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             exclude_paths=params.exclude_paths,
                         )
                         source_bytes = total_file_bytes(selected_files)
-                        plan = storage_plan(params.destination, source_bytes)
+                        plan = storage_plan(
+                            params.destination, source_bytes,
+                            archive_parent=archive_parent,
+                        )
                         # When skip_duplicates is on, ingest() will hash and
                         # skip files whose hash is already in the catalog
                         # OR already seen earlier in this same run before
@@ -1209,6 +1212,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             if filtered_bytes < source_bytes:
                                 plan = storage_plan(
                                     params.destination, filtered_bytes,
+                                    archive_parent=archive_parent,
                                 )
                         result["local_processing"] = {
                             **plan,
@@ -1216,16 +1220,33 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             "final_destination": final_destination,
                         }
                         if plan["batching_required"]:
-                            _bail_storage(
-                                "Local processing needs about "
-                                f"{format_bytes(plan['required_bytes'])}, but "
-                                f"only {format_bytes(plan['usable_bytes'])} is "
-                                "available after keeping local free-space "
-                                "reserve. This import needs "
-                                f"{plan['batch_count']} local-processing "
-                                "batches; automatic batch execution is not "
-                                "available in this build yet."
-                            )
+                            # Tell the user which volume came up short — the
+                            # destination running out of room reads as a
+                            # different problem (pick a bigger archive
+                            # drive) than the staging volume running out
+                            # (free space on ~/.vireo or batch later).
+                            if not plan.get("archive_enough", True):
+                                _bail_storage(
+                                    "Archive destination needs about "
+                                    f"{format_bytes(plan['archive_required_bytes'])}, "
+                                    "but only "
+                                    f"{format_bytes(plan['archive_usable_bytes'] or 0)} "
+                                    f"is free under {archive_parent} after "
+                                    "the free-space reserve. Free space at "
+                                    "the destination or pick a different "
+                                    "archive folder."
+                                )
+                            else:
+                                _bail_storage(
+                                    "Local processing needs about "
+                                    f"{format_bytes(plan['required_bytes'])}, but "
+                                    f"only {format_bytes(plan['usable_bytes'])} is "
+                                    "available after keeping local free-space "
+                                    "reserve. This import needs "
+                                    f"{plan['batch_count']} local-processing "
+                                    "batches; automatic batch execution is not "
+                                    "available in this build yet."
+                                )
                             return
                         summary = (
                             f"{format_bytes(plan['required_bytes'])} needed, "
@@ -4289,6 +4310,27 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             name for name, s in stages.items() if s.get("status") == "failed"
         ]
         if already_failed:
+            # Before bailing, deindex the local staging folder. scanner_stage
+            # may have already registered it (and its photos' hashes) before
+            # the downstream failure surfaced. Without removing those rows,
+            # a retry of the same source would hit ingest()'s known-hash
+            # skip and copy nothing — the user would then "successfully"
+            # archive an empty destination while the original files only
+            # ever existed in the abandoned staging tree. Leave the on-disk
+            # staging files in place so the user can still recover them.
+            try:
+                thread_db = Database(db_path)
+                thread_db.set_active_workspace(workspace_id)
+                folder = thread_db.conn.execute(
+                    "SELECT id FROM folders WHERE path = ?",
+                    (params.destination,),
+                ).fetchone()
+                if folder:
+                    thread_db.delete_folder(folder["id"])
+            except Exception:
+                log.exception(
+                    "Failed to deindex local staging folder on archive skip",
+                )
             stages["archive"]["status"] = "skipped"
             runner.update_step(
                 job["id"], "archive",

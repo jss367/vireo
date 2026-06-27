@@ -439,6 +439,102 @@ def test_pipeline_local_processing_skips_archive_when_previews_fail(
         f"missing at {staging_file}"
     )
 
+    # The staging folder and its photo hashes must be removed from the
+    # catalog. Otherwise ingest()'s known-hash skip would treat a retry's
+    # files as duplicates and stage nothing, letting the next archive
+    # publish an empty destination.
+    from db import Database
+    check_db = Database(db_path)
+    staging_dir = str(staging_file.parent)
+    folder_row = check_db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", (staging_dir,),
+    ).fetchone()
+    assert folder_row is None, (
+        f"staging folder must be deindexed on archive skip, still present "
+        f"at {staging_dir}"
+    )
+    photo_rows = check_db.conn.execute(
+        "SELECT id FROM photos WHERE folder_id IN ("
+        "  SELECT id FROM folders WHERE path LIKE ?"
+        ")",
+        (str(tmp_path / "staging" / job_id) + "%",),
+    ).fetchall()
+    assert not photo_rows, (
+        "no photo rows should remain under the abandoned staging tree, "
+        f"got {len(photo_rows)}"
+    )
+    check_db.close()
+
+
+def test_pipeline_local_processing_retry_after_skip_actually_copies(
+    setup, tmp_path, monkeypatch
+):
+    """End-to-end regression: a local-processing run whose archive was
+    skipped (due to an earlier failed stage) must leave the catalog in a
+    state where the user can retry the same source folder and have ingest
+    actually re-copy the files. Without deindexing the failed staging
+    tree, ingest's known-hash gate would skip every file in the new
+    staging dir and the second run would publish an empty destination."""
+    app, db_path = setup
+
+    src = tmp_path / "card_retry"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(src / "again.jpg")
+
+    final_parent = tmp_path / "nas_retry"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    # First run: previews fail, archive is skipped, staging is left on
+    # disk but deindexed from the catalog.
+    import image_loader
+    real_load_image = image_loader.load_image
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("synthetic preview failure")
+
+    monkeypatch.setattr(image_loader, "load_image", boom)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        first_job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+    assert first_job["status"] == "failed", first_job
+    assert not (final_dest / "again.jpg").exists()
+
+    # Second run: previews succeed (restore the real loader). The retry
+    # must actually re-stage the file and publish to final_dest — the
+    # previous-run staging hashes must no longer block ingest.
+    monkeypatch.setattr(image_loader, "load_image", real_load_image)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        second_job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+    assert second_job["status"] == "completed", second_job
+    assert (final_dest / "again.jpg").is_file(), (
+        "retry must actually copy the file to the archive; deindex on "
+        "archive-skip is what makes that possible"
+    )
+
 
 def test_pipeline_local_processing_fails_ingest_when_files_fail_to_copy(
     setup, tmp_path, monkeypatch
@@ -620,12 +716,15 @@ def test_pipeline_local_processing_preflight_filters_duplicates(
     fresh_bytes = (src / "fresh.jpg").stat().st_size
     dup_bytes = (src / "dup.jpg").stat().st_size
     total_bytes = fresh_bytes + dup_bytes
-    # required_bytes ≈ source_bytes * 1.25 (overhead ratio) when
-    # MIN_DERIVED_OVERHEAD_BYTES=0. Pick free = roughly fresh_bytes * 2 plus
-    # reserve so the duplicate-filtered plan fits but the naive plan doesn't.
+    # required_bytes ≈ source_bytes * 2.25 here: staging and archive_parent
+    # both resolve to tmp_path so storage_plan's same-device branch doubles
+    # the source-byte allotment (originals in staging + originals at the
+    # destination during copy-verify-delete) on top of the 0.25 derived
+    # overhead. Pick free so the duplicate-filtered plan fits but the
+    # naive plan doesn't.
     reserve = 4
-    free = int(fresh_bytes * 1.5) + reserve + 1
-    assert free < int(total_bytes * 1.25) + reserve, "free must exceed filtered need but not the naive need"
+    free = int(fresh_bytes * 2.5) + reserve + 1
+    assert free < int(total_bytes * 2.25) + reserve, "free must exceed filtered need but not the naive need"
 
     from collections import namedtuple
     Usage = namedtuple("Usage", "total used free")

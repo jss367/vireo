@@ -97,19 +97,68 @@ def storage_plan(
     staging_dir: str,
     source_bytes: int,
     *,
+    archive_parent: str | None = None,
     reserved_free_bytes: int | None = None,
 ) -> dict:
     """Return local-storage availability and whether batching is required.
 
     ``reserved_free_bytes`` defaults to the module-level constant, looked up
     at call time so monkeypatching it in tests actually takes effect.
+
+    When ``archive_parent`` is supplied the plan also accounts for the
+    destination volume: archive runs copy-verify-delete via ``move_folder``,
+    so the staged originals must briefly coexist at the destination before
+    staging is removed. When both paths live on the same device, the
+    staging volume must hold the originals once for staging, the derived
+    files, AND a second copy for the destination — without doubling
+    ``source_bytes`` the run could pass the preflight, process for hours,
+    and then fail in the final move with ENOSPC. When they live on
+    different devices, the destination volume gets an independent free
+    space check.
     """
     if reserved_free_bytes is None:
         reserved_free_bytes = RESERVED_FREE_BYTES
+
+    same_device = False
+    if archive_parent:
+        try:
+            same_device = (
+                os.stat(staging_dir).st_dev == os.stat(archive_parent).st_dev
+            )
+        except OSError:
+            same_device = False
+
     usage = shutil.disk_usage(staging_dir)
     required = estimate_required_bytes(source_bytes)
+    if same_device:
+        # Both staging copy and destination copy land on this volume; the
+        # destination copy is taken from staging before the staging files
+        # are deleted, so the peak working set is staging + derived +
+        # destination = required + source_bytes.
+        required += source_bytes
     usable = max(0, usage.free - reserved_free_bytes)
-    if required <= usable:
+    staging_enough = required <= usable
+
+    archive_required = 0
+    archive_free = None
+    archive_usable = None
+    archive_enough = True
+    if archive_parent and not same_device:
+        archive_required = source_bytes
+        try:
+            archive_usage = shutil.disk_usage(archive_parent)
+        except OSError:
+            # Can't probe the destination volume — let the eventual
+            # move_folder surface ENOSPC rather than guess. Leave
+            # archive_enough True so the preflight doesn't false-positive.
+            pass
+        else:
+            archive_free = archive_usage.free
+            archive_usable = max(0, archive_usage.free - reserved_free_bytes)
+            archive_enough = archive_required <= archive_usable
+
+    enough = staging_enough and archive_enough
+    if enough:
         batch_count = 1
         batch_bytes = source_bytes
     else:
@@ -118,7 +167,7 @@ def storage_plan(
         # before full batch execution is available.
         per_batch_source = max(
             1,
-            int(usable / (1 + DERIVED_OVERHEAD_RATIO)),
+            int(usable / (1 + DERIVED_OVERHEAD_RATIO + (1 if same_device else 0))),
         )
         batch_count = math.ceil(source_bytes / per_batch_source) if source_bytes else 1
         batch_bytes = per_batch_source
@@ -128,8 +177,14 @@ def storage_plan(
         "free_bytes": usage.free,
         "reserved_free_bytes": reserved_free_bytes,
         "usable_bytes": usable,
-        "enough": required <= usable,
-        "batching_required": required > usable,
+        "staging_enough": staging_enough,
+        "archive_required_bytes": archive_required,
+        "archive_free_bytes": archive_free,
+        "archive_usable_bytes": archive_usable,
+        "archive_enough": archive_enough,
+        "same_device": same_device,
+        "enough": enough,
+        "batching_required": not enough,
         "batch_count": int(batch_count),
         "estimated_batch_source_bytes": int(batch_bytes),
     }
