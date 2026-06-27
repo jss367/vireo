@@ -211,13 +211,13 @@ def conflicting_archive_paths(
             chosen_name = _suffix_against(folder_taken, source_file.name)
 
             dest_file = dest_folder / chosen_name
-            if not dest_file.exists():
+            if not os.path.lexists(dest_file):
                 folder_taken.add(chosen_name)
                 if seen_hashes is not None:
                     pending_survivor_hashes.append(source_file)
                 continue
 
-            if dest_file.is_file():
+            if not dest_file.is_symlink() and dest_file.is_file():
                 source_size = source_file.stat().st_size
                 if (
                     dest_file.stat().st_size == source_size
@@ -316,7 +316,7 @@ def existing_archive_bytes(
             folder_taken.add(chosen_name)
             dest_file = dest_folder / chosen_name
             key = os.path.normcase(os.path.abspath(dest_file))
-            if key in credited or not dest_file.is_file():
+            if key in credited or dest_file.is_symlink() or not dest_file.is_file():
                 continue
             source_size = source_file.stat().st_size
             if dest_file.stat().st_size != source_size:

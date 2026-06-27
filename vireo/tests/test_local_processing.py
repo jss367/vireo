@@ -280,6 +280,30 @@ def test_existing_archive_bytes_ignores_unmatched_or_different_files(tmp_path):
     ) == 0
 
 
+def test_existing_archive_bytes_ignores_symlink_matches(tmp_path):
+    """Symlinked archive entries are not safe resume credit, even when their
+    target bytes match the source file."""
+    src = tmp_path / "card"
+    src.mkdir()
+    source = src / "linked.jpg"
+    source.write_bytes(b"same")
+
+    dest = tmp_path / "archive"
+    dest.mkdir()
+    target = dest / "target.jpg"
+    target.write_bytes(b"same")
+    try:
+        (dest / "linked.jpg").symlink_to(target)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    assert local_processing.existing_archive_bytes(
+        str(dest),
+        [source],
+        folder_template="",
+    ) == 0
+
+
 def test_conflicting_archive_paths_reports_different_existing_files(tmp_path):
     """Same archive-relative path with different content must be rejected
     before the final merge-mode archive step."""
@@ -302,6 +326,30 @@ def test_conflicting_archive_paths_reports_different_existing_files(tmp_path):
         [matching, conflicting, missing],
         folder_template="",
     ) == [str(dest / "conflict.jpg")]
+
+
+def test_conflicting_archive_paths_reports_symlink_even_when_target_matches(tmp_path):
+    """A symlink at the archive-relative resume path must be treated as a
+    conflict before staging, not as a safe same-content resume hit."""
+    src = tmp_path / "card"
+    src.mkdir()
+    source = src / "linked.jpg"
+    source.write_bytes(b"same")
+
+    dest = tmp_path / "archive"
+    dest.mkdir()
+    target = dest / "target.jpg"
+    target.write_bytes(b"same")
+    try:
+        (dest / "linked.jpg").symlink_to(target)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    assert local_processing.conflicting_archive_paths(
+        str(dest),
+        [source],
+        folder_template="",
+    ) == [str(dest / "linked.jpg")]
 
 
 def test_conflicting_archive_paths_skips_known_duplicates(tmp_path):
