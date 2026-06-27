@@ -1088,8 +1088,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             archive_parent = os.path.dirname(
                                 os.path.normpath(final_destination),
                             )
+                            # Use lexists so a broken/dangling symlink at
+                            # final_destination is caught here too. os.path
+                            # .exists returns False for a broken symlink, so
+                            # a stale link left by an unmounted or moved
+                            # archive root would slip through, let the
+                            # pipeline stage and process everything, and
+                            # only fail when move_folder/rsync tried to
+                            # create a directory at a path already occupied
+                            # by that symlink entry.
                             if (
-                                os.path.exists(final_destination)
+                                os.path.lexists(final_destination)
                                 and not os.path.isdir(final_destination)
                             ):
                                 _bail_storage(

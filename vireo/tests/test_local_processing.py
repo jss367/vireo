@@ -768,3 +768,78 @@ def test_storage_plan_recomputes_archive_credit_for_duplicate_filtered_set(
         reserved_free_bytes=0,
     )
     assert buggy_plan["archive_required_bytes"] == 0
+
+
+def test_conflicting_archive_paths_treats_empty_files_as_no_duplicate_identity(
+    tmp_path,
+):
+    """Zero-byte sources must not poison ``seen_hashes`` with
+    ``EMPTY_FILE_SHA256``. ingest() clears the empty-file hash to None
+    before duplicate checks, so an early empty survivor must not cause a
+    later empty source's same-path conflict to be falsely skipped as an
+    intra-batch duplicate. Without this, a real archive collision on the
+    second empty source would be hidden by the preflight and only
+    surface when ``move_folder(..., merge=True)`` rejected it after
+    every processing stage had already run."""
+    src = tmp_path / "card"
+    src.mkdir()
+    # First empty source: its archive path is missing, so the function
+    # only records it as a pending survivor. Without the fix,
+    # _flush_pending would add EMPTY_FILE_SHA256 to seen_hashes.
+    first = src / "first.jpg"
+    first.write_bytes(b"")
+    # Second empty source: its archive path is occupied by a different
+    # file. Without the fix, the conflict branch would hash `second`,
+    # see EMPTY_FILE_SHA256 in seen_hashes from the flush, and treat
+    # `second` as an intra-batch duplicate skip — so the real conflict
+    # would never reach the caller.
+    second = src / "second.jpg"
+    second.write_bytes(b"")
+
+    dest = tmp_path / "archive"
+    dest.mkdir()
+    (dest / "second.jpg").write_bytes(b"unrelated non-empty content")
+
+    # Empty known_hashes (skip_duplicates on, no catalog matches) still
+    # enables the survivor-tracking branch. With the fix, the empty
+    # files have no duplicate identity, so the conflict on `second` is
+    # reported instead of being silently swallowed.
+    conflicts = local_processing.conflicting_archive_paths(
+        str(dest),
+        [first, second],
+        folder_template="",
+        known_hashes=set(),
+    )
+    assert conflicts == [str(dest / "second.jpg")]
+
+
+def test_non_duplicate_files_keeps_zero_byte_sources(tmp_path):
+    """ingest() doesn't dedupe zero-byte files by hash, so the survivor
+    list mustn't collapse two empty sources into one — that would
+    under-count the staged set and let downstream callers (such as the
+    duplicate-filtered storage retry) credit destination space against
+    the wrong number of bytes."""
+    fresh = tmp_path / "fresh.jpg"
+    fresh.write_bytes(b"fresh-bytes-payload")
+    empty_a = tmp_path / "empty_a.jpg"
+    empty_a.write_bytes(b"")
+    empty_b = tmp_path / "empty_b.jpg"
+    empty_b.write_bytes(b"")
+
+    survivors = local_processing.non_duplicate_files(
+        [fresh, empty_a, empty_b], set(),
+    )
+    # Both empty sources survive, matching ingest's copy-both-as-
+    # placeholders behavior.
+    assert survivors == [fresh, empty_a, empty_b]
+
+    # Even when an empty hash is in known_hashes (which scanner is
+    # careful never to write, but a buggy caller might pass in), the
+    # empty source must still survive — ingest itself ignores
+    # EMPTY_FILE_SHA256 entries when deciding what to skip.
+    from scanner import EMPTY_FILE_SHA256
+
+    survivors_with_poisoned_known = local_processing.non_duplicate_files(
+        [fresh, empty_a, empty_b], {EMPTY_FILE_SHA256},
+    )
+    assert survivors_with_poisoned_known == [fresh, empty_a, empty_b]

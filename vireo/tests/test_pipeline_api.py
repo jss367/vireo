@@ -1322,6 +1322,57 @@ def test_pipeline_local_processing_rejects_existing_file_archive_destination(
     assert "not a directory" in error_text
 
 
+def test_pipeline_local_processing_rejects_broken_symlink_archive_destination(
+    setup, tmp_path, monkeypatch
+):
+    """A broken/dangling symlink left at ``final_destination`` — e.g. by an
+    unmounted or moved archive root — must be rejected up front. The
+    earlier ``os.path.exists`` guard followed the symlink and returned
+    False for a dangling target, so the pipeline staged and processed
+    every source before ``move_folder`` ultimately failed trying to
+    create a directory at a pathname already occupied by the symlink
+    entry. The lexists guard catches the entry regardless of whether
+    its target resolves."""
+    app, _db_path = setup
+
+    src = tmp_path / "card-broken-symlink"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "green").save(src / "fresh.jpg")
+
+    archive_parent = tmp_path / "archive-parent"
+    archive_parent.mkdir()
+    final_dest = archive_parent / "Archive"
+    missing_target = tmp_path / "missing-mount-point"
+    try:
+        os.symlink(str(missing_target), str(final_dest))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this filesystem")
+    assert os.path.lexists(str(final_dest))
+    assert not os.path.exists(str(final_dest))
+
+    import local_processing
+
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert job["status"] == "failed", job
+    error_text = (job.get("error") or "") + str(job.get("result", ""))
+    assert "not a directory" in error_text
+
+
 def test_pipeline_local_processing_rejects_archive_path_conflicts(
     setup, tmp_path, monkeypatch
 ):

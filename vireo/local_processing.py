@@ -75,6 +75,34 @@ def total_file_bytes(files: list[Path]) -> int:
     return total
 
 
+def _duplicate_identity(path: Path) -> str | None:
+    """Return ``path``'s duplicate-identity hash, or ``None`` if it has
+    none.
+
+    Mirrors ingest()'s zero-byte rule: a zero-byte source clears its
+    hash to ``None`` before duplicate checks so ``EMPTY_FILE_SHA256``
+    never enters the identity index. Every empty file is bit-identical
+    to every other, so treating them as duplicates by hash would either
+    drop legitimate placeholders or, in the same-name-collision branch,
+    mint endless ``name_1.ext`` siblings on retry. The preflight callers
+    here must skip empty files for the same reason: an earlier zero-byte
+    source must not poison ``seen_hashes`` and cause a later zero-byte
+    source's same-path conflict to be falsely skipped, and the
+    duplicate-filter survivor list must not collapse two empty sources
+    into one when ingest would copy both.
+    """
+    from scanner import EMPTY_FILE_SHA256, compute_file_hash
+
+    file_hash = compute_file_hash(str(path))
+    if file_hash == EMPTY_FILE_SHA256:
+        try:
+            if path.stat().st_size == 0:
+                return None
+        except OSError:
+            return None
+    return file_hash
+
+
 def _suffix_against(folder_taken: set[str], name: str) -> str:
     """Pick the next free slot for ``name`` given the per-folder set
     ``folder_taken``. Mirrors ingest()'s name-collision rule: the first
@@ -156,13 +184,19 @@ def conflicting_archive_paths(
     def _flush_pending() -> None:
         if seen_hashes is None or not pending_survivor_hashes:
             return
-        from scanner import compute_file_hash
         while pending_survivor_hashes:
             survivor = pending_survivor_hashes.pop(0)
             try:
-                seen_hashes.add(compute_file_hash(str(survivor)))
+                file_hash = _duplicate_identity(survivor)
             except OSError:
                 continue
+            # Zero-byte survivors carry no duplicate identity in
+            # ingest, so don't pollute ``seen_hashes`` with
+            # ``EMPTY_FILE_SHA256`` — that would cause a later
+            # zero-byte source's same-path conflict to be falsely
+            # skipped as an intra-batch duplicate.
+            if file_hash is not None:
+                seen_hashes.add(file_hash)
 
     for source_file in files:
         try:
@@ -204,19 +238,26 @@ def conflicting_archive_paths(
                 # survivor's hash before checking the current source,
                 # mirroring ingest()'s known-hash accumulator order.
                 _flush_pending()
-                from scanner import compute_file_hash
                 try:
-                    file_hash = compute_file_hash(str(source_file))
+                    file_hash = _duplicate_identity(source_file)
                 except OSError:
                     continue
-                if file_hash in seen_hashes:
-                    # ingest's skip_duplicates branch drops this source
-                    # before staging; do not claim a slot either.
-                    continue
-                # Track the hash so a same-hash sibling later in
-                # ``files`` is treated as an intra-batch duplicate too,
-                # the way ingest()'s pass-2 ``known_hashes`` set does.
-                seen_hashes.add(file_hash)
+                # Zero-byte sources have no duplicate identity in
+                # ingest (``EMPTY_FILE_SHA256`` is cleared to ``None``
+                # before the dup check), so don't treat them as
+                # intra-batch duplicates of an earlier empty source
+                # and don't pollute ``seen_hashes`` with their hash.
+                if file_hash is not None:
+                    if file_hash in seen_hashes:
+                        # ingest's skip_duplicates branch drops this
+                        # source before staging; do not claim a slot
+                        # either.
+                        continue
+                    # Track the hash so a same-hash sibling later in
+                    # ``files`` is treated as an intra-batch duplicate
+                    # too, the way ingest()'s pass-2 ``known_hashes``
+                    # set does.
+                    seen_hashes.add(file_hash)
 
             conflicts.add(str(dest_file))
             folder_taken.add(chosen_name)
@@ -310,14 +351,20 @@ def non_duplicate_files(
     the destination-space preflight even when the fresh files still need
     room at the archive.
     """
-    from scanner import compute_file_hash
-
     seen = set(known_hashes)
     survivors: list[Path] = []
     for path in files:
         try:
-            file_hash = compute_file_hash(str(path))
+            file_hash = _duplicate_identity(path)
         except OSError:
+            continue
+        # Zero-byte sources have no duplicate identity in ingest, so
+        # every empty file is a survivor and contributes nothing to
+        # ``seen`` — matching ingest's behavior where two empty sources
+        # both get copied (the second as ``name_1.ext`` if the
+        # destination already has the unsuffixed slot).
+        if file_hash is None:
+            survivors.append(path)
             continue
         if file_hash in seen:
             continue
