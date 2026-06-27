@@ -878,6 +878,36 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
         # before any DB write so no transaction is open while it runs.
         ok = extract_working_copy(source, wc_abs, max_size=wc_max_size, quality=wc_quality)
         raw_failed_then_companion = False
+        # libraw returns an embedded JPEG when it can't demosaic a RAW; that
+        # preview is often a fraction of sensor resolution, so ok=True here
+        # can still produce an undersized working copy. Treat a substantially
+        # undersized RAW extraction the same as a hard failure so the
+        # companion-fallback branch below replaces it instead of caching the
+        # downscaled preview.
+        if (
+            ok
+            and primary_is_raw
+            and companion_path
+            and row["width"]
+            and row["height"]
+        ):
+            expected_long = max(int(row["width"]), int(row["height"]))
+            if wc_max_size and wc_max_size > 0:
+                expected_long = min(expected_long, wc_max_size)
+            try:
+                from PIL import Image as _PILImage
+                with _PILImage.open(wc_abs) as _wc:
+                    wc_long = max(_wc.size)
+            except Exception:
+                wc_long = 0
+            if expected_long > 0 and wc_long and wc_long < expected_long * 0.9:
+                log.info(
+                    "RAW working-copy extraction for photo %s produced "
+                    "undersized result (%d, expected long edge %d); "
+                    "retrying from companion JPEG %s",
+                    row["id"], wc_long, expected_long, companion_path,
+                )
+                ok = False
         if not ok and primary_is_raw and companion_path:
             log.info(
                 "RAW working-copy extraction failed for photo %s (%s); "

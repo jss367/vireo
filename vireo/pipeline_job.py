@@ -1851,6 +1851,70 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     )
                     img = load_image(canonical, max_size=load_max_size, **load_kwargs)
                     if (
+                        img is not None
+                        and os.path.splitext(canonical)[1].lower() in _RAW_EXTENSIONS
+                        and detail_photo["width"]
+                        and detail_photo["height"]
+                    ):
+                        # _load_raw falls back to an embedded JPEG when
+                        # libraw can't demosaic; that preview is often a
+                        # fraction of sensor resolution, so non-None can
+                        # still be undersized. Mirror serve_preview's
+                        # cache-miss undersized check so we don't bake an
+                        # embedded preview into the tracked warmed cache.
+                        expected_long = max(
+                            int(detail_photo["width"]),
+                            int(detail_photo["height"]),
+                        )
+                        if load_max_size is not None:
+                            expected_long = min(expected_long, load_max_size)
+                        loaded_long = max(img.size)
+                        if (
+                            expected_long > 0
+                            and loaded_long < expected_long * 0.9
+                        ):
+                            companion_rel = detail_photo["companion_path"]
+                            folder_path = folders.get(
+                                detail_photo["folder_id"]
+                            )
+                            if companion_rel and folder_path:
+                                companion_abs = os.path.join(
+                                    folder_path, companion_rel,
+                                )
+                                if (
+                                    os.path.exists(companion_abs)
+                                    and companion_abs != canonical
+                                ):
+                                    log.info(
+                                        "RAW decode for photo %s pipeline "
+                                        "preview at size=%s returned "
+                                        "undersized embedded preview "
+                                        "(%dx%d, expected long edge %d); "
+                                        "falling back to companion JPEG",
+                                        detail_photo["id"], max_size,
+                                        img.size[0], img.size[1],
+                                        expected_long,
+                                    )
+                                    img.close()
+                                    companion_img = load_image(
+                                        companion_abs,
+                                        max_size=load_max_size,
+                                    )
+                                    if companion_img is not None:
+                                        img = companion_img
+                                        canonical = companion_abs
+                                    else:
+                                        # Companion unreadable — recover the
+                                        # embedded preview so the warmer
+                                        # still produces something rather
+                                        # than counting this photo as
+                                        # failed for the size mismatch.
+                                        img = load_image(
+                                            canonical,
+                                            max_size=load_max_size,
+                                            **load_kwargs,
+                                        )
+                    if (
                         img is None
                         and os.path.splitext(canonical)[1].lower() in _RAW_EXTENSIONS
                     ):
