@@ -199,29 +199,45 @@ _ARCHIVE_DESTINATIONS_GUARD = threading.Lock()
 
 
 def _normalize_archive_destination(path):
+    """Absolute, symlink-resolved, case-normalised form of ``path``.
+
+    ``realpath`` resolves symlinks (including partial resolution when the
+    leaf doesn't exist yet — the existing prefix is followed and the
+    missing tail is preserved). ``normcase`` folds case on Windows. Two
+    spellings that point at the same physical destination — a symlink and
+    its real path, a case-only alias on case-insensitive Windows —
+    collapse to the same key, so reservation/release can't drift apart and
+    a reservation lookup hits even when the caller used a different
+    spelling.
+
+    Case-insensitive POSIX (default macOS APFS) needs an FS probe to fold
+    case, which ``_paths_overlap`` does via ``move._path_equal_or_descends``
+    for the comparison itself. Keeping the stored key as
+    ``normcase(realpath(...))`` is enough because reserve/release are
+    paired with the same Python string in pipeline_job.
+    """
     import os
 
-    return os.path.normpath(os.path.abspath(path))
+    return os.path.normcase(os.path.realpath(path))
 
 
 def _paths_overlap(a, b):
     """Return True if ``a`` and ``b`` are equal or one descends from the other.
 
-    Both inputs must already be normalised absolute paths. Uses
-    ``os.path.commonpath`` so prefix-string traps like ``/Photos/Shoot`` vs
-    ``/Photos/ShootSubset`` don't false-positive as overlapping.
+    Defers to ``move._path_equal_or_descends`` so the reservation check
+    folds the same alias surface (symlinks, Windows case folding,
+    case-insensitive POSIX) that ``move_folder``'s own overlap check runs
+    later. Without this, two pipelines targeting the same physical
+    destination via different spellings could both pass the reservation
+    check and race into the same archive root before the move-time guard
+    runs.
     """
-    import os
+    from move import _path_equal_or_descends
 
     if a == b:
         return True
-    try:
-        common = os.path.commonpath([a, b])
-    except ValueError:
-        # Different drives (Windows) or one path isn't absolute. After
-        # normalisation that means the two can't possibly overlap.
-        return False
-    return common in (a, b)
+    return (_path_equal_or_descends(a, b)
+            or _path_equal_or_descends(b, a))
 
 
 def try_reserve_archive_destination(path):

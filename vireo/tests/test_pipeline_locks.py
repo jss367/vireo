@@ -376,3 +376,29 @@ def test_archive_destination_reserve_normalises_relative_paths():
         assert try_reserve_archive_destination(abs_path) is False
     finally:
         release_archive_destination("Photos/Shoot")
+
+
+def test_archive_destination_reserve_rejects_symlinked_alias(tmp_path):
+    """A symlink and its real path resolve to the same archive root.
+
+    Without realpath in the normalisation, two jobs choosing the same
+    physical destination via different spellings (a real path and a
+    symlink to it) could both pass the reservation check; with two
+    pipeline slots they would then race into the same archive root before
+    ``move_folder``'s catalog-side guards run.
+    """
+    real_target = tmp_path / "real_dest"
+    real_target.mkdir()
+    symlink = tmp_path / "link_dest"
+    symlink.symlink_to(real_target)
+
+    real_child = str(real_target / "Shoot")
+    aliased_child = str(symlink / "Shoot")
+
+    try:
+        assert try_reserve_archive_destination(real_child) is True
+        # Aliased path resolves through realpath to the same physical
+        # directory — the second reservation must collide.
+        assert try_reserve_archive_destination(aliased_child) is False
+    finally:
+        release_archive_destination(real_child)

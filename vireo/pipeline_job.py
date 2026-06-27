@@ -4482,15 +4482,42 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     with contextlib.suppress(OSError):
                         os.rmdir(staging_parent)
 
+                # move_folder repointed the catalog at final_destination
+                # before deleting the source originals, so a
+                # ``cleanup_error`` means the archive IS committed — files
+                # are at the destination, but some leftovers remain in
+                # staging (locked file, permission issue, etc.). Report
+                # success with a warning rather than failure: the
+                # alternative ("failed" + "results remain in staging") tells
+                # the user their data is lost when it's actually safe at
+                # final_destination, and would also leave the freshly
+                # created tracked folder row in the catalog while we tried
+                # to deindex a staging row that move_folder_path already
+                # renamed away.
+                cleanup_error = move_result.get("cleanup_error")
                 stages["archive"]["status"] = "completed"
-                summary = f"{move_result.get('moved', 0)} photos archived"
+                moved = move_result.get("moved", 0)
+                if cleanup_error:
+                    summary = (
+                        f"{moved} photos archived "
+                        f"(staging cleanup failed: {cleanup_error})"
+                    )
+                    errors.append(
+                        f"[archive] Warning: staging cleanup failed after "
+                        f"commit — leftover files in {params.destination}: "
+                        f"{cleanup_error}"
+                    )
+                else:
+                    summary = f"{moved} photos archived"
                 runner.update_step(
                     job["id"], "archive", status="completed", summary=summary,
                 )
                 result["archive"] = {
                     "final_destination": final_destination,
-                    "moved": move_result.get("moved", 0),
+                    "moved": moved,
                 }
+                if cleanup_error:
+                    result["archive"]["cleanup_error"] = cleanup_error
             except Exception as e:
                 msg = (
                     f"{e}. Processing results remain in local staging: "

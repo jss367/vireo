@@ -1410,7 +1410,11 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             succeeds, so the photos stay in the library and resolve whenever
             the NAS is mounted.
 
-    Returns dict with keys: moved (int), errors (list of str)
+    Returns dict with keys: moved (int), errors (list of str). When the
+    catalog has already been repointed at the new destination but deleting
+    the source originals afterwards fails, an extra ``cleanup_error`` (str)
+    is included — the archive is committed and ``errors`` stays empty, but
+    callers should still surface the leftover originals to the user.
     """
     folder = db.conn.execute(
         "SELECT id, path, name FROM folders WHERE id = ?", (folder_id,)
@@ -1808,13 +1812,26 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             old_child = src_path + new_child[len(catalog_path):]
             relocate_developed_dir(developed_dir, old_child, new_child)
 
-    # Delete originals
+    # Delete originals. The catalog already points at the new destination,
+    # so anything that goes wrong from here is post-commit: the archive is
+    # already published. Return a ``cleanup_error`` so the caller can warn
+    # the user about leftover originals without misreporting the move as
+    # failed (which would also leave the archive's tracked row in place
+    # while telling the user their data is still in staging).
     if progress_cb:
         progress_cb(total_files, total_files, "", "Removing originals")
     log.info("Verification passed, deleting originals: %s", src_path)
-    shutil.rmtree(src_path)
+    cleanup_error = None
+    try:
+        shutil.rmtree(src_path)
+    except OSError as e:
+        log.exception("Post-commit cleanup of %s failed", src_path)
+        cleanup_error = str(e)
 
     if progress_cb:
         progress_cb(total_files, total_files, folder_name, "Done")
 
-    return {"moved": total_photos, "errors": []}
+    result = {"moved": total_photos, "errors": []}
+    if cleanup_error is not None:
+        result["cleanup_error"] = cleanup_error
+    return result

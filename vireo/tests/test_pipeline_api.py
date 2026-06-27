@@ -804,6 +804,81 @@ def test_pipeline_local_processing_failed_archive_reports_failed_even_after_canc
     assert job["status"] == "failed", job
 
 
+def test_pipeline_local_processing_post_commit_cleanup_error_reports_completed(
+    setup, tmp_path, monkeypatch
+):
+    """Regression: post-commit rmtree failures must not flip the job to failed.
+
+    ``move_folder`` repoints the catalog at ``final_destination`` before
+    deleting the staging originals. If the post-commit rmtree raises (a
+    locked file, a permission glitch in ``~/.vireo/staging``), the archive
+    IS committed: files exist at the destination and the catalog points
+    there. Previously the broad except in archive_stage caught the rmtree
+    exception, marked the stage failed, and told the user "results remain
+    in local staging" — but the files were at ``final_destination`` and a
+    freshly created tracked folder row was now in the catalog. The fix
+    distinguishes the post-commit cleanup error via ``move_folder``'s
+    new ``cleanup_error`` return key and reports the job completed with a
+    warning instead.
+    """
+    app, db_path = setup
+
+    final_parent = tmp_path / "nas_post_commit"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+
+    src = tmp_path / "card_post_commit"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(src / "kept.jpg")
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    import move as move_mod
+    real_move_folder_fn = move_mod.move_folder
+
+    def cleanup_failing_move_folder(db, folder_id, destination, **kwargs):
+        # Run the real move (it commits) but inject a cleanup error via
+        # rmtree. We do this by patching shutil.rmtree only for the
+        # duration of this call, so the real verify/move_folder_path runs
+        # but the final src delete raises.
+        import shutil
+        orig_rmtree = shutil.rmtree
+
+        def raising_rmtree(path, *a, **k):
+            raise OSError("permission denied: staging file locked")
+
+        shutil.rmtree = raising_rmtree
+        try:
+            return real_move_folder_fn(db, folder_id, destination, **kwargs)
+        finally:
+            shutil.rmtree = orig_rmtree
+
+    monkeypatch.setattr(move_mod, "move_folder", cleanup_failing_move_folder)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job_id = resp.get_json()["job_id"]
+        job = wait_for_job_via_client(c, job_id)
+
+    # The archive committed despite the staging cleanup error.
+    assert job["status"] == "completed", job
+    assert (final_dest / "kept.jpg").is_file()
+    archive_result = job["result"]["archive"]
+    assert archive_result["final_destination"] == str(final_dest)
+    assert "cleanup_error" in archive_result
+
+
 def test_pipeline_local_processing_deindexes_staging_on_cancel_after_scan(
     setup, tmp_path, monkeypatch
 ):
