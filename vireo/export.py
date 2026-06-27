@@ -205,7 +205,8 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
                 break
         if not source_path:
             use_wc = _working_copy_can_satisfy_export(
-                photo, recipe, max_size, wc_max, vireo_dir, exif_data=exif_data
+                photo, recipe, max_size, wc_max, vireo_dir,
+                exif_data=exif_data, folder_path=folder_path,
             )
             source_path = None
             if not use_wc:
@@ -753,22 +754,27 @@ def _find_developed_output(
 
 
 def _working_copy_can_satisfy_export(
-    photo, recipe, max_size, wc_max, vireo_dir, exif_data=None
+    photo, recipe, max_size, wc_max, vireo_dir, exif_data=None, folder_path=None
 ):
     """Return True when the working copy can preserve requested export pixels."""
     if not max_size or max_size <= 0:
         return False
     if max_size > wc_max:
         return False
-    # For RAW primaries with an edit recipe, the working copy is unreliable:
-    # libraries built before the highlight-preserving RAW decode landed
-    # carry working copies derived from clipped sources (camera JPEG or the
-    # JPEG-first RAW path), and EDIT_MATH_VERSION purges previews/thumbnails
-    # but not working copies. Reusing such a copy would silently apply the
-    # recipe to clipped bytes. Force the export path back to the RAW so the
-    # later load_image() call gets RAW_DECODE_PRESERVE_HIGHLIGHTS.
+    # For RAW primaries with an edit recipe, the working copy is unreliable
+    # while the RAW source is available: libraries built before the
+    # highlight-preserving RAW decode landed carry working copies derived
+    # from clipped sources (camera JPEG or the JPEG-first RAW path), and
+    # EDIT_MATH_VERSION purges previews/thumbnails but not working copies.
+    # Reusing such a copy would silently apply the recipe to clipped bytes.
+    # If the RAW source is offline/missing, though, the working copy is the
+    # only local fallback for resized exports.
     if recipe and os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS:
-        return False
+        if not folder_path:
+            return False
+        original = os.path.join(folder_path, photo["filename"])
+        if os.path.exists(original):
+            return False
     wc_rel = photo["working_copy_path"]
     if not wc_rel:
         return False
