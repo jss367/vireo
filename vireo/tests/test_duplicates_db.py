@@ -419,6 +419,28 @@ def test_run_duplicate_scan_emits_resolved_proposal(tmp_path):
     assert result["loser_count"] == 0
 
 
+def test_run_duplicate_scan_marks_empty_file_groups(tmp_path):
+    """Historical empty-file duplicate groups are called out for the UI."""
+    from duplicate_scan import run_duplicate_scan
+
+    empty_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    db = Database(str(tmp_path / "t.db"))
+    fid = db.add_folder(str(tmp_path))
+    _add(db, fid, "DSC_0001.NEF", file_hash=empty_hash)
+    _add(db, fid, "DSC_0002.NEF", file_hash=empty_hash)
+    db.conn.execute(
+        "UPDATE photos SET file_size = 0 WHERE file_hash = ?", (empty_hash,)
+    )
+    db.conn.commit()
+
+    result = run_duplicate_scan({"progress": {}}, db, include_resolved=True)
+
+    prop = result["proposals"][0]
+    assert prop["status"] == "resolved"
+    assert prop["empty_file_group"] is True
+    assert prop["losers"][0]["reason"] == "empty file"
+
+
 def test_run_duplicate_scan_attaches_edit_recipes(tmp_path):
     """Fresh scan results seed thumbnail edit cache keys immediately."""
     from duplicate_scan import run_duplicate_scan

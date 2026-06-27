@@ -109,6 +109,37 @@ def test_check_duplicates_all_new(app_and_db, tmp_path):
     assert done[0]["duplicate_count"] == 0
 
 
+def test_check_duplicates_ignores_zero_byte_images(app_and_db, tmp_path):
+    """Empty image placeholders should not be reported as duplicate photos."""
+    app, db, fid = app_and_db
+    from scanner import EMPTY_FILE_SHA256
+
+    # Historical DB state: older scans could store the empty-file hash.
+    db.add_photo(
+        folder_id=fid,
+        filename="empty.NEF",
+        extension=".nef",
+        file_size=0,
+        file_mtime=1.0,
+        file_hash=EMPTY_FILE_SHA256,
+    )
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "DSC_0001.NEF").write_bytes(b"")
+    (source / "DSC_0002.NEF").write_bytes(b"")
+
+    client = app.test_client()
+    resp = client.post("/api/import/check-duplicates", json={
+        "paths": [str(source / "DSC_0001.NEF"), str(source / "DSC_0002.NEF")],
+    })
+
+    events = parse_sse_events(resp.data)
+    done = [e for e in events if e.get("done")]
+    assert len(done) == 1
+    assert done[0]["duplicate_count"] == 0
+
+
 def test_check_duplicates_missing_file_skipped(app_and_db, tmp_path):
     """Missing files are skipped without crashing."""
     app, db, fid = app_and_db

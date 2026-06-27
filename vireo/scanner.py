@@ -28,6 +28,7 @@ from PIL import Image
 from xmp import read_hierarchical_keywords, read_keywords
 
 log = logging.getLogger(__name__)
+EMPTY_FILE_SHA256 = hashlib.sha256(b"").hexdigest()
 
 # scan() runs inside JobRunner/pipeline_job background threads, so the
 # default POSIX "fork" start method is unsafe here: forking a
@@ -1324,8 +1325,26 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                         (existing["timestamp"] is None or dims_suspect)
                         and existing["id"] not in exif_extracted
                     )
+                    if "file_hash" in existing.keys():
+                        existing_file_hash = existing["file_hash"]
+                    else:
+                        hash_row = db.conn.execute(
+                            "SELECT file_hash FROM photos WHERE id = ?",
+                            (existing["id"],),
+                        ).fetchone()
+                        existing_file_hash = (
+                            hash_row["file_hash"] if hash_row else None
+                        )
+                    empty_hash_needs_repair = (
+                        existing["file_size"] == 0
+                        and existing_file_hash == EMPTY_FILE_SHA256
+                    )
 
-                    if file_unchanged and xmp_unchanged and not metadata_missing:
+                    if (
+                        file_unchanged and xmp_unchanged
+                        and not metadata_missing
+                        and not empty_hash_needs_repair
+                    ):
                         processed_count += 1
                         if photo_callback:
                             photo_callback(existing["id"], full_path_str)
@@ -1352,7 +1371,11 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                         )
                         commit_with_retry(db.conn)
 
-                    if file_unchanged and not metadata_missing:
+                    if (
+                        file_unchanged
+                        and not metadata_missing
+                        and not empty_hash_needs_repair
+                    ):
                         processed_count += 1
                         if photo_callback:
                             photo_callback(existing["id"], full_path_str)
@@ -1456,6 +1479,12 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             touched_folder_ids.add(folder_id)
             file_size = stat.st_size
             file_mtime = stat.st_mtime
+            if file_size == 0 and file_hash == EMPTY_FILE_SHA256:
+                log.warning(
+                    "Empty image file detected; skipping duplicate identity hash: %s",
+                    image_path,
+                )
+                file_hash = None
 
             # XMP sidecar
             xmp_path = image_path.with_suffix(".xmp")
@@ -1519,7 +1548,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             # for them avoids O(N) wasted UPDATE + commit round-trips on
             # large initial scans.
             existing_row = db.conn.execute(
-                "SELECT file_hash FROM photos WHERE folder_id = ? AND filename = ?",
+                "SELECT file_hash, flag FROM photos WHERE folder_id = ? AND filename = ?",
                 (folder_id, image_path.name),
             ).fetchone()
             row_already_existed = existing_row is not None
@@ -1575,6 +1604,13 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                     # that recomputes the same hash leaves coverage intact.
                     updates.append("hash_checked_at=NULL")
                     updates.append("hash_status=NULL")
+            elif file_size == 0:
+                updates.append("file_hash=NULL")
+                if row_already_existed and prev_file_hash is not None:
+                    updates.append("hash_checked_at=NULL")
+                    updates.append("hash_status=NULL")
+                if row_already_existed and prev_file_hash == EMPTY_FILE_SHA256:
+                    updates.append("flag=CASE WHEN flag='rejected' THEN 'none' ELSE flag END")
             if file_meta and extract_full_metadata:
                 updates.append("exif_data=?")
                 update_params.append(json.dumps(file_meta))
@@ -1595,7 +1631,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 # such a file's mtime current would make the next incremental
                 # scan skip it forever with a stale hash and stale derived
                 # caches; leaving the old mtime in place retries it instead.
-                if file_hash is not None:
+                if file_hash is not None or file_size == 0:
                     updates.extend(["file_mtime=?", "file_size=?"])
                     update_params.extend([file_mtime, file_size])
                 # xmp_mtime stays unconditional — the sidecar is a separate

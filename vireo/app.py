@@ -10511,7 +10511,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not paths:
             return json_error("paths required", 400)
 
-        from scanner import compute_file_hash
+        from scanner import EMPTY_FILE_SHA256, compute_file_hash
 
         db = _get_db()
         rows = db.conn.execute(
@@ -10533,6 +10533,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             for checked, path in enumerate(paths, 1):
                 try:
                     file_hash = compute_file_hash(path)
+                    if file_hash == EMPTY_FILE_SHA256 and os.path.getsize(path) == 0:
+                        continue
                     if file_hash in known_hashes or file_hash in seen_hashes:
                         batch_duplicates.append(path)
                         duplicate_count += 1

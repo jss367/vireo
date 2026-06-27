@@ -318,6 +318,46 @@ def test_scan_discovers_photos(tmp_path):
     assert filenames == {'img1.jpg', 'img2.jpg', 'img3.jpg'}
 
 
+def test_scan_zero_byte_images_are_not_duplicate_photos(tmp_path):
+    """Empty image files are corruption/placeholders, not duplicate photos."""
+    from db import Database
+    from scanner import EMPTY_FILE_SHA256, scan
+
+    root = tmp_path / "photos"
+    root.mkdir()
+    (root / "DSC_0001.NEF").write_bytes(b"")
+    (root / "DSC_0002.NEF").write_bytes(b"")
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(str(root), db)
+
+    rows = db.conn.execute(
+        "SELECT filename, file_size, file_hash, flag FROM photos ORDER BY filename"
+    ).fetchall()
+    assert [r["filename"] for r in rows] == ["DSC_0001.NEF", "DSC_0002.NEF"]
+    assert all(r["file_size"] == 0 for r in rows)
+    assert all(r["file_hash"] is None for r in rows)
+    assert all(r["flag"] != "rejected" for r in rows)
+
+    # Historical repair: older scans stored the SHA-256 of empty bytes, which
+    # made unrelated empty files look like exact duplicates and auto-rejected
+    # all but one. A rescan should clear that duplicate identity and undo only
+    # those empty-hash auto-rejections.
+    db.conn.execute(
+        "UPDATE photos SET file_hash = ?, flag = 'rejected'",
+        (EMPTY_FILE_SHA256,),
+    )
+    db.conn.commit()
+
+    scan(str(root), db, incremental=True)
+
+    repaired = db.conn.execute(
+        "SELECT file_hash, flag FROM photos ORDER BY filename"
+    ).fetchall()
+    assert all(r["file_hash"] is None for r in repaired)
+    assert all(r["flag"] == "none" for r in repaired)
+
+
 def test_scan_cancel_check_aborts_before_discovery(tmp_path):
     """scan() honors cancel_check before doing scan work."""
     from db import Database

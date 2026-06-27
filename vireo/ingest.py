@@ -19,7 +19,7 @@ from image_loader import (
     safe_iter_dir,
     safe_scan_walk,
 )
-from scanner import compute_file_hash
+from scanner import EMPTY_FILE_SHA256, compute_file_hash
 
 log = logging.getLogger(__name__)
 
@@ -538,6 +538,8 @@ def ingest(
     for source_file in files:
         try:
             file_hash = compute_file_hash(str(source_file))
+            if file_hash == EMPTY_FILE_SHA256 and source_file.stat().st_size == 0:
+                file_hash = None
         except Exception as e:
             log.warning("Failed to ingest %s: %s", source_file, e)
             failed += 1
@@ -546,7 +548,7 @@ def ingest(
                 progress_callback(emitted, total, source_file.name)
             continue
 
-        if skip_duplicates and file_hash in known_hashes:
+        if skip_duplicates and file_hash is not None and file_hash in known_hashes:
             skipped_duplicate += 1
             # Record every destination folder that holds a copy of
             # this file, not just one. The pipeline uses this set
@@ -584,7 +586,7 @@ def ingest(
         # if the primary's copy fails (e.g. the destination filename
         # collides with a directory of the same name), the sibling
         # still gets a chance to import the bytes.
-        if skip_duplicates and file_hash in known_hashes:
+        if skip_duplicates and file_hash is not None and file_hash in known_hashes:
             skipped_duplicate += 1
             dest = batch_dest_folders.get(file_hash)
             if dest is not None:
@@ -606,7 +608,7 @@ def ingest(
             # Handle filename collision (different file, same name)
             if dest_file.exists():
                 dest_hash = compute_file_hash(str(dest_file))
-                if file_hash == dest_hash:
+                if file_hash is not None and file_hash == dest_hash:
                     # Exact same file already there
                     skipped_duplicate += 1
                     known_hashes.add(file_hash)
@@ -625,8 +627,9 @@ def ingest(
                     counter += 1
 
             shutil.copy2(str(source_file), str(dest_file))
-            known_hashes.add(file_hash)
-            batch_dest_folders[file_hash] = str(dest_folder)
+            if file_hash is not None:
+                known_hashes.add(file_hash)
+                batch_dest_folders[file_hash] = str(dest_folder)
             copied_paths.append(str(dest_file))
             copied += 1
 
