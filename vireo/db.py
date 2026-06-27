@@ -2343,6 +2343,51 @@ class Database:
                 missing.append(row)
         return missing
 
+    def nearest_ancestor_folder_id(self, path, exclude_id=None):
+        """Return the id of the folder whose stored path is the longest proper
+        ancestor of ``path`` (platform-neutral prefix match), or None if no
+        folder row is an ancestor.
+
+        Used to keep ``parent_id`` consistent with ``path`` after relocations
+        and moves. Those operations rewrite a folder's ``path`` but would
+        otherwise leave ``parent_id`` pinned to the OLD location's parent,
+        which mis-nests the folder in the browse tree (e.g. a date folder
+        moved onto another volume staying linked to its original parent).
+        Folder counts are small, so the linear scan is fine.
+        """
+        target = _path_for_subtree_match(path)
+        best_id = None
+        best_len = -1
+        for row in self.conn.execute("SELECT id, path FROM folders"):
+            if exclude_id is not None and row["id"] == exclude_id:
+                continue
+            cand = _path_for_subtree_match(row["path"])
+            if target == cand or not target.startswith(cand + "/"):
+                continue
+            if len(cand) > best_len:
+                best_id = row["id"]
+                best_len = len(cand)
+        return best_id
+
+    def _relink_parents_by_path(self, folder_ids):
+        """Re-derive ``parent_id`` from the current ``path`` for each folder.
+
+        Relocations and merges rewrite ``path`` but leave ``parent_id``
+        pinned to the pre-move parent, which mis-nests the folder in the
+        browse tree. Call this after path rewrites — all affected paths must
+        already be committed to the rows so ancestor lookup sees them.
+        """
+        for fid in folder_ids:
+            row = self.conn.execute(
+                "SELECT path FROM folders WHERE id = ?", (fid,)
+            ).fetchone()
+            if row is None:
+                continue
+            self.conn.execute(
+                "UPDATE folders SET parent_id = ? WHERE id = ?",
+                (self.nearest_ancestor_folder_id(row["path"], exclude_id=fid), fid),
+            )
+
     def relocate_folder(self, folder_id, new_path):
         """Update folder path and set status to 'ok'.
 
@@ -2423,6 +2468,7 @@ class Database:
                 )
                 cascaded.append({"id": child["id"], "old_path": child["path"], "new_path": candidate})
 
+        self._relink_parents_by_path([folder_id] + [c["id"] for c in cascaded])
         self.conn.commit()
         return cascaded
 
@@ -2548,6 +2594,7 @@ class Database:
                 )
                 cascaded.append({"id": child["id"], "old_path": child["path"], "new_path": candidate})
 
+        self._relink_parents_by_path([c["id"] for c in cascaded])
         self.conn.commit()
         return cascaded
 
