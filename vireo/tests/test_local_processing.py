@@ -280,6 +280,30 @@ def test_existing_archive_bytes_ignores_unmatched_or_different_files(tmp_path):
     ) == 0
 
 
+def test_conflicting_archive_paths_reports_different_existing_files(tmp_path):
+    """Same archive-relative path with different content must be rejected
+    before the final merge-mode archive step."""
+    src = tmp_path / "card"
+    src.mkdir()
+    matching = src / "matching.jpg"
+    matching.write_bytes(b"same")
+    conflicting = src / "conflict.jpg"
+    conflicting.write_bytes(b"source")
+    missing = src / "missing.jpg"
+    missing.write_bytes(b"new")
+
+    dest = tmp_path / "archive"
+    dest.mkdir()
+    (dest / "matching.jpg").write_bytes(b"same")
+    (dest / "conflict.jpg").write_bytes(b"target")
+
+    assert local_processing.conflicting_archive_paths(
+        str(dest),
+        [matching, conflicting, missing],
+        folder_template="",
+    ) == [str(dest / "conflict.jpg")]
+
+
 def test_existing_archive_bytes_returns_zero_for_missing_or_file(tmp_path):
     """Missing directories and regular files give no credit — the caller
     treats them as a fresh archive run."""

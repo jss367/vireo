@@ -75,6 +75,62 @@ def total_file_bytes(files: list[Path]) -> int:
     return total
 
 
+def _archive_destination_for_source(
+    archive_root: Path,
+    source_file: Path,
+    timestamps: dict[Path, object],
+    folder_template: str,
+) -> Path:
+    rel_folder = build_destination_path(
+        timestamps.get(source_file),
+        folder_template,
+    )
+    return archive_root / rel_folder / source_file.name
+
+
+def conflicting_archive_paths(
+    path: str,
+    files: list[Path],
+    folder_template: str = "%Y/%Y-%m-%d",
+) -> list[str]:
+    """Return existing archive paths that would block merge-mode archive.
+
+    ``move_folder(..., merge=True)`` refuses same-relative-path files whose
+    contents differ. Detect those conflicts before the expensive staging and
+    processing work begins.
+    """
+    try:
+        if not os.path.isdir(path):
+            return []
+    except OSError:
+        return []
+
+    timestamps = _source_file_timestamps(files)
+    archive_root = Path(path)
+    conflicts: set[str] = set()
+    for source_file in files:
+        try:
+            dest_file = _archive_destination_for_source(
+                archive_root,
+                source_file,
+                timestamps,
+                folder_template,
+            )
+            if not dest_file.exists():
+                continue
+            if dest_file.is_file():
+                source_size = source_file.stat().st_size
+                if (
+                    dest_file.stat().st_size == source_size
+                    and filecmp.cmp(source_file, dest_file, shallow=False)
+                ):
+                    continue
+            conflicts.add(str(dest_file))
+        except OSError:
+            continue
+    return sorted(conflicts)
+
+
 def existing_archive_bytes(
     path: str,
     files: list[Path],
@@ -100,11 +156,12 @@ def existing_archive_bytes(
     archive_root = Path(path)
     for source_file in files:
         try:
-            rel_folder = build_destination_path(
-                timestamps.get(source_file),
+            dest_file = _archive_destination_for_source(
+                archive_root,
+                source_file,
+                timestamps,
                 folder_template,
             )
-            dest_file = archive_root / rel_folder / source_file.name
             key = os.path.normcase(os.path.abspath(dest_file))
             if key in credited or not dest_file.is_file():
                 continue

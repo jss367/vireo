@@ -993,6 +993,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
                     if params.local_processing:
                         from local_processing import (
+                            conflicting_archive_paths,
                             existing_archive_bytes,
                             format_bytes,
                             non_duplicate_files,
@@ -1120,6 +1121,25 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 recursive=params.recursive,
                                 exclude_paths=params.exclude_paths,
                             )
+                            archive_conflicts = conflicting_archive_paths(
+                                final_destination,
+                                selected_files,
+                                params.folder_template,
+                            )
+                            if archive_conflicts:
+                                examples = ", ".join(archive_conflicts[:3])
+                                more = (
+                                    f" and {len(archive_conflicts) - 3} more"
+                                    if len(archive_conflicts) > 3 else ""
+                                )
+                                _bail_storage(
+                                    "Archive destination already contains "
+                                    "different files at the same import paths: "
+                                    f"{examples}{more}. Pick an empty archive "
+                                    "folder, remove the conflicting files, or "
+                                    "import without local processing."
+                                )
+                                return
                             source_bytes = total_file_bytes(selected_files)
                             # When a previous archive attempt left a partial
                             # untracked directory at final_destination, the
@@ -4508,20 +4528,22 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         current_file=filename,
                     )
 
-                # Consume any pending cancellation and lock the job uncancellable
-                # BEFORE the move begins. move_folder is an uninterruptible commit
-                # step (copy → verify → repoint catalog → delete originals); we
-                # can't tear it down mid-flight without leaving partial state.
-                # Clearing AFTER move_folder returns leaves a window where a Stop
-                # press landing during the move would survive into the failure
-                # path: if move_folder raises (ENOSPC, rsync error, verify
-                # mismatch), runner.is_cancelled(job_id) would still be True at
-                # the outer job-terminalization check, JobRunner would record
-                # "cancelled", and the user would never see the archive failure.
-                # Consume up front so a successful commit reports "completed" AND
-                # a failed commit reports "failed" — both win against the racing
-                # Stop press, which couldn't have been honored anyway.
-                runner.clear_cancellation(job["id"])
+                # Atomically lock the job uncancellable BEFORE the move begins,
+                # but only if Stop is not already pending. move_folder is an
+                # uninterruptible commit step (copy -> verify -> repoint catalog
+                # -> delete originals); once it starts, a Stop press cannot be
+                # honored without leaving partial state. If Stop landed just
+                # before this transition, skip archive and let the outer runner
+                # record the job as cancelled.
+                if not runner.begin_uncancellable(job["id"]):
+                    _deindex_staging()
+                    stages["archive"]["status"] = "skipped"
+                    runner.update_step(
+                        job["id"], "archive",
+                        status="completed", summary="Skipped",
+                    )
+                    _update_stages(runner, job["id"], stages)
+                    return
 
                 move_result = move_folder(
                     thread_db,

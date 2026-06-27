@@ -745,6 +745,66 @@ def test_pipeline_local_processing_completes_when_cancel_during_archive(
     assert job["result"]["archive"]["final_destination"] == str(final_dest)
 
 
+def test_pipeline_local_processing_cancels_before_archive_commit(
+    setup, tmp_path, monkeypatch
+):
+    """A Stop press that lands just before archive commit begins is still
+    honorably cancellable because nothing has been published yet."""
+    app, db_path = setup
+
+    final_parent = tmp_path / "nas_cancel_before_commit"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+
+    src = tmp_path / "card_cancel_before_commit"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(src / "kept.jpg")
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    runner = app._job_runner
+    real_begin_uncancellable = runner.begin_uncancellable
+    cancelled_once = {"done": False}
+
+    def cancelling_begin_uncancellable(job_id):
+        if not cancelled_once["done"]:
+            cancelled_once["done"] = True
+            assert runner.cancel_job(job_id) is True
+        return real_begin_uncancellable(job_id)
+
+    monkeypatch.setattr(
+        runner, "begin_uncancellable", cancelling_begin_uncancellable,
+    )
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job_id = resp.get_json()["job_id"]
+        job = wait_for_job_via_client(c, job_id)
+
+    assert job["status"] == "cancelled", job
+    assert not (final_dest / "kept.jpg").exists()
+
+    from db import Database
+    check_db = Database(db_path)
+    folder_row = check_db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?",
+        (str(tmp_path / "staging" / job_id / "Photos"),),
+    ).fetchone()
+    check_db.close()
+    assert folder_row is None
+
+
 def test_pipeline_local_processing_failed_archive_reports_failed_even_after_cancel(
     setup, tmp_path, monkeypatch
 ):
@@ -1260,6 +1320,44 @@ def test_pipeline_local_processing_rejects_existing_file_archive_destination(
     assert job["status"] == "failed", job
     error_text = (job.get("error") or "") + str(job.get("result", ""))
     assert "not a directory" in error_text
+
+
+def test_pipeline_local_processing_rejects_archive_path_conflicts(
+    setup, tmp_path, monkeypatch
+):
+    app, _db_path = setup
+
+    src = tmp_path / "card-conflict"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "green").save(src / "fresh.jpg")
+
+    final_parent = tmp_path / "archive-conflict-parent"
+    final_parent.mkdir()
+    final_dest = final_parent / "Archive"
+    final_dest.mkdir()
+    (final_dest / "fresh.jpg").write_bytes(b"different existing bytes")
+
+    import local_processing
+
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert job["status"] == "failed", job
+    error_text = (job.get("error") or "") + str(job.get("result", ""))
+    assert "different files at the same import paths" in error_text
 
 
 def test_pipeline_local_processing_credits_existing_archive_for_resume(

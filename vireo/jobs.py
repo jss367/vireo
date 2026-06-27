@@ -1036,6 +1036,20 @@ class JobRunner:
         with self._lock:
             return job_id in self._cancelled
 
+    def begin_uncancellable(self, job_id):
+        """Atomically enter an uninterruptible phase if not cancelled.
+
+        Returns False when a cancellation is already pending, leaving that flag
+        intact so ``_run_job`` can record the job as cancelled. Once this
+        returns True, later ``cancel_job`` calls are ignored until the job
+        reaches a terminal state.
+        """
+        with self._lock:
+            if job_id in self._cancelled:
+                return False
+            self._uncancellable.add(job_id)
+            return True
+
     def clear_cancellation(self, job_id):
         """Consume any pending cancellation flag for ``job_id`` and
         mark the job uncancellable.
