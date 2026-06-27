@@ -1672,12 +1672,31 @@ function renderApplyState() {
   var applyBtn = document.getElementById('applyBtn');
   var applyNextBtn = document.getElementById('applyNextBtn');
   var diff = rapidComputeApplyDiff();
+  var waitingForState = !rapid.seeded && rapid.sessionIndex >= 0 && rapid.items && rapid.items.length && !rapid.loadError;
+  var stateFailed = !rapid.seeded && rapid.loadError;
   applyBtn.disabled = disabled;
   applyNextBtn.disabled = disabled || rapid.sessionIndex >= rapid.sessions.length - 1;
-  applyBtn.textContent = rapid.applying ? 'Applying...' : rapidApplyButtonText('Apply', diff);
-  applyNextBtn.textContent = rapid.applying ? 'Applying...' : rapidApplyButtonText('Apply & Next', diff);
-  applyBtn.title = rapidApplyTitle(diff, false);
-  applyNextBtn.title = rapidApplyTitle(diff, true);
+  if (rapid.applying) {
+    applyBtn.textContent = 'Applying...';
+    applyNextBtn.textContent = 'Applying...';
+    applyBtn.title = 'Applying changes to this burst.';
+    applyNextBtn.title = 'Applying changes to this burst.';
+  } else if (waitingForState) {
+    applyBtn.textContent = 'Loading burst state...';
+    applyNextBtn.textContent = 'Loading burst state...';
+    applyBtn.title = 'Apply will be available after burst state loads.';
+    applyNextBtn.title = 'Apply & Next will be available after burst state loads.';
+  } else if (stateFailed) {
+    applyBtn.textContent = 'Apply unavailable';
+    applyNextBtn.textContent = 'Apply & Next unavailable';
+    applyBtn.title = 'Apply is unavailable because burst state failed to load.';
+    applyNextBtn.title = 'Apply & Next is unavailable because burst state failed to load.';
+  } else {
+    applyBtn.textContent = rapidApplyButtonText('Apply', diff);
+    applyNextBtn.textContent = rapidApplyButtonText('Apply & Next', diff);
+    applyBtn.title = rapidApplyTitle(diff, false);
+    applyNextBtn.title = rapidApplyTitle(diff, true);
+  }
   applyBtn.setAttribute('aria-label', applyBtn.title);
   applyNextBtn.setAttribute('aria-label', applyNextBtn.title);
 }
