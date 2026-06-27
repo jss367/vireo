@@ -390,6 +390,46 @@ def test_conflicting_archive_paths_skips_known_duplicates(tmp_path):
     ) == []
 
 
+def test_conflicting_archive_paths_skips_duplicates_before_claiming_names(
+    tmp_path,
+):
+    """A catalog duplicate must not reserve a destination filename before a
+    later fresh source with the same basename is evaluated."""
+    from scanner import compute_file_hash
+
+    src = tmp_path / "card"
+    src.mkdir()
+    already_imported = src / "existing" / "frame.jpg"
+    already_imported.parent.mkdir()
+    already_imported.write_bytes(b"already-imported")
+    fresh = src / "fresh" / "frame.jpg"
+    fresh.parent.mkdir()
+    fresh.write_bytes(b"fresh-bytes")
+
+    dest = tmp_path / "archive"
+    dest.mkdir()
+    (dest / "frame_1.jpg").write_bytes(b"unrelated-target")
+
+    # Without duplicate filtering, the first frame.jpg claims the unsuffixed
+    # slot and the fresh frame.jpg is correctly checked against frame_1.jpg.
+    assert local_processing.conflicting_archive_paths(
+        str(dest),
+        [already_imported, fresh],
+        folder_template="",
+    ) == [str(dest / "frame_1.jpg")]
+
+    # With the first source already in the catalog, ingest skips it before
+    # claiming frame.jpg. The fresh source therefore stages as frame.jpg, not
+    # frame_1.jpg, and the unrelated partial frame_1.jpg is irrelevant.
+    known = {compute_file_hash(str(already_imported))}
+    assert local_processing.conflicting_archive_paths(
+        str(dest),
+        [already_imported, fresh],
+        folder_template="",
+        known_hashes=known,
+    ) == []
+
+
 def test_conflicting_archive_paths_tracks_survivor_hashes(tmp_path):
     """When skip_duplicates is enabled and the selected sources contain the
     same bytes twice (for example the same card folder selected twice),

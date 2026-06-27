@@ -138,25 +138,20 @@ def conflicting_archive_paths(
       already known to the catalog are treated as ingest skips — they never
       reach staging, so they cannot conflict at the final archive step.
       Callers normally pass the catalog hash set when ``skip_duplicates``
-      is enabled. Hashing only happens for sources whose unsuffixed
-      archive path has a same-name collision; common imports with no
-      archive overlap pay no extra hash cost.
+      is enabled. Duplicate identity is checked before a source claims
+      an archive filename so skipped duplicates cannot shift later
+      survivors onto suffixed paths that ingest would not use.
     * When two surviving sources land in the same archive subfolder under
       the same filename, ingest stages the first at the unsuffixed name
       and the second under ``name_1.ext`` (then ``name_2.ext`` ...). The
       preflight tracks per-folder occupied names so the existing archive's
       same-name file is only compared to the first survivor's content,
       not also (incorrectly) to the second survivor's.
-    * When ``known_hashes`` is in use, the hashes of earlier survivors are
-      folded into ``seen_hashes`` before a later source's conflict check.
-      Mirrors ingest()'s ``extra_known_hashes`` accumulator so the same
-      card/folder selected twice still recognises the second occurrence as
-      an intra-batch duplicate that ingest would skip — without that, a
-      later same-hash source whose archive path collides with an unrelated
-      file would be reported as a fresh conflict and the run would abort.
-      Survivor hashes are computed lazily, only when an actual conflict
-      needs resolving, so the common no-overlap case still pays no hash
-      cost.
+    * When ``known_hashes`` is in use, earlier survivors are added to
+      ``seen_hashes`` as they claim names. Mirrors ingest()'s
+      ``extra_known_hashes`` accumulator so the same card/folder selected
+      twice still recognises the second occurrence as an intra-batch
+      duplicate that ingest would skip.
     """
     try:
         if not os.path.isdir(path):
@@ -173,30 +168,27 @@ def conflicting_archive_paths(
     # Per-archive-subfolder name slots already claimed by earlier survivors
     # in this iteration. Mirrors the per-batch staging tree ingest builds.
     occupied: dict[str, set[str]] = {}
-    # Survivors (sources that ingest would stage) whose hash hasn't been
-    # computed yet. When ``seen_hashes`` is in use and a later source hits
-    # a same-path conflict that needs hash resolution, these get hashed
-    # first so ``seen_hashes`` matches ingest()'s known-hash set at that
-    # point in the source iteration. Stays empty when ``known_hashes`` is
-    # ``None``, so callers without skip_duplicates pay no extra cost.
-    pending_survivor_hashes: list[Path] = []
 
-    def _flush_pending() -> None:
-        if seen_hashes is None or not pending_survivor_hashes:
-            return
-        while pending_survivor_hashes:
-            survivor = pending_survivor_hashes.pop(0)
-            try:
-                file_hash = _duplicate_identity(survivor)
-            except OSError:
-                continue
-            # Zero-byte survivors carry no duplicate identity in
-            # ingest, so don't pollute ``seen_hashes`` with
-            # ``EMPTY_FILE_SHA256`` — that would cause a later
-            # zero-byte source's same-path conflict to be falsely
-            # skipped as an intra-batch duplicate.
-            if file_hash is not None:
-                seen_hashes.add(file_hash)
+    def _skip_or_record_survivor(source_file: Path) -> bool:
+        """Return True when ingest would skip ``source_file`` as a duplicate."""
+        if seen_hashes is None:
+            return False
+        try:
+            file_hash = _duplicate_identity(source_file)
+        except OSError:
+            # ingest() treats hash failures as per-file failures before copy,
+            # so they do not claim destination names.
+            return True
+        # Zero-byte survivors carry no duplicate identity in ingest, so
+        # don't pollute ``seen_hashes`` with ``EMPTY_FILE_SHA256`` — that
+        # would cause a later zero-byte source's same-path conflict to be
+        # falsely skipped as an intra-batch duplicate.
+        if file_hash is None:
+            return False
+        if file_hash in seen_hashes:
+            return True
+        seen_hashes.add(file_hash)
+        return False
 
     for source_file in files:
         try:
@@ -212,9 +204,9 @@ def conflicting_archive_paths(
 
             dest_file = dest_folder / chosen_name
             if not os.path.lexists(dest_file):
+                if _skip_or_record_survivor(source_file):
+                    continue
                 folder_taken.add(chosen_name)
-                if seen_hashes is not None:
-                    pending_survivor_hashes.append(source_file)
                 continue
 
             if not dest_file.is_symlink() and dest_file.is_file():
@@ -223,41 +215,19 @@ def conflicting_archive_paths(
                     dest_file.stat().st_size == source_size
                     and filecmp.cmp(source_file, dest_file, shallow=False)
                 ):
+                    if _skip_or_record_survivor(source_file):
+                        continue
                     folder_taken.add(chosen_name)
-                    if seen_hashes is not None:
-                        pending_survivor_hashes.append(source_file)
                     continue
 
             # Same-path archive file with different content. If ingest
             # would skip this source as a known duplicate, it never
             # reaches staging and so cannot conflict — confirm before
-            # rejecting the run. Hashing is deferred to this branch so
-            # the common no-overlap case stays cheap.
-            if seen_hashes is not None:
-                # Bring ``seen_hashes`` up to date with every earlier
-                # survivor's hash before checking the current source,
-                # mirroring ingest()'s known-hash accumulator order.
-                _flush_pending()
-                try:
-                    file_hash = _duplicate_identity(source_file)
-                except OSError:
-                    continue
-                # Zero-byte sources have no duplicate identity in
-                # ingest (``EMPTY_FILE_SHA256`` is cleared to ``None``
-                # before the dup check), so don't treat them as
-                # intra-batch duplicates of an earlier empty source
-                # and don't pollute ``seen_hashes`` with their hash.
-                if file_hash is not None:
-                    if file_hash in seen_hashes:
-                        # ingest's skip_duplicates branch drops this
-                        # source before staging; do not claim a slot
-                        # either.
-                        continue
-                    # Track the hash so a same-hash sibling later in
-                    # ``files`` is treated as an intra-batch duplicate
-                    # too, the way ingest()'s pass-2 ``known_hashes``
-                    # set does.
-                    seen_hashes.add(file_hash)
+            # rejecting the run.
+            if _skip_or_record_survivor(source_file):
+                # ingest's skip_duplicates branch drops this source
+                # before staging; do not claim a slot either.
+                continue
 
             conflicts.add(str(dest_file))
             folder_taken.add(chosen_name)
