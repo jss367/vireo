@@ -3108,6 +3108,162 @@ def test_original_falls_back_to_companion_when_raw_extraction_fails(
     assert resp.mimetype == "image/jpeg"
 
 
+def test_original_uses_companion_when_raw_extract_returns_undersized(
+    client_with_photo, monkeypatch,
+):
+    """``extract_working_copy`` returns True even when ``_load_raw`` falls
+    back to a small embedded JPEG, so a successful extract can still
+    produce a working copy that's a fraction of the sensor's full
+    resolution. /photos/<id>/original must detect that fallback and
+    re-extract from the companion JPEG before caching it as the
+    working copy — otherwise every later 1:1 request silently serves
+    the downscaled preview even though a full-size sidecar exists.
+    """
+    import io
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    folder_row = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    folder_path = folder_row["path"]
+
+    raw_path = os.path.join(folder_path, "source.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(b"unsupported raw")
+    companion_path = os.path.join(folder_path, "source.JPG")
+    Image.new("RGB", (6000, 4000), (90, 140, 180)).save(
+        companion_path, "JPEG", quality=85,
+    )
+
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path='source.JPG',
+               working_copy_path=NULL,
+               working_copy_failed_at=NULL,
+               working_copy_failed_mtime=NULL,
+               working_copy_failed_source=NULL,
+               width=6000, height=4000
+           WHERE id=?""",
+        (photo_id,),
+    )
+    db.conn.commit()
+
+    real_extract = image_loader.extract_working_copy
+    extract_calls = []
+
+    def extract_with_size_fallback(source, output, *args, **kwargs):
+        extract_calls.append(str(source))
+        if str(source).lower().endswith(".nef"):
+            # Stand in for `_load_raw` returning the embedded JPEG when
+            # libraw can't demosaic the RAW: write an undersized JPEG
+            # and return True (matches the current contract).
+            os.makedirs(os.path.dirname(output), exist_ok=True)
+            Image.new("RGB", (1600, 1067), (200, 50, 50)).save(
+                output, "JPEG", quality=85,
+            )
+            return True
+        return real_extract(source, output, *args, **kwargs)
+
+    monkeypatch.setattr(image_loader, "extract_working_copy", extract_with_size_fallback)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/original")
+
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert resp.mimetype == "image/jpeg"
+    # Both sources must be tried — RAW first, then companion after the
+    # undersized output is detected.
+    assert len(extract_calls) == 2
+    assert extract_calls[0].lower().endswith(".nef")
+    assert extract_calls[1].lower().endswith(".jpg")
+    # The persisted working copy must be the full-size companion render.
+    with Image.open(io.BytesIO(resp.data)) as img:
+        assert max(img.size) >= 5400
+
+
+def test_edited_original_uses_companion_when_raw_returns_undersized(
+    client_with_photo, monkeypatch,
+):
+    """For edited RAW originals, ``load_image`` can return a small
+    embedded JPEG when ``rawpy.postprocess`` fails — the
+    ``preserve_highlights`` mode still falls back to the embedded
+    thumb. The endpoint must compare the loaded dimensions against
+    the photo's stored full-resolution dimensions and try the
+    companion JPEG before caching an undersized originals/<id>.jpg.
+    """
+    import io
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    folder_row = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    folder_path = folder_row["path"]
+
+    raw_path = os.path.join(folder_path, "edit.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(b"unsupported raw")
+    companion_path = os.path.join(folder_path, "edit.JPG")
+    Image.new("RGB", (6000, 4000), (90, 140, 180)).save(
+        companion_path, "JPEG", quality=85,
+    )
+
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='edit.NEF', extension='.nef',
+               companion_path='edit.JPG',
+               working_copy_path=NULL,
+               working_copy_failed_at=NULL,
+               working_copy_failed_mtime=NULL,
+               working_copy_failed_source=NULL,
+               width=6000, height=4000
+           WHERE id=?""",
+        (photo_id,),
+    )
+    db.conn.commit()
+    # An edit recipe routes the request through the highlight-preserving
+    # decode path that the new size-validation guards.
+    db.set_photo_edit_recipe(photo_id, {"rotation": 0})
+
+    load_calls = []
+
+    def fake_load_image(file_path, max_size=1024, **kwargs):
+        load_calls.append((str(file_path), kwargs))
+        if str(file_path).lower().endswith(".nef"):
+            # Stand in for `_load_raw` returning an undersized embedded
+            # preview when libraw can't demosaic the sensor data.
+            return Image.new("RGB", (1600, 1067), (200, 50, 50))
+        return Image.new("RGB", (6000, 4000), (90, 140, 180))
+
+    monkeypatch.setattr(image_loader, "load_image", fake_load_image)
+    # The endpoint imports load_image into the local module namespace too.
+    import app as app_module
+    monkeypatch.setattr(app_module, "load_image", fake_load_image, raising=False)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/original")
+
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    # The RAW was attempted first, then the companion JPEG after the
+    # undersized result was detected.
+    paths = [str(p[0]).lower() for p in load_calls]
+    assert any(p.endswith(".nef") for p in paths)
+    assert any(p.endswith(".jpg") for p in paths)
+    # The cached original must be the full-size companion render.
+    with Image.open(io.BytesIO(resp.data)) as img:
+        assert max(img.size) >= 5400
+
+
 def test_eviction_removes_oldest_files_when_over_quota(tmp_path, monkeypatch):
     """When writes push cache over quota, oldest-accessed entries are evicted."""
     import os

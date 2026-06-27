@@ -18577,6 +18577,42 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
             load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
             img = load_image(image_path, max_size=None, **load_kwargs)
+            if (
+                img is not None
+                and resolved_ext in RAW_EXTENSIONS
+                and photo["width"]
+                and photo["height"]
+            ):
+                # _load_raw falls back to the embedded JPEG even in
+                # preserve-highlights mode when libraw can't demosaic the
+                # sensor data, so a successful load can still be the small
+                # camera preview rather than full-resolution pixels. For
+                # 1:1 edited views that's the wrong file to cache — try
+                # the full-size companion before saving an undersized
+                # originals/<id>.jpg.
+                loaded_long = max(img.size)
+                expected_long = max(int(photo["width"]), int(photo["height"]))
+                if expected_long > 0 and loaded_long < expected_long * 0.9:
+                    companion_fallback = _full_res_companion_path(
+                        folder["path"], using_offline_cache,
+                    )
+                    if companion_fallback and companion_fallback != image_path:
+                        log.info(
+                            "RAW decode for photo %s edited original returned "
+                            "undersized embedded preview (%dx%d, expected long "
+                            "edge %d); falling back to companion JPEG",
+                            photo_id, img.size[0], img.size[1], expected_long,
+                        )
+                        img.close()
+                        img = load_image(companion_fallback, max_size=None)
+                        if img is not None:
+                            image_path = companion_fallback
+                        else:
+                            # Companion path also unreadable — fall back
+                            # to the embedded preview rather than 500ing.
+                            img = load_image(
+                                image_path, max_size=None, **load_kwargs,
+                            )
             if img is None and resolved_ext in RAW_EXTENSIONS:
                 # RAW couldn't decode (unsupported variant, no embedded JPEG).
                 # Fall back to the full-resolution companion JPEG when one
@@ -18695,6 +18731,39 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             from PIL import Image as _PILImage
             with _PILImage.open(wc_abs) as upgraded:
                 uw, uh = upgraded.size
+            # For RAW sources, extract_working_copy can succeed via the
+            # embedded JPEG fallback when libraw can't demosaic the file.
+            # That preview is often a fraction of the sensor's full
+            # resolution, so persisting it as the working copy would
+            # silently downgrade /original for every later request. Try
+            # the companion JPEG instead when one can satisfy the full
+            # size before recording this wc.
+            if (
+                resolved_ext in RAW_EXTENSIONS
+                and companion_for_extraction
+                and companion_for_extraction != source_for_extraction
+                and photo["width"]
+                and photo["height"]
+            ):
+                expected_long = max(int(photo["width"]), int(photo["height"]))
+                if expected_long > 0 and max(uw, uh) < expected_long * 0.9:
+                    log.info(
+                        "RAW working copy for photo %s is undersized "
+                        "(%dx%d, expected long edge %d); re-extracting "
+                        "from companion JPEG",
+                        photo_id, uw, uh, expected_long,
+                    )
+                    if extract_working_copy(
+                        companion_for_extraction, wc_abs,
+                        max_size=0, quality=quality,
+                    ):
+                        with _PILImage.open(wc_abs) as upgraded:
+                            uw, uh = upgraded.size
+                    else:
+                        log.warning(
+                            "Companion re-extraction failed for photo %s; "
+                            "keeping undersized RAW working copy", photo_id,
+                        )
             updates = ["working_copy_path=?"]
             params = [wc_rel]
             if not photo["width"] or not photo["height"]:
@@ -18749,6 +18818,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
         img = load_image(image_path, max_size=None, **load_kwargs)
+        if (
+            img is not None
+            and resolved_ext in RAW_EXTENSIONS
+            and companion_for_extraction
+            and companion_for_extraction != image_path
+            and photo["width"]
+            and photo["height"]
+        ):
+            # Same undersized-embedded-JPEG guard as the working-copy path
+            # above: if rawpy.postprocess fell back to a small embedded
+            # preview, prefer the full-size companion JPEG before caching.
+            loaded_long = max(img.size)
+            expected_long = max(int(photo["width"]), int(photo["height"]))
+            if expected_long > 0 and loaded_long < expected_long * 0.9:
+                log.info(
+                    "RAW decode for photo %s original returned undersized "
+                    "embedded preview (%dx%d, expected long edge %d); "
+                    "falling back to companion JPEG",
+                    photo_id, img.size[0], img.size[1], expected_long,
+                )
+                img.close()
+                img = load_image(companion_for_extraction, max_size=None)
+                if img is not None:
+                    image_path = companion_for_extraction
+                else:
+                    img = load_image(image_path, max_size=None, **load_kwargs)
         if (
             img is None
             and resolved_ext in RAW_EXTENSIONS
