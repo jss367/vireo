@@ -37,41 +37,60 @@ runs:
         owner="${REPO%/*}"
         name="${REPO#*/}"
 
-        data=$(gh api graphql -f query='
-          query($owner:String!, $name:String!, $pr:Int!) {
-            repository(owner:$owner, name:$name) {
-              pullRequest(number:$pr) {
-                author { login }
-                reviewThreads(first:100) {
-                  nodes {
-                    isResolved
-                    isOutdated
-                    comments(last:1) { nodes { author { login } } }
-                  }
-                  pageInfo { hasNextPage }
-                }
-              }
-            }
-          }' -F owner="$owner" -F name="$name" -F pr="$PR")
-
-        pr_author=$(jq -r '.data.repository.pullRequest.author.login' <<<"$data")
-
-        if [[ "$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage' <<<"$data")" == "true" ]]; then
-          echo "WARNING: PR #${PR} has >100 review threads; only the first 100 were inspected." >&2
-        fi
-
+        # Paginate review threads, stopping early as soon as one needs a
+        # response, so large PRs (>100 threads) are not silently truncated.
         # A thread needs an agent response when it is unresolved, not outdated,
         # and its latest comment is from someone other than the PR author (i.e.
         # a reviewer left something the author has not yet replied to).
-        needs=$(jq -r --arg author "$pr_author" '
-          [ .data.repository.pullRequest.reviewThreads.nodes[]
-            | select(.isResolved == false and .isOutdated == false)
-            | .comments.nodes[-1].author.login
-            | select(. != null and . != $author) ] | length' <<<"$data")
+        pr_author=""
+        cursor=""
+        needs=0
+        while :; do
+          after=""
+          if [[ -n "$cursor" ]]; then
+            after=", after: \"$cursor\""
+          fi
+
+          data=$(gh api graphql -f query="
+            query(\$owner:String!, \$name:String!, \$pr:Int!) {
+              repository(owner:\$owner, name:\$name) {
+                pullRequest(number:\$pr) {
+                  author { login }
+                  reviewThreads(first:100${after}) {
+                    nodes {
+                      isResolved
+                      isOutdated
+                      comments(last:1) { nodes { author { login } } }
+                    }
+                    pageInfo { hasNextPage endCursor }
+                  }
+                }
+              }
+            }" -F owner="$owner" -F name="$name" -F pr="$PR")
+
+          if [[ -z "$pr_author" ]]; then
+            pr_author=$(jq -r '.data.repository.pullRequest.author.login' <<<"$data")
+          fi
+
+          page_needs=$(jq -r --arg author "$pr_author" '
+            [ .data.repository.pullRequest.reviewThreads.nodes[]
+              | select(.isResolved == false and .isOutdated == false)
+              | .comments.nodes[-1].author.login
+              | select(. != null and . != $author) ] | length' <<<"$data")
+
+          if [[ "${page_needs:-0}" -gt 0 ]]; then
+            needs=$page_needs
+            break
+          fi
+
+          has_next=$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage' <<<"$data")
+          cursor=$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor' <<<"$data")
+          [[ "$has_next" == "true" && -n "$cursor" && "$cursor" != "null" ]] || break
+        done
 
         if [[ "${needs:-0}" -gt 0 ]]; then
           echo "needs_response=true" >> "$GITHUB_OUTPUT"
-          echo "PR #${PR}: ${needs} review thread(s) await an agent response; firing routine."
+          echo "PR #${PR}: a review thread awaits an agent response; firing routine."
         else
           echo "needs_response=false" >> "$GITHUB_OUTPUT"
           echo "PR #${PR}: no unresolved, non-outdated review threads await an agent response; skipping."

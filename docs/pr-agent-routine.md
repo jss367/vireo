@@ -180,10 +180,10 @@ gate.
   thread whose latest comment is from the PR author as "already answered". If
   the PR author leaves an *inline review comment* asking the agent to do
   something, the gate counts it as an author reply and the review event will
-  not fire the routine. Use a top-level comment or `/claude-fix` for author
-  requests — those route through jobs the gate does not touch. The gate also
-  inspects only the first 100 review threads and logs a warning if a PR exceeds
-  that.
+  not fire the routine. Use a top-level comment, a review body, or
+  `/claude-fix` for author requests — those route through jobs or branches of
+  the guard the inline-thread check does not gate. The gate paginates through
+  all review threads, so large PRs are not truncated.
 
 ## Auto-Merge Details
 
