@@ -137,6 +137,56 @@ def test_workspace_root_hides_materialized_descendant_when_parent_has_photos(db)
     assert {p["filename"] for p in db.get_photos()} == {"root.jpg", "child.jpg"}
 
 
+def test_workspace_folder_roots_report_subtree_photo_counts(db):
+    ws_id = db._active_workspace_id
+    db.set_active_workspace(None)
+    # Root with no direct photos — all images live in subfolders. The
+    # direct-only folders.photo_count would read 0 here.
+    root_id = db.add_folder("/photos/usa", name="usa")
+    child_a = db.add_folder("/photos/usa/2026", name="2026", parent_id=root_id)
+    child_b = db.add_folder("/photos/usa/2025", name="2025", parent_id=root_id)
+    db.add_photo(child_a, "a1.jpg", ".jpg", 1000, 1.0)
+    db.add_photo(child_a, "a2.jpg", ".jpg", 1000, 1.0)
+    db.add_photo(child_b, "b1.jpg", ".jpg", 1000, 1.0)
+    # A separate sibling root — its photos must not bleed into usa's count.
+    other_root = db.add_folder("/photos/canada", name="canada")
+    db.add_photo(other_root, "c1.jpg", ".jpg", 1000, 1.0)
+    db.set_active_workspace(ws_id)
+
+    db.add_workspace_folder(ws_id, root_id)
+    db.add_workspace_folder(ws_id, other_root)
+
+    counts = {
+        f["path"]: f["workspace_photo_count"]
+        for f in db.get_workspace_folder_roots(ws_id)
+    }
+    assert counts["/photos/usa"] == 3
+    assert counts["/photos/canada"] == 1
+
+
+def test_workspace_root_count_is_scoped_to_its_workspace(db):
+    # The same folder tree lives in two workspaces; each root's count must
+    # reflect only photos and folders linked to that workspace.
+    db.set_active_workspace(None)
+    root_id = db.add_folder("/photos/usa", name="usa")
+    child_id = db.add_folder("/photos/usa/2026", name="2026", parent_id=root_id)
+    db.add_photo(child_id, "a.jpg", ".jpg", 1000, 1.0)
+    db.add_photo(child_id, "b.jpg", ".jpg", 1000, 1.0)
+
+    ws_a = db.create_workspace("A")
+    ws_b = db.create_workspace("B")
+    db.set_active_workspace(ws_a)
+    db.add_workspace_folder(ws_a, root_id)
+
+    counts_a = {
+        f["path"]: f["workspace_photo_count"]
+        for f in db.get_workspace_folder_roots(ws_a)
+    }
+    assert counts_a["/photos/usa"] == 2
+    # ws_b never linked the folder — it has no roots to report.
+    assert db.get_workspace_folder_roots(ws_b) == []
+
+
 def test_workspace_root_materializes_windows_style_descendants(db):
     ws_id = db._active_workspace_id
     db.set_active_workspace(None)
