@@ -1229,6 +1229,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
                     if params.local_processing:
                         from local_processing import (
+                            existing_archive_bytes,
                             format_bytes,
                             non_duplicate_bytes,
                             selected_source_files,
@@ -1356,9 +1357,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 exclude_paths=params.exclude_paths,
                             )
                             source_bytes = total_file_bytes(selected_files)
+                            # When a previous archive attempt left a partial
+                            # untracked directory at final_destination, the
+                            # retry uses move_folder(..., merge=True), which
+                            # rsyncs only the missing files. Credit the bytes
+                            # already published so the preflight doesn't
+                            # reject a retry whose remaining delta would fit.
+                            existing_bytes = existing_archive_bytes(final_destination)
                             plan = storage_plan(
                                 params.destination, source_bytes,
                                 archive_parent=archive_space_path,
+                                archive_existing_bytes=existing_bytes,
                             )
                             # When skip_duplicates is on, ingest() will hash and
                             # skip files whose hash is already in the catalog
@@ -1390,6 +1399,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     plan = storage_plan(
                                         params.destination, filtered_bytes,
                                         archive_parent=archive_space_path,
+                                        archive_existing_bytes=existing_bytes,
                                     )
                             result["local_processing"] = {
                                 **plan,

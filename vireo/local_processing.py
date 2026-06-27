@@ -70,6 +70,34 @@ def total_file_bytes(files: list[Path]) -> int:
     return total
 
 
+def existing_archive_bytes(path: str) -> int:
+    """Sum the bytes already present under ``path`` for resume calculations.
+
+    When a previous archive attempt left a partial untracked
+    ``final_destination``, ``move_folder(..., merge=True)`` rsyncs only the
+    files that aren't already there. The storage preflight can therefore
+    credit the bytes already on the archive volume against the required
+    space; otherwise a retry would be rejected for needing room for the
+    full source even though most of it is already published.
+    """
+    try:
+        if not os.path.isdir(path):
+            return 0
+    except OSError:
+        return 0
+    total = 0
+    try:
+        for root, _dirs, files in os.walk(path):
+            for name in files:
+                try:
+                    total += os.path.getsize(os.path.join(root, name))
+                except OSError:
+                    continue
+    except OSError:
+        return 0
+    return total
+
+
 def non_duplicate_bytes(files: list[Path], known_hashes: set[str]) -> int:
     """Sum bytes of ``files`` whose content hash isn't already known.
 
@@ -115,6 +143,7 @@ def storage_plan(
     source_bytes: int,
     *,
     archive_parent: str | None = None,
+    archive_existing_bytes: int = 0,
     reserved_free_bytes: int | None = None,
 ) -> dict:
     """Return local-storage availability and whether batching is required.
@@ -132,9 +161,23 @@ def storage_plan(
     and then fail in the final move with ENOSPC. When they live on
     different devices, the destination volume gets an independent free
     space check.
+
+    When ``archive_existing_bytes`` is non-zero it tells the planner that a
+    previous archive attempt already left that many bytes at the
+    destination. ``move_folder(..., merge=True)`` skips files that are
+    already present, so a retry only needs space for the remaining bytes —
+    capped at ``source_bytes`` so unrelated content at the destination
+    can't extend an unbounded credit. Without this credit a retry whose
+    delta would fit gets rejected as batching-required and the user has
+    to delete the partial archive by hand before resuming.
     """
     if reserved_free_bytes is None:
         reserved_free_bytes = RESERVED_FREE_BYTES
+
+    # Cap at source_bytes so an oversized or unrelated destination tree
+    # doesn't inflate the credit beyond what merge-mode can actually skip.
+    existing_credit = max(0, min(archive_existing_bytes, source_bytes))
+    archive_delta = max(0, source_bytes - existing_credit)
 
     same_device = False
     if archive_parent:
@@ -150,9 +193,10 @@ def storage_plan(
     if same_device:
         # Both staging copy and destination copy land on this volume; the
         # destination copy is taken from staging before the staging files
-        # are deleted, so the peak working set is staging + derived +
-        # destination = required + source_bytes.
-        required += source_bytes
+        # are deleted. In merge-mode resumes, only the delta is rewritten
+        # at the destination, so the peak working set on this volume is
+        # staging + derived + delta.
+        required += archive_delta
     usable = max(0, usage.free - reserved_free_bytes)
     staging_enough = required <= usable
 
@@ -161,7 +205,7 @@ def storage_plan(
     archive_usable = None
     archive_enough = True
     if archive_parent and not same_device:
-        archive_required = source_bytes
+        archive_required = archive_delta
         try:
             archive_usage = shutil.disk_usage(archive_parent)
         except OSError:
@@ -196,6 +240,7 @@ def storage_plan(
         "usable_bytes": usable,
         "staging_enough": staging_enough,
         "archive_required_bytes": archive_required,
+        "archive_existing_bytes": existing_credit,
         "archive_free_bytes": archive_free,
         "archive_usable_bytes": archive_usable,
         "archive_enough": archive_enough,

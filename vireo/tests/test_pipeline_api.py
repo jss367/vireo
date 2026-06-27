@@ -1177,6 +1177,56 @@ def test_pipeline_local_processing_rejects_existing_file_archive_destination(
     assert "not a directory" in error_text
 
 
+def test_pipeline_local_processing_credits_existing_archive_for_resume(
+    setup, tmp_path, monkeypatch
+):
+    """When a previous archive attempt left bytes at the destination, the
+    preflight calls storage_plan with archive_existing_bytes set so the
+    delta fits even when the destination volume is tight."""
+    app, _db_path = setup
+
+    src = tmp_path / "card-resume"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "red").save(src / "fresh.jpg")
+
+    final_parent = tmp_path / "archive-parent"
+    final_parent.mkdir()
+    final_dest = final_parent / "Archive"
+    final_dest.mkdir()
+    # Seed the destination with a partial-archive file so the credit > 0.
+    (final_dest / "already-published.jpg").write_bytes(b"existing-payload")
+
+    import local_processing
+
+    real_storage_plan = local_processing.storage_plan
+    credits: list = []
+
+    def recording_storage_plan(staging_dir, source_bytes, **kwargs):
+        credits.append(kwargs.get("archive_existing_bytes"))
+        return real_storage_plan(staging_dir, source_bytes, **kwargs)
+
+    monkeypatch.setattr(local_processing, "storage_plan", recording_storage_plan)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert credits, "storage_plan was not called"
+    assert all(c is not None for c in credits)
+    # Credit equals the bytes already at the destination (one seeded file).
+    assert credits[0] == len(b"existing-payload")
+    assert job["status"] == "completed", job
+
+
 def test_import_full_scan_only_returns_job_id(setup):
     """copy=false skips ingest, just scans the source folder."""
     app, db_path = setup

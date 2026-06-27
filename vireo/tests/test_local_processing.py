@@ -235,6 +235,169 @@ def test_storage_plan_same_device_batching_when_insufficient(
     assert plan["enough"] is False
 
 
+def test_existing_archive_bytes_sums_existing_directory(tmp_path):
+    """existing_archive_bytes() walks the destination so a partial archive
+    contributes a credit for the next preflight."""
+    dest = tmp_path / "archive"
+    dest.mkdir()
+    (dest / "a.jpg").write_bytes(b"x" * 100)
+    nested = dest / "sub"
+    nested.mkdir()
+    (nested / "b.jpg").write_bytes(b"y" * 250)
+
+    assert local_processing.existing_archive_bytes(str(dest)) == 350
+
+
+def test_existing_archive_bytes_returns_zero_for_missing_or_file(tmp_path):
+    """Missing directories and regular files give no credit — the caller
+    treats them as a fresh archive run."""
+    assert local_processing.existing_archive_bytes(
+        str(tmp_path / "does-not-exist")
+    ) == 0
+
+    plain = tmp_path / "plain.txt"
+    plain.write_bytes(b"hello")
+    assert local_processing.existing_archive_bytes(str(plain)) == 0
+
+
+def test_storage_plan_credits_existing_archive_on_resume(monkeypatch, tmp_path):
+    """When a previous archive attempt left bytes at the destination, the
+    preflight credits them: move_folder merge-mode rsyncs only the delta,
+    so a retry whose remaining work fits must not be rejected as
+    batching-required."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    archive_parent = tmp_path / "archive_parent"
+    archive_parent.mkdir()
+
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    usage_by_path = {
+        str(staging): Usage(total=10_000, used=0, free=10_000),
+        # Without the credit, archive_required would be 800 and this
+        # destination (free=300) would fail the preflight. With 700 bytes
+        # already archived, the delta is only 100 and the retry fits.
+        str(archive_parent): Usage(total=10_000, used=9_700, free=300),
+    }
+    monkeypatch.setattr(
+        local_processing.shutil,
+        "disk_usage",
+        lambda path: usage_by_path[path],
+    )
+
+    real_stat = local_processing.os.stat
+    class FakeStat:
+        def __init__(self, dev): self.st_dev = dev
+    stat_by_path = {
+        str(staging): FakeStat(1), str(archive_parent): FakeStat(2),
+    }
+    monkeypatch.setattr(
+        local_processing.os, "stat",
+        lambda path: stat_by_path.get(path, real_stat(path)),
+    )
+
+    plan = local_processing.storage_plan(
+        str(staging),
+        source_bytes=800,
+        archive_parent=str(archive_parent),
+        archive_existing_bytes=700,
+        reserved_free_bytes=0,
+    )
+
+    assert plan["archive_existing_bytes"] == 700
+    assert plan["archive_required_bytes"] == 100
+    assert plan["archive_enough"] is True
+    assert plan["enough"] is True
+    assert plan["batching_required"] is False
+
+
+def test_storage_plan_caps_existing_credit_at_source_bytes(monkeypatch, tmp_path):
+    """A destination that contains more bytes than the source — extra
+    unrelated content from a previous run — must not extend the credit
+    past source_bytes, otherwise the preflight would always treat the
+    destination as full enough regardless of the source."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    archive_parent = tmp_path / "archive_parent"
+    archive_parent.mkdir()
+
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    usage_by_path = {
+        str(staging): Usage(total=10_000, used=0, free=10_000),
+        str(archive_parent): Usage(total=10_000, used=9_900, free=100),
+    }
+    monkeypatch.setattr(
+        local_processing.shutil,
+        "disk_usage",
+        lambda path: usage_by_path[path],
+    )
+
+    real_stat = local_processing.os.stat
+    class FakeStat:
+        def __init__(self, dev): self.st_dev = dev
+    stat_by_path = {
+        str(staging): FakeStat(1), str(archive_parent): FakeStat(2),
+    }
+    monkeypatch.setattr(
+        local_processing.os, "stat",
+        lambda path: stat_by_path.get(path, real_stat(path)),
+    )
+
+    plan = local_processing.storage_plan(
+        str(staging),
+        source_bytes=500,
+        archive_parent=str(archive_parent),
+        archive_existing_bytes=10_000,  # absurd overshoot
+        reserved_free_bytes=0,
+    )
+
+    assert plan["archive_existing_bytes"] == 500
+    assert plan["archive_required_bytes"] == 0
+    assert plan["archive_enough"] is True
+
+
+def test_storage_plan_same_device_credits_existing_archive(monkeypatch, tmp_path):
+    """On same-device runs the destination copy is the move-folder rewrite,
+    which in merge mode only writes the delta. The same-device extra
+    requirement must shrink to the delta too — otherwise resume runs that
+    fit are rejected even when the destination is already most of the way
+    there."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    archive_parent = tmp_path / "archive"
+    archive_parent.mkdir()
+
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(
+        local_processing.shutil,
+        "disk_usage",
+        lambda path: Usage(total=10_000, used=0, free=1_400),
+    )
+    real_stat = local_processing.os.stat
+    class FakeStat:
+        def __init__(self, dev): self.st_dev = dev
+    stat_by_path = {
+        str(staging): FakeStat(7), str(archive_parent): FakeStat(7),
+    }
+    monkeypatch.setattr(
+        local_processing.os, "stat",
+        lambda path: stat_by_path.get(path, real_stat(path)),
+    )
+
+    # Without credit: required = 1000 + 250 + 1000 = 2250 → batching.
+    # With 900 already archived: required = 1000 + 250 + 100 = 1350 → fits.
+    plan = local_processing.storage_plan(
+        str(staging),
+        source_bytes=1_000,
+        archive_parent=str(archive_parent),
+        archive_existing_bytes=900,
+        reserved_free_bytes=0,
+    )
+
+    assert plan["same_device"] is True
+    assert plan["required_bytes"] == 1_350
+    assert plan["enough"] is True
+
+
 def test_non_duplicate_bytes_deduplicates_within_pass(tmp_path):
     """Intra-run duplicates — the same file selected twice via overlapping
     sources, or two source folders sharing a file — must collapse the way
