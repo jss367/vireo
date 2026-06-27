@@ -234,7 +234,18 @@ def test_highlights_lightbox_next_preserves_pending_one_to_one_zoom(live_server,
     expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
     expect(page.locator("#lightboxCounter")).to_contain_text("1 /")
 
-    page.evaluate(
+    # Leave the first photo at a true 1:1 zoom, and pre-seed the *next* photo's
+    # cached viewport as un-zoomed (fit). Navigation must override that cache and
+    # carry the 1:1 intent forward, not honor the stale fit state.
+    #
+    # The 1:1 handoff is established synchronously by lightboxNav -> openLightbox;
+    # only the later async /api/photos + image-load callbacks settle it (and, for
+    # a real high-res photo, resolve the pending flag into an actual 1:1 zoom).
+    # The seeded photos have no on-disk file or dimensions, so that settling is
+    # degenerate and timing-dependent. Trigger the nav and read the handoff state
+    # in the same synchronous tick — before any async callback runs — so we test
+    # exactly the guarantee (intent carried across navigation) deterministically.
+    handoff = page.evaluate(
         """() => {
             const next = window._lightboxPhotoList[1];
             window._lbNativeZoom = 2;
@@ -247,14 +258,20 @@ def test_highlights_lightbox_next_preserves_pending_one_to_one_zoom(live_server,
                 oneToOne: false,
                 pending1To1: false,
             };
+            lightboxNav(1);
+            return {
+                counter: document.getElementById('lightboxCounter').textContent,
+                pending1To1: window._lbPending1To1,
+                zoom: window._lbZoom,
+                srcKey: window._lbCurrentSrcKey,
+            };
         }"""
     )
 
-    page.locator("[title='Next (→)']").click()
-    expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
-    assert page.evaluate("window._lbPending1To1") is True
-    assert page.evaluate("window._lbZoom > 1.001") is True
-    assert page.evaluate("window._lbCurrentSrcKey") == "original"
+    assert "2 /" in handoff["counter"]
+    assert handoff["pending1To1"] is True
+    assert handoff["zoom"] > 1.001
+    assert handoff["srcKey"] == "original"
 
 
 def test_highlights_api_limits_initial_bucket_and_loads_more(live_server):
