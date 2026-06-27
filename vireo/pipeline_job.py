@@ -18,7 +18,6 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
 
 import numpy as np
 from db import Database, commit_with_retry
@@ -26,13 +25,22 @@ from model_cache import get_default_cache
 from pipeline_locks import acquire_photo_mask, acquire_workspace_regroup
 from render_source import (
     companion_image_can_replace_raw_result as _companion_image_can_replace_raw_result,
+)
+from render_source import (
     has_current_working_copy_failure as _has_current_working_copy_failure,
+)
+from render_source import (
     image_is_smaller_than_expected as _image_is_smaller_than_expected,
+)
+from render_source import (
     photo_value as _photo_value,
+)
+from render_source import (
     recipe_render_source,
+)
+from render_source import (
     scaled_recipe_source_dimensions as _scaled_recipe_source_dimensions,
 )
-from render_source import path_satisfies_recipe_render as _path_satisfies_recipe_render
 
 log = logging.getLogger(__name__)
 

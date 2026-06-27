@@ -16,8 +16,6 @@ from pathlib import Path
 import imagehash
 from db import commit_with_retry
 from exif_orientation import orientation_swaps_axes as _orientation_swaps_axes
-from render_source import exif_orientation as _exif_orientation_from_data
-from render_source import is_undersized
 from image_loader import (
     RAW_EXTENSIONS,
     SUPPORTED_EXTENSIONS,
@@ -28,6 +26,8 @@ from image_loader import (
 )
 from metadata import extract_metadata
 from PIL import Image
+from render_source import exif_orientation as _exif_orientation_from_data
+from render_source import is_undersized
 from xmp import read_hierarchical_keywords, read_keywords
 
 log = logging.getLogger(__name__)

@@ -30,16 +30,6 @@ from db import (
     IncompatibleDatabaseError,
     commit_with_retry,
 )
-from render_source import (
-    companion_image_can_replace_raw_result as _companion_image_can_replace_raw_result,
-    has_current_working_copy_failure as _has_current_working_copy_failure,
-    image_is_smaller_than_expected as _image_is_smaller_than_expected,
-    recipe_render_source as _recipe_render_source,
-    recipe_source_dimensions as _recipe_source_dimensions,
-    record_working_copy_failure as _record_working_copy_failure,
-    scaled_recipe_source_dimensions as _scaled_recipe_source_dimensions,
-)
-from render_source import path_satisfies_recipe_render as _path_satisfies_recipe_render
 from flask import (
     Flask,
     Response,
@@ -58,6 +48,28 @@ from preview_cache import (
 )
 from preview_cache import (
     reconcile_preview_cache,
+)
+from render_source import (
+    companion_image_can_replace_raw_result as _companion_image_can_replace_raw_result,
+)
+from render_source import (
+    has_current_working_copy_failure as _has_current_working_copy_failure,
+)
+from render_source import (
+    image_is_smaller_than_expected as _image_is_smaller_than_expected,
+)
+from render_source import path_satisfies_recipe_render as _path_satisfies_recipe_render
+from render_source import (
+    recipe_render_source as _recipe_render_source,
+)
+from render_source import (
+    recipe_source_dimensions as _recipe_source_dimensions,
+)
+from render_source import (
+    record_working_copy_failure as _record_working_copy_failure,
+)
+from render_source import (
+    scaled_recipe_source_dimensions as _scaled_recipe_source_dimensions,
 )
 from werkzeug.exceptions import BadRequest
 

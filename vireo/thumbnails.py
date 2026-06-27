@@ -13,11 +13,14 @@ from image_loader import (
 )
 from render_source import (
     image_is_smaller_than_expected,
-    photo_value as _photo_value,
     recipe_render_source,
+)
+from render_source import (
+    photo_value as _photo_value,
+)
+from render_source import (
     scaled_recipe_source_dimensions as _scaled_recipe_source_dimensions,
 )
-from render_source import path_satisfies_recipe_render as _path_satisfies_recipe_render
 
 log = logging.getLogger(__name__)
 

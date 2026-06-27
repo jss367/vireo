@@ -1,6 +1,5 @@
 """Photo export with resize, quality control, and template-based naming."""
 
-import contextlib
 import hashlib
 import logging
 import os
@@ -12,10 +11,14 @@ from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS, RAW_EXTENSIONS, load_im
 from render_source import (
     companion_image_can_replace_raw_result,
     image_is_smaller_than_expected,
-    image_size_after_exif_orientation as _image_size_after_exif_orientation,
-    recipe_source_dimensions as _recipe_source_dimensions,
     rendered_recipe_long_edge,
     scaled_recipe_source_dimensions,
+)
+from render_source import (
+    image_size_after_exif_orientation as _image_size_after_exif_orientation,
+)
+from render_source import (
+    recipe_source_dimensions as _recipe_source_dimensions,
 )
 
 log = logging.getLogger(__name__)
