@@ -673,6 +673,117 @@ def test_pipeline_local_processing_completes_when_cancel_during_archive(
     assert job["result"]["archive"]["final_destination"] == str(final_dest)
 
 
+def test_pipeline_local_processing_deindexes_staging_on_cancel_after_scan(
+    setup, tmp_path, monkeypatch
+):
+    """Regression: when the user clicks Stop after scanner_stage has
+    already indexed the local staging folder but before archive_stage runs,
+    the cancel_watcher sets abort and every downstream stage skips with
+    status "skipped" (not "failed"). archive_stage's abort/cancel
+    early-return must still deindex the staging folder — otherwise the
+    abandoned staging rows would gate ingest()'s known-hash skip on the
+    next retry, letting that retry "successfully" archive an empty
+    destination. The already_failed branch's deindex doesn't help here:
+    cancellation marks stages "skipped", not "failed", so the existing
+    failed-stage cleanup path never runs.
+    """
+    app, db_path = setup
+
+    final_parent = tmp_path / "nas_cancel_pre"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+
+    src = tmp_path / "card_cancel_pre"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(src / "kept.jpg")
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    # Trigger cancellation in scanner_stage's finally block, after the
+    # staging folder has been scanned and the photo hashes committed. The
+    # pipeline's cancel_watcher polls runner.is_cancelled and sets `abort`
+    # within 0.25s, so by the time archive_stage runs it sees abort.is_set()
+    # and takes the early-return path.
+    import new_images
+    runner = app._job_runner
+    cancelled_once = {"done": False}
+    real_invalidate = new_images.invalidate_new_images_after_scan
+
+    def cancelling_invalidate(db, root):
+        if not cancelled_once["done"]:
+            with runner._lock:
+                running = [
+                    jid for jid, j in runner._jobs.items()
+                    if j.get("status") == "running"
+                    and jid.startswith("pipeline-")
+                ]
+            if running:
+                runner.cancel_job(running[0])
+                cancelled_once["done"] = True
+        return real_invalidate(db, root)
+
+    monkeypatch.setattr(
+        new_images, "invalidate_new_images_after_scan",
+        cancelling_invalidate,
+    )
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job_id = resp.get_json()["job_id"]
+        job = wait_for_job_via_client(c, job_id)
+
+    # archive must NOT publish files when cancelled before commit.
+    assert not (final_dest / "kept.jpg").exists()
+    # The terminal status reflects the cancellation, not a successful run.
+    assert job["status"] != "completed", job
+
+    # Staging files stay on disk so the user can recover.
+    staging_file = (
+        tmp_path / "staging" / job_id / "Photos" / "kept.jpg"
+    )
+    assert staging_file.is_file(), (
+        f"staging files should remain when archive is skipped, "
+        f"missing at {staging_file}"
+    )
+
+    # The staging folder must be removed from the catalog. Without the
+    # abort branch's deindex, this row would survive and ingest()'s
+    # known-hash gate would skip every file on retry — producing an empty
+    # archive on the next run of the same source.
+    from db import Database
+    check_db = Database(db_path)
+    staging_dir = str(staging_file.parent)
+    folder_row = check_db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", (staging_dir,),
+    ).fetchone()
+    assert folder_row is None, (
+        f"staging folder must be deindexed when archive is skipped via "
+        f"abort/cancel, still present at {staging_dir}"
+    )
+    photo_rows = check_db.conn.execute(
+        "SELECT id FROM photos WHERE folder_id IN ("
+        "  SELECT id FROM folders WHERE path LIKE ?"
+        ")",
+        (str(tmp_path / "staging" / job_id) + "%",),
+    ).fetchall()
+    assert not photo_rows, (
+        "no photo rows should remain under the abandoned staging tree, "
+        f"got {len(photo_rows)}"
+    )
+    check_db.close()
+
+
 def test_pipeline_local_processing_preflight_filters_duplicates(
     setup, tmp_path, monkeypatch
 ):

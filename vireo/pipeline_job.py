@@ -4284,7 +4284,38 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         """Move a local-processing staging folder to the final destination."""
         if not params.local_processing:
             return
+
+        def _deindex_staging():
+            # scanner_stage may have already registered the staging folder
+            # and its photos' hashes before we got here. Without removing
+            # those rows a retry of the same source would hit ingest()'s
+            # known-hash skip and copy nothing — the user would then
+            # "successfully" archive an empty destination while the
+            # original files only ever existed in the abandoned staging
+            # tree. Leave the on-disk staging files in place so the user
+            # can still recover them.
+            try:
+                thread_db = Database(db_path)
+                thread_db.set_active_workspace(workspace_id)
+                folder = thread_db.conn.execute(
+                    "SELECT id FROM folders WHERE path = ?",
+                    (params.destination,),
+                ).fetchone()
+                if folder:
+                    thread_db.delete_folder(folder["id"])
+            except Exception:
+                log.exception(
+                    "Failed to deindex local staging folder on archive skip",
+                )
+
         if abort.is_set() or runner.is_cancelled(job["id"]):
+            # Fatal upstream stages (partial scan, thumbnail setup, model
+            # load, detect, classify) set abort and fall through to here
+            # without populating stages[*]["status"] == "failed", so the
+            # already_failed branch below would miss them. Deindex here too
+            # — otherwise the next retry of the same source would treat
+            # every file as a duplicate and publish an empty archive.
+            _deindex_staging()
             stages["archive"]["status"] = "skipped"
             runner.update_step(
                 job["id"], "archive", status="completed", summary="Skipped",
@@ -4310,27 +4341,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             name for name, s in stages.items() if s.get("status") == "failed"
         ]
         if already_failed:
-            # Before bailing, deindex the local staging folder. scanner_stage
-            # may have already registered it (and its photos' hashes) before
-            # the downstream failure surfaced. Without removing those rows,
-            # a retry of the same source would hit ingest()'s known-hash
-            # skip and copy nothing — the user would then "successfully"
-            # archive an empty destination while the original files only
-            # ever existed in the abandoned staging tree. Leave the on-disk
-            # staging files in place so the user can still recover them.
-            try:
-                thread_db = Database(db_path)
-                thread_db.set_active_workspace(workspace_id)
-                folder = thread_db.conn.execute(
-                    "SELECT id FROM folders WHERE path = ?",
-                    (params.destination,),
-                ).fetchone()
-                if folder:
-                    thread_db.delete_folder(folder["id"])
-            except Exception:
-                log.exception(
-                    "Failed to deindex local staging folder on archive skip",
-                )
+            _deindex_staging()
             stages["archive"]["status"] = "skipped"
             runner.update_step(
                 job["id"], "archive",
