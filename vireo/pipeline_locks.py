@@ -185,3 +185,91 @@ def acquire_photo_mask(photo_id):
 
 def _photo_mask_lock_for_tests(photo_id):
     return acquire_photo_mask(photo_id)
+
+
+# In-flight archive destinations claimed by local-processing pipeline runs.
+# Two pipelines aimed at the same new ``final_destination`` can both pass the
+# DB-only overlap check before either one has created the folder row (jobs.py
+# allows up to SLOT_CAP=2 pipeline jobs concurrently), and the second would
+# only fail inside ``move_folder`` after staging and processing everything.
+# Reserving the destination up front rejects the duplicate run before any
+# expensive work starts.
+_ARCHIVE_DESTINATIONS: set = set()
+_ARCHIVE_DESTINATIONS_GUARD = threading.Lock()
+
+
+def _normalize_archive_destination(path):
+    """Absolute, symlink-resolved, case-normalised form of ``path``.
+
+    ``realpath`` resolves symlinks (including partial resolution when the
+    leaf doesn't exist yet — the existing prefix is followed and the
+    missing tail is preserved). ``normcase`` folds case on Windows. Two
+    spellings that point at the same physical destination — a symlink and
+    its real path, a case-only alias on case-insensitive Windows —
+    collapse to the same key, so reservation/release can't drift apart and
+    a reservation lookup hits even when the caller used a different
+    spelling.
+
+    Case-insensitive POSIX (default macOS APFS) needs an FS probe to fold
+    case, which ``_paths_overlap`` does via ``move._path_equal_or_descends``
+    for the comparison itself. Keeping the stored key as
+    ``normcase(realpath(...))`` is enough because reserve/release are
+    paired with the same Python string in pipeline_job.
+    """
+    import os
+
+    return os.path.normcase(os.path.realpath(path))
+
+
+def _paths_overlap(a, b):
+    """Return True if ``a`` and ``b`` are equal or one descends from the other.
+
+    Defers to ``move._path_equal_or_descends`` so the reservation check
+    folds the same alias surface (symlinks, Windows case folding,
+    case-insensitive POSIX) that ``move_folder``'s own overlap check runs
+    later. Without this, two pipelines targeting the same physical
+    destination via different spellings could both pass the reservation
+    check and race into the same archive root before the move-time guard
+    runs.
+    """
+    from move import _path_equal_or_descends
+
+    if a == b:
+        return True
+    return (_path_equal_or_descends(a, b)
+            or _path_equal_or_descends(b, a))
+
+
+def try_reserve_archive_destination(path):
+    """Claim ``path`` for an in-flight local-processing archive.
+
+    Returns True on first claim, False if another running pipeline already
+    owns an overlapping destination — equal to ``path``, an ancestor of it,
+    or a descendant of it. Equal paths obviously collide; nested paths also
+    collide because ``move_folder`` would either create the parent's tracked
+    row inside its child's archive root, or move a parent into a destination
+    that the child has already claimed, leaving overlapping folder roots in
+    the catalog. Paths are normalised to absolute, so ``/Photos/Shoot`` and
+    ``./Photos/Shoot`` collide. Must be paired with
+    ``release_archive_destination`` once the run terminates (success or
+    failure) so retries and follow-on runs can re-acquire.
+    """
+    normalized = _normalize_archive_destination(path)
+    with _ARCHIVE_DESTINATIONS_GUARD:
+        for existing in _ARCHIVE_DESTINATIONS:
+            if _paths_overlap(existing, normalized):
+                return False
+        _ARCHIVE_DESTINATIONS.add(normalized)
+        return True
+
+
+def release_archive_destination(path):
+    """Release a previously reserved archive destination."""
+    normalized = _normalize_archive_destination(path)
+    with _ARCHIVE_DESTINATIONS_GUARD:
+        _ARCHIVE_DESTINATIONS.discard(normalized)
+
+
+def _archive_destinations_for_tests():
+    with _ARCHIVE_DESTINATIONS_GUARD:
+        return set(_ARCHIVE_DESTINATIONS)

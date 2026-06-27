@@ -182,6 +182,58 @@ def test_move_folder_copies_tree(move_env):
     assert folder["path"] == str(env["dst"] / "src")
 
 
+def test_move_folder_reports_cleanup_error_after_commit(move_env, monkeypatch):
+    """Catalog repoints first, so a post-commit rmtree failure is committed.
+
+    If rmtree(src_path) raises after move_folder_path has already pointed
+    the catalog at the destination, the archive IS published — the files
+    exist at the destination and the catalog resolves there. Surfacing
+    that as a normal ``errors`` entry would tell the caller the move
+    failed (the pipeline reports "results remain in staging") even though
+    the data is safely at final_destination and the freshly created
+    tracked folder row is in the catalog. Returning ``cleanup_error``
+    separately lets callers warn about leftover originals without
+    misreporting the move.
+    """
+    import move as move_mod
+
+    env = move_env
+
+    def raise_on_rmtree(path):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(move_mod.shutil, "rmtree", raise_on_rmtree)
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"])
+    )
+    assert result["errors"] == []
+    assert result["moved"] >= 1
+    assert result.get("cleanup_error") == "permission denied"
+    # Catalog now points at the new destination (commit step ran before
+    # rmtree) — verifying we don't roll that back on the cleanup failure.
+    folder = env["db"].conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (env["fid_src"],)
+    ).fetchone()
+    assert folder["path"] == str(env["dst"] / "src")
+
+
+def test_move_folder_no_cleanup_error_on_clean_run(move_env):
+    """When rmtree succeeds, ``cleanup_error`` is not present.
+
+    Locks in that the new key is opt-in and the existing happy-path
+    return shape is unchanged for the typical case.
+    """
+    from move import move_folder
+
+    env = move_env
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"])
+    )
+    assert "cleanup_error" not in result
+    assert result["errors"] == []
+
+
 def test_move_folder_refuses_existing_dest_without_merge(move_env):
     """move_folder refuses an existing destination and preserves originals."""
     from move import move_folder
@@ -496,6 +548,26 @@ def test_move_folder_merge_refuses_tracked_descendant(move_env):
     assert result["moved"] == 0
     assert any("already manage" in e for e in result["errors"])
     assert (env["src"] / "bird1.jpg").exists()
+
+
+def test_move_folder_refuses_destination_inside_tracked_ancestor(move_env):
+    """Moving into a subfolder of a tracked root would create overlapping roots."""
+    from move import move_folder
+
+    env = move_env
+    destination = env["dst"] / "Archive"
+
+    result = move_folder(
+        db=env["db"],
+        folder_id=env["fid_src"],
+        destination=str(destination),
+        reject_tracked_ancestor=True,
+    )
+
+    assert result["moved"] == 0
+    assert any("inside a folder Vireo already manages" in e for e in result["errors"])
+    assert (env["src"] / "bird1.jpg").exists()
+    assert not destination.exists()
 
 
 def test_move_folder_refuses_missing_tracked_destination_before_copy(move_env):

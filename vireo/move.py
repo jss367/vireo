@@ -1200,6 +1200,43 @@ def _tracked_destination_overlap(db, folder_id, dest_path):
     return None
 
 
+def _tracked_destination_ancestor(db, folder_id, dest_path):
+    """Return a tracked folder that is an ancestor of dest_path, if any.
+
+    The complement of ``_tracked_destination_overlap``: that one catches
+    tracked folders AT or BELOW ``dest_path``; this one catches tracked
+    folders ABOVE it on the path tree.
+
+    The pipeline's local-processing archive step uses ``db.move_folder_path``
+    to repoint the catalog after rsync, but ``move_folder_path`` only rewrites
+    the moved folder's own path (and cascades to its tracked children). It
+    does NOT reparent the moved row under a tracked ancestor of the new path.
+    If the user picks an archive destination inside an already-tracked root
+    (catalog manages ``/Photos`` and they pick ``/Photos/NewShoot``), the
+    archive move succeeds on disk but leaves the catalog with two unrelated
+    workspace roots whose path strings overlap — a permanently confusing
+    folder tree that breaks future scans of the ancestor root. Reject
+    upfront so the user picks a different archive folder before the pipeline
+    spends time staging and processing.
+
+    Passes ``case_insensitive_root=None`` to skip the per-row case-fold
+    probe; the realpath/normcase comparison at the top of
+    ``_path_equal_or_descends`` already catches every same-case ancestor,
+    which is the only practical case for archive destinations (the user is
+    typing a fresh subfolder name into a UI, not chasing a stale catalog row
+    that differs only by case).
+    """
+    for row in db.conn.execute(
+        "SELECT id, path FROM folders WHERE id != ?", (folder_id,)
+    ):
+        if _path_equal_or_descends(
+            dest_path, row["path"],
+            case_insensitive_root=None,
+        ):
+            return row
+    return None
+
+
 def move_photos(db, photo_ids, destination, progress_cb=None):
     """Move individual photos to a destination directory.
 
@@ -1336,7 +1373,7 @@ def move_photos(db, photo_ids, destination, progress_cb=None):
 
 
 def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
-                merge=False, remote=None):
+                merge=False, remote=None, reject_tracked_ancestor=False):
     """Move an entire folder (and subfolders) to a destination.
 
     The folder is placed inside the destination, preserving its name.
@@ -1375,8 +1412,18 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             path; the catalog is repointed at the mount path once the move
             succeeds, so the photos stay in the library and resolve whenever
             the NAS is mounted.
+        reject_tracked_ancestor: when True, also reject a destination inside
+            another tracked folder. Normal user-initiated moves can validly
+            move into a tracked destination parent; local-processing archive
+            commits opt into this stricter guard because they create a new
+            top-level archive root and cannot be reparented under the
+            existing catalog row.
 
-    Returns dict with keys: moved (int), errors (list of str)
+    Returns dict with keys: moved (int), errors (list of str). When the
+    catalog has already been repointed at the new destination but deleting
+    the source originals afterwards fails, an extra ``cleanup_error`` (str)
+    is included — the archive is committed and ``errors`` stays empty, but
+    callers should still surface the leftover originals to the user.
     """
     folder = db.conn.execute(
         "SELECT id, path, name FROM folders WHERE id = ?", (folder_id,)
@@ -1502,6 +1549,13 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             f"({tracked['path']}). Merging into or around a tracked folder "
             f"isn't supported."
         ]}
+    if reject_tracked_ancestor:
+        ancestor = _tracked_destination_ancestor(db, folder_id, overlap_check_path)
+        if ancestor:
+            return {"moved": 0, "errors": [
+                f"Destination is inside a folder Vireo already manages "
+                f"({ancestor['path']}). Pick an untracked archive destination."
+            ]}
 
     if remote:
         probe = _remote_dir_exists(remote, transfer_dest)
@@ -1774,13 +1828,26 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             old_child = src_path + new_child[len(catalog_path):]
             relocate_developed_dir(developed_dir, old_child, new_child)
 
-    # Delete originals
+    # Delete originals. The catalog already points at the new destination,
+    # so anything that goes wrong from here is post-commit: the archive is
+    # already published. Return a ``cleanup_error`` so the caller can warn
+    # the user about leftover originals without misreporting the move as
+    # failed (which would also leave the archive's tracked row in place
+    # while telling the user their data is still in staging).
     if progress_cb:
         progress_cb(total_files, total_files, "", "Removing originals")
     log.info("Verification passed, deleting originals: %s", src_path)
-    shutil.rmtree(src_path)
+    cleanup_error = None
+    try:
+        shutil.rmtree(src_path)
+    except OSError as e:
+        log.exception("Post-commit cleanup of %s failed", src_path)
+        cleanup_error = str(e)
 
     if progress_cb:
         progress_cb(total_files, total_files, folder_name, "Done")
 
-    return {"moved": total_photos, "errors": []}
+    result = {"moved": total_photos, "errors": []}
+    if cleanup_error is not None:
+        result["cleanup_error"] = cleanup_error
+    return result

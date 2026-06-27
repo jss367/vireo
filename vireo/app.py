@@ -1852,69 +1852,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db.conn.close()
 
     def _cleanup_cached_files_for_deleted_photos(files):
-        """Remove thumbnail, preview, and working-copy files for deleted photos.
-
-        ``files`` is the list returned by ``db.delete_photos`` /
-        ``db.delete_folder``. The FK cascade drops preview_cache rows when
-        photos are deleted, but the on-disk files stay unless we unlink
-        them here — otherwise they leak into untracked bytes that eviction
-        can't see.
-
-        Note: if an unlink fails (e.g. file locked on Windows), the file
-        remains on disk as an orphan because the cascade has already removed
-        the preview_cache row. "Clear cache" in Settings recovers by
-        globbing the directory.
-        """
-        import glob as _glob
-        thumb_dir = app.config["THUMB_CACHE_DIR"]
-        vireo_dir = os.path.dirname(thumb_dir)
-        preview_dir = os.path.join(vireo_dir, "previews")
-        working_dir = os.path.join(vireo_dir, "working")
-        # Offline-cache layout: offline/{originals,xmp,companions}/{pid}{ext}.
-        # The FK cascade drops the offline_originals row when the photo is
-        # deleted, so we lose the exact stored paths — glob by photo id to
-        # cover any source extension and any sidecar/companion that was
-        # copied alongside it.
-        offline_dirs = [
-            os.path.join(vireo_dir, "offline", "originals"),
-            os.path.join(vireo_dir, "offline", "xmp"),
-            os.path.join(vireo_dir, "offline", "companions"),
-        ]
-        for f in files:
-            pid = f["photo_id"]
-            # {id}.jpg lives in all three dirs (legacy full preview, thumb,
-            # working copy). {id}_{size}.jpg is sized preview variants.
-            for d in [thumb_dir, preview_dir, working_dir]:
-                cached = os.path.join(d, f"{pid}.jpg")
-                if os.path.isfile(cached):
-                    try:
-                        os.remove(cached)
-                    except OSError as e:
-                        log.warning(
-                            "Failed to remove cached file %s after photo "
-                            "delete — will be reclaimed by Clear Cache: %s",
-                            cached, e,
-                        )
-            for variant in _glob.glob(os.path.join(preview_dir, f"{pid}_*.jpg")):
-                try:
-                    os.remove(variant)
-                except OSError as e:
-                    log.warning(
-                        "Failed to remove preview variant %s after photo "
-                        "delete — will be reclaimed by Clear Cache: %s",
-                        variant, e,
-                    )
-            for d in offline_dirs:
-                for orphan in _glob.glob(os.path.join(d, f"{pid}.*")):
-                    try:
-                        os.remove(orphan)
-                    except OSError as e:
-                        log.warning(
-                            "Failed to remove offline cache file %s after "
-                            "photo delete — will be reclaimed by Clear "
-                            "Cache: %s",
-                            orphan, e,
-                        )
+        from preview_cache import cleanup_cached_files_for_deleted_photos
+        cleanup_cached_files_for_deleted_photos(
+            app.config["THUMB_CACHE_DIR"], files,
+        )
 
     @app.before_request
     def _enforce_api_v1_token():
@@ -13786,10 +13727,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     result["ok"] = False
                     result["summary"] = f"Move failed — {errors[0]}"
                 else:
+                    cleanup_error = result.get("cleanup_error")
                     result["ok"] = True
                     result["summary"] = (
                         f"Moved {moved} photo{'s' if moved != 1 else ''}"
                         + (f", {len(errors)} error(s)" if errors else "")
+                        + (
+                            f"; cleanup failed: {cleanup_error}"
+                            if cleanup_error else ""
+                        )
                     )
             return result
 
@@ -16143,6 +16089,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     return json_error(f"source directory not found: {source}")
 
         destination = body.get("destination")
+        local_processing = bool(body.get("local_processing"))
         # Copy-ingest ("destination") is incompatible with snapshot runs:
         # ingest would copy entire source folders, then snapshot filtering
         # would drop the destination-scanned photo ids, producing empty
@@ -16153,6 +16100,39 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         if destination and not os.path.isabs(destination):
             return json_error("destination must be an absolute path")
+        if local_processing and not destination:
+            return json_error("local_processing requires a destination")
+        if local_processing and destination:
+            from local_processing import final_destination_name
+
+            try:
+                final_destination_name(destination)
+            except ValueError:
+                return json_error(
+                    "local_processing destination cannot be a filesystem root"
+                )
+        # Local processing only makes sense for import pipelines (source or
+        # sources). Collection pipelines set skip_scan and never run the
+        # ingest stage, so the staging folder is never created or indexed —
+        # the job would burn through every processing stage on the existing
+        # photos and then fail in archive_stage with "local staging folder
+        # was not indexed". Snapshot-scoped runs are likewise rejected: they
+        # also bypass ingest because the snapshot's existing files drive
+        # scan_roots directly. Reject whenever collection_id or
+        # source_snapshot_id is set — a stale source/sources field in the
+        # same request must not slip past, because run_pipeline_job keys
+        # skip_scan off collection_id alone and would still skip ingest.
+        if local_processing and (
+            collection_id is not None or source_snapshot_id is not None
+        ):
+            return json_error(
+                "local_processing cannot be combined with collection_id or "
+                "source_snapshot_id — it requires source or sources"
+            )
+        if local_processing and not source and not sources:
+            return json_error(
+                "local_processing requires source or sources"
+            )
 
         folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
         if destination and folder_template:
@@ -16166,6 +16146,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             sources=sources,
             source_snapshot_id=source_snapshot_id,
             destination=destination,
+            local_processing=local_processing,
             file_types=body.get("file_types", "both"),
             folder_template=folder_template,
             skip_duplicates=body.get("skip_duplicates", True),
@@ -16282,6 +16263,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "source": source,
                 "sources": sources,
                 "collection_id": collection_id,
+                "destination": destination,
+                "local_processing": local_processing,
                 "skip_classify": params.skip_classify,
                 "skip_extract_masks": params.skip_extract_masks,
                 "skip_regroup": params.skip_regroup,

@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 from app import create_app
 from PIL import Image
+from wait import wait_for_job_via_client
 
 
 @pytest.fixture
@@ -178,6 +179,1577 @@ def test_import_full_rejects_relative_destination(setup):
             assert "absolute" in resp.get_json()["error"].lower()
     finally:
         shutil.rmtree(src, ignore_errors=True)
+
+
+def test_pipeline_local_processing_requires_destination(setup):
+    app, db_path = setup
+    src = tempfile.mkdtemp()
+    try:
+        with app.test_client() as c:
+            resp = c.post("/api/jobs/pipeline", json={
+                "sources": [src],
+                "local_processing": True,
+                "skip_classify": True,
+                "skip_extract_masks": True,
+                "skip_regroup": True,
+            })
+            assert resp.status_code == 400
+            assert "destination" in resp.get_json()["error"].lower()
+    finally:
+        shutil.rmtree(src, ignore_errors=True)
+
+
+def test_pipeline_local_processing_rejects_filesystem_root_destination(
+    setup, tmp_path
+):
+    app, _db_path = setup
+    src = tmp_path / "card"
+    src.mkdir()
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": os.path.abspath(os.sep),
+            "local_processing": True,
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 400
+        assert "filesystem root" in resp.get_json()["error"].lower()
+
+
+def test_pipeline_local_processing_rejects_collection_id(setup, tmp_path):
+    # Collection pipelines set skip_scan and never run ingest, so the
+    # staging folder is never created/indexed. Without this rejection
+    # the job would burn through every processing stage and then fail
+    # at archive_stage with "local staging folder was not indexed".
+    app, _db_path = setup
+    dest = tmp_path / "archive"
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "collection_id": 1,
+            "destination": str(dest),
+            "local_processing": True,
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 400
+        err = resp.get_json()["error"].lower()
+        assert "local_processing" in err
+        assert "collection_id" in err
+
+
+def test_pipeline_local_processing_rejects_collection_id_with_stale_sources(
+    setup, tmp_path,
+):
+    # run_pipeline_job sets skip_scan = collection_id is not None, so a
+    # request that mixes collection_id with a stale source/sources field
+    # still skips ingest — the staging folder never gets created or
+    # indexed and archive_stage fails with "local staging folder was not
+    # indexed". The API guard must reject collection_id outright when
+    # local_processing is on, not just the no-source case.
+    app, _db_path = setup
+    src = tmp_path / "card"
+    src.mkdir()
+    dest = tmp_path / "archive"
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "collection_id": 1,
+            "sources": [str(src)],
+            "destination": str(dest),
+            "local_processing": True,
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 400
+        err = resp.get_json()["error"].lower()
+        assert "local_processing" in err
+        assert "collection_id" in err
+
+
+def test_pipeline_local_processing_archives_to_final_destination(
+    setup, tmp_path, monkeypatch
+):
+    app, db_path = setup
+    src = tmp_path / "card"
+    src.mkdir()
+    final_parent = tmp_path / "nas"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+
+    img = Image.new("RGB", (16, 16), "white")
+    img.save(src / "test.jpg")
+
+    import local_processing
+
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert job["status"] == "completed", job
+    assert (final_dest / "test.jpg").is_file()
+    assert job["result"]["archive"]["final_destination"] == str(final_dest)
+
+
+def test_pipeline_local_processing_rejects_already_tracked_destination(
+    setup, tmp_path, monkeypatch
+):
+    """Regression: a second local-processing import to a destination that
+    Vireo already manages must fail fast at the storage preflight. Without
+    the upfront check the pipeline would stage everything, complete every
+    processing step, and only fail in move_folder's tracked-overlap guard —
+    leaving the staged copy stranded under ~/.vireo/staging."""
+    app, db_path = setup
+
+    final_parent = tmp_path / "nas"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    # Seed the catalog with a tracked folder at the prospective archive path,
+    # matching the post-state of an earlier successful local-processing run.
+    from db import Database
+    db = Database(db_path)
+    db.add_folder(str(final_dest))
+    db.close()
+
+    src = tmp_path / "card2"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "blue").save(src / "again.jpg")
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert job["status"] == "failed", job
+    error_text = (job.get("error") or "") + str(job.get("result", ""))
+    assert "Vireo already manages" in error_text, job
+
+
+def test_pipeline_local_processing_rejects_destination_inside_tracked_root(
+    setup, tmp_path, monkeypatch
+):
+    """Regression: an archive destination INSIDE an already-tracked folder
+    (catalog manages /Photos and the user picks /Photos/NewShoot) must fail
+    fast at the storage preflight. db.move_folder_path only rewrites the
+    moved row's path — it does NOT reparent the row under the tracked
+    ancestor. Without this check the archive would succeed on disk but
+    leave the catalog with two unrelated workspace roots whose path strings
+    overlap (e.g. /Photos and /Photos/NewShoot), confusing the folder tree
+    and breaking future scans of the ancestor root."""
+    app, db_path = setup
+
+    tracked_root = tmp_path / "nas_ancestor" / "Photos"
+    tracked_root.mkdir(parents=True)
+    # Nested archive destination INSIDE the existing tracked root.
+    final_dest = tracked_root / "NewShoot"
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    from db import Database
+    db = Database(db_path)
+    db.add_folder(str(tracked_root))
+    db.close()
+
+    src = tmp_path / "card_ancestor"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "red").save(src / "shot.jpg")
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert job["status"] == "failed", job
+    error_text = (job.get("error") or "") + str(job.get("result", ""))
+    assert "is inside a folder Vireo already manages" in error_text, job
+    # The pipeline must NOT have archived anything: tracked_root still has
+    # no NewShoot subdirectory and the source files weren't published.
+    assert not final_dest.exists(), final_dest
+
+
+def test_pipeline_local_processing_creates_missing_archive_parent(
+    setup, tmp_path, monkeypatch
+):
+    """Regression: a nested archive destination whose parent doesn't yet
+    exist (e.g. /mnt/nas/NewShoot/Photos when NewShoot was never created
+    by the user) must be set up during the storage preflight, not left for
+    move_folder to discover after every processing step finishes. Without
+    the upfront makedirs the run would stage, process, and only fail at
+    the final move, leaving the staged copy stranded."""
+    app, db_path = setup
+
+    nonexistent_parent = tmp_path / "nas" / "NewShoot"
+    assert not nonexistent_parent.exists()
+    final_dest = nonexistent_parent / "Photos"
+
+    src = tmp_path / "card_parent"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(src / "shot.jpg")
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert job["status"] == "completed", job
+    assert (final_dest / "shot.jpg").is_file()
+    assert nonexistent_parent.is_dir()
+
+
+def test_pipeline_local_processing_detects_missing_archive_mount_root(monkeypatch):
+    """Unmounted NAS paths like /Volumes/NAS/Shoot must not be created as
+    local stub directories during archive-parent preflight."""
+    import pipeline_job
+
+    real_lexists = os.path.lexists
+
+    def fake_lexists(path):
+        if path == "/Volumes/NAS":
+            return False
+        return real_lexists(path)
+
+    monkeypatch.setattr(pipeline_job.os.path, "lexists", fake_lexists)
+
+    assert (
+        pipeline_job._missing_archive_mount_root("/Volumes/NAS/Shoot")
+        == "/Volumes/NAS"
+    )
+    assert pipeline_job._missing_archive_mount_root("/Volumes/NAS") == "/Volumes/NAS"
+
+
+def test_pipeline_local_processing_rejects_missing_archive_mount_root(
+    setup, tmp_path, monkeypatch
+):
+    """Regression: storage preflight must fail before makedirs can create a
+    missing mount root and accidentally archive onto the local disk."""
+    app, _db_path = setup
+
+    final_dest = tmp_path / "missing_mount"
+
+    src = tmp_path / "card_mount"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(src / "shot.jpg")
+
+    import local_processing
+    import pipeline_job
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+    monkeypatch.setattr(
+        pipeline_job,
+        "_missing_archive_mount_root",
+        lambda path: str(final_dest) if path == str(final_dest) else None,
+    )
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert job["status"] == "failed", job
+    errors = job.get("result", {}).get("errors", [])
+    assert any(
+        f"Archive mount root {final_dest}" in error for error in errors
+    ), job
+    assert not final_dest.exists()
+
+
+def test_pipeline_local_processing_skips_archive_when_previews_fail(
+    setup, tmp_path, monkeypatch
+):
+    """Regression: previews, extract_masks, eye_keypoints, regroup, and
+    miss can all fail without aborting the run, but run_pipeline_job
+    raises at the end whenever any stage status is "failed". If
+    archive_stage ran anyway, the staged folder would already be moved to
+    the user's archive root by the time that failure surfaced — publishing
+    a partial result from a job marked failed. Skip the archive when an
+    earlier stage failed and leave staging intact instead."""
+    app, db_path = setup
+
+    final_parent = tmp_path / "nas2"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+
+    src = tmp_path / "card_fail"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(src / "boom.jpg")
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    # Force previews_stage to fail without setting abort. The stage's
+    # outer try/except catches load_image() failures and marks the stage
+    # status "failed"; abort stays clear and the rest of the pipeline
+    # continues toward archive.
+    import image_loader
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("synthetic preview failure")
+
+    monkeypatch.setattr(image_loader, "load_image", boom)
+
+    import json
+
+    from db import Database
+    from pipeline import _results_cache_path
+
+    seed_db = Database(db_path)
+    ws_id = seed_db._active_workspace_id
+    seed_db.set_workspace_group_state(
+        ws_id, fingerprint="stale-group-fingerprint", when_ts=1714579200,
+    )
+    seed_db.close()
+    cache_path = _results_cache_path(os.path.dirname(db_path), ws_id)
+    with open(cache_path, "w") as f:
+        json.dump(
+            {
+                "photos": [{"id": 999999}],
+                "encounters": [],
+                "summary": {},
+            },
+            f,
+        )
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job_id = resp.get_json()["job_id"]
+        job = wait_for_job_via_client(c, job_id)
+
+    # The job fails because previews_stage marked itself failed and
+    # run_pipeline_job re-raises at the end for any failed stage.
+    assert job["status"] == "failed", job
+
+    # archive must NOT publish files when an earlier stage failed.
+    assert not (final_dest / "boom.jpg").exists()
+
+    # Staging stays intact so the user can recover or retry.
+    staging_file = (
+        tmp_path / "staging" / job_id / "Photos" / "boom.jpg"
+    )
+    assert staging_file.is_file(), (
+        f"staging file should remain when archive is skipped, "
+        f"missing at {staging_file}"
+    )
+
+    # The staging folder and its photo hashes must be removed from the
+    # catalog. Otherwise ingest()'s known-hash skip would treat a retry's
+    # files as duplicates and stage nothing, letting the next archive
+    # publish an empty destination.
+    check_db = Database(db_path)
+    staging_dir = str(staging_file.parent)
+    folder_row = check_db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", (staging_dir,),
+    ).fetchone()
+    assert folder_row is None, (
+        f"staging folder must be deindexed on archive skip, still present "
+        f"at {staging_dir}"
+    )
+    photo_rows = check_db.conn.execute(
+        "SELECT id FROM photos WHERE folder_id IN ("
+        "  SELECT id FROM folders WHERE path LIKE ?"
+        ")",
+        (str(tmp_path / "staging" / job_id) + "%",),
+    ).fetchall()
+    assert not photo_rows, (
+        "no photo rows should remain under the abandoned staging tree, "
+        f"got {len(photo_rows)}"
+    )
+    assert not os.path.exists(cache_path), (
+        "abandoning staged rows must remove the grouping cache, otherwise "
+        "pipeline review can render deleted photo IDs"
+    )
+    ws_row = check_db.conn.execute(
+        "SELECT last_grouped_at, last_group_fingerprint "
+        "FROM workspaces WHERE id = ?",
+        (ws_id,),
+    ).fetchone()
+    assert ws_row["last_grouped_at"] is None
+    assert ws_row["last_group_fingerprint"] is None
+    check_db.close()
+
+
+def test_pipeline_local_processing_retry_after_skip_actually_copies(
+    setup, tmp_path, monkeypatch
+):
+    """End-to-end regression: a local-processing run whose archive was
+    skipped (due to an earlier failed stage) must leave the catalog in a
+    state where the user can retry the same source folder and have ingest
+    actually re-copy the files. Without deindexing the failed staging
+    tree, ingest's known-hash gate would skip every file in the new
+    staging dir and the second run would publish an empty destination."""
+    app, db_path = setup
+
+    src = tmp_path / "card_retry"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(src / "again.jpg")
+
+    final_parent = tmp_path / "nas_retry"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    # First run: previews fail, archive is skipped, staging is left on
+    # disk but deindexed from the catalog.
+    import image_loader
+    real_load_image = image_loader.load_image
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("synthetic preview failure")
+
+    monkeypatch.setattr(image_loader, "load_image", boom)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        first_job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+    assert first_job["status"] == "failed", first_job
+    assert not (final_dest / "again.jpg").exists()
+
+    # Second run: previews succeed (restore the real loader). The retry
+    # must actually re-stage the file and publish to final_dest — the
+    # previous-run staging hashes must no longer block ingest.
+    monkeypatch.setattr(image_loader, "load_image", real_load_image)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        second_job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+    assert second_job["status"] == "completed", second_job
+    assert (final_dest / "again.jpg").is_file(), (
+        "retry must actually copy the file to the archive; deindex on "
+        "archive-skip is what makes that possible"
+    )
+
+
+def test_pipeline_local_processing_fails_ingest_when_files_fail_to_copy(
+    setup, tmp_path, monkeypatch
+):
+    """Regression: ingest() catches per-file copy errors and returns a
+    non-zero ``failed`` count without raising, but the scanner stage was
+    marking ingest as "completed" regardless. archive_stage's "any earlier
+    stage failed" gate then let the partial staging tree publish to the
+    final destination. Local-processing mode must fail the ingest stage
+    when files fail to copy so the archive is skipped and staging is
+    preserved for the user to recover.
+    """
+    app, db_path = setup
+
+    final_parent = tmp_path / "nas_fail_ingest"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+
+    src = tmp_path / "card_partial"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(src / "good.jpg")
+    Image.new("RGB", (16, 16), "red").save(src / "bad.jpg")
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    # Simulate a partial-card copy failure: ingest() catches the OSError
+    # and bumps `failed` by 1, but returns normally so the run continues.
+    import ingest as ingest_mod
+
+    real_copy2 = ingest_mod.shutil.copy2
+
+    def flaky_copy2(src_path, dest_path, *args, **kwargs):
+        if os.path.basename(str(src_path)) == "bad.jpg":
+            raise OSError("synthetic copy failure")
+        return real_copy2(src_path, dest_path, *args, **kwargs)
+
+    monkeypatch.setattr(ingest_mod.shutil, "copy2", flaky_copy2)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job_id = resp.get_json()["job_id"]
+        job = wait_for_job_via_client(c, job_id)
+
+    # Ingest is marked failed and the whole run is recorded as failed.
+    assert job["status"] == "failed", job
+
+    # Nothing is published at the final destination, even though good.jpg
+    # made it into staging.
+    assert not (final_dest / "good.jpg").exists()
+    assert not final_dest.exists() or not any(final_dest.iterdir())
+
+    # The successfully-copied file stays in staging so the user can recover.
+    staging_root = tmp_path / "staging" / job_id / "Photos"
+    assert staging_root.is_dir(), staging_root
+    assert (staging_root / "good.jpg").is_file()
+
+
+def test_pipeline_local_processing_ingest_failure_short_circuits_pipeline(
+    setup, tmp_path, monkeypatch
+):
+    """Regression: a fatal local-processing ingest failure marked the
+    ingest step "failed" but left ``abort`` clear, so scanner_stage went
+    on to scan the partial staging tree and previews/classify/regroup
+    ran on the photos that did copy. In a normal pipeline run with
+    regroup enabled, that overwrote the workspace pipeline results with
+    photo IDs that archive_stage then deindexed during staging cleanup —
+    the workspace was left pointing at rows that no longer existed,
+    after spending hours processing a partial import. A fatal ingest
+    failure must set ``abort`` so every downstream stage short-circuits.
+    """
+    app, _db_path = setup
+
+    final_parent = tmp_path / "nas_short_circuit"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+
+    src = tmp_path / "card_short_circuit"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(src / "good.jpg")
+    Image.new("RGB", (16, 16), "red").save(src / "bad.jpg")
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    # ingest() catches per-file copy errors and continues — bad.jpg will
+    # bump ``failed`` while good.jpg still lands in staging.
+    import ingest as ingest_mod
+
+    real_copy2 = ingest_mod.shutil.copy2
+
+    def flaky_copy2(src_path, dest_path, *args, **kwargs):
+        if os.path.basename(str(src_path)) == "bad.jpg":
+            raise OSError("synthetic copy failure")
+        return real_copy2(src_path, dest_path, *args, **kwargs)
+
+    monkeypatch.setattr(ingest_mod.shutil, "copy2", flaky_copy2)
+
+    # Track whether scanner.scan ever ran. If the abort propagation in
+    # the ingest-failure branch is wired correctly the scan stage is
+    # marked skipped without calling do_scan; if it ever fires we know
+    # the scanner/previews/classify/regroup chain executed against the
+    # partial copy.
+    import scanner as scanner_mod
+    scan_calls: list[str] = []
+    real_scan = scanner_mod.scan
+
+    def tracking_scan(root, *args, **kwargs):
+        scan_calls.append(str(root))
+        return real_scan(root, *args, **kwargs)
+
+    with patch.object(scanner_mod, "scan", tracking_scan):
+        with app.test_client() as c:
+            # Deliberately leave skip_regroup unset so a regression here
+            # would actually run the regroup stage against the partial
+            # subset.
+            resp = c.post("/api/jobs/pipeline", json={
+                "sources": [str(src)],
+                "destination": str(final_dest),
+                "local_processing": True,
+                "folder_template": "",
+                "skip_classify": True,
+                "skip_extract_masks": True,
+            })
+            assert resp.status_code == 200
+            job_id = resp.get_json()["job_id"]
+            job = wait_for_job_via_client(c, job_id)
+
+    assert job["status"] == "failed", job
+    assert not scan_calls, (
+        "scanner.scan must not be called after a fatal local-processing "
+        f"ingest failure; called with {scan_calls!r}"
+    )
+    # Nothing publishes at the destination.
+    assert not (final_dest / "good.jpg").exists()
+    # Staging stays intact for recovery.
+    staging_root = tmp_path / "staging" / job_id / "Photos"
+    assert staging_root.is_dir(), staging_root
+    assert (staging_root / "good.jpg").is_file()
+
+
+def test_pipeline_local_processing_completes_when_cancel_during_archive(
+    setup, tmp_path, monkeypatch
+):
+    """Regression: move_folder does not accept a cancellation signal, and
+    tearing it down mid-flight would leave a partial archive at the
+    destination. A Stop press once the archive begins must therefore be
+    consumed so the job records "completed" rather than recording a
+    "cancelled" status for a run that actually published its output.
+    """
+    app, db_path = setup
+
+    final_parent = tmp_path / "nas_cancel"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+
+    src = tmp_path / "card_cancel"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(src / "kept.jpg")
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    # Simulate the user clicking Stop while move_folder is mid-copy: wrap
+    # the real move_folder so that, just as it begins, the job is added
+    # to the runner's cancellation set. Without clear_cancellation in
+    # archive_stage, JobRunner._run_job's atomic terminal check would
+    # then record the run as "cancelled" even though the archive
+    # committed and the originals were removed.
+    import move as move_mod
+    real_move_folder_fn = move_mod.move_folder
+
+    runner = app._job_runner
+
+    def cancelling_move_folder(db, folder_id, destination, **kwargs):
+        # Resolve the current job id off the runner — we can't get it
+        # passed in directly. There's exactly one running pipeline job at
+        # this point, so pick it out of the runner's job map.
+        with runner._lock:
+            running = [
+                jid for jid, j in runner._jobs.items()
+                if j.get("status") == "running"
+                and jid.startswith("pipeline-")
+            ]
+        assert len(running) == 1, running
+        runner.cancel_job(running[0])
+        return real_move_folder_fn(db, folder_id, destination, **kwargs)
+
+    monkeypatch.setattr(move_mod, "move_folder", cancelling_move_folder)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job_id = resp.get_json()["job_id"]
+        job = wait_for_job_via_client(c, job_id)
+
+    # The archive committed, so the job must NOT record cancelled.
+    assert job["status"] == "completed", job
+    assert (final_dest / "kept.jpg").is_file()
+    assert job["result"]["archive"]["final_destination"] == str(final_dest)
+
+
+def test_pipeline_local_processing_cancels_before_archive_commit(
+    setup, tmp_path, monkeypatch
+):
+    """A Stop press that lands just before archive commit begins is still
+    honorably cancellable because nothing has been published yet."""
+    app, db_path = setup
+
+    final_parent = tmp_path / "nas_cancel_before_commit"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+
+    src = tmp_path / "card_cancel_before_commit"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(src / "kept.jpg")
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    runner = app._job_runner
+    real_begin_uncancellable = runner.begin_uncancellable
+    cancelled_once = {"done": False}
+
+    def cancelling_begin_uncancellable(job_id):
+        if not cancelled_once["done"]:
+            cancelled_once["done"] = True
+            assert runner.cancel_job(job_id) is True
+        return real_begin_uncancellable(job_id)
+
+    monkeypatch.setattr(
+        runner, "begin_uncancellable", cancelling_begin_uncancellable,
+    )
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job_id = resp.get_json()["job_id"]
+        job = wait_for_job_via_client(c, job_id)
+
+    assert job["status"] == "cancelled", job
+    assert not (final_dest / "kept.jpg").exists()
+
+    from db import Database
+    check_db = Database(db_path)
+    folder_row = check_db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?",
+        (str(tmp_path / "staging" / job_id / "Photos"),),
+    ).fetchone()
+    check_db.close()
+    assert folder_row is None
+
+
+def test_pipeline_local_processing_failed_archive_reports_failed_even_after_cancel(
+    setup, tmp_path, monkeypatch
+):
+    """Regression: clear_cancellation must consume the Stop flag BEFORE
+    move_folder runs, not after. If clear is deferred to after a successful
+    move, a Stop press that landed during a move which then FAILED (ENOSPC,
+    rsync error, verify mismatch) would leave the cancel flag set; the
+    outer JobRunner terminal check would record the run as "cancelled",
+    masking the archive failure from the user. The job must report
+    "failed" so the user sees the real outcome.
+    """
+    app, db_path = setup
+
+    final_parent = tmp_path / "nas_cancel_fail"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+
+    src = tmp_path / "card_cancel_fail"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(src / "kept.jpg")
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    # Simulate the user clicking Stop while move_folder is mid-copy AND the
+    # move then fails (e.g. verification mismatch). Two requirements:
+    # (1) clear_cancellation must already have run before move_folder is
+    # invoked, so the cancel flag is gone; (2) when move_folder returns a
+    # failure result, the job must report "failed", not "cancelled".
+    import move as move_mod
+
+    runner = app._job_runner
+
+    def cancelling_and_failing_move_folder(db, folder_id, destination, **kwargs):
+        with runner._lock:
+            running = [
+                jid for jid, j in runner._jobs.items()
+                if j.get("status") == "running"
+                and jid.startswith("pipeline-")
+            ]
+        assert len(running) == 1, running
+        # cancel_job must be a no-op here: the archive stage has already
+        # marked the job uncancellable via clear_cancellation. Without that
+        # ordering, the Stop press below would land in _cancelled and
+        # survive into _run_job's terminal check, recording "cancelled".
+        accepted = runner.cancel_job(running[0])
+        assert accepted is False, (
+            "cancel_job accepted after the archive stage started; "
+            "clear_cancellation must run BEFORE move_folder to make the "
+            "job uncancellable for the duration of the commit"
+        )
+        # Now simulate the move itself failing — e.g. an rsync verify
+        # mismatch. archive_stage raises and falls into the except branch.
+        return {"moved": 0, "errors": [
+            "Verification failed: 'kept.jpg' is missing or differs at the "
+            "destination. Originals preserved."
+        ]}
+
+    monkeypatch.setattr(move_mod, "move_folder", cancelling_and_failing_move_folder)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job_id = resp.get_json()["job_id"]
+        job = wait_for_job_via_client(c, job_id)
+
+    # The archive raised — the run must report failed, not cancelled.
+    assert job["status"] == "failed", job
+
+
+def test_pipeline_local_processing_post_commit_cleanup_error_reports_completed(
+    setup, tmp_path, monkeypatch
+):
+    """Regression: post-commit rmtree failures must not flip the job to failed.
+
+    ``move_folder`` repoints the catalog at ``final_destination`` before
+    deleting the staging originals. If the post-commit rmtree raises (a
+    locked file, a permission glitch in ``~/.vireo/staging``), the archive
+    IS committed: files exist at the destination and the catalog points
+    there. Previously the broad except in archive_stage caught the rmtree
+    exception, marked the stage failed, and told the user "results remain
+    in local staging" — but the files were at ``final_destination`` and a
+    freshly created tracked folder row was now in the catalog. The fix
+    distinguishes the post-commit cleanup error via ``move_folder``'s
+    new ``cleanup_error`` return key and reports the job completed with a
+    warning instead.
+    """
+    app, db_path = setup
+
+    final_parent = tmp_path / "nas_post_commit"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+
+    src = tmp_path / "card_post_commit"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(src / "kept.jpg")
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    import move as move_mod
+    real_move_folder_fn = move_mod.move_folder
+
+    def cleanup_failing_move_folder(db, folder_id, destination, **kwargs):
+        # Run the real move (it commits) but inject a cleanup error via
+        # rmtree. We do this by patching shutil.rmtree only for the
+        # duration of this call, so the real verify/move_folder_path runs
+        # but the final src delete raises.
+        import shutil
+        orig_rmtree = shutil.rmtree
+
+        def raising_rmtree(path, *a, **k):
+            raise OSError("permission denied: staging file locked")
+
+        shutil.rmtree = raising_rmtree
+        try:
+            return real_move_folder_fn(db, folder_id, destination, **kwargs)
+        finally:
+            shutil.rmtree = orig_rmtree
+
+    monkeypatch.setattr(move_mod, "move_folder", cleanup_failing_move_folder)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job_id = resp.get_json()["job_id"]
+        job = wait_for_job_via_client(c, job_id)
+
+    # The archive committed despite the staging cleanup error.
+    assert job["status"] == "completed", job
+    assert (final_dest / "kept.jpg").is_file()
+    archive_result = job["result"]["archive"]
+    assert archive_result["final_destination"] == str(final_dest)
+    assert "cleanup_error" in archive_result
+    assert job["result"]["errors"] == []
+
+
+def test_pipeline_local_processing_deindexes_staging_on_cancel_after_scan(
+    setup, tmp_path, monkeypatch
+):
+    """Regression: when the user clicks Stop after scanner_stage has
+    already indexed the local staging folder but before archive_stage runs,
+    the cancel_watcher sets abort and every downstream stage skips with
+    status "skipped" (not "failed"). archive_stage's abort/cancel
+    early-return must still deindex the staging folder — otherwise the
+    abandoned staging rows would gate ingest()'s known-hash skip on the
+    next retry, letting that retry "successfully" archive an empty
+    destination. The already_failed branch's deindex doesn't help here:
+    cancellation marks stages "skipped", not "failed", so the existing
+    failed-stage cleanup path never runs.
+    """
+    app, db_path = setup
+
+    final_parent = tmp_path / "nas_cancel_pre"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+
+    src = tmp_path / "card_cancel_pre"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(src / "kept.jpg")
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    # Trigger cancellation in scanner_stage's finally block, after the
+    # staging folder has been scanned and the photo hashes committed. The
+    # pipeline's cancel_watcher polls runner.is_cancelled and sets `abort`
+    # within 0.25s, so by the time archive_stage runs it sees abort.is_set()
+    # and takes the early-return path.
+    import new_images
+    runner = app._job_runner
+    cancelled_once = {"done": False}
+    real_invalidate = new_images.invalidate_new_images_after_scan
+
+    def cancelling_invalidate(db, root):
+        if not cancelled_once["done"]:
+            with runner._lock:
+                running = [
+                    jid for jid, j in runner._jobs.items()
+                    if j.get("status") == "running"
+                    and jid.startswith("pipeline-")
+                ]
+            if running:
+                runner.cancel_job(running[0])
+                cancelled_once["done"] = True
+        return real_invalidate(db, root)
+
+    monkeypatch.setattr(
+        new_images, "invalidate_new_images_after_scan",
+        cancelling_invalidate,
+    )
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job_id = resp.get_json()["job_id"]
+        job = wait_for_job_via_client(c, job_id)
+
+    # archive must NOT publish files when cancelled before commit.
+    assert not (final_dest / "kept.jpg").exists()
+    # The terminal status reflects the cancellation, not a successful run.
+    assert job["status"] != "completed", job
+
+    # Staging files stay on disk so the user can recover.
+    staging_file = (
+        tmp_path / "staging" / job_id / "Photos" / "kept.jpg"
+    )
+    assert staging_file.is_file(), (
+        f"staging files should remain when archive is skipped, "
+        f"missing at {staging_file}"
+    )
+
+    # The staging folder must be removed from the catalog. Without the
+    # abort branch's deindex, this row would survive and ingest()'s
+    # known-hash gate would skip every file on retry — producing an empty
+    # archive on the next run of the same source.
+    from db import Database
+    check_db = Database(db_path)
+    staging_dir = str(staging_file.parent)
+    folder_row = check_db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", (staging_dir,),
+    ).fetchone()
+    assert folder_row is None, (
+        f"staging folder must be deindexed when archive is skipped via "
+        f"abort/cancel, still present at {staging_dir}"
+    )
+    photo_rows = check_db.conn.execute(
+        "SELECT id FROM photos WHERE folder_id IN ("
+        "  SELECT id FROM folders WHERE path LIKE ?"
+        ")",
+        (str(tmp_path / "staging" / job_id) + "%",),
+    ).fetchall()
+    assert not photo_rows, (
+        "no photo rows should remain under the abandoned staging tree, "
+        f"got {len(photo_rows)}"
+    )
+    check_db.close()
+
+
+def test_pipeline_local_processing_preflight_filters_duplicates(
+    setup, tmp_path, monkeypatch
+):
+    """When skip_duplicates is on and the source is mostly already in the
+    catalog, the storage preflight must measure only the bytes ingest would
+    actually copy. Without the duplicate-aware re-check, the naive byte sum
+    would set batching_required and abort an import that would fit in
+    staging."""
+    app, db_path = setup
+
+    final_parent = tmp_path / "nas"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+
+    src = tmp_path / "card3"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(src / "dup.jpg")
+    Image.new("RGB", (16, 16), "red").save(src / "fresh.jpg")
+
+    # Insert the dup file's hash into the catalog so skip_duplicates will
+    # treat it as already-known. selected_source_files only walks the source
+    # tree, so the photos table just needs the hash present.
+    from db import Database
+    from scanner import compute_file_hash
+    dup_hash = compute_file_hash(str(src / "dup.jpg"))
+
+    db = Database(db_path)
+    seed_folder = tmp_path / "seed"
+    seed_folder.mkdir()
+    folder_id = db.add_folder(str(seed_folder))
+    ws_id = db._active_workspace_id
+    db.add_workspace_folder(ws_id, folder_id)
+    db.add_photo(
+        folder_id=folder_id, filename="dup.jpg", extension=".jpg",
+        file_size=10, file_mtime=1.0, file_hash=dup_hash,
+    )
+    db.close()
+
+    # Pick a disk_usage and reserve combination so that summing both files
+    # would exceed the usable budget, but the fresh file alone fits.
+    fresh_bytes = (src / "fresh.jpg").stat().st_size
+    dup_bytes = (src / "dup.jpg").stat().st_size
+    total_bytes = fresh_bytes + dup_bytes
+    # required_bytes ≈ source_bytes * 2.25 here: staging and archive_parent
+    # both resolve to tmp_path so storage_plan's same-device branch doubles
+    # the source-byte allotment (originals in staging + originals at the
+    # destination during copy-verify-delete) on top of the 0.25 derived
+    # overhead. Pick free so the duplicate-filtered plan fits but the
+    # naive plan doesn't.
+    reserve = 4
+    free = int(fresh_bytes * 2.5) + reserve + 1
+    assert free < int(total_bytes * 2.25) + reserve, "free must exceed filtered need but not the naive need"
+
+    from collections import namedtuple
+    Usage = namedtuple("Usage", "total used free")
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", reserve)
+    monkeypatch.setattr(
+        local_processing.shutil, "disk_usage",
+        lambda path: Usage(total=free * 10, used=0, free=free),
+    )
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "skip_duplicates": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert job["status"] == "completed", job
+    # Storage plan recorded on the job reflects the filtered bytes, not the
+    # naive sum that would have aborted.
+    plan = job["result"]["local_processing"]
+    assert plan["batching_required"] is False, plan
+    assert plan["source_bytes"] <= fresh_bytes, plan
+
+
+def test_pipeline_local_processing_plans_archive_credit_after_duplicate_filter(
+    setup, tmp_path, monkeypatch
+):
+    """Storage preflight must plan archive credit from survivor files, not from
+    skipped duplicates, before accepting a plan."""
+    app, db_path = setup
+
+    final_parent = tmp_path / "nas-filtered-credit"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+    final_dest.mkdir()
+
+    src = tmp_path / "card-filtered-credit"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(src / "dup.jpg")
+    Image.new("RGB", (16, 16), "red").save(src / "fresh.jpg")
+    shutil.copy2(src / "dup.jpg", final_dest / "dup.jpg")
+
+    from db import Database
+    from scanner import compute_file_hash
+    dup_hash = compute_file_hash(str(src / "dup.jpg"))
+
+    db = Database(db_path)
+    seed_folder = tmp_path / "seed-filtered-credit"
+    seed_folder.mkdir()
+    folder_id = db.add_folder(str(seed_folder))
+    ws_id = db._active_workspace_id
+    db.add_workspace_folder(ws_id, folder_id)
+    db.add_photo(
+        folder_id=folder_id, filename="dup.jpg", extension=".jpg",
+        file_size=10, file_mtime=1.0, file_hash=dup_hash,
+    )
+    db.close()
+
+    fresh_bytes = (src / "fresh.jpg").stat().st_size
+    dup_bytes = (src / "dup.jpg").stat().st_size
+    total_bytes = fresh_bytes + dup_bytes
+    reserve = 4
+    free = int(fresh_bytes * 2.5) + reserve + 1
+    assert free < int(total_bytes * 1.25 + fresh_bytes) + reserve
+
+    from collections import namedtuple
+    Usage = namedtuple("Usage", "total used free")
+
+    import local_processing
+    real_storage_plan = local_processing.storage_plan
+    storage_calls = []
+
+    def recording_storage_plan(staging_dir, source_bytes, **kwargs):
+        storage_calls.append({
+            "source_bytes": source_bytes,
+            "archive_existing_bytes": kwargs.get("archive_existing_bytes"),
+        })
+        return real_storage_plan(staging_dir, source_bytes, **kwargs)
+
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", reserve)
+    monkeypatch.setattr(local_processing, "storage_plan", recording_storage_plan)
+    monkeypatch.setattr(
+        local_processing.shutil, "disk_usage",
+        lambda path: Usage(total=free * 10, used=0, free=free),
+    )
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "skip_duplicates": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert job["status"] == "completed", job
+    assert len(storage_calls) == 1
+    assert storage_calls[0]["source_bytes"] == fresh_bytes
+    assert storage_calls[0]["archive_existing_bytes"] == 0
+
+
+def test_pipeline_local_processing_preflight_probes_existing_final_destination(
+    setup, tmp_path, monkeypatch
+):
+    """Existing archive folders may be mount roots and must be probed directly."""
+    app, _db_path = setup
+
+    src = tmp_path / "card4"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "blue").save(src / "fresh.jpg")
+
+    final_parent = tmp_path / "Volumes"
+    final_parent.mkdir()
+    final_dest = final_parent / "Archive"
+    final_dest.mkdir()
+
+    import local_processing
+
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+    real_storage_plan = local_processing.storage_plan
+    archive_paths = []
+
+    def recording_storage_plan(staging_dir, source_bytes, **kwargs):
+        archive_paths.append(kwargs.get("archive_parent"))
+        return real_storage_plan(staging_dir, source_bytes, **kwargs)
+
+    monkeypatch.setattr(local_processing, "storage_plan", recording_storage_plan)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert job["status"] == "completed", job
+    assert archive_paths
+    assert set(archive_paths) == {str(final_dest)}
+
+
+def test_pipeline_local_processing_rejects_existing_file_archive_destination(
+    setup, tmp_path, monkeypatch
+):
+    app, _db_path = setup
+
+    src = tmp_path / "card5"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "green").save(src / "fresh.jpg")
+
+    final_dest = tmp_path / "Archive"
+    final_dest.write_text("not a directory")
+
+    import local_processing
+
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert job["status"] == "failed", job
+    error_text = (job.get("error") or "") + str(job.get("result", ""))
+    assert "not a directory" in error_text
+
+
+def test_pipeline_local_processing_rejects_broken_symlink_archive_destination(
+    setup, tmp_path, monkeypatch
+):
+    """A broken/dangling symlink left at ``final_destination`` — e.g. by an
+    unmounted or moved archive root — must be rejected up front. The
+    earlier ``os.path.exists`` guard followed the symlink and returned
+    False for a dangling target, so the pipeline staged and processed
+    every source before ``move_folder`` ultimately failed trying to
+    create a directory at a pathname already occupied by the symlink
+    entry. The lexists guard catches the entry regardless of whether
+    its target resolves."""
+    app, _db_path = setup
+
+    src = tmp_path / "card-broken-symlink"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "green").save(src / "fresh.jpg")
+
+    archive_parent = tmp_path / "archive-parent"
+    archive_parent.mkdir()
+    final_dest = archive_parent / "Archive"
+    missing_target = tmp_path / "missing-mount-point"
+    try:
+        os.symlink(str(missing_target), str(final_dest))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this filesystem")
+    assert os.path.lexists(str(final_dest))
+    assert not os.path.exists(str(final_dest))
+
+    import local_processing
+
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert job["status"] == "failed", job
+    error_text = (job.get("error") or "") + str(job.get("result", ""))
+    assert "not a directory" in error_text
+
+
+def test_pipeline_local_processing_rejects_archive_path_conflicts(
+    setup, tmp_path, monkeypatch
+):
+    app, _db_path = setup
+
+    src = tmp_path / "card-conflict"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "green").save(src / "fresh.jpg")
+
+    final_parent = tmp_path / "archive-conflict-parent"
+    final_parent.mkdir()
+    final_dest = final_parent / "Archive"
+    final_dest.mkdir()
+    (final_dest / "fresh.jpg").write_bytes(b"different existing bytes")
+
+    import local_processing
+
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert job["status"] == "failed", job
+    error_text = (job.get("error") or "") + str(job.get("result", ""))
+    assert "different files at the same import paths" in error_text
+
+
+def test_pipeline_local_processing_conflict_preflight_skips_known_duplicates(
+    setup, tmp_path, monkeypatch
+):
+    """A source whose hash is already in the catalog is skipped by ingest
+    before staging, so a same-name different-content file at the archive
+    must not cause the preflight to abort the run."""
+    app, db_path = setup
+
+    src = tmp_path / "card-dup-conflict"
+    src.mkdir()
+    dup_path = src / "dup.jpg"
+    Image.new("RGB", (16, 16), "white").save(dup_path)
+    fresh_path = src / "fresh.jpg"
+    Image.new("RGB", (16, 16), "red").save(fresh_path)
+
+    from db import Database
+    from scanner import compute_file_hash
+
+    dup_hash = compute_file_hash(str(dup_path))
+
+    db = Database(db_path)
+    seed_folder = tmp_path / "seed"
+    seed_folder.mkdir()
+    folder_id = db.add_folder(str(seed_folder))
+    ws_id = db._active_workspace_id
+    db.add_workspace_folder(ws_id, folder_id)
+    db.add_photo(
+        folder_id=folder_id, filename="dup.jpg", extension=".jpg",
+        file_size=10, file_mtime=1.0, file_hash=dup_hash,
+    )
+    db.close()
+
+    final_parent = tmp_path / "archive-parent"
+    final_parent.mkdir()
+    final_dest = final_parent / "Archive"
+    final_dest.mkdir()
+    # Same archive-relative path as the dup source, different content.
+    # Without the duplicate filter the preflight would reject this run.
+    (final_dest / "dup.jpg").write_bytes(b"different existing bytes")
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "skip_duplicates": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    error_text = (job.get("error") or "") + str(job.get("result", ""))
+    assert "different files at the same import paths" not in error_text
+    assert job["status"] == "completed", job
+
+
+def test_pipeline_local_processing_credits_existing_archive_for_resume(
+    setup, tmp_path, monkeypatch
+):
+    """When a previous archive attempt left bytes at the destination, the
+    preflight calls storage_plan with archive_existing_bytes set so the
+    delta fits even when the destination volume is tight."""
+    app, _db_path = setup
+
+    src = tmp_path / "card-resume"
+    src.mkdir()
+    source_file = src / "fresh.jpg"
+    Image.new("RGB", (16, 16), "red").save(source_file)
+
+    final_parent = tmp_path / "archive-parent"
+    final_parent.mkdir()
+    final_dest = final_parent / "Archive"
+    final_dest.mkdir()
+    # Seed the destination with the exact file that a previous archive
+    # attempt would have left behind so the resume credit is valid.
+    shutil.copy2(source_file, final_dest / "fresh.jpg")
+
+    import local_processing
+
+    real_storage_plan = local_processing.storage_plan
+    credits: list = []
+
+    def recording_storage_plan(staging_dir, source_bytes, **kwargs):
+        credits.append(kwargs.get("archive_existing_bytes"))
+        return real_storage_plan(staging_dir, source_bytes, **kwargs)
+
+    monkeypatch.setattr(local_processing, "storage_plan", recording_storage_plan)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert credits, "storage_plan was not called"
+    assert all(c is not None for c in credits)
+    # Credit equals the matching source bytes already at the destination.
+    assert credits[0] == source_file.stat().st_size
+    assert job["status"] == "completed", job
+
+
+def test_pipeline_local_processing_does_not_credit_unrelated_archive_content(
+    setup, tmp_path, monkeypatch
+):
+    """Existing destination bytes only count when they match selected source
+    files at the same archive-relative path."""
+    app, _db_path = setup
+
+    src = tmp_path / "card-unrelated"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "red").save(src / "fresh.jpg")
+
+    final_parent = tmp_path / "archive-parent"
+    final_parent.mkdir()
+    final_dest = final_parent / "Archive"
+    final_dest.mkdir()
+    (final_dest / "unrelated.jpg").write_bytes(b"existing-payload")
+
+    import local_processing
+
+    real_storage_plan = local_processing.storage_plan
+    credits: list = []
+
+    def recording_storage_plan(staging_dir, source_bytes, **kwargs):
+        credits.append(kwargs.get("archive_existing_bytes"))
+        return real_storage_plan(staging_dir, source_bytes, **kwargs)
+
+    monkeypatch.setattr(local_processing, "storage_plan", recording_storage_plan)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert credits, "storage_plan was not called"
+    assert credits[0] == 0
+    assert job["status"] == "completed", job
 
 
 def test_import_full_scan_only_returns_job_id(setup):
