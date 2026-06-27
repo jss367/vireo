@@ -128,6 +128,23 @@ def test_move_photos_creates_dest_folder_record(move_env):
     assert row is not None
 
 
+def test_move_photos_dest_folder_nests_under_ancestor(move_env):
+    """A new destination under an existing folder gets parent_id set to that
+    ancestor so it nests in the browse tree instead of floating as a root."""
+    from move import move_photos
+
+    env = move_env
+    # Destination is a brand-new subfolder of the existing `dst` folder.
+    sub_dst = env["dst"] / "sub"
+    sub_dst.mkdir()
+
+    move_photos(db=env["db"], photo_ids=[env["p1"]], destination=str(sub_dst))
+    row = env["db"].conn.execute(
+        "SELECT parent_id FROM folders WHERE path = ?", (str(sub_dst),)
+    ).fetchone()
+    assert row["parent_id"] == env["fid_dst"]
+
+
 def test_move_photos_companion_files(move_env):
     """move_photos moves companion (RAW) files alongside the photo."""
     from move import move_photos

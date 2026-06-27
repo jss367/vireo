@@ -6164,6 +6164,53 @@ def test_relocate_folder_cascade(tmp_path):
     assert row["status"] == "ok"
 
 
+def test_nearest_ancestor_folder_id(tmp_path):
+    """nearest_ancestor_folder_id returns the longest proper-ancestor row."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    usa = db.add_folder("/vol/USA", name="USA")
+    usa_2026 = db.add_folder("/vol/USA/2026", name="2026", parent_id=usa)
+
+    # Longest ancestor wins over the shallower one.
+    assert db.nearest_ancestor_folder_id("/vol/USA/2026/2026-05-30") == usa_2026
+    # Falls back to the nearest existing ancestor when the immediate one has
+    # no row.
+    assert db.nearest_ancestor_folder_id("/vol/USA/gap/leaf") == usa
+    # No ancestor row -> None (folder is a root).
+    assert db.nearest_ancestor_folder_id("/elsewhere/x") is None
+    # A row is never its own ancestor.
+    assert db.nearest_ancestor_folder_id("/vol/USA", exclude_id=usa) is None
+
+
+def test_relocate_folder_relinks_parent_by_path(tmp_path):
+    """Relocating a folder re-derives parent_id from its new path so it does
+    not stay nested under its pre-move parent (browse-tree mis-nesting bug)."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    pics_2026 = db.add_folder("/pics/2026", name="2026")
+    usa = db.add_folder("/vol/USA", name="USA")
+    # A date folder that originally lived under /pics/2026.
+    date = db.add_folder("/pics/2026/2026-05-30", name="2026-05-30",
+                         parent_id=pics_2026)
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (date,))
+    db.conn.commit()
+
+    # User moved it onto the USA volume and re-points Vireo at the new path.
+    db.relocate_folder(date, "/vol/USA/2026-05-30")
+
+    row = db.conn.execute(
+        "SELECT parent_id FROM folders WHERE id = ?", (date,)
+    ).fetchone()
+    # Re-linked to its real new ancestor, not left pointing at /pics/2026.
+    assert row["parent_id"] == usa
+
+
 def test_relocate_folder_merge_into_existing(tmp_path):
     """relocate_folder merges photos into existing folder when paths conflict."""
     from db import Database

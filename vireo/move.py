@@ -1221,10 +1221,13 @@ def move_photos(db, photo_ids, destination, progress_cb=None):
     if dest_row:
         dest_folder_id = dest_row["id"]
     else:
-        # Insert folder record without auto-linking to workspace (add_folder would auto-link)
+        # Insert folder record without auto-linking to workspace (add_folder would auto-link).
+        # Set parent_id from the nearest existing ancestor so the destination
+        # nests correctly in the browse tree instead of floating as a root.
         cur = db.conn.execute(
-            "INSERT OR IGNORE INTO folders (path, name) VALUES (?, ?)",
-            (destination, os.path.basename(destination)),
+            "INSERT OR IGNORE INTO folders (path, name, parent_id) VALUES (?, ?, ?)",
+            (destination, os.path.basename(destination),
+             db.nearest_ancestor_folder_id(destination)),
         )
         db.conn.commit()
         if cur.rowcount > 0:
