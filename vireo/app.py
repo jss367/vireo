@@ -1917,6 +1917,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         )
 
+    def _companion_image_can_replace_raw_result(
+        companion_img, current_img, expected_w, expected_h,
+    ):
+        if companion_img is None:
+            return False
+        if expected_w > 0 and expected_h > 0:
+            return not _image_is_smaller_than_expected(
+                companion_img, expected_w, expected_h,
+            )
+        if current_img is None:
+            return True
+        return (
+            companion_img.size[0] >= current_img.size[0]
+            and companion_img.size[1] >= current_img.size[1]
+        )
+
     def _image_size_after_exif_orientation(img):
         width, height = img.size
         orientation = None
@@ -13364,35 +13380,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                     os.path.exists(companion_abs)
                                     and companion_abs != canonical
                                 ):
-                                    log.info(
-                                        "RAW decode for photo %s preview "
-                                        "warmup at size=%s returned "
-                                        "undersized embedded preview "
-                                        "(%dx%d, expected %dx%d); "
-                                        "falling back to companion JPEG",
-                                        detail_photo["id"], max_size,
-                                        img.size[0], img.size[1],
-                                        expected_w, expected_h,
-                                    )
-                                    img.close()
                                     companion_img = load_image(
                                         companion_abs,
                                         max_size=load_max_size,
                                     )
-                                    if companion_img is not None:
+                                    if _companion_image_can_replace_raw_result(
+                                        companion_img, img,
+                                        expected_w, expected_h,
+                                    ):
+                                        log.info(
+                                            "RAW decode for photo %s preview "
+                                            "warmup at size=%s returned "
+                                            "undersized embedded preview "
+                                            "(%dx%d, expected %dx%d); "
+                                            "falling back to companion JPEG",
+                                            detail_photo["id"], max_size,
+                                            img.size[0], img.size[1],
+                                            expected_w, expected_h,
+                                        )
+                                        img.close()
                                         img = companion_img
                                         canonical = companion_abs
-                                    else:
-                                        # Companion unreadable — recover the
-                                        # embedded preview so the warmer
-                                        # still produces something rather
-                                        # than counting this photo as
-                                        # failed for the size mismatch.
-                                        img = load_image(
-                                            canonical,
-                                            max_size=load_max_size,
-                                            **load_kwargs,
-                                        )
+                                    elif companion_img is not None:
+                                        companion_img.close()
                     if (
                         img is None
                         and os.path.splitext(canonical)[1].lower() in RAW_EXTENSIONS
@@ -18461,28 +18471,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         os.path.exists(companion_abs)
                         and companion_abs != canonical
                     ):
-                        log.info(
-                            "RAW decode for photo %s preview at size=%s "
-                            "returned undersized embedded preview (%dx%d, "
-                            "expected %dx%d); falling back to "
-                            "companion JPEG",
-                            photo_id, size, img.size[0], img.size[1],
-                            expected_w, expected_h,
-                        )
-                        img.close()
                         companion_img = load_image(
                             companion_abs, max_size=load_max_size,
                         )
-                        if companion_img is not None:
+                        if _companion_image_can_replace_raw_result(
+                            companion_img, img, expected_w, expected_h,
+                        ):
+                            log.info(
+                                "RAW decode for photo %s preview at size=%s "
+                                "returned undersized embedded preview (%dx%d, "
+                                "expected %dx%d); falling back to "
+                                "companion JPEG",
+                                photo_id, size, img.size[0], img.size[1],
+                                expected_w, expected_h,
+                            )
+                            img.close()
                             img = companion_img
                             canonical = companion_abs
-                        else:
-                            # Companion unreadable — recover the embedded
-                            # preview rather than 500ing the request.
-                            img = load_image(
-                                canonical, max_size=load_max_size,
-                                **load_kwargs,
-                            )
+                        elif companion_img is not None:
+                            companion_img.close()
         if img is None and selected_ext in RAW_EXTENSIONS:
             # libraw couldn't decode this RAW (unsupported variant, corrupt
             # file, no usable embedded JPEG). Try the companion JPEG before
@@ -18683,25 +18690,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             os.path.exists(companion_abs)
                             and companion_abs != canonical
                         ):
-                            log.info(
-                                "RAW decode for photo %s edit-preview "
-                                "returned undersized embedded preview "
-                                "(%dx%d, expected %dx%d); falling "
-                                "back to companion JPEG",
-                                photo_id, img.size[0], img.size[1],
-                                expected_w, expected_h,
-                            )
-                            img.close()
                             companion_img = load_image(
                                 companion_abs, max_size=size,
                             )
-                            if companion_img is not None:
+                            if _companion_image_can_replace_raw_result(
+                                companion_img, img, expected_w, expected_h,
+                            ):
+                                log.info(
+                                    "RAW decode for photo %s edit-preview "
+                                    "returned undersized embedded preview "
+                                    "(%dx%d, expected %dx%d); falling "
+                                    "back to companion JPEG",
+                                    photo_id, img.size[0], img.size[1],
+                                    expected_w, expected_h,
+                                )
+                                img.close()
                                 img = companion_img
                                 canonical = companion_abs
-                            else:
-                                img = load_image(
-                                    canonical, max_size=size, **load_kwargs,
-                                )
+                            elif companion_img is not None:
+                                companion_img.close()
             if img is None and selected_ext in RAW_EXTENSIONS:
                 # Same companion fallback as serve_preview's cache-miss
                 # path: an unsupported RAW shouldn't kill the in-progress
