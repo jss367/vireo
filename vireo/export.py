@@ -210,8 +210,19 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
             )
             source_path = None
             if not use_wc:
+                primary_path = (
+                    os.path.join(folder_path, photo["filename"])
+                    if folder_path else ""
+                )
+                primary_is_raw = (
+                    os.path.splitext(photo["filename"])[1].lower()
+                    in RAW_EXTENSIONS
+                )
                 source_path = _companion_can_satisfy_export(
-                    photo, folder_path, recipe, max_size, exif_data=exif_data
+                    photo, folder_path, recipe, max_size, exif_data=exif_data,
+                    skip_raw_primary=(
+                        not primary_is_raw or os.path.isfile(primary_path)
+                    ),
                 )
             if not source_path:
                 source_path = _resolve_source(

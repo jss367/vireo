@@ -9274,14 +9274,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 ):
                     return wc_path
 
-            # For RAW primaries, never substitute the companion JPEG: its
-            # highlights are already clipped, so the handoff would apply the
-            # recipe to a clipped render even though the RAW would have been
-            # decoded with RAW_DECODE_PRESERVE_HIGHLIGHTS otherwise.
-
             folder_path = folders.get(photo["folder_id"])
             if folder_path:
-                if not primary_is_raw:
+                raw_source_available = os.path.exists(fallback_path)
+                # For RAW primaries, skip the companion JPEG while the RAW is
+                # available so edits render from the preserve-highlights decode.
+                # If the RAW volume is offline, a full-size sidecar is the best
+                # remaining local source.
+                if not primary_is_raw or not raw_source_available:
                     companion_path = photo["companion_path"]
                     if companion_path:
                         companion = os.path.join(folder_path, companion_path)
@@ -11586,14 +11586,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ):
                 return wc_path
 
-        # RAW primaries are decoded with RAW_DECODE_PRESERVE_HIGHLIGHTS later;
-        # substituting the camera JPEG companion here would apply the recipe
-        # to a clipped render instead.
-        if primary_is_raw:
-            return fallback_path
-
         companion_path = photo["companion_path"]
-        if companion_path:
+        raw_source_available = os.path.exists(fallback_path)
+        # RAW primaries are decoded with RAW_DECODE_PRESERVE_HIGHLIGHTS later;
+        # only use the clipped camera JPEG when the RAW source is offline.
+        if companion_path and (not primary_is_raw or not raw_source_available):
             companion = os.path.join(photo["folder_path"], companion_path)
             if (
                 os.path.exists(companion)
@@ -11793,7 +11790,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 )
                 if wc_rel else None
             )
-            if not (recipe and wc_abs and os.path.isfile(wc_abs)):
+            companion_abs = (
+                os.path.join(photo["folder_path"], photo["companion_path"])
+                if photo["companion_path"] else None
+            )
+            if not (
+                recipe
+                and (
+                    (wc_abs and os.path.isfile(wc_abs))
+                    or (companion_abs and os.path.isfile(companion_abs))
+                )
+            ):
                 return json_error("Photo file not found on disk", 404)
 
         upload_path, upload_error = _inat_upload_photo_path(db, photo, photo_path)
