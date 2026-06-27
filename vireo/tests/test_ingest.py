@@ -574,6 +574,51 @@ def test_ingest_custom_folder_template(tmp_path):
     assert (dst / "2026" / "03" / "photo.jpg").exists()
 
 
+def test_ingest_skip_duplicates_zero_byte_destination_collision(tmp_path):
+    """A zero-byte source that finds a zero-byte file at the exact
+    destination path must be treated as a duplicate skip — not as a
+    name collision needing ``name_1.ext``.
+
+    Pass 1 deliberately clears ``file_hash`` to ``None`` for zero-byte
+    sources so ``EMPTY_FILE_SHA256`` doesn't enter the global
+    duplicate-identity index. Pass 2's hash-based exact-match check
+    therefore can't recognise the collision; without an explicit
+    zero-byte branch a ``skip_duplicates`` retry of an interrupted card
+    import would fall through to the numeric-suffix branch and keep
+    minting empty placeholders forever.
+    """
+    src = tmp_path / "card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    empty = src / "DSC_0001.NEF"
+    empty.write_bytes(b"")
+    mtime = datetime(2026, 3, 28).timestamp()
+    os.utime(str(empty), (mtime, mtime))
+
+    db = Database(str(tmp_path / "test.db"))
+    first = ingest(str(src), str(dst), db=db, skip_duplicates=True)
+    assert first["copied"] == 1
+    assert first["skipped_duplicate"] == 0
+
+    date_folder = dst / "2026" / "2026-03-28"
+    assert sorted(p.name for p in date_folder.iterdir()) == ["DSC_0001.NEF"]
+
+    # Retry the same card: the destination already holds a zero-byte
+    # file at the exact path. The retry must skip it, not create
+    # ``DSC_0001_1.NEF``.
+    second = ingest(str(src), str(dst), db=db, skip_duplicates=True)
+    assert second["copied"] == 0, (
+        f"retry created an extra placeholder: {second!r}"
+    )
+    assert second["skipped_duplicate"] == 1
+    assert sorted(p.name for p in date_folder.iterdir()) == ["DSC_0001.NEF"], (
+        "retry produced a name_1 sibling instead of skipping the existing "
+        "zero-byte file"
+    )
+
+
 def test_ingest_filename_collision(tmp_path):
     """Same filename from different source gets a suffix."""
     src1 = tmp_path / "card1"

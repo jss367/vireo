@@ -28,6 +28,7 @@ from PIL import Image
 from xmp import read_hierarchical_keywords, read_keywords
 
 log = logging.getLogger(__name__)
+EMPTY_FILE_SHA256 = hashlib.sha256(b"").hexdigest()
 
 # scan() runs inside JobRunner/pipeline_job background threads, so the
 # default POSIX "fork" start method is unsafe here: forking a
@@ -1173,12 +1174,17 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
 
     # Build existing photo lookup for incremental mode
     existing_photos = {}
+    existing_file_hashes = {}
     exif_extracted = set()  # photo IDs where ExifTool has already run
     if incremental:
         all_photos = db.get_photos(per_page=999999)
         for p in all_photos:
             # Key by folder_id + filename won't work easily, so use a second lookup
             existing_photos[p["id"]] = p
+        existing_file_hashes = {
+            row["id"]: row["file_hash"]
+            for row in db.conn.execute("SELECT id, file_hash FROM photos")
+        }
         # Build a path-based lookup: we need folder path + filename
         existing_by_path = {}
         folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
@@ -1324,8 +1330,17 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                         (existing["timestamp"] is None or dims_suspect)
                         and existing["id"] not in exif_extracted
                     )
+                    existing_file_hash = existing_file_hashes.get(existing["id"])
+                    empty_hash_needs_repair = (
+                        existing["file_size"] == 0
+                        and existing_file_hash == EMPTY_FILE_SHA256
+                    )
 
-                    if file_unchanged and xmp_unchanged and not metadata_missing:
+                    if (
+                        file_unchanged and xmp_unchanged
+                        and not metadata_missing
+                        and not empty_hash_needs_repair
+                    ):
                         processed_count += 1
                         if photo_callback:
                             photo_callback(existing["id"], full_path_str)
@@ -1352,7 +1367,11 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                         )
                         commit_with_retry(db.conn)
 
-                    if file_unchanged and not metadata_missing:
+                    if (
+                        file_unchanged
+                        and not metadata_missing
+                        and not empty_hash_needs_repair
+                    ):
                         processed_count += 1
                         if photo_callback:
                             photo_callback(existing["id"], full_path_str)
@@ -1456,6 +1475,12 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             touched_folder_ids.add(folder_id)
             file_size = stat.st_size
             file_mtime = stat.st_mtime
+            if file_size == 0 and file_hash == EMPTY_FILE_SHA256:
+                log.warning(
+                    "Empty image file detected; skipping duplicate identity hash: %s",
+                    image_path,
+                )
+                file_hash = None
 
             # XMP sidecar
             xmp_path = image_path.with_suffix(".xmp")
@@ -1519,7 +1544,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             # for them avoids O(N) wasted UPDATE + commit round-trips on
             # large initial scans.
             existing_row = db.conn.execute(
-                "SELECT file_hash FROM photos WHERE folder_id = ? AND filename = ?",
+                "SELECT file_hash, flag FROM photos WHERE folder_id = ? AND filename = ?",
                 (folder_id, image_path.name),
             ).fetchone()
             row_already_existed = existing_row is not None
@@ -1575,6 +1600,20 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                     # that recomputes the same hash leaves coverage intact.
                     updates.append("hash_checked_at=NULL")
                     updates.append("hash_status=NULL")
+            elif file_size == 0:
+                updates.append("file_hash=NULL")
+                if row_already_existed and prev_file_hash is not None:
+                    updates.append("hash_checked_at=NULL")
+                    updates.append("hash_status=NULL")
+                # Historical rows where the empty SHA leaked in are repaired
+                # here by clearing file_hash above. We deliberately leave the
+                # ``flag`` column untouched: a 'rejected' value could come
+                # from the user (Browse / culling) just as easily as from
+                # past duplicate auto-resolution, and we have no marker that
+                # distinguishes them. Silently un-rejecting a user's
+                # placeholder would be worse than leaving it as-is; the
+                # duplicates page already flags empty-byte groups for
+                # manual review.
             if file_meta and extract_full_metadata:
                 updates.append("exif_data=?")
                 update_params.append(json.dumps(file_meta))
@@ -1595,7 +1634,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 # such a file's mtime current would make the next incremental
                 # scan skip it forever with a stale hash and stale derived
                 # caches; leaving the old mtime in place retries it instead.
-                if file_hash is not None:
+                if file_hash is not None or file_size == 0:
                     updates.extend(["file_mtime=?", "file_size=?"])
                     update_params.extend([file_mtime, file_size])
                 # xmp_mtime stays unconditional — the sidecar is a separate
@@ -1618,15 +1657,33 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             # stale. Includes the NULL → concrete transition for legacy
             # rows that predate hash tracking — we can't prove their
             # caches match current bytes, so safer to flush and
-            # regenerate. Gated on ``row_already_existed`` so brand-new
-            # inserts (prev_file_hash is always NULL there) don't
-            # trigger pointless UPDATE + commit round-trips on large
-            # initial scans. Requires explicit vireo_dir; callers must
-            # pass it (scan can't guess because --db and --thumb-dir
-            # are independently configurable).
+            # regenerate. Also fires when a file is truncated to zero
+            # bytes: file_hash is None in that branch (empty files don't
+            # carry duplicate identity), so the plain
+            # ``file_hash is not None`` guard would otherwise leave
+            # thumbnails and working copies from the old bytes in place.
+            # The zero-byte clause covers BOTH non-empty → empty and
+            # legacy NULL → empty: a pre-hash row whose file is now
+            # truncated still has thumbnails rendered from its old
+            # non-empty bytes, and before this fix the previous code
+            # path (which stored the concrete empty SHA) would have
+            # invalidated it via the NULL → concrete branch. Skips the
+            # empty → empty repair case (prev was already the empty SHA)
+            # because the bytes didn't actually change. Gated on
+            # ``row_already_existed`` so brand-new inserts
+            # (prev_file_hash is always NULL there) don't trigger
+            # pointless UPDATE + commit round-trips on large initial
+            # scans. Requires explicit vireo_dir; callers must pass it
+            # (scan can't guess because --db and --thumb-dir are
+            # independently configurable).
+            content_identity_changed = (
+                file_hash is not None and prev_file_hash != file_hash
+            ) or (
+                file_size == 0
+                and prev_file_hash != EMPTY_FILE_SHA256
+            )
             if (row_already_existed
-                    and file_hash is not None
-                    and prev_file_hash != file_hash
+                    and content_identity_changed
                     and vireo_dir):
                 _invalidate_derived_caches(
                     db, vireo_dir, photo_id, thumb_cache_dir=thumb_cache_dir,
