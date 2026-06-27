@@ -1,0 +1,78 @@
+name: Has open review threads
+description: >-
+  Decide whether a PR has a review thread that still needs an agent response:
+  unresolved, not outdated, and whose latest comment is from someone other than
+  the PR author. This collapses the Codex re-review storm — Codex re-posts its
+  open findings as fresh inline comments on every commit, and its review body is
+  always the same stock template, so neither body nor comment-count carries a
+  signal. Thread state does: once the author has replied to every open thread
+  (latest comment is the author's), there is nothing new to fire on.
+
+inputs:
+  repo:
+    description: "owner/name of the repository"
+    required: true
+  pr:
+    description: "PR number to inspect"
+    required: true
+  token:
+    description: "GitHub token with read access to the PR"
+    required: true
+
+outputs:
+  needs_response:
+    description: "'true' if at least one review thread still awaits an agent response"
+    value: ${{ steps.check.outputs.needs_response }}
+
+runs:
+  using: composite
+  steps:
+    - id: check
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ inputs.repo }}
+        PR: ${{ inputs.pr }}
+      run: |
+        owner="${REPO%/*}"
+        name="${REPO#*/}"
+
+        data=$(gh api graphql -f query='
+          query($owner:String!, $name:String!, $pr:Int!) {
+            repository(owner:$owner, name:$name) {
+              pullRequest(number:$pr) {
+                author { login }
+                reviewThreads(first:100) {
+                  nodes {
+                    isResolved
+                    isOutdated
+                    comments(last:1) { nodes { author { login } } }
+                  }
+                  pageInfo { hasNextPage }
+                }
+              }
+            }
+          }' -F owner="$owner" -F name="$name" -F pr="$PR")
+
+        pr_author=$(jq -r '.data.repository.pullRequest.author.login' <<<"$data")
+
+        if [[ "$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage' <<<"$data")" == "true" ]]; then
+          echo "WARNING: PR #${PR} has >100 review threads; only the first 100 were inspected." >&2
+        fi
+
+        # A thread needs an agent response when it is unresolved, not outdated,
+        # and its latest comment is from someone other than the PR author (i.e.
+        # a reviewer left something the author has not yet replied to).
+        needs=$(jq -r --arg author "$pr_author" '
+          [ .data.repository.pullRequest.reviewThreads.nodes[]
+            | select(.isResolved == false and .isOutdated == false)
+            | .comments.nodes[-1].author.login
+            | select(. != null and . != $author) ] | length' <<<"$data")
+
+        if [[ "${needs:-0}" -gt 0 ]]; then
+          echo "needs_response=true" >> "$GITHUB_OUTPUT"
+          echo "PR #${PR}: ${needs} review thread(s) await an agent response; firing routine."
+        else
+          echo "needs_response=false" >> "$GITHUB_OUTPUT"
+          echo "PR #${PR}: no unresolved, non-outdated review threads await an agent response; skipping."
+        fi
