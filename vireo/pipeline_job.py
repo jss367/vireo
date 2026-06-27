@@ -52,6 +52,26 @@ log = logging.getLogger(__name__)
 _SENTINEL = object()  # unique end-of-stream marker
 
 
+def _missing_archive_mount_root(path: str) -> str | None:
+    """Return a likely missing mount root that must not be auto-created."""
+    def _candidate(posix_path: str) -> str | None:
+        parts = posix_path.split("/")
+        if len(parts) >= 3 and parts[0] == "" and parts[1] in {"Volumes", "mnt"}:
+            return f"/{parts[1]}/{parts[2]}"
+        if len(parts) >= 4 and parts[0] == "" and parts[1] == "media":
+            return f"/media/{parts[2]}/{parts[3]}"
+        return None
+
+    raw_posix = os.path.expanduser(path).replace("\\", "/")
+    normalized = os.path.normpath(os.path.abspath(os.path.expanduser(path)))
+    normalized_posix = normalized.replace("\\", "/")
+
+    for mount_root in (_candidate(raw_posix), _candidate(normalized_posix)):
+        if mount_root and not os.path.lexists(mount_root):
+            return mount_root
+    return None
+
+
 @dataclass
 class PipelineParams:
     """Parameters for a streaming pipeline job."""
@@ -1113,6 +1133,16 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 if os.path.exists(final_destination)
                                 else archive_parent
                             )
+                            missing_mount_root = _missing_archive_mount_root(
+                                archive_parent,
+                            )
+                            if missing_mount_root:
+                                _bail_storage(
+                                    f"Archive mount root {missing_mount_root} "
+                                    "is not available. Check that the "
+                                    "destination drive is mounted and writable."
+                                )
+                                return
                             try:
                                 os.makedirs(archive_parent, exist_ok=True)
                             except OSError as exc:

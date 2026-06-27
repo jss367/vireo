@@ -446,6 +446,70 @@ def test_pipeline_local_processing_creates_missing_archive_parent(
     assert nonexistent_parent.is_dir()
 
 
+def test_pipeline_local_processing_detects_missing_archive_mount_root(monkeypatch):
+    """Unmounted NAS paths like /Volumes/NAS/Shoot must not be created as
+    local stub directories during archive-parent preflight."""
+    import pipeline_job
+
+    real_lexists = os.path.lexists
+
+    def fake_lexists(path):
+        if path == "/Volumes/NAS":
+            return False
+        return real_lexists(path)
+
+    monkeypatch.setattr(pipeline_job.os.path, "lexists", fake_lexists)
+
+    assert (
+        pipeline_job._missing_archive_mount_root("/Volumes/NAS/Shoot")
+        == "/Volumes/NAS"
+    )
+    assert pipeline_job._missing_archive_mount_root("/Volumes/NAS") == "/Volumes/NAS"
+
+
+def test_pipeline_local_processing_rejects_missing_archive_mount_root(
+    setup, tmp_path, monkeypatch
+):
+    """Regression: storage preflight must fail before makedirs can create a
+    missing mount root and accidentally archive onto the local disk."""
+    app, _db_path = setup
+
+    missing_mount = tmp_path / "missing_mount"
+    final_dest = missing_mount / "Shoot" / "Photos"
+
+    src = tmp_path / "card_mount"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(src / "shot.jpg")
+
+    import local_processing
+    import pipeline_job
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+    monkeypatch.setattr(
+        pipeline_job,
+        "_missing_archive_mount_root",
+        lambda _path: str(missing_mount),
+    )
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert job["status"] == "failed", job
+    error_text = (job.get("error") or "") + str(job.get("result", ""))
+    assert f"Archive mount root {missing_mount}" in error_text
+    assert not missing_mount.exists()
+
+
 def test_pipeline_local_processing_skips_archive_when_previews_fail(
     setup, tmp_path, monkeypatch
 ):
