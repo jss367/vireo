@@ -1240,11 +1240,11 @@ def test_pipeline_local_processing_preflight_filters_duplicates(
     assert plan["source_bytes"] <= fresh_bytes, plan
 
 
-def test_pipeline_local_processing_recomputes_archive_credit_after_duplicate_filter(
+def test_pipeline_local_processing_plans_archive_credit_after_duplicate_filter(
     setup, tmp_path, monkeypatch
 ):
-    """Duplicate-filtered storage retries must recompute archive credit from
-    survivor files, not from skipped duplicates."""
+    """Storage preflight must plan archive credit from survivor files, not from
+    skipped duplicates, before accepting a plan."""
     app, db_path = setup
 
     final_parent = tmp_path / "nas-filtered-credit"
@@ -1318,11 +1318,9 @@ def test_pipeline_local_processing_recomputes_archive_credit_after_duplicate_fil
         job = wait_for_job_via_client(c, resp.get_json()["job_id"])
 
     assert job["status"] == "completed", job
-    assert len(storage_calls) >= 2
-    assert storage_calls[0]["source_bytes"] == total_bytes
-    assert storage_calls[0]["archive_existing_bytes"] == dup_bytes
-    assert storage_calls[-1]["source_bytes"] == fresh_bytes
-    assert storage_calls[-1]["archive_existing_bytes"] == 0
+    assert len(storage_calls) == 1
+    assert storage_calls[0]["source_bytes"] == fresh_bytes
+    assert storage_calls[0]["archive_existing_bytes"] == 0
 
 
 def test_pipeline_local_processing_preflight_probes_existing_final_destination(

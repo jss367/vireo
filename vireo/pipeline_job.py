@@ -1167,7 +1167,21 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     "import without local processing."
                                 )
                                 return
-                            source_bytes = total_file_bytes(selected_files)
+                            planning_files = selected_files
+                            if (
+                                params.skip_duplicates
+                                and selected_files
+                                and catalog_hashes is not None
+                            ):
+                                # Plan against the exact files ingest will
+                                # stage, not the full selection. This keeps
+                                # both source_bytes and resume credit aligned
+                                # with skip_duplicates even when the unfiltered
+                                # plan appears to have enough space.
+                                planning_files = non_duplicate_files(
+                                    selected_files, catalog_hashes,
+                                )
+                            source_bytes = total_file_bytes(planning_files)
                             # When a previous archive attempt left a partial
                             # untracked directory at final_destination, the
                             # retry uses move_folder(..., merge=True), which
@@ -1176,7 +1190,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             # reject a retry whose remaining delta would fit.
                             existing_bytes = existing_archive_bytes(
                                 final_destination,
-                                selected_files,
+                                planning_files,
                                 params.folder_template,
                             )
                             plan = storage_plan(
@@ -1184,59 +1198,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 archive_parent=archive_space_path,
                                 archive_existing_bytes=existing_bytes,
                             )
-                            # When skip_duplicates is on, ingest() will hash and
-                            # skip files whose hash is already in the catalog
-                            # OR already seen earlier in this same run before
-                            # writing to staging. The naive byte sum above would
-                            # mark a mostly-duplicate card — or one where the
-                            # same folder appears in `sources` twice — as
-                            # batching-required even though the staging copy
-                            # would fit. Re-check using the duplicate-filtered
-                            # set, but only when the optimistic check failed —
-                            # otherwise we'd hash the entire source set on every
-                            # import. The filter runs even when the catalog is
-                            # empty so intra-run duplicates still collapse.
-                            if (
-                                plan["batching_required"]
-                                and params.skip_duplicates
-                                and selected_files
-                            ):
-                                # ``catalog_hashes`` was already fetched
-                                # above for the conflict preflight when
-                                # skip_duplicates is on; reuse it instead
-                                # of re-querying the photos table.
-                                known_hashes = (
-                                    catalog_hashes
-                                    if catalog_hashes is not None
-                                    else set()
-                                )
-                                filtered_files = non_duplicate_files(
-                                    selected_files, known_hashes,
-                                )
-                                filtered_bytes = total_file_bytes(filtered_files)
-                                if filtered_bytes < source_bytes:
-                                    # Recompute the destination credit against
-                                    # the survivor set. The first existing_bytes
-                                    # call counts every selected file that's
-                                    # already at final_destination, including
-                                    # known duplicates ingest will SKIP. If a
-                                    # large skipped file is present at the
-                                    # destination and a smaller fresh file is
-                                    # not, that credit would cap to filtered_
-                                    # bytes and drive archive_delta to zero —
-                                    # passing the destination-space preflight
-                                    # for a run that still has to write the
-                                    # fresh file at the archive.
-                                    filtered_existing_bytes = existing_archive_bytes(
-                                        final_destination,
-                                        filtered_files,
-                                        params.folder_template,
-                                    )
-                                    plan = storage_plan(
-                                        params.destination, filtered_bytes,
-                                        archive_parent=archive_space_path,
-                                        archive_existing_bytes=filtered_existing_bytes,
-                                    )
                             result["local_processing"] = {
                                 **plan,
                                 "staging_destination": params.destination,
