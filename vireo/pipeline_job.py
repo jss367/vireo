@@ -4431,6 +4431,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             )
             errors.append(f"[archive] Fatal: {msg}")
             log.exception("Pipeline archive stage failed")
+            # move_folder doesn't repoint the catalog until it has
+            # verified every copied file, so a raise here means the
+            # folders/photos rows still point at the staging tree. If we
+            # leave them indexed, a retry of the same source sees the
+            # staging hashes via ingest()'s global duplicate check, skips
+            # the copy, and "successfully" publishes an empty archive
+            # while the original files remain only under ~/.vireo/staging.
+            # Deindex to match the archive-skip paths above; the on-disk
+            # staging files are left in place per the error message so
+            # the user can still recover them manually.
+            _deindex_staging()
             stages["archive"]["status"] = "failed"
             runner.update_step(
                 job["id"], "archive", status="failed", error=msg,

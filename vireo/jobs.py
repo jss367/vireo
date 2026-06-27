@@ -40,6 +40,14 @@ class JobRunner:
         self._subscribers = {}  # job_id -> list of queues
         self._lock = threading.Lock()
         self._cancelled = set()  # job ids that have been cancelled
+        # job ids past an uninterruptible commit point (e.g. the
+        # local-processing archive move). Once a job is in here, any
+        # late ``cancel_job`` call is a no-op so the terminal status can
+        # no longer be flipped to "cancelled" by a Stop press that
+        # landed after the commit finished but before _run_job recorded
+        # the result. Cleared by _prune_finished_jobs alongside
+        # _cancelled.
+        self._uncancellable = set()
         self._db_path = None
         # Pending pipeline work, keyed by job_id. Populated by
         # ``enqueue_pipeline`` and consumed by ``_try_promote_queued``
@@ -442,6 +450,7 @@ class JobRunner:
             self._events.pop(jid, None)
             self._subscribers.pop(jid, None)
             self._cancelled.discard(jid)
+            self._uncancellable.discard(jid)
 
     def _run_job(self, job, work_fn):
         start_time = time.time()
@@ -915,6 +924,15 @@ class JobRunner:
             if job is not None and job["status"] == "running":
                 if expected_status and expected_status != "running":
                     return False
+                # Stop is a no-op once the job has entered an
+                # uninterruptible commit step (e.g. the local-processing
+                # archive move). Without this guard a Stop landing after
+                # clear_cancellation() but before _run_job's terminal
+                # check would re-add the job to _cancelled and record
+                # the run as "cancelled" even though the archive
+                # already committed to disk.
+                if job_id in self._uncancellable:
+                    return False
                 self._cancelled.add(job_id)
                 return True
             if job is not None:
@@ -954,6 +972,12 @@ class JobRunner:
                     and job["status"] == "running"
                     and (expected_status is None or expected_status == "running")
                 ):
+                    # Same uncancellable guard as the first running-job
+                    # branch above; the post-commit Stop race exists on
+                    # this path too when promotion beat the queued
+                    # cancel.
+                    if job_id in self._uncancellable:
+                        return False
                     self._cancelled.add(job_id)
                     return True
                 if self._queued_pipelines.get(job_id) is queued_cancel:
@@ -1013,7 +1037,8 @@ class JobRunner:
             return job_id in self._cancelled
 
     def clear_cancellation(self, job_id):
-        """Consume any pending cancellation flag for ``job_id``.
+        """Consume any pending cancellation flag for ``job_id`` and
+        mark the job uncancellable.
 
         Used by stages that have entered an uninterruptible commit step
         (e.g. the local-processing archive move) where a Stop press
@@ -1021,9 +1046,15 @@ class JobRunner:
         Without consuming the flag, ``_run_job``'s atomic terminal check
         would record the job as "cancelled" even though the commit
         succeeded — confusing the user about whether the archive landed.
+
+        The flag is consumed AND the job is added to ``_uncancellable``
+        so a Stop press that lands after this call but before
+        ``_run_job`` flips to a terminal status can't re-add the
+        cancellation flag and override the committed result.
         """
         with self._lock:
             self._cancelled.discard(job_id)
+            self._uncancellable.add(job_id)
 
 
 class LogBroadcaster(logging.Handler):
