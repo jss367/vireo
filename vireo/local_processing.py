@@ -53,6 +53,32 @@ def total_file_bytes(files: list[Path]) -> int:
     return total
 
 
+def non_duplicate_bytes(files: list[Path], known_hashes: set[str]) -> int:
+    """Sum bytes of ``files`` whose content hash isn't in ``known_hashes``.
+
+    Mirrors the duplicate gate ingest() applies with skip_duplicates=True so
+    the local-storage preflight estimate matches what ingest will actually
+    copy. Without this filter a card that's mostly already-imported photos
+    would set ``batching_required`` and abort even though the staging copy
+    would fit (or be zero bytes).
+    """
+    from scanner import compute_file_hash
+
+    total = 0
+    for path in files:
+        try:
+            file_hash = compute_file_hash(str(path))
+        except OSError:
+            continue
+        if file_hash in known_hashes:
+            continue
+        try:
+            total += path.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
 def estimate_required_bytes(source_bytes: int) -> int:
     """Estimate local working-set size for originals plus derived files."""
     derived = max(
@@ -66,9 +92,15 @@ def storage_plan(
     staging_dir: str,
     source_bytes: int,
     *,
-    reserved_free_bytes: int = RESERVED_FREE_BYTES,
+    reserved_free_bytes: int | None = None,
 ) -> dict:
-    """Return local-storage availability and whether batching is required."""
+    """Return local-storage availability and whether batching is required.
+
+    ``reserved_free_bytes`` defaults to the module-level constant, looked up
+    at call time so monkeypatching it in tests actually takes effect.
+    """
+    if reserved_free_bytes is None:
+        reserved_free_bytes = RESERVED_FREE_BYTES
     usage = shutil.disk_usage(staging_dir)
     required = estimate_required_bytes(source_bytes)
     usable = max(0, usage.free - reserved_free_bytes)

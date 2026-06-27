@@ -1095,16 +1095,60 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 if params.local_processing:
                     from local_processing import (
                         format_bytes,
+                        non_duplicate_bytes,
                         selected_source_files,
                         storage_plan,
                         total_file_bytes,
                     )
+                    from move import _tracked_destination_overlap
 
                     stages["storage"]["status"] = "running"
                     runner.update_step(job["id"], "storage", status="running")
                     _update_stages(runner, job["id"], stages)
 
+                    def _bail_storage(msg):
+                        # collection_stage spins on stages["scan"]["status"]
+                        # until it reaches a terminal value, so a storage
+                        # failure that skips scan and ingest entirely must
+                        # mark both as skipped here — otherwise its join()
+                        # blocks the whole pipeline forever.
+                        errors.append(f"[storage] Fatal: {msg}")
+                        stages["storage"]["status"] = "failed"
+                        runner.update_step(
+                            job["id"], "storage",
+                            status="failed", error=msg,
+                        )
+                        for skipped in ("ingest", "scan"):
+                            stages[skipped]["status"] = "skipped"
+                            runner.update_step(
+                                job["id"], skipped,
+                                status="completed", summary="Skipped",
+                            )
+                        abort.set()
+                        scan_to_thumb.put(_SENTINEL)
+
                     try:
+                        # Reject up front if the archive destination is already
+                        # a Vireo-managed folder (e.g., a repeat import to the
+                        # same archive root). Without this check the pipeline
+                        # would stage everything, complete every processing
+                        # step, and then fail in move_folder's tracked-overlap
+                        # guard — leaving the staged copy stranded under
+                        # ~/.vireo/staging with no way to resume.
+                        tracked = _tracked_destination_overlap(
+                            thread_db, -1, final_destination,
+                        )
+                        if tracked:
+                            _bail_storage(
+                                f"Archive destination {final_destination} "
+                                f"overlaps a folder Vireo already manages "
+                                f"({tracked['path']}). Local processing "
+                                "imports must land at a new archive folder; "
+                                "pick a different destination or import "
+                                "without local processing."
+                            )
+                            return
+
                         os.makedirs(params.destination, exist_ok=True)
                         selected_files = selected_source_files(
                             sources,
@@ -1112,17 +1156,42 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             recursive=params.recursive,
                             exclude_paths=params.exclude_paths,
                         )
-                        plan = storage_plan(
-                            params.destination,
-                            total_file_bytes(selected_files),
-                        )
+                        source_bytes = total_file_bytes(selected_files)
+                        plan = storage_plan(params.destination, source_bytes)
+                        # When skip_duplicates is on, ingest() will hash and
+                        # skip files whose hash is already in the catalog
+                        # before writing to staging. The naive byte sum above
+                        # would mark a mostly-duplicate card as batching-
+                        # required even though the staging copy would fit.
+                        # Re-check using the duplicate-filtered set, but only
+                        # when the optimistic check failed — otherwise we'd
+                        # hash the entire source set on every import.
+                        if (
+                            plan["batching_required"]
+                            and params.skip_duplicates
+                            and selected_files
+                        ):
+                            known_hashes = {
+                                row["file_hash"] for row in thread_db.conn.execute(
+                                    "SELECT file_hash FROM photos "
+                                    "WHERE file_hash IS NOT NULL"
+                                )
+                            }
+                            if known_hashes:
+                                filtered_bytes = non_duplicate_bytes(
+                                    selected_files, known_hashes,
+                                )
+                                if filtered_bytes < source_bytes:
+                                    plan = storage_plan(
+                                        params.destination, filtered_bytes,
+                                    )
                         result["local_processing"] = {
                             **plan,
                             "staging_destination": params.destination,
                             "final_destination": final_destination,
                         }
                         if plan["batching_required"]:
-                            msg = (
+                            _bail_storage(
                                 "Local processing needs about "
                                 f"{format_bytes(plan['required_bytes'])}, but "
                                 f"only {format_bytes(plan['usable_bytes'])} is "
@@ -1132,13 +1201,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 "batches; automatic batch execution is not "
                                 "available in this build yet."
                             )
-                            errors.append(f"[storage] Fatal: {msg}")
-                            stages["storage"]["status"] = "failed"
-                            runner.update_step(
-                                job["id"], "storage", status="failed", error=msg,
-                            )
-                            abort.set()
-                            scan_to_thumb.put(_SENTINEL)
                             return
                         summary = (
                             f"{format_bytes(plan['required_bytes'])} needed, "
@@ -1151,14 +1213,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             summary=summary,
                         )
                     except Exception as e:
-                        errors.append(f"[storage] Fatal: {e}")
                         log.exception("Pipeline local-storage preflight failed")
-                        stages["storage"]["status"] = "failed"
-                        runner.update_step(
-                            job["id"], "storage", status="failed", error=str(e),
-                        )
-                        abort.set()
-                        scan_to_thumb.put(_SENTINEL)
+                        _bail_storage(str(e))
                         return
 
                 # Same accumulator pattern as scan_acc: do_ingest() is called

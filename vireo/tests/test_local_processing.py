@@ -53,3 +53,29 @@ def test_storage_plan_reports_batching_when_local_space_is_short(
     assert plan["batching_required"] is True
     assert plan["batch_count"] > 1
     assert plan["usable_bytes"] == 150
+
+
+def test_non_duplicate_bytes_excludes_known_hashes(tmp_path):
+    """non_duplicate_bytes mirrors ingest()'s skip_duplicates gate: files whose
+    hash is already in the catalog must not be counted against the staging
+    budget, otherwise a mostly-duplicate card would fail the storage preflight
+    even when the actual copy would fit comfortably."""
+    from scanner import compute_file_hash
+
+    fresh = tmp_path / "fresh.jpg"
+    fresh.write_bytes(b"fresh-bytes-payload")
+    dup = tmp_path / "dup.jpg"
+    dup.write_bytes(b"already-imported-content")
+
+    known = {compute_file_hash(str(dup))}
+    assert local_processing.non_duplicate_bytes([fresh, dup], known) == fresh.stat().st_size
+
+    # All files duplicates → zero bytes to stage.
+    known_all = {compute_file_hash(str(fresh)), compute_file_hash(str(dup))}
+    assert local_processing.non_duplicate_bytes([fresh, dup], known_all) == 0
+
+    # Empty known set → behaves like total_file_bytes.
+    assert (
+        local_processing.non_duplicate_bytes([fresh, dup], set())
+        == local_processing.total_file_bytes([fresh, dup])
+    )

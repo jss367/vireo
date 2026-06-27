@@ -235,6 +235,136 @@ def test_pipeline_local_processing_archives_to_final_destination(
     assert job["result"]["archive"]["final_destination"] == str(final_dest)
 
 
+def test_pipeline_local_processing_rejects_already_tracked_destination(
+    setup, tmp_path, monkeypatch
+):
+    """Regression: a second local-processing import to a destination that
+    Vireo already manages must fail fast at the storage preflight. Without
+    the upfront check the pipeline would stage everything, complete every
+    processing step, and only fail in move_folder's tracked-overlap guard —
+    leaving the staged copy stranded under ~/.vireo/staging."""
+    app, db_path = setup
+
+    final_parent = tmp_path / "nas"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    # Seed the catalog with a tracked folder at the prospective archive path,
+    # matching the post-state of an earlier successful local-processing run.
+    from db import Database
+    db = Database(db_path)
+    db.add_folder(str(final_dest))
+    db.close()
+
+    src = tmp_path / "card2"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "blue").save(src / "again.jpg")
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert job["status"] == "failed", job
+    error_text = (job.get("error") or "") + str(job.get("result", ""))
+    assert "Vireo already manages" in error_text, job
+
+
+def test_pipeline_local_processing_preflight_filters_duplicates(
+    setup, tmp_path, monkeypatch
+):
+    """When skip_duplicates is on and the source is mostly already in the
+    catalog, the storage preflight must measure only the bytes ingest would
+    actually copy. Without the duplicate-aware re-check, the naive byte sum
+    would set batching_required and abort an import that would fit in
+    staging."""
+    app, db_path = setup
+
+    final_parent = tmp_path / "nas"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+
+    src = tmp_path / "card3"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(src / "dup.jpg")
+    Image.new("RGB", (16, 16), "red").save(src / "fresh.jpg")
+
+    # Insert the dup file's hash into the catalog so skip_duplicates will
+    # treat it as already-known. selected_source_files only walks the source
+    # tree, so the photos table just needs the hash present.
+    from db import Database
+    from scanner import compute_file_hash
+    dup_hash = compute_file_hash(str(src / "dup.jpg"))
+
+    db = Database(db_path)
+    seed_folder = tmp_path / "seed"
+    seed_folder.mkdir()
+    folder_id = db.add_folder(str(seed_folder))
+    ws_id = db._active_workspace_id
+    db.add_workspace_folder(ws_id, folder_id)
+    db.add_photo(
+        folder_id=folder_id, filename="dup.jpg", extension=".jpg",
+        file_size=10, file_mtime=1.0, file_hash=dup_hash,
+    )
+    db.close()
+
+    # Pick a disk_usage and reserve combination so that summing both files
+    # would exceed the usable budget, but the fresh file alone fits.
+    fresh_bytes = (src / "fresh.jpg").stat().st_size
+    dup_bytes = (src / "dup.jpg").stat().st_size
+    total_bytes = fresh_bytes + dup_bytes
+    # required_bytes ≈ source_bytes * 1.25 (overhead ratio) when
+    # MIN_DERIVED_OVERHEAD_BYTES=0. Pick free = roughly fresh_bytes * 2 plus
+    # reserve so the duplicate-filtered plan fits but the naive plan doesn't.
+    reserve = 4
+    free = int(fresh_bytes * 1.5) + reserve + 1
+    assert free < int(total_bytes * 1.25) + reserve, "free must exceed filtered need but not the naive need"
+
+    from collections import namedtuple
+    Usage = namedtuple("Usage", "total used free")
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", reserve)
+    monkeypatch.setattr(
+        local_processing.shutil, "disk_usage",
+        lambda path: Usage(total=free * 10, used=0, free=free),
+    )
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "skip_duplicates": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert job["status"] == "completed", job
+    # Storage plan recorded on the job reflects the filtered bytes, not the
+    # naive sum that would have aborted.
+    plan = job["result"]["local_processing"]
+    assert plan["batching_required"] is False, plan
+    assert plan["source_bytes"] <= fresh_bytes, plan
+
+
 def test_import_full_scan_only_returns_job_id(setup):
     """copy=false skips ingest, just scans the source folder."""
     app, db_path = setup
