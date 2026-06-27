@@ -252,6 +252,71 @@ def test_generate_all_routes_through_canonical_helper(tmp_path, monkeypatch):
         "generate_all should route source-path resolution through get_canonical_image_path"
 
 
+def test_generate_all_retries_edited_raw_thumbnail_with_companion(
+    tmp_path, monkeypatch,
+):
+    """Standalone thumbnail generation should mirror app/pipeline fallback.
+
+    Edited RAW thumbnails try the RAW first for highlight preservation. If that
+    decode fails, a usable sidecar JPEG should still generate the grid thumb and
+    stamp the source failure marker for later source selection.
+    """
+    import thumbnails
+    from db import Database
+
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    raw_path = photos_dir / "source.NEF"
+    raw_path.write_bytes(b"unsupported raw")
+    companion_path = photos_dir / "source.jpg"
+    Image.new("RGB", (800, 600), "green").save(companion_path, "JPEG")
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    db = Database(str(vireo_dir / "test.db"))
+    folder_id = db.add_folder(str(photos_dir), name="photos")
+    photo_id = db.add_photo(
+        folder_id,
+        "source.NEF",
+        ".nef",
+        file_size=raw_path.stat().st_size,
+        file_mtime=1234.0,
+        width=800,
+        height=600,
+    )
+    db.conn.execute(
+        "UPDATE photos SET companion_path='source.jpg' WHERE id=?",
+        (photo_id,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+
+    loaded_paths = []
+    original_load_image = thumbnails.load_image
+
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        loaded_paths.append(str(file_path))
+        if str(file_path).lower().endswith(".nef"):
+            return None
+        return original_load_image(file_path, max_size=max_size, **kwargs)
+
+    monkeypatch.setattr(thumbnails, "load_image", tracking_load_image)
+
+    thumb_dir = vireo_dir / "thumbs"
+    result = thumbnails.generate_all(db, str(thumb_dir), vireo_dir=str(vireo_dir))
+
+    assert result["generated"] == 1
+    assert result["failed"] == 0
+    assert loaded_paths[0] == str(raw_path)
+    assert loaded_paths[1] == str(companion_path)
+    assert os.path.exists(thumb_dir / f"{photo_id}.jpg")
+    row = db.conn.execute(
+        "SELECT working_copy_failed_source FROM photos WHERE id=?",
+        (photo_id,),
+    ).fetchone()
+    assert row["working_copy_failed_source"] == "source"
+
+
 def test_generate_all_creates_missing(tmp_path):
     """generate_all generates thumbnails for photos without them."""
     from db import Database

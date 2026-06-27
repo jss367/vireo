@@ -2873,6 +2873,68 @@ def test_preview_falls_back_to_companion_on_first_raw_decode_failure(
     assert row["working_copy_failed_source"] == "source"
 
 
+def test_preview_falls_back_to_companion_when_raw_short_edge_is_smaller(
+    client_with_photo, monkeypatch,
+):
+    """Preview caching must compare both RAW result axes before accepting it."""
+    import io
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+
+    raw_path = os.path.join(folder["path"], "wide.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(b"unsupported raw")
+    companion_abs = os.path.join(folder["path"], "wide.jpg")
+    Image.new("RGB", (6000, 4000), (40, 90, 180)).save(
+        companion_abs, "JPEG", quality=85,
+    )
+
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='wide.NEF', extension='.nef',
+               companion_path='wide.jpg',
+               working_copy_path=NULL,
+               width=6000, height=4000,
+               working_copy_failed_at=NULL,
+               working_copy_failed_mtime=NULL,
+               working_copy_failed_source=NULL
+           WHERE id=?""",
+        (photo_id,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(photo_id, {"rotation": 0})
+
+    original_load_image = image_loader.load_image
+    loaded_paths = []
+
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        loaded_paths.append(str(file_path))
+        if str(file_path).lower().endswith(".nef"):
+            # Same requested long edge as the 1920px preview, but the expected
+            # 3:2 short edge is 1280. A long-edge-only check would accept this.
+            return Image.new("RGB", (1920, 1080), (200, 50, 50))
+        return original_load_image(file_path, max_size=max_size, **kwargs)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert loaded_paths[0] == raw_path
+    assert loaded_paths[1] == companion_abs
+    with Image.open(io.BytesIO(resp.data)) as img:
+        assert img.size == (1920, 1280)
+
+
 def test_original_skips_recent_failed_raw_working_copy(
     client_with_photo, monkeypatch,
 ):

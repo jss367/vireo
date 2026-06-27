@@ -219,6 +219,48 @@ def _has_current_raw_failure(photo, source_path):
     return age < 24 * 60 * 60
 
 
+def _retry_thumbnail_with_companion(
+    db, photo, source_path, cache_dir, size, quality, recipe, folder_path,
+):
+    if not photo or not folder_path:
+        return None
+    companion_rel = _photo_value(photo, "companion_path")
+    if not companion_rel:
+        return None
+    companion_abs = os.path.join(folder_path, companion_rel)
+    if (
+        not os.path.exists(companion_abs)
+        or os.path.abspath(companion_abs) == os.path.abspath(source_path)
+    ):
+        return None
+    photo_id = _photo_value(photo, "id")
+    log.info(
+        "Thumbnail RAW decode failed for photo %s; falling back to companion JPEG",
+        photo_id,
+    )
+    file_mtime = _photo_value(photo, "file_mtime")
+    if file_mtime is not None and photo_id is not None and hasattr(db, "conn"):
+        with contextlib.suppress(Exception):
+            db.conn.execute(
+                "UPDATE photos SET"
+                " working_copy_failed_at=datetime('now'),"
+                " working_copy_failed_mtime=?,"
+                " working_copy_failed_source='source'"
+                " WHERE id=?",
+                (file_mtime, photo_id),
+            )
+            db.conn.commit()
+    recipe_kwargs = {"recipe": recipe} if recipe else {}
+    return generate_thumbnail(
+        photo_id,
+        companion_abs,
+        cache_dir,
+        size=size,
+        quality=quality,
+        **recipe_kwargs,
+    )
+
+
 def generate_thumbnail(
     photo_id, source_path, cache_dir, size=THUMB_SIZE, quality=85, recipe=None,
     raw_decode=None,
@@ -356,7 +398,7 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
             source_photo["filename"]
         )[1].lower() in RAW_EXTENSIONS:
             raw_decode_kwargs["raw_decode"] = RAW_DECODE_PRESERVE_HIGHLIGHTS
-        if generate_thumbnail(
+        result_path = generate_thumbnail(
             photo["id"],
             source_path,
             cache_dir,
@@ -364,7 +406,23 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
             quality=thumb_quality,
             **recipe_kwargs,
             **raw_decode_kwargs,
-        ) is not None:
+        )
+        if (
+            result_path is None
+            and recipe
+            and os.path.splitext(source_path)[1].lower() in RAW_EXTENSIONS
+        ):
+            result_path = _retry_thumbnail_with_companion(
+                db,
+                source_photo,
+                source_path,
+                cache_dir,
+                thumb_size,
+                thumb_quality,
+                recipe,
+                folders.get(source_photo["folder_id"]),
+            )
+        if result_path is not None:
             generated += 1
             # Record on-disk presence in the photos table so the dashboard's
             # coverage query (`thumb_path IS NOT NULL`) reflects this run.

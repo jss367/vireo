@@ -53,6 +53,23 @@ _SCAN_MP_METHOD = (
 _WINDOWS_MAX_WORKERS = 61
 
 
+def _scaled_dimensions(width, height, max_size):
+    try:
+        width = int(width or 0)
+        height = int(height or 0)
+    except (TypeError, ValueError):
+        return 0, 0
+    if width <= 0 or height <= 0:
+        return 0, 0
+    if max_size and max_size > 0:
+        long_edge = max(width, height)
+        if long_edge > max_size:
+            scale = max_size / long_edge
+            width = round(width * scale)
+            height = round(height * scale)
+    return width, height
+
+
 def compute_file_hash(file_path, chunk_size=65536):
     """Compute SHA-256 hash of a file. Returns hex digest string."""
     h = hashlib.sha256()
@@ -891,13 +908,12 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
             and row["width"]
             and row["height"]
         ):
-            expected_long = max(int(row["width"]), int(row["height"]))
-            if wc_max_size and wc_max_size > 0:
-                expected_long = min(expected_long, wc_max_size)
+            expected_w, expected_h = _scaled_dimensions(
+                row["width"], row["height"], wc_max_size,
+            )
             try:
-                from PIL import Image as _PILImage
-                with _PILImage.open(wc_abs) as _wc:
-                    wc_long = max(_wc.size)
+                with Image.open(wc_abs) as _wc:
+                    wc_w, wc_h = _wc.size
             except Exception:
                 # PIL couldn't open the file: corrupt / truncated /
                 # unsupported. Treat as a failed extraction so the
@@ -909,19 +925,23 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
                     "JPEG %s",
                     row["id"], wc_abs, companion_path,
                 )
-                wc_long = 0
+                wc_w = wc_h = 0
                 ok = False
             if (
                 ok
-                and expected_long > 0
-                and wc_long
-                and wc_long < expected_long * 0.9
+                and expected_w > 0
+                and expected_h > 0
+                and (
+                    wc_w + 1 < expected_w
+                    or wc_h + 1 < expected_h
+                )
             ):
                 log.info(
                     "RAW working-copy extraction for photo %s produced "
-                    "undersized result (%d, expected long edge %d); "
+                    "undersized result (%dx%d, expected %dx%d); "
                     "retrying from companion JPEG %s",
-                    row["id"], wc_long, expected_long, companion_path,
+                    row["id"], wc_w, wc_h, expected_w, expected_h,
+                    companion_path,
                 )
                 ok = False
         if not ok and primary_is_raw and companion_path:

@@ -136,6 +136,30 @@ def _recipe_source_dimensions(photo):
     return width, height
 
 
+def _scaled_recipe_source_dimensions(photo, max_size=None):
+    width, height = _recipe_source_dimensions(photo)
+    if width <= 0 or height <= 0:
+        return 0, 0
+    if max_size:
+        long_edge = max(width, height)
+        if long_edge > max_size:
+            scale = max_size / long_edge
+            width = round(width * scale)
+            height = round(height * scale)
+    return width, height
+
+
+def _image_is_smaller_than_expected(img, expected_w, expected_h):
+    return (
+        expected_w > 0
+        and expected_h > 0
+        and (
+            img.size[0] + 1 < expected_w
+            or img.size[1] + 1 < expected_h
+        )
+    )
+
+
 def _image_size_after_exif_orientation(img):
     width, height = img.size
     orientation = None
@@ -1935,16 +1959,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         # still be undersized. Mirror serve_preview's
                         # cache-miss undersized check so we don't bake an
                         # embedded preview into the tracked warmed cache.
-                        expected_long = max(
-                            int(detail_photo["width"]),
-                            int(detail_photo["height"]),
+                        expected_w, expected_h = _scaled_recipe_source_dimensions(
+                            detail_photo, load_max_size,
                         )
-                        if load_max_size is not None:
-                            expected_long = min(expected_long, load_max_size)
-                        loaded_long = max(img.size)
-                        if (
-                            expected_long > 0
-                            and loaded_long < expected_long * 0.9
+                        if _image_is_smaller_than_expected(
+                            img, expected_w, expected_h,
                         ):
                             companion_rel = detail_photo["companion_path"]
                             folder_path = folders.get(
@@ -1962,11 +1981,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                         "RAW decode for photo %s pipeline "
                                         "preview at size=%s returned "
                                         "undersized embedded preview "
-                                        "(%dx%d, expected long edge %d); "
+                                        "(%dx%d, expected %dx%d); "
                                         "falling back to companion JPEG",
                                         detail_photo["id"], max_size,
                                         img.size[0], img.size[1],
-                                        expected_long,
+                                        expected_w, expected_h,
                                     )
                                     img.close()
                                     companion_img = load_image(

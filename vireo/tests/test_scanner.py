@@ -1661,6 +1661,65 @@ def test_scan_falls_back_to_companion_when_raw_extraction_fails(
     assert float(raw_row["working_copy_failed_mtime"]) == float(raw_row["file_mtime"])
 
 
+def test_scan_falls_back_when_raw_working_copy_short_edge_is_smaller(
+    tmp_path, monkeypatch,
+):
+    """A RAW embedded preview can tie the expected long edge while missing
+    short-edge pixels. Scanner must compare both axes before accepting the
+    RAW-derived working copy, otherwise the companion fallback never runs.
+    """
+    import config as cfg
+    import scanner
+    from db import Database
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+
+    nef_file = photo_dir / "IMG_004.nef"
+    nef_file.write_bytes(b"fake raw data")
+    jpg_file = photo_dir / "IMG_004.jpg"
+    Image.new("RGB", (6000, 4000), color=(0, 255, 0)).save(str(jpg_file), "JPEG")
+
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths: {})
+
+    sources_used = []
+
+    def fake_extract(source, output, max_size=4096, quality=92):
+        sources_used.append(source)
+        os.makedirs(os.path.dirname(output), exist_ok=True)
+        if source.endswith(".nef"):
+            # Same expected long edge after scaling (4096), but short edge is
+            # too small for a 6000x4000 source scaled to 4096x2731.
+            Image.new("RGB", (4096, 2305)).save(output, "JPEG")
+        else:
+            Image.new("RGB", (4096, 2731)).save(output, "JPEG")
+        return True
+
+    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+
+    db = Database(str(vireo_dir / "test.db"))
+    scanner.scan(str(photo_dir), db, vireo_dir=str(vireo_dir))
+
+    assert len(sources_used) == 2
+    assert sources_used[0].endswith("IMG_004.nef")
+    assert sources_used[1].endswith("IMG_004.jpg")
+
+    raw_row = db.conn.execute(
+        "SELECT working_copy_path, working_copy_failed_source"
+        " FROM photos WHERE extension = '.nef'"
+    ).fetchone()
+    assert raw_row["working_copy_path"] is not None
+    assert raw_row["working_copy_failed_source"] == "source"
+
+    with Image.open(vireo_dir / raw_row["working_copy_path"]) as img:
+        assert img.size == (4096, 2731)
+
+
 def test_scan_marks_source_failure_when_raw_and_companion_both_fail(
     tmp_path, monkeypatch,
 ):

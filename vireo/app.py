@@ -1895,6 +1895,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return height, width
         return width, height
 
+    def _scaled_recipe_source_dimensions(photo, max_size=None):
+        width, height = _recipe_source_dimensions(photo)
+        if width <= 0 or height <= 0:
+            return 0, 0
+        if max_size:
+            long_edge = max(width, height)
+            if long_edge > max_size:
+                scale = max_size / long_edge
+                width = round(width * scale)
+                height = round(height * scale)
+        return width, height
+
+    def _image_is_smaller_than_expected(img, expected_w, expected_h):
+        return (
+            expected_w > 0
+            and expected_h > 0
+            and (
+                img.size[0] + 1 < expected_w
+                or img.size[1] + 1 < expected_h
+            )
+        )
+
     def _image_size_after_exif_orientation(img):
         width, height = img.size
         orientation = None
@@ -13299,16 +13321,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         # can still be undersized. Mirror serve_preview's
                         # cache-miss undersized check so we don't bake an
                         # embedded preview into the tracked warmed cache.
-                        expected_long = max(
-                            int(detail_photo["width"]),
-                            int(detail_photo["height"]),
+                        expected_w, expected_h = _scaled_recipe_source_dimensions(
+                            detail_photo, load_max_size,
                         )
-                        if load_max_size is not None:
-                            expected_long = min(expected_long, load_max_size)
-                        loaded_long = max(img.size)
-                        if (
-                            expected_long > 0
-                            and loaded_long < expected_long * 0.9
+                        if _image_is_smaller_than_expected(
+                            img, expected_w, expected_h,
                         ):
                             companion_rel = detail_photo["companion_path"]
                             folder_path = folders.get(
@@ -13326,11 +13343,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                         "RAW decode for photo %s preview "
                                         "warmup at size=%s returned "
                                         "undersized embedded preview "
-                                        "(%dx%d, expected long edge %d); "
+                                        "(%dx%d, expected %dx%d); "
                                         "falling back to companion JPEG",
                                         detail_photo["id"], max_size,
                                         img.size[0], img.size[1],
-                                        expected_long,
+                                        expected_w, expected_h,
                                     )
                                     img.close()
                                     companion_img = load_image(
@@ -18401,11 +18418,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # companion JPEG could satisfy the requested size, prefer it
             # over caching a downscaled embedded preview that future hits
             # would silently keep serving.
-            expected_long = max(int(photo["width"]), int(photo["height"]))
-            if load_max_size is not None:
-                expected_long = min(expected_long, load_max_size)
-            loaded_long = max(img.size)
-            if expected_long > 0 and loaded_long < expected_long * 0.9:
+            expected_w, expected_h = _scaled_recipe_source_dimensions(
+                photo, load_max_size,
+            )
+            if _image_is_smaller_than_expected(img, expected_w, expected_h):
                 companion_rel = photo["companion_path"]
                 if companion_rel:
                     companion_abs = os.path.join(folder_row["path"], companion_rel)
@@ -18416,10 +18432,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         log.info(
                             "RAW decode for photo %s preview at size=%s "
                             "returned undersized embedded preview (%dx%d, "
-                            "expected long edge %d); falling back to "
+                            "expected %dx%d); falling back to "
                             "companion JPEG",
                             photo_id, size, img.size[0], img.size[1],
-                            expected_long,
+                            expected_w, expected_h,
                         )
                         img.close()
                         companion_img = load_image(
@@ -18622,11 +18638,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # in-progress editor doesn't render against a clipped
                 # downscaled preview when a full-size companion JPEG is
                 # sitting next to the RAW.
-                expected_long = min(
-                    max(int(photo["width"]), int(photo["height"])), size,
+                expected_w, expected_h = _scaled_recipe_source_dimensions(
+                    photo, size,
                 )
-                loaded_long = max(img.size)
-                if expected_long > 0 and loaded_long < expected_long * 0.9:
+                if _image_is_smaller_than_expected(img, expected_w, expected_h):
                     companion_rel = photo["companion_path"]
                     if companion_rel:
                         companion_abs = os.path.join(
@@ -18639,10 +18654,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             log.info(
                                 "RAW decode for photo %s edit-preview "
                                 "returned undersized embedded preview "
-                                "(%dx%d, expected long edge %d); falling "
+                                "(%dx%d, expected %dx%d); falling "
                                 "back to companion JPEG",
                                 photo_id, img.size[0], img.size[1],
-                                expected_long,
+                                expected_w, expected_h,
                             )
                             img.close()
                             companion_img = load_image(
@@ -18873,18 +18888,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # 1:1 edited views that's the wrong file to cache — try
                 # the full-size companion before saving an undersized
                 # originals/<id>.jpg.
-                loaded_long = max(img.size)
-                expected_long = max(int(photo["width"]), int(photo["height"]))
-                if expected_long > 0 and loaded_long < expected_long * 0.9:
+                expected_w, expected_h = _scaled_recipe_source_dimensions(photo)
+                if _image_is_smaller_than_expected(img, expected_w, expected_h):
                     companion_fallback = _full_res_companion_path(
                         folder["path"], using_offline_cache,
                     )
                     if companion_fallback and companion_fallback != image_path:
                         log.info(
                             "RAW decode for photo %s edited original returned "
-                            "undersized embedded preview (%dx%d, expected long "
-                            "edge %d); falling back to companion JPEG",
-                            photo_id, img.size[0], img.size[1], expected_long,
+                            "undersized embedded preview (%dx%d, expected "
+                            "%dx%d); falling back to companion JPEG",
+                            photo_id, img.size[0], img.size[1],
+                            expected_w, expected_h,
                         )
                         img.close()
                         img = load_image(companion_fallback, max_size=None)
@@ -19028,13 +19043,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 and photo["width"]
                 and photo["height"]
             ):
-                expected_long = max(int(photo["width"]), int(photo["height"]))
-                if expected_long > 0 and max(uw, uh) < expected_long * 0.9:
+                expected_w, expected_h = _scaled_recipe_source_dimensions(photo)
+                if (
+                    expected_w > 0
+                    and expected_h > 0
+                    and (
+                        uw + 1 < expected_w
+                        or uh + 1 < expected_h
+                    )
+                ):
                     log.info(
                         "RAW working copy for photo %s is undersized "
-                        "(%dx%d, expected long edge %d); re-extracting "
+                        "(%dx%d, expected %dx%d); re-extracting "
                         "from companion JPEG",
-                        photo_id, uw, uh, expected_long,
+                        photo_id, uw, uh, expected_w, expected_h,
                     )
                     if extract_working_copy(
                         companion_for_extraction, wc_abs,
@@ -19112,14 +19134,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # Same undersized-embedded-JPEG guard as the working-copy path
             # above: if rawpy.postprocess fell back to a small embedded
             # preview, prefer the full-size companion JPEG before caching.
-            loaded_long = max(img.size)
-            expected_long = max(int(photo["width"]), int(photo["height"]))
-            if expected_long > 0 and loaded_long < expected_long * 0.9:
+            expected_w, expected_h = _scaled_recipe_source_dimensions(photo)
+            if _image_is_smaller_than_expected(img, expected_w, expected_h):
                 log.info(
                     "RAW decode for photo %s original returned undersized "
-                    "embedded preview (%dx%d, expected long edge %d); "
+                    "embedded preview (%dx%d, expected %dx%d); "
                     "falling back to companion JPEG",
-                    photo_id, img.size[0], img.size[1], expected_long,
+                    photo_id, img.size[0], img.size[1],
+                    expected_w, expected_h,
                 )
                 img.close()
                 img = load_image(companion_for_extraction, max_size=None)
