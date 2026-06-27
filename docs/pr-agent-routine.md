@@ -152,6 +152,14 @@ subsequent Codex re-reviews no longer wake the routine. Top-level comments and
 `/claude-fix` route through `fix-comment-feedback`/`activate` and are not
 affected by this gate.
 
+`fix-comments` also fires when a trusted human reviewer leaves a non-empty
+review body, even if no inline review thread is open. This preserves the
+prior behavior for body-only reviews (e.g. a `commented` or `changes_requested`
+review whose feedback lives entirely in the review body). The body-firing
+check excludes the Codex connector bot because its body is always the stock
+template; Codex findings still route through inline comments and the thread
+gate.
+
 ## Limits and caveats
 
 - **Daily routine cap.** Each account has a daily limit on routine runs.

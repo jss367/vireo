@@ -127,8 +127,27 @@ jobs:
           pr: ${{ github.event.pull_request.number }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # A non-empty review body from a human reviewer carries actionable
+      # feedback even when no inline threads exist, so fire on body in that
+      # case. Codex's review body is always the stock template and carries
+      # no signal — its findings come as inline comments handled by the
+      # thread gate — so skip body-firing when the actor is the Codex bot.
+      - name: Check for actionable review body
+        id: body
+        env:
+          REVIEW_BODY: ${{ github.event.review.body }}
+          REVIEW_ACTOR: ${{ github.actor }}
+        shell: bash
+        run: |
+          if [[ -n "$REVIEW_BODY" && "$REVIEW_ACTOR" != "chatgpt-codex-connector[bot]" ]]; then
+            echo "has_actionable_body=true" >> "$GITHUB_OUTPUT"
+            echo "Review by ${REVIEW_ACTOR} has a non-empty body; will fire routine."
+          else
+            echo "has_actionable_body=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Fire routine
-        if: steps.threads.outputs.needs_response == 'true'
+        if: steps.threads.outputs.needs_response == 'true' || steps.body.outputs.has_actionable_body == 'true'
         uses: ./.github/actions/fire-routine
         with:
           url: ${{ secrets.CLAUDE_ROUTINE_URL }}
