@@ -18939,23 +18939,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         folder["path"], using_offline_cache,
                     )
                     if companion_fallback and companion_fallback != image_path:
-                        log.info(
-                            "RAW decode for photo %s edited original returned "
-                            "undersized embedded preview (%dx%d, expected "
-                            "%dx%d); falling back to companion JPEG",
-                            photo_id, img.size[0], img.size[1],
-                            expected_w, expected_h,
+                        companion_img = load_image(
+                            companion_fallback, max_size=None,
                         )
-                        img.close()
-                        img = load_image(companion_fallback, max_size=None)
-                        if img is not None:
-                            image_path = companion_fallback
-                        else:
-                            # Companion path also unreadable — fall back
-                            # to the embedded preview rather than 500ing.
-                            img = load_image(
-                                image_path, max_size=None, **load_kwargs,
+                        if _companion_image_can_replace_raw_result(
+                            companion_img, img, expected_w, expected_h,
+                        ):
+                            log.info(
+                                "RAW decode for photo %s edited original "
+                                "returned undersized embedded preview "
+                                "(%dx%d, expected %dx%d); falling back to "
+                                "companion JPEG",
+                                photo_id, img.size[0], img.size[1],
+                                expected_w, expected_h,
                             )
+                            img.close()
+                            img = companion_img
+                            image_path = companion_fallback
+                        elif companion_img is not None:
+                            companion_img.close()
             if img is None and resolved_ext in RAW_EXTENSIONS:
                 # RAW couldn't decode (unsupported variant, no embedded JPEG).
                 # Fall back to the full-resolution companion JPEG when one
@@ -19195,19 +19197,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # preview, prefer the full-size companion JPEG before caching.
             expected_w, expected_h = _scaled_recipe_source_dimensions(photo)
             if _image_is_smaller_than_expected(img, expected_w, expected_h):
-                log.info(
-                    "RAW decode for photo %s original returned undersized "
-                    "embedded preview (%dx%d, expected %dx%d); "
-                    "falling back to companion JPEG",
-                    photo_id, img.size[0], img.size[1],
-                    expected_w, expected_h,
+                companion_img = load_image(
+                    companion_for_extraction, max_size=None,
                 )
-                img.close()
-                img = load_image(companion_for_extraction, max_size=None)
-                if img is not None:
+                if _companion_image_can_replace_raw_result(
+                    companion_img, img, expected_w, expected_h,
+                ):
+                    log.info(
+                        "RAW decode for photo %s original returned "
+                        "undersized embedded preview (%dx%d, expected "
+                        "%dx%d); falling back to companion JPEG",
+                        photo_id, img.size[0], img.size[1],
+                        expected_w, expected_h,
+                    )
+                    img.close()
+                    img = companion_img
                     image_path = companion_for_extraction
-                else:
-                    img = load_image(image_path, max_size=None, **load_kwargs)
+                elif companion_img is not None:
+                    companion_img.close()
         if (
             img is None
             and resolved_ext in RAW_EXTENSIONS

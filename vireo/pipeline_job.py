@@ -160,6 +160,23 @@ def _image_is_smaller_than_expected(img, expected_w, expected_h):
     )
 
 
+def _companion_image_can_replace_raw_result(
+    companion_img, current_img, expected_w, expected_h,
+):
+    if companion_img is None:
+        return False
+    if expected_w > 0 and expected_h > 0:
+        return not _image_is_smaller_than_expected(
+            companion_img, expected_w, expected_h,
+        )
+    if current_img is None:
+        return True
+    return (
+        companion_img.size[0] >= current_img.size[0]
+        and companion_img.size[1] >= current_img.size[1]
+    )
+
+
 def _image_size_after_exif_orientation(img):
     width, height = img.size
     orientation = None
@@ -1999,35 +2016,30 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     os.path.exists(companion_abs)
                                     and companion_abs != canonical
                                 ):
-                                    log.info(
-                                        "RAW decode for photo %s pipeline "
-                                        "preview at size=%s returned "
-                                        "undersized embedded preview "
-                                        "(%dx%d, expected %dx%d); "
-                                        "falling back to companion JPEG",
-                                        detail_photo["id"], max_size,
-                                        img.size[0], img.size[1],
-                                        expected_w, expected_h,
-                                    )
-                                    img.close()
                                     companion_img = load_image(
                                         companion_abs,
                                         max_size=load_max_size,
                                     )
-                                    if companion_img is not None:
+                                    if _companion_image_can_replace_raw_result(
+                                        companion_img, img,
+                                        expected_w, expected_h,
+                                    ):
+                                        log.info(
+                                            "RAW decode for photo %s "
+                                            "pipeline preview at size=%s "
+                                            "returned undersized embedded "
+                                            "preview (%dx%d, expected "
+                                            "%dx%d); falling back to "
+                                            "companion JPEG",
+                                            detail_photo["id"], max_size,
+                                            img.size[0], img.size[1],
+                                            expected_w, expected_h,
+                                        )
+                                        img.close()
                                         img = companion_img
                                         canonical = companion_abs
-                                    else:
-                                        # Companion unreadable — recover the
-                                        # embedded preview so the warmer
-                                        # still produces something rather
-                                        # than counting this photo as
-                                        # failed for the size mismatch.
-                                        img = load_image(
-                                            canonical,
-                                            max_size=load_max_size,
-                                            **load_kwargs,
-                                        )
+                                    elif companion_img is not None:
+                                        companion_img.close()
                     if (
                         img is None
                         and os.path.splitext(canonical)[1].lower() in _RAW_EXTENSIONS
