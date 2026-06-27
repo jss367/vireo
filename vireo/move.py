@@ -1200,6 +1200,43 @@ def _tracked_destination_overlap(db, folder_id, dest_path):
     return None
 
 
+def _tracked_destination_ancestor(db, folder_id, dest_path):
+    """Return a tracked folder that is an ancestor of dest_path, if any.
+
+    The complement of ``_tracked_destination_overlap``: that one catches
+    tracked folders AT or BELOW ``dest_path``; this one catches tracked
+    folders ABOVE it on the path tree.
+
+    The pipeline's local-processing archive step uses ``db.move_folder_path``
+    to repoint the catalog after rsync, but ``move_folder_path`` only rewrites
+    the moved folder's own path (and cascades to its tracked children). It
+    does NOT reparent the moved row under a tracked ancestor of the new path.
+    If the user picks an archive destination inside an already-tracked root
+    (catalog manages ``/Photos`` and they pick ``/Photos/NewShoot``), the
+    archive move succeeds on disk but leaves the catalog with two unrelated
+    workspace roots whose path strings overlap — a permanently confusing
+    folder tree that breaks future scans of the ancestor root. Reject
+    upfront so the user picks a different archive folder before the pipeline
+    spends time staging and processing.
+
+    Passes ``case_insensitive_root=None`` to skip the per-row case-fold
+    probe; the realpath/normcase comparison at the top of
+    ``_path_equal_or_descends`` already catches every same-case ancestor,
+    which is the only practical case for archive destinations (the user is
+    typing a fresh subfolder name into a UI, not chasing a stale catalog row
+    that differs only by case).
+    """
+    for row in db.conn.execute(
+        "SELECT id, path FROM folders WHERE id != ?", (folder_id,)
+    ):
+        if _path_equal_or_descends(
+            dest_path, row["path"],
+            case_insensitive_root=None,
+        ):
+            return row
+    return None
+
+
 def move_photos(db, photo_ids, destination, progress_cb=None):
     """Move individual photos to a destination directory.
 

@@ -1100,7 +1100,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         storage_plan,
                         total_file_bytes,
                     )
-                    from move import _tracked_destination_overlap
+                    from move import (
+                        _tracked_destination_ancestor,
+                        _tracked_destination_overlap,
+                    )
 
                     stages["storage"]["status"] = "running"
                     runner.update_step(job["id"], "storage", status="running")
@@ -1146,6 +1149,29 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 "imports must land at a new archive folder; "
                                 "pick a different destination or import "
                                 "without local processing."
+                            )
+                            return
+
+                        # Also reject when the archive destination would land
+                        # INSIDE an already-tracked folder. db.move_folder_path
+                        # (called by move_folder during archive) only rewrites
+                        # the moved row's path string — it does NOT reparent the
+                        # row under the tracked ancestor. The catalog would end
+                        # up with two unrelated workspace roots whose path
+                        # strings overlap, e.g. /Photos and /Photos/NewShoot,
+                        # silently confusing the folder tree and breaking
+                        # future scans of the ancestor root.
+                        ancestor = _tracked_destination_ancestor(
+                            thread_db, -1, final_destination,
+                        )
+                        if ancestor:
+                            _bail_storage(
+                                f"Archive destination {final_destination} "
+                                f"is inside a folder Vireo already manages "
+                                f"({ancestor['path']}). Pick an archive "
+                                f"folder outside {ancestor['path']}, or "
+                                "import without local processing so the "
+                                "scan can attach to the existing folder."
                             )
                             return
 
@@ -4389,6 +4415,21 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     current_file=filename,
                 )
 
+            # Consume any pending cancellation and lock the job uncancellable
+            # BEFORE the move begins. move_folder is an uninterruptible commit
+            # step (copy → verify → repoint catalog → delete originals); we
+            # can't tear it down mid-flight without leaving partial state.
+            # Clearing AFTER move_folder returns leaves a window where a Stop
+            # press landing during the move would survive into the failure
+            # path: if move_folder raises (ENOSPC, rsync error, verify
+            # mismatch), runner.is_cancelled(job_id) would still be True at
+            # the outer job-terminalization check, JobRunner would record
+            # "cancelled", and the user would never see the archive failure.
+            # Consume up front so a successful commit reports "completed" AND
+            # a failed commit reports "failed" — both win against the racing
+            # Stop press, which couldn't have been honored anyway.
+            runner.clear_cancellation(job["id"])
+
             move_result = move_folder(
                 thread_db,
                 folder["id"],
@@ -4403,17 +4444,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             if staging_parent:
                 with contextlib.suppress(OSError):
                     os.rmdir(staging_parent)
-
-            # The archive has been published and originals removed. A Stop
-            # pressed during the move cannot be honored here: move_folder
-            # doesn't accept a cancellation signal, and tearing it down
-            # mid-flight would either leave files in both staging and
-            # destination or wipe staging before verification completes.
-            # Consume any cancellation that landed during the commit so
-            # JobRunner records the run as "completed" rather than
-            # "cancelled" — the archive is on disk and the user should
-            # see that, not a misleading cancelled-status pill.
-            runner.clear_cancellation(job["id"])
 
             stages["archive"]["status"] = "completed"
             summary = f"{move_result.get('moved', 0)} photos archived"

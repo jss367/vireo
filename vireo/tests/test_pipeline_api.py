@@ -333,6 +333,58 @@ def test_pipeline_local_processing_rejects_already_tracked_destination(
     assert "Vireo already manages" in error_text, job
 
 
+def test_pipeline_local_processing_rejects_destination_inside_tracked_root(
+    setup, tmp_path, monkeypatch
+):
+    """Regression: an archive destination INSIDE an already-tracked folder
+    (catalog manages /Photos and the user picks /Photos/NewShoot) must fail
+    fast at the storage preflight. db.move_folder_path only rewrites the
+    moved row's path — it does NOT reparent the row under the tracked
+    ancestor. Without this check the archive would succeed on disk but
+    leave the catalog with two unrelated workspace roots whose path strings
+    overlap (e.g. /Photos and /Photos/NewShoot), confusing the folder tree
+    and breaking future scans of the ancestor root."""
+    app, db_path = setup
+
+    tracked_root = tmp_path / "nas_ancestor" / "Photos"
+    tracked_root.mkdir(parents=True)
+    # Nested archive destination INSIDE the existing tracked root.
+    final_dest = tracked_root / "NewShoot"
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    from db import Database
+    db = Database(db_path)
+    db.add_folder(str(tracked_root))
+    db.close()
+
+    src = tmp_path / "card_ancestor"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "red").save(src / "shot.jpg")
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert job["status"] == "failed", job
+    error_text = (job.get("error") or "") + str(job.get("result", ""))
+    assert "is inside a folder Vireo already manages" in error_text, job
+    # The pipeline must NOT have archived anything: tracked_root still has
+    # no NewShoot subdirectory and the source files weren't published.
+    assert not final_dest.exists(), final_dest
+
+
 def test_pipeline_local_processing_creates_missing_archive_parent(
     setup, tmp_path, monkeypatch
 ):
@@ -671,6 +723,85 @@ def test_pipeline_local_processing_completes_when_cancel_during_archive(
     assert job["status"] == "completed", job
     assert (final_dest / "kept.jpg").is_file()
     assert job["result"]["archive"]["final_destination"] == str(final_dest)
+
+
+def test_pipeline_local_processing_failed_archive_reports_failed_even_after_cancel(
+    setup, tmp_path, monkeypatch
+):
+    """Regression: clear_cancellation must consume the Stop flag BEFORE
+    move_folder runs, not after. If clear is deferred to after a successful
+    move, a Stop press that landed during a move which then FAILED (ENOSPC,
+    rsync error, verify mismatch) would leave the cancel flag set; the
+    outer JobRunner terminal check would record the run as "cancelled",
+    masking the archive failure from the user. The job must report
+    "failed" so the user sees the real outcome.
+    """
+    app, db_path = setup
+
+    final_parent = tmp_path / "nas_cancel_fail"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+
+    src = tmp_path / "card_cancel_fail"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(src / "kept.jpg")
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    # Simulate the user clicking Stop while move_folder is mid-copy AND the
+    # move then fails (e.g. verification mismatch). Two requirements:
+    # (1) clear_cancellation must already have run before move_folder is
+    # invoked, so the cancel flag is gone; (2) when move_folder returns a
+    # failure result, the job must report "failed", not "cancelled".
+    import move as move_mod
+
+    runner = app._job_runner
+
+    def cancelling_and_failing_move_folder(db, folder_id, destination, **kwargs):
+        with runner._lock:
+            running = [
+                jid for jid, j in runner._jobs.items()
+                if j.get("status") == "running"
+                and jid.startswith("pipeline-")
+            ]
+        assert len(running) == 1, running
+        # cancel_job must be a no-op here: the archive stage has already
+        # marked the job uncancellable via clear_cancellation. Without that
+        # ordering, the Stop press below would land in _cancelled and
+        # survive into _run_job's terminal check, recording "cancelled".
+        accepted = runner.cancel_job(running[0])
+        assert accepted is False, (
+            "cancel_job accepted after the archive stage started; "
+            "clear_cancellation must run BEFORE move_folder to make the "
+            "job uncancellable for the duration of the commit"
+        )
+        # Now simulate the move itself failing — e.g. an rsync verify
+        # mismatch. archive_stage raises and falls into the except branch.
+        return {"moved": 0, "errors": [
+            "Verification failed: 'kept.jpg' is missing or differs at the "
+            "destination. Originals preserved."
+        ]}
+
+    monkeypatch.setattr(move_mod, "move_folder", cancelling_and_failing_move_folder)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job_id = resp.get_json()["job_id"]
+        job = wait_for_job_via_client(c, job_id)
+
+    # The archive raised — the run must report failed, not cancelled.
+    assert job["status"] == "failed", job
 
 
 def test_pipeline_local_processing_deindexes_staging_on_cancel_after_scan(
