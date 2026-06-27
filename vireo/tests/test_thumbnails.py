@@ -242,8 +242,11 @@ def test_generate_all_routes_through_canonical_helper(tmp_path, monkeypatch):
         width=200, height=150,
     )
 
+    # Source resolution routes through render_source (shared by thumbnails,
+    # app, pipeline and export); patch it there.
+    import render_source
     mock_helper = MagicMock(return_value=str(src))
-    monkeypatch.setattr(thumbnails, "get_canonical_image_path", mock_helper)
+    monkeypatch.setattr(render_source, "get_canonical_image_path", mock_helper)
 
     thumb_dir = vireo_dir / "thumbs"
     thumbnails.generate_all(db, str(thumb_dir), vireo_dir=str(vireo_dir))

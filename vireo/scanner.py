@@ -16,6 +16,8 @@ from pathlib import Path
 import imagehash
 from db import commit_with_retry
 from exif_orientation import orientation_swaps_axes as _orientation_swaps_axes
+from render_source import exif_orientation as _exif_orientation_from_data
+from render_source import is_undersized
 from image_loader import (
     RAW_EXTENSIONS,
     SUPPORTED_EXTENSIONS,
@@ -70,29 +72,6 @@ def _scaled_dimensions(width, height, max_size):
             width = round(width * scale)
             height = round(height * scale)
     return width, height
-
-
-def _exif_orientation_from_data(exif_data):
-    # Mirror of vireo.thumbnails._exif_orientation; kept local so the scanner
-    # doesn't take a runtime dependency on the request-path thumbnail module.
-    if not exif_data:
-        return None
-    if isinstance(exif_data, str):
-        try:
-            metadata = json.loads(exif_data)
-        except (TypeError, ValueError):
-            return None
-    elif isinstance(exif_data, dict):
-        metadata = exif_data
-    else:
-        return None
-    if not isinstance(metadata, dict):
-        return None
-    for group in ("EXIF", "IFD0", "TIFF", "File"):
-        values = metadata.get(group)
-        if isinstance(values, dict) and "Orientation" in values:
-            return values["Orientation"]
-    return metadata.get("Orientation")
 
 
 def _oriented_dimensions(width, height, exif_data):
@@ -976,14 +955,12 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
                 )
                 wc_w = wc_h = 0
                 ok = False
-            if (
-                ok
-                and expected_w > 0
-                and expected_h > 0
-                and (
-                    wc_w < expected_w * 0.99
-                    or wc_h < expected_h * 0.99
-                )
+            # Use a 1% relative tolerance (not the request paths' 1px slack):
+            # libraw can emit the active image area a few pixels narrower than
+            # the full sensor, and a strict check would mark a valid extraction
+            # as failed and route every edited render away from the RAW.
+            if ok and is_undersized(
+                wc_w, wc_h, expected_w, expected_h, abs_slack=0, rel_slack=0.01,
             ):
                 log.info(
                     "RAW working-copy extraction for photo %s produced "
