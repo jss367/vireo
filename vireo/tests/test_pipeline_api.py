@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 from app import create_app
 from PIL import Image
+from wait import wait_for_job_via_client
 
 
 @pytest.fixture
@@ -178,6 +179,60 @@ def test_import_full_rejects_relative_destination(setup):
             assert "absolute" in resp.get_json()["error"].lower()
     finally:
         shutil.rmtree(src, ignore_errors=True)
+
+
+def test_pipeline_local_processing_requires_destination(setup):
+    app, db_path = setup
+    src = tempfile.mkdtemp()
+    try:
+        with app.test_client() as c:
+            resp = c.post("/api/jobs/pipeline", json={
+                "sources": [src],
+                "local_processing": True,
+                "skip_classify": True,
+                "skip_extract_masks": True,
+                "skip_regroup": True,
+            })
+            assert resp.status_code == 400
+            assert "destination" in resp.get_json()["error"].lower()
+    finally:
+        shutil.rmtree(src, ignore_errors=True)
+
+
+def test_pipeline_local_processing_archives_to_final_destination(
+    setup, tmp_path, monkeypatch
+):
+    app, db_path = setup
+    src = tmp_path / "card"
+    src.mkdir()
+    final_parent = tmp_path / "nas"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+
+    img = Image.new("RGB", (16, 16), "white")
+    img.save(src / "test.jpg")
+
+    import local_processing
+
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert job["status"] == "completed", job
+    assert (final_dest / "test.jpg").is_file()
+    assert job["result"]["archive"]["final_destination"] == str(final_dest)
 
 
 def test_import_full_scan_only_returns_job_id(setup):

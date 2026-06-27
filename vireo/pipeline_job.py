@@ -40,6 +40,7 @@ class PipelineParams:
     sources: list | None = None
     source_snapshot_id: int | None = None
     destination: str | None = None
+    local_processing: bool = False
     file_types: str = "both"
     folder_template: str = "%Y/%Y-%m-%d"
     skip_duplicates: bool = True
@@ -672,6 +673,15 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         if thumb_cache_dir
         else os.path.dirname(db_path)
     )
+    final_destination = params.destination if params.local_processing else None
+    staging_parent = None
+    if params.local_processing and params.destination:
+        from local_processing import staging_root
+
+        staging_parent = os.path.join(effective_vireo_dir, "staging", job["id"])
+        params.destination = staging_root(
+            effective_vireo_dir, job["id"], params.destination,
+        )
 
     # Snapshot-scoped pipelines: load the snapshot up front so scan targets
     # are derived from the captured file paths (not a folder the user picked
@@ -717,6 +727,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
     cancel_watcher.start()
 
     stages = {
+        "storage": {"status": "pending", "label": "Checking local storage"},
         "ingest": {"status": "pending", "count": 0, "label": "Importing photos"},
         "scan": {"status": "pending", "count": 0, "label": "Scanning photos"},
         "thumbnails": {"status": "pending", "count": 0, "label": "Generating thumbnails"},
@@ -728,6 +739,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         "eye_keypoints": {"status": "pending", "count": 0, "label": "Detecting eye keypoints"},
         "regroup": {"status": "pending", "label": "Grouping encounters"},
         "misses": {"status": "pending", "count": 0, "label": "Flagging missed shots"},
+        "archive": {"status": "pending", "count": 0, "label": "Archiving photos"},
     }
 
     # Normalize model_ids: prefer the explicit list, fall back to the legacy
@@ -775,6 +787,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
     # Define step tracking for the jobs page
     step_defs = []
     if params.destination:
+        if params.local_processing:
+            step_defs.append({"id": "storage", "label": "Check local storage"})
         step_defs.append({"id": "ingest", "label": "Import photos"})
     step_defs.extend([
         {"id": "scan", "label": "Scan photos"},
@@ -825,6 +839,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
     if not params.skip_regroup:
         step_defs.append({"id": "regroup", "label": "Group encounters"})
         step_defs.append({"id": "misses", "label": "Flag missed shots"})
+    if params.local_processing:
+        step_defs.append({"id": "archive", "label": "Archive to destination"})
     runner.set_steps(job["id"], step_defs)
 
     result = {"stages": {}}
@@ -854,6 +870,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
     # don't show a perpetually-pending stage.
     if not params.destination:
         stages["ingest"]["status"] = "skipped"
+    if not params.local_processing:
+        stages["storage"]["status"] = "skipped"
+        stages["archive"]["status"] = "skipped"
 
     # --- Stage functions ---
 
@@ -1072,6 +1091,75 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 from pathlib import Path
 
                 from ingest import ingest as do_ingest
+
+                if params.local_processing:
+                    from local_processing import (
+                        format_bytes,
+                        selected_source_files,
+                        storage_plan,
+                        total_file_bytes,
+                    )
+
+                    stages["storage"]["status"] = "running"
+                    runner.update_step(job["id"], "storage", status="running")
+                    _update_stages(runner, job["id"], stages)
+
+                    try:
+                        os.makedirs(params.destination, exist_ok=True)
+                        selected_files = selected_source_files(
+                            sources,
+                            params.file_types,
+                            recursive=params.recursive,
+                            exclude_paths=params.exclude_paths,
+                        )
+                        plan = storage_plan(
+                            params.destination,
+                            total_file_bytes(selected_files),
+                        )
+                        result["local_processing"] = {
+                            **plan,
+                            "staging_destination": params.destination,
+                            "final_destination": final_destination,
+                        }
+                        if plan["batching_required"]:
+                            msg = (
+                                "Local processing needs about "
+                                f"{format_bytes(plan['required_bytes'])}, but "
+                                f"only {format_bytes(plan['usable_bytes'])} is "
+                                "available after keeping local free-space "
+                                "reserve. This import needs "
+                                f"{plan['batch_count']} local-processing "
+                                "batches; automatic batch execution is not "
+                                "available in this build yet."
+                            )
+                            errors.append(f"[storage] Fatal: {msg}")
+                            stages["storage"]["status"] = "failed"
+                            runner.update_step(
+                                job["id"], "storage", status="failed", error=msg,
+                            )
+                            abort.set()
+                            scan_to_thumb.put(_SENTINEL)
+                            return
+                        summary = (
+                            f"{format_bytes(plan['required_bytes'])} needed, "
+                            f"{format_bytes(plan['usable_bytes'])} available"
+                        )
+                        stages["storage"]["status"] = "completed"
+                        runner.update_step(
+                            job["id"], "storage",
+                            status="completed",
+                            summary=summary,
+                        )
+                    except Exception as e:
+                        errors.append(f"[storage] Fatal: {e}")
+                        log.exception("Pipeline local-storage preflight failed")
+                        stages["storage"]["status"] = "failed"
+                        runner.update_step(
+                            job["id"], "storage", status="failed", error=str(e),
+                        )
+                        abort.set()
+                        scan_to_thumb.put(_SENTINEL)
+                        return
 
                 # Same accumulator pattern as scan_acc: do_ingest() is called
                 # once per source folder, with (current, total) local to each
@@ -4059,6 +4147,101 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
         _update_stages(runner, job["id"], stages)
 
+    def archive_stage():
+        """Move a local-processing staging folder to the final destination."""
+        if not params.local_processing:
+            return
+        if abort.is_set() or runner.is_cancelled(job["id"]):
+            stages["archive"]["status"] = "skipped"
+            runner.update_step(
+                job["id"], "archive", status="completed", summary="Skipped",
+            )
+            _update_stages(runner, job["id"], stages)
+            return
+        if not final_destination:
+            stages["archive"]["status"] = "skipped"
+            runner.update_step(
+                job["id"], "archive", status="completed", summary="Skipped",
+            )
+            _update_stages(runner, job["id"], stages)
+            return
+
+        stages["archive"]["status"] = "running"
+        runner.update_step(job["id"], "archive", status="running")
+        _update_stages(runner, job["id"], stages)
+
+        try:
+            import config as cfg
+            from move import move_folder
+
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(workspace_id)
+            folder = thread_db.conn.execute(
+                "SELECT id FROM folders WHERE path = ?", (params.destination,)
+            ).fetchone()
+            if not folder:
+                raise RuntimeError(
+                    f"local staging folder was not indexed: {params.destination}"
+                )
+
+            effective_cfg = thread_db.get_effective_config(cfg.load())
+            developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
+            archive_parent = os.path.dirname(os.path.normpath(final_destination))
+            total_files = {"value": 0}
+
+            def archive_cb(current, total, filename, phase=None):
+                total_files["value"] = max(total_files["value"], total or 0)
+                stages["archive"]["count"] = current
+                stages["archive"]["total"] = total
+                runner.update_step(
+                    job["id"], "archive",
+                    current_file=filename,
+                    progress={"current": current, "total": total},
+                )
+                _emit_progress(
+                    runner, job["id"], stages, "archive",
+                    phase or "Archiving photos",
+                    current_file=filename,
+                )
+
+            move_result = move_folder(
+                thread_db,
+                folder["id"],
+                archive_parent,
+                progress_cb=archive_cb,
+                developed_dir=developed_dir,
+                merge=True,
+            )
+            if move_result.get("errors"):
+                raise RuntimeError("; ".join(move_result["errors"]))
+
+            if staging_parent:
+                with contextlib.suppress(OSError):
+                    os.rmdir(staging_parent)
+
+            stages["archive"]["status"] = "completed"
+            summary = f"{move_result.get('moved', 0)} photos archived"
+            runner.update_step(
+                job["id"], "archive", status="completed", summary=summary,
+            )
+            result["archive"] = {
+                "final_destination": final_destination,
+                "moved": move_result.get("moved", 0),
+            }
+        except Exception as e:
+            msg = (
+                f"{e}. Processing results remain in local staging: "
+                f"{params.destination}"
+            )
+            errors.append(f"[archive] Fatal: {msg}")
+            log.exception("Pipeline archive stage failed")
+            stages["archive"]["status"] = "failed"
+            runner.update_step(
+                job["id"], "archive", status="failed", error=msg,
+            )
+
+        _update_stages(runner, job["id"], stages)
+
     # --- Launch threads ---
 
     threads = {}
@@ -4135,6 +4318,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         with acquire_workspace_regroup(workspace_id):
             regroup_stage()
             miss_stage()
+
+    archive_stage()
 
     cancel_watcher_stop.set()
 

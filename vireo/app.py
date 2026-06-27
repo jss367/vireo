@@ -16060,6 +16060,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     return json_error(f"source directory not found: {source}")
 
         destination = body.get("destination")
+        local_processing = bool(body.get("local_processing"))
         # Copy-ingest ("destination") is incompatible with snapshot runs:
         # ingest would copy entire source folders, then snapshot filtering
         # would drop the destination-scanned photo ids, producing empty
@@ -16070,6 +16071,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         if destination and not os.path.isabs(destination):
             return json_error("destination must be an absolute path")
+        if local_processing and not destination:
+            return json_error("local_processing requires a destination")
 
         folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
         if destination and folder_template:
@@ -16083,6 +16086,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             sources=sources,
             source_snapshot_id=source_snapshot_id,
             destination=destination,
+            local_processing=local_processing,
             file_types=body.get("file_types", "both"),
             folder_template=folder_template,
             skip_duplicates=body.get("skip_duplicates", True),
@@ -16199,6 +16203,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "source": source,
                 "sources": sources,
                 "collection_id": collection_id,
+                "destination": destination,
+                "local_processing": local_processing,
                 "skip_classify": params.skip_classify,
                 "skip_extract_masks": params.skip_extract_masks,
                 "skip_regroup": params.skip_regroup,
