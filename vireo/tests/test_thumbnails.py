@@ -261,8 +261,13 @@ def test_generate_all_retries_edited_raw_thumbnail_with_companion(
     decode fails, a usable sidecar JPEG should still generate the grid thumb and
     stamp the source failure marker for later source selection.
     """
+    import config as cfg
     import thumbnails
     from db import Database
+
+    # Isolate config (thumbnail_size/quality) from the real ~/.vireo/config.json
+    # so a leaked value doesn't flake this generate_all run under xdist.
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
 
     photos_dir = tmp_path / "photos"
     photos_dir.mkdir()
@@ -320,8 +325,13 @@ def test_generate_all_retries_edited_raw_thumbnail_with_companion(
 def test_generate_all_retries_when_raw_thumbnail_short_edge_is_smaller(
     tmp_path, monkeypatch,
 ):
+    import config as cfg
     import thumbnails
     from db import Database
+
+    # Isolate config so the (267, 400) assertion below isn't sensitive to a
+    # leaked thumbnail_size override in the real config.
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
 
     photos_dir = tmp_path / "photos"
     photos_dir.mkdir()

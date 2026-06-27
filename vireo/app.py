@@ -13395,6 +13395,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                         canonical = companion_abs
                                     elif companion_img is not None:
                                         companion_img.close()
+                    companion_fallback_undersized = False
                     if (
                         img is None
                         and os.path.splitext(canonical)[1].lower() in RAW_EXTENSIONS
@@ -13428,7 +13429,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                 )
                                 if img is not None:
                                     canonical = companion_abs
-                    if img:
+                                    expected_w, expected_h = (
+                                        _scaled_recipe_source_dimensions(
+                                            detail_photo, load_max_size,
+                                        )
+                                    )
+                                    if _image_is_smaller_than_expected(
+                                        img, expected_w, expected_h,
+                                    ):
+                                        # Sidecar can't satisfy the warmed
+                                        # size — skip the cache write so a
+                                        # future render after a usable source
+                                        # returns isn't blocked by an
+                                        # undersized warmed blob.
+                                        log.info(
+                                            "Companion JPEG fallback for "
+                                            "photo %s preview warmup at "
+                                            "size=%s is undersized (%dx%d, "
+                                            "expected %dx%d); skipping cache",
+                                            detail_photo["id"], max_size,
+                                            img.size[0], img.size[1],
+                                            expected_w, expected_h,
+                                        )
+                                        companion_fallback_undersized = True
+                    if img and not companion_fallback_undersized:
                         if recipe:
                             img = apply_recipe_to_loaded_image(
                                 img, recipe, max_size=max_size,
@@ -13439,6 +13463,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                 photo["id"], max_size, os.path.getsize(cache_path),
                             )
                         generated += 1
+                    elif img and companion_fallback_undersized:
+                        # Don't pollute the warm cache with an undersized
+                        # companion fallback; the on-demand /preview route
+                        # has the same fallback and will retry the RAW or
+                        # serve the sidecar without persisting it.
+                        img.close()
+                        skipped += 1
 
                 runner.push_event(
                     job["id"],
@@ -18482,6 +18513,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             canonical = companion_abs
                         elif companion_img is not None:
                             companion_img.close()
+        companion_fallback_undersized = False
         if img is None and selected_ext in RAW_EXTENSIONS:
             # libraw couldn't decode this RAW (unsupported variant, corrupt
             # file, no usable embedded JPEG). Try the companion JPEG before
@@ -18503,6 +18535,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     img = load_image(companion_abs, max_size=load_max_size)
                     if img is not None:
                         canonical = companion_abs
+                        expected_w, expected_h = _scaled_recipe_source_dimensions(
+                            photo, load_max_size,
+                        )
+                        if _image_is_smaller_than_expected(
+                            img, expected_w, expected_h,
+                        ):
+                            # The sidecar can't satisfy the requested preview
+                            # (e.g. a 1000x667 companion for a 6000x4000 photo).
+                            # Serve it for this request so the user gets pixels
+                            # instead of a 500, but skip the cache write so a
+                            # future render after a usable source returns
+                            # doesn't permanently hit the undersized blob.
+                            log.info(
+                                "Companion JPEG fallback for photo %s preview "
+                                "at size=%s is undersized (%dx%d, expected "
+                                "%dx%d); serving without caching",
+                                photo_id, size,
+                                img.size[0], img.size[1],
+                                expected_w, expected_h,
+                            )
+                            companion_fallback_undersized = True
         if img is None:
             _record_working_copy_failure(db, photo, canonical)
             return "Could not load image", 500
@@ -18523,18 +18576,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # lock / FK violations (photo deleted between lookup and insert).
         # The preview bytes are ready in memory — never fail the request
         # over bookkeeping.
-        try:
-            os.makedirs(preview_dir, exist_ok=True)
-            with open(cache_path, "wb") as f:
-                f.write(data)
-            _invalid_preview_cache_paths.discard(cache_path)
-            _clear_preview_cache_invalid(db, photo_id, size)
-            db.preview_cache_insert(photo_id, size, len(data))
-            evict_preview_cache_if_over_quota(db, vireo_dir)
-        except Exception as e:
-            log.warning(
-                "Failed to persist preview cache %s: %s", cache_path, e,
-            )
+        if not companion_fallback_undersized:
+            try:
+                os.makedirs(preview_dir, exist_ok=True)
+                with open(cache_path, "wb") as f:
+                    f.write(data)
+                _invalid_preview_cache_paths.discard(cache_path)
+                _clear_preview_cache_invalid(db, photo_id, size)
+                db.preview_cache_insert(photo_id, size, len(data))
+                evict_preview_cache_if_over_quota(db, vireo_dir)
+            except Exception as e:
+                log.warning(
+                    "Failed to persist preview cache %s: %s", cache_path, e,
+                )
 
         return Response(data, mimetype="image/jpeg")
 

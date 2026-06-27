@@ -2027,6 +2027,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                         canonical = companion_abs
                                     elif companion_img is not None:
                                         companion_img.close()
+                    companion_fallback_undersized = False
                     if (
                         img is None
                         and os.path.splitext(canonical)[1].lower() in _RAW_EXTENSIONS
@@ -2069,7 +2070,37 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 )
                                 if img is not None:
                                     canonical = companion_abs
-                    if img:
+                                    expected_w, expected_h = (
+                                        _scaled_recipe_source_dimensions(
+                                            detail_photo, load_max_size,
+                                        )
+                                    )
+                                    if _image_is_smaller_than_expected(
+                                        img, expected_w, expected_h,
+                                    ):
+                                        # Sidecar can't satisfy the warmed
+                                        # size — skip the cache write so a
+                                        # future render after a usable source
+                                        # returns isn't blocked by an
+                                        # undersized warmed blob.
+                                        log.info(
+                                            "Companion JPEG fallback for "
+                                            "photo %s pipeline preview at "
+                                            "size=%s is undersized (%dx%d, "
+                                            "expected %dx%d); skipping cache",
+                                            detail_photo["id"], max_size,
+                                            img.size[0], img.size[1],
+                                            expected_w, expected_h,
+                                        )
+                                        companion_fallback_undersized = True
+                    if img and companion_fallback_undersized:
+                        # Don't pollute the warm cache with an undersized
+                        # companion fallback; the on-demand /preview route
+                        # has the same fallback and will retry the RAW or
+                        # serve the sidecar without persisting it.
+                        img.close()
+                        skipped += 1
+                    elif img:
                         if recipe:
                             img = apply_recipe_to_loaded_image(
                                 img, recipe, max_size=max_size,
