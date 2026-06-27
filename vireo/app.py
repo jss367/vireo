@@ -18983,19 +18983,36 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             RAW_EXTENSIONS,
         )
         resolved_ext = os.path.splitext(image_path)[1].lower()
-        if (
+        companion_for_extraction = _full_res_companion_path(
+            folder["path"], using_offline_cache
+        )
+        has_current_raw_failure = (
             (not using_offline_cache or resolved_ext in RAW_EXTENSIONS)
             and _has_current_working_copy_failure(
                 photo, vireo_dir, trust_existing_working_copy=False,
                 live_source_path=image_path, folder_path=folder["path"],
             )
-        ):
-            log.info(
-                "Skipping original-image extraction for photo %s; RAW working-copy "
-                "extraction already failed for current source mtime",
-                photo_id,
-            )
-            return "Could not load image", 500
+        )
+        if has_current_raw_failure:
+            if (
+                resolved_ext in RAW_EXTENSIONS
+                and companion_for_extraction
+                and companion_for_extraction != image_path
+            ):
+                log.info(
+                    "RAW working-copy extraction already failed for photo %s; "
+                    "serving full-size companion JPEG %s for original",
+                    photo_id, companion_for_extraction,
+                )
+                image_path = companion_for_extraction
+                resolved_ext = os.path.splitext(image_path)[1].lower()
+            else:
+                log.info(
+                    "Skipping original-image extraction for photo %s; RAW working-copy "
+                    "extraction already failed for current source mtime",
+                    photo_id,
+                )
+                return "Could not load image", 500
 
         # For browser-native formats without a working copy, serve directly
         ext = resolved_ext
@@ -19016,9 +19033,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Prefer companion JPEG only for non-RAW sources. RAW primaries should
         # be decoded through extract_working_copy's highlight-preserving RAW
         # path rather than replaced with a camera-rendered JPEG.
-        companion_for_extraction = _full_res_companion_path(
-            folder["path"], using_offline_cache
-        )
         source_for_extraction = image_path
         if resolved_ext not in RAW_EXTENSIONS and companion_for_extraction:
             source_for_extraction = companion_for_extraction

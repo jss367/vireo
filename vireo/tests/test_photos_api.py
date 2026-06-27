@@ -3064,6 +3064,78 @@ def test_original_skips_recent_failed_raw_after_rejecting_small_working_copy(
     assert called["extract"] is False
 
 
+def test_original_uses_companion_after_raw_marker_and_small_working_copy(
+    client_with_photo, monkeypatch,
+):
+    """A source RAW failure marker should not block a full-size sidecar.
+
+    Scanner can preserve ``working_copy_failed_source='source'`` after creating
+    a capped companion working copy. When /original rejects that capped working
+    copy, it must upgrade from the sidecar instead of failing fast on the RAW
+    marker before companion fallback is considered.
+    """
+    import io
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    folder_path = folder["path"]
+
+    raw_path = os.path.join(folder_path, "marked.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(b"unsupported raw")
+    companion_path = os.path.join(folder_path, "marked.JPG")
+    Image.new("RGB", (6000, 4000), (90, 140, 180)).save(
+        companion_path, "JPEG", quality=85,
+    )
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    capped_wc_rel = f"working/{photo_id}.jpg"
+    Image.new("RGB", (1000, 667), (20, 40, 60)).save(
+        os.path.join(vireo_dir, capped_wc_rel), "JPEG", quality=85,
+    )
+
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='marked.NEF', extension='.nef',
+               companion_path='marked.JPG',
+               working_copy_path=?,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=file_mtime,
+               working_copy_failed_source='source',
+               width=6000, height=4000
+           WHERE id=?""",
+        (capped_wc_rel, photo_id),
+    )
+    db.conn.commit()
+
+    real_extract = image_loader.extract_working_copy
+    extracted_sources = []
+
+    def tracking_extract(source, output, *args, **kwargs):
+        extracted_sources.append(str(source))
+        if str(source).lower().endswith(".nef"):
+            raise AssertionError("original route retried source-failed RAW")
+        return real_extract(source, output, *args, **kwargs)
+
+    monkeypatch.setattr(image_loader, "extract_working_copy", tracking_extract)
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/original")
+
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert extracted_sources == [companion_path]
+    with Image.open(io.BytesIO(resp.data)) as img:
+        assert img.size == (6000, 4000)
+
+
 def test_original_refreshes_failure_marker_when_stale_retry_fails(
     client_with_photo, monkeypatch,
 ):
