@@ -260,10 +260,18 @@ def test_conftest_autouse_fixture_restores_cfg_path(tmp_path):
             )
     """))
 
+    child_tmp = tmp_path / "subpytest-tmp"
+    child_tmp.mkdir()
+    child_env = os.environ.copy()
+    child_env.pop("PYTEST_ADDOPTS", None)
+    child_env.pop("PYTEST_CURRENT_TEST", None)
+    child_env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    child_env["TMP"] = str(child_tmp)
+    child_env["TEMP"] = str(child_tmp)
     result = subprocess.run(
         [sys.executable, "-m", "pytest", str(sub_dir), "-q",
          "-p", "no:cacheprovider", "-p", "no:xdist", "--no-header"],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, timeout=60, env=child_env,
     )
     assert result.returncode == 0, (
         f"sub-pytest failed (exit {result.returncode}):\n"
