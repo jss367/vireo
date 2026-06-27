@@ -1278,6 +1278,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 all_duplicate_folders: set = set()
                 total_copied = 0
                 total_skipped = 0
+                total_failed = 0
                 for src_folder in sources:
                     try:
                         result_info = do_ingest(
@@ -1298,6 +1299,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     all_duplicate_folders.update(result_info.get("duplicate_folders", []))
                     total_copied += result_info.get("copied", 0)
                     total_skipped += result_info.get("skipped_duplicate", 0)
+                    total_failed += result_info.get("failed", 0)
                     # Collect hashes of files just copied so the next source
                     # iteration treats them as known even before the DB scan.
                     if params.skip_duplicates:
@@ -1308,15 +1310,44 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             with contextlib.suppress(OSError):
                                 accumulated_hashes.add(compute_file_hash(path))
 
-                # Mark ingest complete
+                # In local-processing mode, ingest failures must fail the
+                # ingest stage so archive_stage's "any earlier stage failed"
+                # gate skips publishing. ingest() catches per-file copy
+                # errors (unreadable source, disk full mid-card) and returns
+                # a non-zero ``failed`` count without raising. Without
+                # propagating that here the archive step would happily move
+                # the partial staging tree to the user's final destination
+                # — publishing a partial result that the rest of the
+                # pipeline would otherwise treat as a successful import.
                 parts = []
                 if total_copied:
                     parts.append(f"{total_copied} copied")
                 if total_skipped:
                     parts.append(f"{total_skipped} skipped")
-                stages["ingest"]["status"] = "completed"
-                runner.update_step(job["id"], "ingest", status="completed",
-                                   summary=", ".join(parts) or "0 files")
+                if total_failed:
+                    parts.append(f"{total_failed} failed")
+                summary = ", ".join(parts) or "0 files"
+                if params.local_processing and total_failed:
+                    msg = (
+                        f"{total_failed} file"
+                        f"{'s' if total_failed != 1 else ''} failed to copy "
+                        f"during ingest; archive skipped to avoid publishing "
+                        f"a partial result"
+                    )
+                    errors.append(f"[ingest] Fatal: {msg}")
+                    stages["ingest"]["status"] = "failed"
+                    runner.update_step(
+                        job["id"], "ingest",
+                        status="failed",
+                        error=msg,
+                        summary=summary,
+                    )
+                else:
+                    stages["ingest"]["status"] = "completed"
+                    runner.update_step(
+                        job["id"], "ingest", status="completed",
+                        summary=summary,
+                    )
                 _update_stages(runner, job["id"], stages)
 
                 # Scan only the destination subfolders that actually contain
@@ -4319,6 +4350,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             if staging_parent:
                 with contextlib.suppress(OSError):
                     os.rmdir(staging_parent)
+
+            # The archive has been published and originals removed. A Stop
+            # pressed during the move cannot be honored here: move_folder
+            # doesn't accept a cancellation signal, and tearing it down
+            # mid-flight would either leave files in both staging and
+            # destination or wipe staging before verification completes.
+            # Consume any cancellation that landed during the commit so
+            # JobRunner records the run as "completed" rather than
+            # "cancelled" — the archive is on disk and the user should
+            # see that, not a misleading cancelled-status pill.
+            runner.clear_cancellation(job["id"])
 
             stages["archive"]["status"] = "completed"
             summary = f"{move_result.get('moved', 0)} photos archived"

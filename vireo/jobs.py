@@ -1012,6 +1012,19 @@ class JobRunner:
         with self._lock:
             return job_id in self._cancelled
 
+    def clear_cancellation(self, job_id):
+        """Consume any pending cancellation flag for ``job_id``.
+
+        Used by stages that have entered an uninterruptible commit step
+        (e.g. the local-processing archive move) where a Stop press
+        cannot be honored without leaving a partial published artifact.
+        Without consuming the flag, ``_run_job``'s atomic terminal check
+        would record the job as "cancelled" even though the commit
+        succeeded — confusing the user about whether the archive landed.
+        """
+        with self._lock:
+            self._cancelled.discard(job_id)
+
 
 class LogBroadcaster(logging.Handler):
     """Captures log records and broadcasts to SSE subscribers.

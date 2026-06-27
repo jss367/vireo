@@ -440,6 +440,143 @@ def test_pipeline_local_processing_skips_archive_when_previews_fail(
     )
 
 
+def test_pipeline_local_processing_fails_ingest_when_files_fail_to_copy(
+    setup, tmp_path, monkeypatch
+):
+    """Regression: ingest() catches per-file copy errors and returns a
+    non-zero ``failed`` count without raising, but the scanner stage was
+    marking ingest as "completed" regardless. archive_stage's "any earlier
+    stage failed" gate then let the partial staging tree publish to the
+    final destination. Local-processing mode must fail the ingest stage
+    when files fail to copy so the archive is skipped and staging is
+    preserved for the user to recover.
+    """
+    app, db_path = setup
+
+    final_parent = tmp_path / "nas_fail_ingest"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+
+    src = tmp_path / "card_partial"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(src / "good.jpg")
+    Image.new("RGB", (16, 16), "red").save(src / "bad.jpg")
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    # Simulate a partial-card copy failure: ingest() catches the OSError
+    # and bumps `failed` by 1, but returns normally so the run continues.
+    import ingest as ingest_mod
+
+    real_copy2 = ingest_mod.shutil.copy2
+
+    def flaky_copy2(src_path, dest_path, *args, **kwargs):
+        if os.path.basename(str(src_path)) == "bad.jpg":
+            raise OSError("synthetic copy failure")
+        return real_copy2(src_path, dest_path, *args, **kwargs)
+
+    monkeypatch.setattr(ingest_mod.shutil, "copy2", flaky_copy2)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job_id = resp.get_json()["job_id"]
+        job = wait_for_job_via_client(c, job_id)
+
+    # Ingest is marked failed and the whole run is recorded as failed.
+    assert job["status"] == "failed", job
+
+    # Nothing is published at the final destination, even though good.jpg
+    # made it into staging.
+    assert not (final_dest / "good.jpg").exists()
+    assert not final_dest.exists() or not any(final_dest.iterdir())
+
+    # The successfully-copied file stays in staging so the user can recover.
+    staging_root = tmp_path / "staging" / job_id / "Photos"
+    assert staging_root.is_dir(), staging_root
+    assert (staging_root / "good.jpg").is_file()
+
+
+def test_pipeline_local_processing_completes_when_cancel_during_archive(
+    setup, tmp_path, monkeypatch
+):
+    """Regression: move_folder does not accept a cancellation signal, and
+    tearing it down mid-flight would leave a partial archive at the
+    destination. A Stop press once the archive begins must therefore be
+    consumed so the job records "completed" rather than recording a
+    "cancelled" status for a run that actually published its output.
+    """
+    app, db_path = setup
+
+    final_parent = tmp_path / "nas_cancel"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+
+    src = tmp_path / "card_cancel"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(src / "kept.jpg")
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    # Simulate the user clicking Stop while move_folder is mid-copy: wrap
+    # the real move_folder so that, just as it begins, the job is added
+    # to the runner's cancellation set. Without clear_cancellation in
+    # archive_stage, JobRunner._run_job's atomic terminal check would
+    # then record the run as "cancelled" even though the archive
+    # committed and the originals were removed.
+    import move as move_mod
+    real_move_folder_fn = move_mod.move_folder
+
+    runner = app._job_runner
+
+    def cancelling_move_folder(db, folder_id, destination, **kwargs):
+        # Resolve the current job id off the runner — we can't get it
+        # passed in directly. There's exactly one running pipeline job at
+        # this point, so pick it out of the runner's job map.
+        with runner._lock:
+            running = [
+                jid for jid, j in runner._jobs.items()
+                if j.get("status") == "running"
+                and jid.startswith("pipeline-")
+            ]
+        assert len(running) == 1, running
+        runner.cancel_job(running[0])
+        return real_move_folder_fn(db, folder_id, destination, **kwargs)
+
+    monkeypatch.setattr(move_mod, "move_folder", cancelling_move_folder)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job_id = resp.get_json()["job_id"]
+        job = wait_for_job_via_client(c, job_id)
+
+    # The archive committed, so the job must NOT record cancelled.
+    assert job["status"] == "completed", job
+    assert (final_dest / "kept.jpg").is_file()
+    assert job["result"]["archive"]["final_destination"] == str(final_dest)
+
+
 def test_pipeline_local_processing_preflight_filters_duplicates(
     setup, tmp_path, monkeypatch
 ):
