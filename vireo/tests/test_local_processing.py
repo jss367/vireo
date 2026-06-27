@@ -74,8 +74,36 @@ def test_non_duplicate_bytes_excludes_known_hashes(tmp_path):
     known_all = {compute_file_hash(str(fresh)), compute_file_hash(str(dup))}
     assert local_processing.non_duplicate_bytes([fresh, dup], known_all) == 0
 
-    # Empty known set → behaves like total_file_bytes.
+    # Empty known set with no intra-run duplicates → equals total_file_bytes.
     assert (
         local_processing.non_duplicate_bytes([fresh, dup], set())
         == local_processing.total_file_bytes([fresh, dup])
+    )
+
+
+def test_non_duplicate_bytes_deduplicates_within_pass(tmp_path):
+    """Intra-run duplicates — the same file selected twice via overlapping
+    sources, or two source folders sharing a file — must collapse the way
+    ingest() does. Without intra-run dedup the estimator would double-count
+    them and falsely trigger batching_required on a card that fits, even
+    when the catalog is empty."""
+    fresh = tmp_path / "fresh.jpg"
+    fresh.write_bytes(b"fresh-bytes-payload")
+    dup_a = tmp_path / "dup_a.jpg"
+    dup_a.write_bytes(b"shared-content")
+    dup_b = tmp_path / "dup_b.jpg"
+    dup_b.write_bytes(b"shared-content")  # same bytes → same hash
+
+    # Empty catalog: intra-run duplicates still collapse, so total equals
+    # the unique-hash bytes (fresh + one copy of the shared content).
+    expected = fresh.stat().st_size + dup_a.stat().st_size
+    assert (
+        local_processing.non_duplicate_bytes([fresh, dup_a, dup_b], set())
+        == expected
+    )
+
+    # The same file listed twice (overlapping sources) counts once.
+    assert (
+        local_processing.non_duplicate_bytes([fresh, fresh], set())
+        == fresh.stat().st_size
     )

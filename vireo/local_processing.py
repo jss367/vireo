@@ -54,28 +54,33 @@ def total_file_bytes(files: list[Path]) -> int:
 
 
 def non_duplicate_bytes(files: list[Path], known_hashes: set[str]) -> int:
-    """Sum bytes of ``files`` whose content hash isn't in ``known_hashes``.
+    """Sum bytes of ``files`` whose content hash isn't already known.
 
     Mirrors the duplicate gate ingest() applies with skip_duplicates=True so
     the local-storage preflight estimate matches what ingest will actually
-    copy. Without this filter a card that's mostly already-imported photos
-    would set ``batching_required`` and abort even though the staging copy
-    would fit (or be zero bytes).
+    copy. ``known_hashes`` covers files already in the catalog; this also
+    tracks hashes seen earlier in ``files`` so intra-run duplicates (the
+    same card folder selected twice, or two source folders sharing a file)
+    are counted once — ingest() likewise copies the first occurrence and
+    skips later matches via its ``extra_known_hashes`` accumulator.
     """
     from scanner import compute_file_hash
 
+    seen = set(known_hashes)
     total = 0
     for path in files:
         try:
             file_hash = compute_file_hash(str(path))
         except OSError:
             continue
-        if file_hash in known_hashes:
+        if file_hash in seen:
             continue
         try:
-            total += path.stat().st_size
+            size = path.stat().st_size
         except OSError:
             continue
+        total += size
+        seen.add(file_hash)
     return total
 
 

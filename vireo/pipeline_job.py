@@ -1160,12 +1160,16 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         plan = storage_plan(params.destination, source_bytes)
                         # When skip_duplicates is on, ingest() will hash and
                         # skip files whose hash is already in the catalog
-                        # before writing to staging. The naive byte sum above
-                        # would mark a mostly-duplicate card as batching-
-                        # required even though the staging copy would fit.
-                        # Re-check using the duplicate-filtered set, but only
-                        # when the optimistic check failed — otherwise we'd
-                        # hash the entire source set on every import.
+                        # OR already seen earlier in this same run before
+                        # writing to staging. The naive byte sum above would
+                        # mark a mostly-duplicate card — or one where the
+                        # same folder appears in `sources` twice — as
+                        # batching-required even though the staging copy
+                        # would fit. Re-check using the duplicate-filtered
+                        # set, but only when the optimistic check failed —
+                        # otherwise we'd hash the entire source set on every
+                        # import. The filter runs even when the catalog is
+                        # empty so intra-run duplicates still collapse.
                         if (
                             plan["batching_required"]
                             and params.skip_duplicates
@@ -1177,14 +1181,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     "WHERE file_hash IS NOT NULL"
                                 )
                             }
-                            if known_hashes:
-                                filtered_bytes = non_duplicate_bytes(
-                                    selected_files, known_hashes,
+                            filtered_bytes = non_duplicate_bytes(
+                                selected_files, known_hashes,
+                            )
+                            if filtered_bytes < source_bytes:
+                                plan = storage_plan(
+                                    params.destination, filtered_bytes,
                                 )
-                                if filtered_bytes < source_bytes:
-                                    plan = storage_plan(
-                                        params.destination, filtered_bytes,
-                                    )
                         result["local_processing"] = {
                             **plan,
                             "staging_destination": params.destination,
