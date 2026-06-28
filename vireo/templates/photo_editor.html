@@ -63,7 +63,8 @@ body {
   white-space: nowrap;
 }
 .editor-shell.editor-loading .editor-canvas-wrap,
-.editor-shell.editor-loading .editor-panel {
+.editor-shell.editor-loading .editor-panel,
+.editor-shell.editor-loading .history-panel {
   pointer-events: none;
   opacity: 0.55;
 }
@@ -1112,6 +1113,10 @@ async function saveRecipe(description) {
 }
 
 async function restoreRecipe(recipe) {
+  // The history panel is also pointer-events: none while loading, but guard
+  // here too so a programmatic restore (or any escape from the CSS gate) can't
+  // copy a previous photo's checkpoint onto the photoId currently loading.
+  if (editorState.loading) return;
   editorState.recipe = cloneRecipe(recipe || {});
   ensureCrop(editorState.recipe);
   syncControls();
