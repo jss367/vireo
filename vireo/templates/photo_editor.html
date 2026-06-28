@@ -1045,11 +1045,15 @@ function resetAllEdits() {
 
 async function saveRecipe(description) {
   if (!editorState.photoId) return;
+  // Capture the photo being saved so a Prev/Next during the PUT can't make us
+  // write the previous photo's returned recipe back into the editor state for
+  // a different photo (or refresh the cache under the wrong photoId).
+  var savedPhotoId = editorState.photoId;
   var btn = document.getElementById('saveBtn');
   btn.disabled = true;
   setStatus('Saving...');
   try {
-    var data = await safeFetch('/api/photos/' + editorState.photoId + '/edit-recipe', {
+    var data = await safeFetch('/api/photos/' + savedPhotoId + '/edit-recipe', {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
@@ -1057,21 +1061,32 @@ async function saveRecipe(description) {
         description: description || 'Updated photo edit recipe',
       }),
     }, {toast: false});
+    // Sync the shared edit-recipe cache against the photo we actually saved,
+    // regardless of where the editor is now.
+    if (typeof window.vireoRefreshEditRecipeCache === 'function') {
+      var updates = {};
+      updates[String(savedPhotoId)] = data.recipe || null;
+      window.vireoRefreshEditRecipeCache(updates);
+    }
+    if (typeof showToast === 'function') showToast('Edit saved', 'success');
+    // If the user navigated to a different photo while the PUT was in flight,
+    // the editor now owns that other photo's recipe / savedRecipe / Save
+    // button — don't overwrite it with the previous photo's saved data.
+    if (editorState.photoId !== savedPhotoId) return;
     editorState.savedRecipe = cloneRecipe(data.recipe || {});
     editorState.recipe = cloneRecipe(data.recipe || {});
     ensureCrop(editorState.recipe);
     syncControls();
     updatePreview();
     loadHistory();
-    if (typeof window.vireoRefreshEditRecipeCache === 'function') {
-      var updates = {};
-      updates[String(editorState.photoId)] = data.recipe || null;
-      window.vireoRefreshEditRecipeCache(updates);
-    }
-    if (typeof showToast === 'function') showToast('Edit saved', 'success');
   } catch (e) {
-    btn.disabled = false;
-    setStatus(e.message || 'Save failed', true);
+    // Only re-enable the Save button / surface the error if the editor is
+    // still on the photo we were saving; otherwise the new photo's controls
+    // own these surfaces.
+    if (editorState.photoId === savedPhotoId) {
+      btn.disabled = false;
+      setStatus(e.message || 'Save failed', true);
+    }
   }
 }
 
