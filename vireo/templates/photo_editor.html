@@ -1044,17 +1044,28 @@ function _smoothstep(e0, e1, x) {
 }
 
 // Sample an image into a 256-bin luma histogram plus shadow/highlight clip counts.
-function _lumaStats(img) {
+function _lumaStats(img, crop) {
+  // The base render is geometry-applied but uncropped, and `crop` (normalized
+  // 0..1) is in that same coordinate space. Sample only the pixels inside the
+  // active crop so Auto Tone's heuristics see the frame the user is keeping.
   var maxSample = 180;
-  var scale = Math.min(1, maxSample / Math.max(img.naturalWidth, img.naturalHeight));
-  var w = Math.max(1, Math.round(img.naturalWidth * scale));
-  var h = Math.max(1, Math.round(img.naturalHeight * scale));
+  var sx = 0, sy = 0;
+  var sW = img.naturalWidth, sH = img.naturalHeight;
+  if (crop && !isFullCrop(crop)) {
+    sx = Math.max(0, Math.round((Number(crop.x) || 0) * img.naturalWidth));
+    sy = Math.max(0, Math.round((Number(crop.y) || 0) * img.naturalHeight));
+    sW = Math.max(1, Math.round((Number(crop.w) || 1) * img.naturalWidth));
+    sH = Math.max(1, Math.round((Number(crop.h) || 1) * img.naturalHeight));
+  }
+  var scale = Math.min(1, maxSample / Math.max(sW, sH));
+  var w = Math.max(1, Math.round(sW * scale));
+  var h = Math.max(1, Math.round(sH * scale));
   var c = document.createElement('canvas');
   c.width = w;
   c.height = h;
   var cx = c.getContext('2d', { willReadFrequently: true });
   if (!cx) return null;
-  cx.drawImage(img, 0, 0, w, h);
+  cx.drawImage(img, sx, sy, sW, sH, 0, 0, w, h);
   var data = cx.getImageData(0, 0, w, h).data;
   var hist = new Array(256).fill(0);
   var clipLow = 0;
@@ -1173,7 +1184,7 @@ async function autoTone() {
     var src = '/photos/' + editorState.photoId + '/edit-preview?size=1024&recipe=' +
       encodeURIComponent(JSON.stringify(base));
     var img = await _loadImage(src);
-    var stats = _lumaStats(img);
+    var stats = _lumaStats(img, ensureCrop(editorState.recipe));
     if (!stats) throw new Error('no canvas context');
     var auto = computeAutoTone(stats);
 
