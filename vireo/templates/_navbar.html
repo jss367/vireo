@@ -1920,6 +1920,15 @@ window.vireoEditNav = (function() {
       write(COPY_KEY, {recipe: recipe, source: (meta && meta.source) || null, at: (meta && meta.at) || null});
     },
     getCopiedRecipe: function() { return read(COPY_KEY); },
+    // Cursors hold photo ids whose visibility is workspace-scoped (api_photo_detail
+    // uses verify_workspace=True); a cursor saved in workspace A becomes "Photo
+    // unavailable" / dead Prev-Next ids in workspace B. Drop the cursors on every
+    // workspace activation. The copied recipe is just slider/crop values with no
+    // photo ids, so it stays.
+    clearWorkspaceScopedCursors: function() {
+      write(LAST_KEY, null);
+      write(NAV_KEY, null);
+    },
   };
 })();
 </script>
@@ -3232,6 +3241,7 @@ async function switchWorkspace(wsId, wsName) {
     document.removeEventListener('click', closeWsDropdownOutside);
     // Flag that a workspace switch just happened (for drift check)
     sessionStorage.setItem('vireo_ws_switched', '1');
+    if (window.vireoEditNav) window.vireoEditNav.clearWorkspaceScopedCursors();
     // Redirect to the workspace's saved page, or reload current
     window.location.href = data.restore_path || window.location.pathname;
   } catch(e) {}
@@ -3273,6 +3283,7 @@ async function createWorkspace() {
       body: JSON.stringify({ current_path: window.location.pathname })
     });
     sessionStorage.setItem('vireo_ws_switched', '1');
+    if (window.vireoEditNav) window.vireoEditNav.clearWorkspaceScopedCursors();
     window.location.href = '/pipeline';
   } catch(e) {
     document.getElementById('newWsError').textContent = e.message || 'Failed to create';
