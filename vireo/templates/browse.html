@@ -376,6 +376,24 @@ body {
   font-size: 12px;
   line-height: 1.4;
 }
+.selection-action-btn {
+  width: 100%;
+  background: var(--accent);
+  color: var(--accent-text);
+  border: none;
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.selection-action-btn:hover { filter: brightness(1.05); }
+.selection-action-hint {
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
 .capture-time-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1534,6 +1552,11 @@ body {
     <!-- Multi-select Detail -->
     <div class="selection-panel hidden" id="selectionPanel">
       <div class="selection-heading" id="selectionCount">0 photos selected</div>
+      <div class="detail-section" id="pasteEditSection" hidden>
+        <div class="detail-section-title">Edit Settings</div>
+        <button class="selection-action-btn" id="pasteEditBtn" type="button" onclick="pasteEditSettingsToSelection()">Paste Edit Settings</button>
+        <div class="selection-action-hint" id="pasteEditHint"></div>
+      </div>
       <div class="detail-section">
         <div class="detail-section-title">Fill Missing Keywords</div>
         <div class="selection-keyword-list" id="selectionKeywordSuggestions"></div>
@@ -4178,6 +4201,7 @@ function updateSelectionPanel(ids) {
   if (detail) detail.classList.toggle('visible', detailMatchesSelectedPhoto());
   panel.classList.remove('hidden');
   document.getElementById('selectionCount').textContent = ids.length.toLocaleString() + ' photos selected';
+  updatePasteEditSection(ids);
   if (ids.length > 1000) {
     selectionKeywordKey = selectionIdsKey(ids);
     selectionKeywordMissingById = {};
@@ -4189,6 +4213,58 @@ function updateSelectionPanel(ids) {
     return;
   }
   loadSelectionKeywordSuggestions(ids);
+}
+
+function updatePasteEditSection(ids) {
+  var section = document.getElementById('pasteEditSection');
+  var hint = document.getElementById('pasteEditHint');
+  if (!section) return;
+  var copied = window.vireoEditNav ? window.vireoEditNav.getCopiedRecipe() : null;
+  if (!copied || !copied.recipe) {
+    section.hidden = true;
+    return;
+  }
+  section.hidden = false;
+  if (hint) {
+    var n = ids.length.toLocaleString();
+    hint.textContent = copied.source
+      ? 'Copied from ' + copied.source + ' — applies to ' + n + ' selected photos.'
+      : 'Applies the copied edit settings to ' + n + ' selected photos.';
+  }
+}
+
+async function pasteEditSettingsToSelection() {
+  var ids = getActiveSelection();
+  if (ids.length < 1) { showToast('Select photos first.', 'error'); return; }
+  var copied = window.vireoEditNav ? window.vireoEditNav.getCopiedRecipe() : null;
+  if (!copied || !copied.recipe) {
+    showToast('No copied edit settings. Use "Copy Settings" in the editor first.', 'error');
+    return;
+  }
+  var btn = document.getElementById('pasteEditBtn');
+  if (btn) btn.disabled = true;
+  try {
+    var data = await safeFetch('/api/photos/edit-recipe/apply', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        recipe: copied.recipe,
+        photo_ids: ids,
+        description: copied.source ? ('Pasted edit settings from ' + copied.source) : 'Pasted edit settings',
+      }),
+    }, {toast: false});
+    var count = data.count || 0;
+    if (typeof window.vireoRefreshEditRecipeCache === 'function' && Array.isArray(data.applied)) {
+      var updates = {};
+      data.applied.forEach(function(pid) { updates[String(pid)] = data.recipe || copied.recipe; });
+      window.vireoRefreshEditRecipeCache(updates);
+    }
+    showToast('Pasted edit settings to ' + count.toLocaleString() + ' photo' + (count === 1 ? '' : 's'), 'success');
+  } catch (e) {
+    showToast(e.message || 'Could not paste edit settings', 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 function openBrowseCompare() {

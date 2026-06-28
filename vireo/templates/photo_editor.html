@@ -56,6 +56,12 @@ body {
   text-align: right;
 }
 .editor-status.error { color: var(--danger); }
+.editor-navpos {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 .editor-btn {
   border: 1px solid var(--border-secondary);
   background: var(--bg-tertiary);
@@ -342,14 +348,18 @@ body {
   <section class="editor-stage">
     <div class="editor-topbar">
       <button class="editor-btn" type="button" onclick="goBackToBrowse()">Back</button>
+      <button class="editor-btn" id="prevBtn" type="button" onclick="editorNav(-1)" title="Previous photo (←)" hidden>‹ Prev</button>
+      <button class="editor-btn" id="nextBtn" type="button" onclick="editorNav(1)" title="Next photo (→)" hidden>Next ›</button>
+      <span class="editor-navpos" id="editorNavPos"></span>
       <div class="editor-title">
         <strong id="editorFilename">Loading photo...</strong>
         <span id="editorSubhead">Non-destructive editor</span>
       </div>
       <div class="editor-status" id="editorStatus"></div>
       <button class="editor-btn" id="beforeBtn" type="button" onclick="toggleBeforePreview()">Before</button>
-      <button class="editor-btn active" id="fitBtn" type="button" onclick="setZoomMode('fit')">Fit</button>
+      <button class="editor-btn" id="fitBtn" type="button" onclick="setZoomMode('fit')">Fit</button>
       <button class="editor-btn" id="actualBtn" type="button" onclick="setZoomMode('actual')">100%</button>
+      <button class="editor-btn" id="copySettingsBtn" type="button" onclick="copyEditSettings()" title="Copy these edit settings to paste onto other photos">Copy Settings</button>
       <button class="editor-btn" type="button" onclick="resetAllEdits()">Reset All</button>
       <button class="editor-btn primary" id="saveBtn" type="button" onclick="saveRecipe()" disabled>Save Changes</button>
     </div>
@@ -500,7 +510,12 @@ var editorState = {
   drag: null,
   showBefore: false,
   zoomMode: 'fit',
+  navIds: [],
 };
+
+function isEditorDirty() {
+  return recipeKey(editorState.recipe) !== recipeKey(editorState.savedRecipe);
+}
 
 function cloneRecipe(recipe) {
   if (!recipe || typeof recipe !== 'object') return {};
@@ -1197,25 +1212,82 @@ function initCropDrag() {
   });
 }
 
-async function initEditor() {
-  var match = window.location.pathname.match(/\/edit\/(\d+)/);
-  editorState.photoId = match ? Number(match[1]) : null;
-  if (!editorState.photoId) {
-    setStatus('Missing photo id', true);
+function updateNavControls() {
+  var ids = editorState.navIds || [];
+  var idx = ids.indexOf(Number(editorState.photoId));
+  var prev = document.getElementById('prevBtn');
+  var next = document.getElementById('nextBtn');
+  var pos = document.getElementById('editorNavPos');
+  var hasNav = ids.length > 1 && idx !== -1;
+  if (prev) { prev.hidden = !hasNav; prev.disabled = !hasNav || idx <= 0; }
+  if (next) { next.hidden = !hasNav; next.disabled = !hasNav || idx >= ids.length - 1; }
+  if (pos) pos.textContent = hasNav ? (idx + 1) + ' / ' + ids.length : '';
+}
+
+function editorNav(delta) {
+  var ids = editorState.navIds || [];
+  var idx = ids.indexOf(Number(editorState.photoId));
+  if (idx === -1) return;
+  var newIdx = idx + delta;
+  if (newIdx < 0 || newIdx >= ids.length) return;
+  if (isEditorDirty() && !window.confirm('Discard unsaved edits to this photo?')) return;
+  loadPhoto(ids[newIdx]);
+}
+
+function copyEditSettings() {
+  if (!editorState.photoId || !window.vireoEditNav) return;
+  var recipe = recipeForSave(editorState.recipe);
+  if (!recipe || Object.keys(recipe).length === 0) {
+    if (typeof showToast === 'function') showToast('No edits to copy', 'error');
+    else setStatus('No edits to copy', true);
     return;
   }
-  initCropDrag();
-  clearHistogramFeedback();
-  setZoomMode('fit');
+  window.vireoEditNav.setCopiedRecipe(recipe, {
+    source: (editorState.photo && editorState.photo.filename) || null,
+    at: Date.now(),
+  });
+  if (typeof showToast === 'function') showToast('Edit settings copied — paste onto a selection in Browse', 'success');
+  else setStatus('Settings copied');
+}
+
+function editorEmptyState() {
+  document.getElementById('editorFilename').textContent = 'No photo to edit';
+  document.getElementById('editorSubhead').textContent = 'Open a photo from Browse, then choose Edit.';
+  setStatus('');
+  var img = document.getElementById('editorImg');
+  if (img) img.removeAttribute('src');
+  var box = document.getElementById('editorCropBox');
+  if (box) box.style.display = 'none';
+  ['prevBtn', 'nextBtn', 'copySettingsBtn', 'beforeBtn', 'fitBtn', 'actualBtn', 'saveBtn'].forEach(function(id) {
+    var b = document.getElementById(id);
+    if (b) b.disabled = true;
+  });
+}
+
+async function loadPhoto(photoId, opts) {
+  opts = opts || {};
+  photoId = Number(photoId);
+  if (!Number.isFinite(photoId) || photoId <= 0) return;
+  editorState.photoId = photoId;
+  editorState.showBefore = false;
+  if (window.vireoEditNav) window.vireoEditNav.setLastPhoto(photoId);
+  // Keep the URL in sync so refresh / bookmark / Back behave sensibly.
+  if (!opts.skipUrl) {
+    try { window.history.replaceState({photoId: photoId}, '', '/edit/' + photoId); } catch (_) {}
+  }
+  setStatus('Loading...');
+  document.getElementById('editorFilename').textContent = 'Loading photo...';
+  updateNavControls();
   try {
-    var photo = await safeFetch('/api/photos/' + editorState.photoId, {}, {toast: false});
+    var photo = await safeFetch('/api/photos/' + photoId, {}, {toast: false});
     editorState.photo = photo;
     editorState.savedRecipe = cloneRecipe(photo.edit_recipe || {});
     editorState.recipe = cloneRecipe(photo.edit_recipe || {});
     ensureCrop(editorState.recipe);
-    document.getElementById('editorFilename').textContent = photo.filename || ('Photo ' + editorState.photoId);
-    var dim = photo.width && photo.height ? photo.width + ' x ' + photo.height : 'Photo ' + editorState.photoId;
+    document.getElementById('editorFilename').textContent = photo.filename || ('Photo ' + photoId);
+    var dim = photo.width && photo.height ? photo.width + ' x ' + photo.height : 'Photo ' + photoId;
     document.getElementById('editorSubhead').textContent = dim;
+    updateFeedbackControls();
     syncControls();
     updatePreview();
     loadHistory();
@@ -1223,6 +1295,34 @@ async function initEditor() {
     document.getElementById('editorFilename').textContent = 'Photo unavailable';
     setStatus(e.message || 'Could not load photo', true);
   }
+}
+
+function initEditorKeyboard() {
+  document.addEventListener('keydown', function(e) {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    var t = e.target;
+    var tag = t && t.tagName ? t.tagName.toLowerCase() : '';
+    if (tag === 'input' || tag === 'textarea' || tag === 'select' || (t && t.isContentEditable)) return;
+    if (e.key === 'ArrowLeft') { e.preventDefault(); editorNav(-1); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); editorNav(1); }
+  });
+}
+
+async function initEditor() {
+  initCropDrag();
+  initEditorKeyboard();
+  clearHistogramFeedback();
+  setZoomMode('fit');
+  if (window.vireoEditNav) editorState.navIds = window.vireoEditNav.getList() || [];
+  var match = window.location.pathname.match(/\/edit\/(\d+)/);
+  var photoId = match
+    ? Number(match[1])
+    : (window.vireoEditNav ? window.vireoEditNav.getLastPhoto() : null);
+  if (!photoId) {
+    editorEmptyState();
+    return;
+  }
+  await loadPhoto(photoId, {skipUrl: !!match});
 }
 
 document.addEventListener('DOMContentLoaded', initEditor);
