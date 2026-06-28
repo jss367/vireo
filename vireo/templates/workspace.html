@@ -324,6 +324,7 @@ async function activateWorkspace(wsId) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ current_path: window.location.pathname })
     });
+    if (window.vireoEditNav) window.vireoEditNav.clearWorkspaceScopedCursors();
     window.location.href = data.restore_path || window.location.pathname;
   } catch(e) {}
 }

@@ -11868,7 +11868,7 @@ def test_all_nav_ids_covers_every_page():
     from db import ALL_NAV_IDS
     expected = {
         "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
-        "misses", "highlights", "life_list", "browse", "map", "variants",
+        "misses", "highlights", "life_list", "browse", "edit", "map", "variants",
         "dashboard", "audit", "move", "compare",
         "zoom_test", "settings", "workspace", "lightroom", "shortcuts",
         "keywords", "duplicates", "logs",

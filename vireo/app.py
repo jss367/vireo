@@ -96,6 +96,7 @@ ALL_PAGES = [
     {"id": "highlights",      "label": "Highlights",      "href": "/highlights"},
     {"id": "life_list",       "label": "Life List",       "href": "/life-list"},
     {"id": "browse",          "label": "Browse",          "href": "/browse"},
+    {"id": "edit",            "label": "Edit",            "href": "/edit"},
     {"id": "map",             "label": "Map",             "href": "/map"},
     {"id": "variants",        "label": "Variants",        "href": "/variants"},
     {"id": "dashboard",       "label": "Dashboard",       "href": "/dashboard"},
@@ -2405,6 +2406,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def photo_editor_page(photo_id):
         return render_template("photo_editor.html")
 
+    @app.route("/edit")
+    def photo_editor_page_current():
+        # No photo id in the URL: the editor resolves the last-viewed photo
+        # from localStorage client-side (see initEditor in photo_editor.html)
+        # and rewrites the URL to /edit/<id>, or shows an empty state.
+        return render_template("photo_editor.html")
+
     @app.route("/lightroom")
     def lightroom_page():
         return render_template("lightroom.html")
@@ -3973,6 +3981,85 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 [{"photo_id": photo_id, "old_value": old_value, "new_value": ""}],
             )
         return jsonify({"ok": True, "recipe": None})
+
+    @app.route("/api/photos/edit-recipe/apply", methods=["POST"])
+    def api_apply_photo_edit_recipe_bulk():
+        """Apply one edit recipe to many photos (copy/paste edit settings).
+
+        Replaces each target's recipe with the supplied one and records a
+        single undoable batch history entry. Photos missing from the active
+        workspace are skipped (reported in ``skipped``) rather than failing
+        the whole request.
+        """
+        db = _get_db()
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
+        recipe = body.get("recipe")
+        if not isinstance(recipe, dict):
+            return json_error("recipe must be a JSON object")
+        raw_ids = body.get("photo_ids")
+        if not isinstance(raw_ids, list) or not raw_ids:
+            return json_error("photo_ids must be a non-empty list")
+        seen = set()
+        ids = []
+        for pid in raw_ids:
+            if isinstance(pid, bool) or not isinstance(pid, int):
+                return json_error("photo_ids must be integers")
+            if pid not in seen:
+                seen.add(pid)
+                ids.append(pid)
+
+        from image_edits import RecipeError, recipe_to_json
+
+        # Validate the incoming recipe once up front so a bad payload fails
+        # cleanly before we touch any rows.
+        try:
+            target_json = recipe_to_json(recipe) or ""
+        except RecipeError as e:
+            return json_error(str(e))
+
+        description = body.get("description")
+        if not isinstance(description, str) or not description.strip():
+            description = "Pasted edit settings"
+        description = description.strip()
+
+        items = []
+        applied = []
+        skipped = []
+        for pid in ids:
+            photo = db.get_photo(pid, verify_workspace=True)
+            if not photo:
+                skipped.append(pid)
+                continue
+            old_recipe = db.get_photo_edit_recipe(pid)
+            old_value = recipe_to_json(old_recipe) or ""
+            try:
+                new_recipe = db.set_photo_edit_recipe(pid, recipe, verify_workspace=True)
+            except (RecipeError, ValueError):
+                skipped.append(pid)
+                continue
+            new_value = recipe_to_json(new_recipe) or ""
+            applied.append(pid)
+            if old_value != new_value:
+                _queue_edit_recipe_sync(db, pid, new_value)
+                items.append({
+                    "photo_id": pid,
+                    "old_value": old_value,
+                    "new_value": new_value,
+                })
+
+        if applied:
+            _invalidate_photo_render_cache(db, applied)
+        if items:
+            db.record_edit("edit_recipe", description, target_json, items, is_batch=True)
+        return jsonify({
+            "ok": True,
+            "applied": applied,
+            "skipped": skipped,
+            "count": len(applied),
+            "recipe": db.get_photo_edit_recipe(applied[0]) if applied else None,
+        })
 
     @app.route("/api/photos/<int:photo_id>/edit-history")
     def api_photo_edit_history(photo_id):

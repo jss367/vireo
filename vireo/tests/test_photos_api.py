@@ -1428,6 +1428,106 @@ def test_edit_recipe_api_queues_xmp_sync(client_with_photo):
     assert '"straighten":2.5' in changes[0]["value"]
 
 
+def test_bulk_apply_edit_recipe(app_and_db):
+    """POST /api/photos/edit-recipe/apply applies one recipe to many photos."""
+    app, db = app_and_db
+    client = app.test_client()
+    ids = [p["id"] for p in db.get_photos()]
+
+    resp = client.post(
+        "/api/photos/edit-recipe/apply",
+        json={"recipe": {"rotation": 90}, "photo_ids": ids},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["count"] == len(ids)
+    assert sorted(data["applied"]) == sorted(ids)
+    assert data["skipped"] == []
+    for pid in ids:
+        assert db.get_photo_edit_recipe(pid) == {"version": 1, "rotation": 90}
+
+
+def test_bulk_apply_records_single_undoable_batch(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    ids = [p["id"] for p in db.get_photos()]
+
+    client.post(
+        "/api/photos/edit-recipe/apply",
+        json={"recipe": {"rotation": 90}, "photo_ids": ids},
+    )
+    recipe_entries = [
+        h for h in db.get_edit_history() if h["action_type"] == "edit_recipe"
+    ]
+    assert len(recipe_entries) == 1
+    assert recipe_entries[0]["is_batch"] == 1
+    assert recipe_entries[0]["item_count"] == len(ids)
+
+    # A single undo reverts every photo in the batch.
+    db.undo_last_edit()
+    for pid in ids:
+        assert db.get_photo_edit_recipe(pid) is None
+
+
+def test_bulk_apply_queues_xmp_sync_per_photo(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    ids = [p["id"] for p in db.get_photos()]
+
+    client.post(
+        "/api/photos/edit-recipe/apply",
+        json={"recipe": {"straighten": 2.5}, "photo_ids": ids},
+    )
+    edit_changes = [
+        c for c in db.get_pending_changes() if c["change_type"] == "edit_recipe"
+    ]
+    assert sorted(c["photo_id"] for c in edit_changes) == sorted(ids)
+
+
+def test_bulk_apply_skips_unknown_photo(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    ids = [p["id"] for p in db.get_photos()]
+
+    resp = client.post(
+        "/api/photos/edit-recipe/apply",
+        json={"recipe": {"rotation": 90}, "photo_ids": ids + [999999]},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert 999999 in data["skipped"]
+    assert sorted(data["applied"]) == sorted(ids)
+
+
+def test_bulk_apply_validation_errors(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    ids = [p["id"] for p in db.get_photos()]
+
+    # Missing photo_ids.
+    assert client.post(
+        "/api/photos/edit-recipe/apply", json={"recipe": {"rotation": 90}}
+    ).status_code == 400
+    # Recipe is not an object.
+    assert client.post(
+        "/api/photos/edit-recipe/apply", json={"recipe": 5, "photo_ids": ids}
+    ).status_code == 400
+    # Empty selection.
+    assert client.post(
+        "/api/photos/edit-recipe/apply",
+        json={"recipe": {"rotation": 90}, "photo_ids": []},
+    ).status_code == 400
+
+
+def test_edit_page_routes_render(app_and_db):
+    """Both /edit/<id> and the parameter-less /edit render the editor."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.get_photos()[0]["id"]
+    assert client.get(f"/edit/{pid}").status_code == 200
+    assert client.get("/edit").status_code == 200
+
+
 def test_edit_preview_renders_uncommitted_recipe_without_storing(client_with_photo):
     import io
 

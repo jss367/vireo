@@ -56,6 +56,18 @@ body {
   text-align: right;
 }
 .editor-status.error { color: var(--danger); }
+.editor-navpos {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.editor-shell.editor-loading .editor-canvas-wrap,
+.editor-shell.editor-loading .editor-panel,
+.editor-shell.editor-loading .history-panel {
+  pointer-events: none;
+  opacity: 0.55;
+}
 .editor-btn {
   border: 1px solid var(--border-secondary);
   background: var(--bg-tertiary);
@@ -342,15 +354,19 @@ body {
   <section class="editor-stage">
     <div class="editor-topbar">
       <button class="editor-btn" type="button" onclick="goBackToBrowse()">Back</button>
+      <button class="editor-btn" id="prevBtn" type="button" onclick="editorNav(-1)" title="Previous photo (←)" hidden>‹ Prev</button>
+      <button class="editor-btn" id="nextBtn" type="button" onclick="editorNav(1)" title="Next photo (→)" hidden>Next ›</button>
+      <span class="editor-navpos" id="editorNavPos"></span>
       <div class="editor-title">
         <strong id="editorFilename">Loading photo...</strong>
         <span id="editorSubhead">Non-destructive editor</span>
       </div>
       <div class="editor-status" id="editorStatus"></div>
       <button class="editor-btn" id="beforeBtn" type="button" onclick="toggleBeforePreview()">Before</button>
-      <button class="editor-btn active" id="fitBtn" type="button" onclick="setZoomMode('fit')">Fit</button>
+      <button class="editor-btn" id="fitBtn" type="button" onclick="setZoomMode('fit')">Fit</button>
       <button class="editor-btn" id="actualBtn" type="button" onclick="setZoomMode('actual')">100%</button>
-      <button class="editor-btn" type="button" onclick="resetAllEdits()">Reset All</button>
+      <button class="editor-btn" id="copySettingsBtn" type="button" onclick="copyEditSettings()" title="Copy these edit settings to paste onto other photos">Copy Settings</button>
+      <button class="editor-btn" id="resetAllBtn" type="button" onclick="resetAllEdits()">Reset All</button>
       <button class="editor-btn primary" id="saveBtn" type="button" onclick="saveRecipe()" disabled>Save Changes</button>
     </div>
 
@@ -503,7 +519,28 @@ var editorState = {
   drag: null,
   showBefore: false,
   zoomMode: 'fit',
+  navIds: [],
+  loadSeq: 0,
+  loading: false,
 };
+
+function setEditorLoading(loading) {
+  // While a new photo is fetching, freeze the editing surface so a slider
+  // tweak or crop drag can't mutate state that ends up applied to (and saved
+  // onto) the photo currently loading. markChanged() and the crop pointerdown
+  // handler also gate on editorState.loading as belt-and-braces.
+  editorState.loading = !!loading;
+  var shell = document.querySelector('.editor-shell');
+  if (shell) shell.classList.toggle('editor-loading', !!loading);
+  var resetAll = document.getElementById('resetAllBtn');
+  if (resetAll) resetAll.disabled = !!loading;
+  var copyBtn = document.getElementById('copySettingsBtn');
+  if (copyBtn) copyBtn.disabled = !!loading;
+}
+
+function isEditorDirty() {
+  return recipeKey(editorState.recipe) !== recipeKey(editorState.savedRecipe);
+}
 
 function cloneRecipe(recipe) {
   if (!recipe || typeof recipe !== 'object') return {};
@@ -941,6 +978,7 @@ function renderCropBox() {
 }
 
 function markChanged(render) {
+  if (editorState.loading) return;
   var wasShowingBefore = editorState.showBefore;
   if (wasShowingBefore) editorState.showBefore = false;
   updateFeedbackControls();
@@ -1242,11 +1280,15 @@ function resetAllEdits() {
 
 async function saveRecipe(description) {
   if (!editorState.photoId) return;
+  // Capture the photo being saved so a Prev/Next during the PUT can't make us
+  // write the previous photo's returned recipe back into the editor state for
+  // a different photo (or refresh the cache under the wrong photoId).
+  var savedPhotoId = editorState.photoId;
   var btn = document.getElementById('saveBtn');
   btn.disabled = true;
   setStatus('Saving...');
   try {
-    var data = await safeFetch('/api/photos/' + editorState.photoId + '/edit-recipe', {
+    var data = await safeFetch('/api/photos/' + savedPhotoId + '/edit-recipe', {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
@@ -1254,25 +1296,40 @@ async function saveRecipe(description) {
         description: description || 'Updated photo edit recipe',
       }),
     }, {toast: false});
+    // Sync the shared edit-recipe cache against the photo we actually saved,
+    // regardless of where the editor is now.
+    if (typeof window.vireoRefreshEditRecipeCache === 'function') {
+      var updates = {};
+      updates[String(savedPhotoId)] = data.recipe || null;
+      window.vireoRefreshEditRecipeCache(updates);
+    }
+    if (typeof showToast === 'function') showToast('Edit saved', 'success');
+    // If the user navigated to a different photo while the PUT was in flight,
+    // the editor now owns that other photo's recipe / savedRecipe / Save
+    // button — don't overwrite it with the previous photo's saved data.
+    if (editorState.photoId !== savedPhotoId) return;
     editorState.savedRecipe = cloneRecipe(data.recipe || {});
     editorState.recipe = cloneRecipe(data.recipe || {});
     ensureCrop(editorState.recipe);
     syncControls();
     updatePreview();
     loadHistory();
-    if (typeof window.vireoRefreshEditRecipeCache === 'function') {
-      var updates = {};
-      updates[String(editorState.photoId)] = data.recipe || null;
-      window.vireoRefreshEditRecipeCache(updates);
-    }
-    if (typeof showToast === 'function') showToast('Edit saved', 'success');
   } catch (e) {
-    btn.disabled = false;
-    setStatus(e.message || 'Save failed', true);
+    // Only re-enable the Save button / surface the error if the editor is
+    // still on the photo we were saving; otherwise the new photo's controls
+    // own these surfaces.
+    if (editorState.photoId === savedPhotoId) {
+      btn.disabled = false;
+      setStatus(e.message || 'Save failed', true);
+    }
   }
 }
 
 async function restoreRecipe(recipe) {
+  // The history panel is also pointer-events: none while loading, but guard
+  // here too so a programmatic restore (or any escape from the CSS gate) can't
+  // copy a previous photo's checkpoint onto the photoId currently loading.
+  if (editorState.loading) return;
   editorState.recipe = cloneRecipe(recipe || {});
   ensureCrop(editorState.recipe);
   syncControls();
@@ -1321,11 +1378,16 @@ function historyRow(title, subtitle, recipe, current, disabled) {
   return row;
 }
 
-async function loadHistory() {
+async function loadHistory(photoId) {
+  // Rapid Next/Prev can leave multiple /edit-history requests in flight; bail
+  // out if the editor has moved on so an earlier response can't paint Restore
+  // rows pointing at another photo's recipes.
+  if (photoId == null) photoId = editorState.photoId;
   var list = document.getElementById('historyList');
   list.innerHTML = '<div class="history-empty">Loading history...</div>';
   try {
-    var data = await safeFetch('/api/photos/' + editorState.photoId + '/edit-history?limit=100', {}, {toast: false});
+    var data = await safeFetch('/api/photos/' + photoId + '/edit-history?limit=100', {}, {toast: false});
+    if (editorState.photoId !== photoId) return;
     list.innerHTML = '';
     var currentKey = recipeKey(editorState.savedRecipe);
     var visibleHistoryRows = 0;
@@ -1347,6 +1409,7 @@ async function loadHistory() {
       list.appendChild(empty);
     }
   } catch (e) {
+    if (editorState.photoId !== photoId) return;
     list.innerHTML = '<div class="history-empty">Could not load history.</div>';
   }
 }
@@ -1359,6 +1422,7 @@ function goBackToBrowse() {
 function initCropDrag() {
   var box = document.getElementById('editorCropBox');
   box.addEventListener('pointerdown', function(e) {
+    if (editorState.loading) return;
     var img = document.getElementById('editorImg');
     if (!img || !img.clientWidth || !img.clientHeight) return;
     var handle = e.target && e.target.dataset ? e.target.dataset.handle : '';
@@ -1410,32 +1474,133 @@ function initCropDrag() {
   });
 }
 
-async function initEditor() {
-  var match = window.location.pathname.match(/\/edit\/(\d+)/);
-  editorState.photoId = match ? Number(match[1]) : null;
-  if (!editorState.photoId) {
-    setStatus('Missing photo id', true);
+function updateNavControls() {
+  var ids = editorState.navIds || [];
+  var idx = ids.indexOf(Number(editorState.photoId));
+  var prev = document.getElementById('prevBtn');
+  var next = document.getElementById('nextBtn');
+  var pos = document.getElementById('editorNavPos');
+  var hasNav = ids.length > 1 && idx !== -1;
+  if (prev) { prev.hidden = !hasNav; prev.disabled = !hasNav || idx <= 0; }
+  if (next) { next.hidden = !hasNav; next.disabled = !hasNav || idx >= ids.length - 1; }
+  if (pos) pos.textContent = hasNav ? (idx + 1) + ' / ' + ids.length : '';
+}
+
+function editorNav(delta) {
+  var ids = editorState.navIds || [];
+  var idx = ids.indexOf(Number(editorState.photoId));
+  if (idx === -1) return;
+  var newIdx = idx + delta;
+  if (newIdx < 0 || newIdx >= ids.length) return;
+  if (isEditorDirty() && !window.confirm('Discard unsaved edits to this photo?')) return;
+  loadPhoto(ids[newIdx]);
+}
+
+function copyEditSettings() {
+  if (!editorState.photoId || !window.vireoEditNav) return;
+  var recipe = recipeForSave(editorState.recipe);
+  if (!recipe || Object.keys(recipe).length === 0) {
+    if (typeof showToast === 'function') showToast('No edits to copy', 'error');
+    else setStatus('No edits to copy', true);
     return;
   }
-  initCropDrag();
-  clearHistogramFeedback();
-  setZoomMode('fit');
+  window.vireoEditNav.setCopiedRecipe(recipe, {
+    source: (editorState.photo && editorState.photo.filename) || null,
+    at: Date.now(),
+  });
+  if (typeof showToast === 'function') showToast('Edit settings copied — paste onto a selection in Browse', 'success');
+  else setStatus('Settings copied');
+}
+
+function editorEmptyState() {
+  document.getElementById('editorFilename').textContent = 'No photo to edit';
+  document.getElementById('editorSubhead').textContent = 'Open a photo from Browse, then choose Edit.';
+  setStatus('');
+  var img = document.getElementById('editorImg');
+  if (img) img.removeAttribute('src');
+  var box = document.getElementById('editorCropBox');
+  if (box) box.style.display = 'none';
+  ['prevBtn', 'nextBtn', 'copySettingsBtn', 'beforeBtn', 'fitBtn', 'actualBtn', 'saveBtn'].forEach(function(id) {
+    var b = document.getElementById(id);
+    if (b) b.disabled = true;
+  });
+}
+
+async function loadPhoto(photoId, opts) {
+  opts = opts || {};
+  photoId = Number(photoId);
+  if (!Number.isFinite(photoId) || photoId <= 0) return;
+  // Rapid Next/Prev can leave multiple /api/photos/:id requests in flight; the
+  // seq lets a stale resolution bail out instead of overwriting newer state.
+  var seq = ++editorState.loadSeq;
+  editorState.photoId = photoId;
+  editorState.photo = null;
+  // Reset recipe state so a Save click during the load window can't write the
+  // previous (possibly dirty) photo's recipe onto the new photoId. syncControls
+  // re-runs updateDirtyState after the new photo loads, restoring Save state.
+  editorState.savedRecipe = {};
+  editorState.recipe = {};
+  var saveBtn = document.getElementById('saveBtn');
+  if (saveBtn) saveBtn.disabled = true;
+  editorState.showBefore = false;
+  if (window.vireoEditNav) window.vireoEditNav.setLastPhoto(photoId);
+  // Keep the URL in sync so refresh / bookmark / Back behave sensibly.
+  if (!opts.skipUrl) {
+    try { window.history.replaceState({photoId: photoId}, '', '/edit/' + photoId); } catch (_) {}
+  }
+  setStatus('Loading...');
+  document.getElementById('editorFilename').textContent = 'Loading photo...';
+  updateNavControls();
+  setEditorLoading(true);
   try {
-    var photo = await safeFetch('/api/photos/' + editorState.photoId, {}, {toast: false});
+    var photo = await safeFetch('/api/photos/' + photoId, {}, {toast: false});
+    if (seq !== editorState.loadSeq) return;
     editorState.photo = photo;
     editorState.savedRecipe = cloneRecipe(photo.edit_recipe || {});
     editorState.recipe = cloneRecipe(photo.edit_recipe || {});
     ensureCrop(editorState.recipe);
-    document.getElementById('editorFilename').textContent = photo.filename || ('Photo ' + editorState.photoId);
-    var dim = photo.width && photo.height ? photo.width + ' x ' + photo.height : 'Photo ' + editorState.photoId;
+    document.getElementById('editorFilename').textContent = photo.filename || ('Photo ' + photoId);
+    var dim = photo.width && photo.height ? photo.width + ' x ' + photo.height : 'Photo ' + photoId;
     document.getElementById('editorSubhead').textContent = dim;
+    updateFeedbackControls();
+    setEditorLoading(false);
     syncControls();
     updatePreview();
-    loadHistory();
+    loadHistory(photoId);
   } catch (e) {
+    if (seq !== editorState.loadSeq) return;
+    setEditorLoading(false);
     document.getElementById('editorFilename').textContent = 'Photo unavailable';
     setStatus(e.message || 'Could not load photo', true);
   }
+}
+
+function initEditorKeyboard() {
+  document.addEventListener('keydown', function(e) {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    var t = e.target;
+    var tag = t && t.tagName ? t.tagName.toLowerCase() : '';
+    if (tag === 'input' || tag === 'textarea' || tag === 'select' || (t && t.isContentEditable)) return;
+    if (e.key === 'ArrowLeft') { e.preventDefault(); editorNav(-1); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); editorNav(1); }
+  });
+}
+
+async function initEditor() {
+  initCropDrag();
+  initEditorKeyboard();
+  clearHistogramFeedback();
+  setZoomMode('fit');
+  if (window.vireoEditNav) editorState.navIds = window.vireoEditNav.getList() || [];
+  var match = window.location.pathname.match(/\/edit\/(\d+)/);
+  var photoId = match
+    ? Number(match[1])
+    : (window.vireoEditNav ? window.vireoEditNav.getLastPhoto() : null);
+  if (!photoId) {
+    editorEmptyState();
+    return;
+  }
+  await loadPhoto(photoId, {skipUrl: !!match});
 }
 
 document.addEventListener('DOMContentLoaded', initEditor);
