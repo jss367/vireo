@@ -4254,12 +4254,18 @@ async function pasteEditSettingsToSelection() {
       }),
     }, {toast: false});
     var count = data.count || 0;
+    var skipped = Array.isArray(data.skipped) ? data.skipped.length : 0;
     if (typeof window.vireoRefreshEditRecipeCache === 'function' && Array.isArray(data.applied)) {
       var updates = {};
       data.applied.forEach(function(pid) { updates[String(pid)] = data.recipe || copied.recipe; });
       window.vireoRefreshEditRecipeCache(updates);
     }
-    showToast('Pasted edit settings to ' + count.toLocaleString() + ' photo' + (count === 1 ? '' : 's'), 'success');
+    var appliedMsg = 'Pasted edit settings to ' + count.toLocaleString() + ' photo' + (count === 1 ? '' : 's');
+    if (skipped > 0) {
+      showToast(appliedMsg + '; skipped ' + skipped.toLocaleString() + '.', 'warning');
+    } else {
+      showToast(appliedMsg, 'success');
+    }
   } catch (e) {
     showToast(e.message || 'Could not paste edit settings', 'error');
   } finally {

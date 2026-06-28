@@ -4004,13 +4004,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         seen = set()
         ids = []
         for pid in raw_ids:
-            try:
-                n = int(pid)
-            except (TypeError, ValueError):
+            if isinstance(pid, bool) or not isinstance(pid, int):
                 return json_error("photo_ids must be integers")
-            if n not in seen:
-                seen.add(n)
-                ids.append(n)
+            if pid not in seen:
+                seen.add(pid)
+                ids.append(pid)
 
         from image_edits import RecipeError, recipe_to_json
 
