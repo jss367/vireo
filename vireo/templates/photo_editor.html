@@ -1183,12 +1183,20 @@ async function autoTone() {
     // stripped recipe is empty, so RAW primaries decode with highlight
     // preservation instead of returning clipped legacy JPEG working-copy
     // pixels that would skew the exposure/highlight heuristics.
+    // Snapshot the recipe at start: if the user changes crop, geometry, or
+    // sliders while the render is in flight, the analysis is stale — we
+    // built the URL and the sample crop from the old recipe, so applying
+    // the result would overwrite newer edits or compute from mismatched
+    // geometry.
+    var startKey = recipeKey(editorState.recipe);
+    var sampleCrop = cloneRecipe({crop: ensureCrop(editorState.recipe)}).crop;
     var base = previewRecipeFor(editorState.recipe);
     delete base.adjustments;
     var src = '/photos/' + editorState.photoId + '/edit-preview?size=1024&analysis=1&recipe=' +
       encodeURIComponent(JSON.stringify(base));
     var img = await _loadImage(src);
-    var stats = _lumaStats(img, ensureCrop(editorState.recipe));
+    if (recipeKey(editorState.recipe) !== startKey) return;
+    var stats = _lumaStats(img, sampleCrop);
     if (!stats) throw new Error('no canvas context');
     var auto = computeAutoTone(stats);
 
