@@ -511,6 +511,7 @@ var editorState = {
   showBefore: false,
   zoomMode: 'fit',
   navIds: [],
+  loadSeq: 0,
 };
 
 function isEditorDirty() {
@@ -1268,7 +1269,11 @@ async function loadPhoto(photoId, opts) {
   opts = opts || {};
   photoId = Number(photoId);
   if (!Number.isFinite(photoId) || photoId <= 0) return;
+  // Rapid Next/Prev can leave multiple /api/photos/:id requests in flight; the
+  // seq lets a stale resolution bail out instead of overwriting newer state.
+  var seq = ++editorState.loadSeq;
   editorState.photoId = photoId;
+  editorState.photo = null;
   editorState.showBefore = false;
   if (window.vireoEditNav) window.vireoEditNav.setLastPhoto(photoId);
   // Keep the URL in sync so refresh / bookmark / Back behave sensibly.
@@ -1280,6 +1285,7 @@ async function loadPhoto(photoId, opts) {
   updateNavControls();
   try {
     var photo = await safeFetch('/api/photos/' + photoId, {}, {toast: false});
+    if (seq !== editorState.loadSeq) return;
     editorState.photo = photo;
     editorState.savedRecipe = cloneRecipe(photo.edit_recipe || {});
     editorState.recipe = cloneRecipe(photo.edit_recipe || {});
@@ -1292,6 +1298,7 @@ async function loadPhoto(photoId, opts) {
     updatePreview();
     loadHistory();
   } catch (e) {
+    if (seq !== editorState.loadSeq) return;
     document.getElementById('editorFilename').textContent = 'Photo unavailable';
     setStatus(e.message || 'Could not load photo', true);
   }
