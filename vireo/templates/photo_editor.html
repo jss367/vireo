@@ -1124,11 +1124,16 @@ function historyRow(title, subtitle, recipe, current, disabled) {
   return row;
 }
 
-async function loadHistory() {
+async function loadHistory(photoId) {
+  // Rapid Next/Prev can leave multiple /edit-history requests in flight; bail
+  // out if the editor has moved on so an earlier response can't paint Restore
+  // rows pointing at another photo's recipes.
+  if (photoId == null) photoId = editorState.photoId;
   var list = document.getElementById('historyList');
   list.innerHTML = '<div class="history-empty">Loading history...</div>';
   try {
-    var data = await safeFetch('/api/photos/' + editorState.photoId + '/edit-history?limit=100', {}, {toast: false});
+    var data = await safeFetch('/api/photos/' + photoId + '/edit-history?limit=100', {}, {toast: false});
+    if (editorState.photoId !== photoId) return;
     list.innerHTML = '';
     var currentKey = recipeKey(editorState.savedRecipe);
     var visibleHistoryRows = 0;
@@ -1150,6 +1155,7 @@ async function loadHistory() {
       list.appendChild(empty);
     }
   } catch (e) {
+    if (editorState.photoId !== photoId) return;
     list.innerHTML = '<div class="history-empty">Could not load history.</div>';
   }
 }
@@ -1274,6 +1280,13 @@ async function loadPhoto(photoId, opts) {
   var seq = ++editorState.loadSeq;
   editorState.photoId = photoId;
   editorState.photo = null;
+  // Reset recipe state so a Save click during the load window can't write the
+  // previous (possibly dirty) photo's recipe onto the new photoId. syncControls
+  // re-runs updateDirtyState after the new photo loads, restoring Save state.
+  editorState.savedRecipe = {};
+  editorState.recipe = {};
+  var saveBtn = document.getElementById('saveBtn');
+  if (saveBtn) saveBtn.disabled = true;
   editorState.showBefore = false;
   if (window.vireoEditNav) window.vireoEditNav.setLastPhoto(photoId);
   // Keep the URL in sync so refresh / bookmark / Back behave sensibly.
@@ -1296,7 +1309,7 @@ async function loadPhoto(photoId, opts) {
     updateFeedbackControls();
     syncControls();
     updatePreview();
-    loadHistory();
+    loadHistory(photoId);
   } catch (e) {
     if (seq !== editorState.loadSeq) return;
     document.getElementById('editorFilename').textContent = 'Photo unavailable';
