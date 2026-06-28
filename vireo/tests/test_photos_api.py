@@ -1517,6 +1517,59 @@ def test_edit_preview_skips_recent_failed_raw_before_decode(
     assert called["load"] is False
 
 
+def test_edit_preview_analysis_keeps_raw_on_recipe_render_path(
+    client_with_photo, monkeypatch,
+):
+    """``analysis=1`` must not let an empty recipe drop a RAW primary onto
+    its legacy JPEG working copy. Auto Tone strips tonal adjustments to
+    read neutral pixels; for a RAW with no other geometry the resulting
+    recipe is empty, which would normally short-circuit
+    ``_recipe_render_source`` to the canonical working copy and produce
+    clipped pixels for the highlight/exposure heuristics.
+    """
+    import app as app_module
+
+    app, db, photo_id = client_with_photo
+    db.conn.execute(
+        "UPDATE photos SET filename='neutral.NEF', extension='.nef' WHERE id=?",
+        (photo_id,),
+    )
+    db.conn.commit()
+
+    seen_recipes = []
+    real_render_source = app_module._recipe_render_source
+
+    def spy_render_source(photo, recipe, max_size, vireo_dir, folders):
+        seen_recipes.append(recipe)
+        return real_render_source(photo, recipe, max_size, vireo_dir, folders)
+
+    monkeypatch.setattr(app_module, "_recipe_render_source", spy_render_source)
+
+    client = app.test_client()
+    client.get(
+        f"/photos/{photo_id}/edit-preview",
+        query_string={"size": "1024", "recipe": "{}"},
+    )
+    client.get(
+        f"/photos/{photo_id}/edit-preview",
+        query_string={"size": "1024", "recipe": "{}", "analysis": "1"},
+    )
+    client.get(
+        f"/photos/{photo_id}/edit-preview",
+        query_string={
+            "size": "1024",
+            "recipe": '{"rotation":90}',
+            "analysis": "1",
+        },
+    )
+
+    assert seen_recipes == [
+        {},
+        {"version": 1},
+        {"version": 1, "rotation": 90},
+    ]
+
+
 def test_non_crop_preview_loads_with_requested_size(client_with_photo, monkeypatch):
     import image_loader
 

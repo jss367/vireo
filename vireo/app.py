@@ -18249,6 +18249,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         try:
             from image_edits import (
+                SCHEMA_VERSION,
                 RecipeError,
                 apply_recipe_to_loaded_image,
                 normalize_recipe,
@@ -18273,8 +18274,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # photo with a legacy JPEG working copy must use the RAW source
             # here too, so the in-progress edit preview matches the saved
             # preview/export bytes from the highlight-preserving decode.
+            # Auto Tone strips tonal adjustments to sample neutral pixels;
+            # for a RAW primary that can leave recipe empty, which would
+            # normally short-circuit _recipe_render_source to the canonical
+            # working copy. Pass a sentinel non-empty recipe in that case so
+            # the same RAW-primary gating applies and analysis reads the
+            # highlight-preserved RAW decode rather than clipped legacy
+            # working-copy bytes.
+            source_recipe = recipe
+            if request.args.get("analysis") == "1" and not recipe:
+                source_recipe = {"version": SCHEMA_VERSION}
             canonical, using_working_copy = _recipe_render_source(
-                photo, recipe, size, vireo_dir,
+                photo, source_recipe, size, vireo_dir,
                 {folder_row["id"]: folder_row["path"]},
             )
             selected_ext = os.path.splitext(canonical)[1].lower()
