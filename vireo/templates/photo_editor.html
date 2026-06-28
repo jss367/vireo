@@ -62,6 +62,11 @@ body {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+.editor-shell.editor-loading .editor-canvas-wrap,
+.editor-shell.editor-loading .editor-panel {
+  pointer-events: none;
+  opacity: 0.55;
+}
 .editor-btn {
   border: 1px solid var(--border-secondary);
   background: var(--bg-tertiary);
@@ -360,7 +365,7 @@ body {
       <button class="editor-btn" id="fitBtn" type="button" onclick="setZoomMode('fit')">Fit</button>
       <button class="editor-btn" id="actualBtn" type="button" onclick="setZoomMode('actual')">100%</button>
       <button class="editor-btn" id="copySettingsBtn" type="button" onclick="copyEditSettings()" title="Copy these edit settings to paste onto other photos">Copy Settings</button>
-      <button class="editor-btn" type="button" onclick="resetAllEdits()">Reset All</button>
+      <button class="editor-btn" id="resetAllBtn" type="button" onclick="resetAllEdits()">Reset All</button>
       <button class="editor-btn primary" id="saveBtn" type="button" onclick="saveRecipe()" disabled>Save Changes</button>
     </div>
 
@@ -512,7 +517,22 @@ var editorState = {
   zoomMode: 'fit',
   navIds: [],
   loadSeq: 0,
+  loading: false,
 };
+
+function setEditorLoading(loading) {
+  // While a new photo is fetching, freeze the editing surface so a slider
+  // tweak or crop drag can't mutate state that ends up applied to (and saved
+  // onto) the photo currently loading. markChanged() and the crop pointerdown
+  // handler also gate on editorState.loading as belt-and-braces.
+  editorState.loading = !!loading;
+  var shell = document.querySelector('.editor-shell');
+  if (shell) shell.classList.toggle('editor-loading', !!loading);
+  var resetAll = document.getElementById('resetAllBtn');
+  if (resetAll) resetAll.disabled = !!loading;
+  var copyBtn = document.getElementById('copySettingsBtn');
+  if (copyBtn) copyBtn.disabled = !!loading;
+}
 
 function isEditorDirty() {
   return recipeKey(editorState.recipe) !== recipeKey(editorState.savedRecipe);
@@ -954,6 +974,7 @@ function renderCropBox() {
 }
 
 function markChanged(render) {
+  if (editorState.loading) return;
   var wasShowingBefore = editorState.showBefore;
   if (wasShowingBefore) editorState.showBefore = false;
   updateFeedbackControls();
@@ -1183,6 +1204,7 @@ function goBackToBrowse() {
 function initCropDrag() {
   var box = document.getElementById('editorCropBox');
   box.addEventListener('pointerdown', function(e) {
+    if (editorState.loading) return;
     var img = document.getElementById('editorImg');
     if (!img || !img.clientWidth || !img.clientHeight) return;
     var handle = e.target && e.target.dataset ? e.target.dataset.handle : '';
@@ -1311,6 +1333,7 @@ async function loadPhoto(photoId, opts) {
   setStatus('Loading...');
   document.getElementById('editorFilename').textContent = 'Loading photo...';
   updateNavControls();
+  setEditorLoading(true);
   try {
     var photo = await safeFetch('/api/photos/' + photoId, {}, {toast: false});
     if (seq !== editorState.loadSeq) return;
@@ -1322,11 +1345,13 @@ async function loadPhoto(photoId, opts) {
     var dim = photo.width && photo.height ? photo.width + ' x ' + photo.height : 'Photo ' + photoId;
     document.getElementById('editorSubhead').textContent = dim;
     updateFeedbackControls();
+    setEditorLoading(false);
     syncControls();
     updatePreview();
     loadHistory(photoId);
   } catch (e) {
     if (seq !== editorState.loadSeq) return;
+    setEditorLoading(false);
     document.getElementById('editorFilename').textContent = 'Photo unavailable';
     setStatus(e.message || 'Could not load photo', true);
   }
