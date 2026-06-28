@@ -1179,9 +1179,13 @@ async function autoTone() {
   try {
     // Analyse the photo with current geometry but NO tonal/colour edits, so
     // Auto Tone reads the original pixels and is idempotent across clicks.
+    // ?analysis=1 keeps the server on the recipe-render path even when the
+    // stripped recipe is empty, so RAW primaries decode with highlight
+    // preservation instead of returning clipped legacy JPEG working-copy
+    // pixels that would skew the exposure/highlight heuristics.
     var base = previewRecipeFor(editorState.recipe);
     delete base.adjustments;
-    var src = '/photos/' + editorState.photoId + '/edit-preview?size=1024&recipe=' +
+    var src = '/photos/' + editorState.photoId + '/edit-preview?size=1024&analysis=1&recipe=' +
       encodeURIComponent(JSON.stringify(base));
     var img = await _loadImage(src);
     var stats = _lumaStats(img, ensureCrop(editorState.recipe));
