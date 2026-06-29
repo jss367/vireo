@@ -3419,6 +3419,50 @@ def test_scan_promotes_top_level_target_to_workspace_root(tmp_path):
     assert root_paths == [root]
 
 
+def test_restricted_scan_roots_subfolders_not_destination_base(tmp_path):
+    """A templated import scans the destination *base* but only ingests the
+    leaf subfolders it wrote into (passed as restrict_dirs). Those leaves —
+    not the base — must become the workspace roots, so the new-images walk
+    doesn't later treat un-imported siblings under the base as "new".
+
+    Regression: importing into ``/Volumes/.../USA`` (a whole archive root)
+    promoted ``USA`` to a workspace root, and the new-images detector then
+    walked every un-imported shoot in the archive.
+    """
+    from db import Database
+    from scanner import scan
+
+    base = str(tmp_path / "USA")
+    _create_test_images(base, {
+        "2026-06-22": ["a.jpg", "b.jpg"],   # the import
+        "2026-01-01": ["old.jpg"],          # a pre-existing sibling, NOT imported
+    })
+    imported = os.path.join(base, "2026-06-22")
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id
+
+    scan(base, db, restrict_dirs=[imported])
+
+    root_paths = [f["path"] for f in db.get_workspace_folder_roots(ws_id)]
+    linked_paths = {f["path"] for f in db.get_workspace_folders(ws_id)}
+    # The imported leaf is the user-facing root; the archive base is linked
+    # (for the folder hierarchy) but is NOT a root.
+    assert root_paths == [imported]
+    assert base in linked_paths
+    # Ingestion stayed scoped to the restricted dir — the sibling shoot's
+    # files were never pulled in.
+    photo_paths = {
+        os.path.join(r["folder_path"], r["filename"])
+        for r in db.conn.execute(
+            "SELECT f.path AS folder_path, p.filename "
+            "FROM photos p JOIN folders f ON f.id = p.folder_id"
+        ).fetchall()
+    }
+    assert os.path.join(imported, "a.jpg") in photo_paths
+    assert os.path.join(base, "2026-01-01", "old.jpg") not in photo_paths
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions required")
 def test_scan_surfaces_permission_denied_subdirs(tmp_path):
     """A subdir the kernel won't let us enter must surface as a denied path,
