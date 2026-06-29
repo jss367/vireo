@@ -233,6 +233,51 @@ def test_mapped_roots_excludes_folder_with_any_linked_ancestor(db_with_workspace
     )
 
 
+def test_import_into_archive_base_does_not_surface_siblings_as_new(db_with_workspace):
+    """End-to-end regression for the archive-base over-scope bug.
+
+    Importing into a destination base that already holds a large archive
+    (``USA/`` with many shoot folders) used to promote ``USA`` to a workspace
+    root, so the new-images detector walked every un-imported shoot under it
+    and reported the whole archive as "new". After scoping roots to the
+    imported leaf folders, only genuinely-new files inside those leaves count.
+    """
+    from new_images import count_new_images_for_workspace
+    from scanner import scan
+
+    db, ws_id, tmp_path = db_with_workspace
+    base = tmp_path / "USA"
+    imported = base / "2026-06-22"
+    sibling = base / "2026-01-01"          # pre-existing, never imported
+    _touch_image(str(imported / "IMG_0001.JPG"))
+    _touch_image(str(imported / "IMG_0002.JPG"))
+    _touch_image(str(sibling / "OLD_0001.JPG"))
+
+    # Mirror a templated copy-import: scan the base but restrict ingestion to
+    # the one subfolder the import wrote into.
+    scan(str(base), db, restrict_dirs=[str(imported)])
+
+    # Nothing on disk is unaccounted for within the imported root.
+    result = count_new_images_for_workspace(db, ws_id)
+    assert result["new_count"] == 0, (
+        f"The un-imported sibling shoot must NOT be surfaced as new; "
+        f"got {result['new_count']}. per_root={result['per_root']}"
+    )
+    assert [r["path"] for r in result["per_root"]] == [str(imported)], (
+        f"Only the imported leaf should be walked; per_root={result['per_root']}"
+    )
+
+    # A genuinely new file dropped into the imported root is still detected,
+    # while a new file in the un-imported sibling is correctly ignored.
+    _touch_image(str(imported / "IMG_0003.JPG"))
+    _touch_image(str(sibling / "OLD_0002.JPG"))
+    result2 = count_new_images_for_workspace(db, ws_id)
+    assert result2["new_count"] == 1, (
+        f"Only the new file inside the imported root should count; "
+        f"got {result2['new_count']}. per_root={result2['per_root']}"
+    )
+
+
 def test_progress_callback_fires_during_walk_and_on_completion(db_with_workspace):
     """count_new_images_for_workspace must invoke an optional progress_callback
     while walking and once at the end, so the new-images job entry can stream

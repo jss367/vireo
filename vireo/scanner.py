@@ -1339,6 +1339,23 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     # Build folder cache: path -> folder_id
     folder_cache = {}
 
+    # When the scan is restricted to specific subfolders, those subfolders —
+    # not the broad scan root — are the user-facing workspace roots. A
+    # templated copy-import lands files in ``<destination>/<template>/...``
+    # dirs and passes those leaf dirs as ``restrict_dirs`` while keeping the
+    # destination base as ``root`` only for parent-chain creation. Promoting
+    # the base to a workspace root would make the new-images walk treat every
+    # un-imported sibling under it as "new" (e.g. a whole archive of past
+    # shoots sharing the destination). Mark the restricted dirs as roots
+    # instead; the base stays linked but is_root=0. See
+    # ``new_images.mapped_roots``. ``effective_restrict_dirs`` (bundle-filtered)
+    # is the set actually enumerated, so root marking matches what was scanned.
+    _restrict_root_paths = None
+    if restrict_dirs is not None:
+        _restrict_root_paths = {
+            os.path.normpath(str(d)) for d in effective_restrict_dirs
+        }
+
     def _ensure_folder(folder_path):
         """Ensure a folder and all its parents exist in the DB. Returns folder_id."""
         folder_str = str(folder_path)
@@ -1349,11 +1366,16 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         if folder_path != root_path:
             parent_id = _ensure_folder(folder_path.parent)
 
+        if _restrict_root_paths is not None:
+            is_ws_root = os.path.normpath(folder_str) in _restrict_root_paths
+        else:
+            is_ws_root = (folder_path == root_path)
+
         folder_id = db.add_folder(
             path=folder_str,
             name=folder_path.name,
             parent_id=parent_id,
-            workspace_root=(folder_path == root_path),
+            workspace_root=is_ws_root,
         )
         folder_cache[folder_str] = folder_id
         return folder_id
