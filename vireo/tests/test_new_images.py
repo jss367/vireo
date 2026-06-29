@@ -242,8 +242,8 @@ def test_import_into_archive_base_does_not_surface_siblings_as_new(db_with_works
     and reported the whole archive as "new". After scoping roots to the
     imported leaf folders, only genuinely-new files inside those leaves count.
     """
-    from scanner import scan
     from new_images import count_new_images_for_workspace
+    from scanner import scan
 
     db, ws_id, tmp_path = db_with_workspace
     base = tmp_path / "USA"
