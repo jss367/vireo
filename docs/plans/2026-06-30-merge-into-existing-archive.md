@@ -404,8 +404,9 @@ merge = move_result.get("merge")
 if merge:
     base = move_result.get("merged_into_existing", final_destination)
     summary = (
-        f"{merge['merged_new']} photos archived into existing archive "
-        f"{base} ({merge['merged_into_existing_folders']} folders merged, "
+        f"{merge['new_photos']} new photos archived into existing archive "
+        f"{base} ({merge['new_folders']} new folders, "
+        f"{merge['merged_folders']} merged into existing, "
         f"{merge['already_present']} already present)"
     )
 else:

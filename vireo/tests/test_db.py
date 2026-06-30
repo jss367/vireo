@@ -7418,6 +7418,70 @@ def test_merge_staged_tree_new_subfolders(db):
     assert row is not None and row["is_root"] == 0
 
 
+def test_merge_staged_tree_existing_folder_and_collision(db):
+    """Staged folder folds into a pre-existing target date-folder: a
+    same-filename staged photo (even one carrying keyword links) is dropped as
+    already-archived, a genuinely-new one is reparented, and the counts use the
+    settled photo-count names. Regression guard for the photo_keywords FK that
+    has no ON DELETE CASCADE — deleting the collided photo without first
+    clearing its keyword rows would raise FOREIGN KEY constraint failed."""
+    ws = db._active_workspace_id
+
+    base_id = db.add_folder("/arch/USA", name="USA")
+    year_id = db.add_folder("/arch/USA/2026", name="2026", parent_id=base_id)
+    date_id = db.add_folder("/arch/USA/2026/2026-06-30", name="2026-06-30",
+                            parent_id=year_id)
+    db.add_photo(folder_id=date_id, filename="dup.raf", extension=".raf",
+                 file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=date_id, filename="keep.raf", extension=".raf",
+                 file_size=100, file_mtime=1.0)
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    # Staged tree post-rsync. The intermediate year folder is a real row so the
+    # reparent chain is exercised; the leaf already exists at the target.
+    stage_root = db.add_folder("/stage/USA", name="USA", workspace_root=False)
+    stage_year = db.add_folder("/stage/USA/2026", name="2026",
+                               parent_id=stage_root, workspace_root=False)
+    stage_leaf = db.add_folder("/stage/USA/2026/2026-06-30", name="2026-06-30",
+                               parent_id=stage_year, workspace_root=False)
+    dup_pid = db.add_photo(folder_id=stage_leaf, filename="dup.raf",
+                           extension=".raf", file_size=200, file_mtime=2.0)
+    db.add_photo(folder_id=stage_leaf, filename="fresh.raf", extension=".raf",
+                 file_size=200, file_mtime=2.0)
+
+    # Attach a keyword to the COLLIDED staged photo so the delete must clear
+    # photo_keywords first; without the fix this raises a FK error.
+    kw = db.add_keyword("Osprey")
+    db.tag_photo(dup_pid, kw)
+
+    counts = db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
+
+    # No duplicate dup.raf row; fresh.raf reparented into the existing folder.
+    names = {r["filename"] for r in db.conn.execute(
+        "SELECT filename FROM photos WHERE folder_id = ?", (date_id,))}
+    assert names == {"dup.raf", "keep.raf", "fresh.raf"}
+    assert db.conn.execute(
+        "SELECT COUNT(*) c FROM photos WHERE filename='dup.raf'"
+    ).fetchone()["c"] == 1
+    # The dropped staged photo's keyword links are gone too.
+    assert db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ?", (dup_pid,)
+    ).fetchone() is None
+
+    # Settled count names with correct values: 1 new photo (fresh.raf), no new
+    # folders (every staged folder mapped to an existing target — root, year,
+    # and leaf all pre-exist under /arch/USA), 3 merged folders, 1 dropped.
+    assert counts["new_photos"] == 1
+    assert counts["new_folders"] == 0
+    assert counts["merged_folders"] == 3
+    assert counts["already_present"] == 1
+
+    # All staged rows folded away.
+    assert db.conn.execute(
+        "SELECT 1 FROM folders WHERE path LIKE '/stage/%'"
+    ).fetchone() is None
+
+
 def test_folder_under_rule_excludes_siblings_and_escapes_wildcards(tmp_path, monkeypatch):
     """'folder under /photos/2023' must match that folder and its
     descendants only — not the sibling /photos/2023-trip — and a _ in the

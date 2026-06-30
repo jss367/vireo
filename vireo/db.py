@@ -2733,22 +2733,32 @@ class Database:
         * Target has no folder row -> repoint the staged row to the target path,
           fix its ``parent_id`` to the (now-existing) target-parent folder, and
           link it to the active workspace as a non-root (the existing archive
-          base is the workspace root).
+          base is the workspace root). Every staged photo in that folder is a
+          newly-archived photo.
         * Target already has a folder row -> move the staged folder's photos
           into it (dropping any whose filename already exists there as an
           identical archived file), then delete the now-empty staged folder row.
+          Each moved (not dropped) photo is a newly-archived photo.
 
-        Returns a counts dict: ``merged_new`` (folders repointed to new target
-        paths), ``merged_into_existing_folders`` (staged folders folded into an
-        existing target folder), and ``already_present`` (staged photos dropped
-        because the target folder already held that filename).
+        Returns a counts dict (all defined as the user-facing summary reads
+        them):
+
+        * ``new_photos`` — total staged photos newly placed into the archive,
+          counting BOTH photos reparented into brand-new folders AND photos
+          moved into a pre-existing target folder. This is the headline number.
+        * ``new_folders`` — folders created under the archive (the staged folder
+          had no pre-existing target row).
+        * ``merged_folders`` — staged folders folded into a pre-existing target
+          folder.
+        * ``already_present`` — identical-filename staged photos dropped because
+          the target folder already held that filename.
         """
         staged_root = self.conn.execute(
             "SELECT path FROM folders WHERE id = ?", (staged_root_id,)
         ).fetchone()
         if not staged_root:
-            return {"merged_new": 0, "merged_into_existing_folders": 0,
-                    "already_present": 0}
+            return {"new_photos": 0, "new_folders": 0,
+                    "merged_folders": 0, "already_present": 0}
         staged_root_path = staged_root["path"]
         ws = self._ws_id()
 
@@ -2762,13 +2772,17 @@ class Database:
             (staged_root_path, len(prefix), prefix),
         ).fetchall()
 
-        counts = {"merged_new": 0, "merged_into_existing_folders": 0,
-                  "already_present": 0}
+        counts = {"new_photos": 0, "new_folders": 0,
+                  "merged_folders": 0, "already_present": 0}
         # Staged folders that fold into an existing target row are deleted only
         # after every staged folder has been processed. Deleting eagerly would
         # hit a FK violation when a not-yet-reparented staged child still points
         # at the staged parent we are removing.
         to_delete = []
+        # Map of target-path -> folder id for folders already processed in this
+        # run, so a child can fall back to its parent's id (Fix I2) even if the
+        # parent's row isn't yet findable by path lookup.
+        last_target_parent = {}
 
         for sf in staged_folders:
             rel = _subtree_relative(sf["path"], staged_root_path)
@@ -2782,6 +2796,29 @@ class Database:
             ).fetchone()
             parent_id = parent_row["id"] if parent_row else None
 
+            # Defensive: a non-root staged folder whose target-parent row is
+            # missing would silently get parent_id=NULL, breaking the chain.
+            # The scanner normally materializes every intermediate, so this is
+            # an unenforced invariant — log it, and fall back to the last
+            # processed target-parent id when we have one.
+            if (parent_id is None
+                    and target_path != archive_path
+                    and parent_path and parent_path != target_path):
+                fallback = last_target_parent.get(parent_path)
+                if fallback is not None:
+                    log.warning(
+                        "merge_staged_tree_into_archive: no folder row for "
+                        "target parent %r of %r; falling back to id %s",
+                        parent_path, target_path, fallback,
+                    )
+                    parent_id = fallback
+                else:
+                    log.warning(
+                        "merge_staged_tree_into_archive: no folder row for "
+                        "target parent %r of %r; leaving parent_id NULL",
+                        parent_path, target_path,
+                    )
+
             if target is None:
                 # New folder under the archive: repoint + reparent + link.
                 self.conn.execute(
@@ -2789,7 +2826,16 @@ class Database:
                     (target_path, parent_id, sf["id"]),
                 )
                 self.add_workspace_folder(ws, sf["id"], is_root=False)
-                counts["merged_new"] += 1
+                # Every staged photo in a brand-new folder is newly archived.
+                new_count = self.conn.execute(
+                    "SELECT COUNT(*) c FROM photos WHERE folder_id = ?",
+                    (sf["id"],),
+                ).fetchone()["c"]
+                counts["new_photos"] += new_count
+                counts["new_folders"] += 1
+                # Record this folder's id so a child whose path-parent is this
+                # folder can resolve its parent even before counts re-query.
+                last_target_parent[target_path] = sf["id"]
             else:
                 # Existing folder: move photos in, drop filename-collisions.
                 photo_ids = [r["id"] for r in self.conn.execute(
@@ -2800,6 +2846,12 @@ class Database:
                                   photo_ids, target["id"])}
                 for pid in photo_ids:
                     if pid in collisions:
+                        # photo_keywords.photo_id has no ON DELETE CASCADE
+                        # (unlike every other photo_id FK), so clear keyword
+                        # links before deleting the photo or the FK fires.
+                        self.conn.execute(
+                            "DELETE FROM photo_keywords WHERE photo_id = ?",
+                            (pid,))
                         self.conn.execute(
                             "DELETE FROM photos WHERE id = ?", (pid,))
                         counts["already_present"] += 1
@@ -2808,8 +2860,12 @@ class Database:
                             "UPDATE photos SET folder_id = ? WHERE id = ?",
                             (target["id"], pid),
                         )
+                        # A photo moved into a pre-existing archive folder is
+                        # still a newly-archived photo from the user's view.
+                        counts["new_photos"] += 1
                 to_delete.append(sf["id"])
-                counts["merged_into_existing_folders"] += 1
+                counts["merged_folders"] += 1
+                last_target_parent[target_path] = target["id"]
 
         # Delete deepest-first: ``staged_folders`` (hence ``to_delete``) is
         # shallowest-first, so reverse to remove children before parents and

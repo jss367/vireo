@@ -123,12 +123,22 @@ subordinate to the explicit, stronger "managed archive" callout.
 
 ## §4 — Final summary
 
-`move_folder`'s result gains counts: `merged_new` (staged photos reparented),
-`merged_into_existing_folders` (date-folders folded into pre-existing ones vs.
-created fresh), `already_present` (identical-path staged rows dropped). The
-pipeline archive summary becomes e.g. *"412 photos archived into existing
-archive /Volumes/.../USA — 412 new across 3 folders (2 new, 1 merged into
-existing), 0 already present."* A brand-new destination keeps today's wording.
+`move_folder`'s result gains counts (all defined as the user-facing summary
+reads them — a photo count is a photo count):
+- `new_photos` — total staged photos newly placed into the archive, counting
+  BOTH photos reparented into brand-new folders AND photos moved into a
+  pre-existing target folder. The headline number.
+- `new_folders` — folders created under the archive (no pre-existing target).
+- `merged_folders` — staged folders folded into a pre-existing target folder.
+- `already_present` — identical-filename staged photos dropped because the
+  target folder already held that filename.
+
+The pipeline archive summary becomes e.g. *"412 new photos archived into
+existing archive /Volumes/.../USA (2 new folders, 1 merged into existing, 0
+already present)"* — i.e.
+`"{new_photos} new photos archived into existing archive {base} ({new_folders}
+new folders, {merged_folders} merged into existing, {already_present} already
+present)"`. A brand-new destination keeps today's wording.
 
 ## §5 — Testing (TDD, written first)
 
