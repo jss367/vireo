@@ -159,7 +159,7 @@ def test_pipeline_import_plan_waits_for_folder_preview_scope(live_server, page):
     folder_preview_route = []
     page.route("**/api/import/folder-preview", lambda route: folder_preview_route.append(route))
     page.fill("#cfgSourceInput", "/Volumes/Photography/Raw Files/USA/2026/2026-05-30")
-    page.locator("#card-source button", has_text="Add").click()
+    page.press("#cfgSourceInput", "Enter")
     stale_plan_route[0].fulfill(
         status=200,
         content_type="application/json",
