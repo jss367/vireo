@@ -1583,8 +1583,11 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             # destination. The staged tree lands at its own resolved
             # catalog_path (inside the tracked ancestor); the reconciliation
             # rebases staged rows onto that path and leaves the ancestor's own
-            # rows untouched.
-            merge_into_tracked = catalog_path if remote else transfer_dest
+            # rows untouched. The reconciliation still uses ``catalog_path`` as
+            # the rebase target (below), but the user-facing "existing archive"
+            # base we report is the managed-archive root (``ancestor["path"]``),
+            # not the staged landing path inside it.
+            merge_into_tracked = ancestor["path"]
 
     if remote:
         probe = _remote_dir_exists(remote, transfer_dest)
@@ -1890,6 +1893,10 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     if merge_into_tracked is not None:
         result["merge"] = merge_counts
         result["merged_into_existing"] = merge_into_tracked
+        # On the merge path ``total_photos`` counts every staged source photo,
+        # including identical ones that were dropped as ``already_present``.
+        # Report ``moved`` as the photos actually added to the archive.
+        result["moved"] = merge_counts["new_photos"]
     if cleanup_error is not None:
         result["cleanup_error"] = cleanup_error
     return result

@@ -1021,11 +1021,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             storage_plan,
                             total_file_bytes,
                         )
-                        from move import (
-                            _tracked_destination_ancestor,
-                            _tracked_destination_overlap,
-                        )
-
                         stages["storage"]["status"] = "running"
                         runner.update_step(job["id"], "storage", status="running")
                         _update_stages(runner, job["id"], stages)
@@ -1052,49 +1047,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             scan_to_thumb.put(_SENTINEL)
 
                         try:
-                            # Reject up front if the archive destination is already
-                            # a Vireo-managed folder (e.g., a repeat import to the
-                            # same archive root). Without this check the pipeline
-                            # would stage everything, complete every processing
-                            # step, and then fail in move_folder's tracked-overlap
-                            # guard — leaving the staged copy stranded under
-                            # ~/.vireo/staging with no way to resume.
-                            tracked = _tracked_destination_overlap(
-                                thread_db, -1, final_destination,
-                            )
-                            if tracked:
-                                _bail_storage(
-                                    f"Archive destination {final_destination} "
-                                    f"overlaps a folder Vireo already manages "
-                                    f"({tracked['path']}). Local processing "
-                                    "imports must land at a new archive folder; "
-                                    "pick a different destination or import "
-                                    "without local processing."
-                                )
-                                return
-
-                            # Also reject when the archive destination would land
-                            # INSIDE an already-tracked folder. db.move_folder_path
-                            # (called by move_folder during archive) only rewrites
-                            # the moved row's path string — it does NOT reparent the
-                            # row under the tracked ancestor. The catalog would end
-                            # up with two unrelated workspace roots whose path
-                            # strings overlap, e.g. /Photos and /Photos/NewShoot,
-                            # silently confusing the folder tree and breaking
-                            # future scans of the ancestor root.
-                            ancestor = _tracked_destination_ancestor(
-                                thread_db, -1, final_destination,
-                            )
-                            if ancestor:
-                                _bail_storage(
-                                    f"Archive destination {final_destination} "
-                                    f"is inside a folder Vireo already manages "
-                                    f"({ancestor['path']}). Pick an archive "
-                                    f"folder outside {ancestor['path']}, or "
-                                    "import without local processing so the "
-                                    "scan can attach to the existing folder."
-                                )
-                                return
+                            # A tracked archive destination (the import lands at
+                            # or inside a folder Vireo already manages) is no
+                            # longer a hard failure: the archive move opts into
+                            # merging (allow_tracked_merge=True) and folds the
+                            # staged tree into the existing archive. The precise
+                            # per-file content-conflict guard below
+                            # (conflicting_archive_paths) still refuses any
+                            # same-path file whose bytes differ.
 
                             # Make sure the archive parent exists NOW. Otherwise
                             # the pipeline would stage and process everything,
@@ -4611,6 +4571,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     developed_dir=developed_dir,
                     merge=True,
                     reject_tracked_ancestor=True,
+                    allow_tracked_merge=True,
                 )
                 if move_result.get("errors"):
                     raise RuntimeError("; ".join(move_result["errors"]))
@@ -4634,13 +4595,22 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 cleanup_error = move_result.get("cleanup_error")
                 stages["archive"]["status"] = "completed"
                 moved = move_result.get("moved", 0)
-                if cleanup_error:
+                merge = move_result.get("merge")
+                if merge:
+                    base = move_result.get(
+                        "merged_into_existing", final_destination,
+                    )
                     summary = (
-                        f"{moved} photos archived "
-                        f"(staging cleanup failed: {cleanup_error})"
+                        f"{merge['new_photos']} new photos archived into "
+                        f"existing archive {base} "
+                        f"({merge['new_folders']} new folders, "
+                        f"{merge['merged_folders']} merged into existing, "
+                        f"{merge['already_present']} already present)"
                     )
                 else:
                     summary = f"{moved} photos archived"
+                if cleanup_error:
+                    summary += f" (staging cleanup failed: {cleanup_error})"
                 runner.update_step(
                     job["id"], "archive", status="completed", summary=summary,
                 )
@@ -4648,6 +4618,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     "final_destination": final_destination,
                     "moved": moved,
                 }
+                if merge:
+                    result["archive"]["merge"] = merge
                 if cleanup_error:
                     result["archive"]["cleanup_error"] = cleanup_error
             except Exception as e:

@@ -647,6 +647,48 @@ def test_move_folder_merges_into_tracked_when_allowed(move_env):
     assert names == {"prior.jpg", "bird1.jpg", "bird2.jpg"}
 
 
+def test_move_folder_merge_moved_excludes_already_present(move_env):
+    """On the merge path, identical-filename collisions are dropped as
+    ``already_present`` and must NOT be counted in ``result['moved']``.
+    ``moved`` reflects photos actually added to the archive
+    (== merge['new_photos']), not every staged source photo."""
+    from move import move_folder
+
+    env = move_env
+    db = env["db"]
+
+    # The staged 'src' folder lands at <dst>/src. Pre-seed that archive folder
+    # with a byte-identical copy of one staged photo (bird1.jpg) so it collides
+    # by filename AND content -> dropped as already_present (rsync
+    # --ignore-existing keeps the archive copy; the catalog drops the staged
+    # row). bird1.jpg in the fixture is b"\xff\xd8" + b"\x00"*100.
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    identical_bytes = (env["src"] / "bird1.jpg").read_bytes()
+    (landing / "bird1.jpg").write_bytes(identical_bytes)
+    fid_archive = db.add_folder(str(landing), name="src")
+    db.add_photo(folder_id=fid_archive, filename="bird1.jpg", extension=".jpg",
+                 file_size=len(identical_bytes), file_mtime=3.0)
+
+    result = move_folder(
+        db=db, folder_id=env["fid_src"], destination=str(env["dst"]),
+        merge=True, allow_tracked_merge=True,
+    )
+
+    assert result["errors"] == []
+    merge = result["merge"]
+    # bird1.jpg collides (identical) -> already_present; bird2.jpg is new.
+    assert merge["already_present"] >= 1
+    assert merge["new_photos"] == 1
+    # moved must exclude the already_present photo.
+    assert result["moved"] == merge["new_photos"]
+    # The archive still has exactly one bird1.jpg row (no duplicate).
+    assert db.conn.execute(
+        "SELECT COUNT(*) c FROM photos WHERE folder_id = ? AND filename = ?",
+        (fid_archive, "bird1.jpg"),
+    ).fetchone()["c"] == 1
+
+
 def test_move_folder_refuses_missing_tracked_destination_before_copy(move_env):
     """A stale tracked destination row must block the move even when the
     resolved destination does not currently exist on disk."""
