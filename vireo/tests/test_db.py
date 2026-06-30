@@ -7354,6 +7354,70 @@ def test_move_folder_path_is_case_sensitive(db):
     assert sibling_child["path"] == "/photos/2024/sibling"
 
 
+def test_merge_staged_tree_new_subfolders(db):
+    """Staged tree merged under an existing tracked base: new date folders
+    are repointed under the base, parent_id fixed, workspace linked, and the
+    base's existing photos are untouched."""
+    ws = db._active_workspace_id
+
+    # Existing tracked archive base with one prior shoot, linked as a root.
+    base_id = db.add_folder("/arch/USA", name="USA")
+    old_id = db.add_folder("/arch/USA/2025/2025-01-01", name="2025-01-01",
+                           parent_id=base_id)
+    db.add_photo(folder_id=old_id, filename="old.raf", extension=".raf",
+                 file_size=100, file_mtime=1.0)
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    # Staged tree (post-rsync the files already live at /arch/USA/...). Created
+    # with workspace_root=False so the staged rows are NOT pre-linked as roots.
+    # The intermediate year folder is a real catalog row (a scan would create
+    # it) so the reparenting chain is exercised end to end.
+    stage_root = db.add_folder("/stage/USA", name="USA", workspace_root=False)
+    stage_year = db.add_folder("/stage/USA/2026", name="2026",
+                               parent_id=stage_root, workspace_root=False)
+    stage_leaf = db.add_folder("/stage/USA/2026/2026-06-30", name="2026-06-30",
+                               parent_id=stage_year, workspace_root=False)
+    db.add_photo(folder_id=stage_leaf, filename="new.raf", extension=".raf",
+                 file_size=200, file_mtime=2.0)
+
+    db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
+
+    # New leaf now lives under the base, parented to its (new) target parent.
+    leaf = db.conn.execute(
+        "SELECT id, parent_id FROM folders WHERE path = ?",
+        ("/arch/USA/2026/2026-06-30",),
+    ).fetchone()
+    assert leaf is not None
+    year = db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", ("/arch/USA/2026",),
+    ).fetchone()
+    assert year is not None
+    assert leaf["parent_id"] == year["id"]
+
+    # The staged root and leaf rows are gone (folded into the existing base).
+    assert db.conn.execute(
+        "SELECT 1 FROM folders WHERE path = ?", ("/stage/USA",)
+    ).fetchone() is None
+    assert db.conn.execute(
+        "SELECT 1 FROM folders WHERE path LIKE '/stage/%'"
+    ).fetchone() is None
+
+    # The new photo moved with the folder; the old photo is untouched.
+    assert db.conn.execute(
+        "SELECT folder_id FROM photos WHERE filename = ?", ("new.raf",)
+    ).fetchone()["folder_id"] == leaf["id"]
+    assert db.conn.execute(
+        "SELECT folder_id FROM photos WHERE filename = ?", ("old.raf",)
+    ).fetchone()["folder_id"] == old_id
+
+    # New leaf is linked to the workspace as a non-root (base is the root).
+    row = db.conn.execute(
+        "SELECT is_root FROM workspace_folders WHERE workspace_id=? AND folder_id=?",
+        (ws, leaf["id"]),
+    ).fetchone()
+    assert row is not None and row["is_root"] == 0
+
+
 def test_folder_under_rule_excludes_siblings_and_escapes_wildcards(tmp_path, monkeypatch):
     """'folder under /photos/2023' must match that folder and its
     descendants only — not the sibling /photos/2023-trip — and a _ in the

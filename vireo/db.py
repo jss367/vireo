@@ -2719,6 +2719,112 @@ class Database:
             )
         self.conn.commit()
 
+    def merge_staged_tree_into_archive(self, staged_root_id, archive_path):
+        """Fold a staged folder subtree into an existing tracked archive.
+
+        The on-disk rsync merge has already happened: files that were under the
+        staged root now also live under ``archive_path``. This reconciles the
+        catalog so staged folder/photo rows become rows under the existing
+        archive, with no duplicate ``folders.path`` and correct ``parent_id``.
+
+        For each staged folder (root-first), the target path is the staged path
+        rebased from the staged root onto ``archive_path``:
+
+        * Target has no folder row -> repoint the staged row to the target path,
+          fix its ``parent_id`` to the (now-existing) target-parent folder, and
+          link it to the active workspace as a non-root (the existing archive
+          base is the workspace root).
+        * Target already has a folder row -> move the staged folder's photos
+          into it (dropping any whose filename already exists there as an
+          identical archived file), then delete the now-empty staged folder row.
+
+        Returns a counts dict: ``merged_new`` (folders repointed to new target
+        paths), ``merged_into_existing_folders`` (staged folders folded into an
+        existing target folder), and ``already_present`` (staged photos dropped
+        because the target folder already held that filename).
+        """
+        staged_root = self.conn.execute(
+            "SELECT path FROM folders WHERE id = ?", (staged_root_id,)
+        ).fetchone()
+        if not staged_root:
+            return {"merged_new": 0, "merged_into_existing_folders": 0,
+                    "already_present": 0}
+        staged_root_path = staged_root["path"]
+        ws = self._ws_id()
+
+        # Snapshot staged folders root-first (shallowest path first) so a
+        # parent's target row exists before its children are processed.
+        prefix = _subtree_prefix(staged_root_path)
+        staged_folders = self.conn.execute(
+            """SELECT id, path FROM folders
+               WHERE path = ? OR substr(REPLACE(path, '\\', '/'), 1, ?) = ?
+               ORDER BY length(path) ASC""",
+            (staged_root_path, len(prefix), prefix),
+        ).fetchall()
+
+        counts = {"merged_new": 0, "merged_into_existing_folders": 0,
+                  "already_present": 0}
+        # Staged folders that fold into an existing target row are deleted only
+        # after every staged folder has been processed. Deleting eagerly would
+        # hit a FK violation when a not-yet-reparented staged child still points
+        # at the staged parent we are removing.
+        to_delete = []
+
+        for sf in staged_folders:
+            rel = _subtree_relative(sf["path"], staged_root_path)
+            target_path = _join_subtree_path(archive_path, rel)
+            target = self.conn.execute(
+                "SELECT id FROM folders WHERE path = ?", (target_path,)
+            ).fetchone()
+            parent_path = os.path.dirname(target_path)
+            parent_row = self.conn.execute(
+                "SELECT id FROM folders WHERE path = ?", (parent_path,)
+            ).fetchone()
+            parent_id = parent_row["id"] if parent_row else None
+
+            if target is None:
+                # New folder under the archive: repoint + reparent + link.
+                self.conn.execute(
+                    "UPDATE folders SET path = ?, parent_id = ? WHERE id = ?",
+                    (target_path, parent_id, sf["id"]),
+                )
+                self.add_workspace_folder(ws, sf["id"], is_root=False)
+                counts["merged_new"] += 1
+            else:
+                # Existing folder: move photos in, drop filename-collisions.
+                photo_ids = [r["id"] for r in self.conn.execute(
+                    "SELECT id FROM photos WHERE folder_id = ?", (sf["id"],)
+                )]
+                collisions = {c["photo_id"]
+                              for c in self.check_filename_collisions(
+                                  photo_ids, target["id"])}
+                for pid in photo_ids:
+                    if pid in collisions:
+                        self.conn.execute(
+                            "DELETE FROM photos WHERE id = ?", (pid,))
+                        counts["already_present"] += 1
+                    else:
+                        self.conn.execute(
+                            "UPDATE photos SET folder_id = ? WHERE id = ?",
+                            (target["id"], pid),
+                        )
+                to_delete.append(sf["id"])
+                counts["merged_into_existing_folders"] += 1
+
+        # Delete deepest-first: ``staged_folders`` (hence ``to_delete``) is
+        # shallowest-first, so reverse to remove children before parents and
+        # never orphan a still-referenced ``parent_id``. Drop the folder's
+        # workspace links first — ``workspace_folders.folder_id`` has no
+        # ON DELETE CASCADE, so the folder delete would hit a FK violation.
+        for fid in reversed(to_delete):
+            self.conn.execute(
+                "DELETE FROM workspace_folders WHERE folder_id = ?", (fid,))
+            self.conn.execute("DELETE FROM folders WHERE id = ?", (fid,))
+
+        self.conn.commit()
+        self.update_folder_counts()
+        return counts
+
     def check_filename_collisions(self, photo_ids, target_folder_id):
         """Check if any photo filenames already exist in the target folder.
 
