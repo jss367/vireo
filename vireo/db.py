@@ -2826,6 +2826,19 @@ class Database:
                     (target_path, parent_id, sf["id"]),
                 )
                 self.add_workspace_folder(ws, sf["id"], is_root=False)
+                # The staging scan registers each photo-bearing leaf as its
+                # own workspace ROOT (scanner restrict_dirs => is_root=1). Once
+                # that leaf is folded under the existing archive base it must
+                # become a plain descendant, otherwise the merge leaves a stray
+                # second workspace root inside the archive — the exact overlap
+                # the tracked-ancestor guard was meant to prevent.
+                # add_workspace_folder's INSERT OR IGNORE can't downgrade an
+                # existing is_root=1 row, so demote it explicitly here.
+                self.conn.execute(
+                    "UPDATE workspace_folders SET is_root = 0 "
+                    "WHERE workspace_id = ? AND folder_id = ?",
+                    (ws, sf["id"]),
+                )
                 # Every staged photo in a brand-new folder is newly archived.
                 new_count = self.conn.execute(
                     "SELECT COUNT(*) c FROM photos WHERE folder_id = ?",

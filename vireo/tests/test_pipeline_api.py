@@ -306,41 +306,58 @@ def test_pipeline_local_processing_archives_to_final_destination(
     assert job["result"]["archive"]["final_destination"] == str(final_dest)
 
 
-def test_pipeline_local_processing_rejects_already_tracked_destination(
+def test_pipeline_local_processing_merges_into_tracked_destination(
     setup, tmp_path, monkeypatch
 ):
-    """Regression: a second local-processing import to a destination that
-    Vireo already manages must fail fast at the storage preflight. Without
-    the upfront check the pipeline would stage everything, complete every
-    processing step, and only fail in move_folder's tracked-overlap guard —
-    leaving the staged copy stranded under ~/.vireo/staging."""
+    """A second local-processing import whose archive destination IS an
+    already-managed folder MERGES into it instead of failing. The new files
+    land at the templated date subfolder under the existing base, the prior
+    shoot is untouched, and the catalog gains no duplicate folders.path row."""
     app, db_path = setup
 
     final_parent = tmp_path / "nas"
     final_parent.mkdir()
     final_dest = final_parent / "Photos"
+    final_dest.mkdir()
 
     import local_processing
     monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
     monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
 
-    # Seed the catalog with a tracked folder at the prospective archive path,
-    # matching the post-state of an earlier successful local-processing run.
+    # Seed an existing managed archive: a prior shoot on disk + in the
+    # catalog, with the base linked to the active workspace as a root. This
+    # matches the post-state of an earlier successful local-processing run.
+    prior_dir = final_dest / "2025" / "2025-01-01"
+    prior_dir.mkdir(parents=True)
+    prior_file = prior_dir / "old.jpg"
+    Image.new("RGB", (16, 16), "green").save(prior_file)
+
     from db import Database
     db = Database(db_path)
-    db.add_folder(str(final_dest))
+    base_id = db.add_folder(str(final_dest))
+    prior_id = db.add_folder(
+        str(prior_dir), parent_id=base_id, workspace_root=False
+    )
+    db.add_photo(
+        prior_id, "old.jpg", ".jpg",
+        prior_file.stat().st_size, prior_file.stat().st_mtime,
+    )
     db.close()
 
+    # New shoot whose mtime puts it in a date subfolder not yet present.
     src = tmp_path / "card2"
     src.mkdir()
-    Image.new("RGB", (16, 16), "blue").save(src / "again.jpg")
+    new_file = src / "again.jpg"
+    Image.new("RGB", (16, 16), "blue").save(new_file)
+    new_mtime = datetime(2026, 6, 30, 12, 0, 0).timestamp()
+    os.utime(str(new_file), (new_mtime, new_mtime))
 
     with app.test_client() as c:
         resp = c.post("/api/jobs/pipeline", json={
             "sources": [str(src)],
             "destination": str(final_dest),
             "local_processing": True,
-            "folder_template": "",
+            "folder_template": "%Y/%Y-%m-%d",
             "skip_classify": True,
             "skip_extract_masks": True,
             "skip_regroup": True,
@@ -348,22 +365,55 @@ def test_pipeline_local_processing_rejects_already_tracked_destination(
         assert resp.status_code == 200
         job = wait_for_job_via_client(c, resp.get_json()["job_id"])
 
-    assert job["status"] == "failed", job
+    # Job merged successfully (no storage failure, no tracked-overlap error).
+    assert job["status"] == "completed", job
     error_text = (job.get("error") or "") + str(job.get("result", ""))
-    assert "Vireo already manages" in error_text, job
+    assert "Vireo already manages" not in error_text, job
+
+    # New file landed at the templated destination, merged alongside the
+    # pre-existing prior shoot which is untouched.
+    new_landed = final_dest / "2026" / "2026-06-30" / "again.jpg"
+    assert new_landed.is_file(), list(final_dest.rglob("*"))
+    assert prior_file.is_file()
+
+    # Merge breakdown surfaced on the archive payload.
+    merge = job["result"]["archive"]["merge"]
+    assert merge["new_photos"] >= 1, merge
+    assert merge["new_folders"] >= 1, merge
+
+    # No duplicate folders.path: exactly one row each for the base and the
+    # new leaf, and the new photo is attached under the new leaf.
+    db = Database(db_path)
+    try:
+        for path in (str(final_dest), str(final_dest / "2026" / "2026-06-30")):
+            rows = db.conn.execute(
+                "SELECT id FROM folders WHERE path = ?", (path,)
+            ).fetchall()
+            assert len(rows) == 1, (path, rows)
+        leaf_id = db.conn.execute(
+            "SELECT id FROM folders WHERE path = ?",
+            (str(final_dest / "2026" / "2026-06-30"),),
+        ).fetchone()["id"]
+        attached = db.conn.execute(
+            "SELECT filename FROM photos WHERE folder_id = ?", (leaf_id,)
+        ).fetchall()
+        assert {r["filename"] for r in attached} == {"again.jpg"}, attached
+        # Prior shoot row + photo untouched.
+        assert db.conn.execute(
+            "SELECT 1 FROM photos WHERE filename = ?", ("old.jpg",)
+        ).fetchone() is not None
+    finally:
+        db.close()
 
 
-def test_pipeline_local_processing_rejects_destination_inside_tracked_root(
+def test_pipeline_local_processing_merges_into_subfolder_of_tracked_root(
     setup, tmp_path, monkeypatch
 ):
-    """Regression: an archive destination INSIDE an already-tracked folder
-    (catalog manages /Photos and the user picks /Photos/NewShoot) must fail
-    fast at the storage preflight. db.move_folder_path only rewrites the
-    moved row's path — it does NOT reparent the row under the tracked
-    ancestor. Without this check the archive would succeed on disk but
-    leave the catalog with two unrelated workspace roots whose path strings
-    overlap (e.g. /Photos and /Photos/NewShoot), confusing the folder tree
-    and breaking future scans of the ancestor root."""
+    """An archive destination INSIDE an already-tracked folder (catalog
+    manages /Photos and the user picks /Photos/NewShoot) MERGES into the
+    existing managed tree instead of failing. The staged tree is rebased onto
+    the destination, parented under the tracked ancestor, with no duplicate
+    folders.path row and no stray second workspace root."""
     app, db_path = setup
 
     tracked_root = tmp_path / "nas_ancestor" / "Photos"
@@ -382,14 +432,17 @@ def test_pipeline_local_processing_rejects_destination_inside_tracked_root(
 
     src = tmp_path / "card_ancestor"
     src.mkdir()
-    Image.new("RGB", (16, 16), "red").save(src / "shot.jpg")
+    new_file = src / "shot.jpg"
+    Image.new("RGB", (16, 16), "red").save(new_file)
+    new_mtime = datetime(2026, 6, 30, 12, 0, 0).timestamp()
+    os.utime(str(new_file), (new_mtime, new_mtime))
 
     with app.test_client() as c:
         resp = c.post("/api/jobs/pipeline", json={
             "sources": [str(src)],
             "destination": str(final_dest),
             "local_processing": True,
-            "folder_template": "",
+            "folder_template": "%Y/%Y-%m-%d",
             "skip_classify": True,
             "skip_extract_masks": True,
             "skip_regroup": True,
@@ -397,12 +450,178 @@ def test_pipeline_local_processing_rejects_destination_inside_tracked_root(
         assert resp.status_code == 200
         job = wait_for_job_via_client(c, resp.get_json()["job_id"])
 
-    assert job["status"] == "failed", job
+    assert job["status"] == "completed", job
     error_text = (job.get("error") or "") + str(job.get("result", ""))
-    assert "is inside a folder Vireo already manages" in error_text, job
-    # The pipeline must NOT have archived anything: tracked_root still has
-    # no NewShoot subdirectory and the source files weren't published.
-    assert not final_dest.exists(), final_dest
+    assert "Vireo already manages" not in error_text, job
+
+    # New file landed at the templated destination INSIDE the tracked root.
+    landed = final_dest / "2026" / "2026-06-30" / "shot.jpg"
+    assert landed.is_file(), list(tracked_root.rglob("*"))
+
+    db = Database(db_path)
+    try:
+        # No duplicate folders.path for the leaf or the destination base.
+        for path in (str(final_dest),
+                     str(final_dest / "2026" / "2026-06-30")):
+            rows = db.conn.execute(
+                "SELECT id FROM folders WHERE path = ?", (path,)
+            ).fetchall()
+            assert len(rows) == 1, (path, rows)
+        # The tracked ancestor remains the single workspace root; the merged
+        # subtree is NOT a second root.
+        ws = db._active_workspace_id
+        root_paths = {
+            r["path"] for r in db.conn.execute(
+                """SELECT f.path FROM workspace_folders wf
+                   JOIN folders f ON f.id = wf.folder_id
+                   WHERE wf.workspace_id = ? AND wf.is_root = 1""",
+                (ws,),
+            )
+        }
+        assert str(tracked_root) in root_paths, root_paths
+        assert str(final_dest / "2026" / "2026-06-30") not in root_paths
+        # The new photo is queryable under the new leaf.
+        leaf_id = db.conn.execute(
+            "SELECT id FROM folders WHERE path = ?",
+            (str(final_dest / "2026" / "2026-06-30"),),
+        ).fetchone()["id"]
+        attached = db.conn.execute(
+            "SELECT filename FROM photos WHERE folder_id = ?", (leaf_id,)
+        ).fetchall()
+        assert {r["filename"] for r in attached} == {"shot.jpg"}, attached
+    finally:
+        db.close()
+
+
+def test_pipeline_merges_new_shoot_into_existing_archive(
+    setup, tmp_path, monkeypatch
+):
+    """End-to-end regression for the reported scenario: importing a brand-new
+    shoot into an already-managed archive base seamlessly merges. The prior
+    shoot's files and catalog rows stay untouched, the new files land at the
+    templated date subfolder, no duplicate folders.path is created, and the
+    new leaf is linked to the active workspace (queryable in it)."""
+    app, db_path = setup
+
+    archive_parent = tmp_path / "nas"
+    archive_parent.mkdir()
+    archive_base = archive_parent / "USA"
+    archive_base.mkdir()
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    # Existing tracked archive holding a prior shoot — real files on disk and
+    # catalog rows, base linked as a workspace root.
+    prior_dir = archive_base / "2025" / "2025-01-01"
+    prior_dir.mkdir(parents=True)
+    prior_a = prior_dir / "prior-1.jpg"
+    prior_b = prior_dir / "prior-2.jpg"
+    Image.new("RGB", (16, 16), "green").save(prior_a)
+    Image.new("RGB", (16, 16), "olive").save(prior_b)
+
+    from db import Database
+    db = Database(db_path)
+    base_id = db.add_folder(str(archive_base))
+    prior_id = db.add_folder(
+        str(prior_dir), parent_id=base_id, workspace_root=False
+    )
+    for f in (prior_a, prior_b):
+        db.add_photo(
+            prior_id, f.name, ".jpg",
+            f.stat().st_size, f.stat().st_mtime,
+        )
+    prior_photo_ids = {
+        r["id"] for r in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id = ?", (prior_id,)
+        )
+    }
+    db.close()
+
+    prior_a_bytes = prior_a.read_bytes()
+    prior_b_bytes = prior_b.read_bytes()
+
+    # Two NEW source files whose mtime produces a date subfolder NOT yet
+    # present in the archive.
+    src = tmp_path / "card"
+    src.mkdir()
+    new_a = src / "new-1.jpg"
+    new_b = src / "new-2.jpg"
+    Image.new("RGB", (16, 16), "blue").save(new_a)
+    Image.new("RGB", (16, 16), "navy").save(new_b)
+    new_mtime = datetime(2026, 6, 30, 9, 30, 0).timestamp()
+    for f in (new_a, new_b):
+        os.utime(str(f), (new_mtime, new_mtime))
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(archive_base),
+            "local_processing": True,
+            "folder_template": "%Y/%Y-%m-%d",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert job["status"] == "completed", job
+
+    # New files landed at <base>/<year>/<date>/.
+    new_leaf = archive_base / "2026" / "2026-06-30"
+    assert (new_leaf / "new-1.jpg").is_file(), list(archive_base.rglob("*"))
+    assert (new_leaf / "new-2.jpg").is_file()
+
+    # Prior shoot files untouched on disk (same bytes, same paths).
+    assert prior_a.read_bytes() == prior_a_bytes
+    assert prior_b.read_bytes() == prior_b_bytes
+
+    db = Database(db_path)
+    try:
+        # No duplicate folders.path anywhere.
+        dup = db.conn.execute(
+            "SELECT path, COUNT(*) c FROM folders GROUP BY path HAVING c > 1"
+        ).fetchall()
+        assert dup == [], dup
+        # Exactly one row for the new leaf.
+        leaf_rows = db.conn.execute(
+            "SELECT id FROM folders WHERE path = ?", (str(new_leaf),)
+        ).fetchall()
+        assert len(leaf_rows) == 1, leaf_rows
+        leaf_id = leaf_rows[0]["id"]
+
+        # The new leaf is linked to the active workspace; new photos are
+        # queryable there.
+        ws = db._active_workspace_id
+        linked = db.conn.execute(
+            "SELECT is_root FROM workspace_folders "
+            "WHERE workspace_id = ? AND folder_id = ?",
+            (ws, leaf_id),
+        ).fetchone()
+        assert linked is not None, "new leaf not linked to workspace"
+        assert linked["is_root"] == 0, "new leaf should not be a root"
+        new_names = {
+            r["filename"] for r in db.conn.execute(
+                "SELECT filename FROM photos WHERE folder_id = ?", (leaf_id,)
+            )
+        }
+        assert new_names == {"new-1.jpg", "new-2.jpg"}, new_names
+
+        # Prior shoot rows untouched: same folder id, same photo ids.
+        prior_row = db.conn.execute(
+            "SELECT id FROM folders WHERE path = ?", (str(prior_dir),)
+        ).fetchone()
+        assert prior_row is not None and prior_row["id"] == prior_id
+        still = {
+            r["id"] for r in db.conn.execute(
+                "SELECT id FROM photos WHERE folder_id = ?", (prior_id,)
+            )
+        }
+        assert still == prior_photo_ids, (still, prior_photo_ids)
+    finally:
+        db.close()
 
 
 def test_pipeline_local_processing_creates_missing_archive_parent(
