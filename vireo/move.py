@@ -1373,7 +1373,8 @@ def move_photos(db, photo_ids, destination, progress_cb=None):
 
 
 def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
-                merge=False, remote=None, reject_tracked_ancestor=False):
+                merge=False, remote=None, reject_tracked_ancestor=False,
+                allow_tracked_merge=False):
     """Move an entire folder (and subfolders) to a destination.
 
     The folder is placed inside the destination, preserving its name.
@@ -1418,6 +1419,16 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             commits opt into this stricter guard because they create a new
             top-level archive root and cannot be reparented under the
             existing catalog row.
+        allow_tracked_merge: when True, a tracked destination (overlap or, with
+            ``reject_tracked_ancestor``, ancestor) is no longer an error.
+            Instead, after the verified file copy, the staged folder/photo rows
+            are folded into the existing archive rows via
+            ``db.merge_staged_tree_into_archive`` (new folders repointed,
+            identical-filename photos dropped) rather than a path cascade. Only
+            the local-processing archive commit opts in; manual and remote
+            moves keep the default refusal. The result then carries ``merge``
+            (the reconciliation counts) and ``merged_into_existing`` (the
+            tracked archive path).
 
     Returns dict with keys: moved (int), errors (list of str). When the
     catalog has already been repointed at the new destination but deleting
@@ -1541,21 +1552,39 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     # (default macOS APFS) all collapse to the same tracked row — otherwise
     # a destination reached via any of those would slip past and leave two
     # folder rows managing the same on-disk tree.
+    #
+    # When ``allow_tracked_merge`` is set (the local-processing archive commit
+    # opts in), a tracked destination is NOT an error: instead we remember the
+    # tracked path in ``merge_into_tracked`` and, after the verified file copy,
+    # reconcile the catalog by folding the staged folder/photo rows into the
+    # existing archive rows rather than calling ``db.move_folder_path`` (which
+    # would collide on folders.path UNIQUE). Default (flag off) behaviour is
+    # byte-for-byte unchanged: both tracked-destination cases refuse the move.
     overlap_check_path = catalog_path if remote else transfer_dest
+    merge_into_tracked = None
     tracked = _tracked_destination_overlap(db, folder_id, overlap_check_path)
     if tracked:
-        return {"moved": 0, "errors": [
-            f"Destination overlaps a folder Vireo already manages "
-            f"({tracked['path']}). Merging into or around a tracked folder "
-            f"isn't supported."
-        ]}
-    if reject_tracked_ancestor:
+        if not allow_tracked_merge:
+            return {"moved": 0, "errors": [
+                f"Destination overlaps a folder Vireo already manages "
+                f"({tracked['path']}). Merging into or around a tracked folder "
+                f"isn't supported."
+            ]}
+        merge_into_tracked = tracked["path"]
+    if reject_tracked_ancestor and merge_into_tracked is None:
         ancestor = _tracked_destination_ancestor(db, folder_id, overlap_check_path)
         if ancestor:
-            return {"moved": 0, "errors": [
-                f"Destination is inside a folder Vireo already manages "
-                f"({ancestor['path']}). Pick an untracked archive destination."
-            ]}
+            if not allow_tracked_merge:
+                return {"moved": 0, "errors": [
+                    f"Destination is inside a folder Vireo already manages "
+                    f"({ancestor['path']}). Pick an untracked archive destination."
+                ]}
+            # Merge into the existing archive root that contains the
+            # destination. The staged tree lands at its own resolved
+            # catalog_path (inside the tracked ancestor); the reconciliation
+            # rebases staged rows onto that path and leaves the ancestor's own
+            # rows untouched.
+            merge_into_tracked = catalog_path if remote else transfer_dest
 
     if remote:
         probe = _remote_dir_exists(remote, transfer_dest)
@@ -1792,14 +1821,24 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
 
     # Update DB first: cascade folder paths (safer — if rmtree fails, the old
     # folder becomes an orphan on disk rather than the DB pointing to deleted
-    # paths). A merge into an already-tracked destination is refused above, so
-    # catalog_path is never a different existing folder row here and this
-    # cascade (root + all descendants) cannot collide with folders.path UNIQUE.
+    # paths). Unless the caller opted into merging (``merge_into_tracked``), a
+    # merge into an already-tracked destination is refused above, so
+    # catalog_path is never a different existing folder row in the cascade
+    # branch and that cascade (root + all descendants) cannot collide with
+    # folders.path UNIQUE. When merging into a tracked archive we instead
+    # reconcile the staged rows into the existing archive rows below.
     # For a remote move catalog_path is the local mount path, so the catalog
     # keeps resolving to the photos whenever the NAS is mounted.
     if progress_cb:
         progress_cb(total_files, total_files, "", "Updating catalog")
-    db.move_folder_path(folder_id, catalog_path)
+    merge_counts = None
+    if merge_into_tracked is not None:
+        # Destination is a tracked archive and the caller opted into merging:
+        # fold the staged folder/photo rows into the existing archive rows
+        # instead of a path cascade (which would collide on folders.path).
+        merge_counts = db.merge_staged_tree_into_archive(folder_id, catalog_path)
+    else:
+        db.move_folder_path(folder_id, catalog_path)
     db.update_folder_counts()
 
     # Rebase any developed-output subdirs nested under the configured
@@ -1848,6 +1887,9 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         progress_cb(total_files, total_files, folder_name, "Done")
 
     result = {"moved": total_photos, "errors": []}
+    if merge_into_tracked is not None:
+        result["merge"] = merge_counts
+        result["merged_into_existing"] = merge_into_tracked
     if cleanup_error is not None:
         result["cleanup_error"] = cleanup_error
     return result

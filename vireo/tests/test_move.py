@@ -570,6 +570,83 @@ def test_move_folder_refuses_destination_inside_tracked_ancestor(move_env):
     assert not destination.exists()
 
 
+def test_move_folder_refuses_tracked_merge_by_default(move_env):
+    """Regression guard: without allow_tracked_merge, merging into a tracked
+    destination is still refused (default behaviour byte-for-byte unchanged)."""
+    from move import move_folder
+
+    env = move_env
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    for fn in ("bird1.jpg", "bird1.xmp", "bird2.jpg"):
+        (landing / fn).write_bytes((env["src"] / fn).read_bytes())
+    # Destination already exists as its own folder row in the DB.
+    env["db"].add_folder(str(landing), name="src")
+
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]),
+        merge=True,
+    )
+    assert result["moved"] == 0
+    assert any("already manage" in e for e in result["errors"])
+    # Source intact — nothing merged.
+    assert (env["src"] / "bird1.jpg").exists()
+
+
+def test_move_folder_merges_into_tracked_when_allowed(move_env):
+    """With allow_tracked_merge=True the staged tree's files land in the
+    existing archive on disk, the result reports merge counts, and the catalog
+    has no leftover staged folder rows (they fold into the archive)."""
+    from move import move_folder
+
+    env = move_env
+    db = env["db"]
+
+    # The archive destination is the path the staged 'src' folder lands at when
+    # placed inside 'dst' (move_folder preserves the source folder name).
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    # Prior shoot already in the archive on disk + in the catalog as a tracked
+    # workspace-root folder.
+    (landing / "prior.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 50)
+    fid_archive = db.add_folder(str(landing), name="src")
+    db.add_photo(folder_id=fid_archive, filename="prior.jpg", extension=".jpg",
+                 file_size=52, file_mtime=3.0)
+
+    staged_prefix = str(env["src"])
+
+    result = move_folder(
+        db=db, folder_id=env["fid_src"], destination=str(env["dst"]),
+        merge=True, allow_tracked_merge=True,
+    )
+
+    assert result["errors"] == []
+    assert result["moved"] >= 1
+    # Staged files merged onto disk into the existing archive.
+    assert (landing / "bird1.jpg").exists()
+    assert (landing / "bird2.jpg").exists()
+    assert (landing / "prior.jpg").exists()
+    # Staging cleaned up.
+    assert not env["src"].exists()
+
+    # Merge counts surfaced. The two staged photos fold into the existing
+    # archive folder; the prior photo is untouched.
+    assert result["merged_into_existing"] == str(landing)
+    merge = result["merge"]
+    assert merge["new_photos"] == 2
+    assert merge["merged_folders"] >= 1
+    assert merge["already_present"] == 0
+
+    # No leftover staged folder rows — the staged tree folded into the archive.
+    assert db.conn.execute(
+        "SELECT 1 FROM folders WHERE path LIKE ?", (staged_prefix + "%",)
+    ).fetchone() is None
+    # The archive folder now holds all three photos under one row.
+    names = {r["filename"] for r in db.conn.execute(
+        "SELECT filename FROM photos WHERE folder_id = ?", (fid_archive,))}
+    assert names == {"prior.jpg", "bird1.jpg", "bird2.jpg"}
+
+
 def test_move_folder_refuses_missing_tracked_destination_before_copy(move_env):
     """A stale tracked destination row must block the move even when the
     resolved destination does not currently exist on disk."""
