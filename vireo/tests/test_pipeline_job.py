@@ -2059,6 +2059,89 @@ def _setup_two_fake_downloaded_models(tmp_path, monkeypatch):
     return ["bioclip-vit-b-16", "bioclip-2"]
 
 
+def test_storage_preflight_failure_aborts_in_flight_model_load(tmp_path, monkeypatch):
+    """A local-storage preflight failure must stop concurrent model loading.
+
+    The pipeline starts storage preflight and model loading concurrently. If
+    storage fails, the model loader must observe the shared abort flag instead
+    of continuing through BioCLIP label embedding computation.
+    """
+    import time
+
+    import classifier as classifier_mod
+    import config as cfg
+    import local_processing
+    import pytest
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    src = tmp_path / "card"
+    src.mkdir()
+    _drop_jpeg(str(src), "shot.jpg")
+    dest = tmp_path / "archive"
+
+    model_entered = threading.Event()
+    model_observed_abort = threading.Event()
+
+    def fake_conflicting_archive_paths(*args, **kwargs):
+        assert model_entered.wait(2), "model load did not start before storage failed"
+        return [str(dest / "2026" / "2026-01-01" / "shot.jpg")]
+
+    class FakeClassifier:
+        def __init__(self, *args, cancel_check=None, **kwargs):
+            model_entered.set()
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                if cancel_check and cancel_check():
+                    model_observed_abort.set()
+                    raise RuntimeError("classification cancelled")
+                time.sleep(0.01)
+            raise AssertionError("model load did not observe storage abort")
+
+    monkeypatch.setattr(
+        local_processing,
+        "conflicting_archive_paths",
+        fake_conflicting_archive_paths,
+    )
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    runner = FakeRunner()
+    job = _make_job()
+    with pytest.raises(RuntimeError, match=r"\[storage\] Fatal"):
+        run_pipeline_job(
+            job,
+            runner,
+            db_path,
+            ws_id,
+            PipelineParams(
+                sources=[str(src)],
+                destination=str(dest),
+                local_processing=True,
+                skip_extract_masks=True,
+                skip_regroup=True,
+            ),
+        )
+
+    assert model_observed_abort.is_set()
+    model_loader_updates = [
+        kwargs
+        for _, step_id, kwargs in runner.step_updates
+        if step_id == "model_loader"
+    ]
+    assert any(
+        kwargs.get("summary") == "Skipped (cancelled)"
+        for kwargs in model_loader_updates
+    )
+
+
 def test_pipeline_raises_when_stage_fails(tmp_path, monkeypatch):
     """If any pipeline stage ends in 'failed', run_pipeline_job must raise.
 

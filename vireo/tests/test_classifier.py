@@ -201,6 +201,27 @@ def _make_tol_classifier(tmp_path):
 class TestCustomLabelsMode:
     """Tests for custom labels classification mode."""
 
+    def test_embedding_computation_honors_cancel_check_between_labels(self):
+        """A cancelled embedding precompute stops before processing more labels."""
+        from classifier import _compute_embeddings_with_progress
+
+        text_session = _make_fake_text_session()
+        tokenizer = _make_fake_tokenizer()
+        checks = {"count": 0}
+
+        def cancel_check():
+            checks["count"] += 1
+            return checks["count"] >= 3
+
+        with pytest.raises(RuntimeError, match="classification cancelled"):
+            _compute_embeddings_with_progress(
+                text_session,
+                "input_ids",
+                tokenizer,
+                ["bird", "cat", "dog"],
+                cancel_check=cancel_check,
+            )
+
     def test_classify_returns_predictions(self, tmp_path):
         """classify() returns a list of dicts with species, score, and auto_tag."""
         clf = _make_custom_classifier(tmp_path)

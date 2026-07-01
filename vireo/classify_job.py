@@ -1855,6 +1855,7 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
                 model_str=model_str,
                 pretrained_str=weights_path,
                 embedding_progress_callback=_emb_progress,
+                cancel_check=lambda: runner.is_cancelled(job["id"]),
             )
         runner.update_step(
             job["id"], "load_model", status="completed",
