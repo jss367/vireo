@@ -891,6 +891,74 @@ def test_move_folder_refuses_descendant_tracked_overlap_even_when_merging(move_e
     ).fetchone()["id"] == inner_fid
 
 
+def test_tracked_destination_overlap_prefers_exact_match_over_descendant(move_env):
+    """Regression: when both an exact-match tracked row (destination itself)
+    and a strict-descendant tracked row exist, ``_tracked_destination_overlap``
+    must return the EXACT match. Without the preference, SQLite returns rows in
+    arbitrary order (insertion / rowid by default); a descendant row inserted
+    BEFORE its later-scanned parent would come back first, and the caller's
+    ``tracked_is_destination`` check would then reject the exact-match merge as
+    the unsupported "wrap around a tracked subfolder" case."""
+    from move import _tracked_destination_overlap
+
+    env = move_env
+    db = env["db"]
+    landing = env["dst"] / "src"
+
+    # Insert the DESCENDANT row first so a plain unordered scan returns it
+    # before the exact-match row that arrives later. Neither row needs to
+    # exist on disk — the overlap probe is folder-row based.
+    desc_fid = db.add_folder(str(landing / "existing-shoot"),
+                             name="existing-shoot")
+    exact_fid = db.add_folder(str(landing), name="src")
+    # Confirm the intended insertion order (descendant has the lower rowid,
+    # so a naive SELECT would hit it first).
+    assert desc_fid < exact_fid
+
+    row = _tracked_destination_overlap(db, env["fid_src"], str(landing))
+    assert row is not None
+    assert row["id"] == exact_fid
+    assert row["path"] == str(landing)
+
+
+def test_move_folder_accepts_exact_tracked_merge_despite_descendant_row(move_env):
+    """End-to-end regression for the ordering fix: ``move_folder`` with
+    ``allow_tracked_merge=True`` must accept an EXACT tracked destination
+    (destination IS the tracked row) even when a strict-descendant tracked row
+    also exists and was inserted first. Before the exact-match preference in
+    ``_tracked_destination_overlap`` the descendant row could be returned first
+    and get treated as the unsupported "wrap" case, refusing the merge."""
+    from move import move_folder
+
+    env = move_env
+    db = env["db"]
+    landing = env["dst"] / "src"
+    landing.mkdir()
+
+    # Descendant tracked row first (lower rowid than the exact-match row),
+    # then the exact-match row for the landing path itself.
+    db.add_folder(str(landing / "existing-shoot"), name="existing-shoot")
+    fid_archive = db.add_folder(str(landing), name="src")
+
+    result = move_folder(
+        db=db, folder_id=env["fid_src"], destination=str(env["dst"]),
+        merge=True, allow_tracked_merge=True,
+    )
+    # The exact-match tracked row means this is the accept-as-merge case, NOT
+    # the descendant-only "wrap" case. Merge succeeds, no errors.
+    assert result["errors"] == []
+    merge = result.get("merge")
+    assert merge is not None
+    # Two staged photos, neither collides with anything in the empty archive:
+    # both become newly-archived rows.
+    assert merge["new_photos"] == 2
+    # The two staged photos are now catalog-parented on the archive folder.
+    assert db.conn.execute(
+        "SELECT COUNT(*) c FROM photos WHERE folder_id = ?",
+        (fid_archive,),
+    ).fetchone()["c"] == 2
+
+
 def test_move_folder_merge_moved_excludes_already_present(move_env):
     """On the merge path, identical-filename collisions are dropped as
     ``already_present`` and must NOT be counted in ``result['moved']``.

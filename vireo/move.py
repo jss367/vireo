@@ -1182,6 +1182,15 @@ def _destination_overlaps_source(src_path, dest_path):
 def _tracked_destination_overlap(db, folder_id, dest_path):
     """Return another tracked folder at or below dest_path, if one exists.
 
+    When both an exact-match row (a tracked folder alias-equal to
+    ``dest_path``) AND a strict-descendant row exist, the exact-match row
+    is returned. Otherwise the caller's exact-vs-descendant branch would
+    fire non-deterministically based on the arbitrary order SQLite happened
+    to return the rows in (e.g. ``/Photos/USA`` inserted before its later-
+    scanned parent ``/Photos``): selecting the exact tracked parent would
+    get rejected as the unsupported "wrap around a tracked subfolder" case
+    just because the child row was seen first.
+
     The case-insensitive root of `dest_path` is probed once and reused for
     every row — otherwise the probe (an os.listdir of the deepest existing
     ancestor, plus samefile of two child paths) re-runs per non-matching row,
@@ -1189,6 +1198,7 @@ def _tracked_destination_overlap(db, folder_id, dest_path):
     large catalogs or network-backed destinations.
     """
     dest_ci_root = _case_insensitive_root(dest_path)
+    descendant = None
     for row in db.conn.execute(
         "SELECT id, path FROM folders WHERE id != ?", (folder_id,)
     ):
@@ -1196,8 +1206,18 @@ def _tracked_destination_overlap(db, folder_id, dest_path):
             row["path"], dest_path,
             case_insensitive_root=dest_ci_root,
         ):
-            return row
-    return None
+            # Prefer an exact (alias-folded) match: ``row["path"]`` is
+            # at-or-below ``dest_path``, so if ``dest_path`` is ALSO
+            # at-or-below ``row["path"]`` the two paths alias-fold to the
+            # same directory and this row IS the destination the caller
+            # can accept as a merge. Otherwise the row is a strict
+            # descendant (the "wrap around" case); remember it as a
+            # fallback in case no exact-match row turns up later.
+            if _path_equal_or_descends(dest_path, row["path"]):
+                return row
+            if descendant is None:
+                descendant = row
+    return descendant
 
 
 def _rebase_under_stored_ancestor(catalog_path, ancestor_path):

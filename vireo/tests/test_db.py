@@ -7864,6 +7864,103 @@ def test_merge_staged_tree_case_alias_collision_on_case_insensitive_volume(
     assert counts["new_photos"] == 0
 
 
+def test_merge_staged_tree_rolls_back_on_error(db, monkeypatch):
+    """Regression: ``merge_staged_tree_into_archive`` runs a long sequence of
+    UPDATE/DELETE statements before a single final commit. An exception
+    partway through the reconciliation loop must ``rollback()`` — otherwise
+    the pending mutations sit on the connection and a later unrelated commit
+    silently persists a half-merged catalog. Matches the pattern used by
+    ``delete_folder``, ``move_folders_to_workspace``, and
+    ``_merge_duplicate_keywords_pass``.
+
+    The concrete pending-mutation this test forces is a photo reparent from
+    a staged else-branch iteration (existing target folder). The else-branch
+    contains no ``add_workspace_folder`` call, so its ``UPDATE photos SET
+    folder_id`` is genuinely pending until the end-of-body commit — a raise
+    before that commit must roll it back."""
+    ws = db._active_workspace_id
+
+    # Existing tracked archive base + a pre-existing date folder so the
+    # first staged-folder iteration hits the else-branch (target exists),
+    # not the if-branch (which would commit mid-loop through
+    # ``add_workspace_folder`` and defeat the rollback demonstration).
+    base_id = db.add_folder("/arch/USA", name="USA")
+    existing_date_id = db.add_folder("/arch/USA/2025-12-25",
+                                     name="2025-12-25", parent_id=base_id)
+    db.add_photo(folder_id=existing_date_id, filename="old.raf",
+                 extension=".raf", file_size=100, file_mtime=1.0)
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    # Staged tree with two else-branch iterations. The stage_root maps to
+    # ``/arch/USA`` (base_id, exists), and the stage_leaf maps to
+    # ``/arch/USA/2025-12-25`` (existing_date_id, exists). We seed the
+    # stage_leaf photo so iteration 1 does its pending
+    # ``UPDATE photos SET folder_id`` first, then iteration 2 blows up on
+    # the ``_case_insensitive_root`` probe.
+    stage_root = db.add_folder("/stage/USA", name="USA",
+                               workspace_root=False)
+    staged_root_pid = db.add_photo(
+        folder_id=stage_root, filename="root_new.raf",
+        extension=".raf", file_size=150, file_mtime=1.5,
+    )
+    stage_leaf = db.add_folder("/stage/USA/2025-12-25",
+                               name="2025-12-25", parent_id=stage_root,
+                               workspace_root=False)
+    staged_leaf_pid = db.add_photo(
+        folder_id=stage_leaf, filename="leaf_new.raf",
+        extension=".raf", file_size=200, file_mtime=2.0,
+    )
+
+    # Poison ``_case_insensitive_root`` to succeed on the FIRST call (so
+    # iteration 1 completes its pending photo reparent) and raise on the
+    # SECOND (so iteration 2 crashes AFTER iteration 1's pending
+    # ``UPDATE photos SET folder_id`` is queued but before the end-of-body
+    # commit).
+    import move as move_mod
+    real_ci_root = move_mod._case_insensitive_root
+    call_count = {"n": 0}
+
+    def _flaky(path):
+        call_count["n"] += 1
+        if call_count["n"] >= 2:
+            raise RuntimeError("case-fold probe blew up mid-merge")
+        return real_ci_root(path)
+
+    monkeypatch.setattr(move_mod, "_case_insensitive_root", _flaky)
+
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="case-fold probe blew up"):
+        db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
+
+    # Iteration 1's pending ``UPDATE photos SET folder_id = base_id`` was
+    # rolled back: the staged photo is still on stage_root, NOT on base_id.
+    # Without the try/except + rollback, the pending UPDATE would sit on the
+    # connection and any later commit on the same connection would persist
+    # it — a silent half-merge.
+    assert db.conn.execute(
+        "SELECT folder_id FROM photos WHERE id = ?", (staged_root_pid,)
+    ).fetchone()["folder_id"] == stage_root
+    # Iteration 2's staged photo is untouched (the raise fired before its
+    # photo loop even ran).
+    assert db.conn.execute(
+        "SELECT folder_id FROM photos WHERE id = ?", (staged_leaf_pid,)
+    ).fetchone()["folder_id"] == stage_leaf
+    # Neither staged folder was folded into the archive — stage_root's row
+    # still lives under its staging path, not deleted or reparented.
+    assert db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", ("/stage/USA",)
+    ).fetchone()["id"] == stage_root
+    # The pre-existing archived photo is untouched.
+    old_photo = db.conn.execute(
+        "SELECT folder_id FROM photos WHERE filename = ?", ("old.raf",)
+    ).fetchone()
+    assert old_photo["folder_id"] == existing_date_id
+    # Confirm the poison actually fired twice (i.e. we did reach the raise
+    # via iteration 2, so iteration 1's pending mutation genuinely happened
+    # and the rollback is what returned staged_root_pid to stage_root).
+    assert call_count["n"] == 2
+
+
 def test_folder_under_rule_excludes_siblings_and_escapes_wildcards(tmp_path, monkeypatch):
     """'folder under /photos/2023' must match that folder and its
     descendants only — not the sibling /photos/2023-trip — and a _ in the
