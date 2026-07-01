@@ -172,6 +172,51 @@ def test_concurrent_acquire_from_multiple_threads_only_loads_once():
     assert values == ["loaded", "loaded"]
 
 
+def test_cancelled_load_waiter_retries_instead_of_inheriting_cancel():
+    from classifier import ClassificationCancelled
+
+    cache = ModelCache(idle_secs=60)
+    load_started = threading.Event()
+    release_cancel = threading.Event()
+    good_factory_called = threading.Event()
+    values = []
+
+    def cancelled_factory():
+        load_started.set()
+        release_cancel.wait(timeout=2.0)
+        raise ClassificationCancelled("classification cancelled")
+
+    def good_factory():
+        good_factory_called.set()
+        return "ok"
+
+    def cancelled_loader():
+        with pytest.raises(ClassificationCancelled):
+            with cache.acquire("k", cancelled_factory):
+                pass
+
+    def waiting_loader():
+        with cache.acquire("k", good_factory) as value:
+            values.append(value)
+
+    ta = threading.Thread(target=cancelled_loader)
+    ta.start()
+    assert load_started.wait(timeout=1.0)
+
+    tb = threading.Thread(target=waiting_loader)
+    tb.start()
+    time.sleep(0.05)
+
+    release_cancel.set()
+    ta.join(timeout=2.0)
+    tb.join(timeout=2.0)
+
+    assert not ta.is_alive()
+    assert not tb.is_alive()
+    assert good_factory_called.is_set()
+    assert values == ["ok"]
+
+
 def test_failed_load_waiter_does_not_evict_recreated_entry():
     """Regression: when factory fails while another thread is queued on the
     same key, the waiter must not decrement the refcount of a fresh entry

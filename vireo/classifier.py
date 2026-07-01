@@ -14,6 +14,11 @@ import onnx_runtime
 
 log = logging.getLogger(__name__)
 
+
+class ClassificationCancelled(RuntimeError):
+    """Raised when caller-local cancellation interrupts classifier setup."""
+
+
 CACHE_DIR = os.path.expanduser("~/.vireo/embedding_cache")
 _MANIFEST_PATH = os.path.join(CACHE_DIR, "manifest.json")
 
@@ -320,7 +325,7 @@ def _compute_embeddings_with_progress(
     all_features = []
     for i, classname in enumerate(labels):
         if cancel_check and cancel_check():
-            raise RuntimeError("classification cancelled")
+            raise ClassificationCancelled("classification cancelled")
         txts = [template(classname) for template in OPENAI_IMAGENET_TEMPLATE]
         tokens = _tokenize(tokenizer, txts)
         txt_features = _run_text_batched(
@@ -338,7 +343,7 @@ def _compute_embeddings_with_progress(
         if progress_callback:
             progress_callback(done, total)
         if cancel_check and cancel_check():
-            raise RuntimeError("classification cancelled")
+            raise ClassificationCancelled("classification cancelled")
         if done % 50 == 0 or done == total:
             log.info("Computing label embeddings: %d/%d", done, total)
 
@@ -489,7 +494,7 @@ class Classifier:
 
             if os.path.exists(cache_path):
                 if cancel_check and cancel_check():
-                    raise RuntimeError("classification cancelled")
+                    raise ClassificationCancelled("classification cancelled")
                 log.info(
                     "Loading cached label embeddings for %d labels...", len(labels)
                 )
@@ -497,7 +502,7 @@ class Classifier:
                 log.info("Label embeddings loaded from cache")
             else:
                 if cancel_check and cancel_check():
-                    raise RuntimeError("classification cancelled")
+                    raise ClassificationCancelled("classification cancelled")
                 log.info(
                     "Computing label embeddings for %d labels "
                     "(first run -- will be cached for next time)...",
@@ -550,7 +555,7 @@ class Classifier:
                         self._std = preproc["std"]
 
                     if cancel_check and cancel_check():
-                        raise RuntimeError("classification cancelled")
+                        raise ClassificationCancelled("classification cancelled")
                     self._txt_embeddings = _compute_embeddings_with_progress(
                         text_session,
                         text_input_name,
@@ -563,7 +568,7 @@ class Classifier:
                 finally:
                     del text_session
                 if cancel_check and cancel_check():
-                    raise RuntimeError("classification cancelled")
+                    raise ClassificationCancelled("classification cancelled")
                 os.makedirs(CACHE_DIR, exist_ok=True)
                 np.save(cache_path, self._txt_embeddings)
                 # Update manifest with human-readable metadata

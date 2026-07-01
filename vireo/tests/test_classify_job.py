@@ -1001,7 +1001,7 @@ def test_reclassify_skips_purge_when_cancelled_during_model_load(tmp_path, monke
     runner = FakeRunner()
 
     # Classifier flips the runner to cancelled mid-init, then observes
-    # the cancel_check and raises the same error the real BioCLIP
+    # the cancel_check and raises the same typed error the real BioCLIP
     # embedding path raises between labels. classify_job imports
     # Classifier at module load time, so the patch has to target that
     # reference rather than classifier.Classifier.
@@ -1010,7 +1010,7 @@ def test_reclassify_skips_purge_when_cancelled_during_model_load(tmp_path, monke
         def __init__(self, *a, cancel_check=None, **kw):
             runner.cancelled = True
             if cancel_check and cancel_check():
-                raise RuntimeError("classification cancelled")
+                raise cj.ClassificationCancelled("classification cancelled")
     monkeypatch.setattr(cj, "Classifier", CancellingClassifier)
 
     # Bypass the on-disk model registry — the test doesn't need weights

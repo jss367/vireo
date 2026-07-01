@@ -34,9 +34,12 @@ from db import AUTO_MATCH_REVIEW_MARKER, Database, commit_with_retry
 from models import get_active_model, get_models
 
 try:
-    from classifier import Classifier
+    from classifier import ClassificationCancelled, Classifier
 except ImportError:
     Classifier = None
+
+    class ClassificationCancelled(RuntimeError):
+        pass
 
 try:
     from timm_classifier import TimmClassifier
@@ -1876,9 +1879,7 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
                     embedding_progress_callback=_emb_progress,
                     cancel_check=lambda: runner.is_cancelled(job["id"]),
                 )
-            except RuntimeError as e:
-                if str(e) != "classification cancelled":
-                    raise
+            except ClassificationCancelled:
                 runner.update_step(
                     job["id"], "load_model",
                     status="cancelled", summary="Cancelled",

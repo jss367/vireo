@@ -2335,16 +2335,22 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     )
 
             def _construct_classifier():
+                try:
+                    from classifier import ClassificationCancelled
+                except ImportError:
+                    class ClassificationCancelled(RuntimeError):
+                        pass
+
                 def cancel_check():
                     return _should_abort(abort) or runner.is_cancelled(job["id"])
 
                 if model_type == "timm":
                     if cancel_check():
-                        raise RuntimeError("classification cancelled")
+                        raise ClassificationCancelled("classification cancelled")
                     from timm_classifier import TimmClassifier
                     return TimmClassifier(model_str, taxonomy=tax)
                 if cancel_check():
-                    raise RuntimeError("classification cancelled")
+                    raise ClassificationCancelled("classification cancelled")
                 from classifier import Classifier
                 return Classifier(
                     labels=None if use_tol else labels,
@@ -2566,8 +2572,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     bundle = _load_model_bundle(resolved_specs[0], tax, thread_db)
                     loaded_models.update(bundle)
                 except Exception as preload_err:
+                    is_classification_cancelled = (
+                        preload_err.__class__.__name__ == "ClassificationCancelled"
+                    )
                     if (
                         runner.is_cancelled(job["id"])
+                        or is_classification_cancelled
                         or str(preload_err) == "classification cancelled"
                     ):
                         raise
@@ -2592,7 +2602,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                    summary=summary)
             except Exception as e:
                 abort.set()
-                if runner.is_cancelled(job["id"]) or str(e) == "classification cancelled":
+                is_classification_cancelled = (
+                    e.__class__.__name__ == "ClassificationCancelled"
+                )
+                if (
+                    runner.is_cancelled(job["id"])
+                    or is_classification_cancelled
+                    or str(e) == "classification cancelled"
+                ):
                     stages["model_loader"]["status"] = "skipped"
                     runner.update_step(
                         job["id"], "model_loader",
