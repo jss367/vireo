@@ -3803,6 +3803,38 @@ function selectPipelinePlace(id, name) {
   resetPipelineLabelsStatus();
 }
 
+async function startPipelineLabelEmbeddingPrecompute(precompute) {
+  if (!precompute || !precompute.model_id || !precompute.labels_file) return;
+  var modelName = precompute.model_name || 'active model';
+  try {
+    var data = await safeFetch('/api/jobs/precompute-embeddings', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        model_id: precompute.model_id,
+        labels_file: precompute.labels_file
+      }),
+    }, { toast: false });
+    showToast('Pre-computing embeddings for ' + modelName + ' in background', 'info');
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onComplete: function(result) {
+        if (result.status === 'completed') {
+          showToast('Embeddings cached for ' + modelName, 'success');
+          updateReadiness();
+          schedulePlanRefresh();
+        } else {
+          showToast('Embedding precompute failed; classification can compute them later', 'warning');
+        }
+      },
+      onError: function() {
+        updateReadiness();
+      }
+    });
+  } catch(e) {
+    showToast('Species list downloaded; embedding precompute did not start', 'warning');
+  }
+}
+
 async function fetchPipelineLabels() {
   if (!pipelineSelectedPlaceId) return;
   var groups = [];
@@ -3858,6 +3890,7 @@ async function fetchPipelineLabels() {
             status.style.color = 'var(--accent)';
           }
           if (fill) fill.style.width = '100%';
+          var precompute = result.result.embedding_precompute;
           var selectFiles = getSelectedLabelFiles();
           if (newFile && selectFiles.indexOf(newFile) === -1) selectFiles.push(newFile);
           var saveSelectionFailed = false;
@@ -3877,6 +3910,7 @@ async function fetchPipelineLabels() {
             updateLabelsPickerState();
             updateReadiness();
             schedulePlanRefresh();
+            if (precompute) startPipelineLabelEmbeddingPrecompute(precompute);
             if (!saveSelectionFailed) setTimeout(closePipelineLabelsModal, 900);
           });
         } else {

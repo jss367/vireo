@@ -502,6 +502,22 @@ function selectPlace(id, name) {
   document.getElementById('fetchLabelsBtn').disabled = false;
 }
 
+async function startWelcomeEmbeddingPrecompute(precompute) {
+  if (!precompute || !precompute.model_id || !precompute.labels_file) return;
+  try {
+    await safeFetch('/api/jobs/precompute-embeddings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model_id: precompute.model_id,
+        labels_file: precompute.labels_file,
+      }),
+    }, { toast: false });
+  } catch(e) {
+    /* Non-fatal: the first classification run can still compute embeddings. */
+  }
+}
+
 async function fetchLabels() {
   if (!selectedPlaceId) return;
   var groups = [];
@@ -553,9 +569,12 @@ async function fetchLabels() {
         if (result.status === 'completed' && result.result) {
           bar.style.width = '100%';
           status.style.color = 'var(--accent)';
+          var precompute = result.result.embedding_precompute;
           status.textContent = 'Done! ' + result.result.species_count +
-            ' species downloaded. Finishing setup…';
-          setTimeout(finishSetup, 800);
+            ' species downloaded.' + (precompute ? ' Pre-computing embeddings in background…' : ' Finishing setup…');
+          Promise.resolve(startWelcomeEmbeddingPrecompute(precompute)).then(function() {
+            setTimeout(finishSetup, 500);
+          });
         } else {
           status.style.color = 'var(--danger)';
           status.textContent = 'Failed: ' + ((result.errors || []).join(', ') || 'unknown error');

@@ -11168,7 +11168,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             thread_db.set_active_workspace(active_ws)
             thread_db.set_workspace_active_labels([labels_path])
 
-            # Auto-compute embeddings for the active model
+            precompute = None
             from models import get_active_model
 
             active_model = get_active_model()
@@ -11181,32 +11181,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 try:
                     from classifier import _embedding_cache_path, _resolve_model_dir
 
+                    with open(labels_path) as f:
+                        labels = [line.strip() for line in f if line.strip()]
                     model_dir = _resolve_model_dir(
                         active_model["model_str"], active_model.get("weights_path")
                     )
                     cache_path = _embedding_cache_path(
-                        list(set(species)), active_model["model_str"], model_dir
+                        labels, active_model["model_str"], model_dir
                     )
                     if not os.path.exists(cache_path):
-                        progress_cb(
-                            f'Pre-computing embeddings for {active_model["name"]}...',
-                            0,
-                            0,
-                        )
-                        from classifier import Classifier
-
-                        Classifier(
-                            labels=list(set(species)),
-                            model_str=active_model["model_str"],
-                            pretrained_str=active_model["weights_path"],
-                        )
-                        progress_cb("Embeddings cached!", 0, 0)
+                        precompute = {
+                            "model_id": active_model["id"],
+                            "model_name": active_model["name"],
+                            "labels_file": labels_path,
+                        }
                 except Exception:
                     log.warning(
-                        "Auto-compute embeddings failed (non-fatal)", exc_info=True
+                        "Could not inspect embedding cache after label download",
+                        exc_info=True,
                     )
 
-            return {"species_count": len(set(species)), "labels_file": labels_path}
+            return {
+                "species_count": len(set(species)),
+                "labels_file": labels_path,
+                "embedding_precompute": precompute,
+            }
 
         job_id = runner.start(
             "fetch-labels",

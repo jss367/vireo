@@ -2584,13 +2584,24 @@ async function fetchLabels() {
           status.textContent = 'Done! ' + result.result.species_count + ' species downloaded.';
           status.style.color = 'var(--accent)';
           progressFill.style.width = '100%';
+          var precompute = result.result.embedding_precompute;
+          if (precompute) {
+            startBackgroundEmbeddingPrecompute(precompute, {
+              status: status,
+              progressDiv: progressDiv,
+              progressFill: progressFill
+            });
+          }
         } else {
           status.textContent = 'Failed: ' + (result.errors || []).join(', ');
           status.style.color = 'var(--danger)';
         }
         btn.disabled = false;
         loadLabels();
-        setTimeout(function() { progressDiv.style.display = 'none'; }, 3000);
+        loadEmbeddingMatrix();
+        if (!(result.status === 'completed' && result.result && result.result.embedding_precompute)) {
+          setTimeout(function() { progressDiv.style.display = 'none'; }, 3000);
+        }
       },
       onError: function() {
         status.textContent = 'Connection lost';
@@ -2600,6 +2611,69 @@ async function fetchLabels() {
   } catch(e) {
     status.textContent = 'Error: ' + e.message;
     btn.disabled = false;
+  }
+}
+
+async function startBackgroundEmbeddingPrecompute(precompute, opts) {
+  if (!precompute || !precompute.model_id || !precompute.labels_file) return;
+  opts = opts || {};
+  var status = opts.status;
+  var progressDiv = opts.progressDiv;
+  var progressFill = opts.progressFill;
+  var modelName = precompute.model_name || 'active model';
+  if (status) {
+    status.textContent = 'Pre-computing embeddings for ' + modelName + ' in background...';
+    status.style.color = 'var(--text-dim)';
+  }
+  if (progressDiv) progressDiv.style.display = '';
+  if (progressFill) progressFill.style.width = '0%';
+
+  try {
+    var data = await safeFetch('/api/jobs/precompute-embeddings', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        model_id: precompute.model_id,
+        labels_file: precompute.labels_file
+      }),
+    }, { toast: false });
+
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(p) {
+        if (status && p.current_file) {
+          status.textContent = p.current_file.replace(/^Computing embeddings/, 'Pre-computing embeddings');
+        }
+        if (progressFill && p.total > 0) {
+          progressFill.style.width = Math.round((p.current / p.total) * 100) + '%';
+        }
+      },
+      onComplete: function(result) {
+        if (result.status === 'completed') {
+          if (status) {
+            status.textContent = 'Embeddings cached for ' + modelName + '.';
+            status.style.color = 'var(--accent)';
+          }
+          if (progressFill) progressFill.style.width = '100%';
+        } else if (status) {
+          status.textContent = 'Species list downloaded; embedding precompute failed.';
+          status.style.color = 'var(--warning)';
+        }
+        loadEmbeddingMatrix();
+        if (progressDiv) setTimeout(function() { progressDiv.style.display = 'none'; }, 3000);
+      },
+      onError: function() {
+        if (status) {
+          status.textContent = 'Species list downloaded; embedding precompute is still listed in Jobs.';
+          status.style.color = 'var(--warning)';
+        }
+      }
+    });
+  } catch(e) {
+    if (status) {
+      status.textContent = 'Species list downloaded; embedding precompute did not start: ' + e.message;
+      status.style.color = 'var(--warning)';
+    }
+    if (progressDiv) setTimeout(function() { progressDiv.style.display = 'none'; }, 3000);
   }
 }
 

@@ -17,6 +17,20 @@ def test_models_status_endpoint(app_and_db):
     assert isinstance(data["needs_setup"], bool)
 
 
+def test_welcome_starts_embedding_precompute_after_label_download(app_and_db):
+    """Onboarding label downloads should warm embeddings in the background."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    resp = client.get("/welcome")
+
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert "startWelcomeEmbeddingPrecompute" in html
+    assert "/api/jobs/precompute-embeddings" in html
+    assert "embedding_precompute" in html
+
+
 def test_models_status_no_models_needs_setup(app_and_db, monkeypatch):
     """When no classification model is downloaded, needs_setup is True."""
     import models

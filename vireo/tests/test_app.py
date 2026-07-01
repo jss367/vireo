@@ -1832,6 +1832,76 @@ def test_pipeline_exposes_inline_label_download_modal(app_and_db):
     assert 'id="pipelineFetchLabelsBtn"' in html
 
 
+def test_fetch_labels_returns_embedding_precompute_metadata_without_inline_compute(
+    app_and_db, monkeypatch, tmp_path,
+):
+    """Species-list download should finish before label embeddings compute."""
+    import classifier
+    import labels
+    import models
+
+    labels_dir = tmp_path / "labels"
+    monkeypatch.setattr(labels, "LABELS_DIR", str(labels_dir))
+    monkeypatch.setattr(
+        labels,
+        "fetch_species_list",
+        lambda *args, **kwargs: ["Blue Jay", "American Robin", "Blue Jay"],
+    )
+    monkeypatch.setattr(
+        models,
+        "get_active_model",
+        lambda: {
+            "id": "bioclip-2.5-vith14",
+            "name": "BioCLIP-2.5",
+            "downloaded": True,
+            "model_type": "bioclip",
+            "model_str": "hf-hub:imageomics/bioclip-2.5-vith14",
+            "weights_path": str(tmp_path / "model"),
+        },
+    )
+    monkeypatch.setattr(
+        classifier,
+        "_resolve_model_dir",
+        lambda *args, **kwargs: str(tmp_path / "model"),
+    )
+    monkeypatch.setattr(
+        classifier,
+        "_embedding_cache_path",
+        lambda *args, **kwargs: str(tmp_path / "missing-cache.npy"),
+    )
+
+    classifier_calls = []
+
+    def fail_if_classifier_constructed(*args, **kwargs):
+        classifier_calls.append((args, kwargs))
+        raise AssertionError("fetch-labels must not compute embeddings inline")
+
+    monkeypatch.setattr(classifier, "Classifier", fail_if_classifier_constructed)
+
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/jobs/fetch-labels",
+        json={
+            "place_id": 1,
+            "place_name": "Test Place",
+            "taxon_groups": ["birds"],
+        },
+    )
+
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+
+    assert job["status"] == "completed"
+    assert classifier_calls == []
+    assert job["result"]["species_count"] == 2
+    assert job["result"]["embedding_precompute"] == {
+        "model_id": "bioclip-2.5-vith14",
+        "model_name": "BioCLIP-2.5",
+        "labels_file": job["result"]["labels_file"],
+    }
+
+
 def test_cull_page_uses_pipeline_controls(app_and_db):
     """Cull exposes the same threshold sliders as pipeline review."""
     app, _ = app_and_db
