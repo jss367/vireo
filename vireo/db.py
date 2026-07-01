@@ -2826,6 +2826,57 @@ class Database:
             self.add_workspace_folder(
                 ws, archive_row["id"], is_root=not has_root_ancestor)
 
+        # Materialize any missing intermediate folder rows between the deepest
+        # existing catalog ancestor and ``archive_path``'s parent (inclusive)
+        # BEFORE the reconciliation loop reads ``parent_id`` by path.
+        #
+        # Nested archive destinations expose this gap: when ``/Photos`` is
+        # tracked and the user imports to ``/Photos/2026/NewShoot``, the
+        # storage preflight materializes ``/Photos/2026`` ON DISK (rsync needs
+        # the transfer parent to exist) but never opens a folder row for it —
+        # the scanner didn't visit that path. Without the row, the loop's
+        # ``WHERE path = ?`` lookup for the staged root's target-parent
+        # returns nothing, and the UPDATE below repoints the staged root to
+        # ``archive_path`` with ``parent_id=NULL`` — floating it outside the
+        # managed archive tree and breaking every parent-based subtree
+        # operation (cascade path renames, ``_folder_subtree_ids_by_path``,
+        # etc.). Walk up from the archive parent until an existing row shows
+        # up (or the filesystem root). When no anchor is found (no tracked
+        # ancestor row in the catalog), the destination is a brand-new
+        # unrelated root — leave the loop's ``parent_id=NULL`` alone, which
+        # is the expected shape for a root. Otherwise insert missing rows
+        # top-down so each child's ``parent_id`` resolves to its freshly-
+        # created parent, and link each to the active workspace non-root
+        # (they sit under an existing tracked root by construction).
+        missing_intermediates = []
+        probe = os.path.dirname(archive_path)
+        anchor_found = False
+        while probe and probe != os.path.dirname(probe):
+            row = self.conn.execute(
+                "SELECT id FROM folders WHERE path = ?", (probe,)
+            ).fetchone()
+            if row is not None:
+                anchor_found = True
+                break
+            missing_intermediates.append(probe)
+            probe = os.path.dirname(probe)
+        if anchor_found:
+            for mid_path in reversed(missing_intermediates):
+                mid_parent = os.path.dirname(mid_path)
+                parent_row = self.conn.execute(
+                    "SELECT id FROM folders WHERE path = ?", (mid_parent,)
+                ).fetchone()
+                parent_id_for_mid = (
+                    parent_row["id"] if parent_row else None)
+                name = os.path.basename(mid_path) or mid_path
+                cur = self.conn.execute(
+                    "INSERT INTO folders (path, name, parent_id) "
+                    "VALUES (?, ?, ?)",
+                    (mid_path, name, parent_id_for_mid),
+                )
+                self.add_workspace_folder(
+                    ws, cur.lastrowid, is_root=False)
+
         # Snapshot staged folders root-first (shallowest path first) so a
         # parent's target row exists before its children are processed.
         prefix = _subtree_prefix(staged_root_path)

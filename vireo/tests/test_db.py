@@ -7662,6 +7662,78 @@ def test_merge_staged_tree_ancestor_base_stays_non_root(db):
     assert roots == [root_id]
 
 
+def test_merge_staged_tree_materializes_missing_intermediate_parent(db):
+    """Regression: when the archive destination is nested inside a tracked
+    root but an intermediate archive folder has never been scanned (e.g.
+    ``/Photos`` tracked and the user imports to ``/Photos/2026/NewShoot``),
+    the storage preflight creates ``/Photos/2026`` on disk via rsync's
+    parent-dir setup but never opens a folder row for it. Without the fix
+    the reconciliation repoints the staged root to ``/Photos/2026/NewShoot``
+    with ``parent_id=NULL`` — floating it outside the managed archive tree
+    and breaking every parent-based subtree operation (cascade path
+    renames, ``_folder_subtree_ids_by_path``, tree UI). The merge must
+    materialize the missing intermediate rows top-down so the staged
+    root's ``parent_id`` resolves to the freshly-created ``/Photos/2026``
+    row, and each intermediate must be linked to the active workspace as
+    a non-root (they sit under the existing tracked root).
+    """
+    ws = db._active_workspace_id
+
+    # Existing tracked archive root — a single folder row, no descendants
+    # under it in the catalog. The intermediate ``/Photos/2026`` was
+    # never scanned.
+    root_id = db.add_folder("/Photos", name="Photos")
+    db.add_workspace_folder(ws, root_id, is_root=True)
+
+    # Staged tree that will land at /Photos/2026/NewShoot after rsync.
+    stage_root = db.add_folder("/stage/NewShoot", name="NewShoot",
+                               workspace_root=False)
+    stage_leaf = db.add_folder("/stage/NewShoot/2026-06-30",
+                               name="2026-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    db.add_photo(folder_id=stage_leaf, filename="new.raf", extension=".raf",
+                 file_size=100, file_mtime=1.0)
+
+    db.merge_staged_tree_into_archive(stage_root, "/Photos/2026/NewShoot")
+
+    # The intermediate archive folder now has a real folder row parented
+    # under the tracked root — not floating with parent_id=NULL.
+    mid = db.conn.execute(
+        "SELECT id, parent_id FROM folders WHERE path = ?",
+        ("/Photos/2026",),
+    ).fetchone()
+    assert mid is not None, (
+        "missing intermediate /Photos/2026 should be materialized so the "
+        "reparented staged root has a real parent row to point at"
+    )
+    assert mid["parent_id"] == root_id
+
+    # The staged root, now repointed to the archive destination, is
+    # correctly parented under the freshly-created intermediate.
+    dest = db.conn.execute(
+        "SELECT parent_id FROM folders WHERE path = ?",
+        ("/Photos/2026/NewShoot",),
+    ).fetchone()
+    assert dest is not None
+    assert dest["parent_id"] == mid["id"]
+
+    # /Photos remains the SOLE workspace root — no duplicate overlapping
+    # root created by the materialized intermediates or the reparented
+    # staged root.
+    roots = [r["folder_id"] for r in db.conn.execute(
+        "SELECT folder_id FROM workspace_folders "
+        "WHERE workspace_id=? AND is_root=1", (ws,))]
+    assert roots == [root_id]
+
+    # The intermediate is linked to the active workspace as a non-root so
+    # workspace-scoped queries over the tree include it.
+    mid_link = db.conn.execute(
+        "SELECT is_root FROM workspace_folders "
+        "WHERE workspace_id=? AND folder_id=?", (ws, mid["id"]),
+    ).fetchone()
+    assert mid_link is not None and mid_link["is_root"] == 0
+
+
 def test_merge_staged_tree_missing_target_file_keeps_new_photo(db, tmp_path):
     """Defensive: a filename collision against a STALE target row whose file is
     missing on disk must NOT drop the staged photo as ``already_present``. The
