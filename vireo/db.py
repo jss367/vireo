@@ -2956,13 +2956,33 @@ class Database:
                 parent_id_for_mid = (
                     parent_row["id"] if parent_row else None)
                 name = os.path.basename(mid_path) or mid_path
+                # Two concurrent local-processing jobs targeting siblings
+                # inside the same tracked archive (e.g. ``/Photos/2026/A`` and
+                # ``/Photos/2026/B`` while only ``/Photos`` is tracked) can
+                # each snapshot the shared intermediate (``/Photos/2026``)
+                # as missing above, then race to insert its ``folders`` row
+                # here. The final archive paths don't overlap, so the
+                # storage-destination reservation doesn't serialize them; the
+                # loser's plain INSERT would hit the ``folders.path`` UNIQUE
+                # constraint AFTER all staging/processing work is done.
+                # ``INSERT OR IGNORE`` + re-query keeps the loser's merge
+                # progressing against whichever row won the race — the same
+                # intermediate is folder-idempotent (same path, same tracked
+                # ancestor parent). ``cur.lastrowid`` is 0 on an ignored
+                # insert, so read the id back via ``WHERE path = ?``.
                 cur = self.conn.execute(
-                    "INSERT INTO folders (path, name, parent_id) "
+                    "INSERT OR IGNORE INTO folders (path, name, parent_id) "
                     "VALUES (?, ?, ?)",
                     (mid_path, name, parent_id_for_mid),
                 )
+                if cur.rowcount:
+                    mid_id = cur.lastrowid
+                else:
+                    mid_id = self.conn.execute(
+                        "SELECT id FROM folders WHERE path = ?", (mid_path,)
+                    ).fetchone()["id"]
                 self.add_workspace_folder(
-                    ws, cur.lastrowid, is_root=False)
+                    ws, mid_id, is_root=False)
 
         # Snapshot staged folders root-first (shallowest path first) so a
         # parent's target row exists before its children are processed.

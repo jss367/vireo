@@ -7810,6 +7810,87 @@ def test_merge_staged_tree_materializes_missing_intermediate_parent(db):
     assert mid_link is not None and mid_link["is_root"] == 0
 
 
+def test_merge_staged_tree_intermediate_insert_survives_race(db):
+    """Regression: two concurrent local-processing jobs targeting siblings
+    inside the same tracked archive (e.g. ``/Photos/2026/A`` and
+    ``/Photos/2026/B`` while only ``/Photos`` is tracked) can both snapshot
+    the shared intermediate ``/Photos/2026`` as missing during walk-up, then
+    race to insert it. The archive-destination reservation lets them run
+    because the leaf paths don't overlap. Without ``INSERT OR IGNORE`` +
+    requery, the loser would raise ``IntegrityError`` on the intermediate's
+    ``folders.path`` UNIQUE constraint AFTER all staging/processing work is
+    already done, stranding the merge. The reconciliation must instead fall
+    back to the winner's row and finish parenting the staged tree under it.
+    """
+    ws = db._active_workspace_id
+
+    # Tracked archive root; the shared intermediate /Photos/2026 has never
+    # been scanned (no folder row for it yet).
+    root_id = db.add_folder("/Photos", name="Photos")
+    db.add_workspace_folder(ws, root_id, is_root=True)
+
+    # Staged tree that will land at /Photos/2026/A after rsync.
+    stage_root = db.add_folder("/stage/A", name="A", workspace_root=False)
+    db.add_photo(folder_id=stage_root, filename="a.raf", extension=".raf",
+                 file_size=100, file_mtime=1.0)
+
+    # Simulate the race: the walk-up probe above has already snapshotted
+    # /Photos/2026 as missing; here we sneak in a competing insert JUST
+    # before the reconciliation's own INSERT fires, standing in for the
+    # winning concurrent job's commit. Without INSERT OR IGNORE the loser's
+    # plain INSERT would raise here. Wrap the connection (sqlite3.Connection
+    # is C-implemented and doesn't allow assigning to .execute directly).
+    real_conn = db.conn
+
+    class _RacingConn:
+        race_inserted = False
+
+        def execute(self_wrap, sql, params=()):
+            if (not _RacingConn.race_inserted
+                    and isinstance(sql, str)
+                    and sql.startswith("INSERT OR IGNORE INTO folders")):
+                real_conn.execute(
+                    "INSERT INTO folders (path, name, parent_id) "
+                    "VALUES (?, ?, ?)",
+                    ("/Photos/2026", "2026", root_id),
+                )
+                _RacingConn.race_inserted = True
+            return real_conn.execute(sql, params)
+
+        def __getattr__(self_wrap, name):
+            return getattr(real_conn, name)
+
+    db.conn = _RacingConn()
+    try:
+        db.merge_staged_tree_into_archive(stage_root, "/Photos/2026/A")
+    finally:
+        db.conn = real_conn
+
+    # The race was actually triggered (guards against a future refactor that
+    # renames the INSERT and silently no-ops this simulation).
+    assert _RacingConn.race_inserted, (
+        "expected the reconciliation to run INSERT OR IGNORE for the missing "
+        "intermediate row — the simulation didn't fire, so the race is no "
+        "longer exercised"
+    )
+
+    # Exactly one /Photos/2026 row survives (the winner's), and the staged
+    # tree ended up parented under it — no duplicates, no NULL parent, no
+    # UNIQUE-constraint crash.
+    mid_rows = db.conn.execute(
+        "SELECT id, parent_id FROM folders WHERE path = ?",
+        ("/Photos/2026",),
+    ).fetchall()
+    assert len(mid_rows) == 1
+    mid_id = mid_rows[0]["id"]
+    assert mid_rows[0]["parent_id"] == root_id
+    dest = db.conn.execute(
+        "SELECT parent_id FROM folders WHERE path = ?",
+        ("/Photos/2026/A",),
+    ).fetchone()
+    assert dest is not None and dest["parent_id"] == mid_id
+
+
 def test_merge_staged_tree_missing_target_file_keeps_new_photo(db, tmp_path):
     """Defensive: a filename collision against a STALE target row whose file is
     missing on disk must NOT drop the staged photo as ``already_present``. The
