@@ -2190,12 +2190,14 @@ class Database:
         ``'missing'`` — those are surfaced by ``get_missing_folders`` and
         listing them per-photo would just duplicate that signal at high cost.
 
-        When ``folder_id`` is given, the result is further restricted to that
-        folder and every folder beneath it in the tree (a recursive walk over
-        ``parent_id``). This backs the "rescan a specific folder" flow — the
-        user asked about one folder, so the deleted-original review must not
-        surface ghosts from unrelated parts of the library. ``None`` (the
-        default) keeps the whole-workspace behavior.
+        When ``folder_id`` is given, the result is further restricted to
+        that folder and every folder beneath it in the tree. This backs the
+        "rescan a specific folder" flow — the user asked about one folder,
+        so the deleted-original review must not surface ghosts from unrelated
+        parts of the library. Descendant discovery goes through
+        ``_folder_subtree_ids_by_path`` so legacy rows whose ``parent_id`` is
+        NULL still count as descendants of their path-prefixed root. ``None``
+        (the default) keeps the whole-workspace behavior.
 
         Folder DB ``status`` is updated asynchronously by a 10-minute health
         loop, so a freshly unmounted volume can still show ``status='ok'``
@@ -2213,20 +2215,16 @@ class Database:
         params = [self._ws_id()]
         subtree_clause = ""
         if folder_id is not None:
-            # Restrict to the folder subtree. The CTE seeds on the requested
-            # folder id and walks children via parent_id, so a photo in any
-            # descendant folder is included but nothing outside the branch is.
-            subtree_clause = """
-               AND f.id IN (
-                   WITH RECURSIVE subtree(id) AS (
-                       SELECT id FROM folders WHERE id = ?
-                       UNION ALL
-                       SELECT c.id FROM folders c
-                       JOIN subtree s ON c.parent_id = s.id
-                   )
-                   SELECT id FROM subtree
-               )"""
-            params.append(folder_id)
+            # Restrict to the folder subtree. Path-prefix expansion (the same
+            # helper used by add_workspace_folder etc.) covers legacy rows
+            # whose parent_id is NULL — a plain recursive walk over parent_id
+            # would silently drop those subfolders.
+            subtree_ids = self._folder_subtree_ids_by_path(folder_id)
+            if not subtree_ids:
+                return []
+            placeholders = ",".join("?" for _ in subtree_ids)
+            subtree_clause = f" AND f.id IN ({placeholders})"
+            params.extend(subtree_ids)
         rows = self.conn.execute(
             f"""SELECT p.id, p.filename, p.extension, p.file_size,
                       p.timestamp, p.working_copy_path,

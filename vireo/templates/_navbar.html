@@ -9003,6 +9003,13 @@ setInterval(checkMissingFolders, 600000);
 
 /* ---------- Missing Originals Banner ---------- */
 let _missingPhotosCache = [];
+// Whatever rows the currently open Missing Originals modal is showing,
+// keyed by photo id. Populated by every modal load — including scoped
+// ones that intentionally skip _missingPhotosCache to keep the banner's
+// dismissed-count math honest — so sidecar cleanup can still look up
+// has_xmp_sidecar for a freshly discovered ghost that only exists in a
+// folder-scoped view.
+let _missingPhotosModalRows = new Map();
 let _missingPhotosBannerDismissedCount = 0;
 // Both the banner poll and the modal load hit /api/photos/missing and write
 // to _missingPhotosCache. A slow earlier fetch returning after a newer one
@@ -9617,6 +9624,9 @@ async function loadMissingPhotos() {
     // A folder-scoped load is a subset — don't overwrite the workspace-wide
     // banner cache with it, or the banner's dismissed-count math goes stale.
     if (!scoped && cacheId === _missingPhotosCacheFetchId) _missingPhotosCache = photos;
+    // Sidecar cleanup consults this map (see _deleteMissingPhotoIds) so a
+    // freshly discovered ghost in a scoped load still gets its .xmp removed.
+    _missingPhotosModalRows = new Map(photos.map(p => [p.id, p]));
     if (photos.length === 0) {
       container.innerHTML = '<p style="color:var(--text-secondary);">No photos with missing originals.</p>';
       checkMissingPhotos();
@@ -9709,9 +9719,20 @@ async function _deleteMissingPhotoIds(ids, deleteSidecars) {
   // sidecar paths from the photo row's folder + filename, so once the row
   // is gone the lookup returns nothing and the .xmp would be left behind.
   if (deleteSidecars) {
-    const sidecarIds = _missingPhotosCache
-      .filter(p => ids.includes(p.id) && p.has_xmp_sidecar)
-      .map(p => p.id);
+    // Prefer the modal's own rows: they cover ghosts that only appeared in
+    // a folder-scoped load and therefore aren't in the workspace-wide
+    // cache. Fall back to the cache for the removeOneMissingPhoto path
+    // when the modal isn't open.
+    const idSet = new Set(ids);
+    const seen = new Set();
+    const sidecarIds = [];
+    const consider = (p) => {
+      if (!p || seen.has(p.id)) return;
+      seen.add(p.id);
+      if (idSet.has(p.id) && p.has_xmp_sidecar) sidecarIds.push(p.id);
+    };
+    for (const id of ids) consider(_missingPhotosModalRows.get(id));
+    for (const p of _missingPhotosCache) consider(p);
     if (sidecarIds.length > 0) {
       await safeFetch('/api/photos/missing/delete-sidecars', {
         method: 'POST',

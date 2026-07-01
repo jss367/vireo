@@ -68,6 +68,29 @@ def test_get_missing_photos_scope_includes_subtree(tmp_path):
     db.close()
 
 
+def test_get_missing_photos_scope_includes_legacy_null_parent_descendants(tmp_path):
+    """Legacy DBs can have descendant folders with parent_id=NULL.
+
+    A recursive walk over parent_id would silently skip them; the path-prefix
+    fallback (shared with _folder_subtree_ids_by_path) keeps the scoped
+    Missing Originals review honest on those older workspaces.
+    """
+    db = _db_with_active_ws(tmp_path)
+    root = tmp_path / "root"
+    root.mkdir()
+    sub = root / "sub"
+    sub.mkdir()
+    froot = db.add_folder(str(root), name="root")
+    # Simulate a legacy row: descendant path under root, but no parent_id link.
+    fsub = db.add_folder(str(sub), name="sub", parent_id=None)
+    ps = _add_photo_file(db, sub, fsub, "s1.jpg")
+
+    (sub / "s1.jpg").unlink()
+
+    assert [r["id"] for r in db.get_missing_photos(folder_id=froot)] == [ps]
+    db.close()
+
+
 # ---- App layer: /api/photos/missing?folder_id= and /api/jobs/scan-workspace
 
 @pytest.fixture
