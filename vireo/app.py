@@ -10484,6 +10484,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         except ValueError as e:
             return json_error(str(e), 400)
+
+        # Transparency: if the destination is (or sits inside) a folder Vireo
+        # already manages, surface it as an existing archive so the UI can
+        # frame the import as a merge rather than a fresh copy. Pure catalog
+        # read — no file I/O beyond the tracked-folder probe.
+        from move import _tracked_destination_ancestor, _tracked_destination_overlap
+        db = _get_db()
+        tracked = (_tracked_destination_overlap(db, -1, destination)
+                   or _tracked_destination_ancestor(db, -1, destination))
+        result["managed_archive"] = None
+        if tracked:
+            from db import _subtree_prefix
+            prefix = _subtree_prefix(tracked["path"])
+            count = db.conn.execute(
+                """SELECT COUNT(*) AS c
+                     FROM photos p JOIN folders f ON f.id = p.folder_id
+                    WHERE f.path = ?
+                       OR substr(REPLACE(f.path, '\\', '/'), 1, ?) = ?""",
+                (tracked["path"], len(prefix), prefix),
+            ).fetchone()["c"]
+            result["managed_archive"] = {
+                "path": tracked["path"],
+                "photo_count": count,
+            }
         return jsonify(result)
 
     @app.route("/api/import/folder-preview/thumbnail")

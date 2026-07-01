@@ -2153,6 +2153,113 @@ def test_destination_preview_rejects_absolute_template(setup, tmp_path):
         assert resp.status_code == 400
 
 
+def test_destination_preview_flags_managed_archive(setup, tmp_path):
+    """When the destination is an already-tracked Vireo folder, the preview
+    surfaces it as an existing managed archive with its catalog photo count,
+    so the UI can frame the import as a merge instead of a fresh copy."""
+    app, db_path = setup
+
+    # A real on-disk archive base that the catalog already manages, with a
+    # prior shoot under a date subfolder.
+    archive = tmp_path / "arch" / "USA"
+    prior = archive / "2025" / "2025-01-01"
+    prior.mkdir(parents=True)
+    p1 = prior / "old-1.jpg"
+    p2 = prior / "old-2.jpg"
+    Image.new("RGB", (16, 16), "green").save(p1)
+    Image.new("RGB", (16, 16), "olive").save(p2)
+
+    from db import Database
+    seed = Database(db_path)
+    base_id = seed.add_folder(str(archive))
+    prior_id = seed.add_folder(str(prior), parent_id=base_id, workspace_root=False)
+    for f in (p1, p2):
+        seed.add_photo(prior_id, f.name, ".jpg", f.stat().st_size, f.stat().st_mtime)
+    seed.close()
+
+    # A fresh source card whose files aren't in the archive yet.
+    src = tmp_path / "card"
+    src.mkdir()
+    new = src / "new.jpg"
+    Image.new("RGB", (16, 16), "blue").save(new)
+    mtime = datetime(2026, 6, 30, 9, 30, 0).timestamp()
+    os.utime(str(new), (mtime, mtime))
+
+    with app.test_client() as c:
+        resp = c.post("/api/import/destination-preview", json={
+            "sources": [str(src)],
+            "destination": str(archive),
+            "folder_template": "%Y/%Y-%m-%d",
+        })
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["managed_archive"] is not None
+        assert data["managed_archive"]["path"] == str(archive)
+        assert data["managed_archive"]["photo_count"] == 2
+
+
+def test_destination_preview_fresh_destination_has_no_managed_archive(setup, tmp_path):
+    """A destination that isn't at/inside any tracked folder reports no
+    managed archive, so the UI presents it as a fresh copy target."""
+    app, _ = setup
+    src = tmp_path / "card"
+    src.mkdir()
+    new = src / "new.jpg"
+    Image.new("RGB", (16, 16), "blue").save(new)
+    mtime = datetime(2026, 6, 30, 9, 30, 0).timestamp()
+    os.utime(str(new), (mtime, mtime))
+
+    with app.test_client() as c:
+        resp = c.post("/api/import/destination-preview", json={
+            "sources": [str(src)],
+            "destination": str(tmp_path / "fresh"),
+            "folder_template": "%Y/%Y-%m-%d",
+        })
+        assert resp.status_code == 200
+        assert resp.get_json()["managed_archive"] is None
+
+
+def test_destination_preview_inside_managed_archive_flags_ancestor(setup, tmp_path):
+    """A destination NESTED inside a tracked root surfaces the ancestor archive
+    (and its full photo count), not the nested path — so importing into a new
+    subfolder of a managed root is still flagged as a merge."""
+    app, db_path = setup
+
+    archive = tmp_path / "arch" / "USA"
+    prior = archive / "2025" / "2025-01-01"
+    prior.mkdir(parents=True)
+    p1 = prior / "old-1.jpg"
+    Image.new("RGB", (16, 16), "green").save(p1)
+
+    from db import Database
+    seed = Database(db_path)
+    base_id = seed.add_folder(str(archive))
+    prior_id = seed.add_folder(str(prior), parent_id=base_id, workspace_root=False)
+    seed.add_photo(prior_id, p1.name, ".jpg", p1.stat().st_size, p1.stat().st_mtime)
+    seed.close()
+
+    src = tmp_path / "card"
+    src.mkdir()
+    new = src / "new.jpg"
+    Image.new("RGB", (16, 16), "blue").save(new)
+    mtime = datetime(2026, 6, 30, 9, 30, 0).timestamp()
+    os.utime(str(new), (mtime, mtime))
+
+    nested = archive / "NewShoot"
+
+    with app.test_client() as c:
+        resp = c.post("/api/import/destination-preview", json={
+            "sources": [str(src)],
+            "destination": str(nested),
+            "folder_template": "%Y/%Y-%m-%d",
+        })
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["managed_archive"] is not None
+        assert data["managed_archive"]["path"] == str(archive)
+        assert data["managed_archive"]["photo_count"] == 1
+
+
 def _wait_for_job(client, job_id, timeout=30.0):
     """Poll the job-status endpoint until the job completes or fails."""
     deadline = time.time() + timeout
