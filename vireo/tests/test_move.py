@@ -1001,6 +1001,51 @@ def test_move_folder_merge_moved_excludes_already_present(move_env):
     ).fetchone()["c"] == 1
 
 
+def test_move_folder_merge_reports_dropped_ids_for_cache_cleanup(move_env):
+    """Regression: cached thumbnails/previews/working copies are keyed by
+    ``photos.id``. When the merge drops a staged photo as
+    ``already_present``, the freed rowid would leave orphan cache files on
+    disk (SQLite reuses rowids, so a future import that lands on the same
+    id inherits stale imagery). ``move_folder`` must surface the freed
+    staged ids at ``result['dropped_photo_ids']`` so the pipeline archive
+    stage can hand them to ``cleanup_cached_files_for_deleted_photos``.
+
+    Kept OFF ``result['merge']`` — that dict is serialized into the
+    archive-stage summary/API payload, and internal photo ids are not
+    part of the user-facing shape."""
+    from move import move_folder
+
+    env = move_env
+    db = env["db"]
+
+    # Same setup as ``moved_excludes_already_present`` — bird1.jpg is
+    # byte-identical between staged src and pre-seeded archive landing, so
+    # the merge drops the staged bird1.jpg row.
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    identical_bytes = (env["src"] / "bird1.jpg").read_bytes()
+    (landing / "bird1.jpg").write_bytes(identical_bytes)
+    fid_archive = db.add_folder(str(landing), name="src")
+    db.add_photo(folder_id=fid_archive, filename="bird1.jpg",
+                 extension=".jpg",
+                 file_size=len(identical_bytes), file_mtime=3.0)
+
+    staged_bird1_pid = db.conn.execute(
+        "SELECT id FROM photos WHERE folder_id = ? AND filename = ?",
+        (env["fid_src"], "bird1.jpg"),
+    ).fetchone()["id"]
+
+    result = move_folder(
+        db=db, folder_id=env["fid_src"], destination=str(env["dst"]),
+        merge=True, allow_tracked_merge=True,
+    )
+
+    assert result["errors"] == []
+    assert staged_bird1_pid in result.get("dropped_photo_ids", [])
+    # The user-facing merge dict stays clean of internal ids.
+    assert "dropped_photo_ids" not in result["merge"]
+
+
 def test_move_folder_refuses_missing_tracked_destination_before_copy(move_env):
     """A stale tracked destination row must block the move even when the
     resolved destination does not currently exist on disk."""

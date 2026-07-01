@@ -2039,12 +2039,20 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
 
     result = {"moved": total_photos, "errors": []}
     if merge_into_tracked is not None:
+        # ``dropped_photo_ids`` is a cleanup handle for the caller (thumbnails,
+        # previews, offline copies of the deleted staged photos), not a
+        # user-facing count. Lift it off ``merge_counts`` so ``result["merge"]``
+        # stays a stable dict of display numbers that gets serialized straight
+        # into the archive-stage summary/API payload.
+        dropped = merge_counts.pop("dropped_photo_ids", None) or []
         result["merge"] = merge_counts
         result["merged_into_existing"] = merge_into_tracked
         # On the merge path ``total_photos`` counts every staged source photo,
         # including identical ones that were dropped as ``already_present``.
         # Report ``moved`` as the photos actually added to the archive.
         result["moved"] = merge_counts["new_photos"]
+        if dropped:
+            result["dropped_photo_ids"] = dropped
     if cleanup_error is not None:
         result["cleanup_error"] = cleanup_error
     return result

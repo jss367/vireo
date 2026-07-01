@@ -4611,6 +4611,24 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 if move_result.get("errors"):
                     raise RuntimeError("; ".join(move_result["errors"]))
 
+                # Merge-into-existing-archive dropped some staged photo rows
+                # (identical filename already archived, or a phantom target
+                # row was replaced). SQLite reuses freed rowids, so any
+                # thumbnail / preview / working-copy / offline-cache file
+                # keyed off one of those ids would silently become a stale
+                # asset for whichever future photo lands on the same id.
+                # Mirror the archive-skip cleanup path so no orphaned cache
+                # files can survive the merge.
+                dropped_ids = move_result.get("dropped_photo_ids") or []
+                if dropped_ids:
+                    from preview_cache import (
+                        cleanup_cached_files_for_deleted_photos,
+                    )
+                    cleanup_cached_files_for_deleted_photos(
+                        effective_thumb_cache_dir,
+                        [{"photo_id": pid} for pid in dropped_ids],
+                    )
+
                 if staging_parent:
                     with contextlib.suppress(OSError):
                         os.rmdir(staging_parent)

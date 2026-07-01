@@ -1534,8 +1534,18 @@ class Database:
         ids.update(r["id"] for r in rows)
         return list(ids)
 
-    def add_workspace_folder(self, workspace_id, folder_id, *, is_root=True):
-        """Link a folder and its known descendants to a workspace."""
+    def _add_workspace_folder_no_commit(
+            self, workspace_id, folder_id, *, is_root=True):
+        """Link a folder + descendants to a workspace WITHOUT committing.
+
+        Same body as ``add_workspace_folder`` minus the ``commit()`` and cache
+        invalidation. Intended for callers that already run inside a larger
+        try/except+rollback transaction (e.g. ``merge_staged_tree_into_
+        archive``) where a mid-body commit would break rollback safety by
+        persisting a preceding UPDATE that an outer failure was meant to
+        undo. The caller is responsible for committing (and for invalidating
+        the workspace's new-images cache) after its own transaction closes.
+        """
         folder_ids = self._folder_subtree_ids_by_path(folder_id)
         self.conn.executemany(
             """INSERT OR IGNORE INTO workspace_folders
@@ -1551,6 +1561,11 @@ class Database:
                         WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
                     [folder_id, workspace_id] + chunk,
                 )
+
+    def add_workspace_folder(self, workspace_id, folder_id, *, is_root=True):
+        """Link a folder and its known descendants to a workspace."""
+        self._add_workspace_folder_no_commit(
+            workspace_id, folder_id, is_root=is_root)
         self.conn.commit()
         # The folder's untracked files now count toward this workspace's
         # new-images backlog. Drop any stale cached payload so the next read
@@ -2785,13 +2800,20 @@ class Database:
           folder.
         * ``already_present`` — identical-filename staged photos dropped because
           the target folder already held that filename.
+        * ``dropped_photo_ids`` — staged photo ids that were deleted during
+          the merge (``already_present`` collisions plus phantom target-row
+          replacements). The caller passes these to
+          ``cleanup_cached_files_for_deleted_photos`` so orphaned thumbnail /
+          preview / working-copy files can't be inherited by a later import
+          that reuses one of the freed SQLite rowids.
         """
         staged_root = self.conn.execute(
             "SELECT path FROM folders WHERE id = ?", (staged_root_id,)
         ).fetchone()
         if not staged_root:
             return {"new_photos": 0, "new_folders": 0,
-                    "merged_folders": 0, "already_present": 0}
+                    "merged_folders": 0, "already_present": 0,
+                    "dropped_photo_ids": []}
         staged_root_path = staged_root["path"]
         ws = self._ws_id()
 
@@ -2826,7 +2848,7 @@ class Database:
         # behavior to preserve the root flag. Making the "already root" case
         # an explicit skip keeps the merge safe if that invariant ever changes.
         archive_row = self.conn.execute(
-            "SELECT id FROM folders WHERE path = ?", (archive_path,)
+            "SELECT id, status FROM folders WHERE path = ?", (archive_path,)
         ).fetchone()
         if archive_row:
             existing_link = self.conn.execute(
@@ -2845,6 +2867,20 @@ class Database:
                 self.add_workspace_folder(
                     ws, archive_row["id"], is_root=not has_root_ancestor)
             # else: base is already a workspace root — nothing to do.
+            # If the archive base was marked ``missing`` at a previous health
+            # scan (drive unmounted at the time), the storage preflight has
+            # since verified the volume is mounted and the rsync copy landed
+            # files on disk — flip it back to ``ok`` so ws-scoped photo queries
+            # (which filter ``folders.status IN ('ok', 'partial')``) show the
+            # merged photos instead of hiding them until the next health scan
+            # happens to reconcile. Only migrate ``missing`` → ``ok``: leave
+            # ``partial`` alone (the row still has unverified photos) and
+            # ``ok`` unchanged.
+            if archive_row["status"] == "missing":
+                self.conn.execute(
+                    "UPDATE folders SET status = 'ok' WHERE id = ?",
+                    (archive_row["id"],),
+                )
         elif not self._active_ws_root_ancestor_exists(ws, archive_path):
             # ``archive_path`` has no folder row yet — it's a brand-new
             # subfolder inside an already-tracked archive that the staged
@@ -2934,7 +2970,8 @@ class Database:
         ).fetchall()
 
         counts = {"new_photos": 0, "new_folders": 0,
-                  "merged_folders": 0, "already_present": 0}
+                  "merged_folders": 0, "already_present": 0,
+                  "dropped_photo_ids": []}
         # Staged folders that fold into an existing target row are deleted only
         # after every staged folder has been processed. Deleting eagerly would
         # hit a FK violation when a not-yet-reparented staged child still points
@@ -3003,7 +3040,14 @@ class Database:
                         "WHERE id = ?",
                         (target_path, parent_id, sf["id"]),
                     )
-                    self.add_workspace_folder(ws, sf["id"], is_root=False)
+                    # Use the non-committing variant so the folder path/parent_
+                    # id UPDATE just above stays in the outer transaction — the
+                    # public ``add_workspace_folder`` commits, and a mid-loop
+                    # commit would persist a partial reparent that the outer
+                    # rollback (below) could no longer undo if a later staged
+                    # folder raised.
+                    self._add_workspace_folder_no_commit(
+                        ws, sf["id"], is_root=False)
                     # The staging scan registers each photo-bearing leaf as
                     # its own workspace ROOT (scanner restrict_dirs =>
                     # is_root=1). Once that leaf is folded under the existing
@@ -3036,6 +3080,20 @@ class Database:
                     last_target_parent[target_path] = sf["id"]
                 else:
                     # Existing folder: move photos in, drop filename-collisions.
+                    # Restore the target row to visible status if it was marked
+                    # ``missing`` — same rationale as the archive-base status
+                    # flip above. We just verified files exist at
+                    # ``target_path`` (rsync + verify), so a lingering
+                    # ``missing`` from an earlier health scan would hide the
+                    # newly-merged photos from workspace-scoped queries. Only
+                    # migrate ``missing`` → ``ok``; leave ``partial``/``ok``
+                    # alone. Runs inside the outer try/except so a later
+                    # exception still rolls this back.
+                    self.conn.execute(
+                        "UPDATE folders SET status = 'ok' "
+                        "WHERE id = ? AND status = 'missing'",
+                        (target["id"],),
+                    )
                     staged_photos = list(self.conn.execute(
                         "SELECT id, filename FROM photos WHERE folder_id = ?",
                         (sf["id"],),
@@ -3124,6 +3182,13 @@ class Database:
                             self.conn.execute(
                                 "DELETE FROM photos WHERE id = ?", (pid,))
                             counts["already_present"] += 1
+                            # The staged photo id is now free. Thumbnails,
+                            # previews, working copies, and offline cache files
+                            # were keyed off this id, and SQLite reuses freed
+                            # rowids — a later import that lands on this id
+                            # would inherit stale imagery. Report the id up so
+                            # the caller can drop those files.
+                            counts["dropped_photo_ids"].append(pid)
                         else:
                             if collision is not None:
                                 # Filename collided (case-normalized) but the
@@ -3144,6 +3209,11 @@ class Database:
                                 self.conn.execute(
                                     "DELETE FROM photos WHERE id = ?",
                                     (collision["id"],))
+                                # The phantom target-row id is likewise freed —
+                                # its cache files can be reused for a new
+                                # photo. Report it up for cleanup too.
+                                counts["dropped_photo_ids"].append(
+                                    collision["id"])
                             self.conn.execute(
                                 "UPDATE photos SET folder_id = ? "
                                 "WHERE id = ?",
