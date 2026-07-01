@@ -120,3 +120,27 @@ def test_lightbox_panel_add_and_flip_to_selected(live_server, page):
     selected = panel.locator("button", has_text="Life List photo")
     expect(selected).to_be_visible()
     assert re.search(r"\bprimary\b", selected.get_attribute("class") or "")
+
+
+def test_lightbox_panel_hides_after_current_photo_rejected(live_server, page):
+    """When the currently-open photo is rejected via lightbox flag controls,
+    _photo_can_be_life_list_preference stops accepting it on the server. The
+    panel must refresh so "Add to Life List" stops offering clicks that would
+    be guaranteed 4xxs."""
+    url = live_server["url"]
+    page.goto(f"{url}/life-list")
+
+    card = page.locator(".species-card").first
+    card.wait_for(state="visible")
+    card.click()
+
+    panel = page.locator("#lifeListLightboxPanel")
+    expect(panel).to_be_visible()
+    expect(panel.locator("button", has_text="Add to Life List")).to_be_visible()
+
+    # Reject via the same code path the lightbox flag chips call.
+    page.evaluate("() => _lbApplyFlag(_lightboxCurrentId, 'rejected')")
+
+    # After the flag write settles and the listener refetches, the panel
+    # should hide (backend returns empty life_list for rejected photos).
+    expect(panel).to_be_hidden()
