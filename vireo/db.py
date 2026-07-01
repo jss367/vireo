@@ -2845,6 +2845,32 @@ class Database:
                 self.add_workspace_folder(
                     ws, archive_row["id"], is_root=not has_root_ancestor)
             # else: base is already a workspace root — nothing to do.
+        elif not self._active_ws_root_ancestor_exists(ws, archive_path):
+            # ``archive_path`` has no folder row yet — it's a brand-new
+            # subfolder inside an already-tracked archive that the staged
+            # root will be repointed onto below. When the tracked archive
+            # was scanned only under a DIFFERENT workspace, the active
+            # workspace has no link to any of it, no root ancestor covers
+            # ``archive_path``, and the staged-root demotion further down
+            # (``UPDATE workspace_folders SET is_root = 0``) leaves ``ws``
+            # with no ``is_root=1`` row for the merged tree at all —
+            # ``get_workspace_folder_roots()`` filters on ``is_root=1``, so
+            # the merged archive silently disappears from the active ws
+            # even though the import reports success. Walk up to find the
+            # deepest tracked ancestor and root it in ``ws`` so the merged
+            # tree has a visible anchor. The intermediate-materialization
+            # block below then links each freshly-created intermediate as a
+            # non-root descendant under this new root.
+            probe = os.path.dirname(archive_path)
+            while probe and probe != os.path.dirname(probe):
+                ancestor_row = self.conn.execute(
+                    "SELECT id FROM folders WHERE path = ?", (probe,)
+                ).fetchone()
+                if ancestor_row is not None:
+                    self.add_workspace_folder(
+                        ws, ancestor_row["id"], is_root=True)
+                    break
+                probe = os.path.dirname(probe)
 
         # Materialize any missing intermediate folder rows between the deepest
         # existing catalog ancestor and ``archive_path``'s parent (inclusive)

@@ -7625,6 +7625,77 @@ def test_merge_staged_tree_links_archive_to_active_workspace(db):
     assert row is not None and row["filename"] == "new.raf"
 
 
+def test_merge_staged_tree_new_descendant_roots_tracked_ancestor_for_active_ws(
+        db):
+    """Regression: when the archive destination is a BRAND-NEW subfolder
+    inside a tracked archive that belongs only to a DIFFERENT workspace,
+    the merge used to skip the ``if archive_row:`` linking block (the new
+    subfolder has no folder row yet), then the reconciliation loop
+    reparented the staged root onto the new archive path and explicitly
+    demoted it to ``is_root=0``. The active workspace was left with NO
+    ``is_root=1`` row covering the merged tree, and
+    ``get_workspace_folder_roots()`` (which filters on ``is_root=1``)
+    returned nothing — the newly-archived photos silently disappeared from
+    the active workspace even though the import reported success.
+
+    The fix roots the deepest tracked ancestor in the active workspace
+    when no root ancestor is present, so the merged tree has a visible
+    anchor."""
+    # Archive tracked only under the default ws.
+    other_ws = db._active_workspace_id
+    tracked_id = db.add_folder("/arch", name="arch")
+    db.add_workspace_folder(other_ws, tracked_id, is_root=True)
+
+    # Switch to a fresh workspace with NO link to /arch and NO root
+    # ancestor above it.
+    active_ws = db.create_workspace("Active")
+    db.set_active_workspace(active_ws)
+    assert db.conn.execute(
+        "SELECT 1 FROM workspace_folders "
+        "WHERE workspace_id=? AND folder_id=?",
+        (active_ws, tracked_id),
+    ).fetchone() is None
+
+    # Staged tree destined for a NEW subfolder inside /arch — no folder row
+    # for /arch/NewShoot exists yet.
+    stage_root = db.add_folder("/stage/NewShoot", name="NewShoot",
+                               workspace_root=False)
+    stage_leaf = db.add_folder("/stage/NewShoot/2026-06-30", name="2026-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    new_pid = db.add_photo(folder_id=stage_leaf, filename="new.raf",
+                           extension=".raf", file_size=200, file_mtime=2.0)
+
+    db.merge_staged_tree_into_archive(stage_root, "/arch/NewShoot")
+
+    # The tracked ancestor /arch is now a root of the active workspace, so
+    # get_workspace_folder_roots() has an anchor for the merged tree.
+    ancestor_link = db.conn.execute(
+        "SELECT is_root FROM workspace_folders "
+        "WHERE workspace_id=? AND folder_id=?",
+        (active_ws, tracked_id),
+    ).fetchone()
+    assert ancestor_link is not None and ancestor_link["is_root"] == 1
+
+    # The merged photo is visible via the workspace_folders join every
+    # ws-scoped query uses.
+    row = db.conn.execute(
+        """SELECT p.filename FROM photos p
+           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+           WHERE p.id = ? AND wf.workspace_id = ?""",
+        (new_pid, active_ws),
+    ).fetchone()
+    assert row is not None and row["filename"] == "new.raf"
+
+    # The other workspace's root on /arch is preserved (is_root scoping in
+    # add_workspace_folder is per-workspace).
+    other_link = db.conn.execute(
+        "SELECT is_root FROM workspace_folders "
+        "WHERE workspace_id=? AND folder_id=?",
+        (other_ws, tracked_id),
+    ).fetchone()
+    assert other_link is not None and other_link["is_root"] == 1
+
+
 def test_merge_staged_tree_ancestor_base_stays_non_root(db):
     """Regression: when the active workspace already has a managed root ANCESTOR
     of the archive base (import into an existing subfolder — root ``/Photos``,
