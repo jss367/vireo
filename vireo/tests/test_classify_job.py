@@ -1000,15 +1000,17 @@ def test_reclassify_skips_purge_when_cancelled_during_model_load(tmp_path, monke
 
     runner = FakeRunner()
 
-    # Classifier "loads" successfully but flips the runner to cancelled
-    # mid-init, simulating a user clicking cancel during the (otherwise
-    # uninterruptible) embedding computation. classify_job imports
+    # Classifier flips the runner to cancelled mid-init, then observes
+    # the cancel_check and raises the same error the real BioCLIP
+    # embedding path raises between labels. classify_job imports
     # Classifier at module load time, so the patch has to target that
     # reference rather than classifier.Classifier.
     import classify_job as cj
     class CancellingClassifier:
-        def __init__(self, *a, **kw):
+        def __init__(self, *a, cancel_check=None, **kw):
             runner.cancelled = True
+            if cancel_check and cancel_check():
+                raise RuntimeError("classification cancelled")
     monkeypatch.setattr(cj, "Classifier", CancellingClassifier)
 
     # Bypass the on-disk model registry — the test doesn't need weights
@@ -1039,6 +1041,14 @@ def test_reclassify_skips_purge_when_cancelled_during_model_load(tmp_path, monke
     # The cancel-before-purge gate returns a no-op result.
     assert result["predictions_stored"] == 0
     assert result["detected"] == 0
+
+    finals = _final_step_statuses(runner)
+    assert finals.get("load_model") == "cancelled"
+    for step_id in ("detect", "classify", "finalize"):
+        assert finals.get(step_id) == "cancelled", (
+            f"Step {step_id!r} must be marked cancelled when model "
+            f"initialization observes cancellation, got {finals.get(step_id)!r}"
+        )
 
     # And — the whole point of the gate — cached predictions and
     # detections survive the cancelled run intact.
