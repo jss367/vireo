@@ -2988,6 +2988,23 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         try:
                             bundle = _load_model_bundle(active_spec, tax, thread_db)
                         except Exception as model_err:
+                            is_classification_cancelled = (
+                                model_err.__class__.__name__ == "ClassificationCancelled"
+                            )
+                            if (
+                                _should_abort(abort)
+                                or runner.is_cancelled(job["id"])
+                                or is_classification_cancelled
+                                or str(model_err) == "classification cancelled"
+                            ):
+                                abort.set()
+                                runner.update_step(
+                                    job["id"], step_id,
+                                    status="completed",
+                                    summary="Skipped (cancelled)",
+                                )
+                                completed_step_ids.add(step_id)
+                                continue
                             log.warning(
                                 "Skipping model %s: %s",
                                 active_spec["name"], model_err,
