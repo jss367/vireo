@@ -979,8 +979,20 @@ def test_move_folder_merge_moved_excludes_already_present(move_env):
     identical_bytes = (env["src"] / "bird1.jpg").read_bytes()
     (landing / "bird1.jpg").write_bytes(identical_bytes)
     fid_archive = db.add_folder(str(landing), name="src")
+    # Matching ``file_hash`` on both sides is required for the merge to
+    # treat the collision as real (see merge_staged_tree_into_archive's
+    # hash-only invariant — size alone can't distinguish a real collision
+    # from a rsync-copied phantom in the post-copy path). Pre-seed both
+    # rows with the same hash, and stamp the staged fixture row with it
+    # too so the drop path fires.
     db.add_photo(folder_id=fid_archive, filename="bird1.jpg", extension=".jpg",
-                 file_size=len(identical_bytes), file_mtime=3.0)
+                 file_size=len(identical_bytes), file_mtime=3.0,
+                 file_hash="BIRD1HASH")
+    db.conn.execute(
+        "UPDATE photos SET file_hash = ? WHERE folder_id = ? AND filename = ?",
+        ("BIRD1HASH", env["fid_src"], "bird1.jpg"),
+    )
+    db.conn.commit()
 
     result = move_folder(
         db=db, folder_id=env["fid_src"], destination=str(env["dst"]),
@@ -1026,9 +1038,17 @@ def test_move_folder_merge_reports_dropped_ids_for_cache_cleanup(move_env):
     identical_bytes = (env["src"] / "bird1.jpg").read_bytes()
     (landing / "bird1.jpg").write_bytes(identical_bytes)
     fid_archive = db.add_folder(str(landing), name="src")
+    # Matching ``file_hash`` on both rows exercises the real-collision
+    # drop path (see merge_staged_tree_into_archive's hash-only invariant).
     db.add_photo(folder_id=fid_archive, filename="bird1.jpg",
                  extension=".jpg",
-                 file_size=len(identical_bytes), file_mtime=3.0)
+                 file_size=len(identical_bytes), file_mtime=3.0,
+                 file_hash="BIRD1HASH")
+    db.conn.execute(
+        "UPDATE photos SET file_hash = ? WHERE folder_id = ? AND filename = ?",
+        ("BIRD1HASH", env["fid_src"], "bird1.jpg"),
+    )
+    db.conn.commit()
 
     staged_bird1_pid = db.conn.execute(
         "SELECT id FROM photos WHERE folder_id = ? AND filename = ?",

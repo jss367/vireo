@@ -3156,19 +3156,33 @@ class Database:
                     # bytes into place. By the time we run here rsync has
                     # already finished, so ``os.path.exists`` returns True
                     # in BOTH the real-collision and the phantom-row cases
-                    # and cannot tell them apart. Compare the STAGED photo's
-                    # bytes-identity (file_hash, or file_size fallback) to
-                    # the TARGET row's recorded bytes-identity instead: a
-                    # match means the row correctly describes what is on
-                    # disk (real collision — dropping the staged row is
-                    # safe); a mismatch means rsync just wrote fresh staged
-                    # bytes over a phantom row and the row is stale. In
-                    # the phantom case delete the stale target row and
-                    # reparent the staged photo in its place so the
-                    # surviving catalog row describes the bytes actually on
-                    # disk. This also avoids a UNIQUE(folder_id, filename)
-                    # violation from moving the staged row onto a folder
-                    # that still holds the same basename.
+                    # and cannot tell them apart. Require MATCHING recorded
+                    # ``file_hash`` on both the staged photo and the target
+                    # row to call a collision "real": a hash match means
+                    # the row correctly describes what is on disk (dropping
+                    # the staged row is safe); a hash mismatch means rsync
+                    # replaced a missing file with fresh staged bytes and
+                    # the row is stale. When either recorded hash is
+                    # missing there is no reliable post-copy signal —
+                    # ``file_size`` alone can coincidentally match a
+                    # phantom row's stored size (empty XMP sidecars, small
+                    # metadata files), and hashing the on-disk file to
+                    # compare against the STAGED hash matches trivially in
+                    # BOTH the real-collision case (byte-identical by
+                    # definition) and the phantom case (rsync wrote the
+                    # staged bytes). Default to phantom-replacement below
+                    # when unverifiable: it preserves the freshly-imported
+                    # pipeline output at the cost of any accumulated
+                    # metadata on an unhashed archive row, which is the
+                    # strictly-safer direction — silently dropping the
+                    # newly-imported photo behind a same-size stale row is
+                    # the opposite (and worse) failure. In the phantom
+                    # case delete the stale target row and reparent the
+                    # staged photo in its place so the surviving catalog
+                    # row describes the bytes actually on disk. This also
+                    # avoids a UNIQUE(folder_id, filename) violation from
+                    # moving the staged row onto a folder that still holds
+                    # the same basename.
                     for staged in staged_photos:
                         pid = staged["id"]
                         collision = existing_by_key.get(
@@ -3196,32 +3210,20 @@ class Database:
                             staged_hash = staged["file_hash"]
                             target_hash = collision["file_hash"]
                             if staged_hash and target_hash:
-                                # Byte-identity via hash is the strongest
-                                # signal. Matching hashes → the target
-                                # row's claim matches the file on disk
-                                # (real collision). Mismatch → rsync
+                                # Both hashes present → byte-identity
+                                # comparison is reliable. Match → the
+                                # target row's claim matches the file on
+                                # disk (real collision). Mismatch → rsync
                                 # replaced a missing file with fresh
                                 # bytes; the target row is stale.
                                 real_collision = (staged_hash == target_hash)
-                            else:
-                                # Fall back to file_size when either hash
-                                # is unset (older catalog rows, unhashed
-                                # staged scans). Same principle: the row's
-                                # size matches on-disk → row is accurate;
-                                # differs → row is stale.
-                                target_size = collision["file_size"]
-                                try:
-                                    on_disk_size = os.path.getsize(
-                                        target_disk_path)
-                                except OSError:
-                                    on_disk_size = None
-                                if (target_size is not None
-                                        and on_disk_size is not None):
-                                    real_collision = (
-                                        on_disk_size == target_size)
-                                # else: no signal to verify the row —
-                                # prefer safety and keep the staged photo,
-                                # falling into the phantom branch below.
+                            # else: at least one recorded hash is missing.
+                            # Leave ``real_collision`` False so the
+                            # phantom-replacement branch below runs — see
+                            # the outer comment for why size alone (or a
+                            # freshly-computed on-disk hash) can't safely
+                            # stand in for the recorded-hash comparison
+                            # here.
                         if real_collision:
                             # photo_keywords.photo_id has no ON DELETE CASCADE
                             # (unlike every other photo_id FK), so clear
