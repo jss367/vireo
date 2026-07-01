@@ -252,6 +252,80 @@ body { padding-bottom: 36px; }
   font-size: 12px; color: var(--text-secondary, #8BB8C0);
   margin-top: 6px;
 }
+.labels-setting-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.labels-setting-head .setting-label {
+  margin-bottom: 0;
+}
+.labels-get-more-btn {
+  background: var(--bg-tertiary, #14374E);
+  color: var(--text-secondary, #B0CCCC);
+  border: 1px solid var(--border-secondary, #1A4560);
+  border-radius: 4px;
+  padding: 3px 9px;
+  font-size: 11px;
+  line-height: 1.3;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.labels-get-more-btn:hover {
+  border-color: var(--accent, #24E5CA);
+  color: var(--text-primary, #E0F0F0);
+}
+.pipeline-label-modal-section {
+  margin-bottom: 12px;
+}
+.pipeline-label-modal-section:last-child {
+  margin-bottom: 0;
+}
+.pipeline-label-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.pipeline-label-options.vertical {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  gap: 5px;
+}
+.pipeline-place-dropdown {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-secondary);
+  border-top: none;
+  border-radius: 0 0 4px 4px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.pipeline-place-option {
+  padding: 8px 10px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-bottom: 1px solid var(--border-secondary);
+}
+.pipeline-place-option:hover {
+  background: var(--bg-tertiary);
+}
+.pipeline-label-progress {
+  display: none;
+  height: 4px;
+  background: var(--bg-tertiary);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 8px;
+}
+.pipeline-label-progress div {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.3s;
+}
 .setting-static {
   background: var(--bg-input, #14374E);
   color: var(--text-primary, #E0F0F0);
@@ -967,7 +1041,10 @@ body { padding-bottom: 36px; }
           <div id="modelPicker" style="font-size:12px;max-height:100px;overflow-y:auto;">Loading models...</div>
         </div>
         <div class="setting-item">
-          <div class="setting-label">Labels</div>
+          <div class="labels-setting-head">
+            <div class="setting-label">Labels</div>
+            <button type="button" class="labels-get-more-btn" onclick="openPipelineLabelsModal()">Get more</button>
+          </div>
           <div id="labelsPicker" style="font-size:12px;max-height:100px;overflow-y:auto;"></div>
           <div id="labelsPickerNote" style="font-size:11px;color:var(--text-faint);margin-top:4px;display:none;"></div>
         </div>
@@ -1171,6 +1248,46 @@ body { padding-bottom: 36px; }
   </div>
 </div>
 </div><!-- end pipeline-layout -->
+
+<div class="modal-overlay" id="pipelineLabelsModal" onclick="if(event.target===this)closePipelineLabelsModal()">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="pipelineLabelsModalTitle" style="width:560px;max-width:calc(100vw - 32px);">
+    <h3 id="pipelineLabelsModalTitle">Download Species Labels</h3>
+    <p style="font-size:13px;color:var(--text-dim);line-height:1.5;margin:0 0 14px;">
+      Build a regional species list from iNaturalist for this classification run.
+    </p>
+
+    <div class="pipeline-label-modal-section">
+      <label class="modal-label" for="pipelinePlaceSearch">Region</label>
+      <input type="text" id="pipelinePlaceSearch" class="modal-input"
+             placeholder="e.g. Luxembourg, California, Costa Rica"
+             oninput="searchPipelinePlacesDebounced()" autocomplete="off">
+      <div id="pipelinePlaceDropdown" class="pipeline-place-dropdown"></div>
+    </div>
+
+    <div class="pipeline-label-modal-section">
+      <div class="modal-label">Include</div>
+      <div id="pipelineTaxonCheckboxes" class="pipeline-label-options"></div>
+    </div>
+
+    <div class="pipeline-label-modal-section">
+      <div class="modal-label">Observation Quality</div>
+      <div id="pipelineObservationFilterRadios" class="pipeline-label-options vertical"></div>
+    </div>
+
+    <div id="pipelineFetchLabelsStatus" style="font-size:12px;color:var(--text-dim);min-height:18px;"></div>
+    <div id="pipelineFetchLabelsProgress" class="pipeline-label-progress">
+      <div id="pipelineFetchLabelsFill"></div>
+    </div>
+
+    <div class="modal-actions">
+      <button type="button" class="modal-btn modal-btn-cancel" onclick="closePipelineLabelsModal()">Cancel</button>
+      <button type="button" class="modal-btn modal-btn-primary" id="pipelineFetchLabelsBtn"
+              onclick="fetchPipelineLabels()" disabled>
+        Download Species List
+      </button>
+    </div>
+  </div>
+</div>
 
 <script>
 // -- Page init: fetch pipeline data from API and populate the page --
@@ -3432,12 +3549,278 @@ function updateLabelsPickerState() {
   }
 }
 
-async function loadLabels() {
+function getSelectedLabelFiles() {
+  var files = [];
+  document.querySelectorAll('.labels-run-cb:checked').forEach(function(cb) {
+    files.push(cb.value);
+  });
+  return files;
+}
+
+var pipelineSelectedPlaceId = null;
+var pipelineSelectedPlaceName = '';
+var pipelineLabelsSearchTimer = null;
+var pipelineLabelsFormLoaded = false;
+var pipelineLabelsEscHandler = null;
+
+function openPipelineLabelsModal() {
+  var modal = document.getElementById('pipelineLabelsModal');
+  if (!modal) return;
+  modal.classList.add('open');
+  resetPipelineLabelsStatus();
+  if (!pipelineLabelsFormLoaded) {
+    pipelineLabelsFormLoaded = true;
+    loadPipelineTaxonGroups();
+    loadPipelineObservationFilters();
+  }
+  pipelineLabelsEscHandler = function(e) {
+    if (e.key === 'Escape') closePipelineLabelsModal();
+  };
+  document.addEventListener('keydown', pipelineLabelsEscHandler);
+  setTimeout(function() {
+    var input = document.getElementById('pipelinePlaceSearch');
+    if (input) input.focus();
+  }, 0);
+}
+
+function closePipelineLabelsModal() {
+  var modal = document.getElementById('pipelineLabelsModal');
+  if (modal) modal.classList.remove('open');
+  if (pipelineLabelsEscHandler) {
+    document.removeEventListener('keydown', pipelineLabelsEscHandler);
+    pipelineLabelsEscHandler = null;
+  }
+}
+
+function resetPipelineLabelsStatus() {
+  var status = document.getElementById('pipelineFetchLabelsStatus');
+  var progress = document.getElementById('pipelineFetchLabelsProgress');
+  var fill = document.getElementById('pipelineFetchLabelsFill');
+  var btn = document.getElementById('pipelineFetchLabelsBtn');
+  if (status) {
+    status.textContent = '';
+    status.style.color = 'var(--text-dim)';
+  }
+  if (progress) progress.style.display = 'none';
+  if (fill) fill.style.width = '0%';
+  if (btn) btn.disabled = !pipelineSelectedPlaceId;
+}
+
+async function loadPipelineTaxonGroups() {
+  var box = document.getElementById('pipelineTaxonCheckboxes');
+  if (!box) return;
+  box.textContent = 'Loading...';
   try {
+    var groups = await safeFetch('/api/labels/taxon-groups', {}, { toast: false });
+    box.textContent = '';
+    groups.forEach(function(g) {
+      var label = document.createElement('label');
+      label.style.cssText = 'font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:4px;cursor:pointer;';
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.className = 'pipeline-taxon-cb';
+      cb.value = g.key;
+      cb.checked = g.key === 'birds';
+      cb.style.cssText = 'accent-color:var(--accent);';
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(g.name));
+      box.appendChild(label);
+    });
+  } catch(e) {
+    box.innerHTML = '<span style="color:var(--danger);font-size:12px;">Failed to load taxa</span>';
+  }
+}
+
+async function loadPipelineObservationFilters() {
+  var box = document.getElementById('pipelineObservationFilterRadios');
+  if (!box) return;
+  box.textContent = 'Loading...';
+  try {
+    var filters = await safeFetch('/api/labels/observation-filters', {}, { toast: false });
+    box.textContent = '';
+    filters.forEach(function(f) {
+      var label = document.createElement('label');
+      label.style.cssText = 'font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:4px;cursor:pointer;line-height:1.35;';
+      var radio = document.createElement('input');
+      radio.type = 'radio';
+      radio.name = 'pipeline-obs-filter';
+      radio.value = f.key;
+      radio.checked = f.key === 'research';
+      radio.style.cssText = 'accent-color:var(--accent);';
+      label.appendChild(radio);
+      label.appendChild(document.createTextNode(f.name + ' '));
+      var desc = document.createElement('span');
+      desc.style.cssText = 'color:var(--text-faint);';
+      desc.textContent = '- ' + f.description;
+      label.appendChild(desc);
+      box.appendChild(label);
+    });
+  } catch(e) {
+    box.innerHTML = '<span style="color:var(--danger);font-size:12px;">Failed to load observation filters</span>';
+  }
+}
+
+function searchPipelinePlacesDebounced() {
+  if (pipelineSelectedPlaceId) {
+    pipelineSelectedPlaceId = null;
+    pipelineSelectedPlaceName = '';
+    var btn = document.getElementById('pipelineFetchLabelsBtn');
+    var input = document.getElementById('pipelinePlaceSearch');
+    if (btn) btn.disabled = true;
+    if (input) input.style.borderColor = 'var(--border-secondary)';
+  }
+  resetPipelineLabelsStatus();
+  if (pipelineLabelsSearchTimer) clearTimeout(pipelineLabelsSearchTimer);
+  pipelineLabelsSearchTimer = setTimeout(searchPipelinePlaces, 300);
+}
+
+async function searchPipelinePlaces() {
+  var input = document.getElementById('pipelinePlaceSearch');
+  var dropdown = document.getElementById('pipelinePlaceDropdown');
+  if (!input || !dropdown) return;
+  var q = input.value.trim();
+  if (q.length < 2) {
+    dropdown.textContent = '';
+    return;
+  }
+  try {
+    var places = await safeFetch('/api/labels/search-places?q=' + encodeURIComponent(q), {}, { toast: false });
+    dropdown.textContent = '';
+    if (places.length === 0) {
+      var empty = document.createElement('div');
+      empty.style.cssText = 'padding:8px 10px;font-size:12px;color:var(--text-dim);';
+      empty.textContent = 'No places found';
+      dropdown.appendChild(empty);
+      return;
+    }
+    places.slice(0, 8).forEach(function(p) {
+      var dn = p.display_name || p.name || '';
+      var option = document.createElement('div');
+      option.className = 'pipeline-place-option';
+      option.textContent = dn;
+      option.addEventListener('click', function() {
+        selectPipelinePlace(p.id, dn);
+      });
+      dropdown.appendChild(option);
+    });
+  } catch(e) {
+    dropdown.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:var(--danger);">Search failed</div>';
+  }
+}
+
+function selectPipelinePlace(id, name) {
+  pipelineSelectedPlaceId = parseInt(id, 10);
+  pipelineSelectedPlaceName = name;
+  var dropdown = document.getElementById('pipelinePlaceDropdown');
+  var input = document.getElementById('pipelinePlaceSearch');
+  var btn = document.getElementById('pipelineFetchLabelsBtn');
+  if (dropdown) dropdown.textContent = '';
+  if (input) {
+    input.value = name;
+    input.style.borderColor = 'var(--accent)';
+  }
+  if (btn) btn.disabled = false;
+  resetPipelineLabelsStatus();
+}
+
+async function fetchPipelineLabels() {
+  if (!pipelineSelectedPlaceId) return;
+  var groups = [];
+  document.querySelectorAll('.pipeline-taxon-cb:checked').forEach(function(cb) {
+    groups.push(cb.value);
+  });
+  if (groups.length === 0) {
+    var noGroupsStatus = document.getElementById('pipelineFetchLabelsStatus');
+    if (noGroupsStatus) {
+      noGroupsStatus.textContent = 'Select at least one taxon group.';
+      noGroupsStatus.style.color = 'var(--danger)';
+    }
+    return;
+  }
+
+  var selectedBefore = getSelectedLabelFiles();
+  var btn = document.getElementById('pipelineFetchLabelsBtn');
+  var status = document.getElementById('pipelineFetchLabelsStatus');
+  var progress = document.getElementById('pipelineFetchLabelsProgress');
+  var fill = document.getElementById('pipelineFetchLabelsFill');
+  if (btn) btn.disabled = true;
+  if (status) {
+    status.textContent = 'Starting download...';
+    status.style.color = 'var(--text-dim)';
+  }
+  if (progress) progress.style.display = '';
+  if (fill) fill.style.width = '0%';
+
+  try {
+    var data = await safeFetch('/api/jobs/fetch-labels', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        place_id: pipelineSelectedPlaceId,
+        place_name: pipelineSelectedPlaceName,
+        taxon_groups: groups,
+        observation_filter: (document.querySelector('input[name="pipeline-obs-filter"]:checked') || {}).value || 'research',
+      }),
+    }, { toast: false });
+    if (status) status.textContent = 'Fetching species...';
+
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(p) {
+        if (status && p.current_file) status.textContent = p.current_file;
+        if (fill && p.total > 0 && p.current > 0) {
+          fill.style.width = Math.round((p.current / p.total) * 100) + '%';
+        }
+      },
+      onComplete: function(result) {
+        var newFile = result && result.result ? result.result.labels_file : '';
+        if (result && result.status === 'completed' && result.result) {
+          if (status) {
+            status.textContent = 'Downloaded ' + (result.result.species_count || 0).toLocaleString() + ' species.';
+            status.style.color = 'var(--accent)';
+          }
+          if (fill) fill.style.width = '100%';
+          var selectFiles = selectedBefore.slice();
+          if (newFile && selectFiles.indexOf(newFile) === -1) selectFiles.push(newFile);
+          loadLabels({ selectFiles: selectFiles }).then(function() {
+            updateLabelsPickerState();
+            updateReadiness();
+            schedulePlanRefresh();
+          });
+          setTimeout(closePipelineLabelsModal, 900);
+        } else {
+          if (status) {
+            status.textContent = 'Failed: ' + ((result.errors || []).join(', ') || 'download did not complete');
+            status.style.color = 'var(--danger)';
+          }
+        }
+        if (btn) btn.disabled = !pipelineSelectedPlaceId;
+      },
+      onError: function() {
+        if (status) {
+          status.textContent = 'Connection lost while downloading labels.';
+          status.style.color = 'var(--danger)';
+        }
+        if (btn) btn.disabled = !pipelineSelectedPlaceId;
+      }
+    });
+  } catch(e) {
+    if (status) {
+      status.textContent = 'Error: ' + (e.message || e);
+      status.style.color = 'var(--danger)';
+    }
+    if (btn) btn.disabled = !pipelineSelectedPlaceId;
+  }
+}
+
+async function loadLabels(options) {
+  try {
+    options = options || {};
     var data = await safeFetch('/api/labels', {}, { toast: false });
     var div = document.getElementById('labelsPicker');
     var active = data.active || [];
-    var activePaths = new Set(active.map(function(a) { return a.labels_file; }));
+    var activePaths = new Set(
+      options.selectFiles || active.map(function(a) { return a.labels_file; })
+    );
 
     div.textContent = '';
     if (!data.labels || data.labels.length === 0) {
@@ -3463,6 +3846,7 @@ async function loadLabels() {
       });
     }
 
+    updateLabelsPickerState();
   } catch(e) {}
 }
 
