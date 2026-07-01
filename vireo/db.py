@@ -2834,6 +2834,9 @@ class Database:
                 # the tracked-ancestor guard was meant to prevent.
                 # add_workspace_folder's INSERT OR IGNORE can't downgrade an
                 # existing is_root=1 row, so demote it explicitly here.
+                # At merge time the archive base/ancestor is always the
+                # workspace root, so every folded leaf is unconditionally
+                # non-root — no need to check the base's is_root first.
                 self.conn.execute(
                     "UPDATE workspace_folders SET is_root = 0 "
                     "WHERE workspace_id = ? AND folder_id = ?",

@@ -7418,6 +7418,65 @@ def test_merge_staged_tree_new_subfolders(db):
     assert row is not None and row["is_root"] == 0
 
 
+def test_merge_staged_tree_downgrades_staged_root_leaf(db):
+    """Regression: a staged photo-bearing leaf that the scanner registered as
+    its OWN workspace root (workspace_folders.is_root=1) must be demoted to a
+    plain descendant when it is folded under the existing archive base.
+
+    This reproduces the real trigger: the staging scan restricts to the leaf
+    dir, so add_folder links it as a root. add_workspace_folder's INSERT OR
+    IGNORE cannot downgrade that pre-existing is_root=1 row, so the merge must
+    UPDATE it to 0 explicitly — otherwise a stray second workspace root is left
+    inside the archive. The prior new-subfolders test seeds the staged rows with
+    workspace_root=False, so it would pass even with the fix removed; this one
+    genuinely exercises the downgrade."""
+    ws = db._active_workspace_id
+
+    # Existing tracked archive base, linked as the workspace root.
+    base_id = db.add_folder("/arch/USA", name="USA")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    # Staged tree post-rsync. The leaf is registered as its OWN root, exactly as
+    # the staging scanner does (restrict_dirs => is_root=1 on the scanned leaf).
+    stage_root = db.add_folder("/stage/USA", name="USA", workspace_root=False)
+    stage_year = db.add_folder("/stage/USA/2026", name="2026",
+                               parent_id=stage_root, workspace_root=False)
+    stage_leaf = db.add_folder("/stage/USA/2026/2026-06-30", name="2026-06-30",
+                               parent_id=stage_year, workspace_root=True)
+    db.add_photo(folder_id=stage_leaf, filename="new.raf", extension=".raf",
+                 file_size=200, file_mtime=2.0)
+
+    # Precondition: the staged leaf really IS a workspace root before the merge,
+    # so this test genuinely exercises the downgrade path.
+    pre = db.conn.execute(
+        "SELECT is_root FROM workspace_folders WHERE workspace_id=? AND folder_id=?",
+        (ws, stage_leaf),
+    ).fetchone()
+    assert pre is not None and pre["is_root"] == 1
+
+    db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
+
+    # The folded leaf now lives under the archive as a NON-root descendant.
+    leaf = db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?",
+        ("/arch/USA/2026/2026-06-30",),
+    ).fetchone()
+    assert leaf is not None
+    leaf_link = db.conn.execute(
+        "SELECT is_root FROM workspace_folders WHERE workspace_id=? AND folder_id=?",
+        (ws, leaf["id"]),
+    ).fetchone()
+    assert leaf_link is not None and leaf_link["is_root"] == 0
+
+    # The archive base is the single remaining workspace root.
+    roots = db.conn.execute(
+        "SELECT folder_id FROM workspace_folders "
+        "WHERE workspace_id=? AND is_root=1",
+        (ws,),
+    ).fetchall()
+    assert [r["folder_id"] for r in roots] == [base_id]
+
+
 def test_merge_staged_tree_existing_folder_and_collision(db):
     """Staged folder folds into a pre-existing target date-folder: a
     same-filename staged photo (even one carrying keyword links) is dropped as
