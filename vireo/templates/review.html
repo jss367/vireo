@@ -1556,6 +1556,29 @@ function buildBurstGroupContextMenu(photoId, filename) {
       onClick: function() {
         if (typeof window.submitToInat === 'function') window.submitToInat(photoId);
       } },
+    { label: 'Edit Photo',
+      onClick: function() {
+        // Hand the group's ordered photo list to the editor for Prev/Next,
+        // mirroring the lightbox "Edit Photo" handoff. Use the visible
+        // (non-removed) items so the editor can't navigate into frames the
+        // user has already removed from the group.
+        if (window.vireoEditNav) {
+          window.vireoEditNav.setList(
+            _grmVisibleItems().map(function(it) { return it.photo_id; }), photoId);
+          window.vireoEditNav.setLastPhoto(photoId);
+        }
+        // Open in a new tab in a real browser so the modal stays alive with
+        // any pending pick/reject/remove decisions — navigating in place
+        // would tear it down and drop that unsaved work. Tauri has no tabs
+        // and ignores window.open(_, '_blank'); navigate in place there,
+        // same tradeoff as Open in Browse Mode.
+        var url = '/edit/' + photoId;
+        if (typeof isTauri === 'function' && isTauri()) {
+          window.location.href = url;
+        } else {
+          window.open(url, '_blank', 'noopener');
+        }
+      } },
   ].concat(
     typeof window.buildOpenInEditorMenuItems === 'function'
       ? window.buildOpenInEditorMenuItems([photoId])
