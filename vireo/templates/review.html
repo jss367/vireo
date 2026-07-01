@@ -1556,6 +1556,17 @@ function buildBurstGroupContextMenu(photoId, filename) {
       onClick: function() {
         if (typeof window.submitToInat === 'function') window.submitToInat(photoId);
       } },
+    { label: 'Edit Photo',
+      onClick: function() {
+        // Hand the group's ordered photo list to the editor for Prev/Next,
+        // mirroring the lightbox "Edit Photo" handoff.
+        if (window.vireoEditNav) {
+          window.vireoEditNav.setList(
+            grmState.items.map(function(it) { return it.photo_id; }), photoId);
+          window.vireoEditNav.setLastPhoto(photoId);
+        }
+        window.location.href = '/edit/' + photoId;
+      } },
   ].concat(
     typeof window.buildOpenInEditorMenuItems === 'function'
       ? window.buildOpenInEditorMenuItems([photoId])

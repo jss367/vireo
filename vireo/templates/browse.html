@@ -6423,6 +6423,17 @@ function refreshCardSelectionVisuals() {
   });
 }
 
+// Open a single grid photo straight in the in-app editor, skipping the
+// lightbox. Hand off the current grid's ordered list so the editor can offer
+// Prev/Next, mirroring the lightbox "Edit Photo" handoff.
+function openPhotoEditor(photoId) {
+  if (window.vireoEditNav) {
+    window.vireoEditNav.setList(photos, photoId);
+    window.vireoEditNav.setLastPhoto(photoId);
+  }
+  window.location.href = '/edit/' + photoId;
+}
+
 function buildPhotoContextMenu(photoIds) {
   var one = photoIds.length === 1;
   var hint = one ? undefined : 'Select a single photo';
@@ -6479,6 +6490,9 @@ function buildPhotoContextMenu(photoIds) {
       onClick: function() { openBestBatchForIds(photoIds, photoIds[0]); } },
     { label: 'Review Burst', disabled: photoIds.length < 2, disabledHint: 'Select at least two photos',
       onClick: function() { openSelectedInBurstReview(); } },
+    { separator: true },
+    { label: 'Edit Photo', disabled: !one, disabledHint: hint,
+      onClick: function() { openPhotoEditor(photoIds[0]); } },
   ].concat(buildOpenInEditorMenuItems(photoIds)).concat([
     { label: window.VIREO_REVEAL_LABEL, disabled: !one, disabledHint: hint,
       onClick: function() { revealPhoto(photoIds[0]); } },
