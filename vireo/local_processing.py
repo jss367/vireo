@@ -125,6 +125,26 @@ def conflicting_archive_paths(
     *,
     known_hashes: set[str] | None = None,
 ) -> list[str]:
+    """Return existing archive paths that would block merge-mode archive."""
+    report = archive_conflict_report(
+        path,
+        files,
+        folder_template,
+        known_hashes=known_hashes,
+    )
+    return sorted(
+        report["empty"] + report["partial"] + report["conflicts"]
+    )
+
+
+def archive_conflict_report(
+    path: str,
+    files: list[Path],
+    folder_template: str = "%Y/%Y-%m-%d",
+    *,
+    known_hashes: set[str] | None = None,
+    indexed_paths: set[str] | None = None,
+) -> dict[str, list[str]]:
     """Return existing archive paths that would block merge-mode archive.
 
     ``move_folder(..., merge=True)`` refuses same-relative-path files whose
@@ -152,16 +172,35 @@ def conflicting_archive_paths(
       ``extra_known_hashes`` accumulator so the same card/folder selected
       twice still recognises the second occurrence as an intra-batch
       duplicate that ingest would skip.
+
+    If ``indexed_paths`` is provided, same-path differences are split into:
+
+    * ``empty``: unindexed zero-byte archive files with a non-empty source.
+    * ``partial``: unindexed archive files smaller than the source.
+    * ``conflicts``: everything else that still blocks the merge.
+
+    Empty/partial files are still blocking. They are separated so callers can
+    tell the user this looks like debris from a failed previous archive copy,
+    not a legitimate same-name alternate photo.
     """
     try:
         if not os.path.isdir(path):
-            return []
+            return {"empty": [], "partial": [], "conflicts": []}
     except OSError:
-        return []
+        return {"empty": [], "partial": [], "conflicts": []}
 
     timestamps = _source_file_timestamps(files)
     archive_root = Path(path)
+    empty: set[str] = set()
+    partial: set[str] = set()
     conflicts: set[str] = set()
+    indexed_keys = (
+        {
+            os.path.normcase(os.path.abspath(indexed_path))
+            for indexed_path in indexed_paths
+        }
+        if indexed_paths is not None else None
+    )
     seen_hashes: set[str] | None = (
         set(known_hashes) if known_hashes is not None else None
     )
@@ -209,10 +248,12 @@ def conflicting_archive_paths(
                 folder_taken.add(chosen_name)
                 continue
 
+            source_size = source_file.stat().st_size
+            dest_size: int | None = None
             if not dest_file.is_symlink() and dest_file.is_file():
-                source_size = source_file.stat().st_size
+                dest_size = dest_file.stat().st_size
                 if (
-                    dest_file.stat().st_size == source_size
+                    dest_size == source_size
                     and filecmp.cmp(source_file, dest_file, shallow=False)
                 ):
                     if _skip_or_record_survivor(source_file):
@@ -229,11 +270,29 @@ def conflicting_archive_paths(
                 # before staging; do not claim a slot either.
                 continue
 
-            conflicts.add(str(dest_file))
+            dest_path = str(dest_file)
+            dest_key = os.path.normcase(os.path.abspath(dest_path))
+            is_unindexed = (
+                indexed_keys is not None
+                and dest_key not in indexed_keys
+            )
+            if is_unindexed and source_size > 0 and dest_size is not None:
+                if dest_size == 0:
+                    empty.add(dest_path)
+                elif dest_size < source_size:
+                    partial.add(dest_path)
+                else:
+                    conflicts.add(dest_path)
+            else:
+                conflicts.add(dest_path)
             folder_taken.add(chosen_name)
         except OSError:
             continue
-    return sorted(conflicts)
+    return {
+        "empty": sorted(empty),
+        "partial": sorted(partial),
+        "conflicts": sorted(conflicts),
+    }
 
 
 def existing_archive_bytes(

@@ -1013,7 +1013,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
                     if params.local_processing:
                         from local_processing import (
-                            conflicting_archive_paths,
+                            archive_conflict_report,
                             existing_archive_bytes,
                             format_bytes,
                             non_duplicate_files,
@@ -1173,18 +1173,74 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                         "WHERE file_hash IS NOT NULL"
                                     )
                                 }
-                            archive_conflicts = conflicting_archive_paths(
+
+                            def _indexed_archive_paths(root: str) -> set[str]:
+                                root_path = Path(os.path.normpath(root))
+                                indexed: set[str] = set()
+                                rows = thread_db.conn.execute(
+                                    """SELECT f.path, p.filename
+                                         FROM photos p
+                                         JOIN folders f ON f.id = p.folder_id"""
+                                ).fetchall()
+                                for row in rows:
+                                    folder = Path(os.path.normpath(row["path"]))
+                                    if (
+                                        folder == root_path
+                                        or folder.is_relative_to(root_path)
+                                    ):
+                                        indexed.add(
+                                            str(Path(row["path"]) / row["filename"])
+                                        )
+                                return indexed
+
+                            archive_report = archive_conflict_report(
                                 final_destination,
                                 selected_files,
                                 params.folder_template,
                                 known_hashes=catalog_hashes,
+                                indexed_paths=_indexed_archive_paths(
+                                    final_destination,
+                                ),
+                            )
+                            archive_conflicts = (
+                                archive_report["empty"]
+                                + archive_report["partial"]
+                                + archive_report["conflicts"]
                             )
                             if archive_conflicts:
+                                incomplete = (
+                                    archive_report["empty"]
+                                    + archive_report["partial"]
+                                )
                                 examples = ", ".join(archive_conflicts[:3])
                                 more = (
                                     f" and {len(archive_conflicts) - 3} more"
                                     if len(archive_conflicts) > 3 else ""
                                 )
+                                if incomplete:
+                                    bits = []
+                                    if archive_report["empty"]:
+                                        bits.append(
+                                            f"{len(archive_report['empty'])} empty"
+                                        )
+                                    if archive_report["partial"]:
+                                        bits.append(
+                                            f"{len(archive_report['partial'])} "
+                                            "partial"
+                                        )
+                                    _bail_storage(
+                                        "Archive destination contains "
+                                        f"{' and '.join(bits)} unindexed file"
+                                        f"{'s' if len(incomplete) != 1 else ''} "
+                                        "at incoming import paths: "
+                                        f"{examples}{more}. This looks like an "
+                                        "interrupted previous archive copy. "
+                                        "Remove or replace those incomplete "
+                                        "files, then retry; Vireo will not "
+                                        "suffix around likely corrupt archive "
+                                        "files."
+                                    )
+                                    return
                                 _bail_storage(
                                     "Archive destination already contains "
                                     "different files at the same import paths: "

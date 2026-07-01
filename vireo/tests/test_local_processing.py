@@ -328,6 +328,45 @@ def test_conflicting_archive_paths_reports_different_existing_files(tmp_path):
     ) == [str(dest / "conflict.jpg")]
 
 
+def test_archive_conflict_report_classifies_unindexed_incomplete_files(tmp_path):
+    """Unindexed zero-byte and smaller archive files are likely failed-copy
+    debris, so callers can message them separately from real conflicts."""
+    src = tmp_path / "card"
+    src.mkdir()
+    empty_source = src / "empty-conflict.jpg"
+    empty_source.write_bytes(b"source bytes")
+    partial_source = src / "partial-conflict.jpg"
+    partial_source.write_bytes(b"larger source bytes")
+    full_conflict = src / "full-conflict.jpg"
+    full_conflict.write_bytes(b"source")
+
+    dest = tmp_path / "archive"
+    dest.mkdir()
+    (dest / "empty-conflict.jpg").write_bytes(b"")
+    (dest / "partial-conflict.jpg").write_bytes(b"small")
+    (dest / "full-conflict.jpg").write_bytes(b"different but larger")
+
+    report = local_processing.archive_conflict_report(
+        str(dest),
+        [empty_source, partial_source, full_conflict],
+        folder_template="",
+        indexed_paths=set(),
+    )
+
+    assert report["empty"] == [str(dest / "empty-conflict.jpg")]
+    assert report["partial"] == [str(dest / "partial-conflict.jpg")]
+    assert report["conflicts"] == [str(dest / "full-conflict.jpg")]
+
+    indexed_report = local_processing.archive_conflict_report(
+        str(dest),
+        [empty_source],
+        folder_template="",
+        indexed_paths={str(dest / "empty-conflict.jpg")},
+    )
+    assert indexed_report["empty"] == []
+    assert indexed_report["conflicts"] == [str(dest / "empty-conflict.jpg")]
+
+
 def test_conflicting_archive_paths_reports_symlink_even_when_target_matches(tmp_path):
     """A symlink at the archive-relative resume path must be treated as a
     conflict before staging, not as a safe same-content resume hit."""

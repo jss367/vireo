@@ -1877,13 +1877,14 @@ def test_pipeline_local_processing_rejects_archive_path_conflicts(
 
     src = tmp_path / "card-conflict"
     src.mkdir()
-    Image.new("RGB", (16, 16), "green").save(src / "fresh.jpg")
+    source_path = src / "fresh.jpg"
+    Image.new("RGB", (16, 16), "green").save(source_path)
 
     final_parent = tmp_path / "archive-conflict-parent"
     final_parent.mkdir()
     final_dest = final_parent / "Archive"
     final_dest.mkdir()
-    (final_dest / "fresh.jpg").write_bytes(b"different existing bytes")
+    (final_dest / "fresh.jpg").write_bytes(b"x" * source_path.stat().st_size)
 
     import local_processing
 
@@ -1906,6 +1907,46 @@ def test_pipeline_local_processing_rejects_archive_path_conflicts(
     assert job["status"] == "failed", job
     error_text = (job.get("error") or "") + str(job.get("result", ""))
     assert "different files at the same import paths" in error_text
+
+
+def test_pipeline_local_processing_reports_incomplete_archive_files(
+    setup, tmp_path, monkeypatch
+):
+    app, _db_path = setup
+
+    src = tmp_path / "card-incomplete"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "green").save(src / "fresh.jpg")
+
+    final_parent = tmp_path / "archive-incomplete-parent"
+    final_parent.mkdir()
+    final_dest = final_parent / "Archive"
+    final_dest.mkdir()
+    (final_dest / "fresh.jpg").write_bytes(b"")
+
+    import local_processing
+
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert job["status"] == "failed", job
+    error_text = (job.get("error") or "") + str(job.get("result", ""))
+    assert "1 empty unindexed file" in error_text
+    assert "interrupted previous archive copy" in error_text
+    assert "will not suffix around likely corrupt archive files" in error_text
 
 
 def test_pipeline_local_processing_conflict_preflight_skips_known_duplicates(
