@@ -1480,6 +1480,19 @@ function renderCurrent() {
   var img = document.getElementById('currentPhoto');
   var empty = document.getElementById('stageEmpty');
   var pill = document.getElementById('statusPill');
+  if (p && !rapid.seeded && !rapid.loadError) {
+    img.removeAttribute('src');
+    img.style.display = 'none';
+    empty.style.display = '';
+    empty.textContent = 'Loading burst state...';
+    pill.style.display = 'none';
+    document.getElementById('filename').textContent = 'Loading burst state...';
+    document.getElementById('metricQuality').textContent = '-';
+    document.getElementById('metricSharpness').textContent = '-';
+    document.getElementById('metricLabel').textContent = '-';
+    document.getElementById('metricReviewed').textContent = rapid.reviewed.size + '/' + rapid.items.length;
+    return;
+  }
   if (!p) {
     resetRapidZoom();
     img.removeAttribute('src');
