@@ -6431,17 +6431,23 @@ function buildPhotoContextMenu(photoIds) {
 // toasts; the server (_photo_can_be_life_list_preference) is the backstop for
 // a stale menu. Disabled for a multi-selection because crowning one shot from
 // many is ambiguous; hidden entirely when nothing selected has a species.
+// Rejected photos are excluded here too \u2014 they'd fail the server backstop
+// (`_photo_can_be_life_list_preference` rejects `flag = 'rejected'`) and only
+// produce an error toast, so don't offer the action in the first place.
+function _lifeListEligibleClient(p) {
+  return !!(p && p.species && p.species.length && p.flag !== 'rejected');
+}
 function buildLifeListMenuItems(photoIds) {
-  var hasSpecies = photoIds.some(function(id) {
-    var p = photos.find(function(x) { return x.id === id; });
-    return p && p.species && p.species.length;
+  var anyEligible = photoIds.some(function(id) {
+    return _lifeListEligibleClient(photos.find(function(x) { return x.id === id; }));
   });
-  if (!hasSpecies) return [];
+  if (!anyEligible) return [];
   if (photoIds.length !== 1) {
     return [{ label: 'Add to Life List', disabled: true,
               disabledHint: 'Select a single photo' }];
   }
   var photo = photos.find(function(p) { return p.id === photoIds[0]; });
+  if (!_lifeListEligibleClient(photo)) return [];
   return (photo.species || []).map(function(sp) {
     return {
       label: 'Add to Life List \u2014 ' + sp,
