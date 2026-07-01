@@ -714,6 +714,140 @@ def test_move_folder_merge_alias_destination_uses_stored_tracked_path(
     assert not env["src"].exists()
 
 
+def test_move_folder_ancestor_merge_reconciles_onto_stored_ancestor(
+        move_env, monkeypatch):
+    """Regression: when the destination sits INSIDE a tracked folder that was
+    matched via a symlink or case-only alias, the ancestor-merge branch must
+    rebase the reconciliation onto the STORED ancestor path, not the
+    aliased ``catalog_path``. Otherwise ``merge_staged_tree_into_archive``'s
+    exact ``WHERE path = ?`` parent lookups miss the stored ancestor row and
+    land the staged root under an alias-prefixed path with ``parent_id=NULL``,
+    spawning a parallel row set outside the managed archive tree.
+
+    Simulated on Linux the same way as
+    ``test_move_folder_merge_alias_destination_uses_stored_tracked_path``:
+    a symlink so two path strings share an inode, plus ``realpath``/
+    ``normcase`` patched to no-ops so ``_tracked_destination_ancestor`` misses
+    the string-prefix check and falls into the samefile walk-up.
+    """
+    from move import move_folder
+
+    env = move_env
+    db = env["db"]
+
+    # Real tracked ancestor archive with no rows below it yet.
+    real_archive = env["tmp_path"] / "realarch"
+    real_archive.mkdir()
+    fid_ancestor = db.add_folder(str(real_archive), name="realarch")
+
+    # Alias destination pointing at the same on-disk directory.
+    alias_archive = env["tmp_path"] / "aliasarch"
+    try:
+        os.symlink(str(real_archive), str(alias_archive))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    monkeypatch.setattr(os.path, "realpath", lambda p: p)
+    monkeypatch.setattr(os.path, "normcase", lambda p: p)
+
+    # destination=alias_archive -> resolved dest = alias_archive/src. The
+    # ancestor probe only matches ``real_archive`` via the samefile walk-up,
+    # so ``catalog_path`` is the alias-prefixed ``alias_archive/src``.
+    result = move_folder(
+        db=db, folder_id=env["fid_src"], destination=str(alias_archive),
+        reject_tracked_ancestor=True, allow_tracked_merge=True,
+    )
+
+    assert result["errors"] == []
+    assert result["merged_into_existing"] == str(real_archive)
+
+    # The staged folder was reconciled onto STORED ancestor + "src", NOT the
+    # alias-prefixed ``aliasarch/src``.
+    stored_landing = str(real_archive / "src")
+    alias_landing = str(alias_archive / "src")
+    stored_row = db.conn.execute(
+        "SELECT id, parent_id FROM folders WHERE path = ?", (stored_landing,)
+    ).fetchone()
+    assert stored_row is not None
+    # Parent resolves to the stored ancestor row — not NULL (which would
+    # mean an alias-prefixed row floating outside the managed tree).
+    assert stored_row["parent_id"] == fid_ancestor
+    # No alias-prefixed row was created.
+    assert db.conn.execute(
+        "SELECT 1 FROM folders WHERE path = ?", (alias_landing,)
+    ).fetchone() is None
+    # Files land on disk under the real archive (same inode either way).
+    assert (real_archive / "src" / "bird1.jpg").exists()
+    assert (real_archive / "src" / "bird2.jpg").exists()
+
+
+def test_move_folder_merge_relocates_developed_dir_onto_reconciled_base(
+        move_env, monkeypatch):
+    """Regression: on the exact-overlap merge path with a symlink/case-only
+    alias destination, ``developed_folder_key`` hashes the STORED tracked
+    path (that's what the catalog stores after reconciliation), so the
+    developed-dir relocation must move outputs onto the same reconciled
+    base. Relocating onto the aliased ``catalog_path`` would leave renders
+    under a hash exports never read from, silently falling back to RAW
+    after import.
+    """
+    from export import developed_folder_key
+    from move import move_folder
+
+    env = move_env
+    db = env["db"]
+
+    # Real archive folder, tracked at its real path.
+    real_dst = env["tmp_path"] / "realdst2"
+    landing = real_dst / "src"
+    landing.mkdir(parents=True)
+    fid_archive = db.add_folder(str(landing), name="src")
+
+    alias_dst = env["tmp_path"] / "alias_dst2"
+    try:
+        os.symlink(str(real_dst), str(alias_dst))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    # Pre-existing developed subdir keyed off the STAGED source path (that's
+    # where renders lived before this move ran). Also pre-create the target
+    # keyed off the ALIAS so a bug that relocates onto the alias would look
+    # correct on disk but rot the export path — force the assertion to
+    # distinguish "moved to alias key" from "moved to stored key".
+    developed = env["tmp_path"] / "developed"
+    developed.mkdir()
+    old_key = developed_folder_key(str(env["src"]))
+    (developed / old_key).mkdir()
+    (developed / old_key / "bird1.jpg").write_bytes(b"developed-bytes")
+
+    monkeypatch.setattr(os.path, "realpath", lambda p: p)
+    monkeypatch.setattr(os.path, "normcase", lambda p: p)
+
+    result = move_folder(
+        db=db, folder_id=env["fid_src"], destination=str(alias_dst),
+        merge=True, allow_tracked_merge=True,
+        developed_dir=str(developed),
+    )
+    assert result["errors"] == []
+
+    # The developed subdir moved to the STORED-path key (what export reads
+    # from the catalog after reconciliation), not the alias-path key.
+    stored_key = developed_folder_key(str(landing))
+    alias_key = developed_folder_key(str(alias_dst / "src"))
+    assert stored_key != alias_key
+    assert (developed / stored_key / "bird1.jpg").read_bytes() == b"developed-bytes"
+    assert not (developed / alias_key).exists()
+    # Old (staged-path) key is gone.
+    assert not (developed / old_key).exists()
+    # Catalog still has one archive row — the stored one.
+    assert db.conn.execute(
+        "SELECT COUNT(*) c FROM folders WHERE path = ?", (str(landing),)
+    ).fetchone()["c"] == 1
+    assert db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", (str(landing),)
+    ).fetchone()["id"] == fid_archive
+
+
 def test_move_folder_refuses_descendant_tracked_overlap_even_when_merging(move_env):
     """Regression: ``allow_tracked_merge`` must only accept the "tracked row
     IS the destination" case, not a tracked row that sits STRICTLY BELOW the

@@ -1200,6 +1200,72 @@ def _tracked_destination_overlap(db, folder_id, dest_path):
     return None
 
 
+def _rebase_under_stored_ancestor(catalog_path, ancestor_path):
+    """Return ``catalog_path`` with any alias-prefix folded to STORED
+    ``ancestor_path``.
+
+    ``catalog_path`` is at or below ``ancestor_path`` per
+    ``_tracked_destination_ancestor``, but the match may have been via
+    ``_path_equal_or_descends``' alias surface (symlink resolution, Windows
+    case-fold via ``normcase``, POSIX case-insensitive ``samefile``). In those
+    cases ``catalog_path``'s leading components differ character-for-character
+    from ``ancestor_path`` even though they resolve to the same on-disk
+    directory. ``merge_staged_tree_into_archive`` reads parent rows by exact
+    ``WHERE path = ?`` — an alias-prefixed base would miss the tracked rows and
+    create a parallel alias-path row set outside the managed archive tree
+    (with ``parent_id=NULL``), so re-root the base on the stored form here.
+
+    The exact-overlap branch of ``move_folder`` passes ``tracked["path"]`` as
+    the reconcile base directly (there IS no suffix — the destination IS the
+    tracked folder); this helper is for the ancestor case where a real
+    relative suffix has to be reattached below the stored ancestor.
+    """
+    if catalog_path == ancestor_path:
+        return ancestor_path
+    prefix = ancestor_path + os.sep
+    if catalog_path.startswith(prefix):
+        return catalog_path
+    # Symlink alias: realpath collapses the link. On POSIX ``normcase`` is a
+    # no-op so the raw realpath is enough; on Windows ``normcase`` also
+    # folds case so the ``normcase(realpath(...))`` compare handles both.
+    real_ancestor = os.path.realpath(ancestor_path)
+    real_catalog = os.path.realpath(catalog_path)
+    if real_catalog == real_ancestor:
+        return ancestor_path
+    real_prefix = real_ancestor + os.sep
+    if real_catalog.startswith(real_prefix):
+        return ancestor_path + real_catalog[len(real_ancestor):]
+    norm_ancestor = os.path.normcase(real_ancestor)
+    norm_catalog = os.path.normcase(real_catalog)
+    if norm_catalog == norm_ancestor:
+        return ancestor_path
+    if norm_catalog.startswith(os.path.normcase(real_prefix)):
+        return ancestor_path + real_catalog[len(real_ancestor):]
+    # Case-only POSIX alias: neither ``realpath`` nor ``normcase`` folds it,
+    # so walk up ``catalog_path`` looking for an existing ancestor whose inode
+    # matches ``ancestor_path`` — the same samefile fallback
+    # ``_path_equal_or_descends`` uses to accept the destination in the first
+    # place. Then join the remaining components onto ``ancestor_path``.
+    parts = []
+    cur = catalog_path
+    while cur:
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        if os.path.exists(cur) and _samefile_or_false(cur, ancestor_path):
+            if not parts:
+                return ancestor_path
+            return os.path.join(ancestor_path, *parts)
+        parts.insert(0, os.path.basename(cur))
+        cur = parent
+    # No alias match after all. ``_tracked_destination_ancestor`` already
+    # matched via one of the surfaces above, so this shouldn't happen — if
+    # something in the alias surface changes and the walk falls through,
+    # keep today's behaviour (catalog_path unchanged) rather than silently
+    # corrupting the reconcile base.
+    return catalog_path
+
+
 def _tracked_destination_ancestor(db, folder_id, dest_path):
     """Return a tracked folder that is an ancestor of dest_path, if any.
 
@@ -1613,15 +1679,25 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             # destination. The staged tree lands at its own resolved
             # catalog_path (inside the tracked ancestor); the reconciliation
             # rebases staged rows onto that path and leaves the ancestor's own
-            # rows untouched. The reconciliation still uses ``catalog_path`` as
-            # the rebase target (below), but the user-facing "existing archive"
-            # base we report is the managed-archive root (``ancestor["path"]``),
-            # not the staged landing path inside it. Here the staged tree lands
-            # at its own ``catalog_path`` (a genuinely-new subpath inside the
-            # ancestor), so ``catalog_path`` IS the correct reconciliation base
-            # — unlike the exact-overlap case above.
+            # rows untouched. The user-facing "existing archive" base we
+            # report is the managed-archive root (``ancestor["path"]``), not
+            # the staged landing path inside it.
+            #
+            # The reconciliation base is the STORED ancestor's path with the
+            # relative-below-ancestor suffix appended, NOT the user-entered
+            # ``catalog_path`` — those two only agree when the ancestor probe
+            # matched by pure string prefix. When it matched via a symlink,
+            # Windows case-fold, or POSIX case-only alias (catalog stores
+            # ``/Photos``, user selects ``/photos/NewShoot``),
+            # ``catalog_path`` has an alias prefix that ``merge_staged_tree_
+            # into_archive``'s exact ``WHERE path = ?`` parent lookups miss.
+            # That would land the staged root with ``parent_id=NULL`` under an
+            # alias-prefixed path, spawning a parallel row set outside the
+            # managed archive tree. Fold the alias prefix to the stored form
+            # here.
             merge_into_tracked = ancestor["path"]
-            merge_reconcile_base = catalog_path
+            merge_reconcile_base = _rebase_under_stored_ancestor(
+                catalog_path, ancestor["path"])
 
     if remote:
         probe = _remote_dir_exists(remote, transfer_dest)
@@ -1887,9 +1963,23 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     # path, so the DB update above just invalidated the old subdir's
     # implicit key — rename it on disk to match the new path, and cascade
     # to any descendant folders whose paths also shifted.
+    #
+    # On the merge path the catalog was reparented onto
+    # ``merge_reconcile_base``, not ``catalog_path`` — those two only
+    # differ when the tracked destination was reached via a symlink or
+    # case-alias (see where ``merge_reconcile_base`` is set), but when they
+    # do differ the developed-dir key is derived from the STORED path, not
+    # the alias. Relocating from ``src_path`` to the aliased
+    # ``catalog_path`` would move renders under the alias-path hash and
+    # exports (which read the catalog's stored path) would look under the
+    # stored-path hash, miss them, and fall back to RAW. Use the same
+    # reconciled base the catalog uses.
+    developed_base = (merge_reconcile_base
+                      if merge_into_tracked is not None
+                      else catalog_path)
     if developed_dir:
         from export import relocate_developed_dir
-        relocate_developed_dir(developed_dir, src_path, catalog_path)
+        relocate_developed_dir(developed_dir, src_path, developed_base)
         # SQL LIKE treats `_` and `%` (and the escape char) as wildcards,
         # all of which are valid POSIX path characters. Without a strict
         # prefix guard, an unrelated folder like `/dXst/birds/fake` would
@@ -1898,14 +1988,14 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         # developed subdir. Filter results by a literal prefix check.
         descendant_rows = db.conn.execute(
             "SELECT path FROM folders WHERE path LIKE ?",
-            (catalog_path + "/%",),
+            (developed_base + "/%",),
         ).fetchall()
-        prefix = catalog_path + "/"
+        prefix = developed_base + "/"
         for row in descendant_rows:
             new_child = row["path"]
             if not new_child.startswith(prefix):
                 continue
-            old_child = src_path + new_child[len(catalog_path):]
+            old_child = src_path + new_child[len(developed_base):]
             relocate_developed_dir(developed_dir, old_child, new_child)
 
     # Delete originals. The catalog already points at the new destination,
