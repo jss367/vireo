@@ -3560,6 +3560,7 @@ function getSelectedLabelFiles() {
 var pipelineSelectedPlaceId = null;
 var pipelineSelectedPlaceName = '';
 var pipelineLabelsSearchTimer = null;
+var pipelineLabelsSearchRequestId = 0;
 var pipelineLabelsFormLoaded = false;
 var pipelineLabelsEscHandler = null;
 
@@ -3683,8 +3684,15 @@ async function searchPipelinePlaces() {
     dropdown.textContent = '';
     return;
   }
+  var requestId = ++pipelineLabelsSearchRequestId;
   try {
     var places = await safeFetch('/api/labels/search-places?q=' + encodeURIComponent(q), {}, { toast: false });
+    if (
+      requestId !== pipelineLabelsSearchRequestId ||
+      input.value.trim() !== q
+    ) {
+      return;
+    }
     dropdown.textContent = '';
     if (places.length === 0) {
       var empty = document.createElement('div');
@@ -3704,6 +3712,12 @@ async function searchPipelinePlaces() {
       dropdown.appendChild(option);
     });
   } catch(e) {
+    if (
+      requestId !== pipelineLabelsSearchRequestId ||
+      input.value.trim() !== q
+    ) {
+      return;
+    }
     dropdown.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:var(--danger);">Search failed</div>';
   }
 }
@@ -3781,12 +3795,25 @@ async function fetchPipelineLabels() {
           if (fill) fill.style.width = '100%';
           var selectFiles = selectedBefore.slice();
           if (newFile && selectFiles.indexOf(newFile) === -1) selectFiles.push(newFile);
-          loadLabels({ selectFiles: selectFiles }).then(function() {
+          var saveSelectionFailed = false;
+          safeFetch('/api/labels/active', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({labels_files: selectFiles}),
+          }, { toast: false }).catch(function(e) {
+            saveSelectionFailed = true;
+            if (status) {
+              status.textContent = 'Downloaded, but could not save the active label selection: ' + (e.message || e);
+              status.style.color = 'var(--warning)';
+            }
+          }).then(function() {
+            return loadLabels({ selectFiles: selectFiles });
+          }).then(function() {
             updateLabelsPickerState();
             updateReadiness();
             schedulePlanRefresh();
+            if (!saveSelectionFailed) setTimeout(closePipelineLabelsModal, 900);
           });
-          setTimeout(closePipelineLabelsModal, 900);
         } else {
           if (status) {
             status.textContent = 'Failed: ' + ((result.errors || []).join(', ') || 'download did not complete');
