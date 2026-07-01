@@ -7488,7 +7488,11 @@ def test_merge_staged_tree_existing_folder_and_collision(db, tmp_path):
     ws = db._active_workspace_id
 
     # Real on-disk archive so the collision drop's "archived file exists" check
-    # sees the byte-identical file rsync --ignore-existing preserved.
+    # sees the byte-identical file rsync --ignore-existing preserved. Both the
+    # staged and archived rows carry the SAME file_hash — a real collision (as
+    # opposed to a phantom-row replacement) only reaches the merge when the
+    # bytes on both sides are identical, because the upstream content-conflict
+    # check would abort the whole move otherwise.
     arch = tmp_path / "arch" / "USA"
     date_dir = arch / "2026" / "2026-06-30"
     date_dir.mkdir(parents=True)
@@ -7499,9 +7503,9 @@ def test_merge_staged_tree_existing_folder_and_collision(db, tmp_path):
     year_id = db.add_folder(str(arch / "2026"), name="2026", parent_id=base_id)
     date_id = db.add_folder(str(date_dir), name="2026-06-30", parent_id=year_id)
     db.add_photo(folder_id=date_id, filename="dup.raf", extension=".raf",
-                 file_size=100, file_mtime=1.0)
+                 file_size=12, file_mtime=1.0, file_hash="DUPHASH")
     db.add_photo(folder_id=date_id, filename="keep.raf", extension=".raf",
-                 file_size=100, file_mtime=1.0)
+                 file_size=13, file_mtime=1.0, file_hash="KEEPHASH")
     db.add_workspace_folder(ws, base_id, is_root=True)
 
     # Staged tree post-rsync. The intermediate year folder is a real row so the
@@ -7514,9 +7518,10 @@ def test_merge_staged_tree_existing_folder_and_collision(db, tmp_path):
                                name="2026-06-30",
                                parent_id=stage_year, workspace_root=False)
     dup_pid = db.add_photo(folder_id=stage_leaf, filename="dup.raf",
-                           extension=".raf", file_size=200, file_mtime=2.0)
+                           extension=".raf", file_size=12, file_mtime=2.0,
+                           file_hash="DUPHASH")
     db.add_photo(folder_id=stage_leaf, filename="fresh.raf", extension=".raf",
-                 file_size=200, file_mtime=2.0)
+                 file_size=200, file_mtime=2.0, file_hash="FRESHHASH")
 
     # Attach a keyword to the COLLIDED staged photo so the delete must clear
     # photo_keywords first; without the fix this raises a FK error.
@@ -7856,6 +7861,122 @@ def test_merge_staged_tree_missing_target_file_keeps_new_photo(db, tmp_path):
     ).fetchone() is None
 
 
+def test_merge_staged_tree_phantom_row_replaces_when_file_on_disk_after_rsync(
+    db, tmp_path,
+):
+    """Regression for the exact production ordering: ``move_folder`` runs
+    rsync ``--ignore-existing`` FIRST, then calls
+    ``merge_staged_tree_into_archive``. If the target row was a phantom
+    (its file missing before rsync), rsync creates the file at the target
+    path from the staged bytes — so by the time the merge's collision
+    check runs, ``os.path.exists`` returns True in the phantom case too
+    and can't tell it apart from a real byte-identical collision. Left
+    unfixed, the staged photo would be dropped as ``already_present`` and
+    the freshly-copied bytes would be represented by the phantom row's
+    stale hash/metadata — the newly-imported photo silently disappears
+    behind the stale row.
+
+    Distinguish real collision from phantom by the target row's
+    bytes-identity (``file_hash``) instead of raw file existence.
+    """
+    ws = db._active_workspace_id
+
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-06-30"
+    date_dir.mkdir(parents=True)
+    # The archived file IS on disk — but only because rsync just copied it
+    # in from staging over an empty slot. Its bytes are the STAGED bytes;
+    # the target catalog row was a phantom that had lost track of the
+    # deleted original.
+    (date_dir / "collide.raf").write_bytes(b"fresh-staged-bytes")
+
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-06-30",
+                            parent_id=base_id)
+    phantom_pid = db.add_photo(folder_id=date_id, filename="collide.raf",
+                               extension=".raf", file_size=100,
+                               file_mtime=1.0, file_hash="STALEHASH")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-06-30"), name="2026-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    new_pid = db.add_photo(folder_id=stage_leaf, filename="collide.raf",
+                           extension=".raf", file_size=200, file_mtime=2.0,
+                           file_hash="NEWHASH")
+
+    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    # The freshly-copied bytes are represented by the STAGED row (which
+    # accurately describes them), not the stale phantom row.
+    assert counts["already_present"] == 0
+    assert counts["new_photos"] == 1
+    surviving = db.conn.execute(
+        "SELECT id, folder_id, file_hash FROM photos "
+        "WHERE filename='collide.raf'"
+    ).fetchall()
+    assert len(surviving) == 1
+    assert surviving[0]["id"] == new_pid
+    assert surviving[0]["folder_id"] == date_id
+    assert surviving[0]["file_hash"] == "NEWHASH"
+    # The phantom row is gone; its cache files are reported for cleanup.
+    assert db.conn.execute(
+        "SELECT 1 FROM photos WHERE id = ?", (phantom_pid,)
+    ).fetchone() is None
+    assert phantom_pid in counts["dropped_photo_ids"]
+
+
+def test_merge_staged_tree_phantom_row_replaces_via_file_size_when_hashes_null(
+    db, tmp_path,
+):
+    """When either row's ``file_hash`` is unset (older catalog rows, or a
+    scan that failed to hash), the phantom detection falls back to
+    comparing the target row's recorded ``file_size`` to the actual file
+    on disk. Mismatch → phantom (rsync wrote fresh bytes over a missing
+    file), match → real collision."""
+    ws = db._active_workspace_id
+
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-06-30"
+    date_dir.mkdir(parents=True)
+    # The staged file is 100 bytes; rsync just landed it in the archive
+    # slot after the archived file went missing.
+    (date_dir / "collide.raf").write_bytes(b"x" * 100)
+
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-06-30",
+                            parent_id=base_id)
+    # Phantom row records the OLD (missing) archived file's size (42B),
+    # not the freshly-copied 100B bytes now on disk. No file_hash on the
+    # row exercises the size fallback.
+    phantom_pid = db.add_photo(folder_id=date_id, filename="collide.raf",
+                               extension=".raf", file_size=42,
+                               file_mtime=1.0)
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-06-30"), name="2026-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    new_pid = db.add_photo(folder_id=stage_leaf, filename="collide.raf",
+                           extension=".raf", file_size=100,
+                           file_mtime=2.0)
+
+    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    assert counts["already_present"] == 0
+    assert counts["new_photos"] == 1
+    surviving = db.conn.execute(
+        "SELECT id FROM photos WHERE filename='collide.raf'"
+    ).fetchall()
+    assert len(surviving) == 1
+    assert surviving[0]["id"] == new_pid
+    assert db.conn.execute(
+        "SELECT 1 FROM photos WHERE id = ?", (phantom_pid,)
+    ).fetchone() is None
+
+
 def test_merge_staged_tree_case_alias_collision_on_case_insensitive_volume(
     db, tmp_path, monkeypatch,
 ):
@@ -7883,16 +8004,23 @@ def test_merge_staged_tree_case_alias_collision_on_case_insensitive_volume(
                             parent_id=base_id)
     archived_pid = db.add_photo(folder_id=date_id, filename="IMG.RAF",
                                 extension=".raf", file_size=100,
-                                file_mtime=1.0, file_hash="ARCH")
+                                file_mtime=1.0, file_hash="SAMEBYTES")
     db.add_workspace_folder(ws, base_id, is_root=True)
 
     stage = tmp_path / "stage" / "USA"
     stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
     stage_leaf = db.add_folder(str(stage / "2026-06-30"), name="2026-06-30",
                                parent_id=stage_root, workspace_root=False)
+    # A real case-alias collision only reaches the merge step when the bytes
+    # are identical (the upstream content-conflict check aborts the whole
+    # move otherwise), so the two rows describe the same bytes and share a
+    # hash. Modelling that here keeps the collision check's hash comparison
+    # honest: mismatched hashes would (correctly) be treated as a phantom
+    # row now, so a case-alias test with fake mismatching hashes would not
+    # represent the production invariant it's asserting.
     staged_pid = db.add_photo(folder_id=stage_leaf, filename="img.raf",
                               extension=".raf", file_size=100,
-                              file_mtime=2.0, file_hash="STAGED")
+                              file_mtime=2.0, file_hash="SAMEBYTES")
 
     # Force the merge to treat the target volume as case-insensitive
     # regardless of the CI host's actual filesystem behavior (Linux ext4

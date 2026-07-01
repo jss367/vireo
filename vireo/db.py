@@ -2799,7 +2799,12 @@ class Database:
         * ``merged_folders`` — staged folders folded into a pre-existing target
           folder.
         * ``already_present`` — identical-filename staged photos dropped because
-          the target folder already held that filename.
+          the target folder already held that filename AND the target row's
+          recorded bytes-identity (``file_hash``, falling back to ``file_size``)
+          matches what's currently on disk. A filename collision whose target
+          row is stale (its recorded bytes-identity doesn't match the on-disk
+          file that rsync just copied into place) is treated as a phantom
+          replacement instead — see the collision loop below.
         * ``dropped_photo_ids`` — staged photo ids that were deleted during
           the merge (``already_present`` collisions plus phantom target-row
           replacements). The caller passes these to
@@ -3095,7 +3100,8 @@ class Database:
                         (target["id"],),
                     )
                     staged_photos = list(self.conn.execute(
-                        "SELECT id, filename FROM photos WHERE folder_id = ?",
+                        "SELECT id, filename, file_hash, file_size "
+                        "FROM photos WHERE folder_id = ?",
                         (sf["id"],),
                     ))
                     # Detect collisions against the ACTUAL target volume's case
@@ -3121,7 +3127,8 @@ class Database:
                                  else (lambda s: s))
                     existing_by_key = {}
                     for row in self.conn.execute(
-                        "SELECT id, filename FROM photos WHERE folder_id = ?",
+                        "SELECT id, filename, file_hash, file_size "
+                        "FROM photos WHERE folder_id = ?",
                         (target["id"],),
                     ):
                         # First writer wins on the (unlikely) chance two
@@ -3129,47 +3136,92 @@ class Database:
                         # from a pre-fix catalog.
                         existing_by_key.setdefault(
                             normalize(row["filename"]),
-                            {"id": row["id"], "filename": row["filename"]},
+                            {"id": row["id"], "filename": row["filename"],
+                             "file_hash": row["file_hash"],
+                             "file_size": row["file_size"]},
                         )
 
                     # A filename-collision alone is NOT enough to drop the
                     # staged photo as ``already_present``. The drop is only
                     # safe when the collision is REAL on disk — i.e. the
-                    # archived file actually exists at
-                    # ``target_path/filename``, which is the case the rsync
-                    # ``--ignore-existing`` merge relied on (it skipped the
-                    # staged copy because the byte-identical archived file
-                    # was already there; a DIFFERING file would have aborted
-                    # the move upstream in the content-conflict check). If
-                    # the target catalog row is stale — its file missing on
-                    # disk — the upstream check never fired (no dest file to
-                    # compare), rsync COPIED the staged bytes into place, and
-                    # dropping the staged row would leave those fresh bytes
-                    # represented by the old (phantom) row's hash/metadata,
-                    # losing the new photo. So when the target file is
-                    # absent, do NOT drop the staged photo. Instead delete
-                    # the stale target row (its file no longer exists) and
-                    # reparent the staged photo in its place, so the
+                    # target row accurately describes the bytes at
+                    # ``target_path/filename``. rsync ``--ignore-existing``
+                    # skipped the staged copy only when a byte-identical
+                    # archived file was already there (a DIFFERING file
+                    # would have aborted the move upstream in the
+                    # content-conflict check). If the target catalog row is
+                    # stale — its file was MISSING on disk before the
+                    # archive step — the upstream check never fired (no
+                    # dest file to compare) and rsync COPIED the staged
+                    # bytes into place. By the time we run here rsync has
+                    # already finished, so ``os.path.exists`` returns True
+                    # in BOTH the real-collision and the phantom-row cases
+                    # and cannot tell them apart. Compare the STAGED photo's
+                    # bytes-identity (file_hash, or file_size fallback) to
+                    # the TARGET row's recorded bytes-identity instead: a
+                    # match means the row correctly describes what is on
+                    # disk (real collision — dropping the staged row is
+                    # safe); a mismatch means rsync just wrote fresh staged
+                    # bytes over a phantom row and the row is stale. In
+                    # the phantom case delete the stale target row and
+                    # reparent the staged photo in its place so the
                     # surviving catalog row describes the bytes actually on
                     # disk. This also avoids a UNIQUE(folder_id, filename)
-                    # violation from moving the staged row onto a folder that
-                    # still holds the same basename.
+                    # violation from moving the staged row onto a folder
+                    # that still holds the same basename.
                     for staged in staged_photos:
                         pid = staged["id"]
                         collision = existing_by_key.get(
                             normalize(staged["filename"]))
                         # The archived filename may differ in case from the
                         # staged one; probe for the ACTUAL archived name so
-                        # ``os.path.exists`` matches on case-sensitive volumes
-                        # too (where any case-alias check is pointless anyway).
+                        # the on-disk existence check matches on
+                        # case-sensitive volumes too (where any case-alias
+                        # check is pointless anyway).
                         target_filename = (collision["filename"]
                                            if collision else None)
-                        real_collision = (
-                            target_filename is not None
-                            and os.path.exists(
-                                _join_subtree_path(
-                                    target_path, target_filename))
-                        )
+                        target_disk_path = (
+                            _join_subtree_path(target_path, target_filename)
+                            if target_filename is not None else None)
+                        # A missing file on disk is definitely phantom
+                        # (rsync would have written the staged bytes if
+                        # this ever ran in production; the code path
+                        # tolerates the isolated-unit-test case where no
+                        # rsync happened).
+                        target_on_disk = (
+                            target_disk_path is not None
+                            and os.path.exists(target_disk_path))
+                        real_collision = False
+                        if collision is not None and target_on_disk:
+                            staged_hash = staged["file_hash"]
+                            target_hash = collision["file_hash"]
+                            if staged_hash and target_hash:
+                                # Byte-identity via hash is the strongest
+                                # signal. Matching hashes → the target
+                                # row's claim matches the file on disk
+                                # (real collision). Mismatch → rsync
+                                # replaced a missing file with fresh
+                                # bytes; the target row is stale.
+                                real_collision = (staged_hash == target_hash)
+                            else:
+                                # Fall back to file_size when either hash
+                                # is unset (older catalog rows, unhashed
+                                # staged scans). Same principle: the row's
+                                # size matches on-disk → row is accurate;
+                                # differs → row is stale.
+                                target_size = collision["file_size"]
+                                try:
+                                    on_disk_size = os.path.getsize(
+                                        target_disk_path)
+                                except OSError:
+                                    on_disk_size = None
+                                if (target_size is not None
+                                        and on_disk_size is not None):
+                                    real_collision = (
+                                        on_disk_size == target_size)
+                                # else: no signal to verify the row —
+                                # prefer safety and keep the staged photo,
+                                # falling into the phantom branch below.
                         if real_collision:
                             # photo_keywords.photo_id has no ON DELETE CASCADE
                             # (unlike every other photo_id FK), so clear
@@ -3192,10 +3244,16 @@ class Database:
                         else:
                             if collision is not None:
                                 # Filename collided (case-normalized) but the
-                                # archived file is missing on disk: the staged
-                                # bytes were freshly copied and the target
-                                # row is a phantom. Drop the phantom by id so
-                                # the reparent below can take its (folder_id,
+                                # target row is a phantom — either the
+                                # archived file was missing on disk (rsync
+                                # copied the staged bytes into the empty
+                                # slot) or the file is there but its
+                                # bytes-identity (hash/size) doesn't match
+                                # the row's claim (rsync replaced a missing
+                                # file with fresh staged bytes). Either way
+                                # the staged row correctly describes what's
+                                # on disk. Drop the phantom by id so the
+                                # reparent below can take its (folder_id,
                                 # filename) slot and represent the real file.
                                 # Deleting by id (not filename) is required on
                                 # case-insensitive volumes where the staged
