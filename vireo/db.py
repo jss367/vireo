@@ -3203,10 +3203,35 @@ class Database:
                     # avoids a UNIQUE(folder_id, filename) violation from
                     # moving the staged row onto a folder that still holds
                     # the same basename.
+                    #
+                    # ``staged_normalized_claimed`` tracks case-normalized
+                    # filenames already reparented into ``target`` in this
+                    # pass — the intra-staged analogue of
+                    # ``existing_by_key``. On a case-insensitive target
+                    # volume, two staged files whose names differ only in
+                    # case (e.g. staged on a case-sensitive disk archiving
+                    # to APFS/SMB) collide on the same on-disk destination:
+                    # rsync ``--ignore-existing`` writes only the FIRST
+                    # file and silently skips the rest, so any later
+                    # staged row describes bytes that never landed on
+                    # disk. Without this tracker every such row also gets
+                    # reparented into ``target``, leaving multiple catalog
+                    # rows for the same on-disk file (the SQL
+                    # ``UNIQUE(folder_id, filename)`` doesn't fire because
+                    # the recorded filenames differ in case). Drop
+                    # subsequent case-alias staged rows as
+                    # ``already_present`` — the safe direction since their
+                    # bytes are unrepresented on disk. On case-sensitive
+                    # targets ``normalize`` is identity, so different-case
+                    # names have different keys and this tracker never
+                    # triggers.
+                    staged_normalized_claimed = set()
                     for staged in staged_photos:
                         pid = staged["id"]
-                        collision = existing_by_key.get(
-                            normalize(staged["filename"]))
+                        staged_norm = normalize(staged["filename"])
+                        collision = existing_by_key.get(staged_norm)
+                        intra_staged_collision = (
+                            staged_norm in staged_normalized_claimed)
                         # The archived filename may differ in case from the
                         # staged one; probe for the ACTUAL archived name so
                         # the on-disk existence check matches on
@@ -3244,11 +3269,19 @@ class Database:
                             # freshly-computed on-disk hash) can't safely
                             # stand in for the recorded-hash comparison
                             # here.
-                        if real_collision:
+                        if real_collision or intra_staged_collision:
                             # photo_keywords.photo_id has no ON DELETE CASCADE
                             # (unlike every other photo_id FK), so clear
                             # keyword links before deleting the photo or the
                             # FK fires.
+                            #
+                            # ``intra_staged_collision`` shares this branch
+                            # for the same net effect: the staged row's
+                            # bytes are not represented on disk (an earlier
+                            # staged case-alias already claimed the slot,
+                            # rsync ``--ignore-existing`` skipped this
+                            # file), so treating it as ``already_present``
+                            # is correct.
                             self.conn.execute(
                                 "DELETE FROM photo_keywords "
                                 "WHERE photo_id = ?",
@@ -3303,6 +3336,12 @@ class Database:
                             # is still a newly-archived photo from the user's
                             # view.
                             counts["new_photos"] += 1
+                            # Claim the case-normalized slot so a later
+                            # staged row whose filename case-folds to this
+                            # name is dropped as ``already_present``
+                            # instead of adding a second catalog row for
+                            # the same on-disk destination.
+                            staged_normalized_claimed.add(staged_norm)
                     to_delete.append(sf["id"])
                     counts["merged_folders"] += 1
                     last_target_parent[target_path] = target["id"]
