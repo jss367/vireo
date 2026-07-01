@@ -22,7 +22,14 @@ def test_browse_menu_add_to_life_list_sets_representative(live_server, page):
     expect(menu).to_be_visible()
     item = menu.locator(".vireo-ctx-item", has_text="Add to Life List — Red-tailed Hawk")
     expect(item).to_be_visible()
-    item.click()
+
+    # The menu handler is fire-and-forget (safeFetch(...).then(...)); wait for
+    # the POST to settle before reading state, or the /api/photos read races
+    # the write and intermittently sees is_current_photo: false.
+    with page.expect_response(
+        lambda r: "/api/photo-preferences" in r.url and r.status == 200
+    ):
+        item.click()
 
     # End-to-end: the click hit the real API and set THIS photo as the rep.
     life_list = page.evaluate(
