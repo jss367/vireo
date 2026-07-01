@@ -2102,7 +2102,9 @@ def test_storage_preflight_failure_aborts_in_flight_model_load(tmp_path, monkeyp
             while time.monotonic() < deadline:
                 if cancel_check and cancel_check():
                     model_observed_abort.set()
-                    raise RuntimeError("classification cancelled")
+                    raise classifier_mod.ClassificationCancelled(
+                        "classification cancelled"
+                    )
                 time.sleep(0.01)
             raise AssertionError("model load did not observe storage abort")
 
