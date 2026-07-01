@@ -3752,7 +3752,6 @@ async function fetchPipelineLabels() {
     return;
   }
 
-  var selectedBefore = getSelectedLabelFiles();
   var btn = document.getElementById('pipelineFetchLabelsBtn');
   var status = document.getElementById('pipelineFetchLabelsStatus');
   var progress = document.getElementById('pipelineFetchLabelsProgress');
@@ -3793,7 +3792,7 @@ async function fetchPipelineLabels() {
             status.style.color = 'var(--accent)';
           }
           if (fill) fill.style.width = '100%';
-          var selectFiles = selectedBefore.slice();
+          var selectFiles = getSelectedLabelFiles();
           if (newFile && selectFiles.indexOf(newFile) === -1) selectFiles.push(newFile);
           var saveSelectionFailed = false;
           safeFetch('/api/labels/active', {
