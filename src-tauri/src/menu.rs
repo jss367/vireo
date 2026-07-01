@@ -66,6 +66,7 @@ pub mod ids {
 
     pub const TOOLS_RUN_PIPELINE: &str = "tools_run_pipeline";
     pub const TOOLS_SCAN_LIBRARY: &str = "tools_scan_library";
+    pub const TOOLS_RESCAN: &str = "tools_rescan";
     pub const TOOLS_FIND_DUPLICATES: &str = "tools_find_duplicates";
     pub const TOOLS_BUILD_PREVIEWS: &str = "tools_build_previews";
     pub const TOOLS_SYNC_METADATA: &str = "tools_sync_metadata";
@@ -145,6 +146,7 @@ pub fn command_for_id(id: &str) -> Option<&'static str> {
         ids::REVIEW_EXCLUDE_WILDLIFE => Some("review_exclude_wildlife"),
         ids::TOOLS_RUN_PIPELINE => Some("tools_run_pipeline"),
         ids::TOOLS_SCAN_LIBRARY => Some("tools_scan_library"),
+        ids::TOOLS_RESCAN => Some("tools_rescan"),
         ids::TOOLS_FIND_DUPLICATES => Some("tools_find_duplicates"),
         ids::TOOLS_BUILD_PREVIEWS => Some("tools_build_previews"),
         ids::TOOLS_SYNC_METADATA => Some("tools_sync_metadata"),
@@ -461,6 +463,7 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
         .item(&MenuItemBuilder::with_id(ids::TOOLS_REVIEW_PIPELINE, "Review Pipeline Results").build(app)?)
         .separator()
         .item(&MenuItemBuilder::with_id(ids::TOOLS_SCAN_LIBRARY, "Scan Library...").build(app)?)
+        .item(&MenuItemBuilder::with_id(ids::TOOLS_RESCAN, "Rescan Folders...").build(app)?)
         .item(&MenuItemBuilder::with_id(ids::TOOLS_FIND_DUPLICATES, "Find Duplicates").build(app)?)
         .item(&MenuItemBuilder::with_id(ids::TOOLS_BUILD_PREVIEWS, "Build/Refresh Previews").build(app)?)
         .separator()

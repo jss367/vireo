@@ -2313,12 +2313,21 @@ class Database:
             (self._ws_id(),),
         ).fetchall()
 
-    def get_missing_photos(self):
+    def get_missing_photos(self, folder_id=None):
         """Return photos whose source file is missing from disk.
 
         Scoped to the active workspace. Skips photos in folders flagged
         ``'missing'`` — those are surfaced by ``get_missing_folders`` and
         listing them per-photo would just duplicate that signal at high cost.
+
+        When ``folder_id`` is given, the result is further restricted to
+        that folder and every folder beneath it in the tree. This backs the
+        "rescan a specific folder" flow — the user asked about one folder,
+        so the deleted-original review must not surface ghosts from unrelated
+        parts of the library. Descendant discovery goes through
+        ``_folder_subtree_ids_by_path`` so legacy rows whose ``parent_id`` is
+        NULL still count as descendants of their path-prefixed root. ``None``
+        (the default) keeps the whole-workspace behavior.
 
         Folder DB ``status`` is updated asynchronously by a 10-minute health
         loop, so a freshly unmounted volume can still show ``status='ok'``
@@ -2333,16 +2342,47 @@ class Database:
         ``working_copy_path`` so the caller can render rich UI without
         joining again.
         """
+        params = [self._ws_id()]
+        subtree_clause = ""
+        if folder_id is not None:
+            # Restrict to the folder subtree. Path-prefix expansion (the same
+            # helper used by add_workspace_folder etc.) covers legacy rows
+            # whose parent_id is NULL — a plain recursive walk over parent_id
+            # would silently drop those subfolders.
+            subtree_ids = self._folder_subtree_ids_by_path(folder_id)
+            if not subtree_ids:
+                return []
+            if len(subtree_ids) <= _SQLITE_PARAM_CHUNK_SIZE:
+                placeholders = ",".join("?" for _ in subtree_ids)
+                subtree_clause = f" AND f.id IN ({placeholders})"
+                params.extend(subtree_ids)
+            else:
+                # A workspace root with thousands of descendant folders would
+                # overflow SQLITE_MAX_VARIABLE_NUMBER (999 on legacy builds)
+                # in a single IN(...) clause. Stage the ids in a
+                # connection-local temp table and join through that instead.
+                self.conn.execute(
+                    "CREATE TEMP TABLE IF NOT EXISTS missing_subtree_ids "
+                    "(id INTEGER PRIMARY KEY)"
+                )
+                self.conn.execute("DELETE FROM missing_subtree_ids")
+                self.conn.executemany(
+                    "INSERT OR IGNORE INTO missing_subtree_ids (id) VALUES (?)",
+                    [(i,) for i in subtree_ids],
+                )
+                subtree_clause = (
+                    " AND f.id IN (SELECT id FROM missing_subtree_ids)"
+                )
         rows = self.conn.execute(
-            """SELECT p.id, p.filename, p.extension, p.file_size,
+            f"""SELECT p.id, p.filename, p.extension, p.file_size,
                       p.timestamp, p.working_copy_path,
                       f.id AS folder_id, f.path AS folder_path
                FROM photos p
                JOIN folders f ON p.folder_id = f.id
                JOIN workspace_folders wf ON wf.folder_id = f.id
-               WHERE wf.workspace_id = ? AND f.status != 'missing'
+               WHERE wf.workspace_id = ? AND f.status != 'missing'{subtree_clause}
                ORDER BY f.path, p.filename""",
-            (self._ws_id(),),
+            params,
         ).fetchall()
         # One readdir per folder instead of one stat per photo. On a 50k-photo
         # library across a network volume the per-photo `os.path.exists` was
