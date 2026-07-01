@@ -1182,6 +1182,15 @@ def _destination_overlaps_source(src_path, dest_path):
 def _tracked_destination_overlap(db, folder_id, dest_path):
     """Return another tracked folder at or below dest_path, if one exists.
 
+    When both an exact-match row (a tracked folder alias-equal to
+    ``dest_path``) AND a strict-descendant row exist, the exact-match row
+    is returned. Otherwise the caller's exact-vs-descendant branch would
+    fire non-deterministically based on the arbitrary order SQLite happened
+    to return the rows in (e.g. ``/Photos/USA`` inserted before its later-
+    scanned parent ``/Photos``): selecting the exact tracked parent would
+    get rejected as the unsupported "wrap around a tracked subfolder" case
+    just because the child row was seen first.
+
     The case-insensitive root of `dest_path` is probed once and reused for
     every row — otherwise the probe (an os.listdir of the deepest existing
     ancestor, plus samefile of two child paths) re-runs per non-matching row,
@@ -1189,6 +1198,7 @@ def _tracked_destination_overlap(db, folder_id, dest_path):
     large catalogs or network-backed destinations.
     """
     dest_ci_root = _case_insensitive_root(dest_path)
+    descendant = None
     for row in db.conn.execute(
         "SELECT id, path FROM folders WHERE id != ?", (folder_id,)
     ):
@@ -1196,8 +1206,84 @@ def _tracked_destination_overlap(db, folder_id, dest_path):
             row["path"], dest_path,
             case_insensitive_root=dest_ci_root,
         ):
-            return row
-    return None
+            # Prefer an exact (alias-folded) match: ``row["path"]`` is
+            # at-or-below ``dest_path``, so if ``dest_path`` is ALSO
+            # at-or-below ``row["path"]`` the two paths alias-fold to the
+            # same directory and this row IS the destination the caller
+            # can accept as a merge. Otherwise the row is a strict
+            # descendant (the "wrap around" case); remember it as a
+            # fallback in case no exact-match row turns up later.
+            if _path_equal_or_descends(dest_path, row["path"]):
+                return row
+            if descendant is None:
+                descendant = row
+    return descendant
+
+
+def _rebase_under_stored_ancestor(catalog_path, ancestor_path):
+    """Return ``catalog_path`` with any alias-prefix folded to STORED
+    ``ancestor_path``.
+
+    ``catalog_path`` is at or below ``ancestor_path`` per
+    ``_tracked_destination_ancestor``, but the match may have been via
+    ``_path_equal_or_descends``' alias surface (symlink resolution, Windows
+    case-fold via ``normcase``, POSIX case-insensitive ``samefile``). In those
+    cases ``catalog_path``'s leading components differ character-for-character
+    from ``ancestor_path`` even though they resolve to the same on-disk
+    directory. ``merge_staged_tree_into_archive`` reads parent rows by exact
+    ``WHERE path = ?`` — an alias-prefixed base would miss the tracked rows and
+    create a parallel alias-path row set outside the managed archive tree
+    (with ``parent_id=NULL``), so re-root the base on the stored form here.
+
+    The exact-overlap branch of ``move_folder`` passes ``tracked["path"]`` as
+    the reconcile base directly (there IS no suffix — the destination IS the
+    tracked folder); this helper is for the ancestor case where a real
+    relative suffix has to be reattached below the stored ancestor.
+    """
+    if catalog_path == ancestor_path:
+        return ancestor_path
+    prefix = ancestor_path + os.sep
+    if catalog_path.startswith(prefix):
+        return catalog_path
+    # Symlink alias: realpath collapses the link. On POSIX ``normcase`` is a
+    # no-op so the raw realpath is enough; on Windows ``normcase`` also
+    # folds case so the ``normcase(realpath(...))`` compare handles both.
+    real_ancestor = os.path.realpath(ancestor_path)
+    real_catalog = os.path.realpath(catalog_path)
+    if real_catalog == real_ancestor:
+        return ancestor_path
+    real_prefix = real_ancestor + os.sep
+    if real_catalog.startswith(real_prefix):
+        return ancestor_path + real_catalog[len(real_ancestor):]
+    norm_ancestor = os.path.normcase(real_ancestor)
+    norm_catalog = os.path.normcase(real_catalog)
+    if norm_catalog == norm_ancestor:
+        return ancestor_path
+    if norm_catalog.startswith(os.path.normcase(real_prefix)):
+        return ancestor_path + real_catalog[len(real_ancestor):]
+    # Case-only POSIX alias: neither ``realpath`` nor ``normcase`` folds it,
+    # so walk up ``catalog_path`` looking for an existing ancestor whose inode
+    # matches ``ancestor_path`` — the same samefile fallback
+    # ``_path_equal_or_descends`` uses to accept the destination in the first
+    # place. Then join the remaining components onto ``ancestor_path``.
+    parts = []
+    cur = catalog_path
+    while cur:
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        if os.path.exists(cur) and _samefile_or_false(cur, ancestor_path):
+            if not parts:
+                return ancestor_path
+            return os.path.join(ancestor_path, *parts)
+        parts.insert(0, os.path.basename(cur))
+        cur = parent
+    # No alias match after all. ``_tracked_destination_ancestor`` already
+    # matched via one of the surfaces above, so this shouldn't happen — if
+    # something in the alias surface changes and the walk falls through,
+    # keep today's behaviour (catalog_path unchanged) rather than silently
+    # corrupting the reconcile base.
+    return catalog_path
 
 
 def _tracked_destination_ancestor(db, folder_id, dest_path):
@@ -1373,7 +1459,8 @@ def move_photos(db, photo_ids, destination, progress_cb=None):
 
 
 def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
-                merge=False, remote=None, reject_tracked_ancestor=False):
+                merge=False, remote=None, reject_tracked_ancestor=False,
+                allow_tracked_merge=False):
     """Move an entire folder (and subfolders) to a destination.
 
     The folder is placed inside the destination, preserving its name.
@@ -1418,6 +1505,16 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             commits opt into this stricter guard because they create a new
             top-level archive root and cannot be reparented under the
             existing catalog row.
+        allow_tracked_merge: when True, a tracked destination (overlap or, with
+            ``reject_tracked_ancestor``, ancestor) is no longer an error.
+            Instead, after the verified file copy, the staged folder/photo rows
+            are folded into the existing archive rows via
+            ``db.merge_staged_tree_into_archive`` (new folders repointed,
+            identical-filename photos dropped) rather than a path cascade. Only
+            the local-processing archive commit opts in; manual and remote
+            moves keep the default refusal. The result then carries ``merge``
+            (the reconciliation counts) and ``merged_into_existing`` (the
+            tracked archive path).
 
     Returns dict with keys: moved (int), errors (list of str). When the
     catalog has already been repointed at the new destination but deleting
@@ -1541,21 +1638,86 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     # (default macOS APFS) all collapse to the same tracked row — otherwise
     # a destination reached via any of those would slip past and leave two
     # folder rows managing the same on-disk tree.
+    #
+    # When ``allow_tracked_merge`` is set (the local-processing archive commit
+    # opts in), a tracked destination is NOT an error: instead we remember the
+    # tracked path in ``merge_into_tracked`` and, after the verified file copy,
+    # reconcile the catalog by folding the staged folder/photo rows into the
+    # existing archive rows rather than calling ``db.move_folder_path`` (which
+    # would collide on folders.path UNIQUE). Default (flag off) behaviour is
+    # byte-for-byte unchanged: both tracked-destination cases refuse the move.
     overlap_check_path = catalog_path if remote else transfer_dest
+    merge_into_tracked = None
+    # The catalog path the staged tree is reconciled ONTO. Distinct from
+    # ``merge_into_tracked`` (the user-facing "existing archive" label): for an
+    # exact overlap the reconciliation base must be the STORED tracked path, not
+    # ``catalog_path``, because ``catalog_path`` may be an alias (symlink /
+    # case-only fold) of the tracked folder. The files rsync to the same on-disk
+    # location either way, but ``merge_staged_tree_into_archive`` does exact
+    # ``WHERE path = ?`` catalog lookups that only match the row stored under the
+    # tracked path — rebasing onto the alias would miss it and create a second
+    # folder row for the same archive.
+    merge_reconcile_base = None
     tracked = _tracked_destination_overlap(db, folder_id, overlap_check_path)
     if tracked:
-        return {"moved": 0, "errors": [
-            f"Destination overlaps a folder Vireo already manages "
-            f"({tracked['path']}). Merging into or around a tracked folder "
-            f"isn't supported."
-        ]}
-    if reject_tracked_ancestor:
+        # ``_tracked_destination_overlap`` returns any tracked row at-or-below
+        # ``overlap_check_path``. The opt-in merge only covers the "into an
+        # existing archive" case where the tracked row IS the destination;
+        # a tracked row STRICTLY BELOW the destination is the "wrap a fresh
+        # parent around an existing tracked subtree" case (e.g. /Photos/USA
+        # tracked, destination /Photos). The reconciliation would rebase the
+        # staged tree onto the wrapper path and leave the pre-existing tracked
+        # descendant with unchanged parentage — two overlapping catalog
+        # subtrees managing the same on-disk area. Refuse even when
+        # ``allow_tracked_merge`` is set. Uses the same alias-folding surface
+        # as the overlap probe (symlinks, Windows case-fold, case-insensitive
+        # POSIX) so a case-only alias of the destination still counts as the
+        # tracked row itself, not a wrapping parent.
+        tracked_is_destination = _path_equal_or_descends(
+            overlap_check_path, tracked["path"],
+        )
+        if not allow_tracked_merge or not tracked_is_destination:
+            return {"moved": 0, "errors": [
+                f"Destination overlaps a folder Vireo already manages "
+                f"({tracked['path']}). Merging into or around a tracked folder "
+                f"isn't supported."
+            ]}
+        merge_into_tracked = tracked["path"]
+        # Reconcile onto the STORED tracked path (not the possibly-aliased
+        # ``catalog_path``) so the existing archive rows are found, not
+        # duplicated. See the ``merge_reconcile_base`` note above.
+        merge_reconcile_base = tracked["path"]
+    if reject_tracked_ancestor and merge_into_tracked is None:
         ancestor = _tracked_destination_ancestor(db, folder_id, overlap_check_path)
         if ancestor:
-            return {"moved": 0, "errors": [
-                f"Destination is inside a folder Vireo already manages "
-                f"({ancestor['path']}). Pick an untracked archive destination."
-            ]}
+            if not allow_tracked_merge:
+                return {"moved": 0, "errors": [
+                    f"Destination is inside a folder Vireo already manages "
+                    f"({ancestor['path']}). Pick an untracked archive destination."
+                ]}
+            # Merge into the existing archive root that contains the
+            # destination. The staged tree lands at its own resolved
+            # catalog_path (inside the tracked ancestor); the reconciliation
+            # rebases staged rows onto that path and leaves the ancestor's own
+            # rows untouched. The user-facing "existing archive" base we
+            # report is the managed-archive root (``ancestor["path"]``), not
+            # the staged landing path inside it.
+            #
+            # The reconciliation base is the STORED ancestor's path with the
+            # relative-below-ancestor suffix appended, NOT the user-entered
+            # ``catalog_path`` — those two only agree when the ancestor probe
+            # matched by pure string prefix. When it matched via a symlink,
+            # Windows case-fold, or POSIX case-only alias (catalog stores
+            # ``/Photos``, user selects ``/photos/NewShoot``),
+            # ``catalog_path`` has an alias prefix that ``merge_staged_tree_
+            # into_archive``'s exact ``WHERE path = ?`` parent lookups miss.
+            # That would land the staged root with ``parent_id=NULL`` under an
+            # alias-prefixed path, spawning a parallel row set outside the
+            # managed archive tree. Fold the alias prefix to the stored form
+            # here.
+            merge_into_tracked = ancestor["path"]
+            merge_reconcile_base = _rebase_under_stored_ancestor(
+                catalog_path, ancestor["path"])
 
     if remote:
         probe = _remote_dir_exists(remote, transfer_dest)
@@ -1792,14 +1954,28 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
 
     # Update DB first: cascade folder paths (safer — if rmtree fails, the old
     # folder becomes an orphan on disk rather than the DB pointing to deleted
-    # paths). A merge into an already-tracked destination is refused above, so
-    # catalog_path is never a different existing folder row here and this
-    # cascade (root + all descendants) cannot collide with folders.path UNIQUE.
+    # paths). Unless the caller opted into merging (``merge_into_tracked``), a
+    # merge into an already-tracked destination is refused above, so
+    # catalog_path is never a different existing folder row in the cascade
+    # branch and that cascade (root + all descendants) cannot collide with
+    # folders.path UNIQUE. When merging into a tracked archive we instead
+    # reconcile the staged rows into the existing archive rows below.
     # For a remote move catalog_path is the local mount path, so the catalog
     # keeps resolving to the photos whenever the NAS is mounted.
     if progress_cb:
         progress_cb(total_files, total_files, "", "Updating catalog")
-    db.move_folder_path(folder_id, catalog_path)
+    merge_counts = None
+    if merge_into_tracked is not None:
+        # Destination is a tracked archive and the caller opted into merging:
+        # fold the staged folder/photo rows into the existing archive rows
+        # instead of a path cascade (which would collide on folders.path).
+        # ``merge_reconcile_base`` is the STORED tracked path for an exact
+        # overlap (so alias/case-fold destinations still match the existing
+        # rows) and ``catalog_path`` for the ancestor case; see where it is set.
+        merge_counts = db.merge_staged_tree_into_archive(
+            folder_id, merge_reconcile_base)
+    else:
+        db.move_folder_path(folder_id, catalog_path)
     db.update_folder_counts()
 
     # Rebase any developed-output subdirs nested under the configured
@@ -1807,9 +1983,23 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     # path, so the DB update above just invalidated the old subdir's
     # implicit key — rename it on disk to match the new path, and cascade
     # to any descendant folders whose paths also shifted.
+    #
+    # On the merge path the catalog was reparented onto
+    # ``merge_reconcile_base``, not ``catalog_path`` — those two only
+    # differ when the tracked destination was reached via a symlink or
+    # case-alias (see where ``merge_reconcile_base`` is set), but when they
+    # do differ the developed-dir key is derived from the STORED path, not
+    # the alias. Relocating from ``src_path`` to the aliased
+    # ``catalog_path`` would move renders under the alias-path hash and
+    # exports (which read the catalog's stored path) would look under the
+    # stored-path hash, miss them, and fall back to RAW. Use the same
+    # reconciled base the catalog uses.
+    developed_base = (merge_reconcile_base
+                      if merge_into_tracked is not None
+                      else catalog_path)
     if developed_dir:
         from export import relocate_developed_dir
-        relocate_developed_dir(developed_dir, src_path, catalog_path)
+        relocate_developed_dir(developed_dir, src_path, developed_base)
         # SQL LIKE treats `_` and `%` (and the escape char) as wildcards,
         # all of which are valid POSIX path characters. Without a strict
         # prefix guard, an unrelated folder like `/dXst/birds/fake` would
@@ -1818,14 +2008,14 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         # developed subdir. Filter results by a literal prefix check.
         descendant_rows = db.conn.execute(
             "SELECT path FROM folders WHERE path LIKE ?",
-            (catalog_path + "/%",),
+            (developed_base + "/%",),
         ).fetchall()
-        prefix = catalog_path + "/"
+        prefix = developed_base + "/"
         for row in descendant_rows:
             new_child = row["path"]
             if not new_child.startswith(prefix):
                 continue
-            old_child = src_path + new_child[len(catalog_path):]
+            old_child = src_path + new_child[len(developed_base):]
             relocate_developed_dir(developed_dir, old_child, new_child)
 
     # Delete originals. The catalog already points at the new destination,
@@ -1848,6 +2038,21 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         progress_cb(total_files, total_files, folder_name, "Done")
 
     result = {"moved": total_photos, "errors": []}
+    if merge_into_tracked is not None:
+        # ``dropped_photo_ids`` is a cleanup handle for the caller (thumbnails,
+        # previews, offline copies of the deleted staged photos), not a
+        # user-facing count. Lift it off ``merge_counts`` so ``result["merge"]``
+        # stays a stable dict of display numbers that gets serialized straight
+        # into the archive-stage summary/API payload.
+        dropped = merge_counts.pop("dropped_photo_ids", None) or []
+        result["merge"] = merge_counts
+        result["merged_into_existing"] = merge_into_tracked
+        # On the merge path ``total_photos`` counts every staged source photo,
+        # including identical ones that were dropped as ``already_present``.
+        # Report ``moved`` as the photos actually added to the archive.
+        result["moved"] = merge_counts["new_photos"]
+        if dropped:
+            result["dropped_photo_ids"] = dropped
     if cleanup_error is not None:
         result["cleanup_error"] = cleanup_error
     return result

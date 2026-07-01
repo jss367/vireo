@@ -7354,6 +7354,1278 @@ def test_move_folder_path_is_case_sensitive(db):
     assert sibling_child["path"] == "/photos/2024/sibling"
 
 
+def test_merge_staged_tree_new_subfolders(db):
+    """Staged tree merged under an existing tracked base: new date folders
+    are repointed under the base, parent_id fixed, workspace linked, and the
+    base's existing photos are untouched."""
+    ws = db._active_workspace_id
+
+    # Existing tracked archive base with one prior shoot, linked as a root.
+    base_id = db.add_folder("/arch/USA", name="USA")
+    old_id = db.add_folder("/arch/USA/2025/2025-01-01", name="2025-01-01",
+                           parent_id=base_id)
+    db.add_photo(folder_id=old_id, filename="old.raf", extension=".raf",
+                 file_size=100, file_mtime=1.0)
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    # Staged tree (post-rsync the files already live at /arch/USA/...). Created
+    # with workspace_root=False so the staged rows are NOT pre-linked as roots.
+    # The intermediate year folder is a real catalog row (a scan would create
+    # it) so the reparenting chain is exercised end to end.
+    stage_root = db.add_folder("/stage/USA", name="USA", workspace_root=False)
+    stage_year = db.add_folder("/stage/USA/2026", name="2026",
+                               parent_id=stage_root, workspace_root=False)
+    stage_leaf = db.add_folder("/stage/USA/2026/2026-06-30", name="2026-06-30",
+                               parent_id=stage_year, workspace_root=False)
+    db.add_photo(folder_id=stage_leaf, filename="new.raf", extension=".raf",
+                 file_size=200, file_mtime=2.0)
+
+    db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
+
+    # New leaf now lives under the base, parented to its (new) target parent.
+    leaf = db.conn.execute(
+        "SELECT id, parent_id FROM folders WHERE path = ?",
+        ("/arch/USA/2026/2026-06-30",),
+    ).fetchone()
+    assert leaf is not None
+    year = db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", ("/arch/USA/2026",),
+    ).fetchone()
+    assert year is not None
+    assert leaf["parent_id"] == year["id"]
+
+    # The staged root and leaf rows are gone (folded into the existing base).
+    assert db.conn.execute(
+        "SELECT 1 FROM folders WHERE path = ?", ("/stage/USA",)
+    ).fetchone() is None
+    assert db.conn.execute(
+        "SELECT 1 FROM folders WHERE path LIKE '/stage/%'"
+    ).fetchone() is None
+
+    # The new photo moved with the folder; the old photo is untouched.
+    assert db.conn.execute(
+        "SELECT folder_id FROM photos WHERE filename = ?", ("new.raf",)
+    ).fetchone()["folder_id"] == leaf["id"]
+    assert db.conn.execute(
+        "SELECT folder_id FROM photos WHERE filename = ?", ("old.raf",)
+    ).fetchone()["folder_id"] == old_id
+
+    # New leaf is linked to the workspace as a non-root (base is the root).
+    row = db.conn.execute(
+        "SELECT is_root FROM workspace_folders WHERE workspace_id=? AND folder_id=?",
+        (ws, leaf["id"]),
+    ).fetchone()
+    assert row is not None and row["is_root"] == 0
+
+
+def test_merge_staged_tree_downgrades_staged_root_leaf(db):
+    """Regression: a staged photo-bearing leaf that the scanner registered as
+    its OWN workspace root (workspace_folders.is_root=1) must be demoted to a
+    plain descendant when it is folded under the existing archive base.
+
+    This reproduces the real trigger: the staging scan restricts to the leaf
+    dir, so add_folder links it as a root. add_workspace_folder's INSERT OR
+    IGNORE cannot downgrade that pre-existing is_root=1 row, so the merge must
+    UPDATE it to 0 explicitly — otherwise a stray second workspace root is left
+    inside the archive. The prior new-subfolders test seeds the staged rows with
+    workspace_root=False, so it would pass even with the fix removed; this one
+    genuinely exercises the downgrade."""
+    ws = db._active_workspace_id
+
+    # Existing tracked archive base, linked as the workspace root.
+    base_id = db.add_folder("/arch/USA", name="USA")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    # Staged tree post-rsync. The leaf is registered as its OWN root, exactly as
+    # the staging scanner does (restrict_dirs => is_root=1 on the scanned leaf).
+    stage_root = db.add_folder("/stage/USA", name="USA", workspace_root=False)
+    stage_year = db.add_folder("/stage/USA/2026", name="2026",
+                               parent_id=stage_root, workspace_root=False)
+    stage_leaf = db.add_folder("/stage/USA/2026/2026-06-30", name="2026-06-30",
+                               parent_id=stage_year, workspace_root=True)
+    db.add_photo(folder_id=stage_leaf, filename="new.raf", extension=".raf",
+                 file_size=200, file_mtime=2.0)
+
+    # Precondition: the staged leaf really IS a workspace root before the merge,
+    # so this test genuinely exercises the downgrade path.
+    pre = db.conn.execute(
+        "SELECT is_root FROM workspace_folders WHERE workspace_id=? AND folder_id=?",
+        (ws, stage_leaf),
+    ).fetchone()
+    assert pre is not None and pre["is_root"] == 1
+
+    db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
+
+    # The folded leaf now lives under the archive as a NON-root descendant.
+    leaf = db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?",
+        ("/arch/USA/2026/2026-06-30",),
+    ).fetchone()
+    assert leaf is not None
+    leaf_link = db.conn.execute(
+        "SELECT is_root FROM workspace_folders WHERE workspace_id=? AND folder_id=?",
+        (ws, leaf["id"]),
+    ).fetchone()
+    assert leaf_link is not None and leaf_link["is_root"] == 0
+
+    # The archive base is the single remaining workspace root.
+    roots = db.conn.execute(
+        "SELECT folder_id FROM workspace_folders "
+        "WHERE workspace_id=? AND is_root=1",
+        (ws,),
+    ).fetchall()
+    assert [r["folder_id"] for r in roots] == [base_id]
+
+
+def test_merge_staged_tree_existing_folder_and_collision(db, tmp_path):
+    """Staged folder folds into a pre-existing target date-folder: a
+    same-filename staged photo (even one carrying keyword links) whose archived
+    file REALLY exists on disk is dropped as already-archived, a genuinely-new
+    one is reparented, and the counts use the settled photo-count names.
+    Regression guard for the photo_keywords FK that has no ON DELETE CASCADE —
+    deleting the collided photo without first clearing its keyword rows would
+    raise FOREIGN KEY constraint failed."""
+    ws = db._active_workspace_id
+
+    # Real on-disk archive so the collision drop's "archived file exists" check
+    # sees the byte-identical file rsync --ignore-existing preserved. Both the
+    # staged and archived rows carry the SAME file_hash — a real collision (as
+    # opposed to a phantom-row replacement) only reaches the merge when the
+    # bytes on both sides are identical, because the upstream content-conflict
+    # check would abort the whole move otherwise.
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026" / "2026-06-30"
+    date_dir.mkdir(parents=True)
+    (date_dir / "dup.raf").write_bytes(b"archived-dup")
+    (date_dir / "keep.raf").write_bytes(b"archived-keep")
+
+    base_id = db.add_folder(str(arch), name="USA")
+    year_id = db.add_folder(str(arch / "2026"), name="2026", parent_id=base_id)
+    date_id = db.add_folder(str(date_dir), name="2026-06-30", parent_id=year_id)
+    db.add_photo(folder_id=date_id, filename="dup.raf", extension=".raf",
+                 file_size=12, file_mtime=1.0, file_hash="DUPHASH")
+    db.add_photo(folder_id=date_id, filename="keep.raf", extension=".raf",
+                 file_size=13, file_mtime=1.0, file_hash="KEEPHASH")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    # Staged tree post-rsync. The intermediate year folder is a real row so the
+    # reparent chain is exercised; the leaf already exists at the target.
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_year = db.add_folder(str(stage / "2026"), name="2026",
+                               parent_id=stage_root, workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026" / "2026-06-30"),
+                               name="2026-06-30",
+                               parent_id=stage_year, workspace_root=False)
+    dup_pid = db.add_photo(folder_id=stage_leaf, filename="dup.raf",
+                           extension=".raf", file_size=12, file_mtime=2.0,
+                           file_hash="DUPHASH")
+    db.add_photo(folder_id=stage_leaf, filename="fresh.raf", extension=".raf",
+                 file_size=200, file_mtime=2.0, file_hash="FRESHHASH")
+
+    # Attach a keyword to the COLLIDED staged photo so the delete must clear
+    # photo_keywords first; without the fix this raises a FK error.
+    kw = db.add_keyword("Osprey")
+    db.tag_photo(dup_pid, kw)
+
+    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    # No duplicate dup.raf row; fresh.raf reparented into the existing folder.
+    names = {r["filename"] for r in db.conn.execute(
+        "SELECT filename FROM photos WHERE folder_id = ?", (date_id,))}
+    assert names == {"dup.raf", "keep.raf", "fresh.raf"}
+    assert db.conn.execute(
+        "SELECT COUNT(*) c FROM photos WHERE filename='dup.raf'"
+    ).fetchone()["c"] == 1
+    # The dropped staged photo's keyword links are gone too.
+    assert db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ?", (dup_pid,)
+    ).fetchone() is None
+
+    # Settled count names with correct values: 1 new photo (fresh.raf), no new
+    # folders (every staged folder mapped to an existing target — root, year,
+    # and leaf all pre-exist under the archive), 3 merged folders, 1 dropped.
+    assert counts["new_photos"] == 1
+    assert counts["new_folders"] == 0
+    assert counts["merged_folders"] == 3
+    assert counts["already_present"] == 1
+
+    # All staged rows folded away.
+    assert db.conn.execute(
+        "SELECT 1 FROM folders WHERE path LIKE ?", (str(stage) + "%",)
+    ).fetchone() is None
+
+
+def test_merge_staged_tree_links_archive_to_active_workspace(db):
+    """Regression: when the pre-existing archive base is linked only to a
+    DIFFERENT workspace, merging staged photos into it must link the base
+    (and its subtree) to the active workspace too. Workspace-scoped photo
+    queries join ``workspace_folders`` on ``p.folder_id``; without the link,
+    the else-branch UPDATE moves photos onto a ``target["id"]`` that has no
+    ``workspace_folders`` row for the active ws, and every merged-in photo
+    silently vanishes from ws-scoped views even though the import reports
+    success. Reproduces via two workspaces: the archive lives under ``other``
+    only, and ``active`` runs the merge."""
+    # Archive lives under the default workspace; ``active`` never scans it.
+    other_ws = db._active_workspace_id
+    base_id = db.add_folder("/arch/USA", name="USA")
+    date_id = db.add_folder("/arch/USA/2025-06-30", name="2025-06-30",
+                            parent_id=base_id, workspace_root=False)
+    db.add_photo(folder_id=date_id, filename="prior.raf", extension=".raf",
+                 file_size=100, file_mtime=1.0)
+
+    # Switch to a fresh workspace — the one running the pipeline.
+    active_ws = db.create_workspace("Active")
+    db.set_active_workspace(active_ws)
+
+    # Precondition: the active ws cannot see the archive yet.
+    assert db.conn.execute(
+        "SELECT 1 FROM workspace_folders "
+        "WHERE workspace_id=? AND folder_id=?",
+        (active_ws, base_id),
+    ).fetchone() is None
+
+    # Staged tree post-rsync; a real scan restrict_dirs registers the leaf
+    # as its own root, but the base_id-invisible visibility bug reproduces
+    # regardless of that flag, so keep the setup minimal.
+    stage_root = db.add_folder("/stage/USA", name="USA", workspace_root=False)
+    stage_leaf = db.add_folder("/stage/USA/2025-06-30", name="2025-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    new_pid = db.add_photo(folder_id=stage_leaf, filename="new.raf",
+                           extension=".raf", file_size=200, file_mtime=2.0)
+
+    db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
+
+    # Archive base is now the active workspace's root; the subtree pull in
+    # add_workspace_folder linked the existing date folder along with it.
+    base_link = db.conn.execute(
+        "SELECT is_root FROM workspace_folders "
+        "WHERE workspace_id=? AND folder_id=?",
+        (active_ws, base_id),
+    ).fetchone()
+    assert base_link is not None and base_link["is_root"] == 1
+    assert db.conn.execute(
+        "SELECT 1 FROM workspace_folders "
+        "WHERE workspace_id=? AND folder_id=?",
+        (active_ws, date_id),
+    ).fetchone() is not None
+
+    # The other workspace's link on the archive base is preserved — the
+    # is_root UPDATE in add_workspace_folder is scoped by workspace_id.
+    other_link = db.conn.execute(
+        "SELECT is_root FROM workspace_folders "
+        "WHERE workspace_id=? AND folder_id=?",
+        (other_ws, base_id),
+    ).fetchone()
+    assert other_link is not None and other_link["is_root"] == 1
+
+    # The merged-in photo landed on the existing date folder and is now
+    # visible via the exact workspace_folders join every scoped query uses.
+    row = db.conn.execute(
+        """SELECT p.filename FROM photos p
+           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+           WHERE p.id = ? AND wf.workspace_id = ?""",
+        (new_pid, active_ws),
+    ).fetchone()
+    assert row is not None and row["filename"] == "new.raf"
+
+
+def test_merge_staged_tree_new_descendant_roots_tracked_ancestor_for_active_ws(
+        db):
+    """Regression: when the archive destination is a BRAND-NEW subfolder
+    inside a tracked archive that belongs only to a DIFFERENT workspace,
+    the merge used to skip the ``if archive_row:`` linking block (the new
+    subfolder has no folder row yet), then the reconciliation loop
+    reparented the staged root onto the new archive path and explicitly
+    demoted it to ``is_root=0``. The active workspace was left with NO
+    ``is_root=1`` row covering the merged tree, and
+    ``get_workspace_folder_roots()`` (which filters on ``is_root=1``)
+    returned nothing — the newly-archived photos silently disappeared from
+    the active workspace even though the import reported success.
+
+    The fix roots the deepest tracked ancestor in the active workspace
+    when no root ancestor is present, so the merged tree has a visible
+    anchor."""
+    # Archive tracked only under the default ws.
+    other_ws = db._active_workspace_id
+    tracked_id = db.add_folder("/arch", name="arch")
+    db.add_workspace_folder(other_ws, tracked_id, is_root=True)
+
+    # Switch to a fresh workspace with NO link to /arch and NO root
+    # ancestor above it.
+    active_ws = db.create_workspace("Active")
+    db.set_active_workspace(active_ws)
+    assert db.conn.execute(
+        "SELECT 1 FROM workspace_folders "
+        "WHERE workspace_id=? AND folder_id=?",
+        (active_ws, tracked_id),
+    ).fetchone() is None
+
+    # Staged tree destined for a NEW subfolder inside /arch — no folder row
+    # for /arch/NewShoot exists yet.
+    stage_root = db.add_folder("/stage/NewShoot", name="NewShoot",
+                               workspace_root=False)
+    stage_leaf = db.add_folder("/stage/NewShoot/2026-06-30", name="2026-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    new_pid = db.add_photo(folder_id=stage_leaf, filename="new.raf",
+                           extension=".raf", file_size=200, file_mtime=2.0)
+
+    db.merge_staged_tree_into_archive(stage_root, "/arch/NewShoot")
+
+    # The tracked ancestor /arch is now a root of the active workspace, so
+    # get_workspace_folder_roots() has an anchor for the merged tree.
+    ancestor_link = db.conn.execute(
+        "SELECT is_root FROM workspace_folders "
+        "WHERE workspace_id=? AND folder_id=?",
+        (active_ws, tracked_id),
+    ).fetchone()
+    assert ancestor_link is not None and ancestor_link["is_root"] == 1
+
+    # The merged photo is visible via the workspace_folders join every
+    # ws-scoped query uses.
+    row = db.conn.execute(
+        """SELECT p.filename FROM photos p
+           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+           WHERE p.id = ? AND wf.workspace_id = ?""",
+        (new_pid, active_ws),
+    ).fetchone()
+    assert row is not None and row["filename"] == "new.raf"
+
+    # The other workspace's root on /arch is preserved (is_root scoping in
+    # add_workspace_folder is per-workspace).
+    other_link = db.conn.execute(
+        "SELECT is_root FROM workspace_folders "
+        "WHERE workspace_id=? AND folder_id=?",
+        (other_ws, tracked_id),
+    ).fetchone()
+    assert other_link is not None and other_link["is_root"] == 1
+
+
+def test_merge_staged_tree_ancestor_base_stays_non_root(db):
+    """Regression: when the active workspace already has a managed root ANCESTOR
+    of the archive base (import into an existing subfolder — root ``/Photos``,
+    base ``/Photos/USA``), the merge must LINK the base to the workspace but NOT
+    root it. Rooting it would leave ``/Photos`` and ``/Photos/USA`` as two
+    overlapping workspace roots. When there is no root ancestor the base IS the
+    root (covered by the other merge tests)."""
+    ws = db._active_workspace_id
+
+    # Existing workspace root ancestor.
+    root_id = db.add_folder("/Photos", name="Photos")
+    base_id = db.add_folder("/Photos/USA", name="USA", parent_id=root_id)
+    db.add_workspace_folder(ws, root_id, is_root=True)
+
+    # Staged tree lands at a genuinely-new date subfolder inside the base.
+    stage_root = db.add_folder("/stage/USA", name="USA", workspace_root=False)
+    stage_leaf = db.add_folder("/stage/USA/2026-06-30", name="2026-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    db.add_photo(folder_id=stage_leaf, filename="new.raf", extension=".raf",
+                 file_size=200, file_mtime=2.0)
+
+    db.merge_staged_tree_into_archive(stage_root, "/Photos/USA")
+
+    # The base is linked to the workspace but as a NON-root.
+    base_link = db.conn.execute(
+        "SELECT is_root FROM workspace_folders "
+        "WHERE workspace_id=? AND folder_id=?", (ws, base_id),
+    ).fetchone()
+    assert base_link is not None and base_link["is_root"] == 0
+
+    # /Photos remains the SOLE workspace root — no duplicate overlapping root.
+    roots = [r["folder_id"] for r in db.conn.execute(
+        "SELECT folder_id FROM workspace_folders "
+        "WHERE workspace_id=? AND is_root=1", (ws,))]
+    assert roots == [root_id]
+
+
+def test_merge_staged_tree_materializes_missing_intermediate_parent(db):
+    """Regression: when the archive destination is nested inside a tracked
+    root but an intermediate archive folder has never been scanned (e.g.
+    ``/Photos`` tracked and the user imports to ``/Photos/2026/NewShoot``),
+    the storage preflight creates ``/Photos/2026`` on disk via rsync's
+    parent-dir setup but never opens a folder row for it. Without the fix
+    the reconciliation repoints the staged root to ``/Photos/2026/NewShoot``
+    with ``parent_id=NULL`` — floating it outside the managed archive tree
+    and breaking every parent-based subtree operation (cascade path
+    renames, ``_folder_subtree_ids_by_path``, tree UI). The merge must
+    materialize the missing intermediate rows top-down so the staged
+    root's ``parent_id`` resolves to the freshly-created ``/Photos/2026``
+    row, and each intermediate must be linked to the active workspace as
+    a non-root (they sit under the existing tracked root).
+    """
+    ws = db._active_workspace_id
+
+    # Existing tracked archive root — a single folder row, no descendants
+    # under it in the catalog. The intermediate ``/Photos/2026`` was
+    # never scanned.
+    root_id = db.add_folder("/Photos", name="Photos")
+    db.add_workspace_folder(ws, root_id, is_root=True)
+
+    # Staged tree that will land at /Photos/2026/NewShoot after rsync.
+    stage_root = db.add_folder("/stage/NewShoot", name="NewShoot",
+                               workspace_root=False)
+    stage_leaf = db.add_folder("/stage/NewShoot/2026-06-30",
+                               name="2026-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    db.add_photo(folder_id=stage_leaf, filename="new.raf", extension=".raf",
+                 file_size=100, file_mtime=1.0)
+
+    db.merge_staged_tree_into_archive(stage_root, "/Photos/2026/NewShoot")
+
+    # The intermediate archive folder now has a real folder row parented
+    # under the tracked root — not floating with parent_id=NULL.
+    mid = db.conn.execute(
+        "SELECT id, parent_id FROM folders WHERE path = ?",
+        ("/Photos/2026",),
+    ).fetchone()
+    assert mid is not None, (
+        "missing intermediate /Photos/2026 should be materialized so the "
+        "reparented staged root has a real parent row to point at"
+    )
+    assert mid["parent_id"] == root_id
+
+    # The staged root, now repointed to the archive destination, is
+    # correctly parented under the freshly-created intermediate.
+    dest = db.conn.execute(
+        "SELECT parent_id FROM folders WHERE path = ?",
+        ("/Photos/2026/NewShoot",),
+    ).fetchone()
+    assert dest is not None
+    assert dest["parent_id"] == mid["id"]
+
+    # /Photos remains the SOLE workspace root — no duplicate overlapping
+    # root created by the materialized intermediates or the reparented
+    # staged root.
+    roots = [r["folder_id"] for r in db.conn.execute(
+        "SELECT folder_id FROM workspace_folders "
+        "WHERE workspace_id=? AND is_root=1", (ws,))]
+    assert roots == [root_id]
+
+    # The intermediate is linked to the active workspace as a non-root so
+    # workspace-scoped queries over the tree include it.
+    mid_link = db.conn.execute(
+        "SELECT is_root FROM workspace_folders "
+        "WHERE workspace_id=? AND folder_id=?", (ws, mid["id"]),
+    ).fetchone()
+    assert mid_link is not None and mid_link["is_root"] == 0
+
+
+def test_merge_staged_tree_intermediate_insert_survives_race(db):
+    """Regression: two concurrent local-processing jobs targeting siblings
+    inside the same tracked archive (e.g. ``/Photos/2026/A`` and
+    ``/Photos/2026/B`` while only ``/Photos`` is tracked) can both snapshot
+    the shared intermediate ``/Photos/2026`` as missing during walk-up, then
+    race to insert it. The archive-destination reservation lets them run
+    because the leaf paths don't overlap. Without ``INSERT OR IGNORE`` +
+    requery, the loser would raise ``IntegrityError`` on the intermediate's
+    ``folders.path`` UNIQUE constraint AFTER all staging/processing work is
+    already done, stranding the merge. The reconciliation must instead fall
+    back to the winner's row and finish parenting the staged tree under it.
+    """
+    ws = db._active_workspace_id
+
+    # Tracked archive root; the shared intermediate /Photos/2026 has never
+    # been scanned (no folder row for it yet).
+    root_id = db.add_folder("/Photos", name="Photos")
+    db.add_workspace_folder(ws, root_id, is_root=True)
+
+    # Staged tree that will land at /Photos/2026/A after rsync.
+    stage_root = db.add_folder("/stage/A", name="A", workspace_root=False)
+    db.add_photo(folder_id=stage_root, filename="a.raf", extension=".raf",
+                 file_size=100, file_mtime=1.0)
+
+    # Simulate the race: the walk-up probe above has already snapshotted
+    # /Photos/2026 as missing; here we sneak in a competing insert JUST
+    # before the reconciliation's own INSERT fires, standing in for the
+    # winning concurrent job's commit. Without INSERT OR IGNORE the loser's
+    # plain INSERT would raise here. Wrap the connection (sqlite3.Connection
+    # is C-implemented and doesn't allow assigning to .execute directly).
+    real_conn = db.conn
+
+    class _RacingConn:
+        race_inserted = False
+
+        def execute(self_wrap, sql, params=()):
+            if (not _RacingConn.race_inserted
+                    and isinstance(sql, str)
+                    and sql.startswith("INSERT OR IGNORE INTO folders")):
+                real_conn.execute(
+                    "INSERT INTO folders (path, name, parent_id) "
+                    "VALUES (?, ?, ?)",
+                    ("/Photos/2026", "2026", root_id),
+                )
+                _RacingConn.race_inserted = True
+            return real_conn.execute(sql, params)
+
+        def __getattr__(self_wrap, name):
+            return getattr(real_conn, name)
+
+    db.conn = _RacingConn()
+    try:
+        db.merge_staged_tree_into_archive(stage_root, "/Photos/2026/A")
+    finally:
+        db.conn = real_conn
+
+    # The race was actually triggered (guards against a future refactor that
+    # renames the INSERT and silently no-ops this simulation).
+    assert _RacingConn.race_inserted, (
+        "expected the reconciliation to run INSERT OR IGNORE for the missing "
+        "intermediate row — the simulation didn't fire, so the race is no "
+        "longer exercised"
+    )
+
+    # Exactly one /Photos/2026 row survives (the winner's), and the staged
+    # tree ended up parented under it — no duplicates, no NULL parent, no
+    # UNIQUE-constraint crash.
+    mid_rows = db.conn.execute(
+        "SELECT id, parent_id FROM folders WHERE path = ?",
+        ("/Photos/2026",),
+    ).fetchall()
+    assert len(mid_rows) == 1
+    mid_id = mid_rows[0]["id"]
+    assert mid_rows[0]["parent_id"] == root_id
+    dest = db.conn.execute(
+        "SELECT parent_id FROM folders WHERE path = ?",
+        ("/Photos/2026/A",),
+    ).fetchone()
+    assert dest is not None and dest["parent_id"] == mid_id
+
+
+def test_merge_staged_tree_missing_target_file_keeps_new_photo(db, tmp_path):
+    """Defensive: a filename collision against a STALE target row whose file is
+    missing on disk must NOT drop the staged photo as ``already_present``. The
+    upstream content-conflict check couldn't fire (no dest file), so rsync
+    copied the new staged bytes; dropping the staged row would leave those bytes
+    represented by the phantom row's hash/metadata and lose the new photo.
+    Instead the phantom row is removed and the staged photo reparented in its
+    place, so the surviving row describes the real on-disk file."""
+    ws = db._active_workspace_id
+
+    # Real on-disk archive, but the archived file is ABSENT (stale catalog row).
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-06-30"
+    date_dir.mkdir(parents=True)
+    # NOTE: no missing.raf written to date_dir — the row is stale.
+
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-06-30", parent_id=base_id)
+    stale_pid = db.add_photo(folder_id=date_id, filename="missing.raf",
+                             extension=".raf", file_size=100, file_mtime=1.0,
+                             file_hash="STALEHASH")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    # Staged photo shares the basename but is the freshly-copied real file.
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-06-30"), name="2026-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    new_pid = db.add_photo(folder_id=stage_leaf, filename="missing.raf",
+                           extension=".raf", file_size=200, file_mtime=2.0,
+                           file_hash="NEWHASH")
+
+    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    # The staged photo survived and now lives on the archive date folder — it
+    # was NOT dropped as already_present.
+    assert counts["already_present"] == 0
+    assert counts["new_photos"] == 1
+    surviving = db.conn.execute(
+        "SELECT id, folder_id, file_hash FROM photos WHERE filename='missing.raf'"
+    ).fetchall()
+    assert len(surviving) == 1
+    assert surviving[0]["id"] == new_pid
+    assert surviving[0]["folder_id"] == date_id
+    assert surviving[0]["file_hash"] == "NEWHASH"
+    # The stale phantom row is gone (replaced by the real bytes' row).
+    assert db.conn.execute(
+        "SELECT 1 FROM photos WHERE id = ?", (stale_pid,)
+    ).fetchone() is None
+
+
+def test_merge_staged_tree_phantom_row_replaces_when_file_on_disk_after_rsync(
+    db, tmp_path,
+):
+    """Regression for the exact production ordering: ``move_folder`` runs
+    rsync ``--ignore-existing`` FIRST, then calls
+    ``merge_staged_tree_into_archive``. If the target row was a phantom
+    (its file missing before rsync), rsync creates the file at the target
+    path from the staged bytes — so by the time the merge's collision
+    check runs, ``os.path.exists`` returns True in the phantom case too
+    and can't tell it apart from a real byte-identical collision. Left
+    unfixed, the staged photo would be dropped as ``already_present`` and
+    the freshly-copied bytes would be represented by the phantom row's
+    stale hash/metadata — the newly-imported photo silently disappears
+    behind the stale row.
+
+    Distinguish real collision from phantom by the target row's
+    bytes-identity (``file_hash``) instead of raw file existence.
+    """
+    ws = db._active_workspace_id
+
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-06-30"
+    date_dir.mkdir(parents=True)
+    # The archived file IS on disk — but only because rsync just copied it
+    # in from staging over an empty slot. Its bytes are the STAGED bytes;
+    # the target catalog row was a phantom that had lost track of the
+    # deleted original.
+    (date_dir / "collide.raf").write_bytes(b"fresh-staged-bytes")
+
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-06-30",
+                            parent_id=base_id)
+    phantom_pid = db.add_photo(folder_id=date_id, filename="collide.raf",
+                               extension=".raf", file_size=100,
+                               file_mtime=1.0, file_hash="STALEHASH")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-06-30"), name="2026-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    new_pid = db.add_photo(folder_id=stage_leaf, filename="collide.raf",
+                           extension=".raf", file_size=200, file_mtime=2.0,
+                           file_hash="NEWHASH")
+
+    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    # The freshly-copied bytes are represented by the STAGED row (which
+    # accurately describes them), not the stale phantom row.
+    assert counts["already_present"] == 0
+    assert counts["new_photos"] == 1
+    surviving = db.conn.execute(
+        "SELECT id, folder_id, file_hash FROM photos "
+        "WHERE filename='collide.raf'"
+    ).fetchall()
+    assert len(surviving) == 1
+    assert surviving[0]["id"] == new_pid
+    assert surviving[0]["folder_id"] == date_id
+    assert surviving[0]["file_hash"] == "NEWHASH"
+    # The phantom row is gone; its cache files are reported for cleanup.
+    assert db.conn.execute(
+        "SELECT 1 FROM photos WHERE id = ?", (phantom_pid,)
+    ).fetchone() is None
+    assert phantom_pid in counts["dropped_photo_ids"]
+
+
+def test_merge_staged_tree_defaults_to_phantom_when_hashes_missing(
+    db, tmp_path,
+):
+    """When either row's ``file_hash`` is unset (older catalog rows, or a
+    scan that failed to hash), the collision guard has no safe post-copy
+    signal — ``file_size`` alone can coincidentally match a phantom row's
+    stored size (empty XMP sidecars, small metadata files), and rehashing
+    the on-disk file always matches the staged hash in the phantom case
+    (rsync wrote the staged bytes). Default to phantom-replacement so the
+    freshly-imported pipeline output survives; the alternative (silently
+    dropping the new photo behind a same-size stale row) is the worse
+    failure mode. Regression for the Codex finding at db.py:3221."""
+    ws = db._active_workspace_id
+
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-06-30"
+    date_dir.mkdir(parents=True)
+    # The archived file IS on disk (rsync landed the staged bytes there),
+    # and its size EQUALS the phantom row's recorded size — the exact
+    # coincidence the old size-fallback would have false-flagged as a
+    # real collision, silently dropping the newly-imported photo.
+    (date_dir / "collide.raf").write_bytes(b"x" * 100)
+
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-06-30",
+                            parent_id=base_id)
+    # Phantom row: no file_hash (older catalog row that pre-dates
+    # hashing) and a recorded size that HAPPENS to equal the freshly-
+    # copied staged file's size.
+    phantom_pid = db.add_photo(folder_id=date_id, filename="collide.raf",
+                               extension=".raf", file_size=100,
+                               file_mtime=1.0)
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-06-30"), name="2026-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    # Staged photo also lacks a recorded hash (the unhashed-scan case).
+    new_pid = db.add_photo(folder_id=stage_leaf, filename="collide.raf",
+                           extension=".raf", file_size=100,
+                           file_mtime=2.0)
+
+    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    # Without hash-based verification the guard defaults to phantom, so
+    # the staged (newly-imported) photo is preserved and the unverifiable
+    # target row is dropped.
+    assert counts["already_present"] == 0
+    assert counts["new_photos"] == 1
+    surviving = db.conn.execute(
+        "SELECT id FROM photos WHERE filename='collide.raf'"
+    ).fetchall()
+    assert len(surviving) == 1
+    assert surviving[0]["id"] == new_pid
+    assert db.conn.execute(
+        "SELECT 1 FROM photos WHERE id = ?", (phantom_pid,)
+    ).fetchone() is None
+    # The phantom's cache files must still be reported for cleanup so a
+    # rowid re-use can't inherit stale imagery.
+    assert phantom_pid in counts["dropped_photo_ids"]
+
+
+def test_merge_staged_tree_case_alias_collision_on_case_insensitive_volume(
+    db, tmp_path, monkeypatch,
+):
+    """On a case-insensitive archive volume (default macOS APFS, Windows
+    NTFS) an existing catalog row ``IMG.RAF`` and a staged ``img.raf`` are
+    the same on-disk file: rsync ``--ignore-existing`` treats them as a
+    match and skips the staged copy. Without a case-aware collision check
+    the staged row would be reparented onto the target folder, leaving TWO
+    catalog rows in one folder for the same file (SQLite text-equality is
+    case-sensitive so UNIQUE(folder_id, filename) doesn't fire to catch
+    the mistake). The staged row must be dropped as ``already_present``.
+    """
+    ws = db._active_workspace_id
+
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-06-30"
+    date_dir.mkdir(parents=True)
+    # Only the upper-case archived file exists on disk. The staged
+    # lower-case name would resolve to this same file on a case-folding
+    # volume.
+    (date_dir / "IMG.RAF").write_bytes(b"archived-bytes")
+
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-06-30",
+                            parent_id=base_id)
+    archived_pid = db.add_photo(folder_id=date_id, filename="IMG.RAF",
+                                extension=".raf", file_size=100,
+                                file_mtime=1.0, file_hash="SAMEBYTES")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-06-30"), name="2026-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    # A real case-alias collision only reaches the merge step when the bytes
+    # are identical (the upstream content-conflict check aborts the whole
+    # move otherwise), so the two rows describe the same bytes and share a
+    # hash. Modelling that here keeps the collision check's hash comparison
+    # honest: mismatched hashes would (correctly) be treated as a phantom
+    # row now, so a case-alias test with fake mismatching hashes would not
+    # represent the production invariant it's asserting.
+    staged_pid = db.add_photo(folder_id=stage_leaf, filename="img.raf",
+                              extension=".raf", file_size=100,
+                              file_mtime=2.0, file_hash="SAMEBYTES")
+
+    # Force the merge to treat the target volume as case-insensitive
+    # regardless of the CI host's actual filesystem behavior (Linux ext4
+    # is case-sensitive, so the underlying ``_case_insensitive_root``
+    # probe would otherwise return None and the fix wouldn't be exercised
+    # in this test environment).
+    import move
+    monkeypatch.setattr(move, "_case_insensitive_root", lambda p: "/")
+    # And make ``os.path.exists`` treat the case-alias lookup as present,
+    # since a real case-insensitive volume would resolve
+    # ``.../IMG.raf`` / ``.../img.raf`` back to the same on-disk file.
+    real_exists = os.path.exists
+    def case_insensitive_exists(p):
+        if real_exists(p):
+            return True
+        # Fall back to a case-insensitive directory listing.
+        parent = os.path.dirname(p)
+        base = os.path.basename(p).lower()
+        try:
+            entries = os.listdir(parent)
+        except OSError:
+            return False
+        return any(e.lower() == base for e in entries)
+    monkeypatch.setattr("db.os.path.exists", case_insensitive_exists)
+
+    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    # The staged row was dropped, not reparented — one row remains for the
+    # archived file.
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos WHERE folder_id = ?", (date_id,),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["id"] == archived_pid
+    assert rows[0]["filename"] == "IMG.RAF"
+    assert db.conn.execute(
+        "SELECT 1 FROM photos WHERE id = ?", (staged_pid,)
+    ).fetchone() is None
+    assert counts["already_present"] == 1
+    assert counts["new_photos"] == 0
+
+
+def test_merge_staged_tree_intra_staged_case_alias_collision(
+    db, tmp_path, monkeypatch,
+):
+    """Regression: two staged files whose filenames differ only in case
+    land in the same staged folder (e.g. staged on a case-sensitive disk,
+    archiving to a case-insensitive volume like APFS/SMB). rsync
+    ``--ignore-existing`` writes the FIRST file and silently skips the
+    second, so the second row's bytes never land on disk. Without an
+    intra-staged claim tracker, both rows get reparented into the target
+    folder — SQLite text-equality is case-sensitive so UNIQUE(folder_id,
+    filename) doesn't fire, and the catalog ends up with two rows for one
+    on-disk file (losing the second image). The second staged row must be
+    dropped as ``already_present`` instead of reparented.
+    """
+    ws = db._active_workspace_id
+
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-06-30"
+    date_dir.mkdir(parents=True)
+    # Empty target folder — no pre-existing catalog rows and (initially)
+    # no on-disk photos. The archive-side folder rows exist but the merge
+    # tracker must catch the intra-staged collision itself.
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-06-30",
+                            parent_id=base_id)
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-06-30"), name="2026-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    # Two staged photos with case-differing filenames. Different hashes
+    # model the realistic case where the two source files have DIFFERENT
+    # bytes — rsync writes only one of them to disk and the other row
+    # describes bytes that never landed. Even if the file hashes matched,
+    # only one on-disk file can exist on a case-insensitive volume so a
+    # second catalog row is still wrong.
+    first_pid = db.add_photo(folder_id=stage_leaf, filename="IMG.RAF",
+                             extension=".raf", file_size=100,
+                             file_mtime=1.0, file_hash="FIRSTBYTES")
+    second_pid = db.add_photo(folder_id=stage_leaf, filename="img.raf",
+                              extension=".raf", file_size=200,
+                              file_mtime=2.0, file_hash="OTHERBYTES")
+
+    # Force the merge to treat the target volume as case-insensitive
+    # regardless of the CI host's actual filesystem behavior.
+    import move
+    monkeypatch.setattr(move, "_case_insensitive_root", lambda p: "/")
+
+    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    # Exactly one photo row ends up in the target folder — the first
+    # staged row was reparented, the second was dropped as
+    # ``already_present`` (and its id reported for cache cleanup).
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos WHERE folder_id = ?", (date_id,),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["id"] == first_pid
+    assert rows[0]["filename"] == "IMG.RAF"
+    assert db.conn.execute(
+        "SELECT 1 FROM photos WHERE id = ?", (second_pid,)
+    ).fetchone() is None
+    assert counts["already_present"] == 1
+    assert counts["new_photos"] == 1
+    assert second_pid in counts["dropped_photo_ids"]
+
+
+def test_merge_staged_tree_intra_staged_case_alias_case_sensitive_volume(
+    db, tmp_path, monkeypatch,
+):
+    """On a case-sensitive archive volume (Linux ext4), two staged files
+    ``IMG.RAF`` and ``img.raf`` are distinct on-disk files and both should
+    be reparented into the target folder — the intra-staged claim tracker
+    must NOT trigger. Guards against a regression where the tracker
+    normalizes with ``str.casefold`` unconditionally and drops legitimate
+    distinct files on case-sensitive targets.
+    """
+    ws = db._active_workspace_id
+
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-06-30"
+    date_dir.mkdir(parents=True)
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-06-30",
+                            parent_id=base_id)
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-06-30"), name="2026-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    upper_pid = db.add_photo(folder_id=stage_leaf, filename="IMG.RAF",
+                             extension=".raf", file_size=100,
+                             file_mtime=1.0, file_hash="UPPERBYTES")
+    lower_pid = db.add_photo(folder_id=stage_leaf, filename="img.raf",
+                             extension=".raf", file_size=200,
+                             file_mtime=2.0, file_hash="LOWERBYTES")
+
+    # Case-sensitive target: ``_case_insensitive_root`` returns None.
+    import move
+    monkeypatch.setattr(move, "_case_insensitive_root", lambda p: None)
+
+    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    rows = {r["filename"]: r["id"] for r in db.conn.execute(
+        "SELECT id, filename FROM photos WHERE folder_id = ? ORDER BY filename",
+        (date_id,),
+    ).fetchall()}
+    assert rows == {"IMG.RAF": upper_pid, "img.raf": lower_pid}
+    assert counts["already_present"] == 0
+    assert counts["new_photos"] == 2
+
+
+def test_merge_staged_tree_rolls_back_on_error(db, monkeypatch):
+    """Regression: ``merge_staged_tree_into_archive`` runs a long sequence of
+    UPDATE/DELETE statements before a single final commit. An exception
+    partway through the reconciliation loop must ``rollback()`` — otherwise
+    the pending mutations sit on the connection and a later unrelated commit
+    silently persists a half-merged catalog. Matches the pattern used by
+    ``delete_folder``, ``move_folders_to_workspace``, and
+    ``_merge_duplicate_keywords_pass``.
+
+    The concrete pending-mutation this test forces is a photo reparent from
+    a staged else-branch iteration (existing target folder). The else-branch
+    contains no ``add_workspace_folder`` call, so its ``UPDATE photos SET
+    folder_id`` is genuinely pending until the end-of-body commit — a raise
+    before that commit must roll it back."""
+    ws = db._active_workspace_id
+
+    # Existing tracked archive base + a pre-existing date folder so the
+    # first staged-folder iteration hits the else-branch (target exists),
+    # not the if-branch (which would commit mid-loop through
+    # ``add_workspace_folder`` and defeat the rollback demonstration).
+    base_id = db.add_folder("/arch/USA", name="USA")
+    existing_date_id = db.add_folder("/arch/USA/2025-12-25",
+                                     name="2025-12-25", parent_id=base_id)
+    db.add_photo(folder_id=existing_date_id, filename="old.raf",
+                 extension=".raf", file_size=100, file_mtime=1.0)
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    # Staged tree with two else-branch iterations. The stage_root maps to
+    # ``/arch/USA`` (base_id, exists), and the stage_leaf maps to
+    # ``/arch/USA/2025-12-25`` (existing_date_id, exists). We seed the
+    # stage_leaf photo so iteration 1 does its pending
+    # ``UPDATE photos SET folder_id`` first, then iteration 2 blows up on
+    # the ``_case_insensitive_root`` probe.
+    stage_root = db.add_folder("/stage/USA", name="USA",
+                               workspace_root=False)
+    staged_root_pid = db.add_photo(
+        folder_id=stage_root, filename="root_new.raf",
+        extension=".raf", file_size=150, file_mtime=1.5,
+    )
+    stage_leaf = db.add_folder("/stage/USA/2025-12-25",
+                               name="2025-12-25", parent_id=stage_root,
+                               workspace_root=False)
+    staged_leaf_pid = db.add_photo(
+        folder_id=stage_leaf, filename="leaf_new.raf",
+        extension=".raf", file_size=200, file_mtime=2.0,
+    )
+
+    # Poison ``_case_insensitive_root`` to succeed on the FIRST call (so
+    # iteration 1 completes its pending photo reparent) and raise on the
+    # SECOND (so iteration 2 crashes AFTER iteration 1's pending
+    # ``UPDATE photos SET folder_id`` is queued but before the end-of-body
+    # commit).
+    import move as move_mod
+    real_ci_root = move_mod._case_insensitive_root
+    call_count = {"n": 0}
+
+    def _flaky(path):
+        call_count["n"] += 1
+        if call_count["n"] >= 2:
+            raise RuntimeError("case-fold probe blew up mid-merge")
+        return real_ci_root(path)
+
+    monkeypatch.setattr(move_mod, "_case_insensitive_root", _flaky)
+
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="case-fold probe blew up"):
+        db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
+
+    # Iteration 1's pending ``UPDATE photos SET folder_id = base_id`` was
+    # rolled back: the staged photo is still on stage_root, NOT on base_id.
+    # Without the try/except + rollback, the pending UPDATE would sit on the
+    # connection and any later commit on the same connection would persist
+    # it — a silent half-merge.
+    assert db.conn.execute(
+        "SELECT folder_id FROM photos WHERE id = ?", (staged_root_pid,)
+    ).fetchone()["folder_id"] == stage_root
+    # Iteration 2's staged photo is untouched (the raise fired before its
+    # photo loop even ran).
+    assert db.conn.execute(
+        "SELECT folder_id FROM photos WHERE id = ?", (staged_leaf_pid,)
+    ).fetchone()["folder_id"] == stage_leaf
+    # Neither staged folder was folded into the archive — stage_root's row
+    # still lives under its staging path, not deleted or reparented.
+    assert db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", ("/stage/USA",)
+    ).fetchone()["id"] == stage_root
+    # The pre-existing archived photo is untouched.
+    old_photo = db.conn.execute(
+        "SELECT folder_id FROM photos WHERE filename = ?", ("old.raf",)
+    ).fetchone()
+    assert old_photo["folder_id"] == existing_date_id
+    # Confirm the poison actually fired twice (i.e. we did reach the raise
+    # via iteration 2, so iteration 1's pending mutation genuinely happened
+    # and the rollback is what returned staged_root_pid to stage_root).
+    assert call_count["n"] == 2
+
+
+def test_merge_staged_tree_new_folder_reparent_rolls_back_on_later_error(
+        db, monkeypatch):
+    """Regression: the new-folder branch (``target is None``) used to call
+    ``self.add_workspace_folder(...)`` — which commits the connection — so
+    a later exception's ``rollback()`` could not undo the preceding
+    ``UPDATE folders SET path = ?, parent_id = ?`` on the same staged row.
+    That left a half-merged catalog: the staged folder's path pointed at
+    the archive even though the merge as a whole was rolled back.
+
+    The fix is a non-committing helper (``_add_workspace_folder_no_commit``)
+    used inside the loop. This test exercises specifically the mid-loop
+    new-folder path followed by a later else-branch crash and verifies the
+    new-folder iteration's UPDATE is fully rolled back — a companion to
+    ``test_merge_staged_tree_rolls_back_on_error`` (which covers the
+    else-branch photo reparent)."""
+    ws = db._active_workspace_id
+
+    # Existing tracked archive base + one pre-existing descendant so the
+    # deepest staged iteration hits the else-branch (crash point).
+    base_id = db.add_folder("/arch/USA", name="USA")
+    existing_id = db.add_folder("/arch/USA/existing_leaf",
+                                name="existing_leaf", parent_id=base_id)
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    # Three staged folders ordered by length so iteration order is:
+    #   1. stage_root       → target=/arch/USA (EXISTS, else)
+    #   2. stage_new        → target=/arch/USA/new_leaf (NEW, if-branch — the
+    #                          iteration whose rollback we're verifying)
+    #   3. stage_existing   → target=/arch/USA/existing_leaf (EXISTS, else —
+    #                          the iteration we poison to force the raise)
+    stage_root = db.add_folder("/stage/USA", name="USA",
+                               workspace_root=False)
+    stage_new = db.add_folder("/stage/USA/new_leaf", name="new_leaf",
+                              parent_id=stage_root, workspace_root=False)
+    stage_new_pid = db.add_photo(folder_id=stage_new, filename="new.raf",
+                                 extension=".raf",
+                                 file_size=100, file_mtime=1.0)
+    stage_existing = db.add_folder("/stage/USA/existing_leaf",
+                                   name="existing_leaf",
+                                   parent_id=stage_root, workspace_root=False)
+    db.add_photo(folder_id=stage_existing, filename="dup.raf",
+                 extension=".raf", file_size=100, file_mtime=1.0)
+
+    # Poison ``_case_insensitive_root`` to succeed on the first call (else
+    # iteration 1, stage_root → base) and raise on the second call
+    # (else iteration 3, stage_existing → existing_leaf). Iteration 2
+    # (if-branch, stage_new → new target) queues an UPDATE folders SET
+    # path/parent_id + a workspace-folder link BETWEEN those two calls — the
+    # raise fires with iteration 2's mutations still uncommitted, so a
+    # correct rollback must revert stage_new's path.
+    import move as move_mod
+    real_ci_root = move_mod._case_insensitive_root
+    calls = {"n": 0}
+
+    def _flaky(path):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise RuntimeError("case-fold probe blew up mid-merge")
+        return real_ci_root(path)
+
+    monkeypatch.setattr(move_mod, "_case_insensitive_root", _flaky)
+
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="case-fold probe blew up"):
+        db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
+
+    # Poison actually fired on iteration 3 (2nd call) — confirms iteration 2
+    # completed BEFORE the raise, so its UPDATE is exactly what should have
+    # rolled back.
+    assert calls["n"] == 2
+
+    # stage_new's path UPDATE + parent_id UPDATE was rolled back: still
+    # ``/stage/USA/new_leaf``, parented to stage_root, not to base_id.
+    # Without the fix, the mid-loop commit inside ``add_workspace_folder``
+    # would have persisted the path change and this row would sit at
+    # ``/arch/USA/new_leaf`` with base_id as parent.
+    row = db.conn.execute(
+        "SELECT path, parent_id FROM folders WHERE id = ?", (stage_new,)
+    ).fetchone()
+    assert row["path"] == "/stage/USA/new_leaf"
+    assert row["parent_id"] == stage_root
+    # No archive row at the target path was left behind.
+    assert db.conn.execute(
+        "SELECT 1 FROM folders WHERE path = ?", ("/arch/USA/new_leaf",)
+    ).fetchone() is None
+    # The staged photo still lives under stage_new.
+    assert db.conn.execute(
+        "SELECT folder_id FROM photos WHERE id = ?", (stage_new_pid,)
+    ).fetchone()["folder_id"] == stage_new
+
+
+def test_merge_staged_tree_restores_missing_archive_base_status(db):
+    """Regression: an existing archive row marked ``status='missing'`` (e.g.
+    a health scan ran while the drive was unmounted) must be flipped back to
+    ``ok`` when the merge succeeds, otherwise the ws-scoped photo queries
+    (which filter ``status IN ('ok', 'partial')``) hide the newly-merged
+    photos even though the import reported success."""
+    ws = db._active_workspace_id
+    base_id = db.add_folder("/arch/USA", name="USA")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    # Simulate a prior health scan that saw the drive unmounted.
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (base_id,))
+    db.conn.commit()
+
+    stage_root = db.add_folder("/stage/USA", name="USA",
+                               workspace_root=False)
+    db.add_photo(folder_id=stage_root, filename="new.raf",
+                 extension=".raf", file_size=100, file_mtime=1.0)
+
+    db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
+
+    assert db.conn.execute(
+        "SELECT status FROM folders WHERE id = ?", (base_id,)
+    ).fetchone()["status"] == "ok"
+
+
+def test_merge_staged_tree_restores_missing_target_folder_status(
+        db, tmp_path):
+    """Regression: same as ``restores_missing_archive_base_status`` but for
+    an existing DESCENDANT target folder that the merge folds staged photos
+    into. Any lingering ``missing`` from an older health scan must flip to
+    ``ok`` after the merge so photos aren't hidden."""
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    # Mark the DESCENDANT folder as missing.
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (date_id,))
+    db.conn.commit()
+
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA",
+                               workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    db.add_photo(folder_id=stage_leaf, filename="fresh.raf",
+                 extension=".raf", file_size=100, file_mtime=1.0)
+
+    db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    assert db.conn.execute(
+        "SELECT status FROM folders WHERE id = ?", (date_id,)
+    ).fetchone()["status"] == "ok"
+
+
+def test_merge_staged_tree_partial_archive_base_status_preserved(db):
+    """The status restore only migrates ``missing`` → ``ok``. A folder
+    marked ``partial`` (some verified photos missing on disk) still has
+    unverified state and should remain ``partial`` after the merge — the
+    merge only proves the newly-added files exist, not the earlier ones."""
+    ws = db._active_workspace_id
+    base_id = db.add_folder("/arch/USA", name="USA")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    db.conn.execute(
+        "UPDATE folders SET status = 'partial' WHERE id = ?", (base_id,))
+    db.conn.commit()
+
+    stage_root = db.add_folder("/stage/USA", name="USA",
+                               workspace_root=False)
+    db.add_photo(folder_id=stage_root, filename="new.raf",
+                 extension=".raf", file_size=100, file_mtime=1.0)
+
+    db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
+
+    assert db.conn.execute(
+        "SELECT status FROM folders WHERE id = ?", (base_id,)
+    ).fetchone()["status"] == "partial"
+
+
+def test_merge_staged_tree_reports_dropped_photo_ids_for_collisions(
+        db, tmp_path):
+    """Regression: cached thumbnails/previews/working copies are keyed off
+    ``photos.id``. When the merge drops a staged photo as ``already_present``
+    (identical file already archived), the freed photo id would leave orphan
+    cache files on disk; SQLite reuses freed rowids so a later import that
+    lands on the same id would inherit stale imagery. The merge must report
+    the dropped ids up to the caller so it can clean the on-disk cache."""
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    # The archived file must exist on disk for the collision to be treated
+    # as ``already_present`` (a phantom target row is instead REPLACED).
+    (date_dir / "dup.raf").write_bytes(b"archived")
+
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    # Matching ``file_hash`` on both sides is required for the collision
+    # guard to treat this as a real collision — the row's byte-identity
+    # claim (hash) has to match the staged photo's for the drop to be
+    # safe in the post-copy path. See merge_staged_tree_into_archive's
+    # hash-only invariant.
+    db.add_photo(folder_id=date_id, filename="dup.raf", extension=".raf",
+                 file_size=8, file_mtime=1.0, file_hash="DUPHASH")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA",
+                               workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    dup_pid = db.add_photo(folder_id=stage_leaf, filename="dup.raf",
+                           extension=".raf", file_size=8, file_mtime=2.0,
+                           file_hash="DUPHASH")
+
+    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    assert counts["already_present"] == 1
+    assert dup_pid in counts["dropped_photo_ids"]
+
+
+def test_merge_staged_tree_reports_dropped_photo_ids_for_phantom_target(
+        db, tmp_path):
+    """Regression: when the target folder has a filename-collision row whose
+    on-disk file is MISSING (a phantom row from a prior stale state), the
+    merge deletes the phantom and reparents the staged photo. The phantom's
+    freed photo id must also be reported as dropped so its cache files get
+    cleaned."""
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    # NOTE: don't create dup.raf — the phantom target row points at a
+    # non-existent archived file.
+
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    phantom_pid = db.add_photo(folder_id=date_id, filename="dup.raf",
+                               extension=".raf",
+                               file_size=8, file_mtime=1.0)
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA",
+                               workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    db.add_photo(folder_id=stage_leaf, filename="dup.raf",
+                 extension=".raf", file_size=8, file_mtime=2.0)
+
+    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    # No ``already_present`` this time (the collision was a phantom, and the
+    # staged bytes represent the surviving row).
+    assert counts["already_present"] == 0
+    # The phantom id was freed and must be reported for cache cleanup.
+    assert phantom_pid in counts["dropped_photo_ids"]
+
+
 def test_folder_under_rule_excludes_siblings_and_escapes_wildcards(tmp_path, monkeypatch):
     """'folder under /photos/2023' must match that folder and its
     descendants only — not the sibling /photos/2023-trip — and a _ in the

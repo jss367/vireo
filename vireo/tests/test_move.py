@@ -570,6 +570,502 @@ def test_move_folder_refuses_destination_inside_tracked_ancestor(move_env):
     assert not destination.exists()
 
 
+def test_move_folder_refuses_tracked_merge_by_default(move_env):
+    """Regression guard: without allow_tracked_merge, merging into a tracked
+    destination is still refused (default behaviour byte-for-byte unchanged)."""
+    from move import move_folder
+
+    env = move_env
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    for fn in ("bird1.jpg", "bird1.xmp", "bird2.jpg"):
+        (landing / fn).write_bytes((env["src"] / fn).read_bytes())
+    # Destination already exists as its own folder row in the DB.
+    env["db"].add_folder(str(landing), name="src")
+
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]),
+        merge=True,
+    )
+    assert result["moved"] == 0
+    assert any("already manage" in e for e in result["errors"])
+    # Source intact — nothing merged.
+    assert (env["src"] / "bird1.jpg").exists()
+
+
+def test_move_folder_merges_into_tracked_when_allowed(move_env):
+    """With allow_tracked_merge=True the staged tree's files land in the
+    existing archive on disk, the result reports merge counts, and the catalog
+    has no leftover staged folder rows (they fold into the archive)."""
+    from move import move_folder
+
+    env = move_env
+    db = env["db"]
+
+    # The archive destination is the path the staged 'src' folder lands at when
+    # placed inside 'dst' (move_folder preserves the source folder name).
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    # Prior shoot already in the archive on disk + in the catalog as a tracked
+    # workspace-root folder.
+    (landing / "prior.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 50)
+    fid_archive = db.add_folder(str(landing), name="src")
+    db.add_photo(folder_id=fid_archive, filename="prior.jpg", extension=".jpg",
+                 file_size=52, file_mtime=3.0)
+
+    staged_prefix = str(env["src"])
+
+    result = move_folder(
+        db=db, folder_id=env["fid_src"], destination=str(env["dst"]),
+        merge=True, allow_tracked_merge=True,
+    )
+
+    assert result["errors"] == []
+    assert result["moved"] >= 1
+    # Staged files merged onto disk into the existing archive.
+    assert (landing / "bird1.jpg").exists()
+    assert (landing / "bird2.jpg").exists()
+    assert (landing / "prior.jpg").exists()
+    # Staging cleaned up.
+    assert not env["src"].exists()
+
+    # Merge counts surfaced. The two staged photos fold into the existing
+    # archive folder; the prior photo is untouched.
+    assert result["merged_into_existing"] == str(landing)
+    merge = result["merge"]
+    assert merge["new_photos"] == 2
+    assert merge["merged_folders"] >= 1
+    assert merge["already_present"] == 0
+
+    # No leftover staged folder rows — the staged tree folded into the archive.
+    assert db.conn.execute(
+        "SELECT 1 FROM folders WHERE path LIKE ?", (staged_prefix + "%",)
+    ).fetchone() is None
+    # The archive folder now holds all three photos under one row.
+    names = {r["filename"] for r in db.conn.execute(
+        "SELECT filename FROM photos WHERE folder_id = ?", (fid_archive,))}
+    assert names == {"prior.jpg", "bird1.jpg", "bird2.jpg"}
+
+
+def test_move_folder_merge_alias_destination_uses_stored_tracked_path(
+        move_env, monkeypatch):
+    """Regression: when the archive destination is a symlink/case-only alias of
+    an already-tracked folder, the exact-overlap merge must reconcile onto the
+    STORED tracked path, not the aliased ``catalog_path``. Otherwise
+    ``merge_staged_tree_into_archive``'s exact ``WHERE path = ?`` lookups miss
+    the existing row and create a SECOND folder row for the same on-disk
+    archive.
+
+    Simulated on Linux the same way as the case-alias refusal tests:
+      1. Symlink so two distinct path strings share an inode.
+      2. realpath/normcase patched to no-ops so the string-based tracked check
+         misses and the samefile fallback in ``_path_equal_or_descends`` folds
+         the alias to the tracked row.
+    """
+    from move import move_folder
+
+    env = move_env
+    db = env["db"]
+
+    # The real archive folder, tracked at its real path with a prior shoot.
+    real_dst = env["tmp_path"] / "realdst"
+    landing = real_dst / "src"
+    landing.mkdir(parents=True)
+    (landing / "prior.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 50)
+    fid_archive = db.add_folder(str(landing), name="src")
+    db.add_photo(folder_id=fid_archive, filename="prior.jpg", extension=".jpg",
+                 file_size=52, file_mtime=3.0)
+
+    alias_dst = env["tmp_path"] / "alias_dst"
+    try:
+        os.symlink(str(real_dst), str(alias_dst))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    monkeypatch.setattr(os.path, "realpath", lambda p: p)
+    monkeypatch.setattr(os.path, "normcase", lambda p: p)
+
+    # destination=alias_dst → resolved dest = alias_dst/src, an alias of the
+    # tracked realdst/src. The merge is accepted (exact overlap via samefile)
+    # and must fold into the existing row, not create a second one.
+    result = move_folder(
+        db=db, folder_id=env["fid_src"], destination=str(alias_dst),
+        merge=True, allow_tracked_merge=True,
+    )
+
+    assert result["errors"] == []
+    # The reconciliation base is the STORED tracked path, so the existing
+    # archive row absorbs the staged photos — exactly ONE folder row for the
+    # on-disk archive, no alias-path duplicate.
+    archive_rows = db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", (str(landing),)
+    ).fetchall()
+    assert len(archive_rows) == 1
+    assert archive_rows[0]["id"] == fid_archive
+    # No folder row was created under the alias path.
+    assert db.conn.execute(
+        "SELECT 1 FROM folders WHERE path = ?", (str(alias_dst / "src"),)
+    ).fetchone() is None
+    # All three photos live under the single archive row.
+    names = {r["filename"] for r in db.conn.execute(
+        "SELECT filename FROM photos WHERE folder_id = ?", (fid_archive,))}
+    assert names == {"prior.jpg", "bird1.jpg", "bird2.jpg"}
+    # Staging folded away.
+    assert not env["src"].exists()
+
+
+def test_move_folder_ancestor_merge_reconciles_onto_stored_ancestor(
+        move_env, monkeypatch):
+    """Regression: when the destination sits INSIDE a tracked folder that was
+    matched via a symlink or case-only alias, the ancestor-merge branch must
+    rebase the reconciliation onto the STORED ancestor path, not the
+    aliased ``catalog_path``. Otherwise ``merge_staged_tree_into_archive``'s
+    exact ``WHERE path = ?`` parent lookups miss the stored ancestor row and
+    land the staged root under an alias-prefixed path with ``parent_id=NULL``,
+    spawning a parallel row set outside the managed archive tree.
+
+    Simulated on Linux the same way as
+    ``test_move_folder_merge_alias_destination_uses_stored_tracked_path``:
+    a symlink so two path strings share an inode, plus ``realpath``/
+    ``normcase`` patched to no-ops so ``_tracked_destination_ancestor`` misses
+    the string-prefix check and falls into the samefile walk-up.
+    """
+    from move import move_folder
+
+    env = move_env
+    db = env["db"]
+
+    # Real tracked ancestor archive with no rows below it yet.
+    real_archive = env["tmp_path"] / "realarch"
+    real_archive.mkdir()
+    fid_ancestor = db.add_folder(str(real_archive), name="realarch")
+
+    # Alias destination pointing at the same on-disk directory.
+    alias_archive = env["tmp_path"] / "aliasarch"
+    try:
+        os.symlink(str(real_archive), str(alias_archive))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    monkeypatch.setattr(os.path, "realpath", lambda p: p)
+    monkeypatch.setattr(os.path, "normcase", lambda p: p)
+
+    # destination=alias_archive -> resolved dest = alias_archive/src. The
+    # ancestor probe only matches ``real_archive`` via the samefile walk-up,
+    # so ``catalog_path`` is the alias-prefixed ``alias_archive/src``.
+    result = move_folder(
+        db=db, folder_id=env["fid_src"], destination=str(alias_archive),
+        reject_tracked_ancestor=True, allow_tracked_merge=True,
+    )
+
+    assert result["errors"] == []
+    assert result["merged_into_existing"] == str(real_archive)
+
+    # The staged folder was reconciled onto STORED ancestor + "src", NOT the
+    # alias-prefixed ``aliasarch/src``.
+    stored_landing = str(real_archive / "src")
+    alias_landing = str(alias_archive / "src")
+    stored_row = db.conn.execute(
+        "SELECT id, parent_id FROM folders WHERE path = ?", (stored_landing,)
+    ).fetchone()
+    assert stored_row is not None
+    # Parent resolves to the stored ancestor row — not NULL (which would
+    # mean an alias-prefixed row floating outside the managed tree).
+    assert stored_row["parent_id"] == fid_ancestor
+    # No alias-prefixed row was created.
+    assert db.conn.execute(
+        "SELECT 1 FROM folders WHERE path = ?", (alias_landing,)
+    ).fetchone() is None
+    # Files land on disk under the real archive (same inode either way).
+    assert (real_archive / "src" / "bird1.jpg").exists()
+    assert (real_archive / "src" / "bird2.jpg").exists()
+
+
+def test_move_folder_merge_relocates_developed_dir_onto_reconciled_base(
+        move_env, monkeypatch):
+    """Regression: on the exact-overlap merge path with a symlink/case-only
+    alias destination, ``developed_folder_key`` hashes the STORED tracked
+    path (that's what the catalog stores after reconciliation), so the
+    developed-dir relocation must move outputs onto the same reconciled
+    base. Relocating onto the aliased ``catalog_path`` would leave renders
+    under a hash exports never read from, silently falling back to RAW
+    after import.
+    """
+    from export import developed_folder_key
+    from move import move_folder
+
+    env = move_env
+    db = env["db"]
+
+    # Real archive folder, tracked at its real path.
+    real_dst = env["tmp_path"] / "realdst2"
+    landing = real_dst / "src"
+    landing.mkdir(parents=True)
+    fid_archive = db.add_folder(str(landing), name="src")
+
+    alias_dst = env["tmp_path"] / "alias_dst2"
+    try:
+        os.symlink(str(real_dst), str(alias_dst))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    # Pre-existing developed subdir keyed off the STAGED source path (that's
+    # where renders lived before this move ran). Also pre-create the target
+    # keyed off the ALIAS so a bug that relocates onto the alias would look
+    # correct on disk but rot the export path — force the assertion to
+    # distinguish "moved to alias key" from "moved to stored key".
+    developed = env["tmp_path"] / "developed"
+    developed.mkdir()
+    old_key = developed_folder_key(str(env["src"]))
+    (developed / old_key).mkdir()
+    (developed / old_key / "bird1.jpg").write_bytes(b"developed-bytes")
+
+    monkeypatch.setattr(os.path, "realpath", lambda p: p)
+    monkeypatch.setattr(os.path, "normcase", lambda p: p)
+
+    result = move_folder(
+        db=db, folder_id=env["fid_src"], destination=str(alias_dst),
+        merge=True, allow_tracked_merge=True,
+        developed_dir=str(developed),
+    )
+    assert result["errors"] == []
+
+    # The developed subdir moved to the STORED-path key (what export reads
+    # from the catalog after reconciliation), not the alias-path key.
+    stored_key = developed_folder_key(str(landing))
+    alias_key = developed_folder_key(str(alias_dst / "src"))
+    assert stored_key != alias_key
+    assert (developed / stored_key / "bird1.jpg").read_bytes() == b"developed-bytes"
+    assert not (developed / alias_key).exists()
+    # Old (staged-path) key is gone.
+    assert not (developed / old_key).exists()
+    # Catalog still has one archive row — the stored one.
+    assert db.conn.execute(
+        "SELECT COUNT(*) c FROM folders WHERE path = ?", (str(landing),)
+    ).fetchone()["c"] == 1
+    assert db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", (str(landing),)
+    ).fetchone()["id"] == fid_archive
+
+
+def test_move_folder_refuses_descendant_tracked_overlap_even_when_merging(move_env):
+    """Regression: ``allow_tracked_merge`` must only accept the "tracked row
+    IS the destination" case, not a tracked row that sits STRICTLY BELOW the
+    resolved destination. The descendant case is "wrap a fresh parent around
+    an existing tracked subtree" (e.g. ``/Photos/USA/2024`` scanned as its
+    own workspace root, then a fresh staged tree lands at ``/Photos/USA``);
+    the reconciliation would rebase the staged tree onto the wrapper path
+    while leaving the pre-existing tracked descendant's parentage untouched,
+    creating two overlapping catalog subtrees managing the same on-disk area.
+    Refuse before any copy — same guard as the default-off case."""
+    from move import move_folder
+
+    env = move_env
+    db = env["db"]
+
+    # Landing resolves to <dst>/src. Register a tracked row STRICTLY BELOW
+    # that landing so ``_tracked_destination_overlap`` returns a descendant
+    # (not an exact match). The row doesn't need to exist on disk — the
+    # overlap probe is folder-row based.
+    landing = env["dst"] / "src"
+    inner = landing / "existing-shoot"
+    inner_fid = db.add_folder(str(inner), name="existing-shoot")
+
+    result = move_folder(
+        db=db, folder_id=env["fid_src"], destination=str(env["dst"]),
+        merge=True, allow_tracked_merge=True,
+    )
+    assert result["moved"] == 0
+    assert any("already manage" in e for e in result["errors"])
+    # Source intact — the guard fires before any copy or delete.
+    assert (env["src"] / "bird1.jpg").exists()
+    assert (env["src"] / "bird2.jpg").exists()
+    # Landing was never materialized and no wrapper folder row was created
+    # for it. The pre-existing tracked descendant row is untouched.
+    assert not landing.exists()
+    assert db.conn.execute(
+        "SELECT 1 FROM folders WHERE path = ?", (str(landing),)
+    ).fetchone() is None
+    assert db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", (str(inner),)
+    ).fetchone()["id"] == inner_fid
+
+
+def test_tracked_destination_overlap_prefers_exact_match_over_descendant(move_env):
+    """Regression: when both an exact-match tracked row (destination itself)
+    and a strict-descendant tracked row exist, ``_tracked_destination_overlap``
+    must return the EXACT match. Without the preference, SQLite returns rows in
+    arbitrary order (insertion / rowid by default); a descendant row inserted
+    BEFORE its later-scanned parent would come back first, and the caller's
+    ``tracked_is_destination`` check would then reject the exact-match merge as
+    the unsupported "wrap around a tracked subfolder" case."""
+    from move import _tracked_destination_overlap
+
+    env = move_env
+    db = env["db"]
+    landing = env["dst"] / "src"
+
+    # Insert the DESCENDANT row first so a plain unordered scan returns it
+    # before the exact-match row that arrives later. Neither row needs to
+    # exist on disk — the overlap probe is folder-row based.
+    desc_fid = db.add_folder(str(landing / "existing-shoot"),
+                             name="existing-shoot")
+    exact_fid = db.add_folder(str(landing), name="src")
+    # Confirm the intended insertion order (descendant has the lower rowid,
+    # so a naive SELECT would hit it first).
+    assert desc_fid < exact_fid
+
+    row = _tracked_destination_overlap(db, env["fid_src"], str(landing))
+    assert row is not None
+    assert row["id"] == exact_fid
+    assert row["path"] == str(landing)
+
+
+def test_move_folder_accepts_exact_tracked_merge_despite_descendant_row(move_env):
+    """End-to-end regression for the ordering fix: ``move_folder`` with
+    ``allow_tracked_merge=True`` must accept an EXACT tracked destination
+    (destination IS the tracked row) even when a strict-descendant tracked row
+    also exists and was inserted first. Before the exact-match preference in
+    ``_tracked_destination_overlap`` the descendant row could be returned first
+    and get treated as the unsupported "wrap" case, refusing the merge."""
+    from move import move_folder
+
+    env = move_env
+    db = env["db"]
+    landing = env["dst"] / "src"
+    landing.mkdir()
+
+    # Descendant tracked row first (lower rowid than the exact-match row),
+    # then the exact-match row for the landing path itself.
+    db.add_folder(str(landing / "existing-shoot"), name="existing-shoot")
+    fid_archive = db.add_folder(str(landing), name="src")
+
+    result = move_folder(
+        db=db, folder_id=env["fid_src"], destination=str(env["dst"]),
+        merge=True, allow_tracked_merge=True,
+    )
+    # The exact-match tracked row means this is the accept-as-merge case, NOT
+    # the descendant-only "wrap" case. Merge succeeds, no errors.
+    assert result["errors"] == []
+    merge = result.get("merge")
+    assert merge is not None
+    # Two staged photos, neither collides with anything in the empty archive:
+    # both become newly-archived rows.
+    assert merge["new_photos"] == 2
+    # The two staged photos are now catalog-parented on the archive folder.
+    assert db.conn.execute(
+        "SELECT COUNT(*) c FROM photos WHERE folder_id = ?",
+        (fid_archive,),
+    ).fetchone()["c"] == 2
+
+
+def test_move_folder_merge_moved_excludes_already_present(move_env):
+    """On the merge path, identical-filename collisions are dropped as
+    ``already_present`` and must NOT be counted in ``result['moved']``.
+    ``moved`` reflects photos actually added to the archive
+    (== merge['new_photos']), not every staged source photo."""
+    from move import move_folder
+
+    env = move_env
+    db = env["db"]
+
+    # The staged 'src' folder lands at <dst>/src. Pre-seed that archive folder
+    # with a byte-identical copy of one staged photo (bird1.jpg) so it collides
+    # by filename AND content -> dropped as already_present (rsync
+    # --ignore-existing keeps the archive copy; the catalog drops the staged
+    # row). bird1.jpg in the fixture is b"\xff\xd8" + b"\x00"*100.
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    identical_bytes = (env["src"] / "bird1.jpg").read_bytes()
+    (landing / "bird1.jpg").write_bytes(identical_bytes)
+    fid_archive = db.add_folder(str(landing), name="src")
+    # Matching ``file_hash`` on both sides is required for the merge to
+    # treat the collision as real (see merge_staged_tree_into_archive's
+    # hash-only invariant — size alone can't distinguish a real collision
+    # from a rsync-copied phantom in the post-copy path). Pre-seed both
+    # rows with the same hash, and stamp the staged fixture row with it
+    # too so the drop path fires.
+    db.add_photo(folder_id=fid_archive, filename="bird1.jpg", extension=".jpg",
+                 file_size=len(identical_bytes), file_mtime=3.0,
+                 file_hash="BIRD1HASH")
+    db.conn.execute(
+        "UPDATE photos SET file_hash = ? WHERE folder_id = ? AND filename = ?",
+        ("BIRD1HASH", env["fid_src"], "bird1.jpg"),
+    )
+    db.conn.commit()
+
+    result = move_folder(
+        db=db, folder_id=env["fid_src"], destination=str(env["dst"]),
+        merge=True, allow_tracked_merge=True,
+    )
+
+    assert result["errors"] == []
+    merge = result["merge"]
+    # bird1.jpg collides (identical) -> already_present; bird2.jpg is new.
+    assert merge["already_present"] >= 1
+    assert merge["new_photos"] == 1
+    # moved must exclude the already_present photo.
+    assert result["moved"] == merge["new_photos"]
+    # The archive still has exactly one bird1.jpg row (no duplicate).
+    assert db.conn.execute(
+        "SELECT COUNT(*) c FROM photos WHERE folder_id = ? AND filename = ?",
+        (fid_archive, "bird1.jpg"),
+    ).fetchone()["c"] == 1
+
+
+def test_move_folder_merge_reports_dropped_ids_for_cache_cleanup(move_env):
+    """Regression: cached thumbnails/previews/working copies are keyed by
+    ``photos.id``. When the merge drops a staged photo as
+    ``already_present``, the freed rowid would leave orphan cache files on
+    disk (SQLite reuses rowids, so a future import that lands on the same
+    id inherits stale imagery). ``move_folder`` must surface the freed
+    staged ids at ``result['dropped_photo_ids']`` so the pipeline archive
+    stage can hand them to ``cleanup_cached_files_for_deleted_photos``.
+
+    Kept OFF ``result['merge']`` — that dict is serialized into the
+    archive-stage summary/API payload, and internal photo ids are not
+    part of the user-facing shape."""
+    from move import move_folder
+
+    env = move_env
+    db = env["db"]
+
+    # Same setup as ``moved_excludes_already_present`` — bird1.jpg is
+    # byte-identical between staged src and pre-seeded archive landing, so
+    # the merge drops the staged bird1.jpg row.
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    identical_bytes = (env["src"] / "bird1.jpg").read_bytes()
+    (landing / "bird1.jpg").write_bytes(identical_bytes)
+    fid_archive = db.add_folder(str(landing), name="src")
+    # Matching ``file_hash`` on both rows exercises the real-collision
+    # drop path (see merge_staged_tree_into_archive's hash-only invariant).
+    db.add_photo(folder_id=fid_archive, filename="bird1.jpg",
+                 extension=".jpg",
+                 file_size=len(identical_bytes), file_mtime=3.0,
+                 file_hash="BIRD1HASH")
+    db.conn.execute(
+        "UPDATE photos SET file_hash = ? WHERE folder_id = ? AND filename = ?",
+        ("BIRD1HASH", env["fid_src"], "bird1.jpg"),
+    )
+    db.conn.commit()
+
+    staged_bird1_pid = db.conn.execute(
+        "SELECT id FROM photos WHERE folder_id = ? AND filename = ?",
+        (env["fid_src"], "bird1.jpg"),
+    ).fetchone()["id"]
+
+    result = move_folder(
+        db=db, folder_id=env["fid_src"], destination=str(env["dst"]),
+        merge=True, allow_tracked_merge=True,
+    )
+
+    assert result["errors"] == []
+    assert staged_bird1_pid in result.get("dropped_photo_ids", [])
+    # The user-facing merge dict stays clean of internal ids.
+    assert "dropped_photo_ids" not in result["merge"]
+
+
 def test_move_folder_refuses_missing_tracked_destination_before_copy(move_env):
     """A stale tracked destination row must block the move even when the
     resolved destination does not currently exist on disk."""
