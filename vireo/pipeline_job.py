@@ -1174,21 +1174,37 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     )
                                 }
 
+                            from move import _case_insensitive_root
+
                             def _indexed_archive_paths(root: str) -> set[str]:
                                 # Fold symlink/case aliases before deciding a
                                 # cataloged row belongs under this destination:
                                 # the tracked-destination preflight above
-                                # accepts alias-equal roots, so a lexical-only
-                                # is_relative_to would drop indexed rows whose
-                                # stored path uses the canonical spelling while
-                                # the user picked an alias (or vice versa), and
-                                # archive_conflict_report would then label
-                                # zero-byte/truncated indexed archive files as
-                                # unindexed failed-copy debris.
+                                # accepts alias-equal roots via
+                                # _path_equal_or_descends, so anything less here
+                                # would drop indexed rows whose stored path uses
+                                # a different alias than the user-picked
+                                # destination (symlink target vs. link, or a
+                                # case-only twin on case-insensitive POSIX like
+                                # default APFS — os.path.normcase is a no-op on
+                                # POSIX and os.path.realpath preserves the
+                                # supplied spelling, so a lexical
+                                # commonpath/is_relative_to check misses the
+                                # case-only alias). Dropping the row would then
+                                # feed an empty index to
+                                # archive_conflict_report and get a
+                                # zero-byte/truncated indexed archive file
+                                # labelled as unindexed failed-copy debris —
+                                # telling the user to remove a cataloged file.
+                                # Probe the case-insensitive fold root once and
+                                # reuse it per row so
+                                # _path_equal_or_descends' listdir/samefile
+                                # probe doesn't re-run per catalog folder.
                                 root_path = Path(os.path.normpath(root))
                                 root_real = os.path.normcase(
                                     os.path.realpath(root),
                                 )
+                                dest_ci_root = _case_insensitive_root(root)
                                 indexed: set[str] = set()
                                 rows = thread_db.conn.execute(
                                     """SELECT f.path, p.filename
@@ -1196,29 +1212,64 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                          JOIN folders f ON f.id = p.folder_id"""
                                 ).fetchall()
                                 for row in rows:
+                                    folder = row["path"]
+                                    if not _path_equal_or_descends(
+                                        folder, root,
+                                        case_insensitive_root=dest_ci_root,
+                                    ):
+                                        continue
+                                    # Extract the below-root portion of the
+                                    # folder path so we can rebase onto the
+                                    # user-picked root spelling
+                                    # (archive_conflict_report joins
+                                    # `path`/rel_folder/filename to build the
+                                    # dest_key we're matching against). A
+                                    # realpath-based string prefix covers the
+                                    # same-case and symlink-alias cases; the
+                                    # case-fold branch mirrors
+                                    # _path_equal_or_descends' probed-CI-root
+                                    # logic so a POSIX case-only alias still
+                                    # yields the right tail.
                                     folder_real = os.path.normcase(
-                                        os.path.realpath(row["path"]),
+                                        os.path.realpath(folder),
                                     )
-                                    try:
-                                        common = os.path.commonpath(
-                                            [root_real, folder_real],
-                                        )
-                                    except ValueError:
-                                        # Different drives on Windows: no
-                                        # possible overlap.
+                                    rel_suffix: str | None = None
+                                    if folder_real == root_real:
+                                        rel_suffix = ""
+                                    elif folder_real.startswith(
+                                        root_real + os.sep,
+                                    ):
+                                        rel_suffix = folder_real[
+                                            len(root_real) + 1:
+                                        ]
+                                    elif dest_ci_root:
+                                        root_low = root_real.lower()
+                                        folder_low = folder_real.lower()
+                                        if folder_low == root_low:
+                                            rel_suffix = ""
+                                        elif folder_low.startswith(
+                                            root_low + os.sep,
+                                        ):
+                                            rel_suffix = folder_real[
+                                                len(root_real) + 1:
+                                            ]
+                                    if rel_suffix is None:
+                                        # _path_equal_or_descends accepted the
+                                        # row via a samefile walk-up (missing
+                                        # intermediate leaf whose parent aliases
+                                        # to root), so the realpath spelling
+                                        # doesn't line up as a string prefix and
+                                        # we can't safely rebase onto the
+                                        # user-picked spelling. Catalog folders
+                                        # exist on disk by construction — this
+                                        # branch is rare — so drop the row
+                                        # rather than fabricate a spelling.
                                         continue
-                                    if common != root_real:
-                                        continue
-                                    rel = os.path.relpath(
-                                        folder_real, root_real,
-                                    )
-                                    # Rebase the row back onto the user-picked
-                                    # root spelling so the entries here share
-                                    # the same prefix archive_conflict_report
-                                    # uses to build dest_key downstream.
                                     indexed_folder = (
-                                        root_path if rel == "."
-                                        else root_path / rel
+                                        root_path if rel_suffix == ""
+                                        else root_path.joinpath(
+                                            *rel_suffix.split(os.sep),
+                                        )
                                     )
                                     indexed.add(
                                         str(indexed_folder / row["filename"]),
