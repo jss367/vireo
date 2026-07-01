@@ -1877,13 +1877,14 @@ def test_pipeline_local_processing_rejects_archive_path_conflicts(
 
     src = tmp_path / "card-conflict"
     src.mkdir()
-    Image.new("RGB", (16, 16), "green").save(src / "fresh.jpg")
+    source_path = src / "fresh.jpg"
+    Image.new("RGB", (16, 16), "green").save(source_path)
 
     final_parent = tmp_path / "archive-conflict-parent"
     final_parent.mkdir()
     final_dest = final_parent / "Archive"
     final_dest.mkdir()
-    (final_dest / "fresh.jpg").write_bytes(b"different existing bytes")
+    (final_dest / "fresh.jpg").write_bytes(b"x" * source_path.stat().st_size)
 
     import local_processing
 
@@ -1906,6 +1907,166 @@ def test_pipeline_local_processing_rejects_archive_path_conflicts(
     assert job["status"] == "failed", job
     error_text = (job.get("error") or "") + str(job.get("result", ""))
     assert "different files at the same import paths" in error_text
+
+
+def test_pipeline_local_processing_reports_incomplete_archive_files(
+    setup, tmp_path, monkeypatch
+):
+    app, _db_path = setup
+
+    src = tmp_path / "card-incomplete"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "green").save(src / "fresh.jpg")
+
+    final_parent = tmp_path / "archive-incomplete-parent"
+    final_parent.mkdir()
+    final_dest = final_parent / "Archive"
+    final_dest.mkdir()
+    (final_dest / "fresh.jpg").write_bytes(b"")
+
+    import local_processing
+
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert job["status"] == "failed", job
+    error_text = (job.get("error") or "") + str(job.get("result", ""))
+    assert "1 empty unindexed file" in error_text
+    assert "interrupted previous archive copy" in error_text
+    assert "will not suffix around likely corrupt archive files" in error_text
+
+
+def test_pipeline_local_processing_recognises_indexed_archive_via_alias(
+    setup, tmp_path, monkeypatch
+):
+    """When the destination is a symlink alias of a tracked archive folder,
+    the indexed-path lookup must fold the alias so cataloged rows still
+    count as indexed. Otherwise a zero-byte tracked archive file would be
+    mis-reported as unindexed 'interrupted previous archive copy' debris,
+    telling the user to delete a file Vireo already manages."""
+    app, db_path = setup
+
+    src = tmp_path / "card-alias"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "green").save(src / "fresh.jpg")
+
+    real_parent = tmp_path / "archive-alias-real-parent"
+    real_parent.mkdir()
+    real_dest = real_parent / "Archive"
+    real_dest.mkdir()
+    # Zero bytes so it hits the "empty" branch of archive_conflict_report
+    # when it (wrongly) looks unindexed.
+    (real_dest / "fresh.jpg").write_bytes(b"")
+
+    alias_parent = tmp_path / "archive-alias-link-parent"
+    alias_parent.mkdir()
+    alias_dest = alias_parent / "Archive"
+    try:
+        os.symlink(real_dest, alias_dest, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not supported on this platform")
+
+    from db import Database
+    db = Database(db_path)
+    folder_id = db.add_folder(str(real_dest))
+    ws_id = db._active_workspace_id
+    db.add_workspace_folder(ws_id, folder_id)
+    db.add_photo(
+        folder_id=folder_id, filename="fresh.jpg", extension=".jpg",
+        file_size=0, file_mtime=1.0, file_hash=None,
+    )
+    db.close()
+
+    import local_processing
+
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(alias_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert job["status"] == "failed", job
+    error_text = (job.get("error") or "") + str(job.get("result", ""))
+    # The indexed archive row should be recognised through the alias, so
+    # the preflight must not label it as unindexed failed-copy debris.
+    assert "interrupted previous archive copy" not in error_text
+    assert "different files at the same import paths" in error_text
+
+
+def test_pipeline_local_processing_limits_incomplete_examples_to_incomplete(
+    setup, tmp_path, monkeypatch
+):
+    """Mixed incomplete + real-conflict runs must only list the incomplete
+    paths as examples in the 'interrupted previous archive copy' message —
+    the message's wording only describes empty/partial files, so leaking
+    full-content conflict paths into the example list points the user at
+    files that are neither empty nor truncated."""
+    app, _db_path = setup
+
+    src = tmp_path / "card-mixed"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "green").save(src / "incomplete.jpg")
+    Image.new("RGB", (16, 16), "blue").save(src / "conflict.jpg")
+
+    final_parent = tmp_path / "archive-mixed-parent"
+    final_parent.mkdir()
+    final_dest = final_parent / "Archive"
+    final_dest.mkdir()
+    # Empty (incomplete) archive file for the first source.
+    (final_dest / "incomplete.jpg").write_bytes(b"")
+    # Different-content archive file at least as big as the source so
+    # the conflict is a real content mismatch, not partial debris.
+    src_size = (src / "conflict.jpg").stat().st_size
+    (final_dest / "conflict.jpg").write_bytes(b"x" * max(src_size, 1))
+
+    import local_processing
+
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(final_dest),
+            "local_processing": True,
+            "folder_template": "",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert job["status"] == "failed", job
+    error_text = (job.get("error") or "") + str(job.get("result", ""))
+    assert "interrupted previous archive copy" in error_text
+    assert "incomplete.jpg" in error_text
+    # The conflict-only file must not appear in the incomplete branch's
+    # example list — the message wording is about empty/partial files.
+    assert "conflict.jpg" not in error_text
 
 
 def test_pipeline_local_processing_conflict_preflight_skips_known_duplicates(

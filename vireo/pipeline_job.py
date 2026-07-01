@@ -1013,7 +1013,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
                     if params.local_processing:
                         from local_processing import (
-                            conflicting_archive_paths,
+                            archive_conflict_report,
                             existing_archive_bytes,
                             format_bytes,
                             non_duplicate_files,
@@ -1173,13 +1173,167 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                         "WHERE file_hash IS NOT NULL"
                                     )
                                 }
-                            archive_conflicts = conflicting_archive_paths(
+
+                            from move import _case_insensitive_root
+
+                            def _indexed_archive_paths(root: str) -> set[str]:
+                                # Fold symlink/case aliases before deciding a
+                                # cataloged row belongs under this destination:
+                                # the tracked-destination preflight above
+                                # accepts alias-equal roots via
+                                # _path_equal_or_descends, so anything less here
+                                # would drop indexed rows whose stored path uses
+                                # a different alias than the user-picked
+                                # destination (symlink target vs. link, or a
+                                # case-only twin on case-insensitive POSIX like
+                                # default APFS — os.path.normcase is a no-op on
+                                # POSIX and os.path.realpath preserves the
+                                # supplied spelling, so a lexical
+                                # commonpath/is_relative_to check misses the
+                                # case-only alias). Dropping the row would then
+                                # feed an empty index to
+                                # archive_conflict_report and get a
+                                # zero-byte/truncated indexed archive file
+                                # labelled as unindexed failed-copy debris —
+                                # telling the user to remove a cataloged file.
+                                # Probe the case-insensitive fold root once and
+                                # reuse it per row so
+                                # _path_equal_or_descends' listdir/samefile
+                                # probe doesn't re-run per catalog folder.
+                                root_path = Path(os.path.normpath(root))
+                                root_real = os.path.normcase(
+                                    os.path.realpath(root),
+                                )
+                                dest_ci_root = _case_insensitive_root(root)
+                                indexed: set[str] = set()
+                                rows = thread_db.conn.execute(
+                                    """SELECT f.path, p.filename
+                                         FROM photos p
+                                         JOIN folders f ON f.id = p.folder_id"""
+                                ).fetchall()
+                                for row in rows:
+                                    folder = row["path"]
+                                    if not _path_equal_or_descends(
+                                        folder, root,
+                                        case_insensitive_root=dest_ci_root,
+                                    ):
+                                        continue
+                                    # Extract the below-root portion of the
+                                    # folder path so we can rebase onto the
+                                    # user-picked root spelling
+                                    # (archive_conflict_report joins
+                                    # `path`/rel_folder/filename to build the
+                                    # dest_key we're matching against). A
+                                    # realpath-based string prefix covers the
+                                    # same-case and symlink-alias cases; the
+                                    # case-fold branch mirrors
+                                    # _path_equal_or_descends' probed-CI-root
+                                    # logic so a POSIX case-only alias still
+                                    # yields the right tail.
+                                    folder_real = os.path.normcase(
+                                        os.path.realpath(folder),
+                                    )
+                                    rel_suffix: str | None = None
+                                    if folder_real == root_real:
+                                        rel_suffix = ""
+                                    elif folder_real.startswith(
+                                        root_real + os.sep,
+                                    ):
+                                        rel_suffix = folder_real[
+                                            len(root_real) + 1:
+                                        ]
+                                    elif dest_ci_root:
+                                        root_low = root_real.lower()
+                                        folder_low = folder_real.lower()
+                                        if folder_low == root_low:
+                                            rel_suffix = ""
+                                        elif folder_low.startswith(
+                                            root_low + os.sep,
+                                        ):
+                                            rel_suffix = folder_real[
+                                                len(root_real) + 1:
+                                            ]
+                                    if rel_suffix is None:
+                                        # _path_equal_or_descends accepted the
+                                        # row via a samefile walk-up (missing
+                                        # intermediate leaf whose parent aliases
+                                        # to root), so the realpath spelling
+                                        # doesn't line up as a string prefix and
+                                        # we can't safely rebase onto the
+                                        # user-picked spelling. Catalog folders
+                                        # exist on disk by construction — this
+                                        # branch is rare — so drop the row
+                                        # rather than fabricate a spelling.
+                                        continue
+                                    indexed_folder = (
+                                        root_path if rel_suffix == ""
+                                        else root_path.joinpath(
+                                            *rel_suffix.split(os.sep),
+                                        )
+                                    )
+                                    indexed.add(
+                                        str(indexed_folder / row["filename"]),
+                                    )
+                                return indexed
+
+                            archive_report = archive_conflict_report(
                                 final_destination,
                                 selected_files,
                                 params.folder_template,
                                 known_hashes=catalog_hashes,
+                                indexed_paths=_indexed_archive_paths(
+                                    final_destination,
+                                ),
+                            )
+                            archive_conflicts = (
+                                archive_report["empty"]
+                                + archive_report["partial"]
+                                + archive_report["conflicts"]
                             )
                             if archive_conflicts:
+                                incomplete = (
+                                    archive_report["empty"]
+                                    + archive_report["partial"]
+                                )
+                                if incomplete:
+                                    # Only surface incomplete-file paths in
+                                    # this branch: the message tells the user
+                                    # to remove empty/partial debris, so
+                                    # mixing full-content conflict paths into
+                                    # the example list would point them at
+                                    # files that are neither empty nor
+                                    # truncated.
+                                    incomplete_examples = ", ".join(
+                                        incomplete[:3],
+                                    )
+                                    incomplete_more = (
+                                        f" and {len(incomplete) - 3} more"
+                                        if len(incomplete) > 3 else ""
+                                    )
+                                    bits = []
+                                    if archive_report["empty"]:
+                                        bits.append(
+                                            f"{len(archive_report['empty'])} empty"
+                                        )
+                                    if archive_report["partial"]:
+                                        bits.append(
+                                            f"{len(archive_report['partial'])} "
+                                            "partial"
+                                        )
+                                    _bail_storage(
+                                        "Archive destination contains "
+                                        f"{' and '.join(bits)} unindexed file"
+                                        f"{'s' if len(incomplete) != 1 else ''} "
+                                        "at incoming import paths: "
+                                        f"{incomplete_examples}"
+                                        f"{incomplete_more}. This looks like "
+                                        "an interrupted previous archive "
+                                        "copy. Remove or replace those "
+                                        "incomplete files, then retry; Vireo "
+                                        "will not suffix around likely "
+                                        "corrupt archive files."
+                                    )
+                                    return
                                 examples = ", ".join(archive_conflicts[:3])
                                 more = (
                                     f" and {len(archive_conflicts) - 3} more"
