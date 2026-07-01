@@ -2762,6 +2762,25 @@ class Database:
         staged_root_path = staged_root["path"]
         ws = self._ws_id()
 
+        # Ensure the existing archive base — and every folder row already
+        # below it — is linked to the active workspace before any staged
+        # photo is reparented onto one of those pre-existing folder rows.
+        # If the archive was scanned only under a different workspace, the
+        # else-branch UPDATE below would move photos onto a ``target["id"]``
+        # that has no ``workspace_folders`` row for ``ws``; workspace-scoped
+        # photo queries join ``workspace_folders`` on ``p.folder_id`` and
+        # would silently drop every merged-in photo. ``add_workspace_folder``
+        # pulls the whole subtree (path-prefix), so a single link on the
+        # archive base covers every existing descendant the reconciliation
+        # can hit. ``is_root=True`` is safe against other workspaces — the
+        # is_root UPDATE is scoped by ``workspace_id`` — and no-ops when the
+        # base was already this workspace's root.
+        archive_row = self.conn.execute(
+            "SELECT id FROM folders WHERE path = ?", (archive_path,)
+        ).fetchone()
+        if archive_row:
+            self.add_workspace_folder(ws, archive_row["id"], is_root=True)
+
         # Snapshot staged folders root-first (shallowest path first) so a
         # parent's target row exists before its children are processed.
         prefix = _subtree_prefix(staged_root_path)

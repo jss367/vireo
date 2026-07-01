@@ -7541,6 +7541,80 @@ def test_merge_staged_tree_existing_folder_and_collision(db):
     ).fetchone() is None
 
 
+def test_merge_staged_tree_links_archive_to_active_workspace(db):
+    """Regression: when the pre-existing archive base is linked only to a
+    DIFFERENT workspace, merging staged photos into it must link the base
+    (and its subtree) to the active workspace too. Workspace-scoped photo
+    queries join ``workspace_folders`` on ``p.folder_id``; without the link,
+    the else-branch UPDATE moves photos onto a ``target["id"]`` that has no
+    ``workspace_folders`` row for the active ws, and every merged-in photo
+    silently vanishes from ws-scoped views even though the import reports
+    success. Reproduces via two workspaces: the archive lives under ``other``
+    only, and ``active`` runs the merge."""
+    # Archive lives under the default workspace; ``active`` never scans it.
+    other_ws = db._active_workspace_id
+    base_id = db.add_folder("/arch/USA", name="USA")
+    date_id = db.add_folder("/arch/USA/2025-06-30", name="2025-06-30",
+                            parent_id=base_id, workspace_root=False)
+    db.add_photo(folder_id=date_id, filename="prior.raf", extension=".raf",
+                 file_size=100, file_mtime=1.0)
+
+    # Switch to a fresh workspace — the one running the pipeline.
+    active_ws = db.create_workspace("Active")
+    db.set_active_workspace(active_ws)
+
+    # Precondition: the active ws cannot see the archive yet.
+    assert db.conn.execute(
+        "SELECT 1 FROM workspace_folders "
+        "WHERE workspace_id=? AND folder_id=?",
+        (active_ws, base_id),
+    ).fetchone() is None
+
+    # Staged tree post-rsync; a real scan restrict_dirs registers the leaf
+    # as its own root, but the base_id-invisible visibility bug reproduces
+    # regardless of that flag, so keep the setup minimal.
+    stage_root = db.add_folder("/stage/USA", name="USA", workspace_root=False)
+    stage_leaf = db.add_folder("/stage/USA/2025-06-30", name="2025-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    new_pid = db.add_photo(folder_id=stage_leaf, filename="new.raf",
+                           extension=".raf", file_size=200, file_mtime=2.0)
+
+    db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
+
+    # Archive base is now the active workspace's root; the subtree pull in
+    # add_workspace_folder linked the existing date folder along with it.
+    base_link = db.conn.execute(
+        "SELECT is_root FROM workspace_folders "
+        "WHERE workspace_id=? AND folder_id=?",
+        (active_ws, base_id),
+    ).fetchone()
+    assert base_link is not None and base_link["is_root"] == 1
+    assert db.conn.execute(
+        "SELECT 1 FROM workspace_folders "
+        "WHERE workspace_id=? AND folder_id=?",
+        (active_ws, date_id),
+    ).fetchone() is not None
+
+    # The other workspace's link on the archive base is preserved — the
+    # is_root UPDATE in add_workspace_folder is scoped by workspace_id.
+    other_link = db.conn.execute(
+        "SELECT is_root FROM workspace_folders "
+        "WHERE workspace_id=? AND folder_id=?",
+        (other_ws, base_id),
+    ).fetchone()
+    assert other_link is not None and other_link["is_root"] == 1
+
+    # The merged-in photo landed on the existing date folder and is now
+    # visible via the exact workspace_folders join every scoped query uses.
+    row = db.conn.execute(
+        """SELECT p.filename FROM photos p
+           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+           WHERE p.id = ? AND wf.workspace_id = ?""",
+        (new_pid, active_ws),
+    ).fetchone()
+    assert row is not None and row["filename"] == "new.raf"
+
+
 def test_folder_under_rule_excludes_siblings_and_escapes_wildcards(tmp_path, monkeypatch):
     """'folder under /photos/2023' must match that folder and its
     descendants only — not the sibling /photos/2023-trip — and a _ in the

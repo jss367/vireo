@@ -647,6 +647,49 @@ def test_move_folder_merges_into_tracked_when_allowed(move_env):
     assert names == {"prior.jpg", "bird1.jpg", "bird2.jpg"}
 
 
+def test_move_folder_refuses_descendant_tracked_overlap_even_when_merging(move_env):
+    """Regression: ``allow_tracked_merge`` must only accept the "tracked row
+    IS the destination" case, not a tracked row that sits STRICTLY BELOW the
+    resolved destination. The descendant case is "wrap a fresh parent around
+    an existing tracked subtree" (e.g. ``/Photos/USA/2024`` scanned as its
+    own workspace root, then a fresh staged tree lands at ``/Photos/USA``);
+    the reconciliation would rebase the staged tree onto the wrapper path
+    while leaving the pre-existing tracked descendant's parentage untouched,
+    creating two overlapping catalog subtrees managing the same on-disk area.
+    Refuse before any copy — same guard as the default-off case."""
+    from move import move_folder
+
+    env = move_env
+    db = env["db"]
+
+    # Landing resolves to <dst>/src. Register a tracked row STRICTLY BELOW
+    # that landing so ``_tracked_destination_overlap`` returns a descendant
+    # (not an exact match). The row doesn't need to exist on disk — the
+    # overlap probe is folder-row based.
+    landing = env["dst"] / "src"
+    inner = landing / "existing-shoot"
+    inner_fid = db.add_folder(str(inner), name="existing-shoot")
+
+    result = move_folder(
+        db=db, folder_id=env["fid_src"], destination=str(env["dst"]),
+        merge=True, allow_tracked_merge=True,
+    )
+    assert result["moved"] == 0
+    assert any("already manage" in e for e in result["errors"])
+    # Source intact — the guard fires before any copy or delete.
+    assert (env["src"] / "bird1.jpg").exists()
+    assert (env["src"] / "bird2.jpg").exists()
+    # Landing was never materialized and no wrapper folder row was created
+    # for it. The pre-existing tracked descendant row is untouched.
+    assert not landing.exists()
+    assert db.conn.execute(
+        "SELECT 1 FROM folders WHERE path = ?", (str(landing),)
+    ).fetchone() is None
+    assert db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", (str(inner),)
+    ).fetchone()["id"] == inner_fid
+
+
 def test_move_folder_merge_moved_excludes_already_present(move_env):
     """On the merge path, identical-filename collisions are dropped as
     ``already_present`` and must NOT be counted in ``result['moved']``.

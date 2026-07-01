@@ -1564,7 +1564,23 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     merge_into_tracked = None
     tracked = _tracked_destination_overlap(db, folder_id, overlap_check_path)
     if tracked:
-        if not allow_tracked_merge:
+        # ``_tracked_destination_overlap`` returns any tracked row at-or-below
+        # ``overlap_check_path``. The opt-in merge only covers the "into an
+        # existing archive" case where the tracked row IS the destination;
+        # a tracked row STRICTLY BELOW the destination is the "wrap a fresh
+        # parent around an existing tracked subtree" case (e.g. /Photos/USA
+        # tracked, destination /Photos). The reconciliation would rebase the
+        # staged tree onto the wrapper path and leave the pre-existing tracked
+        # descendant with unchanged parentage — two overlapping catalog
+        # subtrees managing the same on-disk area. Refuse even when
+        # ``allow_tracked_merge`` is set. Uses the same alias-folding surface
+        # as the overlap probe (symlinks, Windows case-fold, case-insensitive
+        # POSIX) so a case-only alias of the destination still counts as the
+        # tracked row itself, not a wrapping parent.
+        tracked_is_destination = _path_equal_or_descends(
+            overlap_check_path, tracked["path"],
+        )
+        if not allow_tracked_merge or not tracked_is_destination:
             return {"moved": 0, "errors": [
                 f"Destination overlaps a folder Vireo already manages "
                 f"({tracked['path']}). Merging into or around a tracked folder "
