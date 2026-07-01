@@ -2730,6 +2730,28 @@ class Database:
             )
         self.conn.commit()
 
+    def _active_ws_root_ancestor_exists(self, workspace_id, path):
+        """True if ``workspace_id`` has an ``is_root=1`` folder that equals or
+        is an ancestor of ``path``.
+
+        Used by the merge to decide whether the archive base should itself
+        become a workspace root. Comparison is platform-neutral (``\\`` folded
+        to ``/``, trailing slashes stripped) so a Windows-style stored root
+        still matches a forward-slash archive path.
+        """
+        target = _path_for_subtree_match(path)
+        rows = self.conn.execute(
+            """SELECT f.path FROM workspace_folders wf
+               JOIN folders f ON f.id = wf.folder_id
+               WHERE wf.workspace_id = ? AND wf.is_root = 1""",
+            (workspace_id,),
+        ).fetchall()
+        for r in rows:
+            root = _path_for_subtree_match(r["path"])
+            if target == root or target.startswith(root + "/"):
+                return True
+        return False
+
     def merge_staged_tree_into_archive(self, staged_root_id, archive_path):
         """Fold a staged folder subtree into an existing tracked archive.
 
@@ -2743,9 +2765,9 @@ class Database:
 
         * Target has no folder row -> repoint the staged row to the target path,
           fix its ``parent_id`` to the (now-existing) target-parent folder, and
-          link it to the active workspace as a non-root (the existing archive
-          base is the workspace root). Every staged photo in that folder is a
-          newly-archived photo.
+          link it to the active workspace as a non-root (an existing archive
+          root ancestor already covers it). Every staged photo in that folder is
+          a newly-archived photo.
         * Target already has a folder row -> move the staged folder's photos
           into it (dropping any whose filename already exists there as an
           identical archived file), then delete the now-empty staged folder row.
@@ -2783,14 +2805,26 @@ class Database:
         # would silently drop every merged-in photo. ``add_workspace_folder``
         # pulls the whole subtree (path-prefix), so a single link on the
         # archive base covers every existing descendant the reconciliation
-        # can hit. ``is_root=True`` is safe against other workspaces — the
-        # is_root UPDATE is scoped by ``workspace_id`` — and no-ops when the
-        # base was already this workspace's root.
+        # can hit.
+        #
+        # Root the base ONLY when the active workspace has no existing root
+        # ancestor of it. For an ancestor merge (``/Photos`` is already a
+        # workspace root, base ``/Photos/USA``), rooting the base would create
+        # a SECOND overlapping workspace root inside the first — the exact
+        # duplicate-root state the tracked-overlap guards exist to prevent
+        # (``add_workspace_folder(is_root=True)`` only demotes rows inside the
+        # base's own subtree, so the outer ``/Photos`` root would survive). In
+        # that case just LINK the base non-root; the existing ancestor root
+        # keeps covering it. When there is no root ancestor (the base IS the
+        # archive the user imported into), the base is the natural root.
         archive_row = self.conn.execute(
             "SELECT id FROM folders WHERE path = ?", (archive_path,)
         ).fetchone()
         if archive_row:
-            self.add_workspace_folder(ws, archive_row["id"], is_root=True)
+            has_root_ancestor = self._active_ws_root_ancestor_exists(
+                ws, archive_path)
+            self.add_workspace_folder(
+                ws, archive_row["id"], is_root=not has_root_ancestor)
 
         # Snapshot staged folders root-first (shallowest path first) so a
         # parent's target row exists before its children are processed.
@@ -2864,9 +2898,9 @@ class Database:
                 # the tracked-ancestor guard was meant to prevent.
                 # add_workspace_folder's INSERT OR IGNORE can't downgrade an
                 # existing is_root=1 row, so demote it explicitly here.
-                # At merge time the archive base/ancestor is always the
-                # workspace root, so every folded leaf is unconditionally
-                # non-root — no need to check the base's is_root first.
+                # A folded-in leaf is always a descendant of an existing archive
+                # root (the base itself, or an ancestor root above it), so it is
+                # unconditionally non-root — no need to check the base's is_root.
                 self.conn.execute(
                     "UPDATE workspace_folders SET is_root = 0 "
                     "WHERE workspace_id = ? AND folder_id = ?",
@@ -2887,11 +2921,38 @@ class Database:
                 photo_ids = [r["id"] for r in self.conn.execute(
                     "SELECT id FROM photos WHERE folder_id = ?", (sf["id"],)
                 )]
-                collisions = {c["photo_id"]
+                # ``check_filename_collisions`` is filename-only: it flags a
+                # staged photo whose basename already has a catalog row in the
+                # target folder. That is NOT sufficient to drop the staged
+                # photo as ``already_present``. The drop is only safe when the
+                # collision is REAL on disk — i.e. the archived file actually
+                # exists at ``target_path/filename``, which is the case the
+                # rsync ``--ignore-existing`` merge relied on (it skipped the
+                # staged copy because the byte-identical archived file was
+                # already there; a DIFFERING file would have aborted the move
+                # upstream in the content-conflict check). If the target catalog
+                # row is stale — its file missing on disk — the upstream check
+                # never fired (no dest file to compare), rsync COPIED the staged
+                # bytes into place, and dropping the staged row would leave those
+                # fresh bytes represented by the old (phantom) row's
+                # hash/metadata, losing the new photo. So when the target file is
+                # absent, do NOT drop the staged photo. Instead delete the stale
+                # target row (its file no longer exists) and reparent the staged
+                # photo in its place, so the surviving catalog row describes the
+                # bytes actually on disk. This also avoids a UNIQUE(folder_id,
+                # filename) violation from moving the staged row onto a folder
+                # that still holds the same basename.
+                collisions = {c["photo_id"]: c["filename"]
                               for c in self.check_filename_collisions(
                                   photo_ids, target["id"])}
                 for pid in photo_ids:
-                    if pid in collisions:
+                    filename = collisions.get(pid)
+                    real_collision = (
+                        filename is not None
+                        and os.path.exists(
+                            _join_subtree_path(target_path, filename))
+                    )
+                    if real_collision:
                         # photo_keywords.photo_id has no ON DELETE CASCADE
                         # (unlike every other photo_id FK), so clear keyword
                         # links before deleting the photo or the FK fires.
@@ -2902,6 +2963,24 @@ class Database:
                             "DELETE FROM photos WHERE id = ?", (pid,))
                         counts["already_present"] += 1
                     else:
+                        if filename is not None:
+                            # Filename collided but the archived file is missing
+                            # on disk: the staged bytes were freshly copied and
+                            # the target row is a phantom. Drop the phantom so
+                            # the reparent below can take its (folder_id,
+                            # filename) slot and represent the real file.
+                            stale = self.conn.execute(
+                                "SELECT id FROM photos "
+                                "WHERE folder_id = ? AND filename = ?",
+                                (target["id"], filename),
+                            ).fetchone()
+                            if stale is not None:
+                                self.conn.execute(
+                                    "DELETE FROM photo_keywords "
+                                    "WHERE photo_id = ?", (stale["id"],))
+                                self.conn.execute(
+                                    "DELETE FROM photos WHERE id = ?",
+                                    (stale["id"],))
                         self.conn.execute(
                             "UPDATE photos SET folder_id = ? WHERE id = ?",
                             (target["id"], pid),

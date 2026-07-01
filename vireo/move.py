@@ -1562,6 +1562,16 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     # byte-for-byte unchanged: both tracked-destination cases refuse the move.
     overlap_check_path = catalog_path if remote else transfer_dest
     merge_into_tracked = None
+    # The catalog path the staged tree is reconciled ONTO. Distinct from
+    # ``merge_into_tracked`` (the user-facing "existing archive" label): for an
+    # exact overlap the reconciliation base must be the STORED tracked path, not
+    # ``catalog_path``, because ``catalog_path`` may be an alias (symlink /
+    # case-only fold) of the tracked folder. The files rsync to the same on-disk
+    # location either way, but ``merge_staged_tree_into_archive`` does exact
+    # ``WHERE path = ?`` catalog lookups that only match the row stored under the
+    # tracked path — rebasing onto the alias would miss it and create a second
+    # folder row for the same archive.
+    merge_reconcile_base = None
     tracked = _tracked_destination_overlap(db, folder_id, overlap_check_path)
     if tracked:
         # ``_tracked_destination_overlap`` returns any tracked row at-or-below
@@ -1587,6 +1597,10 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
                 f"isn't supported."
             ]}
         merge_into_tracked = tracked["path"]
+        # Reconcile onto the STORED tracked path (not the possibly-aliased
+        # ``catalog_path``) so the existing archive rows are found, not
+        # duplicated. See the ``merge_reconcile_base`` note above.
+        merge_reconcile_base = tracked["path"]
     if reject_tracked_ancestor and merge_into_tracked is None:
         ancestor = _tracked_destination_ancestor(db, folder_id, overlap_check_path)
         if ancestor:
@@ -1602,8 +1616,12 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             # rows untouched. The reconciliation still uses ``catalog_path`` as
             # the rebase target (below), but the user-facing "existing archive"
             # base we report is the managed-archive root (``ancestor["path"]``),
-            # not the staged landing path inside it.
+            # not the staged landing path inside it. Here the staged tree lands
+            # at its own ``catalog_path`` (a genuinely-new subpath inside the
+            # ancestor), so ``catalog_path`` IS the correct reconciliation base
+            # — unlike the exact-overlap case above.
             merge_into_tracked = ancestor["path"]
+            merge_reconcile_base = catalog_path
 
     if remote:
         probe = _remote_dir_exists(remote, transfer_dest)
@@ -1855,7 +1873,11 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         # Destination is a tracked archive and the caller opted into merging:
         # fold the staged folder/photo rows into the existing archive rows
         # instead of a path cascade (which would collide on folders.path).
-        merge_counts = db.merge_staged_tree_into_archive(folder_id, catalog_path)
+        # ``merge_reconcile_base`` is the STORED tracked path for an exact
+        # overlap (so alias/case-fold destinations still match the existing
+        # rows) and ``catalog_path`` for the ancestor case; see where it is set.
+        merge_counts = db.merge_staged_tree_into_archive(
+            folder_id, merge_reconcile_base)
     else:
         db.move_folder_path(folder_id, catalog_path)
     db.update_folder_counts()

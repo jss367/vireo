@@ -647,6 +647,73 @@ def test_move_folder_merges_into_tracked_when_allowed(move_env):
     assert names == {"prior.jpg", "bird1.jpg", "bird2.jpg"}
 
 
+def test_move_folder_merge_alias_destination_uses_stored_tracked_path(
+        move_env, monkeypatch):
+    """Regression: when the archive destination is a symlink/case-only alias of
+    an already-tracked folder, the exact-overlap merge must reconcile onto the
+    STORED tracked path, not the aliased ``catalog_path``. Otherwise
+    ``merge_staged_tree_into_archive``'s exact ``WHERE path = ?`` lookups miss
+    the existing row and create a SECOND folder row for the same on-disk
+    archive.
+
+    Simulated on Linux the same way as the case-alias refusal tests:
+      1. Symlink so two distinct path strings share an inode.
+      2. realpath/normcase patched to no-ops so the string-based tracked check
+         misses and the samefile fallback in ``_path_equal_or_descends`` folds
+         the alias to the tracked row.
+    """
+    from move import move_folder
+
+    env = move_env
+    db = env["db"]
+
+    # The real archive folder, tracked at its real path with a prior shoot.
+    real_dst = env["tmp_path"] / "realdst"
+    landing = real_dst / "src"
+    landing.mkdir(parents=True)
+    (landing / "prior.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 50)
+    fid_archive = db.add_folder(str(landing), name="src")
+    db.add_photo(folder_id=fid_archive, filename="prior.jpg", extension=".jpg",
+                 file_size=52, file_mtime=3.0)
+
+    alias_dst = env["tmp_path"] / "alias_dst"
+    try:
+        os.symlink(str(real_dst), str(alias_dst))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    monkeypatch.setattr(os.path, "realpath", lambda p: p)
+    monkeypatch.setattr(os.path, "normcase", lambda p: p)
+
+    # destination=alias_dst → resolved dest = alias_dst/src, an alias of the
+    # tracked realdst/src. The merge is accepted (exact overlap via samefile)
+    # and must fold into the existing row, not create a second one.
+    result = move_folder(
+        db=db, folder_id=env["fid_src"], destination=str(alias_dst),
+        merge=True, allow_tracked_merge=True,
+    )
+
+    assert result["errors"] == []
+    # The reconciliation base is the STORED tracked path, so the existing
+    # archive row absorbs the staged photos — exactly ONE folder row for the
+    # on-disk archive, no alias-path duplicate.
+    archive_rows = db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", (str(landing),)
+    ).fetchall()
+    assert len(archive_rows) == 1
+    assert archive_rows[0]["id"] == fid_archive
+    # No folder row was created under the alias path.
+    assert db.conn.execute(
+        "SELECT 1 FROM folders WHERE path = ?", (str(alias_dst / "src"),)
+    ).fetchone() is None
+    # All three photos live under the single archive row.
+    names = {r["filename"] for r in db.conn.execute(
+        "SELECT filename FROM photos WHERE folder_id = ?", (fid_archive,))}
+    assert names == {"prior.jpg", "bird1.jpg", "bird2.jpg"}
+    # Staging folded away.
+    assert not env["src"].exists()
+
+
 def test_move_folder_refuses_descendant_tracked_overlap_even_when_merging(move_env):
     """Regression: ``allow_tracked_merge`` must only accept the "tracked row
     IS the destination" case, not a tracked row that sits STRICTLY BELOW the
