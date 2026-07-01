@@ -1738,6 +1738,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
       <div id="wsMenuList"></div>
       <div class="ws-menu-divider"></div>
       <button class="ws-menu-action" onclick="showCreateWorkspaceModal()">+ New Workspace</button>
+      <button class="ws-menu-action" onclick="openRescanModal()">⟳ Rescan folders…</button>
     </div>
   </div>
   <span class="nav-cmd-hint" title="Open command palette (⌘K)" onclick="openCommandPalette()">⌘K</span>
@@ -2091,6 +2092,7 @@ function sendReport() {
 <div class="modal-overlay" id="missingPhotosModal">
   <div class="modal" style="max-width:780px;width:92%;max-height:80vh;display:flex;flex-direction:column;">
     <h3>Missing Originals</h3>
+    <div id="missingPhotosScopeNote" style="display:none;font-size:12px;color:var(--accent);margin-bottom:6px;"></div>
     <p style="color:var(--text-secondary);font-size:13px;margin-bottom:8px;">
       These photos' original files can't be found on disk. Vireo may still have a cached thumbnail, preview, working copy, or XMP sidecar — review what's left, then remove the ones you no longer want in your library.
     </p>
@@ -2105,6 +2107,36 @@ function sendReport() {
       <button class="modal-btn danger" id="missingPhotosRemoveBtn" onclick="removeSelectedMissingPhotos()" disabled>Remove selected</button>
       <button class="modal-btn" onclick="loadMissingPhotos()">Check Again</button>
       <button class="modal-btn modal-btn-cancel" onclick="closeMissingPhotosModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Rescan Folders Modal -->
+<div class="modal-overlay" id="rescanModal">
+  <div class="modal" style="max-width:560px;width:90%;">
+    <h3>Rescan Folders</h3>
+    <p style="color:var(--text-secondary);font-size:13px;margin-bottom:12px;">
+      Re-reads your folders and reconciles Vireo with what's on disk: it picks up
+      photos added or changed outside Vireo, and finds photos whose original files
+      were deleted so you can remove them from your library.
+    </p>
+    <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:14px;">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+        <input type="radio" name="rescanScope" value="workspace" checked onchange="onRescanScopeChange()">
+        <span>Entire workspace <span style="color:var(--text-secondary);">— every folder in this workspace</span></span>
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+        <input type="radio" name="rescanScope" value="folder" onchange="onRescanScopeChange()">
+        <span>A specific folder</span>
+      </label>
+      <select id="rescanFolderSelect" style="margin-left:26px;max-width:100%;padding:6px 8px;" disabled></select>
+    </div>
+    <div id="rescanEmptyNote" style="display:none;color:var(--text-secondary);font-size:13px;margin-bottom:10px;">
+      This workspace has no folders yet. Add one from the Workspace page first.
+    </div>
+    <div class="modal-actions">
+      <button class="modal-btn" id="rescanRunBtn" onclick="runRescan()">Rescan</button>
+      <button class="modal-btn modal-btn-cancel" onclick="closeRescanModal()">Cancel</button>
     </div>
   </div>
 </div>
@@ -7861,6 +7893,10 @@ window.handleNativeMenuCommand = async function(command) {
         nativeMenuRoute('/workspace');
         nativeMenuInfo('Choose a folder or workspace root to scan.');
         break;
+      case 'tools_rescan':
+        if (typeof openRescanModal === 'function') openRescanModal();
+        else nativeMenuRoute('/workspace');
+        break;
       case 'tools_find_duplicates':
         if (typeof startScan === 'function') await startScan();
         else nativeMenuRoute('/duplicates');
@@ -9406,7 +9442,25 @@ async function startRemoveFolder(folderId, path, photoCount) {
 /* ---------- Missing Originals Modal ---------- */
 let _missingPhotosSelected = new Set();
 
-function openMissingPhotosModal() {
+// Scope for the Missing Originals modal. null folderId = whole workspace.
+// The banner poll (checkMissingPhotos) is always workspace-wide; only the
+// modal honors scope so a "rescan this folder" review can't offer to delete
+// ghosts from folders the user didn't ask about.
+let _missingPhotosScope = { folderId: null, label: '' };
+
+function openMissingPhotosModal(folderId, label) {
+  _missingPhotosScope = {
+    folderId: (folderId == null ? null : folderId),
+    label: label || '',
+  };
+  const note = document.getElementById('missingPhotosScopeNote');
+  if (_missingPhotosScope.folderId != null) {
+    note.textContent = 'Showing only: ' + (_missingPhotosScope.label || 'selected folder');
+    note.style.display = 'block';
+  } else {
+    note.style.display = 'none';
+    note.textContent = '';
+  }
   document.getElementById('missingPhotosDeleteSidecars').checked = true;
   document.getElementById('missingPhotosModal').classList.add('open');
   loadMissingPhotos();
@@ -9415,6 +9469,126 @@ function openMissingPhotosModal() {
 function closeMissingPhotosModal() {
   document.getElementById('missingPhotosModal').classList.remove('open');
   checkMissingPhotos();  // refresh banner
+}
+
+/* ---------- Rescan Folders ---------- */
+// Opens the Rescan modal. Scope defaults to the whole workspace; the folder
+// dropdown is populated from the active workspace's root folders.
+async function openRescanModal() {
+  // Close the workspace dropdown if this was triggered from its menu.
+  const wsMenu = document.getElementById('wsMenu');
+  if (wsMenu) wsMenu.classList.remove('open');
+  if (typeof _wsDropdownOpen !== 'undefined') { try { _wsDropdownOpen = false; } catch (e) {} }
+  const wsRadio = document.querySelector('input[name="rescanScope"][value="workspace"]');
+  const folderRadio = document.querySelector('input[name="rescanScope"][value="folder"]');
+  if (wsRadio) { wsRadio.checked = true; wsRadio.disabled = false; }
+  if (folderRadio) folderRadio.disabled = false;
+  const sel = document.getElementById('rescanFolderSelect');
+  sel.innerHTML = '';
+  sel.disabled = true;
+  const emptyNote = document.getElementById('rescanEmptyNote');
+  emptyNote.style.display = 'none';
+  document.getElementById('rescanRunBtn').disabled = false;
+  document.getElementById('rescanModal').classList.add('open');
+  try {
+    const active = await safeFetch('/api/workspaces/active', {}, { toast: false });
+    const folders = await safeFetch('/api/workspaces/' + active.id + '/folders', {}, { toast: false });
+    if (!folders || folders.length === 0) {
+      emptyNote.textContent = 'This workspace has no folders yet. Add one from the Workspace page first.';
+      emptyNote.style.display = 'block';
+      if (folderRadio) folderRadio.disabled = true;
+      return;
+    }
+    folders.forEach(function(f) {
+      const opt = document.createElement('option');
+      opt.value = f.id;
+      opt.textContent = f.name || f.path;
+      opt.title = f.path;
+      sel.appendChild(opt);
+    });
+  } catch (e) {
+    emptyNote.textContent = 'Could not load this workspace’s folders.';
+    emptyNote.style.display = 'block';
+    if (folderRadio) folderRadio.disabled = true;
+  }
+}
+window.openRescanModal = openRescanModal;
+
+function onRescanScopeChange() {
+  const scopeEl = document.querySelector('input[name="rescanScope"]:checked');
+  const isFolder = !!(scopeEl && scopeEl.value === 'folder');
+  document.getElementById('rescanFolderSelect').disabled = !isFolder;
+}
+
+function closeRescanModal() {
+  document.getElementById('rescanModal').classList.remove('open');
+}
+
+async function runRescan() {
+  const scopeEl = document.querySelector('input[name="rescanScope"]:checked');
+  const scope = scopeEl ? scopeEl.value : 'workspace';
+  const btn = document.getElementById('rescanRunBtn');
+  btn.disabled = true;
+  try {
+    if (scope === 'folder') {
+      const sel = document.getElementById('rescanFolderSelect');
+      const fid = parseInt(sel.value, 10);
+      if (isNaN(fid)) {
+        showToast('Pick a folder to rescan.', 'error');
+        btn.disabled = false;
+        return;
+      }
+      const label = sel.options[sel.selectedIndex]
+        ? sel.options[sel.selectedIndex].textContent : '';
+      await safeFetch('/api/folders/' + fid + '/rescan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ incremental: true }),
+      });
+      closeRescanModal();
+      showToast('Rescanning “' + label + '” for new and changed photos…', 'info');
+      await reviewDeletedAfterRescan(fid, label);
+    } else {
+      const res = await safeFetch('/api/jobs/scan-workspace', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ incremental: true }),
+      });
+      closeRescanModal();
+      let msg = 'Rescanning the workspace for new and changed photos…';
+      if (res && res.skipped && res.skipped.length) {
+        const n = res.skipped.length;
+        msg += ' (' + n + ' offline folder' + (n === 1 ? '' : 's') + ' skipped)';
+      }
+      showToast(msg, 'info');
+      await reviewDeletedAfterRescan(null, '');
+    }
+  } catch (e) {
+    // safeFetch already surfaced the error; leave the modal open to retry.
+    btn.disabled = false;
+    return;
+  }
+  btn.disabled = false;
+}
+
+// The scan job (incremental) only adds/updates — it never removes rows for
+// files deleted on disk. So immediately after kicking it off, check for
+// missing originals in the same scope and open the review modal if any exist.
+async function reviewDeletedAfterRescan(folderId, label) {
+  try {
+    const url = folderId != null
+      ? '/api/photos/missing?folder_id=' + encodeURIComponent(folderId)
+      : '/api/photos/missing';
+    const photos = await safeFetch(url, {}, { toast: false });
+    if (photos && photos.length) {
+      openMissingPhotosModal(folderId, label);
+    } else {
+      showToast('No deleted photos found' + (label ? ' in “' + label + '”' : '') + '.', 'info');
+    }
+  } catch (e) {
+    // Non-fatal: the background scan still runs; the banner will catch
+    // deletions on its next poll.
+  }
 }
 
 function _escapeAttr(s) {
@@ -9431,12 +9605,18 @@ async function loadMissingPhotos() {
   const cacheId = ++_missingPhotosCacheFetchId;
   const myId = ++_missingPhotosModalFetchId;
   try {
-    const resp = await fetch('/api/photos/missing');
+    const scoped = _missingPhotosScope.folderId != null;
+    const url = scoped
+      ? '/api/photos/missing?folder_id=' + encodeURIComponent(_missingPhotosScope.folderId)
+      : '/api/photos/missing';
+    const resp = await fetch(url);
     if (!resp.ok) throw new Error('check failed');
     if (myId !== _missingPhotosModalFetchId) return;  // superseded by a newer modal load
     const photos = await resp.json();
     if (myId !== _missingPhotosModalFetchId) return;
-    if (cacheId === _missingPhotosCacheFetchId) _missingPhotosCache = photos;
+    // A folder-scoped load is a subset — don't overwrite the workspace-wide
+    // banner cache with it, or the banner's dismissed-count math goes stale.
+    if (!scoped && cacheId === _missingPhotosCacheFetchId) _missingPhotosCache = photos;
     if (photos.length === 0) {
       container.innerHTML = '<p style="color:var(--text-secondary);">No photos with missing originals.</p>';
       checkMissingPhotos();

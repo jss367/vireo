@@ -2183,12 +2183,19 @@ class Database:
             (self._ws_id(),),
         ).fetchall()
 
-    def get_missing_photos(self):
+    def get_missing_photos(self, folder_id=None):
         """Return photos whose source file is missing from disk.
 
         Scoped to the active workspace. Skips photos in folders flagged
         ``'missing'`` — those are surfaced by ``get_missing_folders`` and
         listing them per-photo would just duplicate that signal at high cost.
+
+        When ``folder_id`` is given, the result is further restricted to that
+        folder and every folder beneath it in the tree (a recursive walk over
+        ``parent_id``). This backs the "rescan a specific folder" flow — the
+        user asked about one folder, so the deleted-original review must not
+        surface ghosts from unrelated parts of the library. ``None`` (the
+        default) keeps the whole-workspace behavior.
 
         Folder DB ``status`` is updated asynchronously by a 10-minute health
         loop, so a freshly unmounted volume can still show ``status='ok'``
@@ -2203,16 +2210,33 @@ class Database:
         ``working_copy_path`` so the caller can render rich UI without
         joining again.
         """
+        params = [self._ws_id()]
+        subtree_clause = ""
+        if folder_id is not None:
+            # Restrict to the folder subtree. The CTE seeds on the requested
+            # folder id and walks children via parent_id, so a photo in any
+            # descendant folder is included but nothing outside the branch is.
+            subtree_clause = """
+               AND f.id IN (
+                   WITH RECURSIVE subtree(id) AS (
+                       SELECT id FROM folders WHERE id = ?
+                       UNION ALL
+                       SELECT c.id FROM folders c
+                       JOIN subtree s ON c.parent_id = s.id
+                   )
+                   SELECT id FROM subtree
+               )"""
+            params.append(folder_id)
         rows = self.conn.execute(
-            """SELECT p.id, p.filename, p.extension, p.file_size,
+            f"""SELECT p.id, p.filename, p.extension, p.file_size,
                       p.timestamp, p.working_copy_path,
                       f.id AS folder_id, f.path AS folder_path
                FROM photos p
                JOIN folders f ON p.folder_id = f.id
                JOIN workspace_folders wf ON wf.folder_id = f.id
-               WHERE wf.workspace_id = ? AND f.status != 'missing'
+               WHERE wf.workspace_id = ? AND f.status != 'missing'{subtree_clause}
                ORDER BY f.path, p.filename""",
-            (self._ws_id(),),
+            params,
         ).fetchall()
         # One readdir per folder instead of one stat per photo. On a 50k-photo
         # library across a network volume the per-photo `os.path.exists` was

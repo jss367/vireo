@@ -2843,8 +2843,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         For each ghost row we report what cached/sidecar artifacts still exist
         (thumb, preview, working copy, XMP) so the user can decide whether
         anything is worth keeping before deleting the row.
+
+        Optional ``?folder_id=N`` scopes the check to that folder and its
+        descendants — the "rescan a specific folder" flow. The id must be
+        linked to the active workspace (same guard as folder rescan); an
+        unknown or foreign id returns 404 rather than silently widening to
+        the whole library.
         """
         db = _get_db()
+        folder_id = request.args.get("folder_id")
+        if folder_id is not None:
+            try:
+                folder_id = int(folder_id)
+            except (TypeError, ValueError):
+                return json_error("folder_id must be an integer")
+            linked = db.conn.execute(
+                "SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+                (db._active_workspace_id, folder_id),
+            ).fetchone()
+            if not linked:
+                return json_error("folder not found", 404)
         thumb_dir = app.config["THUMB_CACHE_DIR"]
         vireo_dir = os.path.dirname(thumb_dir)
         preview_dir = os.path.join(vireo_dir, "previews")
@@ -2869,7 +2887,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             pass  # cache dir hasn't been created yet — no previews
 
         out = []
-        for row in db.get_missing_photos():
+        for row in db.get_missing_photos(folder_id=folder_id):
             pid = row["id"]
             src = os.path.join(row["folder_path"], row["filename"])
             stem, _ext = os.path.splitext(src)
@@ -12057,6 +12075,40 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             workspace_id=active_ws,
         )
         return jsonify({"job_id": job_id})
+
+    @app.route("/api/jobs/scan-workspace", methods=["POST"])
+    def api_job_scan_workspace():
+        """Queue an incremental scan across every root folder of the active
+        workspace.
+
+        Powers the "Rescan entire workspace" option. Roots that no longer
+        resolve on disk are skipped (they're surfaced separately by the
+        missing-folders flow) and reported back in ``skipped`` so the UI can
+        be honest about what actually ran. Returns 400 with a message when no
+        root is currently reachable, so the caller never shows "rescan
+        started" for a no-op.
+        """
+        body = request.get_json(silent=True) or {}
+        incremental = bool(body.get("incremental", True))
+        db = _get_db()
+        active_ws = db._active_workspace_id
+        roots = [r["path"] for r in db.get_workspace_folder_roots(active_ws)]
+        existing = [r for r in roots if os.path.isdir(r)]
+        skipped = [r for r in roots if not os.path.isdir(r)]
+        if not existing:
+            if roots:
+                return json_error("no workspace folders are currently on disk")
+            return json_error("this workspace has no folders to rescan")
+
+        runner = app._job_runner
+        work = _build_scan_work(existing, incremental, active_ws)
+        job_config = {"roots": existing, "incremental": incremental}
+        if len(existing) == 1:
+            job_config["root"] = existing[0]
+        job_id = runner.start(
+            "scan", work, config=job_config, workspace_id=active_ws,
+        )
+        return jsonify({"job_id": job_id, "roots": existing, "skipped": skipped})
 
     @app.route("/api/jobs/thumbnails", methods=["POST"])
     def api_job_thumbnails():
