@@ -543,11 +543,26 @@ def test_pipeline_refuses_destination_that_wraps_tracked_subfolder(
 
     # Job terminated — did not hang waiting for a scan that never runs.
     assert job["status"] == "failed", job
-    error_text = " ".join([
-        str(job.get("error") or ""),
-        str(job.get("result", "")),
-        " ".join(str(s) for s in (job.get("steps") or [])),
-    ])
+
+    def _collect_strings(obj):
+        if isinstance(obj, str):
+            return [obj]
+        if isinstance(obj, dict):
+            out = []
+            for v in obj.values():
+                out.extend(_collect_strings(v))
+            return out
+        if isinstance(obj, (list, tuple)):
+            out = []
+            for v in obj:
+                out.extend(_collect_strings(v))
+            return out
+        return []
+
+    # Collect raw string field values (not ``str(dict)``) so Windows
+    # backslash paths compare cleanly — ``str({"error": "C:\\foo"})``
+    # doubles the backslashes via repr, defeating the substring check.
+    error_text = " ".join(_collect_strings(job))
     # The specific PREFLIGHT wording ("sits above") — distinct from the
     # archive-step ``move_folder`` refusal ("Destination overlaps a folder
     # Vireo already manages") — proves the storage-stage guard fired
