@@ -113,6 +113,105 @@ def test_pipeline_preview_button_disabled_without_source_dest(live_server, page)
     expect(btn).to_be_disabled()
 
 
+def _destination_preview_body(managed_archive):
+    """Minimal destination-preview payload the render path needs, with an
+    optional managed_archive block."""
+    return json.dumps({
+        "total_photos": 3,
+        "total_folders": 1,
+        "new_folders": 0,
+        "existing_folders": 1,
+        "folders": [
+            {"path": "2026/2026-06-30", "count": 3, "exists": True,
+             "full_path": "/arch/USA/2026/2026-06-30"},
+        ],
+        "managed_archive": managed_archive,
+    })
+
+
+def test_pipeline_managed_archive_callout_shown_for_existing_archive(live_server, page):
+    """When destination-preview flags a managed archive, the merge callout
+    renders with the archive path and photo count."""
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    page.click("#card-destination .stage-header")
+    page.check("[data-testid='copy-photos-toggle']")
+
+    page.route(
+        "**/api/import/destination-preview",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=_destination_preview_body(
+                {"path": "/arch/USA", "photo_count": 1234}
+            ),
+        ),
+    )
+    # Drive the preview directly (no on-disk sources needed — the render path
+    # only consumes the stubbed destination-preview response).
+    page.evaluate("previewDestinationFolders()")
+
+    callout = page.locator("[data-testid='managed-archive-callout']")
+    expect(callout).to_be_visible()
+    expect(callout).to_contain_text("existing Vireo archive")
+    expect(callout).to_contain_text("/arch/USA")
+    expect(callout).to_contain_text("1,234 photos")
+    expect(callout).to_contain_text("merged in")
+
+
+def test_pipeline_no_managed_archive_callout_for_fresh_destination(live_server, page):
+    """A fresh (untracked) destination shows no merge callout."""
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    page.click("#card-destination .stage-header")
+    page.check("[data-testid='copy-photos-toggle']")
+
+    page.route(
+        "**/api/import/destination-preview",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=_destination_preview_body(None),
+        ),
+    )
+    page.evaluate("previewDestinationFolders()")
+
+    # Results render, but the callout stays hidden.
+    expect(page.locator("[data-testid='folder-preview-results']")).to_be_visible()
+    expect(page.locator("[data-testid='managed-archive-callout']")).to_be_hidden()
+
+
+def test_pipeline_duplicate_summary_reframed_when_merging(live_server, page):
+    """With a managed archive in play, the duplicate summary reads as an
+    archive merge (already-in-archive + new-will-be-merged), not the generic
+    'already imported' wording."""
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    # Managed-merge framing.
+    page.evaluate(
+        "window._managedArchive = {path: '/arch/USA', photo_count: 10};"
+        "updateDuplicateSummary({done: true, duplicate_count: 2, total: 5});"
+    )
+    dup = page.locator("#previewSummary .dup-status")
+    expect(dup).to_contain_text("already in this archive")
+    expect(dup).to_contain_text("will be skipped")
+    expect(dup).to_contain_text("3 new")
+    expect(dup).to_contain_text("will be merged")
+
+
+def test_pipeline_duplicate_summary_generic_when_fresh(live_server, page):
+    """No managed archive -> today's exact 'already imported' wording."""
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    page.evaluate(
+        "window._managedArchive = null;"
+        "updateDuplicateSummary({done: true, duplicate_count: 2, total: 5});"
+    )
+    dup = page.locator("#previewSummary .dup-status")
+    expect(dup).to_contain_text("already imported")
+    expect(dup).not_to_contain_text("this archive")
+
+
 def test_pipeline_section_headers_visible(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")

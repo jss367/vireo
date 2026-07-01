@@ -877,6 +877,7 @@ body { padding-bottom: 36px; }
             </div>
           </div>
           <div id="folderPreviewResults" style="display:none;margin-top:8px;" data-testid="folder-preview-results">
+            <div id="folderPreviewManagedArchive" style="display:none;font-size:12px;line-height:1.4;margin-bottom:8px;padding:6px 8px;border-radius:4px;background:var(--bg-tertiary,#0d2436);border:1px solid var(--accent,#24E5CA);" data-testid="managed-archive-callout"></div>
             <div id="folderPreviewSummary" style="font-size:12px;font-weight:600;margin-bottom:6px;"></div>
             <div id="folderPreviewList" style="font-size:12px;max-height:200px;overflow-y:auto;"></div>
             <div id="folderPreviewStale" style="display:none;font-size:11px;color:var(--warning,#f0ad4e);margin-top:4px;">
@@ -1435,6 +1436,11 @@ var _previewLoading = false;   // true while import/new-images preview scope is 
 var _previewAbort = null;      // AbortController for in-flight request
 var _duplicateResults = {};    // path -> true for duplicates (cache)
 var _duplicateCheckAbort = null;  // AbortController for in-flight check
+// Set from the last destination-preview when the destination is (or sits
+// inside) an existing Vireo-managed archive: { path, photo_count }. null
+// otherwise. Used to reframe the destination preview + duplicate summary as
+// a merge into an existing archive rather than a fresh copy.
+var _managedArchive = null;
 var _thumbSchedulerCancel = null; // cancels the current thumbnail pump on re-render
 
 function fetchFolderPreview() {
@@ -1789,7 +1795,20 @@ function updateDuplicateSummary(data) {
   span.className = 'stat dup-status';
   if (data.done) {
     if (data.duplicate_count > 0) {
-      span.innerHTML = '<span class="stat-value">' + data.duplicate_count + '</span> already imported';
+      if (_managedArchive) {
+        // Merging into an existing archive: frame duplicates as already
+        // living in that archive (they'll be skipped), and \u2014 when we can
+        // reliably derive it \u2014 how many are genuinely new (will be merged).
+        span.innerHTML = '<span class="stat-value">' + data.duplicate_count
+          + '</span> already in this archive (will be skipped)';
+        if (typeof data.total === 'number' && data.total >= data.duplicate_count) {
+          var newCount = data.total - data.duplicate_count;
+          span.innerHTML += ', <span class="stat-value">' + newCount
+            + '</span> new (will be merged)';
+        }
+      } else {
+        span.innerHTML = '<span class="stat-value">' + data.duplicate_count + '</span> already imported';
+      }
     }
     // If 0 duplicates, show nothing
   } else {
@@ -1818,7 +1837,9 @@ function onSkipDuplicatesToggle() {
     if (dupCount > 0) {
       var span = document.createElement('span');
       span.className = 'stat dup-status';
-      span.innerHTML = '<span class="stat-value">' + dupCount + '</span> already imported';
+      span.innerHTML = _managedArchive
+        ? '<span class="stat-value">' + dupCount + '</span> already in this archive (will be skipped)'
+        : '<span class="stat-value">' + dupCount + '</span> already imported';
       summary.appendChild(span);
     }
   } else {
@@ -2084,6 +2105,12 @@ async function previewDestinationFolders() {
         + '</div>';
     }).join('');
 
+    // Managed-archive callout: when the destination is (or sits inside) an
+    // existing Vireo-managed archive, say so plainly so the dialog never
+    // presents an existing archive as an empty/new destination.
+    _managedArchive = data.managed_archive || null;
+    renderManagedArchiveCallout();
+
     resultsDiv.style.display = '';
     _folderPreviewShown = true;
     btn.textContent = 'Refresh preview';
@@ -2096,8 +2123,44 @@ async function previewDestinationFolders() {
   }
 }
 
+// Render (or hide) the "destination is an existing managed archive" callout
+// based on _managedArchive. Built with textContent so the archive path is
+// never interpreted as HTML.
+function renderManagedArchiveCallout() {
+  var el = document.getElementById('folderPreviewManagedArchive');
+  if (!el) return;
+  if (!_managedArchive || !_managedArchive.path) {
+    el.textContent = '';
+    el.style.display = 'none';
+    return;
+  }
+  var count = _managedArchive.photo_count || 0;
+  el.textContent = '';
+
+  var lead = document.createElement('span');
+  lead.textContent = 'Destination is an existing Vireo archive (';
+  el.appendChild(lead);
+
+  var pathEl = document.createElement('code');
+  pathEl.style.fontFamily = 'monospace';
+  pathEl.textContent = _managedArchive.path;
+  el.appendChild(pathEl);
+
+  var mid = document.createElement('span');
+  mid.textContent = ', ' + count.toLocaleString() + ' photo' + (count === 1 ? '' : 's')
+    + '). New files will be merged in.';
+  el.appendChild(mid);
+
+  el.style.display = '';
+}
+
 function markFolderPreviewStale() {
   if (!_folderPreviewShown) return;
+  // A source/destination change invalidates the managed-archive verdict — drop
+  // it so the duplicate summary doesn't keep merge-framing against a stale
+  // destination. The callout stays visible (with the stale banner below it)
+  // until the user refreshes, at which point it's recomputed.
+  _managedArchive = null;
   document.getElementById('folderPreviewStale').style.display = '';
   var btn = document.getElementById('btnPreviewFolders');
   btn.textContent = 'Refresh preview';
