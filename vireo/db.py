@@ -133,7 +133,18 @@ def _subtree_relative(child_path: str, root_path: str) -> str:
 
 def _join_subtree_path(root_path: str, relative_path: str) -> str:
     parts = [p for p in relative_path.split("/") if p]
-    return os.path.join(root_path, *parts) if parts else root_path
+    if not parts:
+        return root_path
+    # Preserve ``root_path``'s separator convention. ``os.path.join`` on
+    # Windows always inserts ``\``, which mixes separators when the root is
+    # forward-slash — breaking equality lookups (``WHERE path = ?``) against
+    # existing folder rows stored with matching separators. Subtree LIKE
+    # queries normalize with REPLACE, but equality queries do not.
+    sep = "\\" if ("\\" in root_path and "/" not in root_path) else "/"
+    stripped = root_path.rstrip("/\\")
+    if not stripped:
+        return root_path + sep.join(parts)
+    return stripped + sep + sep.join(parts)
 
 
 def _chunks(values, size=_SQLITE_PARAM_CHUNK_SIZE):
