@@ -3469,6 +3469,23 @@ document.addEventListener('lightbox:photochanged', function(event) {
   if (pid != null) _lbRenderLifeListPanel(pid);
 });
 
+// A photo's flag decides its life-list eligibility (a rejected photo can't be a
+// Life List photo, per _photo_can_be_life_list_preference). The cached
+// `life_list` block goes stale the moment the user changes the flag from the
+// lightbox, so re-fetch it and re-render — this hides the panel when the photo
+// becomes rejected and re-shows it when the flag is cleared again.
+document.addEventListener('lightbox:flagchanged', async function(event) {
+  var pid = event.detail ? event.detail.photoId : null;
+  if (pid == null || _lightboxCurrentId !== pid) return;
+  try {
+    var fresh = await window.safeFetch('/api/photos/' + pid, {}, { toast: false });
+    // Guard against a stale fetch clobbering the panel after navigation.
+    if (!fresh || _lightboxCurrentId !== pid) return;
+    _lbPhotoDataByPhoto[String(pid)] = fresh;
+    _lbRenderLifeListPanel(pid);
+  } catch (e) { /* leave the last-rendered panel in place if the refresh fails */ }
+});
+
 var _lbEditRecipe = null;
 var _lbEditRecipeLoaded = false;
 var _lbRenderedAdjustmentValues = null;
