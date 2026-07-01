@@ -1175,7 +1175,20 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 }
 
                             def _indexed_archive_paths(root: str) -> set[str]:
+                                # Fold symlink/case aliases before deciding a
+                                # cataloged row belongs under this destination:
+                                # the tracked-destination preflight above
+                                # accepts alias-equal roots, so a lexical-only
+                                # is_relative_to would drop indexed rows whose
+                                # stored path uses the canonical spelling while
+                                # the user picked an alias (or vice versa), and
+                                # archive_conflict_report would then label
+                                # zero-byte/truncated indexed archive files as
+                                # unindexed failed-copy debris.
                                 root_path = Path(os.path.normpath(root))
+                                root_real = os.path.normcase(
+                                    os.path.realpath(root),
+                                )
                                 indexed: set[str] = set()
                                 rows = thread_db.conn.execute(
                                     """SELECT f.path, p.filename
@@ -1183,14 +1196,33 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                          JOIN folders f ON f.id = p.folder_id"""
                                 ).fetchall()
                                 for row in rows:
-                                    folder = Path(os.path.normpath(row["path"]))
-                                    if (
-                                        folder == root_path
-                                        or folder.is_relative_to(root_path)
-                                    ):
-                                        indexed.add(
-                                            str(Path(row["path"]) / row["filename"])
+                                    folder_real = os.path.normcase(
+                                        os.path.realpath(row["path"]),
+                                    )
+                                    try:
+                                        common = os.path.commonpath(
+                                            [root_real, folder_real],
                                         )
+                                    except ValueError:
+                                        # Different drives on Windows: no
+                                        # possible overlap.
+                                        continue
+                                    if common != root_real:
+                                        continue
+                                    rel = os.path.relpath(
+                                        folder_real, root_real,
+                                    )
+                                    # Rebase the row back onto the user-picked
+                                    # root spelling so the entries here share
+                                    # the same prefix archive_conflict_report
+                                    # uses to build dest_key downstream.
+                                    indexed_folder = (
+                                        root_path if rel == "."
+                                        else root_path / rel
+                                    )
+                                    indexed.add(
+                                        str(indexed_folder / row["filename"]),
+                                    )
                                 return indexed
 
                             archive_report = archive_conflict_report(
@@ -1212,12 +1244,21 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     archive_report["empty"]
                                     + archive_report["partial"]
                                 )
-                                examples = ", ".join(archive_conflicts[:3])
-                                more = (
-                                    f" and {len(archive_conflicts) - 3} more"
-                                    if len(archive_conflicts) > 3 else ""
-                                )
                                 if incomplete:
+                                    # Only surface incomplete-file paths in
+                                    # this branch: the message tells the user
+                                    # to remove empty/partial debris, so
+                                    # mixing full-content conflict paths into
+                                    # the example list would point them at
+                                    # files that are neither empty nor
+                                    # truncated.
+                                    incomplete_examples = ", ".join(
+                                        incomplete[:3],
+                                    )
+                                    incomplete_more = (
+                                        f" and {len(incomplete) - 3} more"
+                                        if len(incomplete) > 3 else ""
+                                    )
                                     bits = []
                                     if archive_report["empty"]:
                                         bits.append(
@@ -1233,14 +1274,20 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                         f"{' and '.join(bits)} unindexed file"
                                         f"{'s' if len(incomplete) != 1 else ''} "
                                         "at incoming import paths: "
-                                        f"{examples}{more}. This looks like an "
-                                        "interrupted previous archive copy. "
-                                        "Remove or replace those incomplete "
-                                        "files, then retry; Vireo will not "
-                                        "suffix around likely corrupt archive "
-                                        "files."
+                                        f"{incomplete_examples}"
+                                        f"{incomplete_more}. This looks like "
+                                        "an interrupted previous archive "
+                                        "copy. Remove or replace those "
+                                        "incomplete files, then retry; Vireo "
+                                        "will not suffix around likely "
+                                        "corrupt archive files."
                                     )
                                     return
+                                examples = ", ".join(archive_conflicts[:3])
+                                more = (
+                                    f" and {len(archive_conflicts) - 3} more"
+                                    if len(archive_conflicts) > 3 else ""
+                                )
                                 _bail_storage(
                                     "Archive destination already contains "
                                     "different files at the same import paths: "
