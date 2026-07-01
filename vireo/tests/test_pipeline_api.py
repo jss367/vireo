@@ -2169,12 +2169,27 @@ def test_destination_preview_flags_managed_archive(setup, tmp_path):
     Image.new("RGB", (16, 16), "green").save(p1)
     Image.new("RGB", (16, 16), "olive").save(p2)
 
+    # A second date subfolder under the same base whose folder row is
+    # 'missing' (e.g. its files went offline). Ingest treats the archive as
+    # status IN ('ok','partial'), so these photos must NOT count toward the
+    # callout's "N photos" even though their rows exist in the catalog.
+    gone = archive / "2024" / "2024-01-01"
+    gone.mkdir(parents=True)
+    g1 = gone / "gone-1.jpg"
+    Image.new("RGB", (16, 16), "gray").save(g1)
+
     from db import Database
     seed = Database(db_path)
     base_id = seed.add_folder(str(archive))
     prior_id = seed.add_folder(str(prior), parent_id=base_id, workspace_root=False)
     for f in (p1, p2):
         seed.add_photo(prior_id, f.name, ".jpg", f.stat().st_size, f.stat().st_mtime)
+    gone_id = seed.add_folder(str(gone), parent_id=base_id, workspace_root=False)
+    seed.add_photo(gone_id, g1.name, ".jpg", g1.stat().st_size, g1.stat().st_mtime)
+    seed.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (gone_id,)
+    )
+    seed.conn.commit()
     seed.close()
 
     # A fresh source card whose files aren't in the archive yet.
@@ -2195,6 +2210,8 @@ def test_destination_preview_flags_managed_archive(setup, tmp_path):
         data = resp.get_json()
         assert data["managed_archive"] is not None
         assert data["managed_archive"]["path"] == str(archive)
+        # Only the two ok-status photos count; the missing folder's photo is
+        # excluded (matches what ingest considers "the archive").
         assert data["managed_archive"]["photo_count"] == 2
 
 

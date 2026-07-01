@@ -115,8 +115,14 @@ managed archive must not be presented as an empty/new destination):
 2. **"N of your selected files are already archived."** The import UI already
    runs the `api_import_check_duplicates` SSE scan (`app.py:10344`), which counts
    selection files whose hash is in the catalog. Reuse that result — when the
-   destination is a managed archive, frame those as *"38 already in this archive
+   destination is a managed archive, frame those as *"38 already in your library
    (will be skipped), 412 new (will be merged)"* instead of generic "duplicates."
+   Note: the duplicate check is catalog-global (`SELECT file_hash FROM photos`,
+   no destination/workspace scope), matching ingest's global `skip_duplicates`.
+   So a match may live in a *different* archive — hence "in your library", not
+   "in this archive" — but the count is still correct for the skip/merge framing
+   (a cross-archive dup is skipped, not merged), so it is deliberately not
+   archive-scoped.
 
 `preview_destination`'s `existing_folders` ("dir exists on disk") stays but is
 subordinate to the explicit, stronger "managed archive" callout.

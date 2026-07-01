@@ -10497,11 +10497,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if tracked:
             from db import _subtree_prefix
             prefix = _subtree_prefix(tracked["path"])
+            # Count only ok/partial folders — the same set ingest treats as
+            # "the archive" — so the callout's "N photos" matches what the merge
+            # actually considers present. Pure catalog read; no on-disk check.
             count = db.conn.execute(
                 """SELECT COUNT(*) AS c
                      FROM photos p JOIN folders f ON f.id = p.folder_id
-                    WHERE f.path = ?
-                       OR substr(REPLACE(f.path, '\\', '/'), 1, ?) = ?""",
+                    WHERE (f.path = ?
+                           OR substr(REPLACE(f.path, '\\', '/'), 1, ?) = ?)
+                      AND f.status IN ('ok', 'partial')""",
                 (tracked["path"], len(prefix), prefix),
             ).fetchone()["c"]
             result["managed_archive"] = {

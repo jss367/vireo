@@ -1797,10 +1797,14 @@ function updateDuplicateSummary(data) {
     if (data.duplicate_count > 0) {
       if (_managedArchive) {
         // Merging into an existing archive: frame duplicates as already
-        // living in that archive (they'll be skipped), and \u2014 when we can
+        // living in the catalog (they'll be skipped), and \u2014 when we can
         // reliably derive it \u2014 how many are genuinely new (will be merged).
+        // The duplicate check is catalog-global (matches ingest's global
+        // skip), so a match may live in a different archive \u2014 hence
+        // "in your library", not "in this archive". The count is still
+        // correct for the skip/merge framing.
         span.innerHTML = '<span class="stat-value">' + data.duplicate_count
-          + '</span> already in this archive (will be skipped)';
+          + '</span> already in your library (will be skipped)';
         if (typeof data.total === 'number' && data.total >= data.duplicate_count) {
           var newCount = data.total - data.duplicate_count;
           span.innerHTML += ', <span class="stat-value">' + newCount
@@ -1838,7 +1842,7 @@ function onSkipDuplicatesToggle() {
       var span = document.createElement('span');
       span.className = 'stat dup-status';
       span.innerHTML = _managedArchive
-        ? '<span class="stat-value">' + dupCount + '</span> already in this archive (will be skipped)'
+        ? '<span class="stat-value">' + dupCount + '</span> already in your library (will be skipped)'
         : '<span class="stat-value">' + dupCount + '</span> already imported';
       summary.appendChild(span);
     }
@@ -2158,9 +2162,11 @@ function markFolderPreviewStale() {
   if (!_folderPreviewShown) return;
   // A source/destination change invalidates the managed-archive verdict — drop
   // it so the duplicate summary doesn't keep merge-framing against a stale
-  // destination. The callout stays visible (with the stale banner below it)
-  // until the user refreshes, at which point it's recomputed.
+  // destination, and hide the callout so it never asserts an "existing archive"
+  // for a path that may no longer be the destination. The amber "click Refresh"
+  // banner below still prompts the user; the callout is recomputed on refresh.
   _managedArchive = null;
+  renderManagedArchiveCallout();
   document.getElementById('folderPreviewStale').style.display = '';
   var btn = document.getElementById('btnPreviewFolders');
   btn.textContent = 'Refresh preview';

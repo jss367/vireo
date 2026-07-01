@@ -193,7 +193,7 @@ def test_pipeline_duplicate_summary_reframed_when_merging(live_server, page):
         "updateDuplicateSummary({done: true, duplicate_count: 2, total: 5});"
     )
     dup = page.locator("#previewSummary .dup-status")
-    expect(dup).to_contain_text("already in this archive")
+    expect(dup).to_contain_text("already in your library")
     expect(dup).to_contain_text("will be skipped")
     expect(dup).to_contain_text("3 new")
     expect(dup).to_contain_text("will be merged")
