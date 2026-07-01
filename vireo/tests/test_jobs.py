@@ -568,8 +568,6 @@ def test_job_history_persists_steps_tree(tmp_path):
 
 def test_job_history_prunes_to_100(tmp_path):
     """Job history prunes entries beyond 100 per workspace."""
-    import time
-
     from db import Database
     from jobs import JobRunner
 
@@ -591,9 +589,12 @@ def test_job_history_prunes_to_100(tmp_path):
     def work(job):
         return {}
 
+    # Pruning happens inside _persist_job (INSERT + retention DELETE), and
+    # _persisted flips true only after both commit. A fixed sleep raced the
+    # worker thread on slower Windows I/O; wait_for_history is the exact
+    # sync point.
     job_id = runner.start("test", work, workspace_id=ws_id)
-    wait_for_job_via_runner(runner, job_id)
-    time.sleep(0.5)
+    wait_for_job_via_runner(runner, job_id, wait_for_history=True)
 
     count = db.conn.execute(
         "SELECT COUNT(*) FROM job_history WHERE workspace_id = ?", (ws_id,)

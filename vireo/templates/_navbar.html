@@ -543,6 +543,13 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
 }
+.lifelist-lb-panel { display:flex; flex-direction:column; gap:6px; align-items:stretch; padding:4px 8px; border-radius:4px; background:rgba(12,14,16,0.88); border:1px solid rgba(255,255,255,0.42); color:#f4f7f8; font-size:12px; font-weight:650; text-shadow:0 1px 1px rgba(0,0,0,0.75); }
+.lifelist-lb-row { display:flex; align-items:center; gap:8px; justify-content:space-between; }
+.lifelist-lb-row .lifelist-lb-species { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:180px; }
+.lifelist-lb-panel button { min-height:24px; border:1px solid rgba(255,255,255,0.42); background:rgba(255,255,255,0.12); color:#fff; border-radius:4px; padding:4px 9px; cursor:pointer; font-size:12px; font-weight:650; }
+.lifelist-lb-panel button:hover { background:rgba(255,255,255,0.2); border-color:rgba(255,255,255,0.72); }
+.lifelist-lb-panel button:disabled { cursor:default; }
+.lifelist-lb-panel button.primary { border-color:rgba(255,224,102,0.84); color:#ffe066; background:rgba(255,224,102,0.10); }
 .lightbox-adjust-panel {
   display: none;
   position: absolute;
@@ -3509,6 +3516,114 @@ var _lbEditRecipeWriteSeq = 0;
 var _lbEditRecipeWriteSeqByPhoto = {};
 var _lbPhotoDataByPhoto = {};
 var _lbRenderVersionByPhoto = {};
+
+// --- Life List: "Add to Life List" panel, shared across every page's lightbox.
+// Driven by the `life_list` block on GET /api/photos/<id> (cached in
+// _lbPhotoDataByPhoto), so the action works wherever a photo is opened — not
+// just on the /life-list page. Each eligible species gets its own row; the
+// button reflects real state (representative → selected, disabled star).
+function _lbEnsureLifeListPanel() {
+  var actions = document.getElementById('lightboxActions');
+  if (!actions) return null;
+  var panel = document.getElementById('lifeListLightboxPanel');
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.id = 'lifeListLightboxPanel';
+    panel.className = 'lifelist-lb-panel';
+    actions.insertBefore(panel, actions.firstChild);
+  }
+  return panel;
+}
+
+function _lbRenderLifeListPanel(photoId) {
+  var panel = _lbEnsureLifeListPanel();
+  if (!panel) return;
+  var data = _lbPhotoDataByPhoto[String(photoId)];
+  var entries = (data && data.life_list) || [];
+  if (!entries.length) {
+    panel.style.display = 'none';
+    panel.innerHTML = '';
+    return;
+  }
+  panel.style.display = '';
+  panel.innerHTML = '';
+  entries.forEach(function(entry) {
+    var row = document.createElement('div');
+    row.className = 'lifelist-lb-row';
+    var label = document.createElement('span');
+    label.className = 'lifelist-lb-species';
+    label.textContent = entry.species;
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    if (entry.is_current_photo) {
+      btn.className = 'primary';
+      btn.disabled = true;
+      btn.textContent = '★ Life List photo';
+    } else {
+      btn.textContent = 'Add to Life List';
+    }
+    btn.addEventListener('click', function(event) {
+      event.stopPropagation();
+      setLifeListPhoto(entry.species, photoId, btn);
+    });
+    row.appendChild(label);
+    row.appendChild(btn);
+    panel.appendChild(row);
+  });
+}
+
+async function setLifeListPhoto(species, photoId, button) {
+  if (!species || !photoId) return;
+  if (button) button.disabled = true;
+  try {
+    await window.safeFetch('/api/photo-preferences', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ purpose: 'life_list', species: species, photo_id: photoId }),
+    });
+    // Re-read this photo's block so the panel shows the honest new state, and
+    // refresh the lightbox's cache so re-renders stay consistent.
+    try {
+      var fresh = await window.safeFetch('/api/photos/' + photoId, {}, { toast: false });
+      if (fresh) _lbPhotoDataByPhoto[String(photoId)] = fresh;
+    } catch (e) { /* keep the panel usable even if the refresh fails */ }
+    if (_lightboxCurrentId === photoId) _lbRenderLifeListPanel(photoId);
+    // Let the /life-list page (or any listener) refresh its grid + ribbons.
+    document.dispatchEvent(new CustomEvent('lifelist:changed', {
+      detail: { species: species, photoId: photoId },
+    }));
+    if (typeof showToast === 'function') {
+      showToast('Life List photo set for ' + species, 'success');
+    }
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+document.addEventListener('lightbox:photochanged', function(event) {
+  var pid = event.detail ? event.detail.photoId : null;
+  // Render from cache now (instant when revisiting a loaded photo); the panel
+  // re-renders again once the fresh /api/photos fetch resolves.
+  if (pid != null) _lbRenderLifeListPanel(pid);
+});
+
+// A photo's flag decides its life-list eligibility (a rejected photo can't be a
+// Life List photo, per _photo_can_be_life_list_preference). The cached
+// `life_list` block goes stale the moment the user changes the flag from the
+// lightbox, so re-fetch it and re-render — this hides the panel when the photo
+// becomes rejected and re-shows it when the flag is cleared again.
+document.addEventListener('lightbox:flagchanged', async function(event) {
+  var pid = event.detail ? event.detail.photoId : null;
+  if (pid == null || _lightboxCurrentId !== pid) return;
+  try {
+    var fresh = await window.safeFetch('/api/photos/' + pid, {}, { toast: false });
+    // Guard against a stale fetch clobbering the panel after navigation.
+    if (!fresh || _lightboxCurrentId !== pid) return;
+    _lbPhotoDataByPhoto[String(pid)] = fresh;
+    _lbRenderLifeListPanel(pid);
+  } catch (e) { /* leave the last-rendered panel in place if the refresh fails */ }
+});
+
 var _lbEditRecipe = null;
 var _lbEditRecipeLoaded = false;
 var _lbRenderedAdjustmentValues = null;
@@ -6194,6 +6309,7 @@ function openLightbox(photoId, filename, photoList, options) {
         data.edit_recipe = _lbRecipeHasEdits(currentRecipe) ? _lbCloneEditRecipe(currentRecipe) : null;
       }
       _lbPhotoDataByPhoto[String(photoId)] = data;
+      _lbRenderLifeListPanel(photoId);
       if (editRecipeFresh) {
         _lbRememberEditRecipe(photoId, data.edit_recipe);
         if (_vireoEditRecipeCacheKey(data.edit_recipe) !== recipeKeyBefore) {
