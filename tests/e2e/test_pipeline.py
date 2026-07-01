@@ -204,6 +204,17 @@ def test_pipeline_reclassify_flips_classify_pill_to_will_run(live_server, page):
     expect(page.locator("#pillClassify")).to_contain_text("Will run")
 
 
+def test_pipeline_labels_get_more_opens_download_modal(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    page.click("#card-classify .stage-header")
+    page.get_by_role("button", name="Get more").click()
+    modal = page.locator("#pipelineLabelsModal")
+    expect(modal).to_have_class(re.compile("open"))
+    expect(modal.get_by_role("heading", name="Download Species Labels")).to_be_visible()
+    expect(page.locator("#pipelineTaxonCheckboxes")).to_contain_text("Birds")
+
+
 def test_pipeline_toggling_classify_off_marks_downstream_will_skip(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")

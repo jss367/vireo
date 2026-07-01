@@ -1820,6 +1820,18 @@ def test_pipeline_has_model_checkboxes(app_and_db):
     assert b'id="cfgModel"' not in resp.data  # old single select removed
 
 
+def test_pipeline_exposes_inline_label_download_modal(app_and_db):
+    """Pipeline page lets users download species labels without leaving."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/pipeline')
+    assert resp.status_code == 200
+    html = resp.data.decode()
+    assert 'openPipelineLabelsModal()' in html
+    assert 'id="pipelineLabelsModal"' in html
+    assert 'id="pipelineFetchLabelsBtn"' in html
+
+
 def test_cull_page_uses_pipeline_controls(app_and_db):
     """Cull exposes the same threshold sliders as pipeline review."""
     app, _ = app_and_db
