@@ -2918,39 +2918,76 @@ class Database:
                 last_target_parent[target_path] = sf["id"]
             else:
                 # Existing folder: move photos in, drop filename-collisions.
-                photo_ids = [r["id"] for r in self.conn.execute(
-                    "SELECT id FROM photos WHERE folder_id = ?", (sf["id"],)
-                )]
-                # ``check_filename_collisions`` is filename-only: it flags a
-                # staged photo whose basename already has a catalog row in the
-                # target folder. That is NOT sufficient to drop the staged
+                staged_photos = list(self.conn.execute(
+                    "SELECT id, filename FROM photos WHERE folder_id = ?",
+                    (sf["id"],),
+                ))
+                # Detect collisions against the ACTUAL target volume's case
+                # rules — not SQLite's default case-sensitive TEXT compare.
+                # On a case-insensitive volume (default macOS APFS, Windows
+                # NTFS), a target row/file named ``IMG.RAF`` and a staged
+                # ``img.raf`` are the same on-disk file: rsync
+                # ``--ignore-existing`` treats them as already present and
+                # skips the copy. A case-sensitive SQL match would miss that,
+                # fall into the else-branch reparent below, and land TWO
+                # catalog rows in one folder pointing at the same on-disk
+                # file (SQLite text-equality is case-sensitive, so
+                # UNIQUE(folder_id, filename) would not fire to catch the
+                # mistake). Build the collision map by normalizing filenames
+                # with the target filesystem's case rules instead. Probes
+                # ``target_path``'s deepest existing ancestor, so a fresh
+                # subfolder inherits its mount's behavior.
+                from move import _case_insensitive_root
+                target_folds_case = _case_insensitive_root(target_path) is not None
+                normalize = (str.casefold if target_folds_case
+                             else (lambda s: s))
+                existing_by_key = {}
+                for row in self.conn.execute(
+                    "SELECT id, filename FROM photos WHERE folder_id = ?",
+                    (target["id"],),
+                ):
+                    # First writer wins on the (unlikely) chance two
+                    # case-alias rows already coexist in the target folder
+                    # from a pre-fix catalog.
+                    existing_by_key.setdefault(
+                        normalize(row["filename"]),
+                        {"id": row["id"], "filename": row["filename"]},
+                    )
+
+                # A filename-collision alone is NOT enough to drop the staged
                 # photo as ``already_present``. The drop is only safe when the
                 # collision is REAL on disk — i.e. the archived file actually
                 # exists at ``target_path/filename``, which is the case the
                 # rsync ``--ignore-existing`` merge relied on (it skipped the
                 # staged copy because the byte-identical archived file was
                 # already there; a DIFFERING file would have aborted the move
-                # upstream in the content-conflict check). If the target catalog
-                # row is stale — its file missing on disk — the upstream check
-                # never fired (no dest file to compare), rsync COPIED the staged
-                # bytes into place, and dropping the staged row would leave those
-                # fresh bytes represented by the old (phantom) row's
-                # hash/metadata, losing the new photo. So when the target file is
-                # absent, do NOT drop the staged photo. Instead delete the stale
-                # target row (its file no longer exists) and reparent the staged
-                # photo in its place, so the surviving catalog row describes the
-                # bytes actually on disk. This also avoids a UNIQUE(folder_id,
-                # filename) violation from moving the staged row onto a folder
-                # that still holds the same basename.
-                collisions = {c["photo_id"]: c["filename"]
-                              for c in self.check_filename_collisions(
-                                  photo_ids, target["id"])}
-                for pid in photo_ids:
-                    filename = collisions.get(pid)
+                # upstream in the content-conflict check). If the target
+                # catalog row is stale — its file missing on disk — the
+                # upstream check never fired (no dest file to compare), rsync
+                # COPIED the staged bytes into place, and dropping the staged
+                # row would leave those fresh bytes represented by the old
+                # (phantom) row's hash/metadata, losing the new photo. So
+                # when the target file is absent, do NOT drop the staged
+                # photo. Instead delete the stale target row (its file no
+                # longer exists) and reparent the staged photo in its place,
+                # so the surviving catalog row describes the bytes actually
+                # on disk. This also avoids a UNIQUE(folder_id, filename)
+                # violation from moving the staged row onto a folder that
+                # still holds the same basename.
+                for staged in staged_photos:
+                    pid = staged["id"]
+                    collision = existing_by_key.get(
+                        normalize(staged["filename"]))
+                    # The archived filename may differ in case from the
+                    # staged one; probe for the ACTUAL archived name so
+                    # ``os.path.exists`` matches on case-sensitive volumes
+                    # too (where any case-alias check is pointless anyway).
+                    target_filename = (collision["filename"]
+                                       if collision else None)
                     real_collision = (
-                        filename is not None
+                        target_filename is not None
                         and os.path.exists(
-                            _join_subtree_path(target_path, filename))
+                            _join_subtree_path(target_path, target_filename))
                     )
                     if real_collision:
                         # photo_keywords.photo_id has no ON DELETE CASCADE
@@ -2963,24 +3000,24 @@ class Database:
                             "DELETE FROM photos WHERE id = ?", (pid,))
                         counts["already_present"] += 1
                     else:
-                        if filename is not None:
-                            # Filename collided but the archived file is missing
-                            # on disk: the staged bytes were freshly copied and
-                            # the target row is a phantom. Drop the phantom so
-                            # the reparent below can take its (folder_id,
+                        if collision is not None:
+                            # Filename collided (case-normalized) but the
+                            # archived file is missing on disk: the staged
+                            # bytes were freshly copied and the target row is
+                            # a phantom. Drop the phantom by id so the
+                            # reparent below can take its (folder_id,
                             # filename) slot and represent the real file.
-                            stale = self.conn.execute(
-                                "SELECT id FROM photos "
-                                "WHERE folder_id = ? AND filename = ?",
-                                (target["id"], filename),
-                            ).fetchone()
-                            if stale is not None:
-                                self.conn.execute(
-                                    "DELETE FROM photo_keywords "
-                                    "WHERE photo_id = ?", (stale["id"],))
-                                self.conn.execute(
-                                    "DELETE FROM photos WHERE id = ?",
-                                    (stale["id"],))
+                            # Deleting by id (not filename) is required on
+                            # case-insensitive volumes where the staged and
+                            # phantom filenames differ only in case: the SQL
+                            # ``filename = ?`` lookup used earlier would miss
+                            # the stale row and leave both intact.
+                            self.conn.execute(
+                                "DELETE FROM photo_keywords "
+                                "WHERE photo_id = ?", (collision["id"],))
+                            self.conn.execute(
+                                "DELETE FROM photos WHERE id = ?",
+                                (collision["id"],))
                         self.conn.execute(
                             "UPDATE photos SET folder_id = ? WHERE id = ?",
                             (target["id"], pid),

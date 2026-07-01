@@ -7713,6 +7713,85 @@ def test_merge_staged_tree_missing_target_file_keeps_new_photo(db, tmp_path):
     ).fetchone() is None
 
 
+def test_merge_staged_tree_case_alias_collision_on_case_insensitive_volume(
+    db, tmp_path, monkeypatch,
+):
+    """On a case-insensitive archive volume (default macOS APFS, Windows
+    NTFS) an existing catalog row ``IMG.RAF`` and a staged ``img.raf`` are
+    the same on-disk file: rsync ``--ignore-existing`` treats them as a
+    match and skips the staged copy. Without a case-aware collision check
+    the staged row would be reparented onto the target folder, leaving TWO
+    catalog rows in one folder for the same file (SQLite text-equality is
+    case-sensitive so UNIQUE(folder_id, filename) doesn't fire to catch
+    the mistake). The staged row must be dropped as ``already_present``.
+    """
+    ws = db._active_workspace_id
+
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-06-30"
+    date_dir.mkdir(parents=True)
+    # Only the upper-case archived file exists on disk. The staged
+    # lower-case name would resolve to this same file on a case-folding
+    # volume.
+    (date_dir / "IMG.RAF").write_bytes(b"archived-bytes")
+
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-06-30",
+                            parent_id=base_id)
+    archived_pid = db.add_photo(folder_id=date_id, filename="IMG.RAF",
+                                extension=".raf", file_size=100,
+                                file_mtime=1.0, file_hash="ARCH")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-06-30"), name="2026-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    staged_pid = db.add_photo(folder_id=stage_leaf, filename="img.raf",
+                              extension=".raf", file_size=100,
+                              file_mtime=2.0, file_hash="STAGED")
+
+    # Force the merge to treat the target volume as case-insensitive
+    # regardless of the CI host's actual filesystem behavior (Linux ext4
+    # is case-sensitive, so the underlying ``_case_insensitive_root``
+    # probe would otherwise return None and the fix wouldn't be exercised
+    # in this test environment).
+    import move
+    monkeypatch.setattr(move, "_case_insensitive_root", lambda p: "/")
+    # And make ``os.path.exists`` treat the case-alias lookup as present,
+    # since a real case-insensitive volume would resolve
+    # ``.../IMG.raf`` / ``.../img.raf`` back to the same on-disk file.
+    real_exists = os.path.exists
+    def case_insensitive_exists(p):
+        if real_exists(p):
+            return True
+        # Fall back to a case-insensitive directory listing.
+        parent = os.path.dirname(p)
+        base = os.path.basename(p).lower()
+        try:
+            entries = os.listdir(parent)
+        except OSError:
+            return False
+        return any(e.lower() == base for e in entries)
+    monkeypatch.setattr("db.os.path.exists", case_insensitive_exists)
+
+    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    # The staged row was dropped, not reparented — one row remains for the
+    # archived file.
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos WHERE folder_id = ?", (date_id,),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["id"] == archived_pid
+    assert rows[0]["filename"] == "IMG.RAF"
+    assert db.conn.execute(
+        "SELECT 1 FROM photos WHERE id = ?", (staged_pid,)
+    ).fetchone() is None
+    assert counts["already_present"] == 1
+    assert counts["new_photos"] == 0
+
+
 def test_folder_under_rule_excludes_siblings_and_escapes_wildcards(tmp_path, monkeypatch):
     """'folder under /photos/2023' must match that folder and its
     descendants only — not the sibling /photos/2023-trip — and a _ in the

@@ -1055,6 +1055,41 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             # per-file content-conflict guard below
                             # (conflicting_archive_paths) still refuses any
                             # same-path file whose bytes differ.
+                            #
+                            # BUT — the merge only supports the "exact overlap"
+                            # (destination IS a tracked folder) and the "ancestor
+                            # overlap" (destination is INSIDE a tracked folder)
+                            # cases. A tracked row STRICTLY BELOW the destination
+                            # (e.g. /Photos/USA already tracked and the user
+                            # picks /Photos) is the "wrap a fresh parent around
+                            # an existing tracked subtree" case which
+                            # move_folder refuses even with allow_tracked_merge.
+                            # Without an early refuse here the pipeline would
+                            # stage and process everything, then fail only at
+                            # the archive step and leave processed results
+                            # stranded under staging. Mirror move_folder's
+                            # alias-folded check so a symlink or case-only alias
+                            # of the tracked path is treated as the exact-match
+                            # case, not a descendant.
+                            from move import (
+                                _path_equal_or_descends,
+                                _tracked_destination_overlap,
+                            )
+                            preflight_tracked = _tracked_destination_overlap(
+                                thread_db, -1, final_destination,
+                            )
+                            if preflight_tracked and not _path_equal_or_descends(
+                                final_destination, preflight_tracked["path"],
+                            ):
+                                _bail_storage(
+                                    f"Archive destination {final_destination} "
+                                    "sits above a folder Vireo already manages "
+                                    f"({preflight_tracked['path']}). Merging "
+                                    "around a tracked subfolder isn't "
+                                    "supported. Pick the tracked folder itself "
+                                    "or a location outside it."
+                                )
+                                return
 
                             # Make sure the archive parent exists NOW. Otherwise
                             # the pipeline would stage and process everything,

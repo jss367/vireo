@@ -493,6 +493,89 @@ def test_pipeline_local_processing_merges_into_subfolder_of_tracked_root(
         db.close()
 
 
+def test_pipeline_refuses_destination_that_wraps_tracked_subfolder(
+    setup, tmp_path, monkeypatch,
+):
+    """Regression: ``move_folder(..., allow_tracked_merge=True)`` refuses a
+    destination that sits STRICTLY ABOVE an already-tracked folder (e.g.
+    ``/Photos/USA`` tracked and the user picks ``/Photos``) — merging would
+    wrap a fresh parent around the existing tracked subtree. Without the
+    matching preflight check in the pipeline the job would stage and
+    process everything, then fail only at the final archive step and leave
+    the processed results stranded under ``~/.vireo/staging``. The
+    preflight must bail in the storage stage before any staging work
+    happens, marking scan and ingest as skipped so the pipeline actually
+    terminates.
+    """
+    app, db_path = setup
+
+    parent_dest = tmp_path / "nas" / "Photos"
+    tracked_child = parent_dest / "USA"
+    tracked_child.mkdir(parents=True)
+
+    import local_processing
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    # Only the child is tracked in the catalog; the parent is NOT.
+    from db import Database
+    db = Database(db_path)
+    db.add_folder(str(tracked_child))
+    db.close()
+
+    src = tmp_path / "card_wrap"
+    src.mkdir()
+    photo = src / "shot.jpg"
+    Image.new("RGB", (16, 16), "purple").save(photo)
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(parent_dest),
+            "local_processing": True,
+            "folder_template": "%Y/%Y-%m-%d",
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        job = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    # Job terminated — did not hang waiting for a scan that never runs.
+    assert job["status"] == "failed", job
+    error_text = " ".join([
+        str(job.get("error") or ""),
+        str(job.get("result", "")),
+        " ".join(str(s) for s in (job.get("steps") or [])),
+    ])
+    # The specific PREFLIGHT wording ("sits above") — distinct from the
+    # archive-step ``move_folder`` refusal ("Destination overlaps a folder
+    # Vireo already manages") — proves the storage-stage guard fired
+    # before staging, not the archive step at the very end after
+    # everything was processed.
+    assert "sits above" in error_text, error_text
+    assert str(tracked_child) in error_text, error_text
+
+    # Ingest never ran — no photo rows for the source file made it into
+    # the catalog. Without the preflight the pipeline would stage the
+    # file, scan it, and land a catalog row before failing at the archive
+    # move.
+    from db import Database as _Db
+    db2 = _Db(db_path)
+    try:
+        photo_count = db2.conn.execute(
+            "SELECT COUNT(*) c FROM photos"
+        ).fetchone()["c"]
+    finally:
+        db2.close()
+    assert photo_count == 0, photo_count
+
+    # Nothing was copied to the archive destination — the fresh parent
+    # dir stays empty (aside from the pre-existing tracked child dir).
+    landed = list(parent_dest.rglob("*.jpg"))
+    assert landed == [], landed
+
+
 def test_pipeline_merges_new_shoot_into_existing_archive(
     setup, tmp_path, monkeypatch
 ):
