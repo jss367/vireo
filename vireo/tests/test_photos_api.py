@@ -496,6 +496,116 @@ def test_api_photo_detail_includes_on_disk_path(app_and_db):
     assert data['path'] == expected_path
 
 
+def test_photo_detail_life_list_lists_eligible_species(app_and_db):
+    """GET /api/photos/<id> exposes a life_list block naming the photo's
+    lifelist-eligible species so the shared lightbox / browse menu can offer
+    an 'Add to Life List' action without page-local data."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.get_photos()[0]["id"]
+    kid = db.add_keyword("American Robin", is_species=True)
+    db.tag_photo(pid, kid)
+
+    data = client.get(f"/api/photos/{pid}").get_json()
+    assert data["life_list"] == [
+        {"species": "American Robin", "is_current_photo": False}
+    ]
+
+
+def test_photo_detail_life_list_marks_current_representative(app_and_db):
+    """is_current_photo is true once this photo is the species' representative."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.get_photos()[0]["id"]
+    kid = db.add_keyword("American Robin", is_species=True)
+    db.tag_photo(pid, kid)
+    db.set_photo_preference("life_list", "American Robin", pid)
+
+    data = client.get(f"/api/photos/{pid}").get_json()
+    assert data["life_list"] == [
+        {"species": "American Robin", "is_current_photo": True}
+    ]
+
+
+def test_photo_detail_life_list_current_false_when_other_photo_is_rep(app_and_db):
+    """A species can be on the list with a different representative photo; this
+    photo then reports is_current_photo false (button, not selected star)."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    p1, p2 = photos[0]["id"], photos[1]["id"]
+    kid = db.add_keyword("American Robin", is_species=True)
+    db.tag_photo(p1, kid)
+    db.tag_photo(p2, kid)
+    db.set_photo_preference("life_list", "American Robin", p2)
+
+    data = client.get(f"/api/photos/{p1}").get_json()
+    assert data["life_list"] == [
+        {"species": "American Robin", "is_current_photo": False}
+    ]
+
+
+def test_photo_detail_life_list_excludes_non_species_keyword(app_and_db):
+    """Plain (non-species) keywords never produce a lifelist entry."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.get_photos()[0]["id"]
+    kid = db.add_keyword("Central Park", kw_type="location")
+    db.tag_photo(pid, kid)
+
+    data = client.get(f"/api/photos/{pid}").get_json()
+    assert data["life_list"] == []
+
+
+def test_photo_detail_life_list_includes_taxonomy_type_keyword(app_and_db):
+    """type='taxonomy' keywords count even when is_species is 0 — same rule as
+    get_life_list_candidates, so the button and the list can't drift."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.get_photos()[0]["id"]
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('Bald Eagle', 'taxonomy', 0)"
+    )
+    kid = db.conn.execute(
+        "SELECT id FROM keywords WHERE name='Bald Eagle'"
+    ).fetchone()["id"]
+    db.tag_photo(pid, kid)
+    db.conn.commit()
+
+    data = client.get(f"/api/photos/{pid}").get_json()
+    assert data["life_list"] == [
+        {"species": "Bald Eagle", "is_current_photo": False}
+    ]
+
+
+def test_photo_detail_life_list_multiple_species_independent_state(app_and_db):
+    """A photo with two species gets two entries, each with its own state."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.get_photos()[0]["id"]
+    db.tag_photo(pid, db.add_keyword("American Robin", is_species=True))
+    db.tag_photo(pid, db.add_keyword("Blue Jay", is_species=True))
+    db.set_photo_preference("life_list", "Blue Jay", pid)
+
+    data = client.get(f"/api/photos/{pid}").get_json()
+    by_species = {e["species"]: e["is_current_photo"] for e in data["life_list"]}
+    assert by_species == {"American Robin": False, "Blue Jay": True}
+
+
+def test_photo_detail_life_list_empty_for_rejected_photo(app_and_db):
+    """Rejected photos are excluded from the life list, so their block is empty
+    — matches _photo_can_be_life_list_preference, the POST-time backstop."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.get_photos()[0]["id"]
+    kid = db.add_keyword("American Robin", is_species=True)
+    db.tag_photo(pid, kid)
+    db.update_photo_flag(pid, "rejected")
+
+    data = client.get(f"/api/photos/{pid}").get_json()
+    assert data["life_list"] == []
+
+
 def test_api_photos_by_ids_preserves_selection_order(app_and_db):
     """POST /api/photos/by-ids returns active-workspace photos in caller order."""
     app, db = app_and_db

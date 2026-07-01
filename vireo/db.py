@@ -7949,6 +7949,35 @@ class Database:
             (ws,),
         ).fetchall()
 
+    def get_photo_life_list_species(self, photo_id):
+        """Return this photo's lifelist-eligible species names in the active
+        workspace, ordered by name.
+
+        Same eligibility rule as :meth:`get_life_list_candidates`: an accepted
+        species keyword (``is_species = 1`` or ``type = 'taxonomy'``) on a
+        non-rejected photo in a workspace-visible folder. Returns ``[]`` when
+        the photo carries no such species (or is rejected / outside the
+        workspace), which is exactly when no "Add to Life List" affordance
+        should appear.
+        """
+        ws = self._ws_id()
+        rows = self.conn.execute(
+            """SELECT DISTINCT k.name AS species
+               FROM photo_keywords pk
+               JOIN keywords k ON k.id = pk.keyword_id
+                AND (k.is_species = 1 OR k.type = 'taxonomy')
+               JOIN photos p ON p.id = pk.photo_id
+                AND COALESCE(p.flag, 'none') != 'rejected'
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                AND wf.workspace_id = ?
+               JOIN folders f ON f.id = p.folder_id
+                AND f.status IN ('ok', 'partial')
+               WHERE pk.photo_id = ?
+               ORDER BY k.name""",
+            (ws, photo_id),
+        ).fetchall()
+        return [r["species"] for r in rows]
+
     def get_life_list_locations(self):
         """Return {species name: [location keyword names]} for the life list.
 

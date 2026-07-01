@@ -37,11 +37,8 @@
 
   .lifelist-empty { text-align:center; padding:80px 24px; color:var(--text-secondary); }
   .lifelist-empty a { color:var(--accent); }
-  .lifelist-lb-panel { display:flex; align-items:center; gap:8px; flex-wrap:wrap; min-height:32px; padding:4px 8px; border-radius:4px; background:rgba(12,14,16,0.88); border:1px solid rgba(255,255,255,0.42); color:#f4f7f8; font-size:12px; font-weight:650; text-shadow:0 1px 1px rgba(0,0,0,0.75); }
-  .lifelist-lb-panel button { min-height:24px; border:1px solid rgba(255,255,255,0.42); background:rgba(255,255,255,0.12); color:#fff; border-radius:4px; padding:4px 9px; cursor:pointer; font-size:12px; font-weight:650; }
-  .lifelist-lb-panel button:hover { background:rgba(255,255,255,0.2); border-color:rgba(255,255,255,0.72); }
-  .lifelist-lb-panel button:disabled { color:rgba(255,255,255,0.48); border-color:rgba(255,255,255,0.22); background:rgba(255,255,255,0.06); cursor:default; }
-  .lifelist-lb-panel button.primary { border-color:rgba(255,224,102,0.84); color:#ffe066; }
+  /* .lifelist-lb-panel styles now live in _navbar.html — the "Add to Life
+     List" lightbox panel is shared across every page's lightbox. */
 </style>
 </head>
 <body>
@@ -111,7 +108,6 @@
 <script>
 var currentData = null;
 var debounceTimer = null;
-var activeLightboxPhotoId = null;
 
 // All dynamic values rendered into card HTML pass through escapeAttr —
 // same escaping convention as highlights.html.
@@ -235,13 +231,12 @@ function render() {
       var entry = (currentData.species || []).find(function(e) { return e.species === sp; });
       if (entry && entry.best && window.openLightbox) {
         // The lightbox set is this species' top photos so the user can
-        // flip through their best shots of the lifer.
-        activeLightboxPhotoId = entry.best.id;
+        // flip through their best shots of the lifer. The shared lightbox
+        // panel (see _navbar.html) renders its own "Add to Life List" control.
         openLightbox(entry.best.id, entry.best.filename, entry.photos || [entry.best]);
       }
     });
   });
-  updateLifeListLightboxControls(activeLightboxPhotoId);
 }
 
 function debounceRender() {
@@ -307,71 +302,11 @@ async function startPublishSite() {
   }
 }
 
-function findLifeListEntryForPhoto(photoId) {
-  if (!currentData || photoId == null) return null;
-  var entries = currentData.species || [];
-  for (var i = 0; i < entries.length; i++) {
-    var match = (entries[i].photos || []).find(function(p) { return p.id === photoId; });
-    if (match) return { entry: entries[i], photo: match };
-  }
-  return null;
-}
-
-function ensureLifeListLightboxPanel() {
-  var actions = document.getElementById('lightboxActions');
-  if (!actions) return null;
-  var panel = document.getElementById('lifeListLightboxPanel');
-  if (!panel) {
-    panel = document.createElement('div');
-    panel.id = 'lifeListLightboxPanel';
-    panel.className = 'lifelist-lb-panel';
-    actions.insertBefore(panel, actions.firstChild);
-  }
-  return panel;
-}
-
-async function setLifeListPhoto(species, photoId, button) {
-  if (!species || !photoId) return;
-  if (button) button.disabled = true;
-  try {
-    await safeFetch('/api/photo-preferences', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ purpose: 'life_list', species: species, photo_id: photoId }),
-    });
-    await loadLifeList();
-    updateLifeListLightboxControls(activeLightboxPhotoId);
-    if (typeof showToast === 'function') showToast('Life List photo set', 'success');
-  } finally {
-    if (button) button.disabled = false;
-  }
-}
-
-function updateLifeListLightboxControls(photoId) {
-  var panel = ensureLifeListLightboxPanel();
-  if (!panel) return;
-  var match = findLifeListEntryForPhoto(photoId);
-  if (!match) {
-    panel.style.display = 'none';
-    panel.innerHTML = '';
-    return;
-  }
-  panel.style.display = '';
-  var selected = !!match.photo.is_life_list_photo;
-  panel.innerHTML = '<span>' + escapeAttr(match.entry.species) + '</span>'
-    + '<button data-lb-action="set-life-list"'
-    + (selected ? ' class="primary"' : '') + '>'
-    + (selected ? 'Life List Photo' : 'Use as Life List') + '</button>';
-  var btn = panel.querySelector('button');
-  btn.addEventListener('click', function(event) {
-    event.stopPropagation();
-    setLifeListPhoto(match.entry.species, match.photo.id, btn);
-  });
-}
-
-document.addEventListener('lightbox:photochanged', function(event) {
-  activeLightboxPhotoId = event.detail ? event.detail.photoId : null;
-  updateLifeListLightboxControls(activeLightboxPhotoId);
+// The "Add to Life List" lightbox panel is shared (see _navbar.html) and
+// works on every page. When it changes a representative photo, it dispatches
+// `lifelist:changed`; refresh this page's grid + ribbons in response.
+document.addEventListener('lifelist:changed', function() {
+  loadLifeList();
 });
 
 loadLifeList();

@@ -3222,6 +3222,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         keywords = db.get_photo_keywords(photo_id)
         result["keywords"] = [dict(k) for k in keywords]
 
+        # Life-list block: the photo's eligible species plus whether this photo
+        # is the current representative for each, so the shared lightbox and
+        # browse context menu can offer "Add to Life List" and show the honest
+        # selected state without page-local data. Empty when the photo has no
+        # lifelist species (built from the same eligibility rule as the list).
+        life_list_prefs = db.get_photo_preferences("life_list")
+        result["life_list"] = [
+            {"species": s, "is_current_photo": life_list_prefs.get(s) == photo_id}
+            for s in db.get_photo_life_list_species(photo_id)
+        ]
+
         # Location section: pre-resolved leaf + parent chain so the photo
         # detail panel can render the filled state without a second roundtrip.
         result["location"] = _serialize_photo_location(db, photo_id)

@@ -6418,10 +6418,49 @@ function buildPhotoContextMenu(photoIds) {
     { separator: true },
     { label: 'Add Keyword\u2026', onClick: function() { batchAddKeyword(); } },
     { label: 'Add to Collection\u2026', onClick: function() { addToCollection(); } },
+  ]).concat(buildLifeListMenuItems(photoIds)).concat([
     { label: 'Adjust Capture Time\u2026', onClick: function() { openCaptureTimeModal(); } },
     { separator: true },
     { label: 'Delete', onClick: function() { batchDelete(); } },
   ]);
+}
+
+// "Add to Life List" context-menu items. A photo is a lifelist representative
+// per species keyword, so one item per eligible species (the same species
+// names shown on the card). Fire-and-forget: it sets the representative and
+// toasts; the server (_photo_can_be_life_list_preference) is the backstop for
+// a stale menu. Disabled for a multi-selection because crowning one shot from
+// many is ambiguous; hidden entirely when nothing selected has a species.
+function buildLifeListMenuItems(photoIds) {
+  var hasSpecies = photoIds.some(function(id) {
+    var p = photos.find(function(x) { return x.id === id; });
+    return p && p.species && p.species.length;
+  });
+  if (!hasSpecies) return [];
+  if (photoIds.length !== 1) {
+    return [{ label: 'Add to Life List', disabled: true,
+              disabledHint: 'Select a single photo' }];
+  }
+  var photo = photos.find(function(p) { return p.id === photoIds[0]; });
+  return (photo.species || []).map(function(sp) {
+    return {
+      label: 'Add to Life List \u2014 ' + sp,
+      onClick: function() { addPhotoToLifeList(sp, photoIds[0]); },
+    };
+  });
+}
+
+function addPhotoToLifeList(species, photoId) {
+  if (!species || !photoId) return;
+  safeFetch('/api/photo-preferences', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ purpose: 'life_list', species: species, photo_id: photoId }),
+  }).then(function() {
+    if (typeof showToast === 'function') {
+      showToast('Life List photo set for ' + species, 'success');
+    }
+  });
 }
 
 // Document-level delegation: grids re-render on sort/filter/scroll, so
