@@ -68,6 +68,39 @@ def test_get_missing_photos_scope_includes_subtree(tmp_path):
     db.close()
 
 
+def test_get_missing_photos_scope_uses_temp_table_over_variable_cap(tmp_path, monkeypatch):
+    """Large workspace roots must not overflow SQLITE_MAX_VARIABLE_NUMBER.
+
+    Legacy SQLite builds cap bound-variable count at 999. A workspace root
+    with thousands of descendant folders would blow past that in a single
+    IN(...) clause; the scoped Missing Originals query stages the ids in a
+    connection-local temp table once the subtree exceeds the chunk size.
+    Force the chunk size down to a handful and verify the query still
+    returns the right ghosts via the temp-table branch.
+    """
+    import db as db_module
+
+    monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 3)
+
+    db = _db_with_active_ws(tmp_path)
+    root = tmp_path / "root"
+    root.mkdir()
+    froot = db.add_folder(str(root), name="root")
+    ghost_ids = []
+    # Enough subfolders to exceed the patched chunk size several times over.
+    for i in range(10):
+        sub = root / f"sub{i}"
+        sub.mkdir()
+        fsub = db.add_folder(str(sub), name=f"sub{i}", parent_id=froot)
+        pid = _add_photo_file(db, sub, fsub, f"g{i}.jpg")
+        (sub / f"g{i}.jpg").unlink()
+        ghost_ids.append(pid)
+
+    got = sorted(r["id"] for r in db.get_missing_photos(folder_id=froot))
+    assert got == sorted(ghost_ids)
+    db.close()
+
+
 def test_get_missing_photos_scope_includes_legacy_null_parent_descendants(tmp_path):
     """Legacy DBs can have descendant folders with parent_id=NULL.
 

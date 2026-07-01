@@ -2222,9 +2222,27 @@ class Database:
             subtree_ids = self._folder_subtree_ids_by_path(folder_id)
             if not subtree_ids:
                 return []
-            placeholders = ",".join("?" for _ in subtree_ids)
-            subtree_clause = f" AND f.id IN ({placeholders})"
-            params.extend(subtree_ids)
+            if len(subtree_ids) <= _SQLITE_PARAM_CHUNK_SIZE:
+                placeholders = ",".join("?" for _ in subtree_ids)
+                subtree_clause = f" AND f.id IN ({placeholders})"
+                params.extend(subtree_ids)
+            else:
+                # A workspace root with thousands of descendant folders would
+                # overflow SQLITE_MAX_VARIABLE_NUMBER (999 on legacy builds)
+                # in a single IN(...) clause. Stage the ids in a
+                # connection-local temp table and join through that instead.
+                self.conn.execute(
+                    "CREATE TEMP TABLE IF NOT EXISTS missing_subtree_ids "
+                    "(id INTEGER PRIMARY KEY)"
+                )
+                self.conn.execute("DELETE FROM missing_subtree_ids")
+                self.conn.executemany(
+                    "INSERT OR IGNORE INTO missing_subtree_ids (id) VALUES (?)",
+                    [(i,) for i in subtree_ids],
+                )
+                subtree_clause = (
+                    " AND f.id IN (SELECT id FROM missing_subtree_ids)"
+                )
         rows = self.conn.execute(
             f"""SELECT p.id, p.filename, p.extension, p.file_size,
                       p.timestamp, p.working_copy_path,
