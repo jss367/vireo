@@ -7290,13 +7290,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if ws_id is None:
             return jsonify({"workspace_id": None, "new_count": 0, "per_root": [], "sample": []})
 
+        def response_payload(result):
+            """Return a small client payload while keeping full paths in cache."""
+            payload = dict(result)
+            payload["workspace_id"] = ws_id
+            payload["sample"] = list(payload.get("sample") or [])[:5]
+            payload.pop("sample_complete", None)
+            return payload
+
         cache = db._new_images_cache
         db_path = db._db_path
         cached = cache.get(db_path, ws_id)
         if cached is not None:
-            payload = dict(cached)
-            payload["workspace_id"] = ws_id
-            return jsonify(payload)
+            return jsonify(response_payload(cached))
 
         # If a recent compute failed and we're still inside the backoff
         # window, surface the error instead of kicking off another walk.
@@ -7334,7 +7340,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             wdb.set_active_workspace(ws_id)
             try:
                 return count_new_images_for_workspace(
-                    wdb, ws_id, progress_callback=progress_callback,
+                    wdb, ws_id, sample_limit=None, progress_callback=progress_callback,
                 )
             except Exception as e:
                 walk_error["exc"] = e
@@ -7401,9 +7407,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if event.wait(timeout=0.5):
             cached = cache.get(db_path, ws_id)
             if cached is not None:
-                payload = dict(cached)
-                payload["workspace_id"] = ws_id
-                return jsonify(payload)
+                return jsonify(response_payload(cached))
             # Compute finished but produced no cached entry — it must have
             # raised. Surface the error captured by the worker.
             recent_err = cache.get_recent_error(db_path, ws_id)
@@ -7430,16 +7434,41 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ws_id = db._active_workspace_id
         if ws_id is None:
             return jsonify({"error": "no active workspace"}), 400
+        cache = db._new_images_cache
+        db_path = db._db_path
+
+        def create_snapshot_from_result(result):
+            file_paths = list(result.get("sample") or [])
+            snap_id = db.create_new_images_snapshot(file_paths)
+            folders = sorted({os.path.dirname(p) for p in file_paths})
+            return jsonify({
+                "snapshot_id": snap_id,
+                "file_count": len(file_paths),
+                "folders": folders,
+            })
+
+        cached = cache.get(db_path, ws_id)
+        if cached is not None and cached.get("sample_complete"):
+            return create_snapshot_from_result(cached)
+
         from new_images import count_new_images_for_workspace
-        result = count_new_images_for_workspace(db, ws_id, sample_limit=None)
-        file_paths = list(result["sample"])
-        snap_id = db.create_new_images_snapshot(file_paths)
-        folders = sorted({os.path.dirname(p) for p in file_paths})
-        return jsonify({
-            "snapshot_id": snap_id,
-            "file_count": len(file_paths),
-            "folders": folders,
-        })
+
+        def compute():
+            from db import Database
+            wdb = Database(db_path)
+            wdb.set_active_workspace(ws_id)
+            return count_new_images_for_workspace(wdb, ws_id, sample_limit=None)
+
+        event = cache.kickoff_compute(db_path, ws_id, compute)
+        if event.wait(timeout=0.5):
+            cached = cache.get(db_path, ws_id)
+            if cached is not None and cached.get("sample_complete"):
+                return create_snapshot_from_result(cached)
+            recent_err = cache.get_recent_error(db_path, ws_id)
+            if recent_err is not None:
+                return jsonify({"error": recent_err}), 500
+
+        return jsonify({"pending": True}), 202
 
     @app.route(
         "/api/workspaces/active/new-images/snapshot/<int:snapshot_id>",

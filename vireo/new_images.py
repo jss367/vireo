@@ -208,7 +208,12 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
     if progress_callback is not None:
         progress_callback(files_checked, total)
 
-    return {"new_count": total, "per_root": per_root, "sample": sample}
+    return {
+        "new_count": total,
+        "per_root": per_root,
+        "sample": sample,
+        "sample_complete": sample_limit is None or len(sample) >= total,
+    }
 
 
 class NewImagesCache:

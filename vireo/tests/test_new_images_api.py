@@ -149,6 +149,40 @@ def test_api_new_images_returns_cached_after_background_compute_finishes(app_and
     assert data["new_count"] == 1
 
 
+def test_api_new_images_response_trims_full_cached_sample(app_and_db):
+    """The navbar only needs a tiny sample, but the server cache keeps the full
+    path list so "Create a pipeline" can snapshot without a second full walk."""
+    import time
+
+    from new_images import get_shared_cache
+
+    app, db, ws_id, tmp_path = app_and_db
+    root = tmp_path / "shoot"
+    for i in range(8):
+        _touch_image(str(root / f"IMG_{i:03d}.JPG"))
+    db.add_folder(str(root), name="shoot")
+
+    client = app.test_client()
+    resp = client.get("/api/workspaces/active/new-images")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["new_count"] == 8
+    assert len(data["sample"]) == 5
+    assert "sample_complete" not in data
+
+    cache = get_shared_cache()
+    deadline = time.monotonic() + 2.0
+    cached = None
+    while time.monotonic() < deadline:
+        cached = cache.get(db._db_path, ws_id)
+        if cached is not None:
+            break
+        time.sleep(0.01)
+    assert cached is not None
+    assert cached["sample_complete"] is True
+    assert len(cached["sample"]) == 8
+
+
 def test_api_new_images_returns_error_when_compute_fails(app_and_db, monkeypatch):
     """If the background walk raises (e.g. unavailable volume, DB error), the
     endpoint must surface an error instead of looping forever on pending.
@@ -451,6 +485,43 @@ def test_post_snapshot_creates_row_with_current_new_images(app_and_db):
 
     snap = db.get_new_images_snapshot(data["snapshot_id"])
     assert snap["file_count"] == 2
+
+
+def test_post_snapshot_uses_complete_cache_without_rewalk(app_and_db, monkeypatch):
+    import new_images as new_images_module
+    from new_images import get_shared_cache
+
+    app, db, ws_id, tmp_path = app_and_db
+    folder = tmp_path / "photos"
+    paths = []
+    for i in range(7):
+        path = folder / f"IMG_{i:03d}.JPG"
+        _touch_image(str(path))
+        paths.append(str(path))
+    db.add_folder(str(folder))
+
+    get_shared_cache().set(db._db_path, ws_id, {
+        "new_count": len(paths),
+        "per_root": [{"folder_id": 1, "path": str(folder), "new_count": len(paths)}],
+        "sample": paths,
+        "sample_complete": True,
+    })
+
+    def boom(*args, **kwargs):
+        raise AssertionError("snapshot endpoint should not re-walk complete cache")
+
+    monkeypatch.setattr(
+        new_images_module, "count_new_images_for_workspace", boom,
+    )
+
+    with app.test_client() as client:
+        resp = client.post("/api/workspaces/active/new-images/snapshot")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["file_count"] == 7
+
+    snap = db.get_new_images_snapshot(data["snapshot_id"])
+    assert snap["file_count"] == 7
 
 
 def test_post_snapshot_zero_new_images_returns_200(app_and_db):
