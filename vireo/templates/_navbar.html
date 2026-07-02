@@ -2253,9 +2253,10 @@ window.NAV_DEFAULT_TABS = [
   'highlights', 'misses', 'settings'
 ];
 window.NAV_ALL_PAGES = [
-  {id: 'pipeline',        label: 'Pipeline',        href: '/pipeline'},
+  {id: 'pipeline',        label: 'Process',         href: '/pipeline',
+   keywords: 'import add photos ingest scan process new'},
   {id: 'jobs',            label: 'Jobs',            href: '/jobs'},
-  {id: 'pipeline_review', label: 'Pipeline Review', href: '/pipeline/review'},
+  {id: 'pipeline_review', label: 'Process Review',  href: '/pipeline/review'},
   {id: 'pipeline_rapid_review', label: 'Rapid Review', href: '/pipeline/rapid-review'},
   {id: 'review',          label: 'Review',          href: '/review'},
   {id: 'cull',            label: 'Cull',            href: '/cull'},
@@ -2913,7 +2914,7 @@ window.NAV_ALL_PAGES = [
     },
     navigation: {
       _title: 'Navigation',
-      import: 'Import', pipeline: 'Pipeline', pipeline_review: 'Pipeline Review',
+      import: 'Import', pipeline: 'Process', pipeline_review: 'Process Review',
       review: 'Review', cull: 'Cull', browse: 'Browse', map: 'Map',
       variants: 'Variants', dashboard: 'Dashboard', audit: 'Audit',
       compare: 'Compare', workspace: 'Workspace', keywords: 'Keywords',
@@ -9222,8 +9223,8 @@ function formatDuration(seconds) {
     // the running-job render path below.
     if (running.length === 0) {
       summary.textContent = waiting.length === 1
-        ? 'Pipeline queued'
-        : waiting.length + ' pipelines queued';
+        ? 'Processing queued'
+        : waiting.length + ' processing jobs queued';
       return;
     }
 
@@ -10053,8 +10054,9 @@ async function _deleteMissingPhotoIds(ids, deleteSidecars) {
     if (window.Fuse) {
       fuse = new Fuse(allPages, {
         keys: [
-          {name: 'label', weight: 0.7},
-          {name: 'id',    weight: 0.3},
+          {name: 'label',    weight: 0.6},
+          {name: 'keywords', weight: 0.3},
+          {name: 'id',       weight: 0.1},
         ],
         threshold: 0.4,
         ignoreLocation: true,
@@ -10109,7 +10111,9 @@ async function _deleteMissingPhotoIds(ids, deleteSidecars) {
     } else {
       const q = query.toLowerCase();
       results = allPages.filter(p =>
-        p.label.toLowerCase().includes(q) || p.id.includes(q)
+        p.label.toLowerCase().includes(q) ||
+        p.id.includes(q) ||
+        (p.keywords || '').toLowerCase().includes(q)
       );
     }
     if (selectedIndex >= results.length) selectedIndex = 0;

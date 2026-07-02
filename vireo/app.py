@@ -86,9 +86,10 @@ _WIN_ERROR_MODE_LOCK = threading.Lock()
 # The `id` is the nav-id used in `tabs`; `href` is the canonical
 # route. Labels match what the navbar showed before the unification.
 ALL_PAGES = [
-    {"id": "pipeline",        "label": "Pipeline",        "href": "/pipeline"},
+    {"id": "pipeline",        "label": "Process",         "href": "/pipeline",
+     "keywords": "import add photos ingest scan process new"},
     {"id": "jobs",            "label": "Jobs",            "href": "/jobs"},
-    {"id": "pipeline_review", "label": "Pipeline Review", "href": "/pipeline/review"},
+    {"id": "pipeline_review", "label": "Process Review",  "href": "/pipeline/review"},
     {"id": "pipeline_rapid_review", "label": "Rapid Review", "href": "/pipeline/rapid-review"},
     {"id": "review",          "label": "Review",          "href": "/review"},
     {"id": "cull",            "label": "Cull",            "href": "/cull"},
