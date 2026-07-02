@@ -82,6 +82,14 @@ def tree_of_life_ready(model_str, model_dir):
         for f in TOL_ARTIFACT_FILES
     )
 
+
+# The model a fresh install downloads and classifies with by default (the
+# welcome flow downloads this, and get_active_model() prefers it when the user
+# hasn't chosen one). BioCLIP-2.5 is the strongest variant and ships Tree of
+# Life embeddings, so it classifies label-free out of the box — no regional
+# species list required for a new user to get results.
+DEFAULT_MODEL_ID = "bioclip-2.5-vith14"
+
 # Known models that can be downloaded.
 # Each entry specifies which ONNX files are needed and the subdirectory
 # within the HF repo where they live.
@@ -387,7 +395,11 @@ def build_self_heal_redownloader(model_dir):
 
 
 def get_active_model():
-    """Return the currently active model config, or the first downloaded one."""
+    """Return the currently active model config, or the default when unset.
+
+    Priority: the explicitly-selected active_model, then DEFAULT_MODEL_ID if
+    downloaded, then any downloaded model (KNOWN_MODELS order).
+    """
     config = _load_config()
     models = get_models()
     active_id = config.get("active_model")
@@ -397,7 +409,12 @@ def get_active_model():
             if m["id"] == active_id and m["downloaded"]:
                 return m
 
-    # Fall back to first downloaded model
+    # No explicit choice: prefer the default model if it's downloaded.
+    for m in models:
+        if m["id"] == DEFAULT_MODEL_ID and m["downloaded"]:
+            return m
+
+    # Otherwise fall back to the first downloaded model.
     for m in models:
         if m["downloaded"]:
             return m

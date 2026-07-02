@@ -282,6 +282,34 @@ def test_get_active_model_fallback(tmp_path, monkeypatch):
     assert active["id"] == "bioclip-vit-b-16"
 
 
+def test_get_active_model_prefers_default(tmp_path, monkeypatch):
+    """With no active_model set, prefer DEFAULT_MODEL_ID over the first
+    downloaded model, even though it isn't first in KNOWN_MODELS order."""
+    import models
+
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+
+    def _make_model(model_id):
+        km = next(m for m in models.KNOWN_MODELS if m["id"] == model_id)
+        d = tmp_path / "models" / model_id
+        d.mkdir(parents=True)
+        for fn in km["files"]:
+            if fn.endswith(".data"):
+                _make_fake_data_file(d / fn)
+            else:
+                (d / fn).write_text("{}")
+
+    # Both v1 (first in KNOWN_MODELS) and the default 2.5 are downloaded.
+    _make_model("bioclip-vit-b-16")
+    _make_model(models.DEFAULT_MODEL_ID)
+    models._save_config({"models": [], "active_model": None})
+
+    active = models.get_active_model()
+    assert active is not None
+    assert active["id"] == models.DEFAULT_MODEL_ID
+
+
 # ---------------------------------------------------------------------------
 # register_model
 # ---------------------------------------------------------------------------
