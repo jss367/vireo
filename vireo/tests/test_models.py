@@ -1740,6 +1740,51 @@ def test_get_models_omits_missing_optional_files_when_all_present(
     assert "missing_optional_files" not in entry
 
 
+def test_get_models_exposes_missing_optional_files_when_unverified(
+    tmp_path, monkeypatch,
+):
+    """An 'unverified' install (all required files present but SHA256
+    check couldn't run because HF was unreachable) must still expose
+    `missing_optional_files` so the Settings UI can offer Repair.
+
+    Without this, the only action on an unverified row is Retry
+    verification, which calls verify_all_models — never download_model
+    or _download_optional_files — and there is no in-app path to fetch
+    the ToL artifacts once they land on HuggingFace short of removing
+    the model entirely.
+
+    Regression for Codex P2 on PR #1077 (vireo/templates/settings.html:2627).
+    """
+    import model_verify
+    import models
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+
+    model_dir = tmp_path / "models" / "bioclip-2.5-vith14"
+    model_dir.mkdir(parents=True)
+    for name in [
+        "image_encoder.onnx",
+        "image_encoder.onnx.data",
+        "text_encoder.onnx",
+        "text_encoder.onnx.data",
+        "tokenizer.json",
+        "config.json",
+    ]:
+        (model_dir / name).write_bytes(b"stub")
+    # Verification could not be run against HuggingFace — this is the
+    # state Codex's comment describes.
+    (model_dir / model_verify.VERIFY_SKIPPED_SENTINEL).write_text(
+        "network unreachable"
+    )
+
+    entry = next(m for m in models.get_models() if m["id"] == "bioclip-2.5-vith14")
+    assert entry["state"] == "unverified"
+    assert entry["downloaded"] is True
+    assert set(entry.get("missing_optional_files") or []) == {
+        "tol_embeddings.npy", "tol_classes.json",
+    }
+
+
 def _stub_hf_for_download_tests(monkeypatch, list_repo_files_fn=None):
     """Install a huggingface_hub stub sufficient for download_model paths.
     list_repo_files_fn, when supplied, drives the optional-file preflight."""
