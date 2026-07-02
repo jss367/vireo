@@ -2431,6 +2431,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 labels_file=params.labels_file,
                 labels_files=params.labels_files,
                 db=thread_db,
+                model_dir=weights_path,
             )
             # Compute a content-addressable fingerprint for the active label set
             # and record it in the labels_fingerprints sidecar. Kept on the bundle
@@ -2468,7 +2469,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 import model_verify
                 try:
                     model_verify.verify_if_needed(
-                        active_model["id"], weights_path, hf_subdir
+                        active_model["id"], weights_path, hf_subdir,
+                        optional_files=active_model.get("optional_files"),
                     )
                 except model_verify.ModelCorruptError as verify_err:
                     log.warning(
@@ -2586,7 +2588,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     ):
                         try:
                             result = model_verify.verify_model(
-                                weights_path, hf_subdir
+                                weights_path, hf_subdir,
+                                optional_files=active_model.get(
+                                    "optional_files"
+                                ),
                             )
                             files_ok = result.ok
                         except model_verify.VerifyError:

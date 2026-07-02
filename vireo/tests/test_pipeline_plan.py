@@ -45,6 +45,20 @@ def _mark_sam_done(db, photo_id, path, variant="sam2-small"):
     db.set_active_mask_variant(photo_id, variant)
 
 
+def _tol_weights(tmp_path, name="bioclip-2"):
+    """Create a fake ToL weights dir with the artifact stubs so
+    `tree_of_life_ready()` treats the model as ready. The label-free ToL
+    gate is disk-aware — it checks `tol_embeddings.npy` and
+    `tol_classes.json` on disk — so tests that mock a ToL-supported model
+    must ship a real dir with the stubs, otherwise the planner blocks the
+    Classify stage. Reused across tests via `exist_ok=True`."""
+    weights = tmp_path / name
+    weights.mkdir(exist_ok=True)
+    (weights / "tol_embeddings.npy").write_bytes(b"stub")
+    (weights / "tol_classes.json").write_bytes(b"[]")
+    return str(weights)
+
+
 # -------- db helpers --------
 
 def test_photos_by_paths_returns_known_and_omits_unknown(tmp_path):
@@ -716,7 +730,8 @@ def test_classify_plan_will_run_when_no_detections_yet(tmp_path, monkeypatch):
     monkeypatch.setattr(models_mod, "get_models", lambda: [
         {"id": "m1", "name": "BioCLIP-2",
          "model_str": "hf-hub:imageomics/bioclip-2",
-         "model_type": "bioclip", "downloaded": True},
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path)},
     ])
     plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
     assert plan["stages"]["Classify"]["state"] == "will-run"
@@ -733,7 +748,8 @@ def test_classify_plan_done_prior_when_all_pairs_recorded(tmp_path, monkeypatch)
     monkeypatch.setattr(models_mod, "get_models", lambda: [
         {"id": "m1", "name": "BioCLIP-2",
          "model_str": "hf-hub:imageomics/bioclip-2",
-         "model_type": "bioclip", "downloaded": True},
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path)},
     ])
     # Pin label resolution: no labels_files passed and no workspace
     # overrides → TOL fallback for bioclip-2. The dev's real
@@ -813,7 +829,8 @@ def test_classify_plan_counts_primary_detections_only(tmp_path, monkeypatch):
     monkeypatch.setattr(models_mod, "get_models", lambda: [
         {"id": "m1", "name": "BioCLIP-2",
          "model_str": "hf-hub:imageomics/bioclip-2",
-         "model_type": "bioclip", "downloaded": True},
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path)},
     ])
     monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
     monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
@@ -841,10 +858,12 @@ def test_classify_plan_will_run_when_new_model_added(tmp_path, monkeypatch):
     monkeypatch.setattr(models_mod, "get_models", lambda: [
         {"id": "m1", "name": "BioCLIP-2",
          "model_str": "hf-hub:imageomics/bioclip-2",
-         "model_type": "bioclip", "downloaded": True},
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path, "bioclip-2")},
         {"id": "m2", "name": "BioCLIP",
          "model_str": "hf-hub:imageomics/bioclip",
-         "model_type": "bioclip", "downloaded": True},
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path, "bioclip")},
     ])
     # Only m1 has been run — the new m2 has zero coverage.
     db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=3)
@@ -868,7 +887,8 @@ def test_classify_plan_reclassify_bypasses_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(models_mod, "get_models", lambda: [
         {"id": "m1", "name": "BioCLIP-2",
          "model_str": "hf-hub:imageomics/bioclip-2",
-         "model_type": "bioclip", "downloaded": True},
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path)},
     ])
     db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=3)
 
@@ -896,7 +916,8 @@ def test_classify_plan_exposes_pending_and_eligible_done_prior(tmp_path, monkeyp
     monkeypatch.setattr(models_mod, "get_models", lambda: [
         {"id": "m1", "name": "BioCLIP-2",
          "model_str": "hf-hub:imageomics/bioclip-2",
-         "model_type": "bioclip", "downloaded": True},
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path)},
     ])
     monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
     monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
@@ -921,10 +942,12 @@ def test_classify_plan_exposes_pending_and_eligible_will_run(tmp_path, monkeypat
     monkeypatch.setattr(models_mod, "get_models", lambda: [
         {"id": "m1", "name": "BioCLIP-2",
          "model_str": "hf-hub:imageomics/bioclip-2",
-         "model_type": "bioclip", "downloaded": True},
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path, "bioclip-2")},
         {"id": "m2", "name": "BioCLIP",
          "model_str": "hf-hub:imageomics/bioclip",
-         "model_type": "bioclip", "downloaded": True},
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path, "bioclip")},
     ])
     monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
     monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
@@ -949,7 +972,8 @@ def test_classify_plan_exposes_pending_and_eligible_reclassify(tmp_path, monkeyp
     monkeypatch.setattr(models_mod, "get_models", lambda: [
         {"id": "m1", "name": "BioCLIP-2",
          "model_str": "hf-hub:imageomics/bioclip-2",
-         "model_type": "bioclip", "downloaded": True},
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path)},
     ])
     db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=3)
 
@@ -1056,7 +1080,8 @@ def test_classify_plan_mixed_blocked_with_no_detections_emits_blocked(
         # Label-free TOL model — unblocked.
         {"id": "m1", "name": "BioCLIP-2",
          "model_str": "hf-hub:imageomics/bioclip-2",
-         "model_type": "bioclip", "downloaded": True},
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path)},
         # Label-needing model with no active labels — blocked.
         {"id": "m2", "name": "BioCLIP ViT-B-16",
          "model_str": "ViT-B-16",
@@ -1104,7 +1129,8 @@ def test_classify_plan_mixed_blocked_with_pending_emits_blocked(
         # uncached and pending_total > 0 for this model).
         {"id": "m1", "name": "BioCLIP-2",
          "model_str": "hf-hub:imageomics/bioclip-2",
-         "model_type": "bioclip", "downloaded": True},
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path)},
         # Label-needing model with no active labels — blocked.
         {"id": "m2", "name": "BioCLIP ViT-B-16",
          "model_str": "ViT-B-16",
@@ -1195,7 +1221,8 @@ def test_classify_plan_emits_fingerprint_outdated_when_stale(
     monkeypatch.setattr(models_mod, "get_models", lambda: [
         {"id": "m1", "name": "BioCLIP-2",
          "model_str": "hf-hub:imageomics/bioclip-2",
-         "model_type": "bioclip", "downloaded": True},
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path)},
     ])
     monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
     monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
@@ -2193,14 +2220,21 @@ def _import_params(paths, **kwargs):
     )
 
 
-def _stub_models(monkeypatch):
+def _stub_models(monkeypatch, tmp_path=None):
     import labels as labels_mod
     import models as models_mod
-    monkeypatch.setattr(models_mod, "get_models", lambda: [
-        {"id": "m1", "name": "BioCLIP-2",
-         "model_str": "hf-hub:imageomics/bioclip-2",
-         "model_type": "bioclip", "downloaded": True},
-    ])
+    model = {
+        "id": "m1", "name": "BioCLIP-2",
+        "model_str": "hf-hub:imageomics/bioclip-2",
+        "model_type": "bioclip", "downloaded": True,
+    }
+    if tmp_path is not None:
+        # Label-free ToL is now disk-aware — the planner checks that the
+        # ToL artifacts exist under weights_path. Tests that expect
+        # BioCLIP-2 to run label-free must ship a real weights dir with
+        # the artifact stubs, otherwise the Classify stage blocks.
+        model["weights_path"] = _tol_weights(tmp_path)
+    monkeypatch.setattr(models_mod, "get_models", lambda: [model])
     monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
     monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
 
@@ -2212,7 +2246,7 @@ def test_import_plan_all_new_files_flips_classify_to_will_run(tmp_path, monkeypa
     from labels_fingerprint import TOL_SENTINEL
     from pipeline_plan import compute_plan
     db, folder_id = _make_db(tmp_path)
-    _stub_models(monkeypatch)
+    _stub_models(monkeypatch, tmp_path)
     # Existing scope: one detection, already classified — would be
     # "done-prior" without imports.
     _, did = _add_photo_with_detection(db, folder_id, "existing.jpg")

@@ -20,6 +20,68 @@ CONFIG_PATH = os.path.expanduser("~/.vireo/models.json")
 # HuggingFace repo containing all ONNX models
 ONNX_REPO = "jss367/vireo-onnx-models"
 
+# BioCLIP model_strs whose model *type* can classify with no label list
+# (open-vocabulary all-species Tree of Life). This is the capability
+# question — "if the artifacts were installed, could this model do ToL?"
+# — not the readiness question. A model's ToL artifacts (tol_embeddings.npy
+# + tol_classes.json) can be declared in either its KNOWN_MODELS "files"
+# manifest (required — the model is 'incomplete' without them) or
+# "optional_files" (best-effort — the model still installs for label-list
+# classification if the artifacts aren't on HF yet or on disk).
+#
+# Callers that route into Classifier(labels=None) or advertise
+# "classification ready" in the UI must use tree_of_life_ready() below,
+# which also checks the artifacts are on disk — otherwise the readiness
+# signal lies about a bioclip-2.5 install whose optional ToL files were
+# skipped (HF hadn't uploaded them, list_repo_files failed, etc.) and
+# the pipeline crashes in Classifier's constructor with FileNotFoundError.
+TOL_SUPPORTED_MODEL_STRS = frozenset({
+    "hf-hub:imageomics/bioclip",
+    "hf-hub:imageomics/bioclip-2",
+    "hf-hub:imageomics/bioclip-2.5-vith14",
+})
+
+# Filenames that make up a Tree of Life install for a supporting model.
+TOL_ARTIFACT_FILES = ("tol_embeddings.npy", "tol_classes.json")
+
+
+def supports_tree_of_life(model_str):
+    """True if the given model_str's TYPE ships Tree of Life text embeddings.
+
+    Capability only — does NOT check whether the artifacts are installed on
+    this host. Use `tree_of_life_ready(model_str, model_dir)` at any site
+    that needs to know "can we actually run ToL right now" (label-free
+    classification, UI readiness).
+    """
+    return model_str in TOL_SUPPORTED_MODEL_STRS
+
+
+def tree_of_life_ready(model_str, model_dir):
+    """True if the model supports ToL AND its artifacts are on disk.
+
+    Combines `supports_tree_of_life(model_str)` with a presence check for
+    `tol_embeddings.npy` and `tol_classes.json` in `model_dir`. Returns
+    False (rather than raising) when `model_dir` is empty/None so callers
+    can treat "not installed" and "install is incomplete" uniformly.
+
+    Concrete example this guards against: bioclip-2.5-vith14 declares its
+    ToL artifacts as `optional_files`, so a download can succeed without
+    them (HF hasn't uploaded them yet, `list_repo_files` failed, or the
+    optional download itself failed). A pure `supports_tree_of_life` gate
+    would then route classification to `Classifier(labels=None)`, which
+    raises FileNotFoundError at construction, and the UI would have
+    already advertised "classification ready" — see CORE_PHILOSOPHY:
+    "no black boxes".
+    """
+    if not supports_tree_of_life(model_str):
+        return False
+    if not model_dir:
+        return False
+    return all(
+        os.path.isfile(os.path.join(model_dir, f))
+        for f in TOL_ARTIFACT_FILES
+    )
+
 # Known models that can be downloaded.
 # Each entry specifies which ONNX files are needed and the subdirectory
 # within the HF repo where they live.
@@ -84,6 +146,16 @@ KNOWN_MODELS = [
             "text_encoder.onnx.data",
             "tokenizer.json",
             "config.json",
+        ],
+        # ToL artifacts are optional so that 2.5 installs stay usable for
+        # normal label-list classification even while the artifacts are
+        # being uploaded to ONNX_REPO — listing them under "files" would
+        # cause download_model() to fail on the missing HF entry and mark
+        # existing 2.5 installs as `incomplete` on any state check. See
+        # docs/tol-embeddings.md for the enablement runbook.
+        "optional_files": [
+            "tol_embeddings.npy",
+            "tol_classes.json",
         ],
         "description": "2025 model with ViT-H/14 backbone, 986M parameters. Largest BioCLIP variant.",
         "size_mb": 3900,
@@ -226,6 +298,24 @@ def get_models():
             entry["verify_skipped_reason"] = (
                 model_verify.read_verify_skipped_reason(model_dir)
             )
+        # Declared-but-absent optional files are advertised so the UI can
+        # offer a Repair-style re-download when they land on HF. Without
+        # this, an existing bioclip-2.5 install stays in state=='ok' even
+        # after tol_embeddings.npy is uploaded, and the readiness message
+        # at /api/pipeline/page-init ("click Repair in Settings → Models")
+        # points at a button that never appears — the Repair button only
+        # renders for state=='incomplete', which we intentionally don't
+        # trigger for absent optionals (that would mark 2.5 unusable for
+        # label-list mode). Keep the list on `missing`/'incomplete' entries
+        # too so the same repair pass fetches optionals when it repairs.
+        optional_declared = km.get("optional_files") or []
+        if optional_declared and downloaded:
+            missing_optional = [
+                f for f in optional_declared
+                if not os.path.isfile(os.path.join(model_dir, f))
+            ]
+            if missing_optional:
+                entry["missing_optional_files"] = missing_optional
         result.append(entry)
 
     # Add custom models
@@ -706,6 +796,22 @@ def download_model(model_id, progress_callback=None):
                     "Open Settings → Models and click Repair to retry the download."
                 )
 
+    # Optional files (best-effort). Downloaded only after required files
+    # succeed so a missing/unavailable optional never turns into a hard
+    # failure of the install. Use case: ToL artifacts declared under a
+    # model's `optional_files` (e.g. bioclip-2.5-vith14 while its
+    # tol_embeddings.npy is being uploaded to ONNX_REPO) — the model must
+    # still install successfully and be usable for label-list mode until
+    # the artifacts land.
+    optional_files_list = km.get("optional_files", [])
+    if optional_files_list:
+        _download_optional_files(
+            optional_files_list, model_dir, hf_subdir,
+            expected_hashes=expected_hashes,
+            revision=pinned_revision,
+            progress_callback=progress_callback,
+        )
+
     state = _classify_model_state(model_dir, files)
     # "unverified" is an acceptable post-download state: every required file
     # is present, only the cryptographic check was skipped because the HF
@@ -747,7 +853,7 @@ _MIN_BINARY_MODEL_BYTES = 10 * 1024 * 1024  # 10 MB
 
 def _download_and_verify_file(
     filename, model_dir, hf_subdir, expected_hashes, progress_callback,
-    revision=None,
+    revision=None, optional=False,
 ):
     """Download one file and verify its SHA256 against expected_hashes.
 
@@ -757,6 +863,11 @@ def _download_and_verify_file(
     cache (otherwise hf_hub_download would happily hand back the same
     corrupt blob on retry) and retries up to _MAX_HASH_RETRIES. On final
     mismatch, raises VerifyError.
+
+    When `optional` is True, a final hash mismatch skips the shared
+    .verify_failed sentinel write so a corrupt optional file doesn't flip
+    the whole model's state to 'incomplete'. The caller is expected to
+    delete the local file on failure.
     """
     attempts = 0
     while True:
@@ -790,18 +901,21 @@ def _download_and_verify_file(
             # sentinel logic is skipped by the exception.  Without this,
             # a repair on an already-installed model leaves all files
             # present and the model appears 'ok' despite proven corruption.
-            sentinel = os.path.join(
-                model_dir, model_verify.VERIFY_FAILED_SENTINEL
-            )
-            try:
-                with open(sentinel, "w") as f:
-                    f.write(
-                        f"hash-mismatch: {filename} "
-                        f"expected {expected_sha[:8]}... "
-                        f"got {actual_sha[:8]}...\n"
-                    )
-            except OSError:
-                pass
+            # Skipped for optional files — their corruption must not gate
+            # the whole model's completeness.
+            if not optional:
+                sentinel = os.path.join(
+                    model_dir, model_verify.VERIFY_FAILED_SENTINEL
+                )
+                try:
+                    with open(sentinel, "w") as f:
+                        f.write(
+                            f"hash-mismatch: {filename} "
+                            f"expected {expected_sha[:8]}... "
+                            f"got {actual_sha[:8]}...\n"
+                        )
+                except OSError:
+                    pass
             raise model_verify.VerifyError(
                 f"{filename} failed SHA256 verification after "
                 f"{_MAX_HASH_RETRIES + 1} attempts "
@@ -816,6 +930,78 @@ def _download_and_verify_file(
         with contextlib.suppress(OSError):
             os.unlink(local_path)
         _purge_hf_cache_file(filename, hf_subdir, revision=revision)
+
+
+def _download_optional_files(
+    filenames, model_dir, hf_subdir, expected_hashes, revision,
+    progress_callback,
+):
+    """Best-effort download of a model's optional_files.
+
+    Uses list_repo_files as a preflight so that optional files not yet
+    uploaded to the HF repo are skipped silently without burning the
+    retry budget in _hf_download_with_retry on a 404. Any per-file
+    download or verification failure is logged and the local file is
+    removed — required files remain the source of truth for install
+    completeness, so a missing/broken optional never fails the install.
+    """
+    if not filenames:
+        return
+
+    try:
+        from huggingface_hub import list_repo_files
+    except ImportError:
+        log.info(
+            "huggingface_hub.list_repo_files unavailable; "
+            "skipping optional downloads for %s.", hf_subdir,
+        )
+        return
+
+    lookup_revision = revision or "main"
+    try:
+        repo_files = set(list_repo_files(
+            ONNX_REPO, revision=lookup_revision,
+        ))
+    except Exception as e:
+        log.info(
+            "Could not list %s@%s to probe optional files (%s); "
+            "skipping optional downloads.",
+            ONNX_REPO, lookup_revision, e,
+        )
+        return
+
+    for fi, filename in enumerate(filenames):
+        hf_path = f"{hf_subdir}/{filename}" if hf_subdir else filename
+        if hf_path not in repo_files:
+            log.info(
+                "Optional file %s not present in %s@%s; skipping.",
+                hf_path, ONNX_REPO, lookup_revision,
+            )
+            continue
+        if progress_callback:
+            progress_callback(
+                f"Downloading optional {fi + 1}/{len(filenames)}: {filename}",
+            )
+        try:
+            _download_and_verify_file(
+                filename=filename,
+                model_dir=model_dir,
+                hf_subdir=hf_subdir,
+                expected_hashes=expected_hashes,
+                revision=revision,
+                progress_callback=progress_callback,
+                optional=True,
+            )
+        except (model_verify.VerifyError, RuntimeError) as e:
+            log.warning(
+                "Optional file %s could not be downloaded/verified (%s); "
+                "removing partial file. Model remains usable without it.",
+                filename, e,
+            )
+            local_path = os.path.join(model_dir, filename)
+            with contextlib.suppress(OSError):
+                if os.path.isfile(local_path):
+                    os.unlink(local_path)
 
 
 def _purge_hf_cache_file(filename, hf_subdir, revision=None):

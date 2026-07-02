@@ -344,6 +344,46 @@ def test_endpoint_tol_only_for_supported_models(app_and_db, tmp_path, monkeypatc
             assert tol_pairs == [], f"{m['name']} should not have a Tree of Life pair"
 
 
+def test_endpoint_supports_tol_uses_capability_not_files_manifest(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """The inventory route must use the ToL capability helper, not a raw
+    `"tol_embeddings.npy" in m["files"]` check.
+
+    bioclip-2.5 declares its ToL artifacts under `optional_files` (so that
+    installs before HF upload aren't marked incomplete), which means a
+    files-manifest check would report supports_tol=False for 2.5 and drop
+    ToL coverage from the stats page entirely — no current-pair emit and
+    no stale-row either, because TOL_SENTINEL is always in current_fps.
+
+    Regression for Codex P2 on PR #1077 (vireo/app.py:5801).
+    """
+    app, _db = app_and_db
+    _setup_labels_dir(tmp_path, monkeypatch, [("birds", ["Robin"])])
+
+    client = app.test_client()
+    resp = client.get("/api/workspace/classification-inventory")
+    body = resp.get_json()
+
+    bioclip_2_5 = next(
+        (m for m in body["models"] if m.get("id") == "bioclip-2.5-vith14"),
+        None,
+    )
+    assert bioclip_2_5 is not None, (
+        "bioclip-2.5 must appear in the inventory even before download"
+    )
+    assert bioclip_2_5["supports_tol"] is True, (
+        "bioclip-2.5 supports Tree of Life via optional_files; the inventory "
+        "route must recognize that via supports_tree_of_life(), not the raw "
+        "`files` manifest"
+    )
+    tol_pairs = [p for p in bioclip_2_5["pairs"] if p.get("is_tol")]
+    assert len(tol_pairs) == 1, (
+        "A Tree of Life pair must be emitted for 2.5 so past ToL runs "
+        "don't fall into the stale bucket by omission"
+    )
+
+
 def test_endpoint_legacy_model_grouped(app_and_db, tmp_path, monkeypatch):
     app, db = app_and_db
     photo_row = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()

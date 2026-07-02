@@ -1911,16 +1911,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         no black boxes). Returns a dict with the active model and the flags
         the status endpoint and the onboarding redirects both consume.
         """
-        from models import get_active_model
+        from models import get_active_model, tree_of_life_ready
 
         active = get_active_model()
         model_downloaded = bool(active and active.get("downloaded"))
-        tol_models = {
-            "hf-hub:imageomics/bioclip",
-            "hf-hub:imageomics/bioclip-2",
-        }
+        # tree_of_life_ready (not just supports_tree_of_life) so an install
+        # whose optional ToL artifacts weren't downloaded (bioclip-2.5
+        # before its HF upload landed, or after a skipped optional
+        # download) is not falsely reported as "classification ready" —
+        # otherwise the pipeline would crash in Classifier's constructor.
         label_free = bool(active and (
-            active.get("model_str") in tol_models
+            tree_of_life_ready(
+                active.get("model_str"), active.get("weights_path"),
+            )
             or active.get("model_type") == "timm"
         ))
         labels_ready = False
@@ -5814,6 +5817,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # downloaded — gives the user visibility into "if you downloaded iNat21
         # this would be N detections of work." Custom models registered without
         # an explicit model_type default to bioclip (same as classify/pipeline).
+        from models import supports_tree_of_life
         all_models = [
             m for m in get_models()
             if m.get("model_type", "bioclip") in ("bioclip", "timm")
@@ -5824,7 +5828,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         for m in all_models:
             model_name = m.get("name") or m.get("id")
-            supports_tol = "tol_embeddings.npy" in m.get("files", [])
+            # Capability question — does this model TYPE ship ToL text
+            # embeddings? Ask supports_tree_of_life(model_str), not the raw
+            # `files` manifest: bioclip-2.5's ToL artifacts are declared
+            # under `optional_files` so a straight `"tol_embeddings.npy" in
+            # m.get("files", [])` would drop ToL coverage from this
+            # inventory entirely — no current-pair emit and no stale-row
+            # for prior ToL runs, because TOL_SENTINEL is always in
+            # current_fps for the model.
+            supports_tol = supports_tree_of_life(m.get("model_str", ""))
             is_closed_set = m.get("model_type") == "timm"
 
             pairs = []
@@ -8374,11 +8386,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 names = [s.get("name", os.path.basename(s["labels_file"])) for s in active_sets]
                 label_name = ", ".join(names)
             else:
-                tol_models = {"hf-hub:imageomics/bioclip", "hf-hub:imageomics/bioclip-2"}
+                from models import supports_tree_of_life, tree_of_life_ready
                 model_str_check = model.get("model_str", "") if model else ""
-                if model_str_check in tol_models:
+                model_dir_check = model.get("weights_path") if model else None
+                if tree_of_life_ready(model_str_check, model_dir_check):
                     use_tol = True
                     label_name = "Tree of Life (all species)"
+                elif supports_tree_of_life(model_str_check):
+                    # ToL-capable model whose artifacts aren't installed
+                    # yet (e.g. bioclip-2.5 before its HF upload lands).
+                    # Tell the user what's missing rather than falsely
+                    # advertising ToL-ready and crashing at classify time.
+                    label_name = (
+                        "Tree of Life files not installed — click Repair "
+                        "in Settings → Models, or download a species list"
+                    )
                 else:
                     label_name = "No labels — download a species list in Settings"
 

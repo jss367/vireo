@@ -90,6 +90,10 @@ def _resolve_models(model_ids):
             "model_str": m.get("model_str") or "",
             "model_type": m.get("model_type", "bioclip"),
             "downloaded": m.get("downloaded", False),
+            # Needed by the label-free ToL check downstream so the planner
+            # doesn't return a fingerprint that promises label-free
+            # coverage for a model whose ToL artifacts aren't installed.
+            "weights_path": m.get("weights_path"),
         })
     return out
 
@@ -128,10 +132,8 @@ def _resolve_labels_for_models(models, labels_files, db):
         else:
             labels = _load(get_active_labels())
 
-    tol_supported = {
-        "hf-hub:imageomics/bioclip",
-        "hf-hub:imageomics/bioclip-2",
-    }
+    from models import tree_of_life_ready
+
     out = {}
     for m in models:
         if m["model_type"] == "timm":
@@ -140,7 +142,12 @@ def _resolve_labels_for_models(models, labels_files, db):
             # and the inventory page keys intrinsic timm coverage this way too.
             out[m["id"]] = {"fingerprint": TOL_SENTINEL, "n": 0}
         elif not labels:
-            if m["model_str"] in tol_supported:
+            # tree_of_life_ready (not just supports_tree_of_life) so a
+            # model whose ToL artifacts are declared optional and were
+            # skipped at download time is treated as blocked in
+            # label-free mode instead of returning a plan the pipeline
+            # will crash executing.
+            if tree_of_life_ready(m["model_str"], m.get("weights_path")):
                 out[m["id"]] = {"fingerprint": TOL_SENTINEL, "n": 0}
             else:
                 out[m["id"]] = {"fingerprint": None, "n": 0, "blocked": True}

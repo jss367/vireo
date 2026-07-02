@@ -44,13 +44,20 @@ def test_models_status_no_models_needs_setup(app_and_db, monkeypatch):
     assert data["classification"]["ready"] is False
 
 
-def test_models_status_tol_model_ready_without_labels(app_and_db, monkeypatch):
+def test_models_status_tol_model_ready_without_labels(app_and_db, monkeypatch, tmp_path):
     """A downloaded Tree-of-Life model classifies label-free, so it's ready
-    even with no species list."""
+    even with no species list. The classification-readiness gate is
+    disk-aware — it checks the ToL artifacts exist under `weights_path` —
+    so the mocked model needs a real weights dir with the stubs."""
     import models
+    weights = tmp_path / "bioclip-2"
+    weights.mkdir()
+    (weights / "tol_embeddings.npy").write_bytes(b"stub")
+    (weights / "tol_classes.json").write_bytes(b"[]")
     monkeypatch.setattr(models, "get_active_model", lambda: {
         "id": "bioclip-2", "name": "BioCLIP-2", "downloaded": True,
         "model_str": "hf-hub:imageomics/bioclip-2",
+        "weights_path": str(weights),
     })
 
     app, _ = app_and_db
@@ -158,13 +165,20 @@ def test_index_redirects_to_welcome_when_no_model(app_and_db, monkeypatch):
     assert "/welcome" in resp.headers["Location"]
 
 
-def test_index_redirects_to_browse_when_model_ready(app_and_db, monkeypatch):
+def test_index_redirects_to_browse_when_model_ready(app_and_db, monkeypatch, tmp_path):
     """GET / redirects to /browse when classification is usable (label-free
-    Tree-of-Life model, so no species list needed)."""
+    Tree-of-Life model, so no species list needed). The classification-
+    readiness gate now checks the ToL artifacts are on disk under
+    `weights_path`, so the mocked model must ship a real weights dir."""
     import models
+    weights = tmp_path / "bioclip-2"
+    weights.mkdir()
+    (weights / "tol_embeddings.npy").write_bytes(b"stub")
+    (weights / "tol_classes.json").write_bytes(b"[]")
     monkeypatch.setattr(models, "get_active_model", lambda: {
         "id": "bioclip-2", "name": "BioCLIP-2", "downloaded": True,
         "model_str": "hf-hub:imageomics/bioclip-2",
+        "weights_path": str(weights),
     })
 
     app, _ = app_and_db
@@ -203,13 +217,20 @@ def test_welcome_page_renders(app_and_db):
     assert b"Vireo" in resp.data
 
 
-def test_welcome_page_redirects_when_setup_done(app_and_db, monkeypatch):
+def test_welcome_page_redirects_when_setup_done(app_and_db, monkeypatch, tmp_path):
     """GET /welcome without ?force redirects to /browse if classification is
-    usable (label-free Tree-of-Life model)."""
+    usable (label-free Tree-of-Life model). The classification-readiness
+    gate now checks the ToL artifacts are on disk under `weights_path`, so
+    the mocked model must ship a real weights dir."""
     import models
+    weights = tmp_path / "bioclip-2"
+    weights.mkdir()
+    (weights / "tol_embeddings.npy").write_bytes(b"stub")
+    (weights / "tol_classes.json").write_bytes(b"[]")
     monkeypatch.setattr(models, "get_active_model", lambda: {
         "id": "bioclip-2", "name": "BioCLIP-2", "downloaded": True,
         "model_str": "hf-hub:imageomics/bioclip-2",
+        "weights_path": str(weights),
     })
 
     app, _ = app_and_db
