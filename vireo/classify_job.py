@@ -34,9 +34,12 @@ from db import AUTO_MATCH_REVIEW_MARKER, Database, commit_with_retry
 from models import get_active_model, get_models
 
 try:
-    from classifier import Classifier
+    from classifier import ClassificationCancelled, Classifier
 except ImportError:
     Classifier = None
+
+    class ClassificationCancelled(RuntimeError):
+        pass
 
 try:
     from timm_classifier import TimmClassifier
@@ -1831,6 +1834,24 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
         )
 
         if model_type == "timm":
+            if runner.is_cancelled(job["id"]):
+                runner.update_step(
+                    job["id"], "load_model",
+                    status="cancelled", summary="Cancelled",
+                )
+                _finalize_remaining_steps(
+                    runner, job["id"], ["detect", "classify", "finalize"],
+                    status="cancelled", summary="Cancelled before start",
+                )
+                return {
+                    "total": total,
+                    "predictions_stored": 0,
+                    "burst_groups": 0,
+                    "already_classified": 0,
+                    "already_labeled": 0,
+                    "detected": 0,
+                    "failed": 0,
+                }
             clf = TimmClassifier(model_str, taxonomy=tax)
         else:
             def _emb_progress(current, emb_total):
@@ -1846,16 +1867,36 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
                         "total": emb_total,
                         "current_file": f"Computing label embeddings ({current}/{emb_total})...",
                         "rate": 0,
-                        "phase": "Step 3/5: Computing embeddings",
+                    "phase": "Step 3/5: Computing embeddings",
                     },
                 )
 
-            clf = Classifier(
-                labels=None if use_tol else labels,
-                model_str=model_str,
-                pretrained_str=weights_path,
-                embedding_progress_callback=_emb_progress,
-            )
+            try:
+                clf = Classifier(
+                    labels=None if use_tol else labels,
+                    model_str=model_str,
+                    pretrained_str=weights_path,
+                    embedding_progress_callback=_emb_progress,
+                    cancel_check=lambda: runner.is_cancelled(job["id"]),
+                )
+            except ClassificationCancelled:
+                runner.update_step(
+                    job["id"], "load_model",
+                    status="cancelled", summary="Cancelled",
+                )
+                _finalize_remaining_steps(
+                    runner, job["id"], ["detect", "classify", "finalize"],
+                    status="cancelled", summary="Cancelled before start",
+                )
+                return {
+                    "total": total,
+                    "predictions_stored": 0,
+                    "burst_groups": 0,
+                    "already_classified": 0,
+                    "already_labeled": 0,
+                    "detected": 0,
+                    "failed": 0,
+                }
         runner.update_step(
             job["id"], "load_model", status="completed",
             summary=effective_name,

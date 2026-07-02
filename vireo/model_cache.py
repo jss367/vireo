@@ -23,6 +23,10 @@ import threading
 log = logging.getLogger(__name__)
 
 
+def _is_caller_cancelled_error(exc):
+    return exc.__class__.__name__ == "ClassificationCancelled"
+
+
 class _Entry:
     __slots__ = (
         "key", "load_lock", "value", "refcount", "idle_timer", "evict_token",
@@ -105,51 +109,54 @@ class ModelCache:
         the key (e.g. ONNX self-heal redownload replaces corrupt weights
         and the post-load file stats no longer match the pre-load ones).
         """
-        with self._global_lock:
-            entry = self._entries.get(key)
-            if entry is None:
-                entry = _Entry(key)
-                self._entries[key] = entry
-            entry.refcount += 1
-            if entry.idle_timer is not None:
-                entry.idle_timer.cancel()
-                entry.idle_timer = None
-            # Invalidate any in-flight stale callback whose cancel() lost
-            # the race with the timer thread firing.
-            entry.evict_token = None
+        while True:
+            with self._global_lock:
+                entry = self._entries.get(key)
+                if entry is None:
+                    entry = _Entry(key)
+                    self._entries[key] = entry
+                entry.refcount += 1
+                if entry.idle_timer is not None:
+                    entry.idle_timer.cancel()
+                    entry.idle_timer = None
+                # Invalidate any in-flight stale callback whose cancel() lost
+                # the race with the timer thread firing.
+                entry.evict_token = None
 
-        with entry.load_lock:
-            if entry.value is None and entry.load_error is None:
-                try:
-                    value = factory()
-                except BaseException as e:
-                    # Surface to this caller and any waiters under the
-                    # load_lock; remove the entry so future acquires retry.
-                    entry.load_error = e
-                    self._abandon(key, entry)
-                    raise
-                entry.value = value
-                if post_load_key is not None:
+            with entry.load_lock:
+                if entry.value is None and entry.load_error is None:
                     try:
-                        actual_key = post_load_key(value)
-                    except Exception:
-                        log.exception(
-                            "ModelCache: post_load_key callback raised; "
-                            "leaving entry keyed by the pre-load key"
-                        )
-                        actual_key = key
-                    if actual_key != key:
-                        self._rekey(key, actual_key, entry)
-            elif entry.load_error is not None:
-                # A prior acquirer's factory raised; this acquirer should
-                # also see the failure and not get a phantom value. Release
-                # by entry identity — between abandon and now, another
-                # acquirer may have created a fresh entry under the same
-                # key, and decrementing it here would corrupt its refcount
-                # and cause spurious eviction of a model still in use.
-                self._release_entry(entry)
-                raise entry.load_error
-            return _Handle(self, entry, entry.value)
+                        value = factory()
+                    except BaseException as e:
+                        # Surface to this caller and any waiters under the
+                        # load_lock; remove the entry so future acquires retry.
+                        entry.load_error = e
+                        self._abandon(key, entry)
+                        raise
+                    entry.value = value
+                    if post_load_key is not None:
+                        try:
+                            actual_key = post_load_key(value)
+                        except Exception:
+                            log.exception(
+                                "ModelCache: post_load_key callback raised; "
+                                "leaving entry keyed by the pre-load key"
+                            )
+                            actual_key = key
+                        if actual_key != key:
+                            self._rekey(key, actual_key, entry)
+                elif entry.load_error is not None:
+                    # A prior acquirer's factory raised; this acquirer should
+                    # also see shared load failures and not get a phantom value.
+                    # Caller-local cancellation is different: this waiter may
+                    # still be healthy, so release the abandoned entry and
+                    # retry against a fresh cache entry.
+                    load_error = entry.load_error
+                    self._release_entry(entry)
+                    if _is_caller_cancelled_error(load_error):
+                        continue
+                    raise load_error
+                return _Handle(self, entry, entry.value)
 
     def _release_entry(self, entry):
         """Decrement refcount on the specific entry the caller acquired.

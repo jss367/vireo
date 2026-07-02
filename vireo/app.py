@@ -9912,6 +9912,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 model_str=model["model_str"],
                 pretrained_str=model["weights_path"],
                 embedding_progress_callback=_progress,
+                cancel_check=lambda: runner.is_cancelled(job["id"]),
             )
 
             return {"labels": len(labels), "model": model["name"]}
