@@ -128,10 +128,8 @@ def _resolve_labels_for_models(models, labels_files, db):
         else:
             labels = _load(get_active_labels())
 
-    tol_supported = {
-        "hf-hub:imageomics/bioclip",
-        "hf-hub:imageomics/bioclip-2",
-    }
+    from models import supports_tree_of_life
+
     out = {}
     for m in models:
         if m["model_type"] == "timm":
@@ -140,7 +138,7 @@ def _resolve_labels_for_models(models, labels_files, db):
             # and the inventory page keys intrinsic timm coverage this way too.
             out[m["id"]] = {"fingerprint": TOL_SENTINEL, "n": 0}
         elif not labels:
-            if m["model_str"] in tol_supported:
+            if supports_tree_of_life(m["model_str"]):
                 out[m["id"]] = {"fingerprint": TOL_SENTINEL, "n": 0}
             else:
                 out[m["id"]] = {"fingerprint": None, "n": 0, "blocked": True}

@@ -139,13 +139,11 @@ def _load_labels(model_type, model_str, labels_file, labels_files, db=None):
     else:
         log.info("Classification config: model=%s, no labels selected", model_str)
 
-    tol_supported_models = {
-        "hf-hub:imageomics/bioclip",
-        "hf-hub:imageomics/bioclip-2",
-    }
+    from models import supports_tree_of_life
+
     use_tol = False
     if not labels:
-        if model_str in tol_supported_models:
+        if supports_tree_of_life(model_str):
             log.info(
                 "No regional labels available — using Tree of Life classifier (all species)"
             )

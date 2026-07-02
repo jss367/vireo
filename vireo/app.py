@@ -1911,16 +1911,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         no black boxes). Returns a dict with the active model and the flags
         the status endpoint and the onboarding redirects both consume.
         """
-        from models import get_active_model
+        from models import get_active_model, supports_tree_of_life
 
         active = get_active_model()
         model_downloaded = bool(active and active.get("downloaded"))
-        tol_models = {
-            "hf-hub:imageomics/bioclip",
-            "hf-hub:imageomics/bioclip-2",
-        }
         label_free = bool(active and (
-            active.get("model_str") in tol_models
+            supports_tree_of_life(active.get("model_str"))
             or active.get("model_type") == "timm"
         ))
         labels_ready = False
@@ -8345,9 +8341,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 names = [s.get("name", os.path.basename(s["labels_file"])) for s in active_sets]
                 label_name = ", ".join(names)
             else:
-                tol_models = {"hf-hub:imageomics/bioclip", "hf-hub:imageomics/bioclip-2"}
+                from models import supports_tree_of_life
                 model_str_check = model.get("model_str", "") if model else ""
-                if model_str_check in tol_models:
+                if supports_tree_of_life(model_str_check):
                     use_tol = True
                     label_name = "Tree of Life (all species)"
                 else:

@@ -20,6 +20,24 @@ CONFIG_PATH = os.path.expanduser("~/.vireo/models.json")
 # HuggingFace repo containing all ONNX models
 ONNX_REPO = "jss367/vireo-onnx-models"
 
+# BioCLIP model_strs that ship precomputed Tree of Life (open-vocabulary,
+# all-species) text embeddings — i.e. can classify with no label list.
+# Single source of truth: the classifier gate (classify_job), the pipeline
+# planner (pipeline_plan), and the UI readiness flags (app) all consult this,
+# so they never disagree about whether a model supports label-free ToL mode.
+# A model only belongs here once its tol_embeddings.npy + tol_classes.json are
+# published to ONNX_REPO and listed in its KNOWN_MODELS "files" manifest.
+TOL_SUPPORTED_MODEL_STRS = frozenset({
+    "hf-hub:imageomics/bioclip",
+    "hf-hub:imageomics/bioclip-2",
+    "hf-hub:imageomics/bioclip-2.5-vith14",
+})
+
+
+def supports_tree_of_life(model_str):
+    """True if the given model_str ships Tree of Life text embeddings."""
+    return model_str in TOL_SUPPORTED_MODEL_STRS
+
 # Known models that can be downloaded.
 # Each entry specifies which ONNX files are needed and the subdirectory
 # within the HF repo where they live.
@@ -84,6 +102,8 @@ KNOWN_MODELS = [
             "text_encoder.onnx.data",
             "tokenizer.json",
             "config.json",
+            "tol_embeddings.npy",
+            "tol_classes.json",
         ],
         "description": "2025 model with ViT-H/14 backbone, 986M parameters. Largest BioCLIP variant.",
         "size_mb": 3900,
