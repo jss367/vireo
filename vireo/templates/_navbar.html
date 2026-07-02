@@ -9876,7 +9876,14 @@ async function loadMissingFolders() {
     const data = await resp.json();
     const folders = data.missing;
     if (folders.length === 0) {
-      container.innerHTML = '<p style="color:var(--text-secondary);">All folders are accounted for.</p>';
+      container.textContent = '';
+      const ok = document.createElement('p');
+      ok.style.cssText = 'color:#4caf50;display:flex;align-items:center;gap:8px;font-weight:500;';
+      const check = document.createElement('span');
+      check.textContent = '✓';
+      check.style.cssText = 'font-size:18px;line-height:1;';
+      ok.append(check, document.createTextNode('All folders are accounted for.'));
+      container.appendChild(ok);
       checkMissingFolders();  // update banner
       return;
     }
