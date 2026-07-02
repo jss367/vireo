@@ -2138,6 +2138,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     app._log_broadcaster = LogBroadcaster(buffer_size=500)
     app._log_broadcaster.install()
 
+    # Per-workspace monotonic timestamp recording when the current snapshot
+    # POST forced a fresh recompute. Subsequent polls on the same request
+    # compare the cache entry's set_at to this value: if the entry was
+    # written after we invalidated, it's the fresh walk's result and can be
+    # reused; if it predates our invalidation, it's a stale navbar probe and
+    # must be re-walked. Cleared when a snapshot is successfully returned.
+    app._new_images_snapshot_kickoff_at = {}
+    app._new_images_snapshot_kickoff_lock = threading.Lock()
+
     # Self-healing background backfill of missing working copies. RAW (and
     # oversized JPEG) imports need a JPEG working copy at
     # ``~/.vireo/working/{photo_id}.jpg`` so /photos/<id>/original can serve
@@ -7436,19 +7445,37 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return jsonify({"error": "no active workspace"}), 400
         cache = db._new_images_cache
         db_path = db._db_path
+        kickoff_key = (db_path, ws_id)
+        kickoff_at_dict = app._new_images_snapshot_kickoff_at
+        kickoff_at_lock = app._new_images_snapshot_kickoff_lock
 
         def create_snapshot_from_result(result):
             file_paths = list(result.get("sample") or [])
             snap_id = db.create_new_images_snapshot(file_paths)
             folders = sorted({os.path.dirname(p) for p in file_paths})
+            with kickoff_at_lock:
+                kickoff_at_dict.pop(kickoff_key, None)
             return jsonify({
                 "snapshot_id": snap_id,
                 "file_count": len(file_paths),
                 "folders": folders,
             })
 
+        # A cached "sample_complete" result may be there because the navbar
+        # probe ran recently — but the cache is not invalidated when files
+        # are copied into a mapped folder, so ``sample`` can omit images
+        # that arrived after that probe. Only trust the cached sample if
+        # this request's snapshot session already forced a fresh walk and
+        # the entry was written *after* that invalidation.
+        with kickoff_at_lock:
+            request_kickoff_at = kickoff_at_dict.get(kickoff_key)
         cached = cache.get(db_path, ws_id)
-        if cached is not None and cached.get("sample_complete"):
+        entry_set_at = cache.get_entry_set_at(db_path, ws_id)
+        if (cached is not None
+                and cached.get("sample_complete")
+                and request_kickoff_at is not None
+                and entry_set_at is not None
+                and entry_set_at >= request_kickoff_at):
             return create_snapshot_from_result(cached)
 
         from new_images import count_new_images_for_workspace
@@ -7459,13 +7486,33 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             wdb.set_active_workspace(ws_id)
             return count_new_images_for_workspace(wdb, ws_id, sample_limit=None)
 
+        # Nothing fresh yet. If a background walk is already running for
+        # this workspace it was almost certainly kicked off by an earlier
+        # poll in this same snapshot session — coalesce onto it rather than
+        # invalidating it out from under itself and starting a redundant
+        # walk. Only when no walk is in flight do we mark the request's
+        # kickoff time and drop the cached entry, so a fresh walk starts
+        # and reflects disk state at click time.
+        if not cache.has_inflight(db_path, ws_id):
+            with kickoff_at_lock:
+                kickoff_at_dict[kickoff_key] = time.monotonic()
+            cache.invalidate_workspaces(db_path, [ws_id])
+            request_kickoff_at = kickoff_at_dict[kickoff_key]
+
         event = cache.kickoff_compute(db_path, ws_id, compute)
         if event.wait(timeout=0.5):
             cached = cache.get(db_path, ws_id)
-            if cached is not None and cached.get("sample_complete"):
+            entry_set_at = cache.get_entry_set_at(db_path, ws_id)
+            if (cached is not None
+                    and cached.get("sample_complete")
+                    and (request_kickoff_at is None
+                         or (entry_set_at is not None
+                             and entry_set_at >= request_kickoff_at))):
                 return create_snapshot_from_result(cached)
             recent_err = cache.get_recent_error(db_path, ws_id)
             if recent_err is not None:
+                with kickoff_at_lock:
+                    kickoff_at_dict.pop(kickoff_key, None)
                 return jsonify({"error": recent_err}), 500
 
         return jsonify({"pending": True}), 202

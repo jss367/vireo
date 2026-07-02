@@ -487,41 +487,166 @@ def test_post_snapshot_creates_row_with_current_new_images(app_and_db):
     assert snap["file_count"] == 2
 
 
-def test_post_snapshot_uses_complete_cache_without_rewalk(app_and_db, monkeypatch):
-    import new_images as new_images_module
+def test_post_snapshot_recomputes_over_navbar_populated_cache(app_and_db):
+    """The navbar probe populates the shared new-images cache and holds it
+    for the ``NewImagesCache`` TTL. Ordinary file copies into a mapped folder
+    do not invalidate it, so a user who gets a banner count, drops more
+    images into the folder, and then clicks "Create a pipeline" must not
+    receive a snapshot built from the stale cached sample — the endpoint
+    must re-walk the disk at click time. Verifies the fix for the Codex
+    review comment on the async-snapshot PR."""
     from new_images import get_shared_cache
 
     app, db, ws_id, tmp_path = app_and_db
     folder = tmp_path / "photos"
-    paths = []
-    for i in range(7):
-        path = folder / f"IMG_{i:03d}.JPG"
-        _touch_image(str(path))
-        paths.append(str(path))
+    folder.mkdir()
     db.add_folder(str(folder))
 
+    # Simulate the navbar's cache after an earlier probe: two images were
+    # on disk and captured in the sample.
+    old_paths = [str(folder / "IMG_001.JPG"), str(folder / "IMG_002.JPG")]
+    for p in old_paths:
+        _touch_image(p)
     get_shared_cache().set(db._db_path, ws_id, {
-        "new_count": len(paths),
-        "per_root": [{"folder_id": 1, "path": str(folder), "new_count": len(paths)}],
-        "sample": paths,
+        "new_count": len(old_paths),
+        "per_root": [{"folder_id": 1, "path": str(folder), "new_count": len(old_paths)}],
+        "sample": list(old_paths),
         "sample_complete": True,
     })
 
-    def boom(*args, **kwargs):
-        raise AssertionError("snapshot endpoint should not re-walk complete cache")
-
-    monkeypatch.setattr(
-        new_images_module, "count_new_images_for_workspace", boom,
-    )
+    # A third image lands on disk between the navbar probe and the click.
+    fresh_path = str(folder / "IMG_003.JPG")
+    _touch_image(fresh_path)
 
     with app.test_client() as client:
         resp = client.post("/api/workspaces/active/new-images/snapshot")
         assert resp.status_code == 200
         data = resp.get_json()
-        assert data["file_count"] == 7
+        # The endpoint must have re-walked and picked up the third file,
+        # not returned the two-file navbar cache.
+        assert data["file_count"] == 3, (
+            f"expected fresh walk to include new file, got {data!r}"
+        )
 
     snap = db.get_new_images_snapshot(data["snapshot_id"])
-    assert snap["file_count"] == 7
+    assert snap["file_count"] == 3
+    assert fresh_path in snap["file_paths"]
+
+
+def test_post_snapshot_reuses_walk_across_polls(app_and_db, monkeypatch):
+    """The client polls the snapshot endpoint on 202 responses. Once the
+    fresh walk this session kicked off populates the cache, subsequent
+    polls must reuse that result rather than tearing it down and starting
+    yet another walk — otherwise polling would livelock, never converging
+    on a snapshot."""
+    import threading
+
+    import new_images as new_images_module
+
+    app, db, ws_id, tmp_path = app_and_db
+    folder = tmp_path / "photos"
+    _touch_image(str(folder / "IMG_001.JPG"))
+    db.add_folder(str(folder))
+
+    call_count = {"n": 0}
+    started = threading.Event()
+    release = threading.Event()
+    lock = threading.Lock()
+    real_count = new_images_module.count_new_images_for_workspace
+
+    def counting_slow(*args, **kwargs):
+        with lock:
+            call_count["n"] += 1
+        started.set()
+        release.wait(timeout=5)
+        return real_count(*args, **kwargs)
+
+    monkeypatch.setattr(
+        new_images_module, "count_new_images_for_workspace", counting_slow,
+    )
+
+    try:
+        with app.test_client() as client:
+            # First POST kicks off the walk; walk is blocked in-flight.
+            first = client.post("/api/workspaces/active/new-images/snapshot")
+            assert first.status_code == 202
+            assert started.is_set()
+            calls_after_first = call_count["n"]
+
+            # A poll arriving before the walk finishes must coalesce, not
+            # spawn a second walk.
+            second = client.post("/api/workspaces/active/new-images/snapshot")
+            assert second.status_code == 202
+            assert call_count["n"] == calls_after_first, (
+                "poll during in-flight walk must not spawn another compute"
+            )
+
+            # Let the walk finish, then poll again — this time the endpoint
+            # should reuse the fresh cache and return the snapshot without
+            # walking a third time.
+            release.set()
+
+            import time as _time
+            deadline = _time.monotonic() + 2.0
+            resp = None
+            while _time.monotonic() < deadline:
+                resp = client.post("/api/workspaces/active/new-images/snapshot")
+                if resp.status_code == 200:
+                    break
+                _time.sleep(0.05)
+            assert resp is not None and resp.status_code == 200, (
+                f"snapshot never converged after walk; last status {resp and resp.status_code}"
+            )
+            assert resp.get_json()["file_count"] == 1
+            assert call_count["n"] == calls_after_first, (
+                f"post-walk poll must not spawn another compute; "
+                f"call_count={call_count['n']} vs baseline {calls_after_first}"
+            )
+    finally:
+        release.set()
+
+
+def test_post_snapshot_next_click_after_success_forces_fresh_walk(app_and_db, monkeypatch):
+    """After a snapshot returns successfully, a fresh click (e.g. the user
+    dismissed the pipeline and clicked "Create a pipeline" again after
+    dropping more files) must trigger a new walk — the previous snapshot
+    session's cache reuse must not linger and mask new arrivals."""
+    import new_images as new_images_module
+
+    app, db, ws_id, tmp_path = app_and_db
+    folder = tmp_path / "photos"
+    _touch_image(str(folder / "IMG_001.JPG"))
+    db.add_folder(str(folder))
+
+    call_count = {"n": 0}
+    real_count = new_images_module.count_new_images_for_workspace
+
+    def counting(*args, **kwargs):
+        call_count["n"] += 1
+        return real_count(*args, **kwargs)
+
+    monkeypatch.setattr(
+        new_images_module, "count_new_images_for_workspace", counting,
+    )
+
+    with app.test_client() as client:
+        first = client.post("/api/workspaces/active/new-images/snapshot")
+        assert first.status_code == 200
+        assert first.get_json()["file_count"] == 1
+        calls_after_first = call_count["n"]
+        assert calls_after_first >= 1
+
+        # User copies another image, then clicks again.
+        _touch_image(str(folder / "IMG_002.JPG"))
+        second = client.post("/api/workspaces/active/new-images/snapshot")
+        assert second.status_code == 200
+        assert second.get_json()["file_count"] == 2, (
+            "second click must recompute and pick up newly-copied file"
+        )
+        assert call_count["n"] > calls_after_first, (
+            f"second click must trigger a fresh walk; "
+            f"call_count went {calls_after_first} -> {call_count['n']}"
+        )
 
 
 def test_post_snapshot_returns_pending_when_cache_is_incomplete(app_and_db, monkeypatch):

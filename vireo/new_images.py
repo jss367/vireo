@@ -278,6 +278,33 @@ class NewImagesCache:
                 return None
             return result
 
+    def get_entry_set_at(self, db_path, workspace_id):
+        """Return the monotonic timestamp at which the current cache entry was
+        written, or ``None`` if there is no live entry. Callers use this to
+        distinguish a cache write that happened *before* their request from
+        one that happened *after*, so that a snapshot POST can tell whether
+        the cached sample reflects disk state at click time or was left over
+        from an earlier navbar probe."""
+        key = (db_path, workspace_id)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                return None
+            _result, set_at = entry
+            if time.monotonic() - set_at > self._ttl:
+                del self._entries[key]
+                return None
+            return set_at
+
+    def has_inflight(self, db_path, workspace_id):
+        """Return True if a background compute is currently running for
+        ``(db_path, workspace_id)``. Callers use this to coalesce onto an
+        existing walk instead of tearing it down with a fresh invalidation.
+        """
+        key = (db_path, workspace_id)
+        with self._lock:
+            return key in self._inflight
+
     def get_generation(self, db_path, workspace_id):
         """Return the current generation for ``(db_path, workspace_id)`` (0 if unseen)."""
         key = (db_path, workspace_id)
