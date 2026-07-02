@@ -2089,16 +2089,21 @@ def test_storage_preflight_failure_aborts_in_flight_model_load(tmp_path, monkeyp
     dest = tmp_path / "archive"
 
     model_entered = threading.Event()
+    storage_preflight_done = threading.Event()
     model_observed_abort = threading.Event()
 
     def fake_conflicting_archive_paths(*args, **kwargs):
         assert model_entered.wait(2), "model load did not start before storage failed"
+        storage_preflight_done.set()
         return [str(dest / "2026" / "2026-01-01" / "shot.jpg")]
 
     class FakeClassifier:
         def __init__(self, *args, cancel_check=None, **kwargs):
             model_entered.set()
-            deadline = time.monotonic() + 30
+            assert storage_preflight_done.wait(120), (
+                "storage preflight did not run while model loading"
+            )
+            deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 if cancel_check and cancel_check():
                     model_observed_abort.set()
