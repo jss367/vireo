@@ -183,6 +183,41 @@ def test_api_new_images_response_trims_full_cached_sample(app_and_db):
     assert len(cached["sample"]) == 8
 
 
+def test_api_new_images_cached_response_slices_without_full_copy(app_and_db):
+    """Cached full snapshots may contain tens of thousands of paths. The
+    navbar response should copy only the five paths it returns, not materialize
+    the entire cached sequence before slicing."""
+    from new_images import get_shared_cache
+
+    class SampleOnlySlice:
+        def __bool__(self):
+            return True
+
+        def __iter__(self):
+            raise AssertionError("sample should be sliced directly")
+
+        def __getitem__(self, key):
+            assert isinstance(key, slice), f"unexpected key: {key!r}"
+            assert key.start is None
+            assert key.stop == 5
+            return [f"/tmp/IMG_{i:03d}.JPG" for i in range(5)]
+
+    app, db, ws_id, tmp_path = app_and_db
+    get_shared_cache().set(db._db_path, ws_id, {
+        "new_count": 100000,
+        "per_root": [],
+        "sample": SampleOnlySlice(),
+        "sample_complete": True,
+    })
+
+    client = app.test_client()
+    resp = client.get("/api/workspaces/active/new-images")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data["sample"]) == 5
+    assert "sample_complete" not in data
+
+
 def test_api_new_images_returns_error_when_compute_fails(app_and_db, monkeypatch):
     """If the background walk raises (e.g. unavailable volume, DB error), the
     endpoint must surface an error instead of looping forever on pending.
@@ -690,6 +725,47 @@ def test_post_snapshot_queues_fresh_walk_when_navbar_walk_inflight(
         assert snap["file_paths"] == [old_path, fresh_path]
     finally:
         old_release.set()
+
+
+def test_post_snapshot_expires_abandoned_session_before_reuse(app_and_db):
+    """If a client abandons a 202 snapshot session, its kickoff marker must
+    not let a later click reuse that old session's cached sample. Once the
+    marker is older than the client retry window, a new POST must invalidate
+    and recompute from current disk state."""
+    import time
+
+    from new_images import get_shared_cache
+
+    app, db, ws_id, tmp_path = app_and_db
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    db.add_folder(str(folder))
+    old_path = str(folder / "IMG_001.JPG")
+    fresh_path = str(folder / "IMG_002.JPG")
+    _touch_image(old_path)
+
+    cache = get_shared_cache()
+    with app._new_images_snapshot_kickoff_lock:
+        app._new_images_snapshot_kickoff_at[(db._db_path, ws_id)] = (
+            time.monotonic() - 121
+        )
+    cache.set(db._db_path, ws_id, {
+        "new_count": 1,
+        "per_root": [{"folder_id": 1, "path": str(folder), "new_count": 1}],
+        "sample": [old_path],
+        "sample_complete": True,
+    })
+
+    _touch_image(fresh_path)
+
+    with app.test_client() as client:
+        resp = client.post("/api/workspaces/active/new-images/snapshot")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["file_count"] == 2
+
+    snap = db.get_new_images_snapshot(data["snapshot_id"])
+    assert fresh_path in snap["file_paths"]
 
 
 def test_post_snapshot_surfaces_async_error_without_retry_loop(

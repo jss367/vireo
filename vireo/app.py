@@ -7303,7 +7303,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             """Return a small client payload while keeping full paths in cache."""
             payload = dict(result)
             payload["workspace_id"] = ws_id
-            payload["sample"] = list(payload.get("sample") or [])[:5]
+            sample = payload.get("sample") or []
+            payload["sample"] = sample[:5]
             payload.pop("sample_complete", None)
             return payload
 
@@ -7461,11 +7462,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "folders": folders,
             })
 
+        session_ttl_seconds = 120
+        now = time.monotonic()
         with kickoff_at_lock:
             request_kickoff_at = kickoff_at_dict.get(kickoff_key)
-            started_snapshot_session = request_kickoff_at is None
+            started_snapshot_session = (
+                request_kickoff_at is None
+                or now - request_kickoff_at > session_ttl_seconds
+            )
             if started_snapshot_session:
-                request_kickoff_at = time.monotonic()
+                request_kickoff_at = now
                 kickoff_at_dict[kickoff_key] = request_kickoff_at
 
         recent_err = cache.get_recent_error(db_path, ws_id)
