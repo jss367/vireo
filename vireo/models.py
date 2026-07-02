@@ -397,8 +397,19 @@ def build_self_heal_redownloader(model_dir):
 def get_active_model():
     """Return the currently active model config, or the default when unset.
 
-    Priority: the explicitly-selected active_model, then DEFAULT_MODEL_ID if
-    downloaded, then any downloaded model (KNOWN_MODELS order).
+    Priority: the explicitly-selected active_model, then DEFAULT_MODEL_ID
+    when downloaded AND label-free-ready (Tree of Life artifacts on disk),
+    then any downloaded model (KNOWN_MODELS order).
+
+    The ToL-ready gate on the default matters because bioclip-2.5's ToL
+    artifacts are declared as `optional_files`: an install can succeed
+    without them and stay usable for label-list mode. In that partial
+    state, overriding a fully-ready ToL model (e.g. bioclip-2, which
+    carries its ToL files as required) with 2.5 would flip the welcome
+    flow to "setup blocked" and make label-free classification raise in
+    Classifier's label loader. Only take over the fallback when the
+    default can actually classify on its own; otherwise fall through so a
+    ToL-ready model already on disk still wins.
     """
     config = _load_config()
     models = get_models()
@@ -409,9 +420,14 @@ def get_active_model():
             if m["id"] == active_id and m["downloaded"]:
                 return m
 
-    # No explicit choice: prefer the default model if it's downloaded.
     for m in models:
-        if m["id"] == DEFAULT_MODEL_ID and m["downloaded"]:
+        if (
+            m["id"] == DEFAULT_MODEL_ID
+            and m["downloaded"]
+            and tree_of_life_ready(
+                m.get("model_str", ""), m.get("weights_path")
+            )
+        ):
             return m
 
     # Otherwise fall back to the first downloaded model.
