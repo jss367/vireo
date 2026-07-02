@@ -524,6 +524,39 @@ def test_post_snapshot_uses_complete_cache_without_rewalk(app_and_db, monkeypatc
     assert snap["file_count"] == 7
 
 
+def test_post_snapshot_returns_pending_when_cache_is_incomplete(app_and_db, monkeypatch):
+    import threading
+
+    import new_images as new_images_module
+
+    app, db, ws_id, tmp_path = app_and_db
+    folder = tmp_path / "photos"
+    _touch_image(str(folder / "IMG_001.JPG"))
+    db.add_folder(str(folder))
+
+    release = threading.Event()
+    started = threading.Event()
+    real_count = new_images_module.count_new_images_for_workspace
+
+    def slow_count(*args, **kwargs):
+        started.set()
+        release.wait(timeout=5)
+        return real_count(*args, **kwargs)
+
+    monkeypatch.setattr(
+        new_images_module, "count_new_images_for_workspace", slow_count,
+    )
+
+    try:
+        with app.test_client() as client:
+            resp = client.post("/api/workspaces/active/new-images/snapshot")
+            assert resp.status_code == 202
+            assert resp.get_json() == {"pending": True}
+            assert started.is_set()
+    finally:
+        release.set()
+
+
 def test_post_snapshot_zero_new_images_returns_200(app_and_db):
     app, db, ws_id, tmp_path = app_and_db
     with app.test_client() as client:

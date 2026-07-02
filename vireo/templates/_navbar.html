@@ -9775,7 +9775,8 @@ async function createPipelineFromNewImages(btn) {
     btn.textContent = 'Preparing...';
   }
   try {
-    while (true) {
+    const maxAttempts = 20;  // About one minute at 3s intervals.
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const r = await fetch('/api/workspaces/active/new-images/snapshot', {method: 'POST'});
       if (r.status === 202) {
         if (btn) btn.textContent = 'Still preparing...';
@@ -9788,6 +9789,7 @@ async function createPipelineFromNewImages(btn) {
       window.location.href = `/pipeline?new_images=${data.snapshot_id}`;
       return;
     }
+    throw new Error('snapshot timed out');
   } catch (e) {
     // Fall back to the existing behavior — blank pipeline wizard.
     window.location.href = '/pipeline';
