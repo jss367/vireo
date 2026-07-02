@@ -1429,6 +1429,27 @@ document.addEventListener('DOMContentLoaded', refreshPipelineUI);
 // -- New images (Stage 1 third option) --
 var newImagesSnapshotId = null;
 
+function sleepNewImagesSnapshot(ms) {
+  return new Promise(function(resolve) { setTimeout(resolve, ms); });
+}
+
+async function createNewImagesSnapshotWithRetry(onPending) {
+  var maxAttempts = 20;  // About one minute at 3s intervals.
+  for (var attempt = 0; attempt < maxAttempts; attempt++) {
+    var resp = await fetch('/api/workspaces/active/new-images/snapshot', {method: 'POST'});
+    if (resp.status === 202) {
+      if (typeof onPending === 'function') onPending(attempt);
+      await sleepNewImagesSnapshot(3000);
+      continue;
+    }
+    if (!resp.ok) throw new Error('snapshot failed');
+    var data = await resp.json();
+    if (!data || data.snapshot_id == null) throw new Error('snapshot missing');
+    return data.snapshot_id;
+  }
+  throw new Error('snapshot timed out');
+}
+
 async function initNewImagesCard() {
   var params = new URLSearchParams(window.location.search);
   var deepLinkId = params.get('new_images');
@@ -2355,17 +2376,28 @@ async function selectSourceMode(mode) {
 
   if (mode === 'new_images' && newImagesSnapshotId === null) {
     // User is selecting the card directly (no deep-link) — freeze the list now.
+    var actionStatus = document.getElementById('pipelineActionStatus');
+    var snapshotError = null;
     try {
-      var resp = await fetch('/api/workspaces/active/new-images/snapshot', {method: 'POST'});
-      if (resp.ok) {
-        var data = await resp.json();
-        newImagesSnapshotId = data.snapshot_id;
+      if (actionStatus) {
+        actionStatus.textContent = 'Preparing new-images snapshot...';
+        actionStatus.className = 'status-msg';
       }
+      newImagesSnapshotId = await createNewImagesSnapshotWithRetry(function() {
+        if (actionStatus) {
+          actionStatus.textContent = 'Still preparing new-images snapshot...';
+        }
+      });
     } catch (e) {
       // Leave snapshot id null; submit will fail validation via updateStartButton.
+      snapshotError = 'New-images snapshot is still being prepared. Try again in a moment.';
     }
     // Snapshot resolved (or failed) — refresh start-button state.
     updateStartButton();
+    if (snapshotError && actionStatus) {
+      actionStatus.textContent = snapshotError;
+      actionStatus.className = 'status-msg error';
+    }
   }
 
   fetchFolderPreview();

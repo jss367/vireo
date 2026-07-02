@@ -2138,6 +2138,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     app._log_broadcaster = LogBroadcaster(buffer_size=500)
     app._log_broadcaster.install()
 
+    # Per-workspace monotonic timestamp recording when the current snapshot
+    # POST forced a fresh recompute. Subsequent polls on the same request
+    # compare the cache entry's set_at to this value: if the entry was
+    # written after we invalidated, it's the fresh walk's result and can be
+    # reused; if it predates our invalidation, it's a stale navbar probe and
+    # must be re-walked. Cleared when a snapshot is successfully returned.
+    app._new_images_snapshot_kickoff_at = {}
+    app._new_images_snapshot_kickoff_lock = threading.Lock()
+
     # Self-healing background backfill of missing working copies. RAW (and
     # oversized JPEG) imports need a JPEG working copy at
     # ``~/.vireo/working/{photo_id}.jpg`` so /photos/<id>/original can serve
@@ -7290,13 +7299,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if ws_id is None:
             return jsonify({"workspace_id": None, "new_count": 0, "per_root": [], "sample": []})
 
+        def response_payload(result):
+            """Return a small client payload while keeping full paths in cache."""
+            payload = dict(result)
+            payload["workspace_id"] = ws_id
+            sample = payload.get("sample") or []
+            payload["sample"] = sample[:5]
+            payload.pop("sample_complete", None)
+            return payload
+
         cache = db._new_images_cache
         db_path = db._db_path
         cached = cache.get(db_path, ws_id)
         if cached is not None:
-            payload = dict(cached)
-            payload["workspace_id"] = ws_id
-            return jsonify(payload)
+            return jsonify(response_payload(cached))
 
         # If a recent compute failed and we're still inside the backoff
         # window, surface the error instead of kicking off another walk.
@@ -7334,7 +7350,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             wdb.set_active_workspace(ws_id)
             try:
                 return count_new_images_for_workspace(
-                    wdb, ws_id, progress_callback=progress_callback,
+                    wdb, ws_id, sample_limit=5, progress_callback=progress_callback,
                 )
             except Exception as e:
                 walk_error["exc"] = e
@@ -7401,9 +7417,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if event.wait(timeout=0.5):
             cached = cache.get(db_path, ws_id)
             if cached is not None:
-                payload = dict(cached)
-                payload["workspace_id"] = ws_id
-                return jsonify(payload)
+                return jsonify(response_payload(cached))
             # Compute finished but produced no cached entry — it must have
             # raised. Surface the error captured by the worker.
             recent_err = cache.get_recent_error(db_path, ws_id)
@@ -7430,16 +7444,88 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ws_id = db._active_workspace_id
         if ws_id is None:
             return jsonify({"error": "no active workspace"}), 400
+        cache = db._new_images_cache
+        db_path = db._db_path
+        kickoff_key = (db_path, ws_id)
+        kickoff_at_dict = app._new_images_snapshot_kickoff_at
+        kickoff_at_lock = app._new_images_snapshot_kickoff_lock
+
+        def create_snapshot_from_result(result):
+            file_paths = list(result.get("sample") or [])
+            snap_id = db.create_new_images_snapshot(file_paths)
+            folders = sorted({os.path.dirname(p) for p in file_paths})
+            with kickoff_at_lock:
+                kickoff_at_dict.pop(kickoff_key, None)
+            return jsonify({
+                "snapshot_id": snap_id,
+                "file_count": len(file_paths),
+                "folders": folders,
+            })
+
+        session_ttl_seconds = 120
+        now = time.monotonic()
+        with kickoff_at_lock:
+            request_kickoff_at = kickoff_at_dict.get(kickoff_key)
+            started_snapshot_session = (
+                request_kickoff_at is None
+                or now - request_kickoff_at > session_ttl_seconds
+            )
+            if started_snapshot_session:
+                request_kickoff_at = now
+                kickoff_at_dict[kickoff_key] = request_kickoff_at
+
+        recent_err = cache.get_recent_error(db_path, ws_id)
+        if recent_err is not None:
+            with kickoff_at_lock:
+                kickoff_at_dict.pop(kickoff_key, None)
+            return jsonify({"error": recent_err}), 500
+
+        # Force the snapshot generation forward before trusting any cache for
+        # a newly-started session. A navbar probe may have begun before the
+        # click but finish after ``request_kickoff_at``; invalidating first
+        # drops that stale write (or makes the in-flight worker stale) before
+        # the cache reuse check below.
+        if started_snapshot_session:
+            cache.invalidate_workspaces(db_path, [ws_id])
+
+        # A cached "sample_complete" result may be there because the navbar
+        # probe ran recently — but the cache is not invalidated when files
+        # are copied into a mapped folder, so ``sample`` can omit images
+        # that arrived after that probe. Only trust the cached sample if
+        # this request's snapshot session already forced a fresh walk and
+        # the entry was written *after* that invalidation.
+        cached = cache.get(db_path, ws_id)
+        entry_set_at = cache.get_entry_set_at(db_path, ws_id)
+        if (cached is not None
+                and cached.get("sample_complete")
+                and entry_set_at is not None
+                and entry_set_at >= request_kickoff_at):
+            return create_snapshot_from_result(cached)
+
         from new_images import count_new_images_for_workspace
-        result = count_new_images_for_workspace(db, ws_id, sample_limit=None)
-        file_paths = list(result["sample"])
-        snap_id = db.create_new_images_snapshot(file_paths)
-        folders = sorted({os.path.dirname(p) for p in file_paths})
-        return jsonify({
-            "snapshot_id": snap_id,
-            "file_count": len(file_paths),
-            "folders": folders,
-        })
+
+        def compute():
+            from db import Database
+            wdb = Database(db_path)
+            wdb.set_active_workspace(ws_id)
+            return count_new_images_for_workspace(wdb, ws_id, sample_limit=None)
+
+        event = cache.kickoff_compute(db_path, ws_id, compute)
+        if event.wait(timeout=0.5):
+            cached = cache.get(db_path, ws_id)
+            entry_set_at = cache.get_entry_set_at(db_path, ws_id)
+            if (cached is not None
+                    and cached.get("sample_complete")
+                    and entry_set_at is not None
+                    and entry_set_at >= request_kickoff_at):
+                return create_snapshot_from_result(cached)
+            recent_err = cache.get_recent_error(db_path, ws_id)
+            if recent_err is not None:
+                with kickoff_at_lock:
+                    kickoff_at_dict.pop(kickoff_key, None)
+                return jsonify({"error": recent_err}), 500
+
+        return jsonify({"pending": True}), 202
 
     @app.route(
         "/api/workspaces/active/new-images/snapshot/<int:snapshot_id>",

@@ -2145,7 +2145,7 @@ function sendReport() {
 <!-- New Images Banner -->
 <div class="new-images-banner" id="newImagesBanner" style="display:none;">
   <span id="newImagesMsg"></span>
-  <button type="button" class="banner-cta" onclick="createPipelineFromNewImages()">Create a pipeline</button>
+  <button type="button" class="banner-cta" onclick="createPipelineFromNewImages(this)">Create a pipeline</button>
   <button class="banner-dismiss" onclick="dismissNewImagesBanner()">&times;</button>
 </div>
 
@@ -9763,15 +9763,41 @@ function dismissNewImagesBanner() {
   }
 }
 
-async function createPipelineFromNewImages() {
+function _sleepNewImages(ms) {
+  return new Promise(function(resolve) { setTimeout(resolve, ms); });
+}
+
+async function createPipelineFromNewImages(btn) {
+  if (btn && btn.disabled) return;
+  const originalText = btn ? btn.textContent : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Preparing...';
+  }
   try {
-    const r = await fetch('/api/workspaces/active/new-images/snapshot', {method: 'POST'});
-    if (!r.ok) throw new Error('snapshot failed');
-    const data = await r.json();
-    window.location.href = `/pipeline?new_images=${data.snapshot_id}`;
+    const maxAttempts = 20;  // About one minute at 3s intervals.
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const r = await fetch('/api/workspaces/active/new-images/snapshot', {method: 'POST'});
+      if (r.status === 202) {
+        if (btn) btn.textContent = 'Still preparing...';
+        await _sleepNewImages(3000);
+        continue;
+      }
+      if (!r.ok) throw new Error('snapshot failed');
+      const data = await r.json();
+      if (!data || data.snapshot_id == null) throw new Error('snapshot missing');
+      window.location.href = `/pipeline?new_images=${data.snapshot_id}`;
+      return;
+    }
+    throw new Error('snapshot timed out');
   } catch (e) {
     // Fall back to the existing behavior — blank pipeline wizard.
     window.location.href = '/pipeline';
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = originalText || 'Create a pipeline';
+    }
   }
 }
 
