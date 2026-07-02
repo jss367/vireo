@@ -285,7 +285,7 @@ if (typeof safeEventSource === 'undefined') {
   };
 }
 
-var MODEL_ID = 'bioclip-vit-b-16';
+var MODEL_ID = 'bioclip-2.5-vith14';
 var modelAlreadyDownloaded = false;
 var classificationReady = false;
 
@@ -363,11 +363,12 @@ async function getStarted() {
   }
 }
 
-/* The model is ready. The default model (BioCLIP ViT-B-16) classifies by
-   matching against a regional species list, so without labels the pipeline
-   would fail at the classify stage. Route the user to the labels step unless
-   classification is already usable (a Tree-of-Life model or labels already
-   present), in which case finish setup straight away. */
+/* The model is ready. The default model (BioCLIP-2.5) ships Tree of Life
+   embeddings, so it classifies label-free and setup can finish straight away.
+   The status endpoint reports classification usable when the active model is
+   label-free (Tree of Life or timm) OR a non-empty label list is present;
+   otherwise route the user to the labels step so the pipeline won't fail at
+   the classify stage. */
 async function proceedAfterModel() {
   var ready = false;
   try {

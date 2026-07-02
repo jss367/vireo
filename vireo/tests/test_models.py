@@ -282,6 +282,80 @@ def test_get_active_model_fallback(tmp_path, monkeypatch):
     assert active["id"] == "bioclip-vit-b-16"
 
 
+def _install_known_model(tmp_path, models, model_id, *, include_optional=False):
+    """Materialize a KNOWN_MODELS entry on disk with `.data` sidecars and
+    JSON stubs so `get_models()` sees it as downloaded. When
+    `include_optional` is True, also drop stubs for `optional_files` —
+    used to simulate a bioclip-2.5 install that has (or doesn't have)
+    its Tree of Life artifacts on disk."""
+    km = next(m for m in models.KNOWN_MODELS if m["id"] == model_id)
+    d = tmp_path / "models" / model_id
+    d.mkdir(parents=True)
+    for fn in km["files"]:
+        if fn.endswith(".data"):
+            _make_fake_data_file(d / fn)
+        else:
+            (d / fn).write_text("{}")
+    if include_optional:
+        for fn in km.get("optional_files", []):
+            (d / fn).write_text("{}")
+
+
+def test_get_active_model_prefers_default(tmp_path, monkeypatch):
+    """With no active_model set, prefer DEFAULT_MODEL_ID over the first
+    downloaded model — but only when the default's Tree of Life artifacts
+    are on disk so it's actually label-free-ready."""
+    import models
+
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+
+    # Both v1 (first in KNOWN_MODELS) and the default 2.5 are downloaded,
+    # with 2.5's ToL artifacts present so it is label-free-ready.
+    _install_known_model(tmp_path, models, "bioclip-vit-b-16")
+    _install_known_model(
+        tmp_path, models, models.DEFAULT_MODEL_ID, include_optional=True,
+    )
+    models._save_config({"models": [], "active_model": None})
+
+    active = models.get_active_model()
+    assert active is not None
+    assert active["id"] == models.DEFAULT_MODEL_ID
+
+
+def test_get_active_model_skips_default_when_tol_missing(tmp_path, monkeypatch):
+    """Prefer the default only when it's actually label-free-ready.
+
+    bioclip-2.5 declares its ToL artifacts as `optional_files`, so an
+    install can succeed without them and be usable only for label-list
+    classification. If we blindly preferred 2.5 anyway, an install where
+    bioclip-2 is fully ToL-ready would get overridden by a 2.5 that can't
+    classify without labels — the status endpoint would report setup
+    blocked and Classifier(labels=None) would raise in _load_labels.
+    Instead, fall through so the ToL-ready bioclip-2 wins.
+    """
+    import models
+
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+
+    # 2.5 installed WITHOUT its optional ToL artifacts; bioclip-2 fully
+    # installed (its ToL files are required, so they land automatically).
+    _install_known_model(
+        tmp_path, models, models.DEFAULT_MODEL_ID, include_optional=False,
+    )
+    _install_known_model(tmp_path, models, "bioclip-2")
+    models._save_config({"models": [], "active_model": None})
+
+    active = models.get_active_model()
+    assert active is not None
+    assert active["id"] != models.DEFAULT_MODEL_ID
+    # Fall-through walks KNOWN_MODELS order; v1 isn't downloaded, so
+    # bioclip-2 is the first downloaded entry — and it's the one we want,
+    # since it's the ToL-ready model.
+    assert active["id"] == "bioclip-2"
+
+
 # ---------------------------------------------------------------------------
 # register_model
 # ---------------------------------------------------------------------------

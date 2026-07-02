@@ -82,6 +82,14 @@ def tree_of_life_ready(model_str, model_dir):
         for f in TOL_ARTIFACT_FILES
     )
 
+
+# The model a fresh install downloads and classifies with by default (the
+# welcome flow downloads this, and get_active_model() prefers it when the user
+# hasn't chosen one). BioCLIP-2.5 is the strongest variant and ships Tree of
+# Life embeddings, so it classifies label-free out of the box — no regional
+# species list required for a new user to get results.
+DEFAULT_MODEL_ID = "bioclip-2.5-vith14"
+
 # Known models that can be downloaded.
 # Each entry specifies which ONNX files are needed and the subdirectory
 # within the HF repo where they live.
@@ -387,7 +395,22 @@ def build_self_heal_redownloader(model_dir):
 
 
 def get_active_model():
-    """Return the currently active model config, or the first downloaded one."""
+    """Return the currently active model config, or the default when unset.
+
+    Priority: the explicitly-selected active_model, then DEFAULT_MODEL_ID
+    when downloaded AND label-free-ready (Tree of Life artifacts on disk),
+    then any downloaded model (KNOWN_MODELS order).
+
+    The ToL-ready gate on the default matters because bioclip-2.5's ToL
+    artifacts are declared as `optional_files`: an install can succeed
+    without them and stay usable for label-list mode. In that partial
+    state, overriding a fully-ready ToL model (e.g. bioclip-2, which
+    carries its ToL files as required) with 2.5 would flip the welcome
+    flow to "setup blocked" and make label-free classification raise in
+    Classifier's label loader. Only take over the fallback when the
+    default can actually classify on its own; otherwise fall through so a
+    ToL-ready model already on disk still wins.
+    """
     config = _load_config()
     models = get_models()
     active_id = config.get("active_model")
@@ -397,7 +420,17 @@ def get_active_model():
             if m["id"] == active_id and m["downloaded"]:
                 return m
 
-    # Fall back to first downloaded model
+    for m in models:
+        if (
+            m["id"] == DEFAULT_MODEL_ID
+            and m["downloaded"]
+            and tree_of_life_ready(
+                m.get("model_str", ""), m.get("weights_path")
+            )
+        ):
+            return m
+
+    # Otherwise fall back to the first downloaded model.
     for m in models:
         if m["downloaded"]:
             return m
