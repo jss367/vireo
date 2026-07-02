@@ -149,9 +149,9 @@ def test_api_new_images_returns_cached_after_background_compute_finishes(app_and
     assert data["new_count"] == 1
 
 
-def test_api_new_images_response_trims_full_cached_sample(app_and_db):
-    """The navbar only needs a tiny sample, but the server cache keeps the full
-    path list so "Create a pipeline" can snapshot without a second full walk."""
+def test_api_new_images_response_keeps_navbar_cache_bounded(app_and_db):
+    """The navbar only needs a tiny sample. Keep that probe's cache bounded;
+    the snapshot POST performs its own full walk when the user clicks."""
     import time
 
     from new_images import get_shared_cache
@@ -179,8 +179,8 @@ def test_api_new_images_response_trims_full_cached_sample(app_and_db):
             break
         time.sleep(0.01)
     assert cached is not None
-    assert cached["sample_complete"] is True
-    assert len(cached["sample"]) == 8
+    assert cached["sample_complete"] is False
+    assert len(cached["sample"]) == 5
 
 
 def test_api_new_images_cached_response_slices_without_full_copy(app_and_db):

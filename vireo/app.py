@@ -7350,7 +7350,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             wdb.set_active_workspace(ws_id)
             try:
                 return count_new_images_for_workspace(
-                    wdb, ws_id, sample_limit=None, progress_callback=progress_callback,
+                    wdb, ws_id, sample_limit=5, progress_callback=progress_callback,
                 )
             except Exception as e:
                 walk_error["exc"] = e
