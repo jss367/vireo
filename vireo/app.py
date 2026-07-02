@@ -7480,6 +7480,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 kickoff_at_dict.pop(kickoff_key, None)
             return jsonify({"error": recent_err}), 500
 
+        # Force the snapshot generation forward before trusting any cache for
+        # a newly-started session. A navbar probe may have begun before the
+        # click but finish after ``request_kickoff_at``; invalidating first
+        # drops that stale write (or makes the in-flight worker stale) before
+        # the cache reuse check below.
+        if started_snapshot_session:
+            cache.invalidate_workspaces(db_path, [ws_id])
+
         # A cached "sample_complete" result may be there because the navbar
         # probe ran recently — but the cache is not invalidated when files
         # are copied into a mapped folder, so ``sample`` can omit images
@@ -7501,14 +7509,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             wdb = Database(db_path)
             wdb.set_active_workspace(ws_id)
             return count_new_images_for_workspace(wdb, ws_id, sample_limit=None)
-
-        # Nothing fresh yet. The first POST in a snapshot session must force
-        # a walk that begins at click time. If a navbar probe is already in
-        # flight, invalidating bumps the cache generation; kickoff_compute
-        # coalesces onto that old event only long enough to queue one fresh
-        # rerun, and the stale write is dropped by the generation guard.
-        if started_snapshot_session:
-            cache.invalidate_workspaces(db_path, [ws_id])
 
         event = cache.kickoff_compute(db_path, ws_id, compute)
         if event.wait(timeout=0.5):

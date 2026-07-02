@@ -568,6 +568,49 @@ def test_post_snapshot_recomputes_over_navbar_populated_cache(app_and_db):
     assert fresh_path in snap["file_paths"]
 
 
+def test_post_snapshot_invalidates_before_trusting_newer_navbar_cache(
+        app_and_db, monkeypatch):
+    """A navbar walk can begin before the click but write its cache after the
+    snapshot session timestamp. The first snapshot POST must invalidate before
+    checking cache freshness, so that pre-click walk cannot masquerade as the
+    snapshot-owned result."""
+    import app as app_module
+    from new_images import get_shared_cache
+
+    fake_now = {"value": 200.0}
+    monkeypatch.setattr(
+        app_module.time, "monotonic", lambda: fake_now["value"],
+    )
+
+    app, db, ws_id, tmp_path = app_and_db
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    db.add_folder(str(folder))
+    old_path = str(folder / "IMG_001.JPG")
+    fresh_path = str(folder / "IMG_002.JPG")
+    _touch_image(old_path)
+    _touch_image(fresh_path)
+
+    # Simulate a navbar worker that started before the click but wrote cache
+    # just after the snapshot session's kickoff timestamp.
+    get_shared_cache().set(db._db_path, ws_id, {
+        "new_count": 1,
+        "per_root": [{"folder_id": 1, "path": str(folder), "new_count": 1}],
+        "sample": [old_path],
+        "sample_complete": True,
+    })
+    fake_now["value"] = 100.0
+
+    with app.test_client() as client:
+        resp = client.post("/api/workspaces/active/new-images/snapshot")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["file_count"] == 2
+
+    snap = db.get_new_images_snapshot(data["snapshot_id"])
+    assert fresh_path in snap["file_paths"]
+
+
 def test_post_snapshot_reuses_walk_across_polls(app_and_db, monkeypatch):
     """The client polls the snapshot endpoint on 202 responses. Once the
     fresh walk this session kicked off populates the cache, subsequent
