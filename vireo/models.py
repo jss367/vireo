@@ -25,8 +25,13 @@ ONNX_REPO = "jss367/vireo-onnx-models"
 # Single source of truth: the classifier gate (classify_job), the pipeline
 # planner (pipeline_plan), and the UI readiness flags (app) all consult this,
 # so they never disagree about whether a model supports label-free ToL mode.
-# A model only belongs here once its tol_embeddings.npy + tol_classes.json are
-# published to ONNX_REPO and listed in its KNOWN_MODELS "files" manifest.
+# A model's ToL artifacts (tol_embeddings.npy + tol_classes.json) can be
+# declared in either its KNOWN_MODELS "files" manifest (required — the model
+# is 'incomplete' without them) or "optional_files" (best-effort — the model
+# is still usable for label-list classification if the artifacts aren't on
+# HF yet or on disk). The classifier raises a clear FileNotFoundError at
+# classify time if a ToL-advertised model's artifacts are missing on disk,
+# so it's safe to advertise support here ahead of the HF upload landing.
 TOL_SUPPORTED_MODEL_STRS = frozenset({
     "hf-hub:imageomics/bioclip",
     "hf-hub:imageomics/bioclip-2",
@@ -102,6 +107,14 @@ KNOWN_MODELS = [
             "text_encoder.onnx.data",
             "tokenizer.json",
             "config.json",
+        ],
+        # ToL artifacts are optional so that 2.5 installs stay usable for
+        # normal label-list classification even while the artifacts are
+        # being uploaded to ONNX_REPO — listing them under "files" would
+        # cause download_model() to fail on the missing HF entry and mark
+        # existing 2.5 installs as `incomplete` on any state check. See
+        # docs/tol-embeddings.md for the enablement runbook.
+        "optional_files": [
             "tol_embeddings.npy",
             "tol_classes.json",
         ],
@@ -726,6 +739,22 @@ def download_model(model_id, progress_callback=None):
                     "Open Settings → Models and click Repair to retry the download."
                 )
 
+    # Optional files (best-effort). Downloaded only after required files
+    # succeed so a missing/unavailable optional never turns into a hard
+    # failure of the install. Use case: ToL artifacts declared under a
+    # model's `optional_files` (e.g. bioclip-2.5-vith14 while its
+    # tol_embeddings.npy is being uploaded to ONNX_REPO) — the model must
+    # still install successfully and be usable for label-list mode until
+    # the artifacts land.
+    optional_files_list = km.get("optional_files", [])
+    if optional_files_list:
+        _download_optional_files(
+            optional_files_list, model_dir, hf_subdir,
+            expected_hashes=expected_hashes,
+            revision=pinned_revision,
+            progress_callback=progress_callback,
+        )
+
     state = _classify_model_state(model_dir, files)
     # "unverified" is an acceptable post-download state: every required file
     # is present, only the cryptographic check was skipped because the HF
@@ -767,7 +796,7 @@ _MIN_BINARY_MODEL_BYTES = 10 * 1024 * 1024  # 10 MB
 
 def _download_and_verify_file(
     filename, model_dir, hf_subdir, expected_hashes, progress_callback,
-    revision=None,
+    revision=None, optional=False,
 ):
     """Download one file and verify its SHA256 against expected_hashes.
 
@@ -777,6 +806,11 @@ def _download_and_verify_file(
     cache (otherwise hf_hub_download would happily hand back the same
     corrupt blob on retry) and retries up to _MAX_HASH_RETRIES. On final
     mismatch, raises VerifyError.
+
+    When `optional` is True, a final hash mismatch skips the shared
+    .verify_failed sentinel write so a corrupt optional file doesn't flip
+    the whole model's state to 'incomplete'. The caller is expected to
+    delete the local file on failure.
     """
     attempts = 0
     while True:
@@ -810,18 +844,21 @@ def _download_and_verify_file(
             # sentinel logic is skipped by the exception.  Without this,
             # a repair on an already-installed model leaves all files
             # present and the model appears 'ok' despite proven corruption.
-            sentinel = os.path.join(
-                model_dir, model_verify.VERIFY_FAILED_SENTINEL
-            )
-            try:
-                with open(sentinel, "w") as f:
-                    f.write(
-                        f"hash-mismatch: {filename} "
-                        f"expected {expected_sha[:8]}... "
-                        f"got {actual_sha[:8]}...\n"
-                    )
-            except OSError:
-                pass
+            # Skipped for optional files — their corruption must not gate
+            # the whole model's completeness.
+            if not optional:
+                sentinel = os.path.join(
+                    model_dir, model_verify.VERIFY_FAILED_SENTINEL
+                )
+                try:
+                    with open(sentinel, "w") as f:
+                        f.write(
+                            f"hash-mismatch: {filename} "
+                            f"expected {expected_sha[:8]}... "
+                            f"got {actual_sha[:8]}...\n"
+                        )
+                except OSError:
+                    pass
             raise model_verify.VerifyError(
                 f"{filename} failed SHA256 verification after "
                 f"{_MAX_HASH_RETRIES + 1} attempts "
@@ -836,6 +873,78 @@ def _download_and_verify_file(
         with contextlib.suppress(OSError):
             os.unlink(local_path)
         _purge_hf_cache_file(filename, hf_subdir, revision=revision)
+
+
+def _download_optional_files(
+    filenames, model_dir, hf_subdir, expected_hashes, revision,
+    progress_callback,
+):
+    """Best-effort download of a model's optional_files.
+
+    Uses list_repo_files as a preflight so that optional files not yet
+    uploaded to the HF repo are skipped silently without burning the
+    retry budget in _hf_download_with_retry on a 404. Any per-file
+    download or verification failure is logged and the local file is
+    removed — required files remain the source of truth for install
+    completeness, so a missing/broken optional never fails the install.
+    """
+    if not filenames:
+        return
+
+    try:
+        from huggingface_hub import list_repo_files
+    except ImportError:
+        log.info(
+            "huggingface_hub.list_repo_files unavailable; "
+            "skipping optional downloads for %s.", hf_subdir,
+        )
+        return
+
+    lookup_revision = revision or "main"
+    try:
+        repo_files = set(list_repo_files(
+            ONNX_REPO, revision=lookup_revision,
+        ))
+    except Exception as e:
+        log.info(
+            "Could not list %s@%s to probe optional files (%s); "
+            "skipping optional downloads.",
+            ONNX_REPO, lookup_revision, e,
+        )
+        return
+
+    for fi, filename in enumerate(filenames):
+        hf_path = f"{hf_subdir}/{filename}" if hf_subdir else filename
+        if hf_path not in repo_files:
+            log.info(
+                "Optional file %s not present in %s@%s; skipping.",
+                hf_path, ONNX_REPO, lookup_revision,
+            )
+            continue
+        if progress_callback:
+            progress_callback(
+                f"Downloading optional {fi + 1}/{len(filenames)}: {filename}",
+            )
+        try:
+            _download_and_verify_file(
+                filename=filename,
+                model_dir=model_dir,
+                hf_subdir=hf_subdir,
+                expected_hashes=expected_hashes,
+                revision=revision,
+                progress_callback=progress_callback,
+                optional=True,
+            )
+        except (model_verify.VerifyError, RuntimeError) as e:
+            log.warning(
+                "Optional file %s could not be downloaded/verified (%s); "
+                "removing partial file. Model remains usable without it.",
+                filename, e,
+            )
+            local_path = os.path.join(model_dir, filename)
+            with contextlib.suppress(OSError):
+                if os.path.isfile(local_path):
+                    os.unlink(local_path)
 
 
 def _purge_hf_cache_file(filename, hf_subdir, revision=None):

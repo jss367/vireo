@@ -94,15 +94,26 @@ the classifier, pipeline planner, and UI readiness flags all consult it.
        bioclip-2.5-vith14/tol_classes.json --repo-type model
    ```
 
-3. **List the files** in the model's `files` manifest in `vireo/models.py`
-   (add `tol_embeddings.npy` and `tol_classes.json`) so the downloader fetches
-   them.
+3. **List the files** in the model's manifest in `vireo/models.py` so the
+   downloader fetches them. Two options:
+   - **`files`** — required. Install is marked `incomplete` if these are
+     missing, and `download_model` fails hard on a missing HF entry. Use
+     this once the artifacts are uploaded and stable.
+   - **`optional_files`** — best-effort. `download_model` probes the HF
+     repo with `list_repo_files` and only fetches what's actually there;
+     missing or 404'd optional files never fail the install and never
+     flip the model to `incomplete`. Use this when you want to advertise
+     ToL support ahead of the HF upload landing, or when a user's local
+     copy may lack the artifacts for any other reason.
 
 4. **Register support** by adding the model's `model_str` to
    `TOL_SUPPORTED_MODEL_STRS` in `vireo/models.py`.
 
-> Order matters: do **not** ship steps 3–4 before step 2 completes. A model
-> listed in `TOL_SUPPORTED_MODEL_STRS` whose `tol_embeddings.npy` isn't yet on
-> HF will advertise ToL in the UI and then fail at classify time with a missing
-> file. bioclip-2.5 already has steps 3–4 applied — its artifact must be
-> uploaded before this is released.
+> Advertising ToL support (step 4) before the HF upload (step 2) is safe
+> when the artifacts are declared under `optional_files`: the model is
+> still usable for label-list mode until the artifacts land, and the
+> classifier raises a clear "download the model from Settings" error if
+> ToL mode is selected without them on disk. bioclip-2.5-vith14 uses the
+> `optional_files` path for exactly this reason — the model is shipped
+> ToL-capable, and the artifacts flow through the same downloader once
+> they're uploaded to `jss367/vireo-onnx-models`.

@@ -1622,3 +1622,297 @@ def test_hf_download_with_retry_cache_lookup_failure_falls_back(tmp_path, monkey
     # Falls back to network-download messaging since cache state is unknown.
     assert result == os.path.join(str(dest_dir), "model.onnx")
     assert any("Downloading" in m and "Hugging Face" in m for m in messages)
+
+
+# ---------------------------------------------------------------------------
+# optional_files — ToL artifacts must not gate install completeness while
+# they're being uploaded to ONNX_REPO. Regression coverage for the Codex
+# review on PR #1077.
+# ---------------------------------------------------------------------------
+
+
+def test_bioclip_2_5_declares_tol_artifacts_as_optional():
+    """bioclip-2.5-vith14 lists tol_embeddings.npy + tol_classes.json under
+    `optional_files`, not `files`. Listing them as required would mean the
+    downloader hard-fails and every 2.5 install without them (i.e. every
+    install until the HF upload lands) is marked `incomplete`, breaking
+    label-list mode on 2.5 too."""
+    from models import KNOWN_MODELS
+
+    entry = next(m for m in KNOWN_MODELS if m["id"] == "bioclip-2.5-vith14")
+    assert "tol_embeddings.npy" not in entry["files"]
+    assert "tol_classes.json" not in entry["files"]
+    optional = entry.get("optional_files", [])
+    assert "tol_embeddings.npy" in optional
+    assert "tol_classes.json" in optional
+
+
+def test_classify_state_ok_when_only_optional_files_missing(tmp_path, monkeypatch):
+    """A model dir that has every required file but is missing its declared
+    optional_files must classify as 'ok' — otherwise 2.5 installs would flip
+    to 'incomplete' the moment ToL artifacts are declared, even though the
+    model is fully functional for label-list mode."""
+    import models
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+
+    model_dir = tmp_path / "models" / "bioclip-2.5-vith14"
+    model_dir.mkdir(parents=True)
+    # Only the required files, none of the optional ToL artifacts.
+    for name in [
+        "image_encoder.onnx",
+        "image_encoder.onnx.data",
+        "text_encoder.onnx",
+        "text_encoder.onnx.data",
+        "tokenizer.json",
+        "config.json",
+    ]:
+        (model_dir / name).write_bytes(b"stub")
+
+    entry = next(m for m in models.get_models() if m["id"] == "bioclip-2.5-vith14")
+    assert entry["state"] == "ok"
+    assert entry["downloaded"] is True
+
+
+def _stub_hf_for_download_tests(monkeypatch, list_repo_files_fn=None):
+    """Install a huggingface_hub stub sufficient for download_model paths.
+    list_repo_files_fn, when supplied, drives the optional-file preflight."""
+    import sys
+    import types
+
+    stub = types.ModuleType("huggingface_hub")
+    stub.hf_hub_download = None  # not called; _hf_download_with_retry is patched
+    stub.try_to_load_from_cache = None
+    if list_repo_files_fn is not None:
+        stub.list_repo_files = list_repo_files_fn
+    monkeypatch.setitem(sys.modules, "huggingface_hub", stub)
+
+
+def test_download_model_skips_missing_optional_files(tmp_path, monkeypatch):
+    """When list_repo_files says the optional files aren't in the HF repo,
+    download_model must skip them silently and register the model as ok.
+    This is the concrete P1 scenario: bioclip-2.5's ToL artifacts haven't
+    been uploaded yet, but a user downloading 2.5 should still get a
+    working label-list-capable model."""
+    import hashlib
+
+    import model_verify
+    models, model_dir = _patch_download_model_env(tmp_path, monkeypatch)
+
+    # Redirect the fixture's default target dir to bioclip-2.5-vith14.
+    model_dir = tmp_path / "models" / "bioclip-2.5-vith14"
+
+    lfs_contents = {
+        "image_encoder.onnx": b"graph-i" * 100,
+        "image_encoder.onnx.data": b"weights-i" * 1000,
+        "text_encoder.onnx": b"graph-t" * 100,
+        "text_encoder.onnx.data": b"weights-t" * 1000,
+    }
+    expected = {
+        name: hashlib.sha256(data).hexdigest()
+        for name, data in lfs_contents.items()
+    }
+
+    downloaded = []
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None,
+                      progress_callback=None, revision=None):
+        downloaded.append(filename)
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        content = lfs_contents.get(filename, b"{}")
+        with open(dest, "wb") as f:
+            f.write(content)
+        return dest
+
+    # HF repo listing: only the required files exist under the 2.5 subdir.
+    # The optional ToL artifacts haven't been uploaded yet.
+    def fake_list_repo_files(repo_id, revision=None):
+        return [
+            "bioclip-2.5-vith14/image_encoder.onnx",
+            "bioclip-2.5-vith14/image_encoder.onnx.data",
+            "bioclip-2.5-vith14/text_encoder.onnx",
+            "bioclip-2.5-vith14/text_encoder.onnx.data",
+            "bioclip-2.5-vith14/tokenizer.json",
+            "bioclip-2.5-vith14/config.json",
+        ]
+
+    _stub_hf_for_download_tests(monkeypatch, fake_list_repo_files)
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(
+        model_verify, "fetch_expected_hashes",
+        lambda subdir, revision="main": expected,
+    )
+
+    result = models.download_model("bioclip-2.5-vith14")
+    assert result.endswith("bioclip-2.5-vith14")
+
+    # Optional files were never fetched — the preflight probe caught the
+    # missing entries before we spent 3 retries on each 404.
+    assert "tol_embeddings.npy" not in downloaded
+    assert "tol_classes.json" not in downloaded
+
+    # And the model still registered as downloaded — a missing optional
+    # file cannot poison install completeness.
+    cfg = models._load_config()
+    assert any(m["id"] == "bioclip-2.5-vith14" for m in cfg.get("models", []))
+
+    # State is 'ok' because required files are present and none of the
+    # sentinel/incomplete flags were tripped by the missing optionals.
+    entry = next(m for m in models.get_models() if m["id"] == "bioclip-2.5-vith14")
+    assert entry["state"] == "ok"
+
+
+def test_download_model_downloads_optional_files_when_present(tmp_path, monkeypatch):
+    """When list_repo_files reports the optional files ARE in the HF repo,
+    download_model fetches them. This is the post-upload path — once
+    tol_embeddings.npy + tol_classes.json are published, the same installer
+    picks them up on the next download or Repair without any code change."""
+    import hashlib
+
+    import model_verify
+    models, _ = _patch_download_model_env(tmp_path, monkeypatch)
+    model_dir = tmp_path / "models" / "bioclip-2.5-vith14"
+
+    file_contents = {
+        "image_encoder.onnx": b"graph-i" * 100,
+        "image_encoder.onnx.data": b"weights-i" * 1000,
+        "text_encoder.onnx": b"graph-t" * 100,
+        "text_encoder.onnx.data": b"weights-t" * 1000,
+        "tol_embeddings.npy": b"tol-emb" * 500,
+        "tol_classes.json": b"tol-cls" * 200,
+    }
+    expected = {
+        name: hashlib.sha256(data).hexdigest()
+        for name, data in file_contents.items()
+    }
+
+    downloaded = []
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None,
+                      progress_callback=None, revision=None):
+        downloaded.append(filename)
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        content = file_contents.get(filename, b"{}")
+        with open(dest, "wb") as f:
+            f.write(content)
+        return dest
+
+    def fake_list_repo_files(repo_id, revision=None):
+        return [f"bioclip-2.5-vith14/{name}" for name in file_contents]
+
+    _stub_hf_for_download_tests(monkeypatch, fake_list_repo_files)
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(
+        model_verify, "fetch_expected_hashes",
+        lambda subdir, revision="main": expected,
+    )
+
+    models.download_model("bioclip-2.5-vith14")
+
+    # Both required files AND optional ToL artifacts made it to disk.
+    assert (model_dir / "tol_embeddings.npy").is_file()
+    assert (model_dir / "tol_classes.json").is_file()
+    assert "tol_embeddings.npy" in downloaded
+    assert "tol_classes.json" in downloaded
+
+
+def test_download_model_skips_optional_when_list_repo_files_fails(tmp_path, monkeypatch):
+    """When the HF list API is unreachable, optional downloads are skipped
+    silently rather than causing spurious install failures. Required
+    downloads (independent code path) still succeed via the mocked
+    _hf_download_with_retry."""
+    import hashlib
+
+    import model_verify
+    models, _ = _patch_download_model_env(tmp_path, monkeypatch)
+
+    lfs_contents = {
+        "image_encoder.onnx": b"graph-i" * 100,
+        "image_encoder.onnx.data": b"weights-i" * 1000,
+        "text_encoder.onnx": b"graph-t" * 100,
+        "text_encoder.onnx.data": b"weights-t" * 1000,
+    }
+    expected = {
+        name: hashlib.sha256(data).hexdigest()
+        for name, data in lfs_contents.items()
+    }
+
+    downloaded = []
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None,
+                      progress_callback=None, revision=None):
+        downloaded.append(filename)
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        with open(dest, "wb") as f:
+            f.write(lfs_contents.get(filename, b"{}"))
+        return dest
+
+    def fake_list_repo_files(repo_id, revision=None):
+        raise RuntimeError("HF list API offline")
+
+    _stub_hf_for_download_tests(monkeypatch, fake_list_repo_files)
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(
+        model_verify, "fetch_expected_hashes",
+        lambda subdir, revision="main": expected,
+    )
+
+    # Should not raise — optional preflight failure degrades to skip.
+    models.download_model("bioclip-2.5-vith14")
+
+    assert "tol_embeddings.npy" not in downloaded
+    assert "tol_classes.json" not in downloaded
+
+    cfg = models._load_config()
+    assert any(m["id"] == "bioclip-2.5-vith14" for m in cfg.get("models", []))
+
+
+def test_download_and_verify_optional_no_sentinel_on_mismatch(tmp_path, monkeypatch):
+    """A hash mismatch on an optional file must NOT write the shared
+    .verify_failed sentinel — otherwise a corrupt optional would flip
+    _classify_model_state to 'incomplete' and kill install completeness
+    for a model whose required files are all fine."""
+    import model_verify
+    import models
+
+    model_dir = tmp_path / "m"
+    model_dir.mkdir()
+
+    call_count = {"n": 0}
+
+    def fake_hf(repo_id, filename, local_dir, subfolder=None,
+                progress_callback=None, revision=None):
+        call_count["n"] += 1
+        dest = os.path.join(local_dir, filename)
+        with open(dest, "wb") as f:
+            f.write(b"wrong-bytes")
+        return dest
+
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_hf)
+    monkeypatch.setattr(
+        models, "_purge_hf_cache_file",
+        lambda filename, subdir, revision=None: None,
+    )
+
+    # SHA that will never match b"wrong-bytes".
+    expected = {"tol_embeddings.npy": "a" * 64}
+
+    import pytest as _pytest
+    with _pytest.raises(model_verify.VerifyError, match="tol_embeddings.npy"):
+        models._download_and_verify_file(
+            filename="tol_embeddings.npy",
+            model_dir=str(model_dir),
+            hf_subdir="bioclip-2.5-vith14",
+            expected_hashes=expected,
+            revision=None,
+            progress_callback=None,
+            optional=True,
+        )
+
+    # No sentinel written — an optional file's failure must never flip
+    # the model to 'incomplete'.
+    sentinel = model_dir / model_verify.VERIFY_FAILED_SENTINEL
+    assert not sentinel.exists()
