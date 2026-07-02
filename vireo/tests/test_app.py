@@ -2204,7 +2204,7 @@ def test_navbar_js_fallbacks_match_python_constants():
     def js_to_json(s):
         s = s.rstrip(';').strip()
         s = s.replace("'", '"')
-        s = re.sub(r'(\b)(id|label|href)(\s*:)', r'\1"\2"\3', s)
+        s = re.sub(r'(\b)(id|label|href|keywords)(\s*:)', r'\1"\2"\3', s)
         return s
 
     js_tabs = json.loads(js_to_json(tabs_match.group(1)))

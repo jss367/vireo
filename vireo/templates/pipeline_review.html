@@ -6,7 +6,7 @@
 <link rel="icon" type="image/png" href="/favicon.ico">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <link rel="stylesheet" href="/static/vireo-base.css">
-<title>Vireo - Pipeline Review</title>
+<title>Vireo - Process Review</title>
 <style>
 /* Layout: sidebar + main */
 .pipeline-layout {
@@ -1411,7 +1411,7 @@ input[type="range"]::-moz-range-thumb {
       <div class="summary-group" aria-label="Inventory counts">
         <div class="summary-group-title">Inventory</div>
         <div class="summary-group-stats">
-          <div class="summary-stat" title="Total photos included in this pipeline review result">
+          <div class="summary-stat" title="Total photos included in this process review result">
             <div class="num" id="statTotalPhotos">0</div>
             <div class="label">Photos</div>
           </div>
@@ -1510,7 +1510,7 @@ input[type="range"]::-moz-range-thumb {
     <div id="encountersContainer"></div>
 
     <div class="empty-state" id="emptyState" style="display:none;">
-      <h2 id="emptyStateHeading">No pipeline results yet</h2>
+      <h2 id="emptyStateHeading">No results yet</h2>
       <p id="emptyStateBody"></p>
       <div class="readiness-stages" id="readinessStages"></div>
       <div class="readiness-actions" id="readinessActions"></div>
@@ -3041,10 +3041,10 @@ function renderEmptyState(readiness) {
 
   if (readiness.state === 'insufficient') {
     heading.textContent = 'Not enough features to compute results yet';
-    body.textContent = 'Run mask extraction on the Pipeline page first '
+    body.textContent = 'Run mask extraction on the Process page first '
       + '— the review page needs masks to score photo quality.';
     actions.innerHTML = '<a href="/pipeline" class="compute-btn" '
-      + 'style="text-decoration:none;display:inline-block;">Open Pipeline</a>';
+      + 'style="text-decoration:none;display:inline-block;">Open Process</a>';
     return;
   }
 
