@@ -1916,3 +1916,79 @@ def test_download_and_verify_optional_no_sentinel_on_mismatch(tmp_path, monkeypa
     # the model to 'incomplete'.
     sentinel = model_dir / model_verify.VERIFY_FAILED_SENTINEL
     assert not sentinel.exists()
+
+
+# ---------------------------------------------------------------------------
+# tree_of_life_ready — disk-aware readiness gate for label-free mode.
+# Regression coverage for Codex P2 on PR #1077: a bioclip-2.5 install whose
+# optional ToL artifacts are absent must NOT be routed to
+# Classifier(labels=None) (which would raise FileNotFoundError), and the UI
+# must not advertise "classification ready" for it.
+# ---------------------------------------------------------------------------
+
+
+def test_tree_of_life_ready_true_when_artifacts_present(tmp_path):
+    """A ToL-supported model with both artifacts on disk is ready."""
+    from models import tree_of_life_ready
+
+    (tmp_path / "tol_embeddings.npy").write_bytes(b"stub")
+    (tmp_path / "tol_classes.json").write_bytes(b"[]")
+
+    assert tree_of_life_ready(
+        "hf-hub:imageomics/bioclip-2.5-vith14", str(tmp_path)
+    ) is True
+
+
+def test_tree_of_life_ready_false_when_artifacts_missing(tmp_path):
+    """A ToL-supported model whose artifacts weren't downloaded is NOT
+    ready — this is the exact 2.5-before-HF-upload scenario. Without
+    this check the pipeline would call Classifier(labels=None) and
+    crash with FileNotFoundError at construction time."""
+    from models import supports_tree_of_life, tree_of_life_ready
+
+    # Directory exists but neither artifact is present.
+    assert supports_tree_of_life(
+        "hf-hub:imageomics/bioclip-2.5-vith14"
+    ) is True
+    assert tree_of_life_ready(
+        "hf-hub:imageomics/bioclip-2.5-vith14", str(tmp_path)
+    ) is False
+
+
+def test_tree_of_life_ready_false_when_one_artifact_missing(tmp_path):
+    """Half-installed ToL (embeddings without classes, or vice versa) is
+    not ready — the Classifier constructor requires both files."""
+    from models import tree_of_life_ready
+
+    (tmp_path / "tol_embeddings.npy").write_bytes(b"stub")
+    # tol_classes.json intentionally absent.
+
+    assert tree_of_life_ready(
+        "hf-hub:imageomics/bioclip-2.5-vith14", str(tmp_path)
+    ) is False
+
+
+def test_tree_of_life_ready_false_for_unsupported_model(tmp_path):
+    """A non-ToL model with artifacts on disk (somehow) is still not
+    ready — the capability check must gate on the model type first."""
+    from models import tree_of_life_ready
+
+    (tmp_path / "tol_embeddings.npy").write_bytes(b"stub")
+    (tmp_path / "tol_classes.json").write_bytes(b"[]")
+
+    assert tree_of_life_ready(
+        "hf-hub:some/other-model", str(tmp_path)
+    ) is False
+
+
+def test_tree_of_life_ready_false_when_model_dir_missing():
+    """None/empty model_dir returns False rather than raising, so callers
+    can treat "not installed" and "install incomplete" uniformly."""
+    from models import tree_of_life_ready
+
+    assert tree_of_life_ready(
+        "hf-hub:imageomics/bioclip-2.5-vith14", None
+    ) is False
+    assert tree_of_life_ready(
+        "hf-hub:imageomics/bioclip-2.5-vith14", ""
+    ) is False

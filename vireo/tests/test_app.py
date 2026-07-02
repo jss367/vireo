@@ -4,13 +4,21 @@ import os
 from wait import wait_for_job_via_client
 
 
-def test_index_redirects_to_browse(app_and_db, monkeypatch):
+def test_index_redirects_to_browse(app_and_db, monkeypatch, tmp_path):
     """GET / redirects to /browse when classification is usable (a label-free
-    Tree-of-Life model needs no species list)."""
+    Tree-of-Life model needs no species list). The classification-readiness
+    gate is now disk-aware — it checks that the ToL artifacts are actually
+    installed — so the mocked model needs a real weights dir with the
+    artifact stubs, otherwise the redirect falls through to /welcome."""
     import models
+    weights = tmp_path / "bioclip-2"
+    weights.mkdir()
+    (weights / "tol_embeddings.npy").write_bytes(b"stub")
+    (weights / "tol_classes.json").write_bytes(b"[]")
     monkeypatch.setattr(models, "get_active_model", lambda: {
         "id": "bioclip-2", "name": "BioCLIP-2", "downloaded": True,
         "model_str": "hf-hub:imageomics/bioclip-2",
+        "weights_path": str(weights),
     })
     app, _ = app_and_db
     client = app.test_client()

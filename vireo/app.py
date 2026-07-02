@@ -1911,12 +1911,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         no black boxes). Returns a dict with the active model and the flags
         the status endpoint and the onboarding redirects both consume.
         """
-        from models import get_active_model, supports_tree_of_life
+        from models import get_active_model, tree_of_life_ready
 
         active = get_active_model()
         model_downloaded = bool(active and active.get("downloaded"))
+        # tree_of_life_ready (not just supports_tree_of_life) so an install
+        # whose optional ToL artifacts weren't downloaded (bioclip-2.5
+        # before its HF upload landed, or after a skipped optional
+        # download) is not falsely reported as "classification ready" —
+        # otherwise the pipeline would crash in Classifier's constructor.
         label_free = bool(active and (
-            supports_tree_of_life(active.get("model_str"))
+            tree_of_life_ready(
+                active.get("model_str"), active.get("weights_path"),
+            )
             or active.get("model_type") == "timm"
         ))
         labels_ready = False
@@ -8341,11 +8348,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 names = [s.get("name", os.path.basename(s["labels_file"])) for s in active_sets]
                 label_name = ", ".join(names)
             else:
-                from models import supports_tree_of_life
+                from models import supports_tree_of_life, tree_of_life_ready
                 model_str_check = model.get("model_str", "") if model else ""
-                if supports_tree_of_life(model_str_check):
+                model_dir_check = model.get("weights_path") if model else None
+                if tree_of_life_ready(model_str_check, model_dir_check):
                     use_tol = True
                     label_name = "Tree of Life (all species)"
+                elif supports_tree_of_life(model_str_check):
+                    # ToL-capable model whose artifacts aren't installed
+                    # yet (e.g. bioclip-2.5 before its HF upload lands).
+                    # Tell the user what's missing rather than falsely
+                    # advertising ToL-ready and crashing at classify time.
+                    label_name = (
+                        "Tree of Life files not installed — click Repair "
+                        "in Settings → Models, or download a species list"
+                    )
                 else:
                     label_name = "No labels — download a species list in Settings"
 

@@ -20,28 +20,67 @@ CONFIG_PATH = os.path.expanduser("~/.vireo/models.json")
 # HuggingFace repo containing all ONNX models
 ONNX_REPO = "jss367/vireo-onnx-models"
 
-# BioCLIP model_strs that ship precomputed Tree of Life (open-vocabulary,
-# all-species) text embeddings — i.e. can classify with no label list.
-# Single source of truth: the classifier gate (classify_job), the pipeline
-# planner (pipeline_plan), and the UI readiness flags (app) all consult this,
-# so they never disagree about whether a model supports label-free ToL mode.
-# A model's ToL artifacts (tol_embeddings.npy + tol_classes.json) can be
-# declared in either its KNOWN_MODELS "files" manifest (required — the model
-# is 'incomplete' without them) or "optional_files" (best-effort — the model
-# is still usable for label-list classification if the artifacts aren't on
-# HF yet or on disk). The classifier raises a clear FileNotFoundError at
-# classify time if a ToL-advertised model's artifacts are missing on disk,
-# so it's safe to advertise support here ahead of the HF upload landing.
+# BioCLIP model_strs whose model *type* can classify with no label list
+# (open-vocabulary all-species Tree of Life). This is the capability
+# question — "if the artifacts were installed, could this model do ToL?"
+# — not the readiness question. A model's ToL artifacts (tol_embeddings.npy
+# + tol_classes.json) can be declared in either its KNOWN_MODELS "files"
+# manifest (required — the model is 'incomplete' without them) or
+# "optional_files" (best-effort — the model still installs for label-list
+# classification if the artifacts aren't on HF yet or on disk).
+#
+# Callers that route into Classifier(labels=None) or advertise
+# "classification ready" in the UI must use tree_of_life_ready() below,
+# which also checks the artifacts are on disk — otherwise the readiness
+# signal lies about a bioclip-2.5 install whose optional ToL files were
+# skipped (HF hadn't uploaded them, list_repo_files failed, etc.) and
+# the pipeline crashes in Classifier's constructor with FileNotFoundError.
 TOL_SUPPORTED_MODEL_STRS = frozenset({
     "hf-hub:imageomics/bioclip",
     "hf-hub:imageomics/bioclip-2",
     "hf-hub:imageomics/bioclip-2.5-vith14",
 })
 
+# Filenames that make up a Tree of Life install for a supporting model.
+TOL_ARTIFACT_FILES = ("tol_embeddings.npy", "tol_classes.json")
+
 
 def supports_tree_of_life(model_str):
-    """True if the given model_str ships Tree of Life text embeddings."""
+    """True if the given model_str's TYPE ships Tree of Life text embeddings.
+
+    Capability only — does NOT check whether the artifacts are installed on
+    this host. Use `tree_of_life_ready(model_str, model_dir)` at any site
+    that needs to know "can we actually run ToL right now" (label-free
+    classification, UI readiness).
+    """
     return model_str in TOL_SUPPORTED_MODEL_STRS
+
+
+def tree_of_life_ready(model_str, model_dir):
+    """True if the model supports ToL AND its artifacts are on disk.
+
+    Combines `supports_tree_of_life(model_str)` with a presence check for
+    `tol_embeddings.npy` and `tol_classes.json` in `model_dir`. Returns
+    False (rather than raising) when `model_dir` is empty/None so callers
+    can treat "not installed" and "install is incomplete" uniformly.
+
+    Concrete example this guards against: bioclip-2.5-vith14 declares its
+    ToL artifacts as `optional_files`, so a download can succeed without
+    them (HF hasn't uploaded them yet, `list_repo_files` failed, or the
+    optional download itself failed). A pure `supports_tree_of_life` gate
+    would then route classification to `Classifier(labels=None)`, which
+    raises FileNotFoundError at construction, and the UI would have
+    already advertised "classification ready" — see CORE_PHILOSOPHY:
+    "no black boxes".
+    """
+    if not supports_tree_of_life(model_str):
+        return False
+    if not model_dir:
+        return False
+    return all(
+        os.path.isfile(os.path.join(model_dir, f))
+        for f in TOL_ARTIFACT_FILES
+    )
 
 # Known models that can be downloaded.
 # Each entry specifies which ONNX files are needed and the subdirectory

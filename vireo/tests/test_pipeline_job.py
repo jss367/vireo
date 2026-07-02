@@ -2032,7 +2032,7 @@ def _setup_fake_downloaded_model(tmp_path, monkeypatch):
     monkeypatch.setattr(
         model_verify,
         "verify_if_needed",
-        lambda model_id, model_dir, hf_subdir: None,
+        lambda model_id, model_dir, hf_subdir, optional_files=None: None,
     )
     return "bioclip-vit-b-16"
 
@@ -2137,7 +2137,7 @@ def test_pipeline_translates_verify_failure_to_repair_message(tmp_path, monkeypa
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
-    def raise_corrupt(model_id, model_dir, hf_subdir):
+    def raise_corrupt(model_id, model_dir, hf_subdir, optional_files=None):
         raise model_verify.ModelCorruptError(
             model_id,
             model_verify.VerifyResult(

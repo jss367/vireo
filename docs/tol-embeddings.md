@@ -40,9 +40,14 @@ not raw cosine.
 
 ## Enabling ToL for a new BioCLIP model
 
-Four steps. The single source of truth for "which models support ToL" is
-`TOL_SUPPORTED_MODEL_STRS` / `supports_tree_of_life()` in `vireo/models.py`;
-the classifier, pipeline planner, and UI readiness flags all consult it.
+Four steps. The single source of truth for "which model types support ToL"
+is `TOL_SUPPORTED_MODEL_STRS` / `supports_tree_of_life()` in
+`vireo/models.py`. `tree_of_life_ready(model_str, model_dir)` is the
+disk-aware readiness gate that also verifies `tol_embeddings.npy` and
+`tol_classes.json` exist on disk before the classifier, pipeline planner,
+or UI advertise label-free mode — otherwise a model whose artifacts are
+declared optional and were skipped at download time would route into
+`Classifier(labels=None)` and crash with FileNotFoundError.
 
 1. **Generate the embeddings** with the model's text encoder (GPU strongly
    recommended). On an 11 GB GPU the ViT-H/14 text encoder OOMs in fp32 beyond
@@ -111,9 +116,18 @@ the classifier, pipeline planner, and UI readiness flags all consult it.
 
 > Advertising ToL support (step 4) before the HF upload (step 2) is safe
 > when the artifacts are declared under `optional_files`: the model is
-> still usable for label-list mode until the artifacts land, and the
-> classifier raises a clear "download the model from Settings" error if
-> ToL mode is selected without them on disk. bioclip-2.5-vith14 uses the
-> `optional_files` path for exactly this reason — the model is shipped
-> ToL-capable, and the artifacts flow through the same downloader once
-> they're uploaded to `jss367/vireo-onnx-models`.
+> still usable for label-list mode until the artifacts land, and
+> `tree_of_life_ready()` returns False whenever the artifacts aren't on
+> disk, so the UI reports label-list-only readiness and `_load_labels`
+> raises a clear "download the ToL files or a species list" error
+> instead of routing into `Classifier(labels=None)`. bioclip-2.5-vith14
+> uses the `optional_files` path for exactly this reason — the model is
+> shipped ToL-capable, and the artifacts flow through the same
+> downloader once they're uploaded to `jss367/vireo-onnx-models`.
+>
+> `verify_model` and `verify_if_needed` accept an `optional_files`
+> argument so that files declared optional AND absent locally aren't
+> flagged as missing on the lazy-verification pass. Without that, a 2.5
+> install whose optionals were skipped would trip `.verify_failed` the
+> first time HF's tree API returned the artifacts, blocking even
+> label-list classification.

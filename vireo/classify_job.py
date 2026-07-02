@@ -75,8 +75,17 @@ def _load_taxonomy(taxonomy_path):
         return None
 
 
-def _load_labels(model_type, model_str, labels_file, labels_files, db=None):
+def _load_labels(
+    model_type, model_str, labels_file, labels_files, db=None, model_dir=None,
+):
     """Resolve labels for classification.
+
+    ``model_dir`` — the on-disk directory of the active model. When given,
+    the label-free ToL fallback checks that the model's ToL artifacts are
+    actually installed (see `models.tree_of_life_ready`) before returning
+    `use_tol=True`. Without this, a bioclip-2.5 install whose optional
+    ToL files were skipped at download time would route to
+    `Classifier(labels=None)` and crash with FileNotFoundError.
 
     Returns:
         (labels, use_tol) where labels is a list of species strings or None,
@@ -139,15 +148,29 @@ def _load_labels(model_type, model_str, labels_file, labels_files, db=None):
     else:
         log.info("Classification config: model=%s, no labels selected", model_str)
 
-    from models import supports_tree_of_life
+    from models import supports_tree_of_life, tree_of_life_ready
 
     use_tol = False
     if not labels:
-        if supports_tree_of_life(model_str):
+        if tree_of_life_ready(model_str, model_dir):
             log.info(
                 "No regional labels available — using Tree of Life classifier (all species)"
             )
             use_tol = True
+        elif supports_tree_of_life(model_str):
+            # ToL-capable model but its optional artifacts weren't
+            # installed on this host (e.g. bioclip-2.5 whose HF upload
+            # of tol_embeddings.npy hasn't landed, or the optional
+            # download was skipped). Surface the missing files
+            # explicitly instead of letting Classifier(labels=None)
+            # crash later with a FileNotFoundError.
+            raise RuntimeError(
+                f"No labels available and Tree of Life files "
+                f"(tol_embeddings.npy, tol_classes.json) are not installed "
+                f"for {model_str}. Go to Settings → Models and click "
+                f"Repair, or Settings → Labels and download a species "
+                f"list for your region."
+            )
         else:
             raise RuntimeError(
                 f"No labels available and Tree of Life mode is not supported "
@@ -1779,6 +1802,7 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
             labels_file=params.labels_file,
             labels_files=params.labels_files,
             db=thread_db,
+            model_dir=weights_path,
         )
         # Compute a content-addressable fingerprint for the active label set.
         # Kept in scope so downstream classifier_runs writes can record the

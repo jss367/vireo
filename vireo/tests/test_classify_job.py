@@ -117,11 +117,18 @@ def test_load_labels_from_file(tmp_path):
     assert use_tol is False
 
 
-def test_load_labels_tol_fallback():
-    """Phase 2: Tree of Life mode when no labels and model supports it."""
+def test_load_labels_tol_fallback(tmp_path):
+    """Phase 2: Tree of Life mode when no labels and the model's ToL
+    artifacts are installed on disk. Passing model_dir now gates
+    label-free fallback on the artifacts being present — a bioclip-2.5
+    install whose optional ToL files were skipped must NOT be routed to
+    ToL mode (see test_load_labels_raises_when_tol_artifacts_missing)."""
     from unittest.mock import patch
 
     from classify_job import _load_labels
+
+    (tmp_path / "tol_embeddings.npy").write_bytes(b"stub")
+    (tmp_path / "tol_classes.json").write_bytes(b"[]")
 
     # Mock get_active_labels to return empty so we fall through to ToL
     with patch("classify_job.get_active_labels", return_value=[]):
@@ -130,9 +137,33 @@ def test_load_labels_tol_fallback():
             model_str="hf-hub:imageomics/bioclip",
             labels_file=None,
             labels_files=None,
+            model_dir=str(tmp_path),
         )
     assert labels is None
     assert use_tol is True
+
+
+def test_load_labels_raises_when_tol_artifacts_missing(tmp_path):
+    """Regression: a ToL-supported model whose artifacts are absent must
+    NOT be routed to Classifier(labels=None) — the raise here is what
+    stops the pipeline from crashing later with FileNotFoundError inside
+    the Classifier constructor.  Concrete scenario: bioclip-2.5 install
+    from before the HF ToL upload landed, or after a skipped optional
+    download."""
+    from unittest.mock import patch
+
+    from classify_job import _load_labels
+
+    # tmp_path exists but has neither tol_embeddings.npy nor tol_classes.json.
+    with patch("classify_job.get_active_labels", return_value=[]):
+        with pytest.raises(RuntimeError, match="Tree of Life files"):
+            _load_labels(
+                model_type="bioclip",
+                model_str="hf-hub:imageomics/bioclip-2.5-vith14",
+                labels_file=None,
+                labels_files=None,
+                model_dir=str(tmp_path),
+            )
 
 
 def test_load_labels_timm_skips():
@@ -1011,13 +1042,20 @@ def test_reclassify_skips_purge_when_cancelled_during_model_load(tmp_path, monke
             runner.cancelled = True
     monkeypatch.setattr(cj, "Classifier", CancellingClassifier)
 
-    # Bypass the on-disk model registry — the test doesn't need weights
-    # since CancellingClassifier ignores its args.
+    # Bypass the on-disk model registry — the test doesn't need real
+    # weights since CancellingClassifier ignores its args. Seed a
+    # directory with stub ToL artifacts so _load_labels' label-free
+    # gate (tree_of_life_ready) succeeds and we exercise the cancel
+    # path rather than the "ToL files not installed" error.
+    fake_weights = tmp_path / "weights"
+    fake_weights.mkdir()
+    (fake_weights / "tol_embeddings.npy").write_bytes(b"stub")
+    (fake_weights / "tol_classes.json").write_bytes(b"[]")
     monkeypatch.setattr(cj, "get_active_model", lambda: {
         "id": "BioCLIP",
         "name": "BioCLIP",
         "model_str": "hf-hub:imageomics/bioclip",
-        "weights_path": "/dev/null",
+        "weights_path": str(fake_weights),
         "model_type": "bioclip",
         "downloaded": True,
     })
