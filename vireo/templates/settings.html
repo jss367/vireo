@@ -2623,8 +2623,12 @@ async function loadModels() {
     models.forEach(function(m) {
       var isActive = m.id === activeId;
       var state = m.state || (m.downloaded ? 'ok' : 'missing');
+      var missingOptional = m.missing_optional_files || [];
+      var hasMissingOptional = state === 'ok' && missingOptional.length > 0;
       var statusColor, statusText;
-      if (state === 'ok') {
+      if (state === 'ok' && hasMissingOptional) {
+        statusColor = 'var(--warning)'; statusText = 'Downloaded — optional files available';
+      } else if (state === 'ok') {
         statusColor = 'var(--accent)'; statusText = 'Downloaded';
       } else if (state === 'incomplete') {
         statusColor = 'var(--warning)'; statusText = 'Incomplete — repair available';
@@ -2649,6 +2653,9 @@ async function loadModels() {
       } else if (state === 'unverified') {
         var reason = m.verify_skipped_reason ? ' (' + escapeHtml(m.verify_skipped_reason) + ')' : '';
         html += '<div style="font-size:11px;color:var(--warning);margin-bottom:6px;">Files are present but SHA256 could not be checked against HuggingFace' + reason + '. The model should work; click Retry verification once the network is reachable.</div>';
+      } else if (hasMissingOptional) {
+        var missingList = missingOptional.map(escapeHtml).join(', ');
+        html += '<div style="font-size:11px;color:var(--warning);margin-bottom:6px;">Optional files not installed: ' + missingList + '. The model works for label-list classification without them; click Repair to fetch them once available on HuggingFace (e.g. to enable Tree of Life mode).</div>';
       }
       html += '<div style="display:flex;align-items:center;gap:8px;">';
       html += '<span style="font-size:11px;color:' + statusColor + ';">' + statusText + '</span>';
@@ -2662,6 +2669,8 @@ async function loadModels() {
         html += '<button onclick="downloadModel(\'' + m.id + '\')" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Repair</button>';
       } else if (state === 'unverified' && m.source !== 'custom') {
         html += '<button onclick="verifyAllModels()" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Retry verification</button>';
+      } else if (hasMissingOptional && m.source !== 'custom') {
+        html += '<button onclick="downloadModel(\'' + m.id + '\')" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Repair</button>';
       } else if (state === 'missing' && m.source !== 'custom') {
         html += '<button onclick="downloadModel(\'' + m.id + '\')" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Download</button>';
       }

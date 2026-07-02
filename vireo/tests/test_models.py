@@ -1674,6 +1674,72 @@ def test_classify_state_ok_when_only_optional_files_missing(tmp_path, monkeypatc
     assert entry["downloaded"] is True
 
 
+def test_get_models_exposes_missing_optional_files(tmp_path, monkeypatch):
+    """When required files are present but declared optional_files are
+    absent, get_models() surfaces the list under `missing_optional_files`.
+
+    Settings uses this to render a Repair button (state stays 'ok' so
+    label-list classification still works), and the pipeline readiness
+    UI can accurately say "click Repair" instead of pointing users at a
+    button that only appears for 'incomplete'.
+
+    Regression for Codex P2 on PR #1077 (vireo/app.py:8364).
+    """
+    import models
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+
+    model_dir = tmp_path / "models" / "bioclip-2.5-vith14"
+    model_dir.mkdir(parents=True)
+    for name in [
+        "image_encoder.onnx",
+        "image_encoder.onnx.data",
+        "text_encoder.onnx",
+        "text_encoder.onnx.data",
+        "tokenizer.json",
+        "config.json",
+    ]:
+        (model_dir / name).write_bytes(b"stub")
+
+    entry = next(m for m in models.get_models() if m["id"] == "bioclip-2.5-vith14")
+    assert entry["state"] == "ok"
+    assert entry["downloaded"] is True
+    assert set(entry.get("missing_optional_files") or []) == {
+        "tol_embeddings.npy", "tol_classes.json",
+    }
+
+
+def test_get_models_omits_missing_optional_files_when_all_present(
+    tmp_path, monkeypatch,
+):
+    """When declared optional_files are all on disk, get_models() must not
+    emit `missing_optional_files` — otherwise the Settings UI would show
+    an "optional files available" repair banner on an install that has
+    everything."""
+    import models
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+
+    model_dir = tmp_path / "models" / "bioclip-2.5-vith14"
+    model_dir.mkdir(parents=True)
+    for name in [
+        "image_encoder.onnx",
+        "image_encoder.onnx.data",
+        "text_encoder.onnx",
+        "text_encoder.onnx.data",
+        "tokenizer.json",
+        "config.json",
+        # Both optionals on disk.
+        "tol_embeddings.npy",
+        "tol_classes.json",
+    ]:
+        (model_dir / name).write_bytes(b"stub")
+
+    entry = next(m for m in models.get_models() if m["id"] == "bioclip-2.5-vith14")
+    assert entry["state"] == "ok"
+    assert "missing_optional_files" not in entry
+
+
 def _stub_hf_for_download_tests(monkeypatch, list_repo_files_fn=None):
     """Install a huggingface_hub stub sufficient for download_model paths.
     list_repo_files_fn, when supplied, drives the optional-file preflight."""

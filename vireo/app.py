@@ -5788,6 +5788,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # downloaded — gives the user visibility into "if you downloaded iNat21
         # this would be N detections of work." Custom models registered without
         # an explicit model_type default to bioclip (same as classify/pipeline).
+        from models import supports_tree_of_life
         all_models = [
             m for m in get_models()
             if m.get("model_type", "bioclip") in ("bioclip", "timm")
@@ -5798,7 +5799,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         for m in all_models:
             model_name = m.get("name") or m.get("id")
-            supports_tol = "tol_embeddings.npy" in m.get("files", [])
+            # Capability question — does this model TYPE ship ToL text
+            # embeddings? Ask supports_tree_of_life(model_str), not the raw
+            # `files` manifest: bioclip-2.5's ToL artifacts are declared
+            # under `optional_files` so a straight `"tol_embeddings.npy" in
+            # m.get("files", [])` would drop ToL coverage from this
+            # inventory entirely — no current-pair emit and no stale-row
+            # for prior ToL runs, because TOL_SENTINEL is always in
+            # current_fps for the model.
+            supports_tol = supports_tree_of_life(m.get("model_str", ""))
             is_closed_set = m.get("model_type") == "timm"
 
             pairs = []

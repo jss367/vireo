@@ -298,6 +298,24 @@ def get_models():
             entry["verify_skipped_reason"] = (
                 model_verify.read_verify_skipped_reason(model_dir)
             )
+        # Declared-but-absent optional files are advertised so the UI can
+        # offer a Repair-style re-download when they land on HF. Without
+        # this, an existing bioclip-2.5 install stays in state=='ok' even
+        # after tol_embeddings.npy is uploaded, and the readiness message
+        # at /api/pipeline/page-init ("click Repair in Settings → Models")
+        # points at a button that never appears — the Repair button only
+        # renders for state=='incomplete', which we intentionally don't
+        # trigger for absent optionals (that would mark 2.5 unusable for
+        # label-list mode). Keep the list on `missing`/'incomplete' entries
+        # too so the same repair pass fetches optionals when it repairs.
+        optional_declared = km.get("optional_files") or []
+        if optional_declared and downloaded:
+            missing_optional = [
+                f for f in optional_declared
+                if not os.path.isfile(os.path.join(model_dir, f))
+            ]
+            if missing_optional:
+                entry["missing_optional_files"] = missing_optional
         result.append(entry)
 
     # Add custom models
