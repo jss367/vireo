@@ -1318,6 +1318,90 @@ def test_move_folders_blocks_descendant_when_source_root_remains(db):
     assert db.get_workspace_folders(ws2) == []
 
 
+def test_archive_merge_preserves_narrower_workspace_root(db):
+    """Merging into a broad archive must not widen an already-scoped workspace."""
+    ws_id = db.create_workspace("USA2026")
+
+    # Existing archive rows are globally known from another workspace/history,
+    # but this workspace is intentionally rooted only at the 2026 subtree.
+    db.set_active_workspace(None)
+    archive_id = db.add_folder("/archive/USA", name="USA")
+    year_id = db.add_folder("/archive/USA/2026", name="2026")
+    old_year_id = db.add_folder(
+        "/archive/USA/2020",
+        name="2020",
+        parent_id=archive_id,
+    )
+    db.add_photo(old_year_id, "old.jpg", ".jpg", 1000, 1.0)
+
+    db.set_active_workspace(ws_id)
+    db.add_workspace_folder(ws_id, year_id)
+
+    # Staging mirrors local-processing imports: the broad staging folder is
+    # just the archive shell; the touched dated leaf is the user-facing import
+    # root while it is still in staging.
+    staged_archive_id = db.add_folder(
+        "/staging/job/USA",
+        name="USA",
+        workspace_root=False,
+    )
+    staged_year_id = db.add_folder(
+        "/staging/job/USA/2026",
+        name="2026",
+        parent_id=staged_archive_id,
+        workspace_root=False,
+    )
+    staged_leaf_id = db.add_folder(
+        "/staging/job/USA/2026/2026-07-02",
+        name="2026-07-02",
+        parent_id=staged_year_id,
+        workspace_root=True,
+    )
+    db.add_photo(staged_leaf_id, "new.jpg", ".jpg", 1000, 2.0)
+
+    result = db.merge_staged_tree_into_archive(staged_archive_id, "/archive/USA")
+
+    assert result["new_photos"] == 1
+    root_paths = {
+        r["path"] for r in db.get_workspace_folder_roots(ws_id)
+    }
+    assert "/archive/USA/2026" in root_paths
+    assert "/archive/USA" not in root_paths
+
+    archive_link = db.conn.execute(
+        """SELECT is_root FROM workspace_folders
+           WHERE workspace_id = ? AND folder_id = ?""",
+        (ws_id, archive_id),
+    ).fetchone()
+    assert archive_link is None
+
+    old_year_link = db.conn.execute(
+        """SELECT 1 FROM workspace_folders
+           WHERE workspace_id = ? AND folder_id = ?""",
+        (ws_id, old_year_id),
+    ).fetchone()
+    assert old_year_link is None
+
+    new_photo = db.conn.execute(
+        """SELECT p.filename
+           FROM photos p
+           JOIN folders f ON f.id = p.folder_id
+           JOIN workspace_folders wf ON wf.folder_id = f.id
+          WHERE wf.workspace_id = ? AND f.path = ?""",
+        (ws_id, "/archive/USA/2026/2026-07-02"),
+    ).fetchone()
+    assert new_photo["filename"] == "new.jpg"
+
+    old_photo = db.conn.execute(
+        """SELECT p.filename
+           FROM photos p
+           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+          WHERE wf.workspace_id = ? AND p.filename = ?""",
+        (ws_id, "old.jpg"),
+    ).fetchone()
+    assert old_photo is None
+
+
 def test_move_folders_validates_source_workspace(db):
     """Raises ValueError if source workspace doesn't exist."""
     ws = db.create_workspace("A")

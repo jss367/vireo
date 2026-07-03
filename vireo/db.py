@@ -2807,6 +2807,22 @@ class Database:
                 return True
         return False
 
+    def _active_ws_root_descendant_exists(self, workspace_id, path):
+        """True if ``workspace_id`` has a strict root descendant of ``path``."""
+        target = _path_for_subtree_match(path)
+        rows = self.conn.execute(
+            """SELECT f.path FROM workspace_folders wf
+               JOIN folders f ON f.id = wf.folder_id
+               WHERE wf.workspace_id = ? AND wf.is_root = 1""",
+            (workspace_id,),
+        ).fetchall()
+        prefix = target + "/"
+        for r in rows:
+            root = _path_for_subtree_match(r["path"])
+            if root.startswith(prefix):
+                return True
+        return False
+
     def merge_staged_tree_into_archive(self, staged_root_id, archive_path):
         """Fold a staged folder subtree into an existing tracked archive.
 
@@ -2903,14 +2919,25 @@ class Database:
             ).fetchone()
             if existing_link is None or existing_link["is_root"] == 0:
                 # Not root of ws (unlinked, or linked non-root): link the
-                # subtree, and root the base only if no strict ancestor is
-                # already a root. ``_active_ws_root_ancestor_exists`` cannot
-                # self-match here because the base is not currently a root
-                # of ws, so the check is a true "ancestor above" question.
+                # subtree, and root the base only if it would not replace an
+                # existing narrower or broader root. A strict descendant root
+                # means the workspace is intentionally scoped inside this
+                # archive (e.g. ``/Photos/USA/2026`` while importing into
+                # ``/Photos/USA``). In that shape, do not link the broad base
+                # at all: even a non-root link materializes every descendant
+                # and would make archive siblings part of workspace queries.
                 has_root_ancestor = self._active_ws_root_ancestor_exists(
                     ws, archive_path)
-                self.add_workspace_folder(
-                    ws, archive_row["id"], is_root=not has_root_ancestor)
+                has_root_descendant = self._active_ws_root_descendant_exists(
+                    ws, archive_path)
+                if has_root_descendant and not has_root_ancestor:
+                    self._materialize_workspace_descendants(ws)
+                else:
+                    self.add_workspace_folder(
+                        ws,
+                        archive_row["id"],
+                        is_root=not has_root_ancestor,
+                    )
             # else: base is already a workspace root — nothing to do.
             # If the archive base was marked ``missing`` at a previous health
             # scan (drive unmounted at the time), the storage preflight has
