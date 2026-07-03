@@ -2823,6 +2823,47 @@ class Database:
                 return True
         return False
 
+    def _prune_ws_nonroot_links_outside_roots(self, workspace_id, path):
+        """Drop non-root links below ``path`` that no root still covers."""
+        target = _path_for_subtree_match(path)
+        roots = [
+            _path_for_subtree_match(r["path"])
+            for r in self.conn.execute(
+                """SELECT f.path FROM workspace_folders wf
+                   JOIN folders f ON f.id = wf.folder_id
+                   WHERE wf.workspace_id = ? AND wf.is_root = 1""",
+                (workspace_id,),
+            ).fetchall()
+        ]
+        rows = self.conn.execute(
+            """SELECT wf.folder_id, f.path FROM workspace_folders wf
+               JOIN folders f ON f.id = wf.folder_id
+               WHERE wf.workspace_id = ? AND wf.is_root = 0""",
+            (workspace_id,),
+        ).fetchall()
+        target_prefix = target + "/"
+        prune_ids = []
+        for row in rows:
+            current = _path_for_subtree_match(row["path"])
+            if current != target and not current.startswith(target_prefix):
+                continue
+            if any(current == root or current.startswith(root + "/")
+                   for root in roots):
+                continue
+            prune_ids.append(row["folder_id"])
+
+        for chunk in _chunks(prune_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            self.conn.execute(
+                f"""DELETE FROM workspace_folders
+                    WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
+                [workspace_id] + chunk,
+            )
+        if prune_ids:
+            self.conn.commit()
+            self._new_images_cache.invalidate_workspaces(
+                self._db_path, [workspace_id])
+
     def merge_staged_tree_into_archive(self, staged_root_id, archive_path):
         """Fold a staged folder subtree into an existing tracked archive.
 
@@ -2931,6 +2972,8 @@ class Database:
                 has_root_descendant = self._active_ws_root_descendant_exists(
                     ws, archive_path)
                 if has_root_descendant and not has_root_ancestor:
+                    self._prune_ws_nonroot_links_outside_roots(
+                        ws, archive_path)
                     self._materialize_workspace_descendants(ws)
                 else:
                     self.add_workspace_folder(
@@ -3126,6 +3169,8 @@ class Database:
                         )
 
                 if target is None:
+                    target_in_workspace = self._active_ws_root_ancestor_exists(
+                        ws, target_path)
                     # New folder under the archive: repoint + reparent + link.
                     self.conn.execute(
                         "UPDATE folders SET path = ?, parent_id = ? "
@@ -3138,26 +3183,29 @@ class Database:
                     # commit would persist a partial reparent that the outer
                     # rollback (below) could no longer undo if a later staged
                     # folder raised.
-                    self._add_workspace_folder_no_commit(
-                        ws, sf["id"], is_root=False)
-                    # The staging scan registers each photo-bearing leaf as
-                    # its own workspace ROOT (scanner restrict_dirs =>
-                    # is_root=1). Once that leaf is folded under the existing
-                    # archive base it must become a plain descendant,
-                    # otherwise the merge leaves a stray second workspace
-                    # root inside the archive — the exact overlap the
-                    # tracked-ancestor guard was meant to prevent.
-                    # add_workspace_folder's INSERT OR IGNORE can't downgrade
-                    # an existing is_root=1 row, so demote it explicitly here.
-                    # A folded-in leaf is always a descendant of an existing
-                    # archive root (the base itself, or an ancestor root
-                    # above it), so it is unconditionally non-root — no need
-                    # to check the base's is_root.
-                    self.conn.execute(
-                        "UPDATE workspace_folders SET is_root = 0 "
-                        "WHERE workspace_id = ? AND folder_id = ?",
-                        (ws, sf["id"]),
-                    )
+                    if target_in_workspace:
+                        self._add_workspace_folder_no_commit(
+                            ws, sf["id"], is_root=False)
+                        # The staging scan registers each photo-bearing leaf as
+                        # its own workspace ROOT (scanner restrict_dirs =>
+                        # is_root=1). Once that leaf is folded under the existing
+                        # archive base it must become a plain descendant,
+                        # otherwise the merge leaves a stray second workspace
+                        # root inside the archive — the exact overlap the
+                        # tracked-ancestor guard was meant to prevent.
+                        # add_workspace_folder's INSERT OR IGNORE can't downgrade
+                        # an existing is_root=1 row, so demote it explicitly here.
+                        self.conn.execute(
+                            "UPDATE workspace_folders SET is_root = 0 "
+                            "WHERE workspace_id = ? AND folder_id = ?",
+                            (ws, sf["id"]),
+                        )
+                    else:
+                        self.conn.execute(
+                            "DELETE FROM workspace_folders "
+                            "WHERE workspace_id = ? AND folder_id = ?",
+                            (ws, sf["id"]),
+                        )
                     # Every staged photo in a brand-new folder is newly
                     # archived.
                     new_count = self.conn.execute(

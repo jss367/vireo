@@ -1336,6 +1336,12 @@ def test_archive_merge_preserves_narrower_workspace_root(db):
 
     db.set_active_workspace(ws_id)
     db.add_workspace_folder(ws_id, year_id)
+    db.conn.executemany(
+        """INSERT INTO workspace_folders (workspace_id, folder_id, is_root)
+           VALUES (?, ?, 0)""",
+        [(ws_id, archive_id), (ws_id, old_year_id)],
+    )
+    db.conn.commit()
 
     # Staging mirrors local-processing imports: the broad staging folder is
     # just the archive shell; the touched dated leaf is the user-facing import
@@ -1358,15 +1364,29 @@ def test_archive_merge_preserves_narrower_workspace_root(db):
         workspace_root=True,
     )
     db.add_photo(staged_leaf_id, "new.jpg", ".jpg", 1000, 2.0)
+    staged_other_year_id = db.add_folder(
+        "/staging/job/USA/2027",
+        name="2027",
+        parent_id=staged_archive_id,
+        workspace_root=False,
+    )
+    staged_other_leaf_id = db.add_folder(
+        "/staging/job/USA/2027/2027-01-01",
+        name="2027-01-01",
+        parent_id=staged_other_year_id,
+        workspace_root=True,
+    )
+    db.add_photo(staged_other_leaf_id, "future.jpg", ".jpg", 1000, 3.0)
 
     result = db.merge_staged_tree_into_archive(staged_archive_id, "/archive/USA")
 
-    assert result["new_photos"] == 1
+    assert result["new_photos"] == 2
     root_paths = {
         r["path"] for r in db.get_workspace_folder_roots(ws_id)
     }
     assert "/archive/USA/2026" in root_paths
     assert "/archive/USA" not in root_paths
+    assert "/archive/USA/2027/2027-01-01" not in root_paths
 
     archive_link = db.conn.execute(
         """SELECT is_root FROM workspace_folders
@@ -1400,6 +1420,15 @@ def test_archive_merge_preserves_narrower_workspace_root(db):
         (ws_id, "old.jpg"),
     ).fetchone()
     assert old_photo is None
+
+    future_photo = db.conn.execute(
+        """SELECT p.filename
+           FROM photos p
+           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+          WHERE wf.workspace_id = ? AND p.filename = ?""",
+        (ws_id, "future.jpg"),
+    ).fetchone()
+    assert future_photo is None
 
 
 def test_move_folders_validates_source_workspace(db):
