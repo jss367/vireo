@@ -75,32 +75,27 @@ def total_file_bytes(files: list[Path]) -> int:
     return total
 
 
-def _duplicate_identity(path: Path) -> str | None:
-    """Return ``path``'s duplicate-identity hash, or ``None`` if it has
-    none.
+def _as_duplicate_checker(duplicates):
+    """Normalize a duplicate-oracle argument to a DuplicateChecker.
 
-    Mirrors ingest()'s zero-byte rule: a zero-byte source clears its
-    hash to ``None`` before duplicate checks so ``EMPTY_FILE_SHA256``
-    never enters the identity index. Every empty file is bit-identical
-    to every other, so treating them as duplicates by hash would either
-    drop legitimate placeholders or, in the same-name-collision branch,
-    mint endless ``name_1.ext`` siblings on retry. The preflight callers
-    here must skip empty files for the same reason: an earlier zero-byte
-    source must not poison ``seen_hashes`` and cause a later zero-byte
-    source's same-path conflict to be falsely skipped, and the
-    duplicate-filter survivor list must not collapse two empty sources
-    into one when ingest would copy both.
+    Callers with full catalog context pass a DuplicateChecker (built by
+    pipeline_job over a CatalogIndex, so predictions here use the exact
+    rules — and mode — the real ingest will). Legacy callers and tests
+    that only have a bare hash set still work: it becomes a hash-only
+    checker in verify mode, which is the historical exact behavior.
+    DuplicateChecker inherits ingest()'s zero-byte rule — empty files
+    carry no duplicate identity, so an earlier zero-byte source can't
+    cause a later zero-byte source's same-path conflict to be falsely
+    skipped, and the duplicate-filter survivor list can't collapse two
+    empty sources ingest would both copy.
     """
-    from scanner import EMPTY_FILE_SHA256, compute_file_hash
+    from import_dedup import CatalogIndex, DuplicateChecker
 
-    file_hash = compute_file_hash(str(path))
-    if file_hash == EMPTY_FILE_SHA256:
-        try:
-            if path.stat().st_size == 0:
-                return None
-        except OSError:
-            return None
-    return file_hash
+    if duplicates is None or isinstance(duplicates, DuplicateChecker):
+        return duplicates
+    return DuplicateChecker(
+        CatalogIndex.from_hashes(duplicates), verify_by_hash=True,
+    )
 
 
 def _suffix_against(folder_taken: set[str], name: str) -> str:
@@ -143,6 +138,7 @@ def archive_conflict_report(
     folder_template: str = "%Y/%Y-%m-%d",
     *,
     known_hashes: set[str] | None = None,
+    duplicate_checker=None,
     indexed_paths: set[str] | None = None,
 ) -> dict[str, list[str]]:
     """Return existing archive paths that would block merge-mode archive.
@@ -154,24 +150,24 @@ def archive_conflict_report(
     The check mirrors ``ingest()``'s staging behavior so it only flags real
     archive conflicts:
 
-    * When ``known_hashes`` is provided, sources whose content hash is
-      already known to the catalog are treated as ingest skips — they never
-      reach staging, so they cannot conflict at the final archive step.
-      Callers normally pass the catalog hash set when ``skip_duplicates``
-      is enabled. Duplicate identity is checked before a source claims
-      an archive filename so skipped duplicates cannot shift later
-      survivors onto suffixed paths that ingest would not use.
+    * When ``duplicate_checker`` (an import_dedup.DuplicateChecker — pass a
+      FRESH instance, its seen-state is consumed here) or ``known_hashes``
+      (legacy bare hash set, checked in exact/verify mode) is provided,
+      sources the checker recognizes as catalog duplicates are treated as
+      ingest skips — they never reach staging, so they cannot conflict at
+      the final archive step. Duplicate identity is checked before a
+      source claims an archive filename so skipped duplicates cannot shift
+      later survivors onto suffixed paths that ingest would not use.
     * When two surviving sources land in the same archive subfolder under
       the same filename, ingest stages the first at the unsuffixed name
       and the second under ``name_1.ext`` (then ``name_2.ext`` ...). The
       preflight tracks per-folder occupied names so the existing archive's
       same-name file is only compared to the first survivor's content,
       not also (incorrectly) to the second survivor's.
-    * When ``known_hashes`` is in use, earlier survivors are added to
-      ``seen_hashes`` as they claim names. Mirrors ingest()'s
-      ``extra_known_hashes`` accumulator so the same card/folder selected
-      twice still recognises the second occurrence as an intra-batch
-      duplicate that ingest would skip.
+    * Earlier survivors are recorded in the checker as they claim names.
+      Mirrors ingest()'s shared-checker accumulator so the same
+      card/folder selected twice still recognises the second occurrence
+      as an intra-batch duplicate that ingest would skip.
 
     If ``indexed_paths`` is provided, same-path differences are split into:
 
@@ -201,33 +197,23 @@ def archive_conflict_report(
         }
         if indexed_paths is not None else None
     )
-    seen_hashes: set[str] | None = (
-        set(known_hashes) if known_hashes is not None else None
-    )
+    checker = duplicate_checker or _as_duplicate_checker(known_hashes)
+    if checker is not None:
+        checker.prepare(files)
     # Per-archive-subfolder name slots already claimed by earlier survivors
     # in this iteration. Mirrors the per-batch staging tree ingest builds.
     occupied: dict[str, set[str]] = {}
 
     def _skip_or_record_survivor(source_file: Path) -> bool:
         """Return True when ingest would skip ``source_file`` as a duplicate."""
-        if seen_hashes is None:
+        if checker is None:
             return False
         try:
-            file_hash = _duplicate_identity(source_file)
+            return checker.check_and_record(source_file)
         except OSError:
-            # ingest() treats hash failures as per-file failures before copy,
-            # so they do not claim destination names.
+            # ingest() treats identity-check failures as per-file failures
+            # before copy, so they do not claim destination names.
             return True
-        # Zero-byte survivors carry no duplicate identity in ingest, so
-        # don't pollute ``seen_hashes`` with ``EMPTY_FILE_SHA256`` — that
-        # would cause a later zero-byte source's same-path conflict to be
-        # falsely skipped as an intra-batch duplicate.
-        if file_hash is None:
-            return False
-        if file_hash in seen_hashes:
-            return True
-        seen_hashes.add(file_hash)
-        return False
 
     for source_file in files:
         try:
@@ -359,18 +345,18 @@ def existing_archive_bytes(
     return total
 
 
-def non_duplicate_files(
-    files: list[Path], known_hashes: set[str],
-) -> list[Path]:
-    """Return ``files`` minus any whose content hash is already known.
+def non_duplicate_files(files: list[Path], duplicates) -> list[Path]:
+    """Return ``files`` minus any the duplicate gate would skip.
 
     Mirrors the duplicate gate ingest() applies with skip_duplicates=True so
     the local-storage preflight estimate matches what ingest will actually
-    copy. ``known_hashes`` covers files already in the catalog; this also
-    tracks hashes seen earlier in ``files`` so intra-run duplicates (the
-    same card folder selected twice, or two source folders sharing a file)
-    yield only the first occurrence — ingest() likewise copies the first and
-    skips later matches via its ``extra_known_hashes`` accumulator.
+    copy. ``duplicates`` is an import_dedup.DuplicateChecker (pass a FRESH
+    instance — its seen-state is consumed here) or a legacy bare hash set,
+    normalized via _as_duplicate_checker. Files whose identity was seen
+    earlier in ``files`` are dropped too, so intra-run duplicates (the same
+    card folder selected twice, or two source folders sharing a file) yield
+    only the first occurrence — ingest() likewise copies the first and
+    skips later matches via its shared-checker accumulator.
 
     Returning the file list (not just a byte sum) lets callers feed the
     survivor set back into ``existing_archive_bytes`` so the destination
@@ -380,31 +366,24 @@ def non_duplicate_files(
     the destination-space preflight even when the fresh files still need
     room at the archive.
     """
-    seen = set(known_hashes)
+    checker = _as_duplicate_checker(duplicates)
+    if checker is None:
+        return list(files)
+    checker.prepare(files)
     survivors: list[Path] = []
     for path in files:
         try:
-            file_hash = _duplicate_identity(path)
+            if checker.check_and_record(path):
+                continue
         except OSError:
             continue
-        # Zero-byte sources have no duplicate identity in ingest, so
-        # every empty file is a survivor and contributes nothing to
-        # ``seen`` — matching ingest's behavior where two empty sources
-        # both get copied (the second as ``name_1.ext`` if the
-        # destination already has the unsuffixed slot).
-        if file_hash is None:
-            survivors.append(path)
-            continue
-        if file_hash in seen:
-            continue
         survivors.append(path)
-        seen.add(file_hash)
     return survivors
 
 
-def non_duplicate_bytes(files: list[Path], known_hashes: set[str]) -> int:
-    """Sum bytes of ``files`` whose content hash isn't already known."""
-    return total_file_bytes(non_duplicate_files(files, known_hashes))
+def non_duplicate_bytes(files: list[Path], duplicates) -> int:
+    """Sum bytes of ``files`` the duplicate gate would let through."""
+    return total_file_bytes(non_duplicate_files(files, duplicates))
 
 
 def estimate_required_bytes(source_bytes: int) -> int:

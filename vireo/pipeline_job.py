@@ -88,6 +88,10 @@ class PipelineParams:
     file_types: str = "both"
     folder_template: str = "%Y/%Y-%m-%d"
     skip_duplicates: bool = True
+    # Identify duplicates by content hash alone (reads every byte of every
+    # source file). Default False: metadata-first matching with a hash
+    # fallback — see import_dedup.
+    verify_by_hash: bool = False
     labels_file: str | None = None
     labels_files: list | None = None
     model_id: str | None = None
@@ -1016,7 +1020,29 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 if params.destination:
                     from pathlib import Path
 
+                    from import_dedup import CatalogIndex, DuplicateChecker
                     from ingest import ingest as do_ingest
+
+                    # Duplicate-oracle infrastructure shared by the
+                    # local-processing preflight and the ingest loop. The
+                    # catalog index is loaded once; every prediction pass
+                    # gets a FRESH checker over it (seen-state must not
+                    # leak between predictions or into the real ingest),
+                    # while the shared times cache keeps each source
+                    # file's EXIF header read to once per run.
+                    dedup_times_cache: dict = {}
+                    catalog_index = None
+                    if params.skip_duplicates:
+                        catalog_index = CatalogIndex.from_db(thread_db)
+
+                    def _fresh_checker():
+                        if catalog_index is None:
+                            return None
+                        return DuplicateChecker(
+                            catalog_index,
+                            verify_by_hash=params.verify_by_hash,
+                            times_cache=dedup_times_cache,
+                        )
 
                     if params.local_processing:
                         from local_processing import (
@@ -1164,22 +1190,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 exclude_paths=params.exclude_paths,
                             )
                             # When skip_duplicates is on, ingest() will skip
-                            # sources whose content hash is already in the
-                            # catalog before they ever reach staging. Pass
-                            # those known hashes to the conflict preflight so
-                            # a duplicate-source that happens to share an
-                            # archive path with an unrelated file does not
-                            # falsely abort the run — ingest will not copy
-                            # it, so it cannot conflict at archive time.
-                            catalog_hashes: set[str] | None = None
-                            if params.skip_duplicates:
-                                catalog_hashes = {
-                                    row["file_hash"]
-                                    for row in thread_db.conn.execute(
-                                        "SELECT file_hash FROM photos "
-                                        "WHERE file_hash IS NOT NULL"
-                                    )
-                                }
+                            # sources that duplicate cataloged photos before
+                            # they ever reach staging. Give the conflict
+                            # preflight a fresh instance of the same
+                            # duplicate oracle so a duplicate-source that
+                            # happens to share an archive path with an
+                            # unrelated file does not falsely abort the run
+                            # — ingest will not copy it, so it cannot
+                            # conflict at archive time.
 
                             from move import _case_insensitive_root
 
@@ -1287,7 +1305,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 final_destination,
                                 selected_files,
                                 params.folder_template,
-                                known_hashes=catalog_hashes,
+                                duplicate_checker=_fresh_checker(),
                                 indexed_paths=_indexed_archive_paths(
                                     final_destination,
                                 ),
@@ -1358,7 +1376,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             if (
                                 params.skip_duplicates
                                 and selected_files
-                                and catalog_hashes is not None
+                                and catalog_index is not None
                             ):
                                 # Plan against the exact files ingest will
                                 # stage, not the full selection. This keeps
@@ -1366,7 +1384,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 # with skip_duplicates even when the unfiltered
                                 # plan appears to have enough space.
                                 planning_files = non_duplicate_files(
-                                    selected_files, catalog_hashes,
+                                    selected_files, _fresh_checker(),
                                 )
                             source_bytes = total_file_bytes(planning_files)
                             # When a previous archive attempt left a partial
@@ -1465,7 +1483,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     runner.update_step(job["id"], "ingest", status="running")
                     _update_stages(runner, job["id"], stages)
 
-                    accumulated_hashes: set = set()
+                    # One shared checker across the whole source loop: files
+                    # copied by earlier iterations are recorded in it, so
+                    # later sources treat them as duplicates even before the
+                    # DB scan (this replaces the old accumulated-hashes
+                    # re-read of every copied file between sources).
+                    ingest_checker = _fresh_checker()
                     all_copied_paths: list = []
                     all_duplicate_folders: set = set()
                     total_copied = 0
@@ -1481,7 +1504,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 folder_template=params.folder_template,
                                 skip_duplicates=params.skip_duplicates,
                                 progress_callback=ingest_cb,
-                                extra_known_hashes=accumulated_hashes,
+                                duplicate_checker=ingest_checker,
                                 skip_paths=params.exclude_paths,
                                 recursive=params.recursive,
                             )
@@ -1492,15 +1515,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         total_copied += result_info.get("copied", 0)
                         total_skipped += result_info.get("skipped_duplicate", 0)
                         total_failed += result_info.get("failed", 0)
-                        # Collect hashes of files just copied so the next source
-                        # iteration treats them as known even before the DB scan.
-                        if params.skip_duplicates:
-                            import contextlib
-
-                            from scanner import compute_file_hash
-                            for path in result_info.get("copied_paths", []):
-                                with contextlib.suppress(OSError):
-                                    accumulated_hashes.add(compute_file_hash(path))
 
                     # In local-processing mode, ingest failures must fail the
                     # ingest stage so archive_stage's "any earlier stage failed"
