@@ -126,8 +126,18 @@ passes. The weight map is built once and materialized at both scales:
    the mask as a second texture (out of scope for v1; the lightbox preview
    approximates and snaps to the server render, as it already does for
    detail and re-edits).
-3. **Local detail** rides the existing detail pass: compute the NR/sharpen
-   deltas once, blend them by the detail weight map before adding back.
+3. **Local detail** runs the existing detail pass **twice** on the
+   pre-detail image — once with subject's `(sharpen, sharpen_radius,
+   noise_reduction)`, once with background's — and blends the two outputs
+   by the detail weight map: `out = subject_out · w + background_out ·
+   (1 − w)`. A single pass with combined scalars cannot represent both
+   regions: `_run_detail` in `detail.py` applies NR to `out` before
+   sharpen reads it, so subject-sharpen + background-NR would noise-reduce
+   the subject before its sharpen delta (or drop one region's setting).
+   Regions whose detail sliders are all zero skip their pass and reuse the
+   pre-detail image; when only one region has detail set, only one pass
+   runs and blends against the untouched pre-detail image on the other
+   side.
 
 No `EDIT_MATH_VERSION` bump: recipes without `local` render byte-identically.
 
@@ -137,9 +147,16 @@ No `EDIT_MATH_VERSION` bump: recipes without `local` render byte-identically.
   has a usable mask; otherwise one honest line ("No subject mask — run the
   pipeline's mask stage") instead of dead sliders.
 - Each band: its allowed sliders + a shared **Feather** slider on the
-  Subject band. A small mask-outline overlay toggle on the preview (reusing
-  the lightbox overlay endpoint) shows exactly which pixels count as
-  subject — the transparency rule applied to masks.
+  Subject band. A small overlay toggle on the preview shows exactly which
+  pixels count as subject — the transparency rule applied to masks — but
+  served from a **new** `/api/local-mask/<pid>/preview.png` endpoint that
+  returns the recipe's weight map (snapshot at `local.mask.ref` → recipe
+  geometry → feather → preview size), the same uncropped weight map used
+  by the editor preview (see §Editor preview). Reusing the existing
+  `/api/masks/<pid>/<variant>.png` would serve the live
+  `photo_masks.path` unchanged, so the overlay would disagree with the
+  saved edit exactly when the recipe has rotation, crop, feather, or a
+  stale active mask — the cases this feature exists to fix.
 - Stale-snapshot banner with an explicit Update action as above.
 - Copy Settings / presets: local adjustments are **not** included in presets
   (they reference a photo-specific mask); Copy Settings to a group copies
