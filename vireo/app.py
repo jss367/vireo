@@ -18562,6 +18562,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 SCHEMA_VERSION,
                 RecipeError,
                 apply_recipe_to_loaded_image,
+                detail_render_scale,
                 normalize_recipe,
             )
             from image_loader import (
@@ -18569,6 +18570,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 RAW_EXTENSIONS,
                 load_image,
             )
+            from render_source import rendered_recipe_long_edge
             recipe = normalize_recipe(recipe) or {}
             display_recipe = dict(recipe)
             display_recipe.pop("crop", None)
@@ -18690,9 +18692,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if img is None:
                 _record_working_copy_failure(db, photo, canonical)
                 return "Could not load image", 500
+            native_dims = _recipe_source_dimensions(photo)
+            # Detail scale must reflect the SAVED (cropped) render even though
+            # we render the preview uncropped — otherwise a tighter crop makes
+            # the saved output's sharpen/NR visibly stronger than the preview
+            # showed, and cropped detail edits look wrong. Simulate what the
+            # saved render's max long edge would be (bounded by the endpoint
+            # size, like /full's crop-aware preview), then compute the scale
+            # from the original recipe (with crop).
+            preview_detail_scale = None
+            if native_dims and native_dims[0] and native_dims[1]:
+                saved_native_long = float(rendered_recipe_long_edge(
+                    native_dims[0], native_dims[1], recipe,
+                ))
+                if saved_native_long > 0:
+                    saved_rendered_long = min(float(size), saved_native_long)
+                    preview_detail_scale = detail_render_scale(
+                        (saved_rendered_long, saved_rendered_long),
+                        native_dims,
+                        recipe,
+                    )
             img = apply_recipe_to_loaded_image(
                 img, recipe_json, max_size=size,
-                native_size=_recipe_source_dimensions(photo),
+                native_size=native_dims,
+                detail_scale=preview_detail_scale,
             )
         except RecipeError as e:
             return str(e), 400

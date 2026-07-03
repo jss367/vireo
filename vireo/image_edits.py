@@ -389,7 +389,9 @@ def detail_render_scale(rendered_size, native_size, recipe):
     return max(rendered_size) / native_long
 
 
-def apply_recipe_to_loaded_image(img, recipe, max_size=None, native_size=None):
+def apply_recipe_to_loaded_image(
+    img, recipe, max_size=None, native_size=None, detail_scale=None,
+):
     """Apply edits, constrain the long edge, then run the detail pass.
 
     Detail ops (sharpen/NR) are neighborhood filters authored in native
@@ -397,6 +399,13 @@ def apply_recipe_to_loaded_image(img, recipe, max_size=None, native_size=None):
     ``detail_render_scale`` — approximating the full-resolution render
     downscaled. Callers that know the photo's native dimensions pass them via
     ``native_size`` (see render_source.recipe_source_dimensions).
+
+    ``detail_scale`` overrides the scale computed from this call's recipe.
+    Use it when rendering a modified recipe (e.g. the edit-preview endpoint
+    strips crop to show the whole frame) so the detail pass still matches
+    what the unmodified recipe's saved render would produce — otherwise a
+    tighter crop scales sharpen/NR up in the saved output but not in the
+    preview, and the two disagree for cropped detail edits.
     """
     normalized = normalize_recipe(recipe)
     result = apply_recipe(img, normalized)
@@ -412,6 +421,11 @@ def apply_recipe_to_loaded_image(img, recipe, max_size=None, native_size=None):
         except ImportError:
             from detail import apply_detail
 
+        scale = (
+            detail_scale
+            if detail_scale is not None
+            else detail_render_scale(result.size, native_size, normalized)
+        )
         result = apply_detail(
             result,
             sharpen=sharpen,
@@ -419,7 +433,7 @@ def apply_recipe_to_loaded_image(img, recipe, max_size=None, native_size=None):
                 "sharpen_radius", SHARPEN_RADIUS_DEFAULT
             ),
             noise_reduction=noise_reduction,
-            scale=detail_render_scale(result.size, native_size, normalized),
+            scale=scale,
         )
     return result
 

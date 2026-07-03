@@ -1709,6 +1709,79 @@ def test_edit_preview_scales_detail_to_native_resolution(client_with_photo):
     assert dist_scaled < dist_unscaled
 
 
+def test_edit_preview_detail_scale_matches_saved_cropped_render(
+    client_with_photo,
+):
+    """When the in-progress recipe has both a crop and a detail adjustment,
+    the uncropped edit-preview must scale sharpen/NR as the saved (cropped)
+    render would — using the recipe's crop for the native long edge, not the
+    full uncropped native. Otherwise a tighter crop makes the saved render
+    visibly sharper than the preview showed."""
+    import io
+    import json as jsonlib
+
+    import numpy as np
+    from image_edits import apply_recipe_to_loaded_image, detail_render_scale
+    from image_loader import load_image
+    from PIL import Image, ImageFilter
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    # Soft vertical edge so sharpening has something to bite on.
+    folder = db.conn.execute("SELECT path FROM folders").fetchone()
+    src_path = os.path.join(folder["path"], "test.jpg")
+    arr = np.zeros((600, 800, 3), dtype=np.uint8)
+    arr[:, 400:, :] = 200
+    arr[:, :400, :] = 55
+    edge = Image.fromarray(arr, "RGB").filter(ImageFilter.GaussianBlur(4.0))
+    edge.save(src_path, "JPEG", quality=95)
+
+    recipe = {
+        "crop": {"x": 0.25, "y": 0.25, "w": 0.5, "h": 0.5},
+        "adjustments": {"sharpen": 100, "sharpen_radius": 3.0},
+    }
+    resp = client.get(
+        f"/photos/{photo_id}/edit-preview",
+        query_string={"size": "256", "recipe": jsonlib.dumps(recipe)},
+    )
+    assert resp.status_code == 200
+    with Image.open(io.BytesIO(resp.data)) as img:
+        served = np.asarray(img.convert("RGB")).astype(np.float32)
+
+    # "As-saved" reference: render the uncropped preview but scale detail by
+    # what the saved cropped render's scale would be (source is 800 wide, size
+    # cap is 256, so both scales bound to size=256).
+    display_recipe = dict(recipe)
+    display_recipe.pop("crop")
+    saved_scale = detail_render_scale((256, 256), (800, 600), recipe)
+    matched = np.asarray(
+        apply_recipe_to_loaded_image(
+            load_image(src_path, max_size=256),
+            display_recipe,
+            max_size=256,
+            native_size=(800, 600),
+            detail_scale=saved_scale,
+        )
+    ).astype(np.float32)
+    # "As-uncropped" (buggy) reference: crop stripped from the scale too.
+    unmatched = np.asarray(
+        apply_recipe_to_loaded_image(
+            load_image(src_path, max_size=256),
+            display_recipe,
+            max_size=256,
+            native_size=(800, 600),
+        )
+    ).astype(np.float32)
+
+    dist_matched = float(np.mean(np.abs(served - matched)))
+    dist_unmatched = float(np.mean(np.abs(served - unmatched)))
+    # The crop shrinks native_long by ~2x, so the crop-aware detail scale is
+    # roughly 2x the crop-stripped one; the two reference renders differ enough
+    # that the served bytes should clearly track the crop-aware one.
+    assert dist_matched < dist_unmatched
+
+
 def test_edit_preview_returns_400_for_malformed_crop(client_with_photo):
     from PIL import Image
 
