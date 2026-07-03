@@ -34,7 +34,19 @@ _ADJUSTMENT_RANGES = {
     "contrast": (-100.0, 100.0),
     "vibrance": (-100.0, 100.0),
     "saturation": (-100.0, 100.0),
+    # Detail ops (see detail.py). Zero is a no-op like every other adjustment;
+    # sharpen_radius is validated separately because its no-op is absence, not 0.
+    "sharpen": (0.0, 100.0),
+    "noise_reduction": (0.0, 100.0),
 }
+
+SHARPEN_RADIUS_RANGE = (0.5, 3.0)
+SHARPEN_RADIUS_DEFAULT = 1.0
+
+# Adjustment keys handled by the neighborhood pass in detail.py, not the
+# per-pixel tone pipeline. A recipe containing only these must not run the
+# tone pass at all (so a detail-only edit stays byte-exact outside detail).
+_DETAIL_KEYS = frozenset({"sharpen", "sharpen_radius", "noise_reduction"})
 
 _WHITE_BALANCE_RANGES = {
     "temperature": (-100.0, 100.0),
@@ -160,6 +172,25 @@ def normalize_recipe(recipe):
             raise RecipeError(f"{name} adjustment must be between {lo:g} and {hi:g}")
         if abs(val) > 1e-9:
             normalized_adjustments[name] = round(val, 6)
+
+    # The USM radius only means something while sharpening is on, and its
+    # default (1.0) is canonicalized to absence so an untouched radius slider
+    # never dirties a recipe.
+    if normalized_adjustments.get("sharpen"):
+        raw_radius = adjustments.get("sharpen_radius")
+        if raw_radius not in (None, ""):
+            if isinstance(raw_radius, bool) or not isinstance(
+                raw_radius, int | float
+            ):
+                raise RecipeError("sharpen_radius adjustment must be numeric")
+            radius = float(raw_radius)
+            lo, hi = SHARPEN_RADIUS_RANGE
+            if not math.isfinite(radius) or radius < lo or radius > hi:
+                raise RecipeError(
+                    f"sharpen_radius adjustment must be between {lo:g} and {hi:g}"
+                )
+            if abs(radius - SHARPEN_RADIUS_DEFAULT) > 1e-9:
+                normalized_adjustments["sharpen_radius"] = round(radius, 6)
 
     white_balance = adjustments.get("white_balance")
     if white_balance is None:
@@ -317,17 +348,79 @@ def apply_recipe(img, recipe):
         result = result.crop((left, top, right, bottom))
 
     adjustments = normalized.get("adjustments") or {}
-    if adjustments:
-        result = _apply_adjustments(result, adjustments)
+    tone_adjustments = {
+        k: v for k, v in adjustments.items() if k not in _DETAIL_KEYS
+    }
+    if tone_adjustments:
+        result = _apply_adjustments(result, tone_adjustments)
 
     return result
 
 
-def apply_recipe_to_loaded_image(img, recipe, max_size=None):
-    """Apply edits, then optionally constrain the long edge."""
-    result = apply_recipe(img, recipe)
+def detail_render_scale(rendered_size, native_size, recipe):
+    """Return output pixels per native pixel for a recipe render.
+
+    ``rendered_size`` is the final image's (width, height); ``native_size`` is
+    the photo's orientation-corrected native (width, height), or None when
+    unknown (scale falls back to 1.0 — apply detail as authored). The scale
+    compares long edges against what the recipe would render at native
+    resolution: right-angle rotation swaps the axes a crop applies to, crop
+    shrinks them, and straighten keeps dimensions.
+    """
+    if not native_size:
+        return 1.0
+    try:
+        native_w, native_h = (float(v) for v in native_size)
+    except (TypeError, ValueError):
+        return 1.0
+    if native_w <= 0 or native_h <= 0:
+        return 1.0
+    if (recipe or {}).get("rotation") in (90, 270):
+        native_w, native_h = native_h, native_w
+    crop = (recipe or {}).get("crop")
+    if crop:
+        native_long = max(
+            float(crop["w"]) * native_w, float(crop["h"]) * native_h
+        )
+    else:
+        native_long = max(native_w, native_h)
+    if native_long <= 0:
+        return 1.0
+    return max(rendered_size) / native_long
+
+
+def apply_recipe_to_loaded_image(img, recipe, max_size=None, native_size=None):
+    """Apply edits, constrain the long edge, then run the detail pass.
+
+    Detail ops (sharpen/NR) are neighborhood filters authored in native
+    pixels, so they run last — at output resolution, with kernels scaled by
+    ``detail_render_scale`` — approximating the full-resolution render
+    downscaled. Callers that know the photo's native dimensions pass them via
+    ``native_size`` (see render_source.recipe_source_dimensions).
+    """
+    normalized = normalize_recipe(recipe)
+    result = apply_recipe(img, normalized)
     if max_size and max_size > 0 and max(result.size) > max_size:
         result.thumbnail((max_size, max_size), resample=Image.Resampling.LANCZOS)
+
+    adjustments = (normalized or {}).get("adjustments") or {}
+    sharpen = adjustments.get("sharpen", 0.0)
+    noise_reduction = adjustments.get("noise_reduction", 0.0)
+    if sharpen or noise_reduction:
+        try:
+            from .detail import apply_detail
+        except ImportError:
+            from detail import apply_detail
+
+        result = apply_detail(
+            result,
+            sharpen=sharpen,
+            sharpen_radius=adjustments.get(
+                "sharpen_radius", SHARPEN_RADIUS_DEFAULT
+            ),
+            noise_reduction=noise_reduction,
+            scale=detail_render_scale(result.size, native_size, normalized),
+        )
     return result
 
 

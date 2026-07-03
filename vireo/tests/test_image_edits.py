@@ -114,6 +114,64 @@ def test_normalize_recipe_accepts_expanded_adjustments():
     }
 
 
+def test_normalize_recipe_accepts_detail_adjustments():
+    assert normalize_recipe(
+        {
+            "adjustments": {
+                "sharpen": 40,
+                "sharpen_radius": 1.5,
+                "noise_reduction": 25,
+            }
+        }
+    ) == {
+        "version": 1,
+        "adjustments": {
+            "sharpen": 40.0,
+            "sharpen_radius": 1.5,
+            "noise_reduction": 25.0,
+        },
+    }
+
+
+def test_normalize_recipe_drops_default_sharpen_radius():
+    assert normalize_recipe(
+        {"adjustments": {"sharpen": 40, "sharpen_radius": 1.0}}
+    ) == {
+        "version": 1,
+        "adjustments": {"sharpen": 40.0},
+    }
+
+
+def test_normalize_recipe_drops_radius_without_sharpen():
+    assert normalize_recipe({"adjustments": {"sharpen_radius": 2.0}}) is None
+    assert normalize_recipe(
+        {"adjustments": {"sharpen": 0, "sharpen_radius": 2.0}}
+    ) is None
+
+
+def test_normalize_recipe_drops_zero_detail_amounts():
+    assert normalize_recipe(
+        {"adjustments": {"sharpen": 0, "noise_reduction": 0}}
+    ) is None
+
+
+@pytest.mark.parametrize(
+    ("adjustments", "message"),
+    [
+        ({"sharpen": -1}, "sharpen adjustment"),
+        ({"sharpen": 101}, "sharpen adjustment"),
+        ({"noise_reduction": 150}, "noise_reduction adjustment"),
+        ({"sharpen": 40, "sharpen_radius": 0.4}, "sharpen_radius"),
+        ({"sharpen": 40, "sharpen_radius": 3.5}, "sharpen_radius"),
+        ({"sharpen": 40, "sharpen_radius": "wide"}, "sharpen_radius"),
+        ({"sharpen": 40, "sharpen_radius": True}, "sharpen_radius"),
+    ],
+)
+def test_normalize_recipe_rejects_invalid_detail_adjustments(adjustments, message):
+    with pytest.raises(RecipeError, match=message):
+        normalize_recipe({"adjustments": adjustments})
+
+
 def test_normalize_recipe_rejects_invalid_white_balance():
     with pytest.raises(RecipeError, match="white_balance.temperature"):
         normalize_recipe({"adjustments": {"white_balance": {"temperature": 200}}})
