@@ -17,7 +17,11 @@ brushing.
   which applies `ImageOps.exif_transpose` (both standard images and RAW
   postprocess), before any recipe geometry (rotation/flip/straighten/crop)
   is applied. The prompt detection box is stored per mask;
-  `photos.active_mask_variant` picks the live one.
+  `photos.active_mask_variant` picks the live one. For RAWs the specific
+  decode mode that produced this pixel grid matters — see next bullet —
+  and the design pins the snapshot to whichever decode mode the edit
+  render is actually using (§Snapshot decode basis), rather than
+  storing a single space-agnostic snapshot.
 - RAW files have **two** decode modes with potentially different pixel
   dimensions and aspect ratios: `RAW_DECODE_JPEG_FIRST` (default —
   embedded camera JPEG when it satisfies the requested size) and
@@ -130,13 +134,22 @@ standard-decode working-copy JPEG on a third. Silently disabling local
 adjustments on those fallback renders would drop user edits on
 first-class supported paths.
 
-Working copies come in two flavors and their basis follows the decode
-that produced them. On the happy path `extract_working_copy`
-(`vireo/image_loader.py:511-537`) decodes the RAW source with
-`RAW_DECODE_PRESERVE_HIGHLIGHTS`, so the resulting JPEG's pixel grid
-(aspect, orientation, cropping) matches the preserve-highlights variant
-— only its `long_edge` may be smaller, which the builder resamples
-through anyway. When RAW extraction *fails* on a RAW+JPEG pair, Vireo
+Working copies come in three flavors and their basis follows the decode
+that actually produced the on-disk pixels. On the happy path
+`extract_working_copy` (`vireo/image_loader.py:511-537`) decodes the RAW
+source with `RAW_DECODE_PRESERVE_HIGHLIGHTS`; when libraw can demosaic
+the sensor data, the resulting JPEG's pixel grid (aspect, orientation,
+cropping) matches the preserve-highlights variant — only its
+`long_edge` may be smaller, which the builder resamples through
+anyway. When libraw *cannot* demosaic (Nikon HE\*/TicoRAW today, other
+unsupported RAWs in the future), `_load_raw`
+(`vireo/image_loader.py:577-600`) silently falls back to the embedded
+JPEG **inside the same preserve-highlights call**, so the working copy
+still writes but its pixel grid is the embedded JPEG's — potentially
+cropped or a different aspect than the sensor's, and specifically not
+the preserve-highlights basis. The scanner cannot detect this after the
+fact from `working_copy_path` alone, so provenance must be recorded at
+extraction time. When RAW extraction *fails* on a RAW+JPEG pair, Vireo
 intentionally re-extracts the working copy from the companion JPEG
 (`vireo/scanner.py:973-987` on scan; `vireo/app.py:19112-19122` and
 `19141-19148` on the on-demand original route); that JPEG is decoded
@@ -161,27 +174,57 @@ all. Inferring basis from this field would therefore misalign local
 weights in both directions.
 
 PR 1 records working-copy provenance in a new dedicated
-`photos.working_copy_source` column (`'raw'` | `'companion'`), written
-by **every** path that materializes `working_copy_path`: scanner's
-happy RAW extraction (`'raw'`), scanner's RAW-then-companion fallback
-(`'companion'`, alongside the existing `working_copy_failed_source='source'`
-routing marker it also writes), and both on-demand `/original`
-companion re-extract branches (`'companion'`). Weight-map basis
-selection reads this column directly: `'raw'` shares the
-`preserve_highlights` basis, `'companion'` shares `standard`. Rows
-migrated from before the column existed carry a NULL value and are
-treated as unknown provenance — the local pass is disabled with the
-same warn-and-hold-zero fallback as a missing snapshot, and the next
-scan or on-demand extraction populates the column so subsequent renders
-recover. Guessing from `working_copy_failed_source` or from disk
-inspection was considered and rejected: both false-positive and
-false-negative paths above make the guess unsound, and silently picking
-the wrong basis is exactly the failure mode local adjustments must
-avoid. Neither flavor needs its own on-disk snapshot variant — each
-reuses an existing one — but the `working_copy_source` column has to be
-checked at render time; treating every working copy as
-preserve-highlights would misalign local weights on the offline-RAW
-companion-derived-working-copy path.
+`photos.working_copy_source` column (`'raw'` | `'companion'` |
+`'embedded_jpeg'`), written by **every** path that materializes
+`working_copy_path`. Scanner's happy RAW extraction writes `'raw'`
+when `_load_raw` returned a demosaiced result, or `'embedded_jpeg'`
+when it returned via the libraw-failure embedded-JPEG fallback
+(`extract_working_copy` distinguishes these by comparing the returned
+image's dimensions to the sensor's `raw.sizes.width`/`.height` — an
+embedded fallback that matches the sensor exactly is safe to treat as
+`'raw'`, everything else is `'embedded_jpeg'`). Scanner's
+RAW-then-companion fallback writes `'companion'` (alongside the
+existing `working_copy_failed_source='source'` routing marker it also
+writes), as do both on-demand `/original` companion re-extract
+branches. Weight-map basis selection reads this column directly:
+`'raw'` shares the `preserve_highlights` basis, `'companion'` shares
+`standard`, and `'embedded_jpeg'` has no snapshot basis at all
+because the embedded preview's crop/aspect against the sensor is
+per-camera and not recorded anywhere Vireo can map to. Rows migrated
+from before the column existed carry a NULL value and are treated as
+unknown provenance — the local pass is disabled with the same
+warn-and-hold-zero fallback as a missing snapshot. For NULL rows the
+scanner's existing `_working_copy_candidate_predicate` skips them
+(its `working_copy_path IS NULL` clause excludes any row that already
+has a working copy on disk) and the on-demand `/original` route
+trusts an existing full-res working copy without regenerating
+(`vireo/app.py:18789-18793`), so the column would stay NULL
+indefinitely. PR 1 therefore adds an explicit backfill: on the same
+schema migration that adds the column, a one-time job walks every row
+where `working_copy_path IS NOT NULL AND working_copy_source IS NULL`
+and re-runs the extraction logic against the current
+source/companion state to write both the working copy (replacing the
+existing file only if the fresh extraction changed the pixel grid) and
+the new column. The job reuses `_extract_working_copies`' machinery
+via a temporary predicate that ignores the `working_copy_path IS
+NULL` clause, so all three flavors are labelled correctly on the
+next startup after the migration, and the local pass recovers
+without waiting for user-driven scans. `'embedded_jpeg'` rows stay
+disabled after backfill by design — that's the honest signal for RAWs
+whose only decode is a camera preview of unknown crop, and the
+alternative (materializing an `embedded_jpeg` snapshot variant whose
+transform to the sensor is unknown) would silently misalign local
+weights on exactly the cases that already have decoding trouble.
+Guessing from `working_copy_failed_source` or from disk inspection
+was considered and rejected: both false-positive and false-negative
+paths above make the guess unsound, and silently picking the wrong
+basis is exactly the failure mode local adjustments must avoid. The
+`raw` and `companion` flavors don't need their own on-disk snapshot
+variant — each reuses an existing one — but the
+`working_copy_source` column has to be checked at render time;
+treating every working copy as preserve-highlights would misalign
+local weights on the offline-RAW companion-derived-working-copy path
+and on the libraw-failure embedded-JPEG path.
 
 Snapshot creation therefore materializes one on-disk variant per
 **distinct decode basis** the render source might use, keyed by decode
@@ -191,15 +234,23 @@ mode, all sharing one `local.mask.ref`:
   `photo_masks` file (which is already in edit-render space).
 - **RAWs whose folder has no companion JPEG:** one variant,
   `preserve_highlights`, generated fresh — it serves both the primary
-  preserve-highlights RAW render and the working-copy fallback, which
-  can only be RAW-derived on this row (no companion to fall back to)
-  and therefore shares the preserve-highlights basis.
+  preserve-highlights RAW render and the working-copy fallback *when
+  the working copy is truly RAW-derived* (`working_copy_source='raw'`,
+  meaning `_load_raw` returned demosaiced pixels). If the working copy
+  is `'embedded_jpeg'` — libraw couldn't demosaic and
+  `extract_working_copy` silently returned the embedded preview — the
+  local pass is disabled on that render (warn-and-hold-zero) rather
+  than reusing the preserve-highlights variant, because the embedded
+  preview's crop and aspect against the sensor are per-camera unknowns
+  and no snapshot basis can be trusted to line up.
 - **RAWs with a companion JPEG:** two variants —
   `preserve_highlights` (for the primary RAW path *and* working copies
   with `photos.working_copy_source='raw'`) *and* `standard` (for the
   companion-fallback path *and* working copies with
   `photos.working_copy_source='companion'`, where the working copy was
   re-extracted from the companion JPEG after RAW extraction failed).
+  `working_copy_source='embedded_jpeg'` rows disable the local pass
+  the same way as above.
 
 **Darktable-developed exports bypass, they don't get their own variant.**
 Export prefers a darktable-developed output ahead of RAW / working copy /
@@ -313,10 +364,14 @@ passes. The weight map is built once and materialized at both scales:
    companion JPEG after RAW extraction failed by scanner or by the
    on-demand `/original` route, so its pixel grid is the companion's
    standard-decode basis), or when the photo is non-RAW. A working copy
-   with a NULL `working_copy_source` (a legacy row from before the
-   column existed) is treated as unknown basis and the local pass is
-   disabled with warn-and-hold-zero, exactly as with a missing snapshot,
-   until the next scan or on-demand extraction populates the column. `recipe_render_source` already
+   with `working_copy_source='embedded_jpeg'` (RAW decode fell through
+   to the embedded preview inside `_load_raw`) or a NULL value (a
+   legacy row from before the column existed and before the migration
+   backfill has run) is treated as unknown basis and the local pass is
+   disabled with warn-and-hold-zero, exactly as with a missing
+   snapshot. NULL rows recover automatically once the migration
+   backfill described in §Snapshot decode basis populates the column;
+   `'embedded_jpeg'` rows stay disabled by design. `recipe_render_source` already
    distinguishes these paths internally, so it returns the effective basis
    alongside the source path for the weight-map builder to consume.
    `recipe_render_source`'s return value is only the *initial* basis, and
