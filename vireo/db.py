@@ -3021,6 +3021,23 @@ class Database:
                     if not self._active_ws_root_descendant_exists(ws, probe):
                         self.add_workspace_folder(
                             ws, ancestor_row["id"], is_root=True)
+                    else:
+                        # Descendant-root guard fires: the workspace is
+                        # scoped narrower than this ancestor, so rooting
+                        # it would widen the scope past the intended root.
+                        # But any pre-existing ``is_root=0`` link on this
+                        # ancestor (or on descendants below it that no
+                        # root still covers) would let
+                        # ``_materialize_workspace_descendants`` — called
+                        # by later ``get_workspace_folders()`` reads —
+                        # pull the broader subtree back into the workspace
+                        # and defeat the scoped merge. Prune those
+                        # uncovered non-root links now, matching the
+                        # cleanup the ``existing_link is None or
+                        # is_root == 0`` branch above already performs
+                        # via ``_prune_ws_nonroot_links_outside_roots``.
+                        self._prune_ws_nonroot_links_outside_roots(
+                            ws, probe)
                     break
                 probe = os.path.dirname(probe)
 
