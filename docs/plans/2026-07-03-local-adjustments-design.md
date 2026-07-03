@@ -141,16 +141,33 @@ and one `background` entry):
   least one active region referencing it.
 - Allowed per-region adjustments (v1): `exposure`, `highlights`, `shadows`,
   `contrast`, `saturation`, plus detail's `sharpen`/`sharpen_radius`/
-  `noise_reduction`. Same ranges as global adjustments; zero values
+  `noise_reduction`. Bidirectional tone fields (`exposure`, `highlights`,
+  `shadows`, `contrast`, `saturation`) use the same signed ranges as their
+  global counterparts. Detail's `sharpen` and `noise_reduction` are stored
+  globally in `0..100` but per-region they are **signed deltas** in
+  `-100..100` — the rendering contract treats them as
+  `global + region_delta`, so a positive delta strengthens the baseline
+  for that region while a negative delta subtracts from it (e.g., global
+  NR=40 with subject NR=−40 renders NR=0 on the subject and NR=40 on the
+  background, letting a photographer keep whole-photo noise reduction
+  while leaving the bird unsmoothed). Restricting local detail to `0..100`
+  the way global does would only let a region **increase** the baseline,
+  which contradicts §Rendering's `global + region_delta` contract and
+  strands the "keep the subject unsmoothed while NR-ing the background"
+  case this feature exists for. The clamp to detail's actual `0..100`
+  input range happens **after** the branch resolves — validation accepts
+  the signed delta, and `_run_detail` sees the clamped resolved scalar.
+  `sharpen_radius` is not a delta (it overrides the global — see
+  §Rendering) so it stays in its normal positive range. Zero values
   normalize away and empty entries are dropped, with one exception:
   `sharpen_radius` is kept whenever the *resolved branch* sharpen is
-  non-zero (`global.sharpen + region.sharpen != 0`), not only when the
-  region's own `sharpen` delta is non-zero. Applying global's rule
-  literally — drop `sharpen_radius` unless the same object's `sharpen`
-  is non-zero — would silently discard a subject-only radius change with
-  zero strength delta, so the branch would fall back to the global
-  radius and contradict §Rendering's local-detail rule where a region
-  radius overrides the global one.
+  non-zero (`clamp(global.sharpen + region.sharpen, 0, 100) != 0`), not
+  only when the region's own `sharpen` delta is non-zero. Applying
+  global's rule literally — drop `sharpen_radius` unless the same
+  object's `sharpen` is non-zero — would silently discard a subject-only
+  radius change with zero strength delta, so the branch would fall back
+  to the global radius and contradict §Rendering's local-detail rule
+  where a region radius overrides the global one.
 
 ### Mask snapshots, not live references
 
@@ -487,17 +504,28 @@ passes. The weight map is built once and materialized at both scales:
    External handoff**, which applies the recipe to the loaded image and
    has the same RAW-decode-failure or undersized-embedded-JPEG →
    companion JPEG switch before `apply_recipe_to_loaded_image`
-   (`vireo/app.py:9195-9266`); and the **iNaturalist upload** path, which
+   (`vireo/app.py:9195-9266`); the **iNaturalist upload** path, which
    mirrors the handoff and does the same swap before rendering
-   (`vireo/app.py:11540-11594`). All five switches change the effective
-   basis from `preserve_highlights` to `standard`, so the weight-map
-   builder consumes the basis that reflects the *actual* loaded image at
-   each site, not the one `recipe_render_source` chose up front — every
-   one of these call sites updates the basis alongside the source swap
-   before invoking the local pass. Restricting the fix to preview/export
-   would silently misalign local weights on the edited `/original`, Open
-   External, and iNat upload renders for exactly the RAW+JPEG cases the
-   fallback exists to serve. If the final basis has no
+   (`vireo/app.py:11540-11594`); the **preview warmup job**
+   (`vireo/app.py:13199-13334`), which materializes the tracked warmed
+   preview cache — it repeats the same undersized-embedded-JPEG and
+   failed-RAW-decode → companion swap before `apply_recipe_to_loaded_image`,
+   and its output is served on subsequent cache-hit reads without any
+   further basis check; and the **pipeline preview warmup**
+   (`vireo/pipeline_job.py:2220-2344`), which does the same swap-then-render
+   for the pipeline's preview cache write. All seven switches change the
+   effective basis from `preserve_highlights` to `standard`, so the
+   weight-map builder consumes the basis that reflects the *actual*
+   loaded image at each site, not the one `recipe_render_source` chose
+   up front — every one of these call sites updates the basis alongside
+   the source swap before invoking the local pass. Restricting the fix
+   to preview/export would silently misalign local weights on the edited
+   `/original`, Open External, and iNat upload renders for exactly the
+   RAW+JPEG cases the fallback exists to serve; leaving the two warmup
+   paths out is worse still because a mismatched basis there bakes the
+   misalignment into a persistent cache — the UI keeps showing shifted
+   local edits on every subsequent read until the cache is invalidated,
+   even after the code is fixed. If the final basis has no
    matching `mask.decodes` entry the pass is disabled, warn-and-hold-zero,
    as above. Load
    the picked variant's on-disk file and bilinearly resample it to the
