@@ -369,7 +369,10 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
                     progress_cb(i + 1, len(photo_ids), photo["filename"])
                 continue
             if recipe:
-                img = apply_recipe_to_loaded_image(img, recipe, max_size=max_size)
+                img = apply_recipe_to_loaded_image(
+                    img, recipe, max_size=max_size,
+                    native_size=_recipe_source_dimensions(photo, exif_data),
+                )
             _save_export_image(img, out_path, format_info, quality)
             img.close()
             exported += 1

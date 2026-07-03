@@ -44,6 +44,9 @@ from render_source import (
     recipe_render_source,
 )
 from render_source import (
+    recipe_source_dimensions as _recipe_source_dimensions,
+)
+from render_source import (
     scaled_recipe_source_dimensions as _scaled_recipe_source_dimensions,
 )
 
@@ -203,6 +206,10 @@ def _retry_thumbnail_with_companion(
             )
             commit_with_retry(thread_db.conn)
     recipe_kwargs = {"recipe": recipe} if recipe else {}
+    if recipe:
+        recipe_kwargs["native_size"] = (
+            _recipe_source_dimensions(photo)
+        )
     return generate_thumbnail(
         photo_id,
         companion_abs,
@@ -1894,6 +1901,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     skipped += 1
                                     continue
                         recipe_kwargs = {"recipe": recipe} if recipe else {}
+                        if recipe:
+                            recipe_kwargs["native_size"] = (
+                                _recipe_source_dimensions(detail_photo)
+                            )
                         raw_decode_kwargs = _thumb_raw_decode_kwargs(
                             detail_photo, recipe,
                         )
@@ -1997,6 +2008,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     skipped += 1
                                     continue
                             recipe_kwargs = {"recipe": recipe} if recipe else {}
+                            if recipe:
+                                recipe_kwargs["native_size"] = (
+                                    _recipe_source_dimensions(detail_photo)
+                                )
                             raw_decode_kwargs = _thumb_raw_decode_kwargs(
                                 detail_photo, recipe,
                             )
@@ -2323,6 +2338,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             if recipe:
                                 img = apply_recipe_to_loaded_image(
                                     img, recipe, max_size=max_size,
+                                    native_size=_recipe_source_dimensions(
+                                        detail_photo
+                                    ),
                                 )
                             # Atomic write: with SLOT_CAP > 1 two pipelines
                             # processing the same photo can both miss the

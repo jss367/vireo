@@ -9145,7 +9145,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
             from image_edits import (
                 EDIT_MATH_VERSION,
-                apply_recipe,
+                apply_recipe_to_loaded_image,
                 recipe_to_json,
             )
             from image_loader import (
@@ -9263,7 +9263,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             tmp_path = None
             fd = None
             try:
-                rendered = apply_recipe(img, recipe)
+                rendered = apply_recipe_to_loaded_image(
+                    img, recipe,
+                    native_size=_recipe_source_dimensions(photo),
+                )
                 quality = cfg.load().get("working_copy_quality", 92)
                 fd, tmp_path = tempfile.mkstemp(
                     prefix=f".{photo['id']}.", suffix=".jpg.tmp", dir=out_dir,
@@ -11476,7 +11479,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not recipe:
             return fallback_path, None
 
-        from image_edits import EDIT_MATH_VERSION, apply_recipe, recipe_to_json
+        from image_edits import (
+            EDIT_MATH_VERSION,
+            apply_recipe_to_loaded_image,
+            recipe_to_json,
+        )
         from image_loader import (
             RAW_DECODE_PRESERVE_HIGHLIGHTS,
             RAW_EXTENSIONS,
@@ -11584,7 +11591,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         tmp_path = None
         fd = None
         try:
-            rendered = apply_recipe(img, recipe)
+            rendered = apply_recipe_to_loaded_image(
+                img, recipe,
+                native_size=_recipe_source_dimensions(photo),
+            )
             quality = cfg.load().get("working_copy_quality", 92)
             fd, tmp_path = tempfile.mkstemp(
                 prefix=f".{photo['id']}.", suffix=".jpg.tmp", dir=out_dir,
@@ -13318,6 +13328,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         if recipe:
                             img = apply_recipe_to_loaded_image(
                                 img, recipe, max_size=max_size,
+                                native_size=_recipe_source_dimensions(
+                                    detail_photo
+                                ),
                             )
                         img.save(cache_path, format="JPEG", quality=preview_quality)
                         with contextlib.suppress(Exception):
@@ -15379,6 +15392,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 recipe=recipe,
                 raw_decode=raw_decode,
                 min_source_size=min_source_size,
+                native_size=(
+                    _recipe_source_dimensions(photo) if recipe else None
+                ),
             )
             if (
                 not result
@@ -15410,6 +15426,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             thumb_dir,
                             size=thumb_size,
                             recipe=recipe,
+                            native_size=(
+                                _recipe_source_dimensions(photo)
+                                if recipe else None
+                            ),
                         )
                         if result:
                             source = companion_abs
@@ -18436,7 +18456,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return "Could not load image", 500
         if recipe:
             from image_edits import apply_recipe_to_loaded_image
-            img = apply_recipe_to_loaded_image(img, recipe, max_size=size)
+            img = apply_recipe_to_loaded_image(
+                img, recipe, max_size=size,
+                native_size=_recipe_source_dimensions(photo),
+            )
 
         preview_quality = cfg.load().get("preview_quality", 90)
 
@@ -18539,6 +18562,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 SCHEMA_VERSION,
                 RecipeError,
                 apply_recipe_to_loaded_image,
+                detail_render_scale,
                 normalize_recipe,
             )
             from image_loader import (
@@ -18546,6 +18570,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 RAW_EXTENSIONS,
                 load_image,
             )
+            from render_source import rendered_recipe_long_edge
             recipe = normalize_recipe(recipe) or {}
             display_recipe = dict(recipe)
             display_recipe.pop("crop", None)
@@ -18667,7 +18692,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if img is None:
                 _record_working_copy_failure(db, photo, canonical)
                 return "Could not load image", 500
-            img = apply_recipe_to_loaded_image(img, recipe_json, max_size=size)
+            native_dims = _recipe_source_dimensions(photo)
+            # Detail scale must reflect the SAVED (cropped) render even though
+            # we render the preview uncropped — otherwise a tighter crop makes
+            # the saved output's sharpen/NR visibly stronger than the preview
+            # showed, and cropped detail edits look wrong. Simulate what the
+            # saved render's max long edge would be (bounded by the endpoint
+            # size, like /full's crop-aware preview), then compute the scale
+            # from the original recipe (with crop).
+            preview_detail_scale = None
+            if native_dims and native_dims[0] and native_dims[1]:
+                saved_native_long = float(rendered_recipe_long_edge(
+                    native_dims[0], native_dims[1], recipe,
+                ))
+                if saved_native_long > 0:
+                    saved_rendered_long = min(float(size), saved_native_long)
+                    preview_detail_scale = detail_render_scale(
+                        (saved_rendered_long, saved_rendered_long),
+                        native_dims,
+                        recipe,
+                    )
+            img = apply_recipe_to_loaded_image(
+                img, recipe_json, max_size=size,
+                native_size=native_dims,
+                detail_scale=preview_detail_scale,
+            )
         except RecipeError as e:
             return str(e), 400
 
@@ -18926,8 +18975,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if img is None:
                 _record_working_copy_failure(db, photo, image_path)
                 return "Could not load image", 500
-            from image_edits import apply_recipe
-            img = apply_recipe(img, recipe)
+            from image_edits import apply_recipe_to_loaded_image
+            img = apply_recipe_to_loaded_image(
+                img, recipe,
+                native_size=_recipe_source_dimensions(photo),
+            )
             originals_dir = os.path.join(vireo_dir, "originals")
             cache_path = os.path.join(originals_dir, f"{photo_id}.jpg")
             os.makedirs(originals_dir, exist_ok=True)
