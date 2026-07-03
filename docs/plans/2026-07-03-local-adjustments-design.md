@@ -12,9 +12,12 @@ brushing.
 
 - `photo_masks`: one row per (photo, variant); PNG single-channel masks
   (0/255) on disk at `~/.vireo/masks/{photo_id}.{variant}.png`, generated at
-  working resolution in **unrotated original pixel space**. The prompt
-  detection box is stored per mask; `photos.active_mask_variant` picks the
-  live one.
+  working resolution in the **orientation-corrected working image space**
+  — the pixel space of `image_loader.load_image` / `render_proxy` output,
+  which applies `ImageOps.exif_transpose` (both standard images and RAW
+  postprocess), before any recipe geometry (rotation/flip/straighten/crop)
+  is applied. The prompt detection box is stored per mask;
+  `photos.active_mask_variant` picks the live one.
 - Masks regenerate when the detection prompt changes and can be deleted by
   storage cleanup (`delete_stale_masks`, variant deletion). Detection IDs are
   not stable across detector re-runs.
