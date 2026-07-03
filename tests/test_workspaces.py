@@ -1547,6 +1547,79 @@ def test_archive_merge_new_path_preserves_narrower_workspace_root(db):
     assert future_photo is None
 
 
+def test_archive_merge_nested_new_path_does_not_link_out_of_scope_intermediate(db):
+    """A missing intermediate under a broad archive must not leak siblings.
+
+    Workspace root ``/archive/USA/2026`` is scoped narrower than the archive
+    base ``/archive/USA``. Merging into a nested new path ``/archive/USA/2027/
+    Trip`` requires materializing ``/archive/USA/2027`` as a folder row for
+    ``parent_id`` chaining. That intermediate must not be linked to the
+    workspace: no workspace root covers it, and any non-root link would let
+    ``_materialize_workspace_descendants`` (called by ``get_workspace_folders``)
+    pull the merged ``/archive/USA/2027/Trip`` subtree into the workspace.
+    """
+    ws_id = db.create_workspace("USA2026")
+
+    db.set_active_workspace(None)
+    archive_id = db.add_folder("/archive/USA", name="USA")
+    year_id = db.add_folder(
+        "/archive/USA/2026",
+        name="2026",
+        parent_id=archive_id,
+    )
+
+    db.set_active_workspace(ws_id)
+    db.add_workspace_folder(ws_id, year_id)
+
+    staged_trip_id = db.add_folder(
+        "/staging/job/Trip",
+        name="Trip",
+        workspace_root=True,
+    )
+    db.add_photo(staged_trip_id, "future.jpg", ".jpg", 1000, 3.0)
+
+    result = db.merge_staged_tree_into_archive(
+        staged_trip_id,
+        "/archive/USA/2027/Trip",
+    )
+
+    assert result["new_photos"] == 1
+
+    root_paths = {
+        r["path"] for r in db.get_workspace_folder_roots(ws_id)
+    }
+    assert root_paths == {"/archive/USA/2026"}
+
+    intermediate_row = db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?",
+        ("/archive/USA/2027",),
+    ).fetchone()
+    assert intermediate_row is not None
+    intermediate_link = db.conn.execute(
+        """SELECT 1 FROM workspace_folders
+           WHERE workspace_id = ? AND folder_id = ?""",
+        (ws_id, intermediate_row["id"]),
+    ).fetchone()
+    assert intermediate_link is None
+
+    # get_workspace_folders() runs _materialize_workspace_descendants; the
+    # merged Trip subtree must remain invisible to this scoped workspace.
+    linked_paths = {
+        r["path"] for r in db.get_workspace_folders(ws_id)
+    }
+    assert "/archive/USA/2027" not in linked_paths
+    assert "/archive/USA/2027/Trip" not in linked_paths
+
+    future_photo = db.conn.execute(
+        """SELECT p.filename
+           FROM photos p
+           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+          WHERE wf.workspace_id = ? AND p.filename = ?""",
+        (ws_id, "future.jpg"),
+    ).fetchone()
+    assert future_photo is None
+
+
 def test_move_folders_validates_source_workspace(db):
     """Raises ValueError if source workspace doesn't exist."""
     ws = db.create_workspace("A")

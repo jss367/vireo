@@ -3045,7 +3045,15 @@ class Database:
         # is the expected shape for a root. Otherwise insert missing rows
         # top-down so each child's ``parent_id`` resolves to its freshly-
         # created parent, and link each to the active workspace non-root
-        # (they sit under an existing tracked root by construction).
+        # ONLY when an existing workspace root actually covers the
+        # intermediate. Linking non-root unconditionally would leak: if the
+        # workspace is scoped to a narrower root (e.g. ``/archive/USA/2026``)
+        # and the merge target is a sibling like ``/archive/USA/2027/Trip``,
+        # the descendant-root guard above suppresses rooting ``/archive/USA``,
+        # so no workspace root covers the ``/archive/USA/2027`` intermediate.
+        # A non-root link there still makes 2027's subtree visible via
+        # ``_materialize_workspace_descendants`` (called by
+        # ``get_workspace_folders``), defeating the scoped-merge behavior.
         missing_intermediates = []
         probe = os.path.dirname(archive_path)
         anchor_found = False
@@ -3092,8 +3100,9 @@ class Database:
                     mid_id = self.conn.execute(
                         "SELECT id FROM folders WHERE path = ?", (mid_path,)
                     ).fetchone()["id"]
-                self.add_workspace_folder(
-                    ws, mid_id, is_root=False)
+                if self._active_ws_root_ancestor_exists(ws, mid_path):
+                    self.add_workspace_folder(
+                        ws, mid_id, is_root=False)
 
         # Snapshot staged folders root-first (shallowest path first) so a
         # parent's target row exists before its children are processed.
