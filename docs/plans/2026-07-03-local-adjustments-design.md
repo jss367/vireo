@@ -120,11 +120,16 @@ and one `background` entry):
   demosaic and hashes the `photos.active_mask_variant` row's file bytes +
   stored prompt + detector version + **the active SAM mask variant/model
   name** (`photos.active_mask_variant` — the name of the SAM model that
-  produced the segmentation, e.g. `sam2-small` vs `sam2-large`); the
-  `standard` variant re-runs detection on the companion JPEG and hashes
-  the **companion JPEG bytes** (via mtime + size + sha1 over the companion
-  file) + the re-detection's own prompt bytes + detector version + **the
-  same active SAM variant/model name** used to segment its own re-run.
+  produced the segmentation, e.g. `sam2-small` vs `sam2-large`) + **the
+  RAW source file's identity** (`photos.file_hash`, which the scanner
+  already maintains as mtime + size + sha1 over the primary file) + **the
+  preserve-space detection prompt that actually produced this snapshot**
+  (the re-detection MegaDetector ran on the preserve-highlights load, not
+  the JPEG-first source mask's stored prompt); the `standard` variant
+  re-runs detection on the companion JPEG and hashes the **companion JPEG
+  bytes** (via mtime + size + sha1 over the companion file) + the
+  re-detection's own prompt bytes + detector version + **the same active
+  SAM variant/model name** used to segment its own re-run.
   Both digests include the SAM variant because switching
   `photos.active_mask_variant` (e.g., `sam2-small` → `sam2-large`) changes
   the segmentation shape even when the source image bytes and the
@@ -397,8 +402,23 @@ its own `source_digest` (see schema), so staleness is evaluated per
 variant against the inputs *that variant was actually built from*:
 - `preserve_highlights` — a hash over the current
   `photos.active_mask_variant` row's source mask file bytes, its stored
-  detection prompt, the detector version that produced it, and the
-  active SAM variant/model name (`photos.active_mask_variant`).
+  detection prompt, the detector version that produced it, the active
+  SAM variant/model name (`photos.active_mask_variant`), the **RAW
+  source file's identity** (`photos.file_hash` — mtime + size + sha1
+  the scanner already maintains on the primary file), and the
+  **preserve-space detection prompt/detector version that actually
+  produced this snapshot** (the re-detection MegaDetector/SAM ran on
+  the preserve-highlights load). Including the RAW file identity
+  catches the case where the RAW is replaced or repaired in place: the
+  scanner does invalidate thumbnails, working copies, and preview
+  caches on `file_hash` change (`vireo/scanner.py:1840-1853`) but does
+  *not* rewrite the existing `photo_masks` row, so a pure source-mask
+  digest would stay clean while edit renders decoded different RAW
+  pixels and the preserve snapshot silently misaligned. Including the
+  preserve-space prompt catches re-detections that only shift in the
+  preserve basis (e.g., a highlight-recovered demosaic that changes
+  the bird's box slightly) even when the JPEG-first source mask is
+  unchanged.
 - `standard` (RAW+JPEG only) — a hash over the companion JPEG's
   file identity (mtime + size + sha1), the prompt/detector version used
   when detection re-ran on the companion, and the active SAM
@@ -511,21 +531,33 @@ passes. The weight map is built once and materialized at both scales:
    preview cache — it repeats the same undersized-embedded-JPEG and
    failed-RAW-decode → companion swap before `apply_recipe_to_loaded_image`,
    and its output is served on subsequent cache-hit reads without any
-   further basis check; and the **pipeline preview warmup**
+   further basis check; the **pipeline preview warmup**
    (`vireo/pipeline_job.py:2220-2344`), which does the same swap-then-render
-   for the pipeline's preview cache write. All seven switches change the
-   effective basis from `preserve_highlights` to `standard`, so the
-   weight-map builder consumes the basis that reflects the *actual*
-   loaded image at each site, not the one `recipe_render_source` chose
-   up front — every one of these call sites updates the basis alongside
-   the source swap before invoking the local pass. Restricting the fix
-   to preview/export would silently misalign local weights on the edited
-   `/original`, Open External, and iNat upload renders for exactly the
-   RAW+JPEG cases the fallback exists to serve; leaving the two warmup
-   paths out is worse still because a mismatched basis there bakes the
+   for the pipeline's preview cache write; and the **thumbnail
+   generation paths** (both the background thumbnail job's
+   `_retry_thumbnail_with_companion` inside `generate_all`, at
+   `vireo/thumbnails.py:80` called from `295-319`, and the on-request
+   `serve_thumbnail` self-heal route at `vireo/app.py:15387-15433`),
+   which each retry the same thumbnail render against the companion
+   JPEG when the RAW decode fails — `generate_thumbnail` calls
+   `apply_recipe_to_loaded_image` on the post-swap loaded image
+   (`vireo/thumbnails.py:177-181`) and writes the result to the on-disk
+   grid-thumbnail cache, so a mismatched basis here bakes shifted local
+   weights into the browser's grid thumbnails until the cache is
+   deleted. All eight switches change the effective basis from
+   `preserve_highlights` to `standard`, so the weight-map builder
+   consumes the basis that reflects the *actual* loaded image at each
+   site, not the one `recipe_render_source` chose up front — every one
+   of these call sites updates the basis alongside the source swap
+   before invoking the local pass. Restricting the fix to preview/export
+   would silently misalign local weights on the edited `/original`, Open
+   External, and iNat upload renders for exactly the RAW+JPEG cases the
+   fallback exists to serve; leaving the warmup and thumbnail paths out
+   is worse still because a mismatched basis there bakes the
    misalignment into a persistent cache — the UI keeps showing shifted
-   local edits on every subsequent read until the cache is invalidated,
-   even after the code is fixed. If the final basis has no
+   local edits (in the grid as well as the lightbox) on every
+   subsequent read until the cache is invalidated, even after the code
+   is fixed. If the final basis has no
    matching `mask.decodes` entry the pass is disabled, warn-and-hold-zero,
    as above. Load
    the picked variant's on-disk file and bilinearly resample it to the
