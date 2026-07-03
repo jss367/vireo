@@ -5101,6 +5101,13 @@ async function showUndoToast() {
 /* showToast is now provided globally by _navbar.html */
 
 async function loadDetail(id) {
+  // If a multi-selection is already active, skip this single-photo load — it
+  // would strip .batch-mode and rewire the sidebar (rating stars → setRating(id))
+  // to the anchor while the user still has N photos selected. Common flow:
+  // click A, then Cmd/Ctrl-click B before A's fetch returns. selectedPhotoId
+  // stays A, so both the sync class removal below and the post-await
+  // renderDetail(A) would overwrite the batch inspector the Cmd-click just set up.
+  if (selectedPhotos.size > 1) return;
   document.getElementById('summaryPanel').classList.add('hidden');
   var detail = document.getElementById('detailContent');
   // Loading a single photo's detail always exits batch mode.
@@ -5109,7 +5116,10 @@ async function loadDetail(id) {
 
   try {
     var photo = await safeFetch('/api/photos/' + id, {}, { toast: false });
-    if (selectedPhotoId === id) {
+    // Re-check after the fetch: a Cmd/Ctrl-click landing during the await can
+    // promote the selection to multi. The batch inspector is already rendered;
+    // don't clobber it with this stale single-photo response.
+    if (selectedPhotoId === id && selectedPhotos.size <= 1) {
       renderDetail(photo);
       if (detail) detail.classList.add('visible');
     }
@@ -5630,15 +5640,18 @@ function renderBatchInspector(ids) {
       '" onclick="batchRate(' + i + ')">&#9733;</span>';
   }
   document.getElementById('detailRating').innerHTML = ratingHtml;
-  _batchToggleMixed('ratingMixed', known && !rs.unanimous);
+  // Show Mixed whenever we can't confirm unanimity — including partially-loaded
+  // selections where `known` is false. Hiding Mixed there made "0 stars / None /
+  // no color" render identically to a truly unanimous no-value selection.
+  _batchToggleMixed('ratingMixed', !(known && rs.unanimous));
 
   var fs = known ? _batchFlagState(ids) : { unanimous: false, value: 'none' };
   updateDetailFlagButtons(fs.unanimous ? fs.value : 'none');
-  _batchToggleMixed('flagMixed', known && !fs.unanimous);
+  _batchToggleMixed('flagMixed', !(known && fs.unanimous));
 
   var cs = known ? _batchColorState(ids) : { unanimous: false, value: null };
   updateDetailColorsValue(cs.unanimous ? cs.value : null);
-  _batchToggleMixed('colorMixed', known && !cs.unanimous);
+  _batchToggleMixed('colorMixed', !(known && cs.unanimous));
 
   // Location input shares the batch-aware submit path (_locationApplyPhotoIds);
   // show the empty input rather than any single photo's saved location.
