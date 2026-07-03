@@ -1437,6 +1437,55 @@ def test_archive_merge_preserves_narrower_workspace_root(db):
     assert future_photo is None
 
 
+def test_archive_merge_scoped_root_invalidates_new_images_cache(db):
+    """Scoped-root merges must flush a stale new-images cache after commit.
+
+    The scoped-root branch skips ``add_workspace_folder`` for the broad
+    archive base; ``_prune_...`` and ``_materialize_...`` only invalidate
+    when they actually change rows. In the shape below both are no-ops, so
+    the only workspace-membership writes come from the reconciliation
+    loop's ``_add_workspace_folder_no_commit`` — which does not invalidate.
+    Without the post-commit invalidation a cache entry set between the
+    rsync copy and reconciliation would keep reporting the just-imported
+    files as "new" until the TTL expired.
+    """
+    ws_id = db.create_workspace("USA2026")
+
+    db.set_active_workspace(None)
+    archive_id = db.add_folder("/archive/USA", name="USA")
+    year_id = db.add_folder("/archive/USA/2026", name="2026")
+
+    db.set_active_workspace(ws_id)
+    db.add_workspace_folder(ws_id, year_id)
+
+    staged_archive_id = db.add_folder(
+        "/staging/job/USA",
+        name="USA",
+        workspace_root=False,
+    )
+    staged_year_id = db.add_folder(
+        "/staging/job/USA/2026",
+        name="2026",
+        parent_id=staged_archive_id,
+        workspace_root=False,
+    )
+    staged_leaf_id = db.add_folder(
+        "/staging/job/USA/2026/2026-07-02",
+        name="2026-07-02",
+        parent_id=staged_year_id,
+        workspace_root=True,
+    )
+    db.add_photo(staged_leaf_id, "new.jpg", ".jpg", 1000, 2.0)
+
+    db._new_images_cache.set(
+        db._db_path, ws_id, {"new_count": 0, "per_root": [], "sample": []}
+    )
+
+    db.merge_staged_tree_into_archive(staged_archive_id, "/archive/USA")
+
+    assert db._new_images_cache.get(db._db_path, ws_id) is None
+
+
 def test_move_folders_validates_source_workspace(db):
     """Raises ValueError if source workspace doesn't exist."""
     ws = db.create_workspace("A")
