@@ -17,19 +17,29 @@ brushing.
   which applies `ImageOps.exif_transpose` (both standard images and RAW
   postprocess), before any recipe geometry (rotation/flip/straighten/crop)
   is applied. The prompt detection box is stored per mask;
-  `photos.active_mask_variant` picks the live one. Orientation-corrected
-  space alone is *not* enough of a contract to align a mask against an
-  edit render, because for RAWs the specific decode mode that produced
-  this pixel grid matters — see next bullet — and the two RAW decodes
-  can differ in aspect and long-edge. The design therefore does not
-  store a single space-agnostic snapshot: instead it materializes one
-  snapshot variant per decode mode the render source can actually
-  deliver, each recorded with its own `mode` and `long_edge` in
-  `local.mask.decodes` and generated from a `load_image` in that same
-  decode (§Snapshot decode basis). The weight-map builder picks the
-  entry whose `mode` matches the render source's effective decode, so a
-  snapshot is by construction the same pixel-space basis as the edit
-  render that consumes it.
+  `photos.active_mask_variant` picks the live one. **This describes only
+  the mask's source-side space**, not the space the renderer aligns
+  against — for RAWs, the working image space is the *default*
+  (JPEG-first) `load_image` output, which does not agree pixel-for-pixel
+  with the preserve-highlights demosaic that edited previews and exports
+  actually load. Aspect and long-edge can differ, and on cameras whose
+  embedded JPEG is cropped relative to the sensor they differ every
+  time. Orientation-corrected space alone is therefore *not* enough of a
+  contract to align a mask against an edit render, because for RAWs the
+  specific decode mode that produced this pixel grid matters — see next
+  bullet — and the two RAW decodes can differ in aspect and long-edge.
+  The design therefore does not store a single space-agnostic snapshot:
+  instead it materializes one snapshot variant per decode mode the
+  render source can actually deliver, each recorded with its own `mode`
+  and `long_edge` in `local.mask.decodes` and **generated from a
+  `load_image` in that same decode mode as the edit render that will
+  consume it** — the preserve-highlights variant is produced by a
+  `RAW_DECODE_PRESERVE_HIGHLIGHTS` load of the RAW, not by transforming
+  the JPEG-first `photo_masks` file (§Snapshot decode basis). The
+  weight-map builder picks the entry whose `mode` matches the render
+  source's effective decode, so a snapshot is by construction the same
+  pixel-space basis as the edit render that consumes it — no separate
+  alignment metadata or transform is needed on top.
 - RAW files have **two** decode modes with potentially different pixel
   dimensions and aspect ratios: `RAW_DECODE_JPEG_FIRST` (default —
   embedded camera JPEG when it satisfies the requested size) and
@@ -108,10 +118,19 @@ and one `background` entry):
   per-variant because a RAW+JPEG pair's two variants have different input
   sources: the `preserve_highlights` variant re-runs detection on the RAW's
   demosaic and hashes the `photos.active_mask_variant` row's file bytes +
-  stored prompt + detector version; the `standard` variant re-runs
-  detection on the companion JPEG and hashes the **companion JPEG bytes**
-  (via mtime + size + sha1 over the companion file) + the re-detection's
-  own prompt bytes + detector version. A single top-level digest could not
+  stored prompt + detector version + **the active SAM mask variant/model
+  name** (`photos.active_mask_variant` — the name of the SAM model that
+  produced the segmentation, e.g. `sam2-small` vs `sam2-large`); the
+  `standard` variant re-runs detection on the companion JPEG and hashes
+  the **companion JPEG bytes** (via mtime + size + sha1 over the companion
+  file) + the re-detection's own prompt bytes + detector version + **the
+  same active SAM variant/model name** used to segment its own re-run.
+  Both digests include the SAM variant because switching
+  `photos.active_mask_variant` (e.g., `sam2-small` → `sam2-large`) changes
+  the segmentation shape even when the source image bytes and the
+  MegaDetector prompt are unchanged; omitting it from the standard digest
+  would let companion/working-copy fallback renders keep using the old SAM
+  segmentation with no stale banner. A single top-level digest could not
   detect the case where the companion JPEG (or its detection) changes
   while the RAW-side active mask stays the same: fallback/offline renders
   on the standard basis would keep using an out-of-date snapshot with no
@@ -361,28 +380,48 @@ its own `source_digest` (see schema), so staleness is evaluated per
 variant against the inputs *that variant was actually built from*:
 - `preserve_highlights` — a hash over the current
   `photos.active_mask_variant` row's source mask file bytes, its stored
-  detection prompt, and the detector version that produced it.
+  detection prompt, the detector version that produced it, and the
+  active SAM variant/model name (`photos.active_mask_variant`).
 - `standard` (RAW+JPEG only) — a hash over the companion JPEG's
-  file identity (mtime + size + sha1) plus the prompt/detector version
-  used when detection re-ran on the companion.
+  file identity (mtime + size + sha1), the prompt/detector version used
+  when detection re-ran on the companion, and the active SAM
+  variant/model name used to segment that re-run. Switching SAM variants
+  (`sam2-small` → `sam2-large`) with unchanged companion bytes must
+  invalidate this entry, so the SAM variant is a first-class digest input
+  on both bases.
 Staleness for a variant means the current inputs' re-computed digest
 differs from that entry's `source_digest`; the editor surfaces "Newer
 subject mask available — Update" whenever **any** variant is stale, and
-Update rewrites the affected variants (regenerating only what changed —
-e.g., a replaced companion JPEG re-materializes just the `standard`
-variant) and their per-variant `source_digest` entries in `mask.decodes`.
-`local.mask.ref` **stays stable** across partial refreshes: on-disk
-filenames are keyed `{photo_id}.{ref}.{decode}.png` with no per-variant
-ref, so rotating the ref while leaving an untouched variant behind would
-orphan that variant's file under the old ref and the next render on that
-basis would see a missing snapshot and disable the local pass. The ref
-only rotates on a **full re-snapshot** where every variant regenerates
-together (e.g., after a mask deletion or a manual reset), keeping the
-on-disk family under the new ref always complete. This matters for
-RAW+JPEG offline renders: if the companion JPEG (or its detection)
-changes while the RAW active mask stays the same, a single top-level
-digest would miss it and the standard-basis fallback would keep using
-the old snapshot with no stale banner. Recipe edits are undoable and cache-invalidating.
+Update **always rotates `local.mask.ref` to a fresh content-addressed
+value** and writes a complete new family under it — regenerating the
+variants whose digests changed and **copying the untouched variant files
+byte-for-byte** to the new ref's filenames. The old ref's files stay
+intact on disk (they are not deleted or overwritten by Update); they are
+still referenced by any edit-history recipe whose snapshot they were
+made for, so re-rendering those historical recipes remains deterministic
+and byte-identical. The old ref eventually GCs away on its own once no
+current or history recipe references it. Rotating in place — mutating
+`{photo_id}.{ref}.{decode}.png` under an unchanged ref — was
+considered and rejected: snapshot GC explicitly keeps files while any
+current or edit-history recipe still references them, so an undo/redo
+back to an earlier local-adjustments recipe would find the file at the
+same on-disk path but with **new** pixels, silently changing what that
+historical recipe renders. Rotating the ref instead is what preserves
+the (source pixels, recipe) → output determinism the design commits to.
+Copying untouched-variant files (rather than leaving them under the old
+ref) keeps the on-disk family under a single ref always complete, so the
+weight-map builder never has to walk multiple refs to find the variant
+that matches the current decode. The rotation covers both partial
+refreshes (only one variant's digest changed) and full re-snapshots
+(mask deletion, manual reset — every variant regenerates); the on-disk
+behavior differs only in how many files are regenerated versus copied.
+This matters for RAW+JPEG offline renders in two ways: if the companion
+JPEG (or its detection) changes while the RAW active mask stays the
+same, the standard variant's digest catches it and only that variant
+regenerates under the new ref (the `preserve_highlights` file is copied
+across); and any recipe still pointing at the old ref keeps rendering
+against its own on-disk files, unaffected by the Update. Recipe edits
+are undoable and cache-invalidating.
 Comparing on inputs is deliberately not a byte comparison against the
 snapshot: for RAWs the snapshot pixels come from a re-detection in
 preserve-highlights space and will never byte-match the JPEG-first
