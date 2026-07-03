@@ -18,6 +18,18 @@ brushing.
   postprocess), before any recipe geometry (rotation/flip/straighten/crop)
   is applied. The prompt detection box is stored per mask;
   `photos.active_mask_variant` picks the live one.
+- RAW files have **two** decode modes with potentially different pixel
+  dimensions and aspect ratios: `RAW_DECODE_JPEG_FIRST` (default —
+  embedded camera JPEG when it satisfies the requested size) and
+  `RAW_DECODE_PRESERVE_HIGHLIGHTS` (libraw demosaic with auto-bright off,
+  used by every edit-quality path — thumbnails, previews, exports — see
+  `image_loader.py:19` and `export.py:303`). Detection and mask
+  extraction (`detector.py:330`, `masking.py:498`) go through the default
+  `load_image`, so today's `photo_masks` for RAWs are typically in
+  JPEG-first space; edit-render sources for the same photos are in
+  preserve-highlights space. On RAWs where the embedded JPEG differs from
+  the demosaiced output (different long-edge size, cropped-to-16:9
+  companion, etc.) the two spaces do not agree pixel-for-pixel.
 - Masks regenerate when the detection prompt changes and can be deleted by
   storage cleanup (`delete_stale_masks`, variant deletion). Detection IDs are
   not stable across detector re-runs.
@@ -77,6 +89,24 @@ same root as the existing `<db_dir>/masks/` store. Vireo supports arbitrary
 would collide across separate databases (tests, alternate libraries) and
 let one database's snapshot GC delete another's referenced snapshots.
 
+**Snapshot space matches the edit-render source.** For non-RAWs the
+existing `photo_masks` file is already in edit-render space and is copied
+as-is. For RAWs the snapshot must be aligned with the edit path's decode
+(RAW_DECODE_PRESERVE_HIGHLIGHTS at working resolution). Cheapest path
+that's guaranteed to align: at snapshot time, re-run the mask's stored
+detection box through the SAM pass on a `load_image(..., raw_decode=
+RAW_DECODE_PRESERVE_HIGHLIGHTS)` load and write the result as the
+snapshot. That trades a few seconds of one-time work for a snapshot that
+is by construction the same pixel space (dimensions, aspect, orientation)
+as every subsequent edit render — no runtime rescale, no per-recipe
+alignment metadata to keep in sync with future decode changes. The
+snapshot's stored width/height are also recorded in the recipe (as a
+sanity check the weight-map builder can verify against the loaded edit
+source; a mismatch disables the local pass with a warning, same failure
+mode as a missing snapshot). Because a snapshot is created at most once
+per (photo, mask content) and reused across every future edit render for
+that recipe, this cost is amortized to zero.
+
 Why not reference the live active mask: renders must stay a deterministic
 function of (source pixels, recipe). Preview/thumbnail caches invalidate on
 recipe change and `EDIT_MATH_VERSION` bumps only — a mask silently
@@ -127,17 +157,30 @@ passes. The weight map is built once and materialized at both scales:
    approximates and snaps to the server render, as it already does for
    detail and re-edits).
 3. **Local detail** runs the existing detail pass **twice** on the
-   pre-detail image — once with subject's `(sharpen, sharpen_radius,
-   noise_reduction)`, once with background's — and blends the two outputs
-   by the detail weight map: `out = subject_out · w + background_out ·
-   (1 − w)`. A single pass with combined scalars cannot represent both
-   regions: `_run_detail` in `detail.py` applies NR to `out` before
-   sharpen reads it, so subject-sharpen + background-NR would noise-reduce
-   the subject before its sharpen delta (or drop one region's setting).
-   Regions whose detail sliders are all zero skip their pass and reuse the
-   pre-detail image; when only one region has detail set, only one pass
-   runs and blends against the untouched pre-detail image on the other
-   side.
+   pre-detail image — once with the **subject branch** parameters, once
+   with the **background branch** — and blends the two outputs by the
+   detail weight map: `out = subject_out · w + background_out · (1 − w)`.
+   Each branch's parameters are `global + region_delta` per field:
+   `sharpen = global.sharpen + subject.sharpen`, `noise_reduction =
+   global.noise_reduction + subject.noise_reduction`, and the same for
+   background — mirroring the tone contract (`ev_global + ev_subject·w
+   + ev_bg·(1−w)`) so local sliders read as deltas on top of the
+   whole-photo baseline. `sharpen_radius` prefers the region's value when
+   set, else falls back to the global (radius is a kernel size, not a
+   strength, so add-on semantics don't apply). All resulting scalars pass
+   through the same clamp/range as normal global detail. When the recipe
+   has **no** `local` block or every region normalizes away, the
+   whole-photo detail pass runs exactly as today (byte-identical — that's
+   what keeps `EDIT_MATH_VERSION` unbumped). A single pass with combined
+   scalars cannot represent both regions when `local` is present:
+   `_run_detail` in `detail.py` applies NR to `out` before sharpen reads
+   it, so subject-sharpen + background-NR would noise-reduce the subject
+   before its sharpen delta (or drop one region's setting). Optimization:
+   if both branches resolve to identical scalars (e.g., both regions have
+   zero deltas, or one region's zeros produce the same `global +
+   delta` as the other's), one pass runs and its output is used for both
+   sides of the blend — the blend then simplifies to that single output,
+   matching the global-only path.
 
 No `EDIT_MATH_VERSION` bump: recipes without `local` render byte-identically.
 
