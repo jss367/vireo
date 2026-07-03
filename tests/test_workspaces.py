@@ -1377,10 +1377,16 @@ def test_archive_merge_preserves_narrower_workspace_root(db):
         workspace_root=True,
     )
     db.add_photo(staged_other_leaf_id, "future.jpg", ".jpg", 1000, 3.0)
+    db._new_images_cache.set(
+        db._db_path,
+        ws_id,
+        {"new_count": 99, "files": []},
+    )
 
     result = db.merge_staged_tree_into_archive(staged_archive_id, "/archive/USA")
 
     assert result["new_photos"] == 2
+    assert db._new_images_cache.get(db._db_path, ws_id) is None
     root_paths = {
         r["path"] for r in db.get_workspace_folder_roots(ws_id)
     }

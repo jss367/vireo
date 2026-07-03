@@ -3474,6 +3474,7 @@ class Database:
                 self.conn.execute("DELETE FROM folders WHERE id = ?", (fid,))
 
             self.conn.commit()
+            self._new_images_cache.invalidate_workspaces(self._db_path, [ws])
         except Exception:
             self.conn.rollback()
             raise
