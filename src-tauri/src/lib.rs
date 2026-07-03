@@ -44,6 +44,19 @@ fn dispatch_menu_command(app: &tauri::AppHandle, command: &str) {
     }
 }
 
+fn reload_main_window(app: &tauri::AppHandle) {
+    if tray::is_browser_mode(app) {
+        log::warn!("Native reload ignored because Vireo is running in browser mode");
+        return;
+    }
+
+    if let Some(window) = app.get_webview_window("main") {
+        if let Err(e) = window.eval("window.location.reload()") {
+            log::error!("Failed to reload main window: {}", e);
+        }
+    }
+}
+
 #[tauri::command]
 fn get_server_port(state: tauri::State<'_, SidecarState>) -> u16 {
     state.port
@@ -267,6 +280,11 @@ pub fn run() {
             // also route to the browser.
             if id == menu::ids::OPEN_IN_BROWSER {
                 tray::open_ui_in_browser(app);
+                return;
+            }
+
+            if id == menu::ids::VIEW_RELOAD {
+                reload_main_window(app);
                 return;
             }
 
