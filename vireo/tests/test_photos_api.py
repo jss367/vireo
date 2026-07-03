@@ -1660,6 +1660,55 @@ def test_edit_preview_renders_uncommitted_recipe_without_storing(client_with_pho
         assert img.size == (600, 800)
 
 
+def test_edit_preview_scales_detail_to_native_resolution(client_with_photo):
+    """A downscaled edit-preview of a sharpen recipe must shrink the USM
+    kernel by the render scale (output px per native px): the served bytes
+    should match a scale-aware detail pass, not an as-authored (scale 1.0)
+    pass on the small render."""
+    import io
+    import json as jsonlib
+
+    import numpy as np
+    from image_edits import apply_recipe_to_loaded_image
+    from image_loader import load_image
+    from PIL import Image, ImageFilter
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    # Re-draw the 800x600 source as a soft vertical edge so sharpening has
+    # something to bite on (the fixture default is a flat color).
+    folder = db.conn.execute("SELECT path FROM folders").fetchone()
+    src_path = os.path.join(folder["path"], "test.jpg")
+    arr = np.zeros((600, 800, 3), dtype=np.uint8)
+    arr[:, 400:, :] = 200
+    arr[:, :400, :] = 55
+    edge = Image.fromarray(arr, "RGB").filter(ImageFilter.GaussianBlur(4.0))
+    edge.save(src_path, "JPEG", quality=95)
+
+    recipe = {"adjustments": {"sharpen": 100, "sharpen_radius": 3.0}}
+    resp = client.get(
+        f"/photos/{photo_id}/edit-preview",
+        query_string={"size": "256", "recipe": jsonlib.dumps(recipe)},
+    )
+    assert resp.status_code == 200
+    with Image.open(io.BytesIO(resp.data)) as img:
+        served = np.asarray(img.convert("RGB")).astype(np.float32)
+
+    scaled = np.asarray(
+        apply_recipe_to_loaded_image(
+            load_image(src_path, max_size=256), recipe, native_size=(800, 600)
+        )
+    ).astype(np.float32)
+    unscaled = np.asarray(
+        apply_recipe_to_loaded_image(load_image(src_path, max_size=256), recipe)
+    ).astype(np.float32)
+
+    dist_scaled = float(np.mean(np.abs(served - scaled)))
+    dist_unscaled = float(np.mean(np.abs(served - unscaled)))
+    assert dist_scaled < dist_unscaled
+
+
 def test_edit_preview_returns_400_for_malformed_crop(client_with_photo):
     from PIL import Image
 

@@ -19,6 +19,9 @@ from render_source import (
     photo_value as _photo_value,
 )
 from render_source import (
+    recipe_source_dimensions as _recipe_source_dimensions,
+)
+from render_source import (
     scaled_recipe_source_dimensions as _scaled_recipe_source_dimensions,
 )
 
@@ -106,6 +109,8 @@ def _retry_thumbnail_with_companion(
             )
             db.conn.commit()
     recipe_kwargs = {"recipe": recipe} if recipe else {}
+    if recipe:
+        recipe_kwargs["native_size"] = _recipe_source_dimensions(photo)
     return generate_thumbnail(
         photo_id,
         companion_abs,
@@ -118,7 +123,7 @@ def _retry_thumbnail_with_companion(
 
 def generate_thumbnail(
     photo_id, source_path, cache_dir, size=THUMB_SIZE, quality=85, recipe=None,
-    raw_decode=None, min_source_size=None,
+    raw_decode=None, min_source_size=None, native_size=None,
 ):
     """Generate a JPEG thumbnail for a photo.
 
@@ -139,6 +144,10 @@ def generate_thumbnail(
             before applying ``recipe``. If the RAW loader falls back to an
             embedded preview smaller than either axis, generation returns
             ``None`` so callers can retry a full-size companion JPEG.
+        native_size: optional orientation-corrected native ``(width, height)``
+            of the photo (see ``render_source.recipe_source_dimensions``),
+            used to scale the recipe's detail pass (sharpen/NR kernels) to
+            this render's resolution.
 
     Returns:
         path to the thumbnail file, or None on failure
@@ -167,7 +176,9 @@ def generate_thumbnail(
             return None
     if recipe:
         from image_edits import apply_recipe_to_loaded_image
-        img = apply_recipe_to_loaded_image(img, recipe, max_size=size)
+        img = apply_recipe_to_loaded_image(
+            img, recipe, max_size=size, native_size=native_size,
+        )
 
     os.makedirs(cache_dir, exist_ok=True)
     # Atomic write: two concurrent jobs (or two iterations of the same job
@@ -259,6 +270,10 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
         # iterations and avoid blocking concurrent jobs (a parallel scan's
         # add_photo INSERT) past the 30s busy_timeout.
         recipe_kwargs = {"recipe": recipe} if recipe else {}
+        if recipe:
+            recipe_kwargs["native_size"] = _recipe_source_dimensions(
+                source_photo
+            )
         # Derive the decode mode from the primary photo's extension so
         # edited RAWs that fall through to the original source path are
         # demosaiced with highlight preservation, matching the preview /
