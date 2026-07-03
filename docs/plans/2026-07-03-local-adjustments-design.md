@@ -50,7 +50,12 @@ and one `background` entry):
 
 ```json
 "local": {
-  "mask": {"ref": "a1b2c3d4", "feather": 12.0},
+  "mask": {
+    "ref": "a1b2c3d4",
+    "source_digest": "e7b8f2c1",
+    "decode": {"mode": "preserve_highlights", "long_edge": 3600},
+    "feather": 12.0
+  },
   "regions": [
     {
       "region": "subject",
@@ -71,6 +76,18 @@ and one `background` entry):
   snapshot GC (no fall-through to the live active mask). Feather is a
   Gaussian softening radius in **native pixels**, scaled at render time like
   detail kernels.
+- `mask.source_digest` is a hash over the source `photo_masks` row's bytes
+  plus its stored detection prompt and detector version — the **inputs**
+  the snapshot was derived from, not the transformed snapshot pixels. This
+  is what staleness compares against (see below), so a RAW snapshot in
+  preserve-highlights space is not flagged stale just because it does not
+  byte-match its JPEG-first source mask.
+- `mask.decode` records the pixel-space basis the snapshot was built in
+  (`mode` = `standard` / `preserve_highlights`, `long_edge` in native
+  pixels). It exists so the weight-map builder can confirm it's operating
+  on the right decode basis at render time (§Rendering); it is not a
+  requirement that the render source's pixel dimensions equal the
+  snapshot's.
 - `local` is dropped from normalization entirely when `regions` is empty or
   every region normalizes away — the shared `mask` never persists without at
   least one active region referencing it.
@@ -89,23 +106,43 @@ same root as the existing `<db_dir>/masks/` store. Vireo supports arbitrary
 would collide across separate databases (tests, alternate libraries) and
 let one database's snapshot GC delete another's referenced snapshots.
 
-**Snapshot space matches the edit-render source.** For non-RAWs the
+**Snapshot decode basis matches the edit-render source.** For non-RAWs the
 existing `photo_masks` file is already in edit-render space and is copied
 as-is. For RAWs the snapshot must be aligned with the edit path's decode
-(RAW_DECODE_PRESERVE_HIGHLIGHTS at working resolution). Cheapest path
-that's guaranteed to align: at snapshot time, re-run the mask's stored
-detection box through the SAM pass on a `load_image(..., raw_decode=
-RAW_DECODE_PRESERVE_HIGHLIGHTS)` load and write the result as the
-snapshot. That trades a few seconds of one-time work for a snapshot that
-is by construction the same pixel space (dimensions, aspect, orientation)
-as every subsequent edit render — no runtime rescale, no per-recipe
-alignment metadata to keep in sync with future decode changes. The
-snapshot's stored width/height are also recorded in the recipe (as a
-sanity check the weight-map builder can verify against the loaded edit
-source; a mismatch disables the local pass with a warning, same failure
-mode as a missing snapshot). Because a snapshot is created at most once
-per (photo, mask content) and reused across every future edit render for
-that recipe, this cost is amortized to zero.
+(RAW_DECODE_PRESERVE_HIGHLIGHTS at working resolution). Two things have to
+be right for that alignment:
+
+- **Space of the mask itself.** The snapshot must be rendered from a
+  `load_image(..., raw_decode=RAW_DECODE_PRESERVE_HIGHLIGHTS)` load so its
+  pixel grid (dimensions, aspect, orientation) is the same basis as every
+  subsequent edit render.
+- **Space of the prompt that produced it.** The `photo_masks` row stores a
+  **normalized** detection bbox that was generated against the JPEG-first
+  proxy (that's the space MegaDetector ran in for RAWs today, since
+  `detector.py` goes through the default `load_image`). Reusing that
+  normalized box directly as SAM's prompt in preserve-highlights space is
+  unsafe when the two decodes have different aspects or embedded-JPEG
+  crops — the same `{x, y, w, h}` in [0,1] points at a physically
+  different region of the scene. Snapshot creation therefore re-runs
+  detection (MegaDetector → SAM) on the preserve-highlights load and uses
+  the resulting native box as SAM's prompt; the stored `photo_masks`
+  prompt is only carried forward when the two decode dimensions and aspect
+  agree.
+
+Cost is a few seconds of one-time work per (photo, mask content), amortized
+across every subsequent edit render of that recipe. In exchange the
+snapshot is by construction the same decode basis as edit renders — no
+per-recipe alignment metadata to keep in sync with future decode changes,
+no runtime aspect fix-ups. `mask.decode` records that basis in the recipe
+so the weight-map builder can confirm it before use; the recorded
+`long_edge` is basis metadata, **not** a size gate. Renders happen at many
+sizes (working-resolution previews, thumbnails, full-res exports), and the
+weight-map builder resamples the snapshot to whatever the current render
+source is (see §Rendering); a snapshot whose `long_edge` differs from the
+current render source is normal and not an error. The pass is only
+disabled if `mask.decode.mode` disagrees with the current decode mode
+(which would indicate an actual basis change), with the same "warn +
+disable both regions" failure mode as a missing snapshot.
 
 Why not reference the live active mask: renders must stay a deterministic
 function of (source pixels, recipe). Preview/thumbnail caches invalidate on
@@ -113,16 +150,28 @@ recipe change and `EDIT_MATH_VERSION` bumps only — a mask silently
 regenerating under a live reference would change render output with no cache
 invalidation and no user-visible cause, violating the no-black-boxes rule.
 
-Staleness is surfaced, not automated: when `photos.active_mask_variant`'s
-mask content differs from the snapshot, the editor shows "Newer subject mask
-available — Update" and updating rewrites `local.mask.ref` (a normal recipe
-edit: undoable, cache-invalidating). If the snapshot file is missing, the
-renderer **disables the whole local pass** for that photo — both subject
-*and* background weights held at zero, so no region's adjustments apply —
-and the editor shows a warning. (A no-op / all-zero subject mask would leave
-background weight = `1 − 0` = 1 everywhere, silently applying background
-edits to the entire frame; disabling both regions keeps missing snapshots
-from turning into a whole-photo edit.)
+Staleness is surfaced, not automated, and it's compared on **source-side
+inputs**, not on the snapshot pixels. When a snapshot is created, the
+recipe records `mask.source_digest` — a hash over the current
+`photos.active_mask_variant` row's source mask file bytes, its stored
+detection prompt, and the detector version that produced it. Staleness
+means the current active mask's re-computed digest differs from
+`mask.source_digest`; that's the signal shown as "Newer subject mask
+available — Update", and Update rewrites `local.mask.ref` and
+`mask.source_digest` together (a normal recipe edit: undoable,
+cache-invalidating). This is deliberately not a byte comparison against
+the snapshot: for RAWs the snapshot pixels come from a re-detection in
+preserve-highlights space and will never byte-match the JPEG-first
+`photo_masks.path` file even when nothing about the underlying detection
+has changed, so a snapshot-byte check would report every RAW snapshot as
+stale on first render and after every Update. If the snapshot file is
+missing entirely, the renderer **disables the whole local pass** for
+that photo — both subject *and* background weights held at zero, so no
+region's adjustments apply — and the editor shows a warning. (A no-op /
+all-zero subject mask would leave background weight = `1 − 0` = 1
+everywhere, silently applying background edits to the entire frame;
+disabling both regions keeps missing snapshots from turning into a
+whole-photo edit.)
 
 Snapshot lifecycle: created on first use, garbage-collected when no recipe
 (current or in edit history) references them — same sweep style as other
@@ -136,7 +185,11 @@ Tone runs at pre-resize working-image dimensions inside `apply_recipe`, then
 at the post-resize render size — so a single weight map cannot serve both
 passes. The weight map is built once and materialized at both scales:
 
-1. **Weight map.** Load the snapshot mask and apply the recipe's geometry
+1. **Weight map.** Load the snapshot mask, bilinearly resample it to the
+   current render source's pre-geometry pixel dimensions (the snapshot's
+   stored `mask.decode.long_edge` is a basis marker, not a size gate — a
+   full-res export and a working-resolution preview both resample the same
+   snapshot to their own source size), then apply the recipe's geometry
    (rotation/flip/straighten/crop — same transforms as the image, bilinear).
    From that geometry-transformed mask, materialize two aligned copies with
    feather applied at each target scale (Gaussian radius scaled the same way
