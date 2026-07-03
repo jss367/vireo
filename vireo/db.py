@@ -2824,7 +2824,18 @@ class Database:
         return False
 
     def _prune_ws_nonroot_links_outside_roots(self, workspace_id, path):
-        """Drop non-root links below ``path`` that no root still covers."""
+        """Drop non-root links that could re-materialize ``path``'s subtree.
+
+        Prunes uncovered non-root links that are ``path`` itself, strict
+        descendants of ``path``, OR strict ancestors of ``path``. Ancestors
+        matter because ``_materialize_workspace_descendants`` walks the whole
+        subtree below every linked folder — a surviving non-root ancestor
+        like ``/archive`` (left over from a restricted scan; see
+        ``scanner.py`` ``_restrict_root_paths``) would immediately re-insert
+        ``/archive/USA`` and any sibling like ``/archive/USA/2027`` after
+        the caller pruned them, defeating a scoped merge into a workspace
+        rooted at ``/archive/USA/2026``.
+        """
         target = _path_for_subtree_match(path)
         roots = [
             _path_for_subtree_match(r["path"])
@@ -2845,7 +2856,10 @@ class Database:
         prune_ids = []
         for row in rows:
             current = _path_for_subtree_match(row["path"])
-            if current != target and not current.startswith(target_prefix):
+            current_prefix = current + "/"
+            if (current != target
+                    and not current.startswith(target_prefix)
+                    and not target.startswith(current_prefix)):
                 continue
             if any(current == root or current.startswith(root + "/")
                    for root in roots):
