@@ -29,6 +29,7 @@ pub mod ids {
     pub const REPORT_ISSUE: &str = "report_issue";
     pub const CHECK_FOR_UPDATES: &str = "check_for_updates";
     pub const OPEN_IN_BROWSER: &str = "open_in_browser_now";
+    pub const VIEW_RELOAD: &str = "view_reload";
 
     pub const FILE_NEW_WORKSPACE: &str = "file_new_workspace";
     pub const FILE_OPEN_WORKSPACE: &str = "file_open_workspace";
@@ -349,6 +350,12 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
     }
 
     view_builder = view_builder.separator().item(
+        &MenuItemBuilder::with_id(ids::VIEW_RELOAD, "Reload")
+            .accelerator("CmdOrCtrl+R")
+            .build(app)?,
+    );
+
+    view_builder = view_builder.item(
         &MenuItemBuilder::with_id(ids::OPEN_IN_BROWSER, "Open in Browser")
             .accelerator("CmdOrCtrl+Shift+B")
             .build(app)?,
@@ -375,7 +382,6 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
         )
         .item(
             &MenuItemBuilder::with_id(ids::PHOTO_REVEAL, reveal_label)
-                .accelerator("CmdOrCtrl+R")
                 .build(app)?,
         )
         .item(
