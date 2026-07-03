@@ -1825,6 +1825,11 @@ var showDetectionBoxes = false;
 var cardFields = ["filename", "rating", "flag", "color_label", "sharpness"]; // default, overridden by config
 var inatSubmitted = {};  // {photo_id: true}
 var colorLabels = {};    // {photo_id: color_string}
+// Which photo ids we've confirmed color-label state for. `colorLabels[id]`
+// missing is ambiguous — either the photo has no color set OR we haven't
+// fetched its color labels yet — so the batch inspector needs this to avoid
+// rendering "everything is uncoloured" for a still-loading selection.
+var colorLabelsFetched = new Set();
 var colorLabelGen = 0;   // bumped on local edits; guards against stale fetch responses
 var loadEpoch = 0;       // bumped on any grid reset; guards against stale loadPhotos responses
 var selectAllRequestSeq = 0; // bumped to ignore stale async select-all responses
@@ -4542,6 +4547,7 @@ async function batchSetColorLabel(color) {
   ids.forEach(function(id) {
     if (color) colorLabels[id] = color;
     else delete colorLabels[id];
+    colorLabelsFetched.add(id);
   });
   refreshGridCards(ids);
   _refreshBatchInspectorIfActive();
@@ -5540,6 +5546,14 @@ async function fetchColorLabels(photoIds) {
       photoIds.forEach(function(id) { delete colorLabels[id]; });
     }
     for (var id in data) colorLabels[id] = data[id];
+    // Mark every requested id as fetched — an absent id in `data` means "no
+    // color set" now that we've asked, so the batch inspector can trust
+    // colorLabels[id] === undefined for these ids as a definite value.
+    photoIds.forEach(function(id) { colorLabelsFetched.add(id); });
+    // A batch selection that included any of these ids may have rendered as
+    // unanimous no-colour with no Mixed marker; refresh it now that we can
+    // trust the state.
+    _refreshBatchInspectorIfActive();
   }
 }
 
@@ -5567,6 +5581,7 @@ async function setColorLabel(color) {
   } else {
     delete colorLabels[photoId];
   }
+  colorLabelsFetched.add(photoId);
   if (selectedPhotoId === photoId) updateDetailColors();
   refreshGridCards([photoId]);
   scheduleCollectionCountsRefresh();
@@ -5629,6 +5644,14 @@ function _batchAllLoaded(ids) {
   });
 }
 
+// Colour labels arrive from a separate async /api/photos/color_labels fetch, so
+// having each photo row loaded (via _batchAllLoaded) is not enough to trust the
+// colour column: a selection made before that fetch returns would otherwise
+// render as unanimous no-colour without a Mixed marker.
+function _batchColorLoaded(ids) {
+  return ids.every(function(id) { return colorLabelsFetched.has(id); });
+}
+
 function renderBatchInspector(ids) {
   var known = _batchAllLoaded(ids);
 
@@ -5649,9 +5672,10 @@ function renderBatchInspector(ids) {
   updateDetailFlagButtons(fs.unanimous ? fs.value : 'none');
   _batchToggleMixed('flagMixed', !(known && fs.unanimous));
 
-  var cs = known ? _batchColorState(ids) : { unanimous: false, value: null };
+  var colorKnown = known && _batchColorLoaded(ids);
+  var cs = colorKnown ? _batchColorState(ids) : { unanimous: false, value: null };
   updateDetailColorsValue(cs.unanimous ? cs.value : null);
-  _batchToggleMixed('colorMixed', !(known && cs.unanimous));
+  _batchToggleMixed('colorMixed', !(colorKnown && cs.unanimous));
 
   // Location input shares the batch-aware submit path (_locationApplyPhotoIds);
   // show the empty input rather than any single photo's saved location.
@@ -5859,10 +5883,11 @@ function chooseLocationKeywordSuggestion(index) {
 }
 
 function _locationApplyPhotoIds() {
-  var ids = getActiveSelection();
-  if (ids.length > 1) return ids;
-  var photoId = window._detailPhotoId;
-  return photoId ? [photoId] : [];
+  // Batch flow (Cmd/Ctrl-click without ever opening a single-photo detail)
+  // leaves window._detailPhotoId unset even though getActiveSelection() has
+  // targets, so derive from the selection directly rather than gating on
+  // the focused-detail photo.
+  return getActiveSelection();
 }
 
 async function _afterLocationMutation(photoIds, detailPhotoId) {
@@ -6556,6 +6581,7 @@ async function setColorLabelFor(photoId, color) {
   } catch(e) { return; }
   if (color) colorLabels[photoId] = color;
   else delete colorLabels[photoId];
+  colorLabelsFetched.add(photoId);
   refreshGridCards([photoId]);
   _refreshInspectorAfterSinglePhotoEdit(photoId, updateDetailColors);
   scheduleCollectionCountsRefresh();
