@@ -32,27 +32,36 @@ brushing.
 
 ### Recipe schema
 
-New optional `local` section, an array of region entries (v1 supports at most
-one `subject` and one `background` entry):
+New optional `local` section — a single object carrying the shared mask
+reference plus an array of region entries (v1 supports at most one `subject`
+and one `background` entry):
 
 ```json
-"local": [
-  {
-    "region": "subject",
-    "mask": {"ref": "a1b2c3d4", "feather": 12.0},
-    "adjustments": {"exposure": 0.6, "shadows": 25, "sharpen": 30}
-  },
-  {
-    "region": "background",
-    "adjustments": {"exposure": -0.4, "saturation": -15, "noise_reduction": 40}
-  }
-]
+"local": {
+  "mask": {"ref": "a1b2c3d4", "feather": 12.0},
+  "regions": [
+    {
+      "region": "subject",
+      "adjustments": {"exposure": 0.6, "shadows": 25, "sharpen": 30}
+    },
+    {
+      "region": "background",
+      "adjustments": {"exposure": -0.4, "saturation": -15, "noise_reduction": 40}
+    }
+  ]
+}
 ```
 
-- `background` is the inverse of the subject mask (shared `mask` object; a
-  background-only entry implies the subject mask inverted). Feather is a
+- The mask reference lives at `local.mask`, not per region — subject and
+  background always share one snapshot (background is its inverse), and
+  hoisting the ref means a **background-only** recipe still records the
+  snapshot needed for deterministic renders, stale-mask comparison, and
+  snapshot GC (no fall-through to the live active mask). Feather is a
   Gaussian softening radius in **native pixels**, scaled at render time like
   detail kernels.
+- `local` is dropped from normalization entirely when `regions` is empty or
+  every region normalizes away — the shared `mask` never persists without at
+  least one active region referencing it.
 - Allowed per-region adjustments (v1): `exposure`, `highlights`, `shadows`,
   `contrast`, `saturation`, plus detail's `sharpen`/`sharpen_radius`/
   `noise_reduction`. Same ranges and normalization rules as global
@@ -60,9 +69,13 @@ one `subject` and one `background` entry):
 
 ### Mask snapshots, not live references
 
-The recipe's `mask.ref` points to a **content-addressed snapshot** copied to
-`~/.vireo/edit-masks/{photo_id}.{sha1[:12]}.png` at the moment the first
-local adjustment is added.
+The recipe's `local.mask.ref` points to a **content-addressed snapshot**
+copied to `<db_dir>/edit-masks/{photo_id}.{sha1[:12]}.png` at the moment the
+first local adjustment is added — where `<db_dir>` is `dirname(--db)`, the
+same root as the existing `<db_dir>/masks/` store. Vireo supports arbitrary
+`--db` paths, so a global `~/.vireo/edit-masks/` keyed only on `photo_id`
+would collide across separate databases (tests, alternate libraries) and
+let one database's snapshot GC delete another's referenced snapshots.
 
 Why not reference the live active mask: renders must stay a deterministic
 function of (source pixels, recipe). Preview/thumbnail caches invalidate on
@@ -72,9 +85,14 @@ invalidation and no user-visible cause, violating the no-black-boxes rule.
 
 Staleness is surfaced, not automated: when `photos.active_mask_variant`'s
 mask content differs from the snapshot, the editor shows "Newer subject mask
-available — Update" and updating rewrites `mask.ref` (a normal recipe edit:
-undoable, cache-invalidating). Missing snapshot files render with a no-op
-mask and an editor warning rather than failing the photo.
+available — Update" and updating rewrites `local.mask.ref` (a normal recipe
+edit: undoable, cache-invalidating). If the snapshot file is missing, the
+renderer **disables the whole local pass** for that photo — both subject
+*and* background weights held at zero, so no region's adjustments apply —
+and the editor shows a warning. (A no-op / all-zero subject mask would leave
+background weight = `1 − 0` = 1 everywhere, silently applying background
+edits to the entire frame; disabling both regions keeps missing snapshots
+from turning into a whole-photo edit.)
 
 Snapshot lifecycle: created on first use, garbage-collected when no recipe
 (current or in edit history) references them — same sweep style as other
@@ -82,12 +100,24 @@ storage cleanups, surfaced in `/api/storage`.
 
 ### Rendering
 
-Order stays geometry → tone → resize → detail, with local weights woven in:
+Order stays geometry → tone → resize → detail, with local weights woven in.
+Tone runs at pre-resize working-image dimensions inside `apply_recipe`, then
+`apply_recipe_to_loaded_image` calls `thumbnail(max_size)`, then detail runs
+at the post-resize render size — so a single weight map cannot serve both
+passes. The weight map is built once and materialized at both scales:
 
-1. **Weight map.** Load the snapshot mask, apply the recipe's geometry
-   (rotation/flip/straighten/crop — same transforms as the image, bilinear),
-   resize to render size, feather with a scale-adjusted Gaussian, normalize
-   to [0,1]. Background weight = 1 − subject weight.
+1. **Weight map.** Load the snapshot mask and apply the recipe's geometry
+   (rotation/flip/straighten/crop — same transforms as the image, bilinear).
+   From that geometry-transformed mask, materialize two aligned copies with
+   feather applied at each target scale (Gaussian radius scaled the same way
+   as detail kernels), normalize to [0,1]:
+   - **Tone weight** — sized to the pre-resize working image, consumed by
+     the tone pass inside `apply_recipe`.
+   - **Detail weight** — sized to the post-`thumbnail` render size, consumed
+     by the detail pass.
+
+   Background weight = 1 − subject weight, computed independently at each
+   scale so tone and detail each see aligned subject/background pairs.
 2. **Local tone** runs inside the existing tone pass with per-pixel strength:
    e.g. exposure becomes `lin * 2^(ev_global + ev_subject·w + ev_bg·(1−w))`;
    range/saturation controls interpolate their amounts by `w` the same way.
@@ -97,7 +127,7 @@ Order stays geometry → tone → resize → detail, with local weights woven in
    approximates and snaps to the server render, as it already does for
    detail and re-edits).
 3. **Local detail** rides the existing detail pass: compute the NR/sharpen
-   deltas once, blend them by the weight map before adding back.
+   deltas once, blend them by the detail weight map before adding back.
 
 No `EDIT_MATH_VERSION` bump: recipes without `local` render byte-identically.
 
