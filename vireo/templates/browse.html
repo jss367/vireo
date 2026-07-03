@@ -4476,6 +4476,19 @@ async function applySelectionKeyword(keywordId) {
   showUndoToast();
 }
 
+// If the batch inspector is visible, keep its Mixed/active state in sync with
+// the mutation we just applied. Keyboard shortcuts (rate_*, flag, color_*) go
+// straight through batchSetRating/Flag/ColorLabel without touching the sidebar
+// re-render path, so without this the stars/flag/color chips display the
+// pre-edit state — and clicking the same star clears the value the shortcut
+// just applied (batchRate treats matching-unanimous as toggle-off).
+function _refreshBatchInspectorIfActive() {
+  var detail = document.getElementById('detailContent');
+  if (detail && detail.classList.contains('batch-mode')) {
+    renderBatchInspector(getActiveSelection());
+  }
+}
+
 async function batchSetRating(rating) {
   var ids = getActiveSelection();
   try {
@@ -4489,6 +4502,7 @@ async function batchSetRating(rating) {
     if (p) p.rating = rating;
   });
   refreshGridCards(ids);
+  _refreshBatchInspectorIfActive();
   scheduleCollectionCountsRefresh();
   refreshPendingSyncBanner();
   showUndoToast();
@@ -4510,6 +4524,7 @@ async function batchSetFlag(flag) {
   if (selectedPhotoId != null && ids.indexOf(selectedPhotoId) !== -1) {
     updateDetailFlagButtons(flag);
   }
+  _refreshBatchInspectorIfActive();
   scheduleCollectionCountsRefresh();
   showUndoToast();
 }
@@ -4529,6 +4544,7 @@ async function batchSetColorLabel(color) {
     else delete colorLabels[id];
   });
   refreshGridCards(ids);
+  _refreshBatchInspectorIfActive();
   scheduleCollectionCountsRefresh();
   showUndoToast();
 }
@@ -6474,6 +6490,19 @@ function developSelected() {
 // helpers (setFlag, setColorLabel) are coupled to selectedPhotoId; the context
 // menu needs to target an arbitrary id without mutating that focus, so we
 // post directly to the batch endpoints with a 1-photo list.
+// Refresh the batch inspector if it's currently rendered, else fall back to
+// the caller-supplied single-photo update. Prevents context-menu edits on a
+// multi-selection anchor from collapsing the panel back to a single-detail
+// view via loadDetail(anchorId) while the user still has N photos selected.
+function _refreshInspectorAfterSinglePhotoEdit(photoId, singleFallback) {
+  var detail = document.getElementById('detailContent');
+  if (detail && detail.classList.contains('batch-mode')) {
+    renderBatchInspector(getActiveSelection());
+    return;
+  }
+  if (selectedPhotoId === photoId) singleFallback();
+}
+
 async function setRatingFor(photoId, rating) {
   try {
     await safeFetch('/api/batch/rating', {
@@ -6485,7 +6514,7 @@ async function setRatingFor(photoId, rating) {
   if (p) p.rating = rating;
   refreshGridCards([photoId]);
   scheduleCollectionCountsRefresh();
-  if (selectedPhotoId === photoId) loadDetail(photoId);
+  _refreshInspectorAfterSinglePhotoEdit(photoId, function() { loadDetail(photoId); });
   refreshPendingSyncBanner();
 }
 
@@ -6499,7 +6528,7 @@ async function setFlagFor(photoId, flag) {
   var p = photos.find(function(x) { return x.id === photoId; });
   if (p) p.flag = flag;
   refreshGridCards([photoId]);
-  if (selectedPhotoId === photoId) updateDetailFlagButtons(flag);
+  _refreshInspectorAfterSinglePhotoEdit(photoId, function() { updateDetailFlagButtons(flag); });
   scheduleCollectionCountsRefresh();
   return true;
 }
@@ -6515,7 +6544,7 @@ async function setColorLabelFor(photoId, color) {
   if (color) colorLabels[photoId] = color;
   else delete colorLabels[photoId];
   refreshGridCards([photoId]);
-  if (selectedPhotoId === photoId) updateDetailColors();
+  _refreshInspectorAfterSinglePhotoEdit(photoId, updateDetailColors);
   scheduleCollectionCountsRefresh();
 }
 
