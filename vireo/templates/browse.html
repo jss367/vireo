@@ -315,6 +315,11 @@ body {
 .summary-panel.hidden { display: none; }
 .detail-content { display: none; }
 .detail-content.visible { display: block; }
+/* Batch mode: the detail panel is reused as a multi-select inspector.
+   Single-photo-only sections are hidden; Rating/Flag/Color/Location/keyword
+   controls remain and act on the whole selection. */
+.detail-content.batch-mode .single-only { display: none !important; }
+.batch-mixed { font-size: 11px; font-weight: 400; color: var(--warning); text-transform: none; letter-spacing: 0; }
 .summary-stat { margin-bottom: 16px; }
 .summary-stat-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
 .summary-stat-value { font-size: 20px; font-weight: 600; color: var(--text-primary); }
@@ -1566,16 +1571,16 @@ body {
     <!-- Photo Detail (shown when a photo is selected) -->
     <div class="detail-content" id="detailContent">
       <button class="detail-close" onclick="closeDetail()">&times;</button>
-      <img class="detail-preview" id="detailImg" src="" alt="" style="cursor:pointer;" onclick="openLightbox(window._detailPhotoId, document.getElementById('detailFilename').textContent, photos)">
-      <div class="detail-filename" id="detailFilename"></div>
+      <img class="detail-preview single-only" id="detailImg" src="" alt="" style="cursor:pointer;" onclick="openLightbox(window._detailPhotoId, document.getElementById('detailFilename').textContent, photos)">
+      <div class="detail-filename single-only" id="detailFilename"></div>
 
       <div class="detail-section">
-        <div class="detail-section-title">Rating</div>
+        <div class="detail-section-title">Rating <span class="batch-mixed" id="ratingMixed" hidden>· Mixed</span></div>
         <div class="detail-rating" id="detailRating"></div>
       </div>
 
       <div class="detail-section">
-        <div class="detail-section-title">Flag</div>
+        <div class="detail-section-title">Flag <span class="batch-mixed" id="flagMixed" hidden>· Mixed</span></div>
         <div class="detail-flags" id="detailFlags">
           <button class="detail-flag-btn" onclick="setFlag('none')">None</button>
           <button class="detail-flag-btn" onclick="setFlag('flagged')">Flag (P)</button>
@@ -1583,13 +1588,13 @@ body {
         </div>
       </div>
 
-      <div class="detail-section">
+      <div class="detail-section single-only">
         <div class="detail-section-title">Wildlife Classification</div>
         <button class="detail-wildlife-btn" id="detailWildlifeExcluded" onclick="toggleDetailWildlifeExcluded()">Not Wildlife</button>
       </div>
 
       <div class="detail-section">
-        <div class="detail-section-title">Color Label</div>
+        <div class="detail-section-title">Color Label <span class="batch-mixed" id="colorMixed" hidden>· Mixed</span></div>
         <div class="detail-colors" id="detailColors">
           <button class="detail-color-btn" data-color="red" onclick="setColorLabel('red')" title="Red (6)"></button>
           <button class="detail-color-btn" data-color="yellow" onclick="setColorLabel('yellow')" title="Yellow (7)"></button>
@@ -1601,7 +1606,7 @@ body {
 
       <div class="detail-section location-section" id="locationSection">
         <div class="detail-section-title">Location</div>
-        <div id="locationFilled" hidden></div>
+        <div id="locationFilled" class="single-only" hidden></div>
         <div id="locationEmpty">
           <div class="keyword-autocomplete">
             <input type="text" id="locationInput" class="add-kw-input" placeholder="📍 Add location..." autocomplete="off">
@@ -1614,25 +1619,25 @@ body {
 
       <div class="detail-section">
         <div class="detail-section-title">Keywords</div>
-        <div id="detailKeywords"></div>
+        <div id="detailKeywords" class="single-only"></div>
         <div class="keyword-autocomplete">
           <input class="add-kw-input" id="addKeywordInput" placeholder="Add keyword..." autocomplete="off">
           <div class="keyword-suggestion-list" id="addKeywordSuggestions" role="listbox"></div>
         </div>
       </div>
 
-      <div class="detail-section">
+      <div class="detail-section single-only">
         <div class="detail-section-title">XMP Sidecar</div>
         <div id="detailXmp" style="font-size:12px;color:var(--text-dim);">—</div>
       </div>
 
-      <div class="detail-section">
+      <div class="detail-section single-only">
         <div class="detail-section-title">Info</div>
         <div class="detail-summary" id="detailSummary"></div>
         <div class="detail-path" id="detailPath"></div>
       </div>
 
-      <div class="detail-section" id="detailMetadataSection" style="display:none;">
+      <div class="detail-section single-only" id="detailMetadataSection" style="display:none;">
         <div class="detail-section-title">All Metadata</div>
         <input type="text" id="metadataSearch" class="add-kw-input"
                placeholder="Search metadata..."
@@ -1641,7 +1646,7 @@ body {
         <div id="metadataGroups"></div>
       </div>
 
-      <div class="detail-section" style="display:flex;gap:8px;">
+      <div class="detail-section single-only" style="display:flex;gap:8px;">
         <button onclick="findSimilar(window._detailPhotoId)" style="flex:1;background:var(--bg-tertiary);color:var(--info);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
           Find Similar
         </button>
@@ -1820,6 +1825,11 @@ var showDetectionBoxes = false;
 var cardFields = ["filename", "rating", "flag", "color_label", "sharpness"]; // default, overridden by config
 var inatSubmitted = {};  // {photo_id: true}
 var colorLabels = {};    // {photo_id: color_string}
+// Which photo ids we've confirmed color-label state for. `colorLabels[id]`
+// missing is ambiguous — either the photo has no color set OR we haven't
+// fetched its color labels yet — so the batch inspector needs this to avoid
+// rendering "everything is uncoloured" for a still-loading selection.
+var colorLabelsFetched = new Set();
 var colorLabelGen = 0;   // bumped on local edits; guards against stale fetch responses
 var loadEpoch = 0;       // bumped on any grid reset; guards against stale loadPhotos responses
 var selectAllRequestSeq = 0; // bumped to ignore stale async select-all responses
@@ -4176,6 +4186,13 @@ function updateSelectionPanel(ids) {
   var panel = document.getElementById('selectionPanel');
   if (!panel) return;
   if (ids.length <= 1) {
+    var dc = document.getElementById('detailContent');
+    if (dc) dc.classList.remove('batch-mode');
+    // Clear batch-only Mixed markers immediately so they can't linger while the
+    // single-photo detail fetch is in flight.
+    _batchToggleMixed('ratingMixed', false);
+    _batchToggleMixed('flagMixed', false);
+    _batchToggleMixed('colorMixed', false);
     var wasVisible = !panel.classList.contains('hidden');
     panel.classList.add('hidden');
     selectionKeywordKey = '';
@@ -4198,10 +4215,17 @@ function updateSelectionPanel(ids) {
   var detail = document.getElementById('detailContent');
   var summary = document.getElementById('summaryPanel');
   if (summary) summary.classList.add('hidden');
-  if (detail) detail.classList.toggle('visible', detailMatchesSelectedPhoto());
+  // Reuse the detail panel as a batch inspector for the whole selection:
+  // Rating/Flag/Color/Location act on all selected photos, single-photo-only
+  // sections are hidden via .batch-mode CSS.
+  if (detail) {
+    detail.classList.add('visible');
+    detail.classList.add('batch-mode');
+  }
   panel.classList.remove('hidden');
   document.getElementById('selectionCount').textContent = ids.length.toLocaleString() + ' photos selected';
   updatePasteEditSection(ids);
+  renderBatchInspector(ids);
   if (ids.length > 1000) {
     selectionKeywordKey = selectionIdsKey(ids);
     selectionKeywordMissingById = {};
@@ -4457,6 +4481,21 @@ async function applySelectionKeyword(keywordId) {
   showUndoToast();
 }
 
+// If the batch inspector is visible, keep its Mixed/active state in sync with
+// the mutation we just applied. Keyboard shortcuts (rate_*, flag, color_*) go
+// straight through batchSetRating/Flag/ColorLabel without touching the sidebar
+// re-render path, so without this the stars/flag/color chips display the
+// pre-edit state — and clicking the same star clears the value the shortcut
+// just applied (batchRate treats matching-unanimous as toggle-off).
+function _refreshBatchInspectorIfActive() {
+  var detail = document.getElementById('detailContent');
+  if (detail && detail.classList.contains('batch-mode')) {
+    // State-only refresh — the selection did not change. Preserve any
+    // in-progress location input the user is typing.
+    renderBatchInspector(getActiveSelection(), { preserveLocation: true });
+  }
+}
+
 async function batchSetRating(rating) {
   var ids = getActiveSelection();
   try {
@@ -4470,6 +4509,7 @@ async function batchSetRating(rating) {
     if (p) p.rating = rating;
   });
   refreshGridCards(ids);
+  _refreshBatchInspectorIfActive();
   scheduleCollectionCountsRefresh();
   refreshPendingSyncBanner();
   showUndoToast();
@@ -4491,6 +4531,7 @@ async function batchSetFlag(flag) {
   if (selectedPhotoId != null && ids.indexOf(selectedPhotoId) !== -1) {
     updateDetailFlagButtons(flag);
   }
+  _refreshBatchInspectorIfActive();
   scheduleCollectionCountsRefresh();
   showUndoToast();
 }
@@ -4508,8 +4549,10 @@ async function batchSetColorLabel(color) {
   ids.forEach(function(id) {
     if (color) colorLabels[id] = color;
     else delete colorLabels[id];
+    colorLabelsFetched.add(id);
   });
   refreshGridCards(ids);
+  _refreshBatchInspectorIfActive();
   scheduleCollectionCountsRefresh();
   showUndoToast();
 }
@@ -5066,13 +5109,25 @@ async function showUndoToast() {
 /* showToast is now provided globally by _navbar.html */
 
 async function loadDetail(id) {
+  // If a multi-selection is already active, skip this single-photo load — it
+  // would strip .batch-mode and rewire the sidebar (rating stars → setRating(id))
+  // to the anchor while the user still has N photos selected. Common flow:
+  // click A, then Cmd/Ctrl-click B before A's fetch returns. selectedPhotoId
+  // stays A, so both the sync class removal below and the post-await
+  // renderDetail(A) would overwrite the batch inspector the Cmd-click just set up.
+  if (selectedPhotos.size > 1) return;
   document.getElementById('summaryPanel').classList.add('hidden');
   var detail = document.getElementById('detailContent');
+  // Loading a single photo's detail always exits batch mode.
+  if (detail) detail.classList.remove('batch-mode');
   if (detail) detail.classList.toggle('visible', window._detailPhotoId === id);
 
   try {
     var photo = await safeFetch('/api/photos/' + id, {}, { toast: false });
-    if (selectedPhotoId === id) {
+    // Re-check after the fetch: a Cmd/Ctrl-click landing during the await can
+    // promote the selection to multi. The batch inspector is already rendered;
+    // don't clobber it with this stale single-photo response.
+    if (selectedPhotoId === id && selectedPhotos.size <= 1) {
       renderDetail(photo);
       if (detail) detail.classList.add('visible');
     }
@@ -5081,6 +5136,10 @@ async function loadDetail(id) {
 
 function renderDetail(photo) {
   window._detailPhotoId = photo.id;
+  // Single-photo view: clear any Mixed markers left over from batch mode.
+  _batchToggleMixed('ratingMixed', false);
+  _batchToggleMixed('flagMixed', false);
+  _batchToggleMixed('colorMixed', false);
   if (
     typeof window.vireoRememberPhotoEditRecipe === 'function' &&
     Object.prototype.hasOwnProperty.call(photo, 'edit_recipe')
@@ -5421,6 +5480,17 @@ async function setRating(photoId, rating) {
 }
 
 async function setFlag(flag) {
+  var sel = getActiveSelection();
+  if (sel.length > 1) {
+    var st = _batchAllLoaded(sel) ? _batchFlagState(sel) : { unanimous: false };
+    var target = (st.unanimous && st.value === flag) ? 'none' : flag;
+    // batchSetFlag runs _refreshBatchInspectorIfActive() against the *current*
+    // selection when the request resolves, so the sidebar reflects whatever is
+    // selected now. Re-rendering with the captured `sel` here would clobber a
+    // fresh render if the user changed the selection during the await.
+    await batchSetFlag(target);
+    return;
+  }
   if (!selectedPhotoId) return;
   var photoId = selectedPhotoId;
   try {
@@ -5481,10 +5551,28 @@ async function fetchColorLabels(photoIds) {
       photoIds.forEach(function(id) { delete colorLabels[id]; });
     }
     for (var id in data) colorLabels[id] = data[id];
+    // Mark every requested id as fetched — an absent id in `data` means "no
+    // color set" now that we've asked, so the batch inspector can trust
+    // colorLabels[id] === undefined for these ids as a definite value.
+    photoIds.forEach(function(id) { colorLabelsFetched.add(id); });
+    // A batch selection that included any of these ids may have rendered as
+    // unanimous no-colour with no Mixed marker; refresh it now that we can
+    // trust the state.
+    _refreshBatchInspectorIfActive();
   }
 }
 
 async function setColorLabel(color) {
+  var sel = getActiveSelection();
+  if (sel.length > 1) {
+    var st = _batchAllLoaded(sel) ? _batchColorState(sel) : { unanimous: false };
+    var target = (st.unanimous && st.value === color) ? null : color;
+    // See setFlag: batchSetColorLabel already refreshes the inspector for the
+    // current selection, so re-rendering with the captured `sel` risks stomping
+    // a fresh render if the user changed the selection during the await.
+    await batchSetColorLabel(target);
+    return;
+  }
   if (!selectedPhotoId) return;
   colorLabelGen++;
   var photoId = selectedPhotoId;
@@ -5500,16 +5588,123 @@ async function setColorLabel(color) {
   } else {
     delete colorLabels[photoId];
   }
+  colorLabelsFetched.add(photoId);
   if (selectedPhotoId === photoId) updateDetailColors();
   refreshGridCards([photoId]);
   scheduleCollectionCountsRefresh();
 }
 
-function updateDetailColors() {
-  var current = colorLabels[selectedPhotoId] || null;
+function updateDetailColorsValue(current) {
   document.querySelectorAll('.detail-color-btn').forEach(function(btn) {
     btn.classList.toggle('active', btn.dataset.color === current);
   });
+}
+
+function updateDetailColors() {
+  updateDetailColorsValue(colorLabels[selectedPhotoId] || null);
+}
+
+// --- Multi-select (batch) inspector ---------------------------------------
+// When >1 photos are selected, the detail panel is reused as a batch editor
+// (see updateSelectionPanel). Rating/Flag/Color reflect the selection's shared
+// value when unanimous, or a "Mixed" marker when the selected photos differ,
+// and edits apply to the whole selection.
+
+function _batchToggleMixed(id, show) {
+  var el = document.getElementById(id);
+  if (el) el.hidden = !show;
+}
+
+// Returns {unanimous, value}. get(id) yields the per-photo value.
+function _batchUnanimous(ids, get) {
+  if (!ids.length) return { unanimous: false, value: null };
+  var first = get(ids[0]);
+  for (var i = 1; i < ids.length; i++) {
+    if (get(ids[i]) !== first) return { unanimous: false, value: null };
+  }
+  return { unanimous: true, value: first };
+}
+
+function _batchRatingState(ids) {
+  return _batchUnanimous(ids, function(id) {
+    var p = photos.find(function(x) { return x.id === id; });
+    return p ? (p.rating || 0) : 0;
+  });
+}
+function _batchFlagState(ids) {
+  return _batchUnanimous(ids, function(id) {
+    var p = photos.find(function(x) { return x.id === id; });
+    return p ? (p.flag || 'none') : 'none';
+  });
+}
+function _batchColorState(ids) {
+  return _batchUnanimous(ids, function(id) { return colorLabels[id] || null; });
+}
+
+// Only trust unanimity when every selected photo is loaded in the current grid
+// (and thus its rating/flag/color is known). A selection that reaches beyond the
+// loaded page — e.g. "select all search results" — is shown as Mixed rather than
+// asserting a shared value we can't actually verify.
+function _batchAllLoaded(ids) {
+  return ids.every(function(id) {
+    return photos.some(function(p) { return p.id === id; });
+  });
+}
+
+// Colour labels arrive from a separate async /api/photos/color_labels fetch, so
+// having each photo row loaded (via _batchAllLoaded) is not enough to trust the
+// colour column: a selection made before that fetch returns would otherwise
+// render as unanimous no-colour without a Mixed marker.
+function _batchColorLoaded(ids) {
+  return ids.every(function(id) { return colorLabelsFetched.has(id); });
+}
+
+function renderBatchInspector(ids, opts) {
+  opts = opts || {};
+  var known = _batchAllLoaded(ids);
+
+  var rs = known ? _batchRatingState(ids) : { unanimous: false, value: 0 };
+  var r = rs.unanimous ? rs.value : 0;
+  var ratingHtml = '';
+  for (var i = 1; i <= 5; i++) {
+    ratingHtml += '<span class="' + (i <= r ? 'detail-star active' : 'detail-star') +
+      '" onclick="batchRate(' + i + ')">&#9733;</span>';
+  }
+  document.getElementById('detailRating').innerHTML = ratingHtml;
+  // Show Mixed whenever we can't confirm unanimity — including partially-loaded
+  // selections where `known` is false. Hiding Mixed there made "0 stars / None /
+  // no color" render identically to a truly unanimous no-value selection.
+  _batchToggleMixed('ratingMixed', !(known && rs.unanimous));
+
+  var fs = known ? _batchFlagState(ids) : { unanimous: false, value: 'none' };
+  updateDetailFlagButtons(fs.unanimous ? fs.value : 'none');
+  _batchToggleMixed('flagMixed', !(known && fs.unanimous));
+
+  var colorKnown = known && _batchColorLoaded(ids);
+  var cs = colorKnown ? _batchColorState(ids) : { unanimous: false, value: null };
+  updateDetailColorsValue(cs.unanimous ? cs.value : null);
+  _batchToggleMixed('colorMixed', !(colorKnown && cs.unanimous));
+
+  // Location input shares the batch-aware submit path (_locationApplyPhotoIds);
+  // show the empty input rather than any single photo's saved location.
+  // Skip the reset on state-only refreshes (opts.preserveLocation) — the user
+  // may be mid-way through typing a batch location when an async event
+  // (e.g. a /api/photos/color_labels fetch resolving, a batch rating shortcut)
+  // triggers _refreshBatchInspectorIfActive, and we'd otherwise erase it.
+  if (!opts.preserveLocation) {
+    renderLocationEmpty();
+  }
+}
+
+async function batchRate(rating) {
+  var ids = getActiveSelection();
+  if (ids.length < 1) return;
+  var st = _batchAllLoaded(ids) ? _batchRatingState(ids) : { unanimous: false };
+  var target = (st.unanimous && st.value === rating) ? 0 : rating;
+  // batchSetRating already refreshes the inspector for the current selection.
+  // A follow-up render using the captured `ids` would clobber that fresh render
+  // if the user changed the selection during the await.
+  await batchSetRating(target);
 }
 
 async function addKeyword(keyword) {
@@ -5543,7 +5738,17 @@ async function addKeyword(keyword) {
     state.selectedKeyword = null;
     hideKeywordSuggestions('addKeywordInput');
     if (!selectedKeyword) invalidateKeywordAutocompleteCache();
-    if (selectedPhotoId) loadDetail(selectedPhotoId);
+    // Same reason as _afterLocationMutation: if a multi-selection is still
+    // active, re-render the batch inspector instead of collapsing to the
+    // anchor photo's single-detail view via loadDetail.
+    var currentSel = getActiveSelection();
+    if (currentSel.length > 1) {
+      // Selection is unchanged after a batch keyword save; keep any in-progress
+      // location input the user may have typed.
+      renderBatchInspector(currentSel, { preserveLocation: true });
+    } else if (selectedPhotoId) {
+      loadDetail(selectedPhotoId);
+    }
     if (useBatch && selectionIdsKey(getActiveSelection()) === batchSelectionKey) {
       selectionKeywordKey = '';
       loadSelectionKeywordSuggestions(ids);
@@ -5696,10 +5901,11 @@ function chooseLocationKeywordSuggestion(index) {
 }
 
 function _locationApplyPhotoIds() {
-  var ids = getActiveSelection();
-  if (ids.length > 1) return ids;
-  var photoId = window._detailPhotoId;
-  return photoId ? [photoId] : [];
+  // Batch flow (Cmd/Ctrl-click without ever opening a single-photo detail)
+  // leaves window._detailPhotoId unset even though getActiveSelection() has
+  // targets, so derive from the selection directly rather than gating on
+  // the focused-detail photo.
+  return getActiveSelection();
 }
 
 async function _afterLocationMutation(photoIds, detailPhotoId) {
@@ -5712,7 +5918,14 @@ async function _afterLocationMutation(photoIds, detailPhotoId) {
     return;
   }
   if (photoIds && photoIds.length) refreshGridCards(photoIds);
-  if (detailPhotoId && selectedPhotoId === detailPhotoId) {
+  // If a multi-selection is still active, keep the batch inspector rendered.
+  // Falling through to loadDetail(anchor) would strip .batch-mode and rewire
+  // the rating stars to setRating(anchorId, i) — collapsing the panel to the
+  // anchor's single-photo view while the user still has N photos selected.
+  var activeSel = getActiveSelection();
+  if (activeSel.length > 1) {
+    renderBatchInspector(activeSel);
+  } else if (detailPhotoId && selectedPhotoId === detailPhotoId) {
     loadDetail(detailPhotoId);
   } else {
     loadSummary();
@@ -5789,18 +6002,22 @@ function normalizeGooglePlaceForSubmit(place) {
 }
 
 async function _submitLocationPlace(placeId, placeDetails) {
-  var photoId = window._detailPhotoId;
-  if (!photoId) return;
   _hideLocationError();
+  // Derive the target photos from the batch-aware selection so a fresh
+  // multi-select (Cmd/Ctrl-click without ever opening a single-photo detail)
+  // still applies to every selected photo. window._detailPhotoId is unset in
+  // that flow, so gating on it up front would silently apply to none.
   var ids = _locationApplyPhotoIds();
+  if (!ids.length) return;
   var useBatch = ids.length > 1;
+  var detailPhotoId = window._detailPhotoId || null;
   var body = { place_id: placeId };
   if (placeDetails) body.place = placeDetails;
   if (useBatch) body.photo_ids = ids;
   try {
     var endpoint = useBatch
       ? '/api/batch/location'
-      : '/api/photos/' + photoId + '/location';
+      : '/api/photos/' + ids[0] + '/location';
     var resp = await safeFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -5809,24 +6026,25 @@ async function _submitLocationPlace(placeId, placeDetails) {
     if (resp && resp.location) {
       renderLocationFilled(resp.location);
     }
-    await _afterLocationMutation(useBatch ? ids : [photoId], photoId);
+    await _afterLocationMutation(ids, detailPhotoId);
   } catch(e) {
     _showLocationError('Could not save location.');
   }
 }
 
 async function _submitLocationKeyword(keyword) {
-  var photoId = window._detailPhotoId;
-  if (!photoId || !keyword || !keyword.id) return;
+  if (!keyword || !keyword.id) return;
   _hideLocationError();
   var ids = _locationApplyPhotoIds();
+  if (!ids.length) return;
   var useBatch = ids.length > 1;
+  var detailPhotoId = window._detailPhotoId || null;
   var body = { keyword_id: keyword.id };
   if (useBatch) body.photo_ids = ids;
   try {
     var endpoint = useBatch
       ? '/api/batch/location'
-      : '/api/photos/' + photoId + '/location';
+      : '/api/photos/' + ids[0] + '/location';
     var resp = await safeFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -5835,22 +6053,22 @@ async function _submitLocationKeyword(keyword) {
     if (resp && resp.location) {
       renderLocationFilled(resp.location);
     }
-    await _afterLocationMutation(useBatch ? ids : [photoId], photoId);
+    await _afterLocationMutation(ids, detailPhotoId);
   } catch(e) {
     _showLocationError('Could not save location.');
   }
 }
 
 async function _submitLocationText(name) {
-  var photoId = window._detailPhotoId;
-  if (!photoId) return;
   _hideLocationError();
   var ids = _locationApplyPhotoIds();
+  if (!ids.length) return;
   var useBatch = ids.length > 1;
+  var detailPhotoId = window._detailPhotoId || null;
   try {
     var endpoint = useBatch
       ? '/api/batch/location/text'
-      : '/api/photos/' + photoId + '/location/text';
+      : '/api/photos/' + ids[0] + '/location/text';
     var body = useBatch
       ? { name: name, photo_ids: ids }
       : { name: name };
@@ -5861,7 +6079,7 @@ async function _submitLocationText(name) {
     });
     if (resp && resp.location) {
       renderLocationFilled(resp.location);
-      await _afterLocationMutation(useBatch ? ids : [photoId], photoId);
+      await _afterLocationMutation(ids, detailPhotoId);
     }
   } catch(e) {
     _showLocationError('Could not save location.');
@@ -6328,6 +6546,21 @@ function developSelected() {
 // helpers (setFlag, setColorLabel) are coupled to selectedPhotoId; the context
 // menu needs to target an arbitrary id without mutating that focus, so we
 // post directly to the batch endpoints with a 1-photo list.
+// Refresh the batch inspector if it's currently rendered, else fall back to
+// the caller-supplied single-photo update. Prevents context-menu edits on a
+// multi-selection anchor from collapsing the panel back to a single-detail
+// view via loadDetail(anchorId) while the user still has N photos selected.
+function _refreshInspectorAfterSinglePhotoEdit(photoId, singleFallback) {
+  var detail = document.getElementById('detailContent');
+  if (detail && detail.classList.contains('batch-mode')) {
+    // Selection is unchanged — this is a state-only refresh after a
+    // context-menu edit. Preserve any in-progress location input.
+    renderBatchInspector(getActiveSelection(), { preserveLocation: true });
+    return;
+  }
+  if (selectedPhotoId === photoId) singleFallback();
+}
+
 async function setRatingFor(photoId, rating) {
   try {
     await safeFetch('/api/batch/rating', {
@@ -6339,7 +6572,7 @@ async function setRatingFor(photoId, rating) {
   if (p) p.rating = rating;
   refreshGridCards([photoId]);
   scheduleCollectionCountsRefresh();
-  if (selectedPhotoId === photoId) loadDetail(photoId);
+  _refreshInspectorAfterSinglePhotoEdit(photoId, function() { loadDetail(photoId); });
   refreshPendingSyncBanner();
 }
 
@@ -6353,7 +6586,7 @@ async function setFlagFor(photoId, flag) {
   var p = photos.find(function(x) { return x.id === photoId; });
   if (p) p.flag = flag;
   refreshGridCards([photoId]);
-  if (selectedPhotoId === photoId) updateDetailFlagButtons(flag);
+  _refreshInspectorAfterSinglePhotoEdit(photoId, function() { updateDetailFlagButtons(flag); });
   scheduleCollectionCountsRefresh();
   return true;
 }
@@ -6368,8 +6601,9 @@ async function setColorLabelFor(photoId, color) {
   } catch(e) { return; }
   if (color) colorLabels[photoId] = color;
   else delete colorLabels[photoId];
+  colorLabelsFetched.add(photoId);
   refreshGridCards([photoId]);
-  if (selectedPhotoId === photoId) updateDetailColors();
+  _refreshInspectorAfterSinglePhotoEdit(photoId, updateDetailColors);
   scheduleCollectionCountsRefresh();
 }
 
