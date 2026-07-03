@@ -17,11 +17,19 @@ brushing.
   which applies `ImageOps.exif_transpose` (both standard images and RAW
   postprocess), before any recipe geometry (rotation/flip/straighten/crop)
   is applied. The prompt detection box is stored per mask;
-  `photos.active_mask_variant` picks the live one. For RAWs the specific
-  decode mode that produced this pixel grid matters — see next bullet —
-  and the design pins the snapshot to whichever decode mode the edit
-  render is actually using (§Snapshot decode basis), rather than
-  storing a single space-agnostic snapshot.
+  `photos.active_mask_variant` picks the live one. Orientation-corrected
+  space alone is *not* enough of a contract to align a mask against an
+  edit render, because for RAWs the specific decode mode that produced
+  this pixel grid matters — see next bullet — and the two RAW decodes
+  can differ in aspect and long-edge. The design therefore does not
+  store a single space-agnostic snapshot: instead it materializes one
+  snapshot variant per decode mode the render source can actually
+  deliver, each recorded with its own `mode` and `long_edge` in
+  `local.mask.decodes` and generated from a `load_image` in that same
+  decode (§Snapshot decode basis). The weight-map builder picks the
+  entry whose `mode` matches the render source's effective decode, so a
+  snapshot is by construction the same pixel-space basis as the edit
+  render that consumes it.
 - RAW files have **two** decode modes with potentially different pixel
   dimensions and aspect ratios: `RAW_DECODE_JPEG_FIRST` (default —
   embedded camera JPEG when it satisfies the requested size) and
@@ -56,10 +64,9 @@ and one `background` entry):
 "local": {
   "mask": {
     "ref": "a1b2c3d4",
-    "source_digest": "e7b8f2c1",
     "decodes": [
-      {"mode": "preserve_highlights", "long_edge": 3600},
-      {"mode": "standard", "long_edge": 3200}
+      {"mode": "preserve_highlights", "long_edge": 3600, "source_digest": "e7b8f2c1"},
+      {"mode": "standard",            "long_edge": 3200, "source_digest": "9d4c60ab"}
     ],
     "feather": 12.0
   },
@@ -83,22 +90,33 @@ and one `background` entry):
   snapshot GC (no fall-through to the live active mask). Feather is a
   Gaussian softening radius in **native pixels**, scaled at render time like
   detail kernels.
-- `mask.source_digest` is a hash over the source `photo_masks` row's bytes
-  plus its stored detection prompt and detector version — the **inputs**
-  the snapshot was derived from, not the transformed snapshot pixels. This
-  is what staleness compares against (see below), so a RAW snapshot in
-  preserve-highlights space is not flagged stale just because it does not
-  byte-match its JPEG-first source mask.
 - `mask.decodes` is a list of the pixel-space bases the snapshot was built
   in — one entry per on-disk variant, each with `mode` (`standard` /
-  `preserve_highlights`) and `long_edge` in native pixels. Non-RAWs load in
-  standard space only, so a single `standard` entry. RAWs whose edit path
-  is preserve-highlights get a `preserve_highlights` entry; RAWs that also
-  have a companion JPEG (and can therefore fall back to standard decode at
-  render time — see §Snapshot decode basis) get both entries. The
-  weight-map builder picks the entry whose `mode` matches the current
-  render source's decode; it is not a requirement that the entry's
-  `long_edge` equal the render source's pixel dimensions.
+  `preserve_highlights`), `long_edge` in native pixels, and a
+  **per-variant** `source_digest`. Non-RAWs load in standard space only, so
+  a single `standard` entry. RAWs whose edit path is preserve-highlights
+  get a `preserve_highlights` entry; RAWs that also have a companion JPEG
+  (and can therefore fall back to standard decode at render time — see
+  §Snapshot decode basis) get both entries. The weight-map builder picks
+  the entry whose `mode` matches the current render source's decode; it is
+  not a requirement that the entry's `long_edge` equal the render source's
+  pixel dimensions.
+- Each entry's `source_digest` is a hash over the **inputs** that
+  variant was derived from — not the transformed snapshot pixels — so a
+  RAW snapshot in preserve-highlights space is not flagged stale just
+  because it does not byte-match its JPEG-first source mask. Digests are
+  per-variant because a RAW+JPEG pair's two variants have different input
+  sources: the `preserve_highlights` variant re-runs detection on the RAW's
+  demosaic and hashes the `photos.active_mask_variant` row's file bytes +
+  stored prompt + detector version; the `standard` variant re-runs
+  detection on the companion JPEG and hashes the **companion JPEG bytes**
+  (via mtime + size + sha1 over the companion file) + the re-detection's
+  own prompt bytes + detector version. A single top-level digest could not
+  detect the case where the companion JPEG (or its detection) changes
+  while the RAW-side active mask stays the same: fallback/offline renders
+  on the standard basis would keep using an out-of-date snapshot with no
+  stale banner. Staleness is per-variant, and Update rewrites only the
+  variants whose digests changed.
 - `local` is dropped from normalization entirely when `regions` is empty or
   every region normalizes away — the shared `mask` never persists without at
   least one active region referencing it.
@@ -243,7 +261,12 @@ and on the libraw-failure embedded-JPEG path.
 
 Snapshot creation therefore materializes one on-disk variant per
 **distinct decode basis** the render source might use, keyed by decode
-mode, all sharing one `local.mask.ref`:
+mode, all sharing one `local.mask.ref`. Export's `darktable`-developed
+output path is deliberately **not** given a variant — recipes with
+`local` bypass developed outputs and render through the RAW / working
+copy / companion / original chain instead, so one of the bases below
+always applies (see the "Darktable-developed exports bypass" paragraph
+after the enumeration for why):
 
 - **Non-RAWs:** one variant, `standard`, copied as-is from the existing
   `photo_masks` file (which is already in edit-render space).
@@ -333,16 +356,27 @@ regenerating under a live reference would change render output with no cache
 invalidation and no user-visible cause, violating the no-black-boxes rule.
 
 Staleness is surfaced, not automated, and it's compared on **source-side
-inputs**, not on the snapshot pixels. When a snapshot is created, the
-recipe records `mask.source_digest` — a hash over the current
-`photos.active_mask_variant` row's source mask file bytes, its stored
-detection prompt, and the detector version that produced it. Staleness
-means the current active mask's re-computed digest differs from
-`mask.source_digest`; that's the signal shown as "Newer subject mask
-available — Update", and Update rewrites `local.mask.ref` and
-`mask.source_digest` together (a normal recipe edit: undoable,
-cache-invalidating). This is deliberately not a byte comparison against
-the snapshot: for RAWs the snapshot pixels come from a re-detection in
+inputs**, not on the snapshot pixels. Each entry in `mask.decodes` carries
+its own `source_digest` (see schema), so staleness is evaluated per
+variant against the inputs *that variant was actually built from*:
+- `preserve_highlights` — a hash over the current
+  `photos.active_mask_variant` row's source mask file bytes, its stored
+  detection prompt, and the detector version that produced it.
+- `standard` (RAW+JPEG only) — a hash over the companion JPEG's
+  file identity (mtime + size + sha1) plus the prompt/detector version
+  used when detection re-ran on the companion.
+Staleness for a variant means the current inputs' re-computed digest
+differs from that entry's `source_digest`; the editor surfaces "Newer
+subject mask available — Update" whenever **any** variant is stale, and
+Update rewrites the affected variants (regenerating only what changed —
+e.g., a replaced companion JPEG re-materializes just the `standard`
+variant) along with `local.mask.ref`. This matters for RAW+JPEG offline
+renders: if the companion JPEG (or its detection) changes while the RAW
+active mask stays the same, a single top-level digest would miss it and
+the standard-basis fallback would keep using the old snapshot with no
+stale banner. Recipe edits are undoable and cache-invalidating.
+Comparing on inputs is deliberately not a byte comparison against the
+snapshot: for RAWs the snapshot pixels come from a re-detection in
 preserve-highlights space and will never byte-match the JPEG-first
 `photo_masks.path` file even when nothing about the underlying detection
 has changed, so a snapshot-byte check would report every RAW snapshot as
@@ -390,18 +424,28 @@ passes. The weight map is built once and materialized at both scales:
    distinguishes these paths internally, so it returns the effective basis
    alongside the source path for the weight-map builder to consume.
    `recipe_render_source`'s return value is only the *initial* basis, and
-   preview/export have **post-load fallbacks** that can switch source
-   after `load_image` returns: `serve_preview` and the edit-preview route
-   drop an undersized embedded-JPEG or failed RAW decode in favor of the
-   companion JPEG (`vireo/app.py:18395-18453`, `18630-18691`), and
-   `export.py:319-363` does the same after `load_image`. Those late
+   **every** recipe render call site that can late-swap the loaded image
+   has to update the basis in lock-step with the swap. Today those sites
+   are: `serve_preview` and the edit-preview route, which drop an
+   undersized embedded-JPEG or failed RAW decode in favor of the
+   companion JPEG (`vireo/app.py:18395-18453`, `18630-18691`); the export
+   pipeline, which does the same after `load_image`
+   (`vireo/export.py:319-363`); the **Open External handoff**, which
+   applies the recipe to the loaded image and has the same
+   RAW-decode-failure or undersized-embedded-JPEG → companion JPEG switch
+   before `apply_recipe_to_loaded_image` (`vireo/app.py:9195-9266`); and
+   the **iNaturalist upload** path, which mirrors the handoff and does
+   the same swap before rendering (`vireo/app.py:11540-11594`). All four
    switches change the effective basis from `preserve_highlights` to
    `standard`, so the weight-map builder consumes the basis that reflects
-   the *actual* loaded image, not the one `recipe_render_source` chose up
-   front — each call site updates the basis alongside the source swap
-   before invoking the local pass. If that final basis has no matching
-   `mask.decodes` entry the pass is disabled, warn-and-hold-zero, as
-   above. Load
+   the *actual* loaded image at each site, not the one
+   `recipe_render_source` chose up front — every one of these call sites
+   updates the basis alongside the source swap before invoking the local
+   pass. Restricting the fix to preview/export would silently misalign
+   local weights on Open External and iNat upload renders for exactly the
+   RAW+JPEG cases the fallback exists to serve. If the final basis has no
+   matching `mask.decodes` entry the pass is disabled, warn-and-hold-zero,
+   as above. Load
    the picked variant's on-disk file and bilinearly resample it to the
    current render source's pre-geometry pixel dimensions (the entry's
    stored `long_edge` is a basis marker, not a size gate — a full-res
