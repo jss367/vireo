@@ -130,14 +130,28 @@ standard-decode working-copy JPEG on a third. Silently disabling local
 adjustments on those fallback renders would drop user edits on
 first-class supported paths.
 
-The working-copy JPEG collapses back to the preserve-highlights basis on
-its own: `extract_working_copy` (`vireo/image_loader.py:511-537`) decodes
-the source with `RAW_DECODE_PRESERVE_HIGHLIGHTS` before saving the JPEG,
-so its pixel grid (aspect, orientation, cropping) is the same basis as
-the preserve-highlights variant — only its `long_edge` may be smaller,
-which the builder resamples through anyway. That means the working-copy
-fallback does not need its own on-disk variant; it reuses
-`preserve_highlights`.
+Working copies come in two flavors and their basis follows the decode
+that produced them. On the happy path `extract_working_copy`
+(`vireo/image_loader.py:511-537`) decodes the RAW source with
+`RAW_DECODE_PRESERVE_HIGHLIGHTS`, so the resulting JPEG's pixel grid
+(aspect, orientation, cropping) matches the preserve-highlights variant
+— only its `long_edge` may be smaller, which the builder resamples
+through anyway. When RAW extraction *fails* on a RAW+JPEG pair, Vireo
+intentionally re-extracts the working copy from the companion JPEG
+(`vireo/scanner.py:973-987` on scan; `vireo/app.py:19112-19122` and
+`19141-19148` on the on-demand original route); that JPEG is decoded
+without a RAW step, so its pixel grid is the companion's
+standard-decode basis, not preserve-highlights. Scanner persists the
+provenance: after a companion-derived extraction it sets
+`working_copy_failed_source='source'` (`vireo/scanner.py:997-1004`), the
+same marker `has_current_working_copy_failure` reads to route render
+fallbacks. Weight-map basis selection consults it too: a working copy
+with `working_copy_failed_source='source'` shares the `standard` basis;
+any other working copy shares `preserve_highlights`. Neither flavor
+needs its own on-disk variant — each reuses an existing one — but the
+provenance flag has to be checked; treating every working copy as
+preserve-highlights would misalign local weights on the offline-RAW
+companion-derived-working-copy path.
 
 Snapshot creation therefore materializes one on-disk variant per
 **distinct decode basis** the render source might use, keyed by decode
@@ -147,11 +161,15 @@ mode, all sharing one `local.mask.ref`:
   `photo_masks` file (which is already in edit-render space).
 - **RAWs whose folder has no companion JPEG:** one variant,
   `preserve_highlights`, generated fresh — it serves both the primary
-  preserve-highlights RAW render and the working-copy fallback, whose
-  JPEG was itself extracted in preserve-highlights space.
+  preserve-highlights RAW render and the working-copy fallback, which
+  can only be RAW-derived on this row (no companion to fall back to)
+  and therefore shares the preserve-highlights basis.
 - **RAWs with a companion JPEG:** two variants —
-  `preserve_highlights` (for the primary RAW path *and* the working-copy
-  fallback) *and* `standard` (for the companion-fallback path).
+  `preserve_highlights` (for the primary RAW path *and* RAW-derived
+  working copies) *and* `standard` (for the companion-fallback path
+  *and* companion-derived working copies — those flagged
+  `working_copy_failed_source='source'`, where the working copy was
+  re-extracted from the companion JPEG after RAW extraction failed).
 
 **Darktable-developed exports bypass, they don't get their own variant.**
 Export prefers a darktable-developed output ahead of RAW / working copy /
@@ -255,11 +273,15 @@ passes. The weight map is built once and materialized at both scales:
 
 1. **Weight map.** Pick the `mask.decodes` entry whose `mode` matches the
    current render source's **effective decode basis** — `preserve_highlights`
-   when the RAW decoded successfully *or* when the render fell back to the
-   working-copy JPEG (`extract_working_copy` decodes with
+   when the RAW decoded successfully *or* when the render fell back to a
+   RAW-derived working-copy JPEG (no `working_copy_failed_source='source'`
+   marker: `extract_working_copy` decoded the RAW with
    `RAW_DECODE_PRESERVE_HIGHLIGHTS`, so its pixel grid shares the
    preserve-highlights basis); `standard` when the render fell back to the
-   companion JPEG or the photo is non-RAW. `recipe_render_source` already
+   companion JPEG, when the working copy is companion-derived
+   (`working_copy_failed_source='source'` — re-extracted from the
+   companion JPEG after RAW extraction failed, so its pixel grid is the
+   companion's standard-decode basis), or when the photo is non-RAW. `recipe_render_source` already
    distinguishes these paths internally, so it returns the effective basis
    alongside the source path for the weight-map builder to consume.
    `recipe_render_source`'s return value is only the *initial* basis, and
