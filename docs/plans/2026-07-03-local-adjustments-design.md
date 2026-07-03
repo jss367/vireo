@@ -153,6 +153,23 @@ mode, all sharing one `local.mask.ref`:
   `preserve_highlights` (for the primary RAW path *and* the working-copy
   fallback) *and* `standard` (for the companion-fallback path).
 
+**Darktable-developed exports bypass, they don't get their own variant.**
+Export prefers a darktable-developed output ahead of RAW / working copy /
+original when one exists (`vireo/export.py:188-214`), and the developed
+file can carry a style crop, a lens correction, or a different aspect
+ratio applied by darktable's own pipeline — none of which are recorded
+anywhere Vireo can read. A separate `developed` snapshot basis would
+therefore have no reliable transform to line the mask up with the
+developed pixels. Recipes with a `local` block are photo-specific
+subject/background edits keyed to the SAM mask over Vireo's own
+pipeline, so mixing them with a darktable-developed output is
+ambiguous by design. Export handles this by **skipping the developed
+preference entirely when the recipe has a `local` block** and rendering
+through the RAW / working copy / companion / original chain instead —
+one of the three decode bases above then applies, exactly as with any
+other edited render. The developed-output export path is only for
+recipes with no local adjustments.
+
 For each variant, two things have to be right for alignment with the
 render load:
 
@@ -244,7 +261,20 @@ passes. The weight map is built once and materialized at both scales:
    preserve-highlights basis); `standard` when the render fell back to the
    companion JPEG or the photo is non-RAW. `recipe_render_source` already
    distinguishes these paths internally, so it returns the effective basis
-   alongside the source path for the weight-map builder to consume. Load
+   alongside the source path for the weight-map builder to consume.
+   `recipe_render_source`'s return value is only the *initial* basis, and
+   preview/export have **post-load fallbacks** that can switch source
+   after `load_image` returns: `serve_preview` and the edit-preview route
+   drop an undersized embedded-JPEG or failed RAW decode in favor of the
+   companion JPEG (`vireo/app.py:18395-18453`, `18630-18691`), and
+   `export.py:319-363` does the same after `load_image`. Those late
+   switches change the effective basis from `preserve_highlights` to
+   `standard`, so the weight-map builder consumes the basis that reflects
+   the *actual* loaded image, not the one `recipe_render_source` chose up
+   front — each call site updates the basis alongside the source swap
+   before invoking the local pass. If that final basis has no matching
+   `mask.decodes` entry the pass is disabled, warn-and-hold-zero, as
+   above. Load
    the picked variant's on-disk file and bilinearly resample it to the
    current render source's pre-geometry pixel dimensions (the entry's
    stored `long_edge` is a basis marker, not a size gate — a full-res
