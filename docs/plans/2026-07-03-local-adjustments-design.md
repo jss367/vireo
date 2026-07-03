@@ -141,15 +141,45 @@ intentionally re-extracts the working copy from the companion JPEG
 (`vireo/scanner.py:973-987` on scan; `vireo/app.py:19112-19122` and
 `19141-19148` on the on-demand original route); that JPEG is decoded
 without a RAW step, so its pixel grid is the companion's
-standard-decode basis, not preserve-highlights. Scanner persists the
-provenance: after a companion-derived extraction it sets
-`working_copy_failed_source='source'` (`vireo/scanner.py:997-1004`), the
-same marker `has_current_working_copy_failure` reads to route render
-fallbacks. Weight-map basis selection consults it too: a working copy
-with `working_copy_failed_source='source'` shares the `standard` basis;
-any other working copy shares `preserve_highlights`. Neither flavor
-needs its own on-disk variant — each reuses an existing one — but the
-provenance flag has to be checked; treating every working copy as
+standard-decode basis, not preserve-highlights.
+
+The existing `working_copy_failed_source='source'` field cannot serve as
+this provenance: it is a RAW-failure request-routing marker consumed by
+`_has_current_working_copy_failure`, and its writers do not line up
+with actual working-copy origin. It is *set without regenerating the
+on-disk working copy* by `record_working_copy_failure`
+(`vireo/render_source.py:407-421`) on a request-time RAW retry failure
+and by `vireo/thumbnails.py:99-107` on a thumbnail RAW decode
+fallback — so a RAW-derived working copy from the scanner's happy path
+can end up flagged `='source'` after a later stale-marker refresh,
+even though its pixel grid is still preserve-highlights. And it is
+*not set* by the on-demand `/original` companion re-extract branches
+(`vireo/app.py:19123-19133` and `19151-19162`), which write
+`working_copy_path` and dimensions only — so a genuinely
+companion-derived working copy from that path carries no marker at
+all. Inferring basis from this field would therefore misalign local
+weights in both directions.
+
+PR 1 records working-copy provenance in a new dedicated
+`photos.working_copy_source` column (`'raw'` | `'companion'`), written
+by **every** path that materializes `working_copy_path`: scanner's
+happy RAW extraction (`'raw'`), scanner's RAW-then-companion fallback
+(`'companion'`, alongside the existing `working_copy_failed_source='source'`
+routing marker it also writes), and both on-demand `/original`
+companion re-extract branches (`'companion'`). Weight-map basis
+selection reads this column directly: `'raw'` shares the
+`preserve_highlights` basis, `'companion'` shares `standard`. Rows
+migrated from before the column existed carry a NULL value and are
+treated as unknown provenance — the local pass is disabled with the
+same warn-and-hold-zero fallback as a missing snapshot, and the next
+scan or on-demand extraction populates the column so subsequent renders
+recover. Guessing from `working_copy_failed_source` or from disk
+inspection was considered and rejected: both false-positive and
+false-negative paths above make the guess unsound, and silently picking
+the wrong basis is exactly the failure mode local adjustments must
+avoid. Neither flavor needs its own on-disk snapshot variant — each
+reuses an existing one — but the `working_copy_source` column has to be
+checked at render time; treating every working copy as
 preserve-highlights would misalign local weights on the offline-RAW
 companion-derived-working-copy path.
 
@@ -165,10 +195,10 @@ mode, all sharing one `local.mask.ref`:
   can only be RAW-derived on this row (no companion to fall back to)
   and therefore shares the preserve-highlights basis.
 - **RAWs with a companion JPEG:** two variants —
-  `preserve_highlights` (for the primary RAW path *and* RAW-derived
-  working copies) *and* `standard` (for the companion-fallback path
-  *and* companion-derived working copies — those flagged
-  `working_copy_failed_source='source'`, where the working copy was
+  `preserve_highlights` (for the primary RAW path *and* working copies
+  with `photos.working_copy_source='raw'`) *and* `standard` (for the
+  companion-fallback path *and* working copies with
+  `photos.working_copy_source='companion'`, where the working copy was
   re-extracted from the companion JPEG after RAW extraction failed).
 
 **Darktable-developed exports bypass, they don't get their own variant.**
@@ -274,14 +304,19 @@ passes. The weight map is built once and materialized at both scales:
 1. **Weight map.** Pick the `mask.decodes` entry whose `mode` matches the
    current render source's **effective decode basis** — `preserve_highlights`
    when the RAW decoded successfully *or* when the render fell back to a
-   RAW-derived working-copy JPEG (no `working_copy_failed_source='source'`
-   marker: `extract_working_copy` decoded the RAW with
+   RAW-derived working-copy JPEG (`photos.working_copy_source='raw'`:
+   `extract_working_copy` decoded the RAW with
    `RAW_DECODE_PRESERVE_HIGHLIGHTS`, so its pixel grid shares the
-   preserve-highlights basis); `standard` when the render fell back to the
-   companion JPEG, when the working copy is companion-derived
-   (`working_copy_failed_source='source'` — re-extracted from the
-   companion JPEG after RAW extraction failed, so its pixel grid is the
-   companion's standard-decode basis), or when the photo is non-RAW. `recipe_render_source` already
+   preserve-highlights basis); `standard` when the render fell back to
+   the companion JPEG, when the working copy is companion-derived
+   (`photos.working_copy_source='companion'` — re-extracted from the
+   companion JPEG after RAW extraction failed by scanner or by the
+   on-demand `/original` route, so its pixel grid is the companion's
+   standard-decode basis), or when the photo is non-RAW. A working copy
+   with a NULL `working_copy_source` (a legacy row from before the
+   column existed) is treated as unknown basis and the local pass is
+   disabled with warn-and-hold-zero, exactly as with a missing snapshot,
+   until the next scan or on-demand extraction populates the column. `recipe_render_source` already
    distinguishes these paths internally, so it returns the effective basis
    alongside the source path for the weight-map builder to consume.
    `recipe_render_source`'s return value is only the *initial* basis, and
