@@ -117,24 +117,41 @@ database's snapshot GC delete another's referenced snapshots.
 
 **Snapshot decode basis matches the edit-render source.** The snapshot has
 to line up with whichever pixel grid the render source is actually
-delivering, and for RAW photos that isn't a single grid — `recipe_render_source`
-(`vireo/render_source.py:312-330`) and `export.py:327-343` both fall back
-to the companion JPEG when the RAW is missing or its decode fails, so a
-single RAW photo can render as preserve-highlights on one recipe render and
-as standard-decode companion JPEG on the next. Silently disabling local
-adjustments on those companion-fallback renders would drop user edits on a
-first-class supported path. Snapshot creation therefore materializes one
-on-disk variant per decode the render source might use, keyed by decode
+delivering, and for RAW photos that isn't a single grid.
+`recipe_render_source` (`vireo/render_source.py:312-335`) and
+`export.py:327-343` both fall back to the companion JPEG when the RAW is
+missing or its decode fails; and `recipe_render_source` has a further
+last-resort fallback (`vireo/render_source.py:331-334`) that returns the
+photo's `working_copy_path` — a pre-extracted JPEG under `<vireo_dir>` —
+when the RAW original is offline *and* no companion is usable. A single
+RAW photo can therefore render as preserve-highlights on one recipe
+render, as standard-decode companion JPEG on another, and as a
+standard-decode working-copy JPEG on a third. Silently disabling local
+adjustments on those fallback renders would drop user edits on
+first-class supported paths.
+
+The working-copy JPEG collapses back to the preserve-highlights basis on
+its own: `extract_working_copy` (`vireo/image_loader.py:511-537`) decodes
+the source with `RAW_DECODE_PRESERVE_HIGHLIGHTS` before saving the JPEG,
+so its pixel grid (aspect, orientation, cropping) is the same basis as
+the preserve-highlights variant — only its `long_edge` may be smaller,
+which the builder resamples through anyway. That means the working-copy
+fallback does not need its own on-disk variant; it reuses
+`preserve_highlights`.
+
+Snapshot creation therefore materializes one on-disk variant per
+**distinct decode basis** the render source might use, keyed by decode
 mode, all sharing one `local.mask.ref`:
 
 - **Non-RAWs:** one variant, `standard`, copied as-is from the existing
   `photo_masks` file (which is already in edit-render space).
 - **RAWs whose folder has no companion JPEG:** one variant,
-  `preserve_highlights`, generated fresh — no other decode is reachable
-  from the edit path.
+  `preserve_highlights`, generated fresh — it serves both the primary
+  preserve-highlights RAW render and the working-copy fallback, whose
+  JPEG was itself extracted in preserve-highlights space.
 - **RAWs with a companion JPEG:** two variants —
-  `preserve_highlights` (for the primary RAW path) *and* `standard` (for
-  the companion-fallback path).
+  `preserve_highlights` (for the primary RAW path *and* the working-copy
+  fallback) *and* `standard` (for the companion-fallback path).
 
 For each variant, two things have to be right for alignment with the
 render load:
@@ -220,15 +237,20 @@ at the post-resize render size — so a single weight map cannot serve both
 passes. The weight map is built once and materialized at both scales:
 
 1. **Weight map.** Pick the `mask.decodes` entry whose `mode` matches the
-   current render source's decode (preserve-highlights when the RAW
-   decoded successfully, standard when the render fell back to the
-   companion JPEG or the photo is non-RAW), load that variant's on-disk
-   file, and bilinearly resample it to the current render source's
-   pre-geometry pixel dimensions (the entry's stored `long_edge` is a
-   basis marker, not a size gate — a full-res export and a
-   working-resolution preview both resample the same variant to their own
-   source size). Then apply the recipe's geometry (rotation/flip/straighten/crop
-   — same transforms as the image, bilinear).
+   current render source's **effective decode basis** — `preserve_highlights`
+   when the RAW decoded successfully *or* when the render fell back to the
+   working-copy JPEG (`extract_working_copy` decodes with
+   `RAW_DECODE_PRESERVE_HIGHLIGHTS`, so its pixel grid shares the
+   preserve-highlights basis); `standard` when the render fell back to the
+   companion JPEG or the photo is non-RAW. `recipe_render_source` already
+   distinguishes these paths internally, so it returns the effective basis
+   alongside the source path for the weight-map builder to consume. Load
+   the picked variant's on-disk file and bilinearly resample it to the
+   current render source's pre-geometry pixel dimensions (the entry's
+   stored `long_edge` is a basis marker, not a size gate — a full-res
+   export and a working-resolution preview both resample the same variant
+   to their own source size). Then apply the recipe's geometry
+   (rotation/flip/straighten/crop — same transforms as the image, bilinear).
    From that geometry-transformed mask, materialize two aligned copies with
    feather applied at each target scale (Gaussian radius scaled the same way
    as detail kernels), normalize to [0,1]:
