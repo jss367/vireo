@@ -7625,3 +7625,71 @@ def test_collection_add_photos_rejects_non_integer_ids(app_and_db):
                        json={'photo_ids': [pid]})
     assert resp.status_code == 200
     assert resp.get_json()["total"] == 1
+
+
+def test_edit_presets_api_crud(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+
+    assert client.get("/api/edit-presets").get_json() == {"presets": []}
+
+    resp = client.post(
+        "/api/edit-presets",
+        json={
+            "name": "Backlit",
+            "recipe": {
+                "rotation": 90,
+                "adjustments": {"exposure": 1, "sharpen": 30},
+            },
+        },
+    )
+    assert resp.status_code == 200
+    preset = resp.get_json()["preset"]
+    assert preset["name"] == "Backlit"
+    assert preset["recipe"] == {
+        "version": 1,
+        "adjustments": {"exposure": 1.0, "sharpen": 30.0},
+    }
+
+    # Upsert by name keeps the id, replaces the recipe.
+    resp = client.post(
+        "/api/edit-presets",
+        json={"name": " Backlit ", "recipe": {"adjustments": {"shadows": 25}}},
+    )
+    assert resp.status_code == 200
+    updated = resp.get_json()["preset"]
+    assert updated["id"] == preset["id"]
+    assert updated["recipe"]["adjustments"] == {"shadows": 25.0}
+
+    client.post(
+        "/api/edit-presets",
+        json={"name": "alpine", "recipe": {"adjustments": {"contrast": 5}}},
+    )
+    names = [p["name"] for p in client.get("/api/edit-presets").get_json()["presets"]]
+    assert names == ["alpine", "Backlit"]
+
+    assert client.delete(f"/api/edit-presets/{preset['id']}").status_code == 200
+    assert client.delete(f"/api/edit-presets/{preset['id']}").status_code == 404
+    names = [p["name"] for p in client.get("/api/edit-presets").get_json()["presets"]]
+    assert names == ["alpine"]
+
+
+def test_edit_presets_api_validation(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+
+    cases = [
+        {"recipe": {"adjustments": {"exposure": 1}}},              # no name
+        {"name": "  ", "recipe": {"adjustments": {"exposure": 1}}},
+        {"name": "x" * 200, "recipe": {"adjustments": {"exposure": 1}}},
+        {"name": "ok"},                                            # no recipe
+        {"name": "ok", "recipe": 5},
+        {"name": "ok", "recipe": {"rotation": 90}},                # geometry only
+        {"name": "ok", "recipe": {"adjustments": {"exposure": 0}}},
+        {"name": "ok", "recipe": {"adjustments": {"exposure": 99}}},  # out of range
+    ]
+    for payload in cases:
+        resp = client.post("/api/edit-presets", json=payload)
+        assert resp.status_code == 400, payload
+
+    assert client.get("/api/edit-presets").get_json() == {"presets": []}
