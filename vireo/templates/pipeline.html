@@ -3036,6 +3036,23 @@ function _formatETA(seconds) {
   return h + 'h ' + m + 'm';
 }
 
+// Ingest is the only stage that ever reads the source (SD card/etc.) — every
+// later stage works off the copy it made. Once it reports success, surface
+// that explicitly instead of leaving the user to guess whether the card is
+// still in use (`ingestInfo.copied` is absent entirely in scan-in-place mode,
+// where there was never a copy and the card stays needed for the whole run).
+function _showSourceEjectSafe(ingestInfo) {
+  if (!ingestInfo || typeof ingestInfo.copied !== 'number') return;
+  var statusSourceEl = document.getElementById('statusSource');
+  if (!statusSourceEl) return;
+  var parts = [ingestInfo.copied.toLocaleString() + ' copied'];
+  if (ingestInfo.skipped_duplicate) {
+    parts.push(ingestInfo.skipped_duplicate.toLocaleString() + ' already present');
+  }
+  statusSourceEl.textContent = parts.join(', ') + ' — the card is safe to eject.';
+  statusSourceEl.className = 'status-msg ok';
+}
+
 function _updatePipelineStageUI(p) {
   var stages = p.stages || {};
 
@@ -3110,6 +3127,7 @@ function _updatePipelineStageUI(p) {
       if (a.completed > 0) {
         _stageOutcomes[cardSuffix2] = 'done';
         _setPill(cardSuffix2, 'done');
+        if (cardSuffix2 === 'Source') _showSourceEjectSafe(stages['ingest']);
       } else {
         // Every substage was skipped. Backend 'skipped' covers both
         // user-disabled stages and auto-skip; pick the right label so a
@@ -3259,8 +3277,12 @@ function _onPipelineComplete(result) {
     var fillSource = document.getElementById('fillSource');
     if (fillSource && fillSource.style.width && fillSource.style.width !== '0%') {
       fillSource.style.width = '100%';
-      var statusSourceEl = document.getElementById('statusSource');
-      if (statusSourceEl) { statusSourceEl.textContent = 'Done!'; statusSourceEl.className = 'status-msg ok'; }
+      if (stageResults.ingest && typeof stageResults.ingest.copied === 'number') {
+        _showSourceEjectSafe(stageResults.ingest);
+      } else {
+        var statusSourceEl = document.getElementById('statusSource');
+        if (statusSourceEl) { statusSourceEl.textContent = 'Done!'; statusSourceEl.className = 'status-msg ok'; }
+      }
     }
   }
 

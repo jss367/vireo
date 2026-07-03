@@ -1411,6 +1411,115 @@ def test_pipeline_scan_step_gets_status_updates(tmp_path, monkeypatch):
         "Status updates should also push SSE progress events"
 
 
+def test_pipeline_ingest_records_safe_to_eject_counts_on_success(tmp_path, monkeypatch):
+    """Once ingest copies everything off the source with no failures, the
+    stage (and final result) should carry 'copied'/'skipped_duplicate' counts
+    so the UI can tell the user the source (e.g. an SD card) is safe to eject.
+    """
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    src = tmp_path / "source"
+    src.mkdir()
+    for name, color in [("a.jpg", "red"), ("b.jpg", "blue")]:
+        img = Image.new("RGB", (100, 100), color)
+        img.save(str(src / name))
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    params = PipelineParams(
+        source=str(src),
+        destination=str(dest),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    result = run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert result["stages"]["ingest"]["copied"] == 2
+    assert result["stages"]["ingest"]["skipped_duplicate"] == 0
+
+    # The live SSE stream should carry the same counts on the completed event.
+    ingest_completed_events = [
+        e[2]["stages"]["ingest"] for e in runner.events
+        if e[1] == "progress" and e[2]["stages"].get("ingest", {}).get("status") == "completed"
+    ]
+    assert ingest_completed_events, "expected a progress event with ingest completed"
+    assert ingest_completed_events[-1]["copied"] == 2
+
+
+def test_pipeline_ingest_omits_safe_to_eject_counts_on_partial_failure(tmp_path, monkeypatch):
+    """Plain copy mode (no local_processing) doesn't abort the run when a file
+    fails to copy — it still marks the ingest stage 'completed'. The
+    safe-to-eject counts must NOT be published in that case, since the source
+    still holds a file that never made it to the destination.
+    """
+    import config as cfg
+    import ingest as ingest_module
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    src = tmp_path / "source"
+    src.mkdir()
+    for name, color in [("a.jpg", "red"), ("b.jpg", "blue")]:
+        img = Image.new("RGB", (100, 100), color)
+        img.save(str(src / name))
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    real_copy2 = ingest_module.shutil.copy2
+
+    def flaky_copy2(source, destination, *args, **kwargs):
+        if str(source).endswith("b.jpg"):
+            raise OSError("simulated card read error")
+        return real_copy2(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(ingest_module.shutil, "copy2", flaky_copy2)
+
+    params = PipelineParams(
+        source=str(src),
+        destination=str(dest),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    result = run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert "ingest" not in result["stages"] or "copied" not in result["stages"]["ingest"]
+
+    ingest_completed_events = [
+        e[2]["stages"]["ingest"] for e in runner.events
+        if e[1] == "progress" and e[2]["stages"].get("ingest", {}).get("status") == "completed"
+    ]
+    assert ingest_completed_events, "expected a progress event with ingest completed"
+    assert "copied" not in ingest_completed_events[-1]
+
+
 def test_pipeline_ingest_step_present_only_with_destination(tmp_path, monkeypatch):
     """The 'ingest' step should only appear in step_defs when destination is set."""
     import config as cfg

@@ -1560,6 +1560,23 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         return
                     else:
                         stages["ingest"]["status"] = "completed"
+                        # Ingest is the only stage that ever reads the source
+                        # (SD card/etc.) — everything after this point works
+                        # from the copy. Record counts so the UI can tell the
+                        # user the card is safe to eject instead of leaving
+                        # them to guess. Only claim this when every discovered
+                        # file actually made it off the card: local_processing
+                        # aborts above on any failure, but plain copy mode
+                        # (local_processing=False) reaches this branch even
+                        # with total_failed > 0, and the card still holds
+                        # files that never got copied.
+                        if total_failed == 0:
+                            stages["ingest"]["copied"] = total_copied
+                            stages["ingest"]["skipped_duplicate"] = total_skipped
+                            result["stages"]["ingest"] = {
+                                "copied": total_copied,
+                                "skipped_duplicate": total_skipped,
+                            }
                         runner.update_step(
                             job["id"], "ingest", status="completed",
                             summary=summary,
