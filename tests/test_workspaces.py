@@ -1318,6 +1318,517 @@ def test_move_folders_blocks_descendant_when_source_root_remains(db):
     assert db.get_workspace_folders(ws2) == []
 
 
+def test_archive_merge_preserves_narrower_workspace_root(db):
+    """Merging into a broad archive must not widen an already-scoped workspace."""
+    ws_id = db.create_workspace("USA2026")
+
+    # Existing archive rows are globally known from another workspace/history,
+    # but this workspace is intentionally rooted only at the 2026 subtree.
+    db.set_active_workspace(None)
+    archive_id = db.add_folder("/archive/USA", name="USA")
+    year_id = db.add_folder("/archive/USA/2026", name="2026")
+    old_year_id = db.add_folder(
+        "/archive/USA/2020",
+        name="2020",
+        parent_id=archive_id,
+    )
+    db.add_photo(old_year_id, "old.jpg", ".jpg", 1000, 1.0)
+
+    db.set_active_workspace(ws_id)
+    db.add_workspace_folder(ws_id, year_id)
+    db.conn.executemany(
+        """INSERT INTO workspace_folders (workspace_id, folder_id, is_root)
+           VALUES (?, ?, 0)""",
+        [(ws_id, archive_id), (ws_id, old_year_id)],
+    )
+    db.conn.commit()
+
+    # Staging mirrors local-processing imports: the broad staging folder is
+    # just the archive shell; the touched dated leaf is the user-facing import
+    # root while it is still in staging.
+    staged_archive_id = db.add_folder(
+        "/staging/job/USA",
+        name="USA",
+        workspace_root=False,
+    )
+    staged_year_id = db.add_folder(
+        "/staging/job/USA/2026",
+        name="2026",
+        parent_id=staged_archive_id,
+        workspace_root=False,
+    )
+    staged_leaf_id = db.add_folder(
+        "/staging/job/USA/2026/2026-07-02",
+        name="2026-07-02",
+        parent_id=staged_year_id,
+        workspace_root=True,
+    )
+    db.add_photo(staged_leaf_id, "new.jpg", ".jpg", 1000, 2.0)
+    staged_other_year_id = db.add_folder(
+        "/staging/job/USA/2027",
+        name="2027",
+        parent_id=staged_archive_id,
+        workspace_root=False,
+    )
+    staged_other_leaf_id = db.add_folder(
+        "/staging/job/USA/2027/2027-01-01",
+        name="2027-01-01",
+        parent_id=staged_other_year_id,
+        workspace_root=True,
+    )
+    db.add_photo(staged_other_leaf_id, "future.jpg", ".jpg", 1000, 3.0)
+    db._new_images_cache.set(
+        db._db_path,
+        ws_id,
+        {"new_count": 99, "files": []},
+    )
+
+    result = db.merge_staged_tree_into_archive(staged_archive_id, "/archive/USA")
+
+    assert result["new_photos"] == 2
+    assert db._new_images_cache.get(db._db_path, ws_id) is None
+    root_paths = {
+        r["path"] for r in db.get_workspace_folder_roots(ws_id)
+    }
+    assert "/archive/USA/2026" in root_paths
+    assert "/archive/USA" not in root_paths
+    assert "/archive/USA/2027/2027-01-01" not in root_paths
+
+    archive_link = db.conn.execute(
+        """SELECT is_root FROM workspace_folders
+           WHERE workspace_id = ? AND folder_id = ?""",
+        (ws_id, archive_id),
+    ).fetchone()
+    assert archive_link is None
+
+    old_year_link = db.conn.execute(
+        """SELECT 1 FROM workspace_folders
+           WHERE workspace_id = ? AND folder_id = ?""",
+        (ws_id, old_year_id),
+    ).fetchone()
+    assert old_year_link is None
+
+    new_photo = db.conn.execute(
+        """SELECT p.filename
+           FROM photos p
+           JOIN folders f ON f.id = p.folder_id
+           JOIN workspace_folders wf ON wf.folder_id = f.id
+          WHERE wf.workspace_id = ? AND f.path = ?""",
+        (ws_id, "/archive/USA/2026/2026-07-02"),
+    ).fetchone()
+    assert new_photo["filename"] == "new.jpg"
+
+    old_photo = db.conn.execute(
+        """SELECT p.filename
+           FROM photos p
+           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+          WHERE wf.workspace_id = ? AND p.filename = ?""",
+        (ws_id, "old.jpg"),
+    ).fetchone()
+    assert old_photo is None
+
+    future_photo = db.conn.execute(
+        """SELECT p.filename
+           FROM photos p
+           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+          WHERE wf.workspace_id = ? AND p.filename = ?""",
+        (ws_id, "future.jpg"),
+    ).fetchone()
+    assert future_photo is None
+
+
+def test_archive_merge_scoped_root_invalidates_new_images_cache(db):
+    """Scoped-root merges must flush a stale new-images cache after commit.
+
+    The scoped-root branch skips ``add_workspace_folder`` for the broad
+    archive base; ``_prune_...`` and ``_materialize_...`` only invalidate
+    when they actually change rows. In the shape below both are no-ops, so
+    the only workspace-membership writes come from the reconciliation
+    loop's ``_add_workspace_folder_no_commit`` — which does not invalidate.
+    Without the post-commit invalidation a cache entry set between the
+    rsync copy and reconciliation would keep reporting the just-imported
+    files as "new" until the TTL expired.
+    """
+    ws_id = db.create_workspace("USA2026")
+
+    db.set_active_workspace(None)
+    archive_id = db.add_folder("/archive/USA", name="USA")
+    year_id = db.add_folder("/archive/USA/2026", name="2026")
+
+    db.set_active_workspace(ws_id)
+    db.add_workspace_folder(ws_id, year_id)
+
+    staged_archive_id = db.add_folder(
+        "/staging/job/USA",
+        name="USA",
+        workspace_root=False,
+    )
+    staged_year_id = db.add_folder(
+        "/staging/job/USA/2026",
+        name="2026",
+        parent_id=staged_archive_id,
+        workspace_root=False,
+    )
+    staged_leaf_id = db.add_folder(
+        "/staging/job/USA/2026/2026-07-02",
+        name="2026-07-02",
+        parent_id=staged_year_id,
+        workspace_root=True,
+    )
+    db.add_photo(staged_leaf_id, "new.jpg", ".jpg", 1000, 2.0)
+
+    db._new_images_cache.set(
+        db._db_path, ws_id, {"new_count": 0, "per_root": [], "sample": []}
+    )
+
+    db.merge_staged_tree_into_archive(staged_archive_id, "/archive/USA")
+
+    assert db._new_images_cache.get(db._db_path, ws_id) is None
+
+
+def test_archive_merge_new_path_preserves_narrower_workspace_root(db):
+    """Merging to a new archive path must not root a broader known ancestor."""
+    ws_id = db.create_workspace("USA2026")
+
+    db.set_active_workspace(None)
+    archive_id = db.add_folder("/archive/USA", name="USA")
+    year_id = db.add_folder(
+        "/archive/USA/2026",
+        name="2026",
+        parent_id=archive_id,
+    )
+    db.add_folder(
+        "/archive/USA/2020",
+        name="2020",
+        parent_id=archive_id,
+    )
+
+    db.set_active_workspace(ws_id)
+    db.add_workspace_folder(ws_id, year_id)
+
+    staged_year_id = db.add_folder(
+        "/staging/job/2027",
+        name="2027",
+        workspace_root=False,
+    )
+    staged_leaf_id = db.add_folder(
+        "/staging/job/2027/2027-01-01",
+        name="2027-01-01",
+        parent_id=staged_year_id,
+        workspace_root=True,
+    )
+    db.add_photo(staged_leaf_id, "future.jpg", ".jpg", 1000, 3.0)
+
+    result = db.merge_staged_tree_into_archive(
+        staged_year_id,
+        "/archive/USA/2027",
+    )
+
+    assert result["new_photos"] == 1
+    root_paths = {
+        r["path"] for r in db.get_workspace_folder_roots(ws_id)
+    }
+    assert root_paths == {"/archive/USA/2026"}
+
+    archive_link = db.conn.execute(
+        """SELECT 1 FROM workspace_folders
+           WHERE workspace_id = ? AND folder_id = ?""",
+        (ws_id, archive_id),
+    ).fetchone()
+    assert archive_link is None
+
+    future_photo = db.conn.execute(
+        """SELECT p.filename
+           FROM photos p
+           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+          WHERE wf.workspace_id = ? AND p.filename = ?""",
+        (ws_id, "future.jpg"),
+    ).fetchone()
+    assert future_photo is None
+
+
+def test_archive_merge_nested_new_path_does_not_link_out_of_scope_intermediate(db):
+    """A missing intermediate under a broad archive must not leak siblings.
+
+    Workspace root ``/archive/USA/2026`` is scoped narrower than the archive
+    base ``/archive/USA``. Merging into a nested new path ``/archive/USA/2027/
+    Trip`` requires materializing ``/archive/USA/2027`` as a folder row for
+    ``parent_id`` chaining. That intermediate must not be linked to the
+    workspace: no workspace root covers it, and any non-root link would let
+    ``_materialize_workspace_descendants`` (called by ``get_workspace_folders``)
+    pull the merged ``/archive/USA/2027/Trip`` subtree into the workspace.
+    """
+    ws_id = db.create_workspace("USA2026")
+
+    db.set_active_workspace(None)
+    archive_id = db.add_folder("/archive/USA", name="USA")
+    year_id = db.add_folder(
+        "/archive/USA/2026",
+        name="2026",
+        parent_id=archive_id,
+    )
+
+    db.set_active_workspace(ws_id)
+    db.add_workspace_folder(ws_id, year_id)
+
+    staged_trip_id = db.add_folder(
+        "/staging/job/Trip",
+        name="Trip",
+        workspace_root=True,
+    )
+    db.add_photo(staged_trip_id, "future.jpg", ".jpg", 1000, 3.0)
+
+    result = db.merge_staged_tree_into_archive(
+        staged_trip_id,
+        "/archive/USA/2027/Trip",
+    )
+
+    assert result["new_photos"] == 1
+
+    root_paths = {
+        r["path"] for r in db.get_workspace_folder_roots(ws_id)
+    }
+    assert root_paths == {"/archive/USA/2026"}
+
+    intermediate_row = db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?",
+        ("/archive/USA/2027",),
+    ).fetchone()
+    assert intermediate_row is not None
+    intermediate_link = db.conn.execute(
+        """SELECT 1 FROM workspace_folders
+           WHERE workspace_id = ? AND folder_id = ?""",
+        (ws_id, intermediate_row["id"]),
+    ).fetchone()
+    assert intermediate_link is None
+
+    # get_workspace_folders() runs _materialize_workspace_descendants; the
+    # merged Trip subtree must remain invisible to this scoped workspace.
+    linked_paths = {
+        r["path"] for r in db.get_workspace_folders(ws_id)
+    }
+    assert "/archive/USA/2027" not in linked_paths
+    assert "/archive/USA/2027/Trip" not in linked_paths
+
+    future_photo = db.conn.execute(
+        """SELECT p.filename
+           FROM photos p
+           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+          WHERE wf.workspace_id = ? AND p.filename = ?""",
+        (ws_id, "future.jpg"),
+    ).fetchone()
+    assert future_photo is None
+
+
+def test_archive_merge_new_path_prunes_stale_broad_nonroot_link(db):
+    """No-row merge must prune a stale broad ``is_root=0`` ancestor link.
+
+    Workspace root ``/archive/USA/2026`` is scoped narrower than the archive
+    base ``/archive/USA``. If the workspace already carries a stale
+    ``is_root=0`` link on ``/archive/USA`` (e.g. from a prior broader merge
+    or a legacy layout), merging into a brand-new sibling like
+    ``/archive/USA/2027/Trip`` (no folder row for the archive destination
+    yet) walks up to ``/archive/USA``, hits the descendant-root guard, and
+    skips rooting it. Without also pruning that stale non-root link the
+    next ``get_workspace_folders()`` runs
+    ``_materialize_workspace_descendants`` from ``/archive/USA`` and pulls
+    the freshly-inserted ``/archive/USA/2027`` (and its ``Trip`` subtree)
+    into the workspace, defeating the scoped merge. The elif branch must
+    prune uncovered non-root links matching the existing-row cleanup.
+    """
+    ws_id = db.create_workspace("USA2026")
+
+    db.set_active_workspace(None)
+    archive_id = db.add_folder("/archive/USA", name="USA")
+    year_id = db.add_folder(
+        "/archive/USA/2026",
+        name="2026",
+        parent_id=archive_id,
+    )
+
+    db.set_active_workspace(ws_id)
+    db.add_workspace_folder(ws_id, year_id)
+    # Seed the stale broad non-root link that this fix must clean up.
+    db.add_workspace_folder(ws_id, archive_id, is_root=False)
+
+    archive_link_before = db.conn.execute(
+        """SELECT is_root FROM workspace_folders
+           WHERE workspace_id = ? AND folder_id = ?""",
+        (ws_id, archive_id),
+    ).fetchone()
+    assert archive_link_before is not None
+    assert archive_link_before["is_root"] == 0
+
+    staged_trip_id = db.add_folder(
+        "/staging/job/Trip",
+        name="Trip",
+        workspace_root=True,
+    )
+    db.add_photo(staged_trip_id, "future.jpg", ".jpg", 1000, 3.0)
+
+    result = db.merge_staged_tree_into_archive(
+        staged_trip_id,
+        "/archive/USA/2027/Trip",
+    )
+
+    assert result["new_photos"] == 1
+
+    # The narrower root survives untouched.
+    root_paths = {
+        r["path"] for r in db.get_workspace_folder_roots(ws_id)
+    }
+    assert root_paths == {"/archive/USA/2026"}
+
+    # The stale ``/archive/USA`` non-root link is gone.
+    archive_link_after = db.conn.execute(
+        """SELECT 1 FROM workspace_folders
+           WHERE workspace_id = ? AND folder_id = ?""",
+        (ws_id, archive_id),
+    ).fetchone()
+    assert archive_link_after is None
+
+    # ``get_workspace_folders`` runs ``_materialize_workspace_descendants``;
+    # the merged Trip subtree and the new 2027 intermediate must remain
+    # invisible to this scoped workspace.
+    linked_paths = {
+        r["path"] for r in db.get_workspace_folders(ws_id)
+    }
+    assert "/archive/USA" not in linked_paths
+    assert "/archive/USA/2027" not in linked_paths
+    assert "/archive/USA/2027/Trip" not in linked_paths
+
+    future_photo = db.conn.execute(
+        """SELECT p.filename
+           FROM photos p
+           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+          WHERE wf.workspace_id = ? AND p.filename = ?""",
+        (ws_id, "future.jpg"),
+    ).fetchone()
+    assert future_photo is None
+
+
+def test_archive_merge_prunes_stale_nonroot_ancestor_above_scoped_root(db):
+    """Existing-row merge must prune non-root ancestors of the merge target.
+
+    A restricted scan (see ``scanner.py`` ``_restrict_root_paths``) links the
+    broad scan base as ``is_root=0`` above the user-facing scoped root — for
+    example, ``/archive`` non-root and ``/archive/USA/2026`` as the only
+    root. When a later merge into ``/archive/USA`` prunes non-root links at
+    or below ``/archive/USA`` and then calls
+    ``_materialize_workspace_descendants``, the surviving ``/archive``
+    non-root ancestor would immediately re-insert ``/archive/USA``,
+    ``/archive/USA/2020``, and any newly-merged sibling like
+    ``/archive/USA/2027``, defeating the scoped merge. The prune must also
+    remove uncovered non-root ancestors of the merge target.
+    """
+    ws_id = db.create_workspace("USA2026")
+
+    db.set_active_workspace(None)
+    archive_base_id = db.add_folder("/archive", name="archive")
+    usa_id = db.add_folder(
+        "/archive/USA",
+        name="USA",
+        parent_id=archive_base_id,
+    )
+    year_id = db.add_folder(
+        "/archive/USA/2026",
+        name="2026",
+        parent_id=usa_id,
+    )
+    old_year_id = db.add_folder(
+        "/archive/USA/2020",
+        name="2020",
+        parent_id=usa_id,
+    )
+    db.add_photo(old_year_id, "old.jpg", ".jpg", 1000, 1.0)
+
+    db.set_active_workspace(ws_id)
+    db.add_workspace_folder(ws_id, year_id)
+    # Seed the stale broad non-root ancestor link. This mirrors what a
+    # restricted scan leaves behind on the scan base above the scoped root.
+    db.add_workspace_folder(ws_id, archive_base_id, is_root=False)
+
+    staged_archive_id = db.add_folder(
+        "/staging/job/USA",
+        name="USA",
+        workspace_root=False,
+    )
+    staged_year_id = db.add_folder(
+        "/staging/job/USA/2026",
+        name="2026",
+        parent_id=staged_archive_id,
+        workspace_root=False,
+    )
+    staged_leaf_id = db.add_folder(
+        "/staging/job/USA/2026/2026-07-02",
+        name="2026-07-02",
+        parent_id=staged_year_id,
+        workspace_root=True,
+    )
+    db.add_photo(staged_leaf_id, "new.jpg", ".jpg", 1000, 2.0)
+    staged_other_year_id = db.add_folder(
+        "/staging/job/USA/2027",
+        name="2027",
+        parent_id=staged_archive_id,
+        workspace_root=False,
+    )
+    staged_other_leaf_id = db.add_folder(
+        "/staging/job/USA/2027/2027-01-01",
+        name="2027-01-01",
+        parent_id=staged_other_year_id,
+        workspace_root=True,
+    )
+    db.add_photo(staged_other_leaf_id, "future.jpg", ".jpg", 1000, 3.0)
+
+    db.merge_staged_tree_into_archive(staged_archive_id, "/archive/USA")
+
+    # Scoped root survives untouched.
+    root_paths = {
+        r["path"] for r in db.get_workspace_folder_roots(ws_id)
+    }
+    assert root_paths == {"/archive/USA/2026"}
+
+    # The stale ``/archive`` non-root ancestor link is gone, so a later
+    # ``_materialize_workspace_descendants`` cannot pull the whole archive
+    # subtree back into the workspace.
+    archive_base_link = db.conn.execute(
+        """SELECT 1 FROM workspace_folders
+           WHERE workspace_id = ? AND folder_id = ?""",
+        (ws_id, archive_base_id),
+    ).fetchone()
+    assert archive_base_link is None
+
+    # ``get_workspace_folders`` invokes ``_materialize_workspace_descendants``;
+    # verify neither the broad archive base nor sibling years surface.
+    linked_paths = {
+        r["path"] for r in db.get_workspace_folders(ws_id)
+    }
+    assert "/archive" not in linked_paths
+    assert "/archive/USA" not in linked_paths
+    assert "/archive/USA/2020" not in linked_paths
+    assert "/archive/USA/2027" not in linked_paths
+    assert "/archive/USA/2027/2027-01-01" not in linked_paths
+
+    # Out-of-scope sibling photos stay hidden.
+    old_photo = db.conn.execute(
+        """SELECT p.filename
+           FROM photos p
+           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+          WHERE wf.workspace_id = ? AND p.filename = ?""",
+        (ws_id, "old.jpg"),
+    ).fetchone()
+    assert old_photo is None
+
+    future_photo = db.conn.execute(
+        """SELECT p.filename
+           FROM photos p
+           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+          WHERE wf.workspace_id = ? AND p.filename = ?""",
+        (ws_id, "future.jpg"),
+    ).fetchone()
+    assert future_photo is None
+
+
 def test_move_folders_validates_source_workspace(db):
     """Raises ValueError if source workspace doesn't exist."""
     ws = db.create_workspace("A")

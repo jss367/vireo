@@ -2807,6 +2807,77 @@ class Database:
                 return True
         return False
 
+    def _active_ws_root_descendant_exists(self, workspace_id, path):
+        """True if ``workspace_id`` has a strict root descendant of ``path``."""
+        target = _path_for_subtree_match(path)
+        rows = self.conn.execute(
+            """SELECT f.path FROM workspace_folders wf
+               JOIN folders f ON f.id = wf.folder_id
+               WHERE wf.workspace_id = ? AND wf.is_root = 1""",
+            (workspace_id,),
+        ).fetchall()
+        prefix = target + "/"
+        for r in rows:
+            root = _path_for_subtree_match(r["path"])
+            if root.startswith(prefix):
+                return True
+        return False
+
+    def _prune_ws_nonroot_links_outside_roots(self, workspace_id, path):
+        """Drop non-root links that could re-materialize ``path``'s subtree.
+
+        Prunes uncovered non-root links that are ``path`` itself, strict
+        descendants of ``path``, OR strict ancestors of ``path``. Ancestors
+        matter because ``_materialize_workspace_descendants`` walks the whole
+        subtree below every linked folder — a surviving non-root ancestor
+        like ``/archive`` (left over from a restricted scan; see
+        ``scanner.py`` ``_restrict_root_paths``) would immediately re-insert
+        ``/archive/USA`` and any sibling like ``/archive/USA/2027`` after
+        the caller pruned them, defeating a scoped merge into a workspace
+        rooted at ``/archive/USA/2026``.
+        """
+        target = _path_for_subtree_match(path)
+        roots = [
+            _path_for_subtree_match(r["path"])
+            for r in self.conn.execute(
+                """SELECT f.path FROM workspace_folders wf
+                   JOIN folders f ON f.id = wf.folder_id
+                   WHERE wf.workspace_id = ? AND wf.is_root = 1""",
+                (workspace_id,),
+            ).fetchall()
+        ]
+        rows = self.conn.execute(
+            """SELECT wf.folder_id, f.path FROM workspace_folders wf
+               JOIN folders f ON f.id = wf.folder_id
+               WHERE wf.workspace_id = ? AND wf.is_root = 0""",
+            (workspace_id,),
+        ).fetchall()
+        target_prefix = target + "/"
+        prune_ids = []
+        for row in rows:
+            current = _path_for_subtree_match(row["path"])
+            current_prefix = current + "/"
+            if (current != target
+                    and not current.startswith(target_prefix)
+                    and not target.startswith(current_prefix)):
+                continue
+            if any(current == root or current.startswith(root + "/")
+                   for root in roots):
+                continue
+            prune_ids.append(row["folder_id"])
+
+        for chunk in _chunks(prune_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            self.conn.execute(
+                f"""DELETE FROM workspace_folders
+                    WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
+                [workspace_id] + chunk,
+            )
+        if prune_ids:
+            self.conn.commit()
+            self._new_images_cache.invalidate_workspaces(
+                self._db_path, [workspace_id])
+
     def merge_staged_tree_into_archive(self, staged_root_id, archive_path):
         """Fold a staged folder subtree into an existing tracked archive.
 
@@ -2903,14 +2974,27 @@ class Database:
             ).fetchone()
             if existing_link is None or existing_link["is_root"] == 0:
                 # Not root of ws (unlinked, or linked non-root): link the
-                # subtree, and root the base only if no strict ancestor is
-                # already a root. ``_active_ws_root_ancestor_exists`` cannot
-                # self-match here because the base is not currently a root
-                # of ws, so the check is a true "ancestor above" question.
+                # subtree, and root the base only if it would not replace an
+                # existing narrower or broader root. A strict descendant root
+                # means the workspace is intentionally scoped inside this
+                # archive (e.g. ``/Photos/USA/2026`` while importing into
+                # ``/Photos/USA``). In that shape, do not link the broad base
+                # at all: even a non-root link materializes every descendant
+                # and would make archive siblings part of workspace queries.
                 has_root_ancestor = self._active_ws_root_ancestor_exists(
                     ws, archive_path)
-                self.add_workspace_folder(
-                    ws, archive_row["id"], is_root=not has_root_ancestor)
+                has_root_descendant = self._active_ws_root_descendant_exists(
+                    ws, archive_path)
+                if has_root_descendant and not has_root_ancestor:
+                    self._prune_ws_nonroot_links_outside_roots(
+                        ws, archive_path)
+                    self._materialize_workspace_descendants(ws)
+                else:
+                    self.add_workspace_folder(
+                        ws,
+                        archive_row["id"],
+                        is_root=not has_root_ancestor,
+                    )
             # else: base is already a workspace root — nothing to do.
             # If the archive base was marked ``missing`` at a previous health
             # scan (drive unmounted at the time), the storage preflight has
@@ -2948,8 +3032,26 @@ class Database:
                     "SELECT id FROM folders WHERE path = ?", (probe,)
                 ).fetchone()
                 if ancestor_row is not None:
-                    self.add_workspace_folder(
-                        ws, ancestor_row["id"], is_root=True)
+                    if not self._active_ws_root_descendant_exists(ws, probe):
+                        self.add_workspace_folder(
+                            ws, ancestor_row["id"], is_root=True)
+                    else:
+                        # Descendant-root guard fires: the workspace is
+                        # scoped narrower than this ancestor, so rooting
+                        # it would widen the scope past the intended root.
+                        # But any pre-existing ``is_root=0`` link on this
+                        # ancestor (or on descendants below it that no
+                        # root still covers) would let
+                        # ``_materialize_workspace_descendants`` — called
+                        # by later ``get_workspace_folders()`` reads —
+                        # pull the broader subtree back into the workspace
+                        # and defeat the scoped merge. Prune those
+                        # uncovered non-root links now, matching the
+                        # cleanup the ``existing_link is None or
+                        # is_root == 0`` branch above already performs
+                        # via ``_prune_ws_nonroot_links_outside_roots``.
+                        self._prune_ws_nonroot_links_outside_roots(
+                            ws, probe)
                     break
                 probe = os.path.dirname(probe)
 
@@ -2974,7 +3076,15 @@ class Database:
         # is the expected shape for a root. Otherwise insert missing rows
         # top-down so each child's ``parent_id`` resolves to its freshly-
         # created parent, and link each to the active workspace non-root
-        # (they sit under an existing tracked root by construction).
+        # ONLY when an existing workspace root actually covers the
+        # intermediate. Linking non-root unconditionally would leak: if the
+        # workspace is scoped to a narrower root (e.g. ``/archive/USA/2026``)
+        # and the merge target is a sibling like ``/archive/USA/2027/Trip``,
+        # the descendant-root guard above suppresses rooting ``/archive/USA``,
+        # so no workspace root covers the ``/archive/USA/2027`` intermediate.
+        # A non-root link there still makes 2027's subtree visible via
+        # ``_materialize_workspace_descendants`` (called by
+        # ``get_workspace_folders``), defeating the scoped-merge behavior.
         missing_intermediates = []
         probe = os.path.dirname(archive_path)
         anchor_found = False
@@ -3021,8 +3131,9 @@ class Database:
                     mid_id = self.conn.execute(
                         "SELECT id FROM folders WHERE path = ?", (mid_path,)
                     ).fetchone()["id"]
-                self.add_workspace_folder(
-                    ws, mid_id, is_root=False)
+                if self._active_ws_root_ancestor_exists(ws, mid_path):
+                    self.add_workspace_folder(
+                        ws, mid_id, is_root=False)
 
         # Snapshot staged folders root-first (shallowest path first) so a
         # parent's target row exists before its children are processed.
@@ -3099,6 +3210,8 @@ class Database:
                         )
 
                 if target is None:
+                    target_in_workspace = self._active_ws_root_ancestor_exists(
+                        ws, target_path)
                     # New folder under the archive: repoint + reparent + link.
                     self.conn.execute(
                         "UPDATE folders SET path = ?, parent_id = ? "
@@ -3111,26 +3224,29 @@ class Database:
                     # commit would persist a partial reparent that the outer
                     # rollback (below) could no longer undo if a later staged
                     # folder raised.
-                    self._add_workspace_folder_no_commit(
-                        ws, sf["id"], is_root=False)
-                    # The staging scan registers each photo-bearing leaf as
-                    # its own workspace ROOT (scanner restrict_dirs =>
-                    # is_root=1). Once that leaf is folded under the existing
-                    # archive base it must become a plain descendant,
-                    # otherwise the merge leaves a stray second workspace
-                    # root inside the archive — the exact overlap the
-                    # tracked-ancestor guard was meant to prevent.
-                    # add_workspace_folder's INSERT OR IGNORE can't downgrade
-                    # an existing is_root=1 row, so demote it explicitly here.
-                    # A folded-in leaf is always a descendant of an existing
-                    # archive root (the base itself, or an ancestor root
-                    # above it), so it is unconditionally non-root — no need
-                    # to check the base's is_root.
-                    self.conn.execute(
-                        "UPDATE workspace_folders SET is_root = 0 "
-                        "WHERE workspace_id = ? AND folder_id = ?",
-                        (ws, sf["id"]),
-                    )
+                    if target_in_workspace:
+                        self._add_workspace_folder_no_commit(
+                            ws, sf["id"], is_root=False)
+                        # The staging scan registers each photo-bearing leaf as
+                        # its own workspace ROOT (scanner restrict_dirs =>
+                        # is_root=1). Once that leaf is folded under the existing
+                        # archive base it must become a plain descendant,
+                        # otherwise the merge leaves a stray second workspace
+                        # root inside the archive — the exact overlap the
+                        # tracked-ancestor guard was meant to prevent.
+                        # add_workspace_folder's INSERT OR IGNORE can't downgrade
+                        # an existing is_root=1 row, so demote it explicitly here.
+                        self.conn.execute(
+                            "UPDATE workspace_folders SET is_root = 0 "
+                            "WHERE workspace_id = ? AND folder_id = ?",
+                            (ws, sf["id"]),
+                        )
+                    else:
+                        self.conn.execute(
+                            "DELETE FROM workspace_folders "
+                            "WHERE workspace_id = ? AND folder_id = ?",
+                            (ws, sf["id"]),
+                        )
                     # Every staged photo in a brand-new folder is newly
                     # archived.
                     new_count = self.conn.execute(
@@ -3399,6 +3515,7 @@ class Database:
                 self.conn.execute("DELETE FROM folders WHERE id = ?", (fid,))
 
             self.conn.commit()
+            self._new_images_cache.invalidate_workspaces(self._db_path, [ws])
         except Exception:
             self.conn.rollback()
             raise

@@ -56,6 +56,8 @@ def test_api_new_images_reports_unscanned_files(app_and_db):
 
 
 def test_api_new_images_zero_when_fully_ingested(app_and_db):
+    import time
+
     app, db, ws_id, tmp_path = app_and_db
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG.JPG"))
@@ -66,6 +68,16 @@ def test_api_new_images_zero_when_fully_ingested(app_and_db):
     client = app.test_client()
     resp = client.get("/api/workspaces/active/new-images")
     data = resp.get_json()
+    # The endpoint waits ~500ms for the background walk before returning
+    # ``pending``. On loaded CI runners the walk can slip past that window,
+    # so tolerate the pending state and re-poll until the cache populates.
+    if data.get("pending"):
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            time.sleep(0.05)
+            data = client.get("/api/workspaces/active/new-images").get_json()
+            if not data.get("pending"):
+                break
     assert data["new_count"] == 0
     assert data["workspace_id"] == ws_id
 
