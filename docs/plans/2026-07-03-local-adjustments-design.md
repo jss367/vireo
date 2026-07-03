@@ -104,8 +104,16 @@ and one `background` entry):
   least one active region referencing it.
 - Allowed per-region adjustments (v1): `exposure`, `highlights`, `shadows`,
   `contrast`, `saturation`, plus detail's `sharpen`/`sharpen_radius`/
-  `noise_reduction`. Same ranges and normalization rules as global
-  adjustments; zero values normalize away, empty entries are dropped.
+  `noise_reduction`. Same ranges as global adjustments; zero values
+  normalize away and empty entries are dropped, with one exception:
+  `sharpen_radius` is kept whenever the *resolved branch* sharpen is
+  non-zero (`global.sharpen + region.sharpen != 0`), not only when the
+  region's own `sharpen` delta is non-zero. Applying global's rule
+  literally — drop `sharpen_radius` unless the same object's `sharpen`
+  is non-zero — would silently discard a subject-only radius change with
+  zero strength delta, so the branch would fall back to the global
+  radius and contradict §Rendering's local-detail rule where a region
+  radius overrides the global one.
 
 ### Mask snapshots, not live references
 
@@ -178,11 +186,18 @@ PR 1 records working-copy provenance in a new dedicated
 `'embedded_jpeg'`), written by **every** path that materializes
 `working_copy_path`. Scanner's happy RAW extraction writes `'raw'`
 when `_load_raw` returned a demosaiced result, or `'embedded_jpeg'`
-when it returned via the libraw-failure embedded-JPEG fallback
-(`extract_working_copy` distinguishes these by comparing the returned
-image's dimensions to the sensor's `raw.sizes.width`/`.height` — an
-embedded fallback that matches the sensor exactly is safe to treat as
-`'raw'`, everything else is `'embedded_jpeg'`). Scanner's
+when it returned via the libraw-failure embedded-JPEG fallback. This
+must not be inferred from returned image dimensions: `extract_working_copy`
+calls `load_image(..., max_size=working_copy_max_size)`, so `load_image`
+thumbnails the RAW after decode — an ordinary 6000×4000 demosaiced RAW
+saved at 4096×2731 would compare unequal to `raw.sizes.width`/`.height`
+and be misclassified as `'embedded_jpeg'`, disabling local adjustments
+on every offline render of a valid RAW-derived working copy. PR 1
+plumbs an explicit `used_embedded_fallback` flag out of `_load_raw`
+(set in the same libraw-failure branch that today falls through to the
+embedded JPEG) and threads it through `extract_working_copy` to the
+scanner, so provenance follows the actual decode path rather than a
+downstream size heuristic. Scanner's
 RAW-then-companion fallback writes `'companion'` (alongside the
 existing `working_copy_failed_source='source'` routing marker it also
 writes), as do both on-demand `/original` companion re-extract
