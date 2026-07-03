@@ -370,11 +370,19 @@ differs from that entry's `source_digest`; the editor surfaces "Newer
 subject mask available — Update" whenever **any** variant is stale, and
 Update rewrites the affected variants (regenerating only what changed —
 e.g., a replaced companion JPEG re-materializes just the `standard`
-variant) along with `local.mask.ref`. This matters for RAW+JPEG offline
-renders: if the companion JPEG (or its detection) changes while the RAW
-active mask stays the same, a single top-level digest would miss it and
-the standard-basis fallback would keep using the old snapshot with no
-stale banner. Recipe edits are undoable and cache-invalidating.
+variant) and their per-variant `source_digest` entries in `mask.decodes`.
+`local.mask.ref` **stays stable** across partial refreshes: on-disk
+filenames are keyed `{photo_id}.{ref}.{decode}.png` with no per-variant
+ref, so rotating the ref while leaving an untouched variant behind would
+orphan that variant's file under the old ref and the next render on that
+basis would see a missing snapshot and disable the local pass. The ref
+only rotates on a **full re-snapshot** where every variant regenerates
+together (e.g., after a mask deletion or a manual reset), keeping the
+on-disk family under the new ref always complete. This matters for
+RAW+JPEG offline renders: if the companion JPEG (or its detection)
+changes while the RAW active mask stays the same, a single top-level
+digest would miss it and the standard-basis fallback would keep using
+the old snapshot with no stale banner. Recipe edits are undoable and cache-invalidating.
 Comparing on inputs is deliberately not a byte comparison against the
 snapshot: for RAWs the snapshot pixels come from a re-detection in
 preserve-highlights space and will never byte-match the JPEG-first
@@ -428,22 +436,29 @@ passes. The weight map is built once and materialized at both scales:
    has to update the basis in lock-step with the swap. Today those sites
    are: `serve_preview` and the edit-preview route, which drop an
    undersized embedded-JPEG or failed RAW decode in favor of the
-   companion JPEG (`vireo/app.py:18395-18453`, `18630-18691`); the export
-   pipeline, which does the same after `load_image`
-   (`vireo/export.py:319-363`); the **Open External handoff**, which
-   applies the recipe to the loaded image and has the same
-   RAW-decode-failure or undersized-embedded-JPEG → companion JPEG switch
-   before `apply_recipe_to_loaded_image` (`vireo/app.py:9195-9266`); and
-   the **iNaturalist upload** path, which mirrors the handoff and does
-   the same swap before rendering (`vireo/app.py:11540-11594`). All four
-   switches change the effective basis from `preserve_highlights` to
-   `standard`, so the weight-map builder consumes the basis that reflects
-   the *actual* loaded image at each site, not the one
-   `recipe_render_source` chose up front — every one of these call sites
-   updates the basis alongside the source swap before invoking the local
-   pass. Restricting the fix to preview/export would silently misalign
-   local weights on Open External and iNat upload renders for exactly the
-   RAW+JPEG cases the fallback exists to serve. If the final basis has no
+   companion JPEG (`vireo/app.py:18395-18453`, `18630-18691`); the
+   **edited `/photos/<id>/original` route**, where `serve_original_photo`
+   applies the same RAW-decode-failure or undersized-embedded-JPEG →
+   companion swap before calling `apply_recipe_to_loaded_image`
+   (`vireo/app.py:18921-18969`, call at `18978-18982`) — this is the
+   full-size / 1:1 edited render served to the lightbox, so omitting it
+   would misalign local weights on exactly the "view at 100%" path users
+   trust to show the finished edit; the export pipeline, which does the
+   same after `load_image` (`vireo/export.py:319-363`); the **Open
+   External handoff**, which applies the recipe to the loaded image and
+   has the same RAW-decode-failure or undersized-embedded-JPEG →
+   companion JPEG switch before `apply_recipe_to_loaded_image`
+   (`vireo/app.py:9195-9266`); and the **iNaturalist upload** path, which
+   mirrors the handoff and does the same swap before rendering
+   (`vireo/app.py:11540-11594`). All five switches change the effective
+   basis from `preserve_highlights` to `standard`, so the weight-map
+   builder consumes the basis that reflects the *actual* loaded image at
+   each site, not the one `recipe_render_source` chose up front — every
+   one of these call sites updates the basis alongside the source swap
+   before invoking the local pass. Restricting the fix to preview/export
+   would silently misalign local weights on the edited `/original`, Open
+   External, and iNat upload renders for exactly the RAW+JPEG cases the
+   fallback exists to serve. If the final basis has no
    matching `mask.decodes` entry the pass is disabled, warn-and-hold-zero,
    as above. Load
    the picked variant's on-disk file and bilinearly resample it to the
