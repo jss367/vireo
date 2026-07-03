@@ -218,6 +218,22 @@ body {
   font-size: 12px;
 }
 .control-row input[type="range"] { width: 100%; }
+.preset-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  margin: 10px 0;
+}
+.preset-row select,
+.preset-row input[type="text"] {
+  width: 100%;
+  padding: 6px 8px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  font-size: 12px;
+}
 .control-value {
   color: var(--text-muted);
   font-size: 12px;
@@ -437,6 +453,21 @@ body {
     </div>
 
     <div class="panel-band">
+      <div class="panel-title">Presets</div>
+      <div class="preset-row">
+        <select id="presetSelect" onchange="onPresetSelected()">
+          <option value="">Select a preset...</option>
+        </select>
+        <input id="presetNameInput" type="text" maxlength="80" placeholder="Preset name" aria-label="Preset name">
+      </div>
+      <div class="button-row">
+        <button class="editor-btn" type="button" id="applyPresetBtn" onclick="applySelectedPreset()" disabled>Apply</button>
+        <button class="editor-btn" type="button" id="savePresetBtn" onclick="saveCurrentAsPreset()">Save</button>
+        <button class="editor-btn" type="button" id="deletePresetBtn" onclick="deleteSelectedPreset()" disabled>Delete</button>
+      </div>
+    </div>
+
+    <div class="panel-band">
       <div class="panel-title">Adjustments</div>
       <div class="button-row">
         <button class="editor-btn" type="button" id="autoToneBtn" onclick="autoTone()">Auto Tone</button>
@@ -536,6 +567,7 @@ var editorState = {
   photo: null,
   savedRecipe: {},
   recipe: {},
+  presets: [],
   previewSeq: 0,
   previewTimer: null,
   drag: null,
@@ -1114,6 +1146,122 @@ function resetAdjustments() {
   markChanged(true);
 }
 
+// --- Presets ---------------------------------------------------------------
+// Reusable adjustments-only looks (tone + white balance + detail). Applying a
+// preset replaces the working recipe's adjustments and leaves geometry alone;
+// nothing persists until the user saves the photo. See
+// docs/plans/2026-07-03-edit-presets-design.md.
+
+async function loadPresets(selectId) {
+  try {
+    var data = await safeFetch('/api/edit-presets', {}, {toast: false});
+    editorState.presets = data.presets || [];
+  } catch (e) {
+    editorState.presets = [];
+  }
+  renderPresetOptions(selectId);
+}
+
+function renderPresetOptions(selectId) {
+  var sel = document.getElementById('presetSelect');
+  if (!sel) return;
+  var current = selectId != null ? String(selectId) : sel.value;
+  sel.innerHTML = '';
+  var placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = editorState.presets.length
+    ? 'Select a preset...'
+    : 'No presets saved yet';
+  sel.appendChild(placeholder);
+  editorState.presets.forEach(function(p) {
+    var opt = document.createElement('option');
+    opt.value = String(p.id);
+    opt.textContent = p.name;
+    sel.appendChild(opt);
+  });
+  sel.value = current;
+  if (sel.value !== current) sel.value = '';
+  onPresetSelected();
+}
+
+function selectedPreset() {
+  var sel = document.getElementById('presetSelect');
+  var id = sel ? Number(sel.value) : NaN;
+  return editorState.presets.find(function(p) { return p.id === id; }) || null;
+}
+
+function onPresetSelected() {
+  var preset = selectedPreset();
+  document.getElementById('applyPresetBtn').disabled = !preset;
+  document.getElementById('deletePresetBtn').disabled = !preset;
+  if (preset) document.getElementById('presetNameInput').value = preset.name;
+}
+
+function applySelectedPreset() {
+  var preset = selectedPreset();
+  if (!preset || editorState.loading) return;
+  var adj = cloneRecipe((preset.recipe || {}).adjustments || {});
+  if (Object.keys(adj).length) editorState.recipe.adjustments = adj;
+  else delete editorState.recipe.adjustments;
+  syncControls();
+  markChanged(true);
+  if (typeof showToast === 'function') {
+    showToast('Applied preset "' + preset.name + '" (not saved yet)', 'success');
+  }
+}
+
+async function saveCurrentAsPreset() {
+  var current = recipeForSave(editorState.recipe);
+  if (!current.adjustments) {
+    if (typeof showToast === 'function') {
+      showToast('No adjustments to save as a preset', 'error');
+    }
+    return;
+  }
+  var name = document.getElementById('presetNameInput').value.trim();
+  if (!name) {
+    if (typeof showToast === 'function') {
+      showToast('Enter a preset name first', 'error');
+    }
+    return;
+  }
+  try {
+    var data = await safeFetch('/api/edit-presets', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        name: name,
+        recipe: {adjustments: current.adjustments},
+      }),
+    }, {toast: false});
+    await loadPresets(data.preset && data.preset.id);
+    if (typeof showToast === 'function') {
+      showToast('Saved preset "' + data.preset.name + '"', 'success');
+    }
+  } catch (e) {
+    if (typeof showToast === 'function') {
+      showToast(e.message || 'Could not save preset', 'error');
+    }
+  }
+}
+
+async function deleteSelectedPreset() {
+  var preset = selectedPreset();
+  if (!preset) return;
+  try {
+    await safeFetch('/api/edit-presets/' + preset.id, {method: 'DELETE'}, {toast: false});
+    document.getElementById('presetNameInput').value = '';
+    await loadPresets('');
+    if (typeof showToast === 'function') {
+      showToast('Deleted preset "' + preset.name + '"', 'success');
+    }
+  } catch (e) {
+    if (typeof showToast === 'function') {
+      showToast(e.message || 'Could not delete preset', 'error');
+    }
+  }
+}
+
 function resetDetail() {
   var adj = cloneRecipe(editorState.recipe.adjustments || {});
   delete adj.sharpen;
@@ -1658,6 +1806,7 @@ async function initEditor() {
   initEditorKeyboard();
   clearHistogramFeedback();
   setZoomMode('fit');
+  loadPresets();
   if (window.vireoEditNav) editorState.navIds = window.vireoEditNav.getList() || [];
   var match = window.location.pathname.match(/\/edit\/(\d+)/);
   var photoId = match

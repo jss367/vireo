@@ -14614,3 +14614,89 @@ def test_workspace_active_labels_survive_non_dict_overrides(tmp_path):
         # Setter must replace the junk rather than crash on item assignment.
         db.set_workspace_active_labels(["birds.txt"])
         assert db.get_workspace_active_labels() == ["birds.txt"]
+
+
+def test_edit_presets_crud_strips_geometry(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    assert db.list_edit_presets() == []
+
+    preset = db.save_edit_preset(
+        "High-ISO forest",
+        {
+            "rotation": 90,
+            "crop": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+            "adjustments": {"exposure": 0.5, "noise_reduction": 40},
+        },
+    )
+    assert preset["name"] == "High-ISO forest"
+    assert preset["recipe"] == {
+        "version": 1,
+        "adjustments": {"exposure": 0.5, "noise_reduction": 40.0},
+    }
+
+    listed = db.list_edit_presets()
+    assert len(listed) == 1
+    assert listed[0]["id"] == preset["id"]
+    assert listed[0]["recipe"]["adjustments"]["noise_reduction"] == 40.0
+
+
+def test_edit_preset_upserts_by_trimmed_name(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+
+    first = db.save_edit_preset("Backlit  ", {"adjustments": {"exposure": 1}})
+    second = db.save_edit_preset(
+        " Backlit", {"adjustments": {"shadows": 30}}
+    )
+
+    assert first["name"] == "Backlit"
+    assert second["id"] == first["id"]
+    listed = db.list_edit_presets()
+    assert len(listed) == 1
+    assert listed[0]["recipe"]["adjustments"] == {"shadows": 30.0}
+
+
+def test_edit_presets_list_sorted_by_name(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    for name in ("zebra dusk", "Backlit", "high-ISO forest"):
+        db.save_edit_preset(name, {"adjustments": {"contrast": 10}})
+
+    names = [p["name"] for p in db.list_edit_presets()]
+    assert names == sorted(names, key=str.casefold)
+
+
+def test_edit_preset_rejects_empty_or_geometry_only(tmp_path):
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+
+    with pytest.raises(ValueError):
+        db.save_edit_preset("Nothing", {})
+    with pytest.raises(ValueError):
+        db.save_edit_preset("Geometry only", {"rotation": 90})
+    with pytest.raises(ValueError):
+        db.save_edit_preset("Zeroed", {"adjustments": {"exposure": 0}})
+    assert db.list_edit_presets() == []
+
+
+def test_edit_preset_rejects_blank_or_overlong_name(tmp_path):
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+
+    with pytest.raises(ValueError):
+        db.save_edit_preset("   ", {"adjustments": {"exposure": 1}})
+    with pytest.raises(ValueError):
+        db.save_edit_preset("x" * 200, {"adjustments": {"exposure": 1}})
+
+
+def test_delete_edit_preset(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    preset = db.save_edit_preset("Doomed", {"adjustments": {"exposure": 1}})
+
+    assert db.delete_edit_preset(preset["id"]) is True
+    assert db.delete_edit_preset(preset["id"]) is False
+    assert db.list_edit_presets() == []

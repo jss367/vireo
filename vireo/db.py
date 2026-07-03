@@ -727,6 +727,14 @@ class Database:
                 updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
+            CREATE TABLE IF NOT EXISTS edit_presets (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT NOT NULL UNIQUE,
+                recipe_json TEXT NOT NULL,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
             CREATE TABLE IF NOT EXISTS photo_preferences (
                 workspace_id  INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
                 purpose       TEXT NOT NULL,
@@ -6570,6 +6578,105 @@ class Database:
         cur = self.conn.execute(
             "DELETE FROM photo_edit_recipes WHERE photo_id = ?",
             (photo_id,),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    # --- edit presets (global, adjustments-only looks) ----------------------
+
+    EDIT_PRESET_NAME_MAX = 80
+
+    def list_edit_presets(self):
+        """Return all edit presets, sorted case-insensitively by name.
+
+        Presets are global (not workspace-scoped): they capture a look, and a
+        look is the same look in every workspace.
+        """
+        from image_edits import copy_recipe
+
+        rows = self.conn.execute(
+            "SELECT id, name, recipe_json, updated_at FROM edit_presets"
+        ).fetchall()
+        out = []
+        for row in rows:
+            try:
+                recipe = copy_recipe(row["recipe_json"])
+            except Exception:
+                log.warning(
+                    "Invalid stored edit preset %s (%r)",
+                    row["id"], row["name"], exc_info=True,
+                )
+                continue
+            out.append({
+                "id": row["id"],
+                "name": row["name"],
+                "recipe": recipe,
+                "updated_at": row["updated_at"],
+            })
+        out.sort(key=lambda p: p["name"].casefold())
+        return out
+
+    def save_edit_preset(self, name, recipe):
+        """Create or overwrite (by trimmed name) a global edit preset.
+
+        Only the recipe's ``adjustments`` section is kept — geometry
+        (rotation/flip/straighten/crop) describes one photo, not a look.
+        Raises ValueError (or RecipeError, its subclass) for a blank or
+        overlong name, a malformed recipe, or one with no effective
+        adjustments. Returns the stored preset dict.
+        """
+        from image_edits import (
+            RecipeError,
+            copy_recipe,
+            normalize_recipe,
+            recipe_to_json,
+        )
+
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("preset name must not be blank")
+        name = name.strip()
+        if len(name) > self.EDIT_PRESET_NAME_MAX:
+            raise ValueError(
+                f"preset name must be {self.EDIT_PRESET_NAME_MAX} "
+                "characters or fewer"
+            )
+
+        if isinstance(recipe, str):
+            recipe = normalize_recipe(recipe) or {}
+        if not isinstance(recipe, dict):
+            raise RecipeError("recipe must be an object")
+        normalized = normalize_recipe(
+            {"adjustments": recipe.get("adjustments") or {}}
+        )
+        if not (normalized or {}).get("adjustments"):
+            raise ValueError("preset must include at least one adjustment")
+        recipe_json = recipe_to_json(normalized)
+
+        self.conn.execute(
+            """INSERT INTO edit_presets (name, recipe_json, updated_at)
+               VALUES (?, ?, datetime('now'))
+               ON CONFLICT(name) DO UPDATE SET
+                   recipe_json = excluded.recipe_json,
+                   updated_at = excluded.updated_at""",
+            (name, recipe_json),
+        )
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT id, name, recipe_json, updated_at FROM edit_presets "
+            "WHERE name = ?",
+            (name,),
+        ).fetchone()
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "recipe": copy_recipe(row["recipe_json"]),
+            "updated_at": row["updated_at"],
+        }
+
+    def delete_edit_preset(self, preset_id):
+        """Delete an edit preset. Returns True if a row was removed."""
+        cur = self.conn.execute(
+            "DELETE FROM edit_presets WHERE id = ?", (preset_id,)
         )
         self.conn.commit()
         return cur.rowcount > 0

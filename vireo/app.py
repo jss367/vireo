@@ -4103,6 +4103,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "recipe": db.get_photo_edit_recipe(applied[0]) if applied else None,
         })
 
+    @app.route("/api/edit-presets", methods=["GET", "POST"])
+    def api_edit_presets():
+        """List or save (upsert by name) global edit presets.
+
+        Presets store an adjustments-only recipe — a reusable look. Geometry
+        is stripped on save; see db.save_edit_preset.
+        """
+        db = _get_db()
+        if request.method == "GET":
+            return jsonify({"presets": db.list_edit_presets()})
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
+        recipe = body.get("recipe")
+        if not isinstance(recipe, dict):
+            return json_error("recipe must be a JSON object")
+        try:
+            preset = db.save_edit_preset(body.get("name"), recipe)
+        except ValueError as e:  # includes RecipeError
+            return json_error(str(e))
+        return jsonify({"ok": True, "preset": preset})
+
+    @app.route("/api/edit-presets/<int:preset_id>", methods=["DELETE"])
+    def api_delete_edit_preset(preset_id):
+        db = _get_db()
+        if not db.delete_edit_preset(preset_id):
+            return json_error("preset not found", 404)
+        return jsonify({"ok": True})
+
     @app.route("/api/photos/<int:photo_id>/edit-history")
     def api_photo_edit_history(photo_id):
         db = _get_db()
