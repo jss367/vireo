@@ -3018,8 +3018,9 @@ class Database:
                     "SELECT id FROM folders WHERE path = ?", (probe,)
                 ).fetchone()
                 if ancestor_row is not None:
-                    self.add_workspace_folder(
-                        ws, ancestor_row["id"], is_root=True)
+                    if not self._active_ws_root_descendant_exists(ws, probe):
+                        self.add_workspace_folder(
+                            ws, ancestor_row["id"], is_root=True)
                     break
                 probe = os.path.dirname(probe)
 

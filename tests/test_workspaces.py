@@ -1486,6 +1486,67 @@ def test_archive_merge_scoped_root_invalidates_new_images_cache(db):
     assert db._new_images_cache.get(db._db_path, ws_id) is None
 
 
+def test_archive_merge_new_path_preserves_narrower_workspace_root(db):
+    """Merging to a new archive path must not root a broader known ancestor."""
+    ws_id = db.create_workspace("USA2026")
+
+    db.set_active_workspace(None)
+    archive_id = db.add_folder("/archive/USA", name="USA")
+    year_id = db.add_folder(
+        "/archive/USA/2026",
+        name="2026",
+        parent_id=archive_id,
+    )
+    db.add_folder(
+        "/archive/USA/2020",
+        name="2020",
+        parent_id=archive_id,
+    )
+
+    db.set_active_workspace(ws_id)
+    db.add_workspace_folder(ws_id, year_id)
+
+    staged_year_id = db.add_folder(
+        "/staging/job/2027",
+        name="2027",
+        workspace_root=False,
+    )
+    staged_leaf_id = db.add_folder(
+        "/staging/job/2027/2027-01-01",
+        name="2027-01-01",
+        parent_id=staged_year_id,
+        workspace_root=True,
+    )
+    db.add_photo(staged_leaf_id, "future.jpg", ".jpg", 1000, 3.0)
+
+    result = db.merge_staged_tree_into_archive(
+        staged_year_id,
+        "/archive/USA/2027",
+    )
+
+    assert result["new_photos"] == 1
+    root_paths = {
+        r["path"] for r in db.get_workspace_folder_roots(ws_id)
+    }
+    assert root_paths == {"/archive/USA/2026"}
+
+    archive_link = db.conn.execute(
+        """SELECT 1 FROM workspace_folders
+           WHERE workspace_id = ? AND folder_id = ?""",
+        (ws_id, archive_id),
+    ).fetchone()
+    assert archive_link is None
+
+    future_photo = db.conn.execute(
+        """SELECT p.filename
+           FROM photos p
+           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+          WHERE wf.workspace_id = ? AND p.filename = ?""",
+        (ws_id, "future.jpg"),
+    ).fetchone()
+    assert future_photo is None
+
+
 def test_move_folders_validates_source_workspace(db):
     """Raises ValueError if source workspace doesn't exist."""
     ws = db.create_workspace("A")
