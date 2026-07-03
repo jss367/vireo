@@ -495,6 +495,28 @@ body {
         <button class="editor-btn" type="button" onclick="resetAdjustments()">Reset Adjustments</button>
       </div>
     </div>
+
+    <div class="panel-band">
+      <div class="panel-title">Detail</div>
+      <div class="control-row">
+        <label for="sharpenRange">Sharpen</label>
+        <input id="sharpenRange" data-adjustment="sharpen" type="range" min="0" max="100" step="1" value="0" oninput="setAdjustment('sharpen', this.value)">
+        <span class="control-value" id="sharpenValue">0</span>
+      </div>
+      <div class="control-row">
+        <label for="sharpen_radiusRange">Radius</label>
+        <input id="sharpen_radiusRange" data-adjustment="sharpen_radius" type="range" min="0.5" max="3" step="0.1" value="1" oninput="setAdjustment('sharpen_radius', this.value)">
+        <span class="control-value" id="sharpen_radiusValue">1.0</span>
+      </div>
+      <div class="control-row">
+        <label for="noise_reductionRange">Denoise</label>
+        <input id="noise_reductionRange" data-adjustment="noise_reduction" type="range" min="0" max="100" step="1" value="0" oninput="setAdjustment('noise_reduction', this.value)">
+        <span class="control-value" id="noise_reductionValue">0</span>
+      </div>
+      <div class="button-row">
+        <button class="editor-btn" type="button" onclick="resetDetail()">Reset Detail</button>
+      </div>
+    </div>
   </aside>
 
   <aside class="history-panel">
@@ -575,11 +597,15 @@ function updateFeedbackControls() {
 }
 
 function setZoomMode(mode) {
-  editorState.zoomMode = mode === 'actual' ? 'actual' : 'fit';
+  var next = mode === 'actual' ? 'actual' : 'fit';
+  var changed = next !== editorState.zoomMode;
+  editorState.zoomMode = next;
   var wrap = document.getElementById('editorCanvasWrap');
   if (wrap) wrap.classList.toggle('zoom-actual', editorState.zoomMode === 'actual');
   updateFeedbackControls();
   renderCropBox();
+  // The two zoom modes request different render sizes.
+  if (changed && editorState.photoId && !editorState.loading) schedulePreview();
 }
 
 function toggleBeforePreview() {
@@ -720,6 +746,9 @@ function adjustmentValues(recipe) {
     tint: Number(wb.tint || adj.tint || 0),
     vibrance: Number(adj.vibrance || 0),
     saturation: Number(adj.saturation || 0),
+    sharpen: Number(adj.sharpen || 0),
+    sharpen_radius: Number(adj.sharpen_radius || 1),
+    noise_reduction: Number(adj.noise_reduction || 0),
   };
 }
 
@@ -754,9 +783,15 @@ function recipeForSave(recipe) {
 
   var vals = adjustmentValues(out);
   var adj = {};
-  ['exposure', 'highlights', 'shadows', 'whites', 'blacks', 'contrast', 'vibrance', 'saturation'].forEach(function(key) {
+  ['exposure', 'highlights', 'shadows', 'whites', 'blacks', 'contrast', 'vibrance', 'saturation', 'sharpen', 'noise_reduction'].forEach(function(key) {
     if (Math.abs(Number(vals[key] || 0)) > 0.000001) adj[key] = Number(vals[key]);
   });
+  // Radius only rides along with active sharpening, and its 1.0 default is
+  // canonicalized to absence — mirrors normalize_recipe so dirty-state
+  // comparison stays stable against the server's canonical form.
+  if (adj.sharpen && Math.abs(Number(vals.sharpen_radius) - 1) > 0.000001) {
+    adj.sharpen_radius = Number(vals.sharpen_radius);
+  }
   var wb = {};
   ['temperature', 'tint'].forEach(function(key) {
     if (Math.abs(Number(vals[key] || 0)) > 0.000001) wb[key] = Number(vals[key]);
@@ -790,6 +825,8 @@ function updateRecipeSummary() {
   if (r.adjustments) {
     Object.keys(r.adjustments).forEach(function(key) {
       if (key === 'white_balance') parts.push('white balance');
+      else if (key === 'sharpen_radius') return; // folded into "sharpen"
+      else if (key === 'noise_reduction') parts.push('noise reduction');
       else parts.push(key);
     });
   }
@@ -815,6 +852,9 @@ function syncControls() {
   set('tint', vals.tint, false);
   set('vibrance', vals.vibrance, false);
   set('saturation', vals.saturation, false);
+  set('sharpen', vals.sharpen, false);
+  set('sharpen_radius', vals.sharpen_radius, true);
+  set('noise_reduction', vals.noise_reduction, false);
   var straight = Number(r.straighten || 0);
   document.getElementById('straightenRange').value = String(straight);
   document.getElementById('straightenValue').textContent = straight.toFixed(1);
@@ -934,11 +974,15 @@ function updatePreview() {
   var seq = ++editorState.previewSeq;
   document.getElementById('previewStatus').textContent = 'Rendering preview...';
   updateFeedbackControls();
+  // 100% zoom asks for the endpoint's max render so detail (sharpen/NR) is
+  // judgeable near native pixels; fit zoom keeps the cheaper 1920 render.
+  var size = editorState.zoomMode === 'actual' ? 3840 : 1920;
   img.onload = function() {
     if (seq !== editorState.previewSeq) return;
-    document.getElementById('previewStatus').textContent = editorState.showBefore
+    var suffix = size === 3840 ? ' (3840px render)' : '';
+    document.getElementById('previewStatus').textContent = (editorState.showBefore
       ? 'Preview is showing the saved recipe'
-      : 'Preview uses the current unsaved recipe';
+      : 'Preview uses the current unsaved recipe') + suffix;
     renderCropBox();
     updateHistogramFeedback();
   };
@@ -948,7 +992,7 @@ function updatePreview() {
     clearHistogramFeedback();
   };
   var recipe = editorState.showBefore ? previewRecipeFor(editorState.savedRecipe) : previewRecipe();
-  img.src = '/photos/' + editorState.photoId + '/edit-preview?size=1920&recipe=' +
+  img.src = '/photos/' + editorState.photoId + '/edit-preview?size=' + size + '&recipe=' +
     encodeURIComponent(JSON.stringify(recipe)) + '&v=' + seq;
 }
 
@@ -1038,13 +1082,15 @@ function setAspect(aspect) {
 function setAdjustment(key, value) {
   var vals = adjustmentValues(editorState.recipe);
   vals[key] = Number(value) || 0;
-  if (key === 'exposure') document.getElementById('exposureValue').textContent = vals[key].toFixed(1);
+  if (key === 'exposure' || key === 'sharpen_radius') document.getElementById(key + 'Value').textContent = vals[key].toFixed(1);
   else document.getElementById(key + 'Value').textContent = String(Math.round(vals[key]));
   var adj = cloneRecipe(editorState.recipe.adjustments || {});
-  ['exposure', 'highlights', 'shadows', 'whites', 'blacks', 'contrast', 'vibrance', 'saturation'].forEach(function(name) {
+  ['exposure', 'highlights', 'shadows', 'whites', 'blacks', 'contrast', 'vibrance', 'saturation', 'sharpen', 'noise_reduction'].forEach(function(name) {
     if (Math.abs(vals[name]) > 0.000001) adj[name] = vals[name];
     else delete adj[name];
   });
+  if (adj.sharpen && Math.abs(vals.sharpen_radius - 1) > 0.000001) adj.sharpen_radius = vals.sharpen_radius;
+  else delete adj.sharpen_radius;
   var wb = {};
   if (Math.abs(vals.temperature) > 0.000001) wb.temperature = vals.temperature;
   if (Math.abs(vals.tint) > 0.000001) wb.tint = vals.tint;
@@ -1056,7 +1102,25 @@ function setAdjustment(key, value) {
 }
 
 function resetAdjustments() {
-  delete editorState.recipe.adjustments;
+  // Detail lives in its own panel band; only clear the tone/color keys.
+  var adj = cloneRecipe(editorState.recipe.adjustments || {});
+  var kept = {};
+  ['sharpen', 'sharpen_radius', 'noise_reduction'].forEach(function(key) {
+    if (adj[key]) kept[key] = adj[key];
+  });
+  if (Object.keys(kept).length) editorState.recipe.adjustments = kept;
+  else delete editorState.recipe.adjustments;
+  syncControls();
+  markChanged(true);
+}
+
+function resetDetail() {
+  var adj = cloneRecipe(editorState.recipe.adjustments || {});
+  delete adj.sharpen;
+  delete adj.sharpen_radius;
+  delete adj.noise_reduction;
+  if (Object.keys(adj).length) editorState.recipe.adjustments = adj;
+  else delete editorState.recipe.adjustments;
   syncControls();
   markChanged(true);
 }
@@ -1244,9 +1308,12 @@ async function autoTone() {
     ['exposure', 'highlights', 'shadows', 'whites', 'blacks', 'contrast'].forEach(function(k) {
       if (Math.abs(auto[k]) > 0.000001) adj[k] = auto[k];
     });
-    ['vibrance', 'saturation'].forEach(function(k) {
+    ['vibrance', 'saturation', 'sharpen', 'noise_reduction'].forEach(function(k) {
       if (Math.abs(vals[k]) > 0.000001) adj[k] = vals[k];
     });
+    if (adj.sharpen && Math.abs(vals.sharpen_radius - 1) > 0.000001) {
+      adj.sharpen_radius = vals.sharpen_radius;
+    }
     var wb = {};
     if (Math.abs(vals.temperature) > 0.000001) wb.temperature = vals.temperature;
     if (Math.abs(vals.tint) > 0.000001) wb.tint = vals.tint;
