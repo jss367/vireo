@@ -5669,7 +5669,15 @@ async function addKeyword(keyword) {
     state.selectedKeyword = null;
     hideKeywordSuggestions('addKeywordInput');
     if (!selectedKeyword) invalidateKeywordAutocompleteCache();
-    if (selectedPhotoId) loadDetail(selectedPhotoId);
+    // Same reason as _afterLocationMutation: if a multi-selection is still
+    // active, re-render the batch inspector instead of collapsing to the
+    // anchor photo's single-detail view via loadDetail.
+    var currentSel = getActiveSelection();
+    if (currentSel.length > 1) {
+      renderBatchInspector(currentSel);
+    } else if (selectedPhotoId) {
+      loadDetail(selectedPhotoId);
+    }
     if (useBatch && selectionIdsKey(getActiveSelection()) === batchSelectionKey) {
       selectionKeywordKey = '';
       loadSelectionKeywordSuggestions(ids);
@@ -5838,7 +5846,14 @@ async function _afterLocationMutation(photoIds, detailPhotoId) {
     return;
   }
   if (photoIds && photoIds.length) refreshGridCards(photoIds);
-  if (detailPhotoId && selectedPhotoId === detailPhotoId) {
+  // If a multi-selection is still active, keep the batch inspector rendered.
+  // Falling through to loadDetail(anchor) would strip .batch-mode and rewire
+  // the rating stars to setRating(anchorId, i) — collapsing the panel to the
+  // anchor's single-photo view while the user still has N photos selected.
+  var activeSel = getActiveSelection();
+  if (activeSel.length > 1) {
+    renderBatchInspector(activeSel);
+  } else if (detailPhotoId && selectedPhotoId === detailPhotoId) {
     loadDetail(detailPhotoId);
   } else {
     loadSummary();
@@ -5915,18 +5930,22 @@ function normalizeGooglePlaceForSubmit(place) {
 }
 
 async function _submitLocationPlace(placeId, placeDetails) {
-  var photoId = window._detailPhotoId;
-  if (!photoId) return;
   _hideLocationError();
+  // Derive the target photos from the batch-aware selection so a fresh
+  // multi-select (Cmd/Ctrl-click without ever opening a single-photo detail)
+  // still applies to every selected photo. window._detailPhotoId is unset in
+  // that flow, so gating on it up front would silently apply to none.
   var ids = _locationApplyPhotoIds();
+  if (!ids.length) return;
   var useBatch = ids.length > 1;
+  var detailPhotoId = window._detailPhotoId || null;
   var body = { place_id: placeId };
   if (placeDetails) body.place = placeDetails;
   if (useBatch) body.photo_ids = ids;
   try {
     var endpoint = useBatch
       ? '/api/batch/location'
-      : '/api/photos/' + photoId + '/location';
+      : '/api/photos/' + ids[0] + '/location';
     var resp = await safeFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -5935,24 +5954,25 @@ async function _submitLocationPlace(placeId, placeDetails) {
     if (resp && resp.location) {
       renderLocationFilled(resp.location);
     }
-    await _afterLocationMutation(useBatch ? ids : [photoId], photoId);
+    await _afterLocationMutation(ids, detailPhotoId);
   } catch(e) {
     _showLocationError('Could not save location.');
   }
 }
 
 async function _submitLocationKeyword(keyword) {
-  var photoId = window._detailPhotoId;
-  if (!photoId || !keyword || !keyword.id) return;
+  if (!keyword || !keyword.id) return;
   _hideLocationError();
   var ids = _locationApplyPhotoIds();
+  if (!ids.length) return;
   var useBatch = ids.length > 1;
+  var detailPhotoId = window._detailPhotoId || null;
   var body = { keyword_id: keyword.id };
   if (useBatch) body.photo_ids = ids;
   try {
     var endpoint = useBatch
       ? '/api/batch/location'
-      : '/api/photos/' + photoId + '/location';
+      : '/api/photos/' + ids[0] + '/location';
     var resp = await safeFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -5961,22 +5981,22 @@ async function _submitLocationKeyword(keyword) {
     if (resp && resp.location) {
       renderLocationFilled(resp.location);
     }
-    await _afterLocationMutation(useBatch ? ids : [photoId], photoId);
+    await _afterLocationMutation(ids, detailPhotoId);
   } catch(e) {
     _showLocationError('Could not save location.');
   }
 }
 
 async function _submitLocationText(name) {
-  var photoId = window._detailPhotoId;
-  if (!photoId) return;
   _hideLocationError();
   var ids = _locationApplyPhotoIds();
+  if (!ids.length) return;
   var useBatch = ids.length > 1;
+  var detailPhotoId = window._detailPhotoId || null;
   try {
     var endpoint = useBatch
       ? '/api/batch/location/text'
-      : '/api/photos/' + photoId + '/location/text';
+      : '/api/photos/' + ids[0] + '/location/text';
     var body = useBatch
       ? { name: name, photo_ids: ids }
       : { name: name };
@@ -5987,7 +6007,7 @@ async function _submitLocationText(name) {
     });
     if (resp && resp.location) {
       renderLocationFilled(resp.location);
-      await _afterLocationMutation(useBatch ? ids : [photoId], photoId);
+      await _afterLocationMutation(ids, detailPhotoId);
     }
   } catch(e) {
     _showLocationError('Could not save location.');
