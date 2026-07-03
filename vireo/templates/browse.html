@@ -4490,7 +4490,9 @@ async function applySelectionKeyword(keywordId) {
 function _refreshBatchInspectorIfActive() {
   var detail = document.getElementById('detailContent');
   if (detail && detail.classList.contains('batch-mode')) {
-    renderBatchInspector(getActiveSelection());
+    // State-only refresh — the selection did not change. Preserve any
+    // in-progress location input the user is typing.
+    renderBatchInspector(getActiveSelection(), { preserveLocation: true });
   }
 }
 
@@ -5482,8 +5484,11 @@ async function setFlag(flag) {
   if (sel.length > 1) {
     var st = _batchAllLoaded(sel) ? _batchFlagState(sel) : { unanimous: false };
     var target = (st.unanimous && st.value === flag) ? 'none' : flag;
+    // batchSetFlag runs _refreshBatchInspectorIfActive() against the *current*
+    // selection when the request resolves, so the sidebar reflects whatever is
+    // selected now. Re-rendering with the captured `sel` here would clobber a
+    // fresh render if the user changed the selection during the await.
     await batchSetFlag(target);
-    renderBatchInspector(sel);
     return;
   }
   if (!selectedPhotoId) return;
@@ -5562,8 +5567,10 @@ async function setColorLabel(color) {
   if (sel.length > 1) {
     var st = _batchAllLoaded(sel) ? _batchColorState(sel) : { unanimous: false };
     var target = (st.unanimous && st.value === color) ? null : color;
+    // See setFlag: batchSetColorLabel already refreshes the inspector for the
+    // current selection, so re-rendering with the captured `sel` risks stomping
+    // a fresh render if the user changed the selection during the await.
     await batchSetColorLabel(target);
-    renderBatchInspector(sel);
     return;
   }
   if (!selectedPhotoId) return;
@@ -5652,7 +5659,8 @@ function _batchColorLoaded(ids) {
   return ids.every(function(id) { return colorLabelsFetched.has(id); });
 }
 
-function renderBatchInspector(ids) {
+function renderBatchInspector(ids, opts) {
+  opts = opts || {};
   var known = _batchAllLoaded(ids);
 
   var rs = known ? _batchRatingState(ids) : { unanimous: false, value: 0 };
@@ -5679,7 +5687,13 @@ function renderBatchInspector(ids) {
 
   // Location input shares the batch-aware submit path (_locationApplyPhotoIds);
   // show the empty input rather than any single photo's saved location.
-  renderLocationEmpty();
+  // Skip the reset on state-only refreshes (opts.preserveLocation) — the user
+  // may be mid-way through typing a batch location when an async event
+  // (e.g. a /api/photos/color_labels fetch resolving, a batch rating shortcut)
+  // triggers _refreshBatchInspectorIfActive, and we'd otherwise erase it.
+  if (!opts.preserveLocation) {
+    renderLocationEmpty();
+  }
 }
 
 async function batchRate(rating) {
@@ -5687,8 +5701,10 @@ async function batchRate(rating) {
   if (ids.length < 1) return;
   var st = _batchAllLoaded(ids) ? _batchRatingState(ids) : { unanimous: false };
   var target = (st.unanimous && st.value === rating) ? 0 : rating;
+  // batchSetRating already refreshes the inspector for the current selection.
+  // A follow-up render using the captured `ids` would clobber that fresh render
+  // if the user changed the selection during the await.
   await batchSetRating(target);
-  renderBatchInspector(ids);
 }
 
 async function addKeyword(keyword) {
@@ -5727,7 +5743,9 @@ async function addKeyword(keyword) {
     // anchor photo's single-detail view via loadDetail.
     var currentSel = getActiveSelection();
     if (currentSel.length > 1) {
-      renderBatchInspector(currentSel);
+      // Selection is unchanged after a batch keyword save; keep any in-progress
+      // location input the user may have typed.
+      renderBatchInspector(currentSel, { preserveLocation: true });
     } else if (selectedPhotoId) {
       loadDetail(selectedPhotoId);
     }
@@ -6535,7 +6553,9 @@ function developSelected() {
 function _refreshInspectorAfterSinglePhotoEdit(photoId, singleFallback) {
   var detail = document.getElementById('detailContent');
   if (detail && detail.classList.contains('batch-mode')) {
-    renderBatchInspector(getActiveSelection());
+    // Selection is unchanged — this is a state-only refresh after a
+    // context-menu edit. Preserve any in-progress location input.
+    renderBatchInspector(getActiveSelection(), { preserveLocation: true });
     return;
   }
   if (selectedPhotoId === photoId) singleFallback();
