@@ -53,7 +53,10 @@ and one `background` entry):
   "mask": {
     "ref": "a1b2c3d4",
     "source_digest": "e7b8f2c1",
-    "decode": {"mode": "preserve_highlights", "long_edge": 3600},
+    "decodes": [
+      {"mode": "preserve_highlights", "long_edge": 3600},
+      {"mode": "standard", "long_edge": 3200}
+    ],
     "feather": 12.0
   },
   "regions": [
@@ -82,12 +85,16 @@ and one `background` entry):
   is what staleness compares against (see below), so a RAW snapshot in
   preserve-highlights space is not flagged stale just because it does not
   byte-match its JPEG-first source mask.
-- `mask.decode` records the pixel-space basis the snapshot was built in
-  (`mode` = `standard` / `preserve_highlights`, `long_edge` in native
-  pixels). It exists so the weight-map builder can confirm it's operating
-  on the right decode basis at render time (§Rendering); it is not a
-  requirement that the render source's pixel dimensions equal the
-  snapshot's.
+- `mask.decodes` is a list of the pixel-space bases the snapshot was built
+  in — one entry per on-disk variant, each with `mode` (`standard` /
+  `preserve_highlights`) and `long_edge` in native pixels. Non-RAWs load in
+  standard space only, so a single `standard` entry. RAWs whose edit path
+  is preserve-highlights get a `preserve_highlights` entry; RAWs that also
+  have a companion JPEG (and can therefore fall back to standard decode at
+  render time — see §Snapshot decode basis) get both entries. The
+  weight-map builder picks the entry whose `mode` matches the current
+  render source's decode; it is not a requirement that the entry's
+  `long_edge` equal the render source's pixel dimensions.
 - `local` is dropped from normalization entirely when `regions` is empty or
   every region normalizes away — the shared `mask` never persists without at
   least one active region referencing it.
@@ -99,50 +106,77 @@ and one `background` entry):
 ### Mask snapshots, not live references
 
 The recipe's `local.mask.ref` points to a **content-addressed snapshot**
-copied to `<db_dir>/edit-masks/{photo_id}.{sha1[:12]}.png` at the moment the
-first local adjustment is added — where `<db_dir>` is `dirname(--db)`, the
-same root as the existing `<db_dir>/masks/` store. Vireo supports arbitrary
-`--db` paths, so a global `~/.vireo/edit-masks/` keyed only on `photo_id`
-would collide across separate databases (tests, alternate libraries) and
-let one database's snapshot GC delete another's referenced snapshots.
+materialized under `<db_dir>/edit-masks/{photo_id}.{sha1[:12]}.{decode}.png`
+at the moment the first local adjustment is added — where `<db_dir>` is
+`dirname(--db)`, the same root as the existing `<db_dir>/masks/` store, and
+`{decode}` selects among the on-disk variants enumerated in
+`mask.decodes` (see below). Vireo supports arbitrary `--db` paths, so a
+global `~/.vireo/edit-masks/` keyed only on `photo_id` would collide
+across separate databases (tests, alternate libraries) and let one
+database's snapshot GC delete another's referenced snapshots.
 
-**Snapshot decode basis matches the edit-render source.** For non-RAWs the
-existing `photo_masks` file is already in edit-render space and is copied
-as-is. For RAWs the snapshot must be aligned with the edit path's decode
-(RAW_DECODE_PRESERVE_HIGHLIGHTS at working resolution). Two things have to
-be right for that alignment:
+**Snapshot decode basis matches the edit-render source.** The snapshot has
+to line up with whichever pixel grid the render source is actually
+delivering, and for RAW photos that isn't a single grid — `recipe_render_source`
+(`vireo/render_source.py:312-330`) and `export.py:327-343` both fall back
+to the companion JPEG when the RAW is missing or its decode fails, so a
+single RAW photo can render as preserve-highlights on one recipe render and
+as standard-decode companion JPEG on the next. Silently disabling local
+adjustments on those companion-fallback renders would drop user edits on a
+first-class supported path. Snapshot creation therefore materializes one
+on-disk variant per decode the render source might use, keyed by decode
+mode, all sharing one `local.mask.ref`:
 
-- **Space of the mask itself.** The snapshot must be rendered from a
-  `load_image(..., raw_decode=RAW_DECODE_PRESERVE_HIGHLIGHTS)` load so its
-  pixel grid (dimensions, aspect, orientation) is the same basis as every
-  subsequent edit render.
+- **Non-RAWs:** one variant, `standard`, copied as-is from the existing
+  `photo_masks` file (which is already in edit-render space).
+- **RAWs whose folder has no companion JPEG:** one variant,
+  `preserve_highlights`, generated fresh — no other decode is reachable
+  from the edit path.
+- **RAWs with a companion JPEG:** two variants —
+  `preserve_highlights` (for the primary RAW path) *and* `standard` (for
+  the companion-fallback path).
+
+For each variant, two things have to be right for alignment with the
+render load:
+
+- **Space of the mask itself.** The variant is rendered from a `load_image`
+  in that decode mode (`raw_decode=RAW_DECODE_PRESERVE_HIGHLIGHTS` for the
+  preserve-highlights variant; the default standard decode for the
+  standard variant, loading the companion JPEG for RAW+companion pairs),
+  so its pixel grid (dimensions, aspect, orientation) is the same basis
+  as any edit render that comes back on the same decode.
 - **Space of the prompt that produced it.** The `photo_masks` row stores a
   **normalized** detection bbox that was generated against the JPEG-first
   proxy (that's the space MegaDetector ran in for RAWs today, since
   `detector.py` goes through the default `load_image`). Reusing that
-  normalized box directly as SAM's prompt in preserve-highlights space is
-  unsafe when the two decodes have different aspects or embedded-JPEG
-  crops — the same `{x, y, w, h}` in [0,1] points at a physically
-  different region of the scene. Snapshot creation therefore re-runs
-  detection (MegaDetector → SAM) on the preserve-highlights load and uses
-  the resulting native box as SAM's prompt; the stored `photo_masks`
-  prompt is only carried forward when the two decode dimensions and aspect
-  agree.
+  normalized box directly in a different decode is unsafe when the two
+  decodes have different aspects or embedded-JPEG crops — the same
+  `{x, y, w, h}` in [0,1] points at a physically different region of the
+  scene. Snapshot creation re-runs detection (MegaDetector → SAM) on each
+  variant's own load and uses the resulting native box as SAM's prompt; the
+  stored `photo_masks` prompt is only carried forward when the variant's
+  decode dimensions and aspect agree with the JPEG-first proxy's.
 
-Cost is a few seconds of one-time work per (photo, mask content), amortized
-across every subsequent edit render of that recipe. In exchange the
-snapshot is by construction the same decode basis as edit renders — no
+On disk the variants live alongside each other under the shared ref, e.g.
+`<db_dir>/edit-masks/{photo_id}.{sha1[:12]}.preserve_highlights.png` and
+`<db_dir>/edit-masks/{photo_id}.{sha1[:12]}.standard.png`; `local.mask.decodes`
+enumerates which variants exist for that ref.
+
+Cost is a few seconds of one-time work per (photo, mask content, decode),
+amortized across every subsequent edit render of that recipe — doubled for
+RAW+companion, still one-shot. In exchange the snapshot is by construction
+the same decode basis as edit renders (including fallback renders) — no
 per-recipe alignment metadata to keep in sync with future decode changes,
-no runtime aspect fix-ups. `mask.decode` records that basis in the recipe
-so the weight-map builder can confirm it before use; the recorded
-`long_edge` is basis metadata, **not** a size gate. Renders happen at many
-sizes (working-resolution previews, thumbnails, full-res exports), and the
-weight-map builder resamples the snapshot to whatever the current render
-source is (see §Rendering); a snapshot whose `long_edge` differs from the
-current render source is normal and not an error. The pass is only
-disabled if `mask.decode.mode` disagrees with the current decode mode
-(which would indicate an actual basis change), with the same "warn +
-disable both regions" failure mode as a missing snapshot.
+no runtime aspect fix-ups. `mask.decodes[i].long_edge` is basis metadata,
+**not** a size gate. Renders happen at many sizes (working-resolution
+previews, thumbnails, full-res exports), and the weight-map builder
+resamples the picked variant to whatever the current render source is (see
+§Rendering); a variant whose `long_edge` differs from the current render
+source is normal and not an error. The pass is only disabled when no
+`mask.decodes` entry matches the current render source's decode mode
+(which would indicate an actual basis change — e.g., a future decode mode
+added after the snapshot was taken), with the same "warn + disable both
+regions" failure mode as a missing snapshot.
 
 Why not reference the live active mask: renders must stay a deterministic
 function of (source pixels, recipe). Preview/thumbnail caches invalidate on
@@ -185,12 +219,16 @@ Tone runs at pre-resize working-image dimensions inside `apply_recipe`, then
 at the post-resize render size — so a single weight map cannot serve both
 passes. The weight map is built once and materialized at both scales:
 
-1. **Weight map.** Load the snapshot mask, bilinearly resample it to the
-   current render source's pre-geometry pixel dimensions (the snapshot's
-   stored `mask.decode.long_edge` is a basis marker, not a size gate — a
-   full-res export and a working-resolution preview both resample the same
-   snapshot to their own source size), then apply the recipe's geometry
-   (rotation/flip/straighten/crop — same transforms as the image, bilinear).
+1. **Weight map.** Pick the `mask.decodes` entry whose `mode` matches the
+   current render source's decode (preserve-highlights when the RAW
+   decoded successfully, standard when the render fell back to the
+   companion JPEG or the photo is non-RAW), load that variant's on-disk
+   file, and bilinearly resample it to the current render source's
+   pre-geometry pixel dimensions (the entry's stored `long_edge` is a
+   basis marker, not a size gate — a full-res export and a
+   working-resolution preview both resample the same variant to their own
+   source size). Then apply the recipe's geometry (rotation/flip/straighten/crop
+   — same transforms as the image, bilinear).
    From that geometry-transformed mask, materialize two aligned copies with
    feather applied at each target scale (Gaussian radius scaled the same way
    as detail kernels), normalize to [0,1]:
