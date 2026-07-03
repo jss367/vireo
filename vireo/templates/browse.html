@@ -315,6 +315,11 @@ body {
 .summary-panel.hidden { display: none; }
 .detail-content { display: none; }
 .detail-content.visible { display: block; }
+/* Batch mode: the detail panel is reused as a multi-select inspector.
+   Single-photo-only sections are hidden; Rating/Flag/Color/Location/keyword
+   controls remain and act on the whole selection. */
+.detail-content.batch-mode .single-only { display: none !important; }
+.batch-mixed { font-size: 11px; font-weight: 400; color: var(--warning); text-transform: none; letter-spacing: 0; }
 .summary-stat { margin-bottom: 16px; }
 .summary-stat-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
 .summary-stat-value { font-size: 20px; font-weight: 600; color: var(--text-primary); }
@@ -1566,16 +1571,16 @@ body {
     <!-- Photo Detail (shown when a photo is selected) -->
     <div class="detail-content" id="detailContent">
       <button class="detail-close" onclick="closeDetail()">&times;</button>
-      <img class="detail-preview" id="detailImg" src="" alt="" style="cursor:pointer;" onclick="openLightbox(window._detailPhotoId, document.getElementById('detailFilename').textContent, photos)">
-      <div class="detail-filename" id="detailFilename"></div>
+      <img class="detail-preview single-only" id="detailImg" src="" alt="" style="cursor:pointer;" onclick="openLightbox(window._detailPhotoId, document.getElementById('detailFilename').textContent, photos)">
+      <div class="detail-filename single-only" id="detailFilename"></div>
 
       <div class="detail-section">
-        <div class="detail-section-title">Rating</div>
+        <div class="detail-section-title">Rating <span class="batch-mixed" id="ratingMixed" hidden>· Mixed</span></div>
         <div class="detail-rating" id="detailRating"></div>
       </div>
 
       <div class="detail-section">
-        <div class="detail-section-title">Flag</div>
+        <div class="detail-section-title">Flag <span class="batch-mixed" id="flagMixed" hidden>· Mixed</span></div>
         <div class="detail-flags" id="detailFlags">
           <button class="detail-flag-btn" onclick="setFlag('none')">None</button>
           <button class="detail-flag-btn" onclick="setFlag('flagged')">Flag (P)</button>
@@ -1583,13 +1588,13 @@ body {
         </div>
       </div>
 
-      <div class="detail-section">
+      <div class="detail-section single-only">
         <div class="detail-section-title">Wildlife Classification</div>
         <button class="detail-wildlife-btn" id="detailWildlifeExcluded" onclick="toggleDetailWildlifeExcluded()">Not Wildlife</button>
       </div>
 
       <div class="detail-section">
-        <div class="detail-section-title">Color Label</div>
+        <div class="detail-section-title">Color Label <span class="batch-mixed" id="colorMixed" hidden>· Mixed</span></div>
         <div class="detail-colors" id="detailColors">
           <button class="detail-color-btn" data-color="red" onclick="setColorLabel('red')" title="Red (6)"></button>
           <button class="detail-color-btn" data-color="yellow" onclick="setColorLabel('yellow')" title="Yellow (7)"></button>
@@ -1601,7 +1606,7 @@ body {
 
       <div class="detail-section location-section" id="locationSection">
         <div class="detail-section-title">Location</div>
-        <div id="locationFilled" hidden></div>
+        <div id="locationFilled" class="single-only" hidden></div>
         <div id="locationEmpty">
           <div class="keyword-autocomplete">
             <input type="text" id="locationInput" class="add-kw-input" placeholder="📍 Add location..." autocomplete="off">
@@ -1614,25 +1619,25 @@ body {
 
       <div class="detail-section">
         <div class="detail-section-title">Keywords</div>
-        <div id="detailKeywords"></div>
+        <div id="detailKeywords" class="single-only"></div>
         <div class="keyword-autocomplete">
           <input class="add-kw-input" id="addKeywordInput" placeholder="Add keyword..." autocomplete="off">
           <div class="keyword-suggestion-list" id="addKeywordSuggestions" role="listbox"></div>
         </div>
       </div>
 
-      <div class="detail-section">
+      <div class="detail-section single-only">
         <div class="detail-section-title">XMP Sidecar</div>
         <div id="detailXmp" style="font-size:12px;color:var(--text-dim);">—</div>
       </div>
 
-      <div class="detail-section">
+      <div class="detail-section single-only">
         <div class="detail-section-title">Info</div>
         <div class="detail-summary" id="detailSummary"></div>
         <div class="detail-path" id="detailPath"></div>
       </div>
 
-      <div class="detail-section" id="detailMetadataSection" style="display:none;">
+      <div class="detail-section single-only" id="detailMetadataSection" style="display:none;">
         <div class="detail-section-title">All Metadata</div>
         <input type="text" id="metadataSearch" class="add-kw-input"
                placeholder="Search metadata..."
@@ -1641,7 +1646,7 @@ body {
         <div id="metadataGroups"></div>
       </div>
 
-      <div class="detail-section" style="display:flex;gap:8px;">
+      <div class="detail-section single-only" style="display:flex;gap:8px;">
         <button onclick="findSimilar(window._detailPhotoId)" style="flex:1;background:var(--bg-tertiary);color:var(--info);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
           Find Similar
         </button>
@@ -4176,6 +4181,13 @@ function updateSelectionPanel(ids) {
   var panel = document.getElementById('selectionPanel');
   if (!panel) return;
   if (ids.length <= 1) {
+    var dc = document.getElementById('detailContent');
+    if (dc) dc.classList.remove('batch-mode');
+    // Clear batch-only Mixed markers immediately so they can't linger while the
+    // single-photo detail fetch is in flight.
+    _batchToggleMixed('ratingMixed', false);
+    _batchToggleMixed('flagMixed', false);
+    _batchToggleMixed('colorMixed', false);
     var wasVisible = !panel.classList.contains('hidden');
     panel.classList.add('hidden');
     selectionKeywordKey = '';
@@ -4198,10 +4210,17 @@ function updateSelectionPanel(ids) {
   var detail = document.getElementById('detailContent');
   var summary = document.getElementById('summaryPanel');
   if (summary) summary.classList.add('hidden');
-  if (detail) detail.classList.toggle('visible', detailMatchesSelectedPhoto());
+  // Reuse the detail panel as a batch inspector for the whole selection:
+  // Rating/Flag/Color/Location act on all selected photos, single-photo-only
+  // sections are hidden via .batch-mode CSS.
+  if (detail) {
+    detail.classList.add('visible');
+    detail.classList.add('batch-mode');
+  }
   panel.classList.remove('hidden');
   document.getElementById('selectionCount').textContent = ids.length.toLocaleString() + ' photos selected';
   updatePasteEditSection(ids);
+  renderBatchInspector(ids);
   if (ids.length > 1000) {
     selectionKeywordKey = selectionIdsKey(ids);
     selectionKeywordMissingById = {};
@@ -5068,6 +5087,8 @@ async function showUndoToast() {
 async function loadDetail(id) {
   document.getElementById('summaryPanel').classList.add('hidden');
   var detail = document.getElementById('detailContent');
+  // Loading a single photo's detail always exits batch mode.
+  if (detail) detail.classList.remove('batch-mode');
   if (detail) detail.classList.toggle('visible', window._detailPhotoId === id);
 
   try {
@@ -5081,6 +5102,10 @@ async function loadDetail(id) {
 
 function renderDetail(photo) {
   window._detailPhotoId = photo.id;
+  // Single-photo view: clear any Mixed markers left over from batch mode.
+  _batchToggleMixed('ratingMixed', false);
+  _batchToggleMixed('flagMixed', false);
+  _batchToggleMixed('colorMixed', false);
   if (
     typeof window.vireoRememberPhotoEditRecipe === 'function' &&
     Object.prototype.hasOwnProperty.call(photo, 'edit_recipe')
@@ -5421,6 +5446,14 @@ async function setRating(photoId, rating) {
 }
 
 async function setFlag(flag) {
+  var sel = getActiveSelection();
+  if (sel.length > 1) {
+    var st = _batchAllLoaded(sel) ? _batchFlagState(sel) : { unanimous: false };
+    var target = (st.unanimous && st.value === flag) ? 'none' : flag;
+    await batchSetFlag(target);
+    renderBatchInspector(sel);
+    return;
+  }
   if (!selectedPhotoId) return;
   var photoId = selectedPhotoId;
   try {
@@ -5485,6 +5518,14 @@ async function fetchColorLabels(photoIds) {
 }
 
 async function setColorLabel(color) {
+  var sel = getActiveSelection();
+  if (sel.length > 1) {
+    var st = _batchAllLoaded(sel) ? _batchColorState(sel) : { unanimous: false };
+    var target = (st.unanimous && st.value === color) ? null : color;
+    await batchSetColorLabel(target);
+    renderBatchInspector(sel);
+    return;
+  }
   if (!selectedPhotoId) return;
   colorLabelGen++;
   var photoId = selectedPhotoId;
@@ -5505,11 +5546,96 @@ async function setColorLabel(color) {
   scheduleCollectionCountsRefresh();
 }
 
-function updateDetailColors() {
-  var current = colorLabels[selectedPhotoId] || null;
+function updateDetailColorsValue(current) {
   document.querySelectorAll('.detail-color-btn').forEach(function(btn) {
     btn.classList.toggle('active', btn.dataset.color === current);
   });
+}
+
+function updateDetailColors() {
+  updateDetailColorsValue(colorLabels[selectedPhotoId] || null);
+}
+
+// --- Multi-select (batch) inspector ---------------------------------------
+// When >1 photos are selected, the detail panel is reused as a batch editor
+// (see updateSelectionPanel). Rating/Flag/Color reflect the selection's shared
+// value when unanimous, or a "Mixed" marker when the selected photos differ,
+// and edits apply to the whole selection.
+
+function _batchToggleMixed(id, show) {
+  var el = document.getElementById(id);
+  if (el) el.hidden = !show;
+}
+
+// Returns {unanimous, value}. get(id) yields the per-photo value.
+function _batchUnanimous(ids, get) {
+  if (!ids.length) return { unanimous: false, value: null };
+  var first = get(ids[0]);
+  for (var i = 1; i < ids.length; i++) {
+    if (get(ids[i]) !== first) return { unanimous: false, value: null };
+  }
+  return { unanimous: true, value: first };
+}
+
+function _batchRatingState(ids) {
+  return _batchUnanimous(ids, function(id) {
+    var p = photos.find(function(x) { return x.id === id; });
+    return p ? (p.rating || 0) : 0;
+  });
+}
+function _batchFlagState(ids) {
+  return _batchUnanimous(ids, function(id) {
+    var p = photos.find(function(x) { return x.id === id; });
+    return p ? (p.flag || 'none') : 'none';
+  });
+}
+function _batchColorState(ids) {
+  return _batchUnanimous(ids, function(id) { return colorLabels[id] || null; });
+}
+
+// Only trust unanimity when every selected photo is loaded in the current grid
+// (and thus its rating/flag/color is known). A selection that reaches beyond the
+// loaded page — e.g. "select all search results" — is shown as Mixed rather than
+// asserting a shared value we can't actually verify.
+function _batchAllLoaded(ids) {
+  return ids.every(function(id) {
+    return photos.some(function(p) { return p.id === id; });
+  });
+}
+
+function renderBatchInspector(ids) {
+  var known = _batchAllLoaded(ids);
+
+  var rs = known ? _batchRatingState(ids) : { unanimous: false, value: 0 };
+  var r = rs.unanimous ? rs.value : 0;
+  var ratingHtml = '';
+  for (var i = 1; i <= 5; i++) {
+    ratingHtml += '<span class="' + (i <= r ? 'detail-star active' : 'detail-star') +
+      '" onclick="batchRate(' + i + ')">&#9733;</span>';
+  }
+  document.getElementById('detailRating').innerHTML = ratingHtml;
+  _batchToggleMixed('ratingMixed', known && !rs.unanimous);
+
+  var fs = known ? _batchFlagState(ids) : { unanimous: false, value: 'none' };
+  updateDetailFlagButtons(fs.unanimous ? fs.value : 'none');
+  _batchToggleMixed('flagMixed', known && !fs.unanimous);
+
+  var cs = known ? _batchColorState(ids) : { unanimous: false, value: null };
+  updateDetailColorsValue(cs.unanimous ? cs.value : null);
+  _batchToggleMixed('colorMixed', known && !cs.unanimous);
+
+  // Location input shares the batch-aware submit path (_locationApplyPhotoIds);
+  // show the empty input rather than any single photo's saved location.
+  renderLocationEmpty();
+}
+
+async function batchRate(rating) {
+  var ids = getActiveSelection();
+  if (ids.length < 1) return;
+  var st = _batchAllLoaded(ids) ? _batchRatingState(ids) : { unanimous: false };
+  var target = (st.unanimous && st.value === rating) ? 0 : rating;
+  await batchSetRating(target);
+  renderBatchInspector(ids);
 }
 
 async function addKeyword(keyword) {
