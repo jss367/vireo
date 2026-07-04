@@ -16544,6 +16544,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if _is_unsafe_path(folder_template):
                 return json_error("folder_template must be a relative path without '..' or backslashes")
 
+        # Snapshot the resolved target dict so the queued run archives to the
+        # host/mount the user saw at click-Start, not whatever the saved target
+        # gets edited to while another pipeline holds the slot. Mirrors how the
+        # move-folder endpoint captures its remote spec at enqueue rather than
+        # re-reading Settings at execution.
+        remote_target_snapshot = (
+            dict(remote_archive_config["target"])
+            if remote_archive_config is not None else None
+        )
         params = PipelineParams(
             collection_id=collection_id,
             source=source,
@@ -16553,6 +16562,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             local_processing=local_processing,
             remote_target_id=remote_target_id or None,
             remote_subpath=remote_subpath or "",
+            remote_target_snapshot=remote_target_snapshot,
             file_types=body.get("file_types", "both"),
             folder_template=folder_template,
             skip_duplicates=body.get("skip_duplicates", True),

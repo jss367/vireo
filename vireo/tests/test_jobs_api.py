@@ -2349,3 +2349,48 @@ def test_pipeline_local_processing_requires_destination_or_remote(
     assert resp.status_code == 400
     err = resp.get_json()["error"]
     assert "destination" in err and "remote target" in err
+
+
+def test_pipeline_remote_archive_snapshots_target_at_enqueue(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """The endpoint must capture the resolved remote target onto
+    ``PipelineParams.remote_target_snapshot`` at Start-click time. Otherwise a
+    queued pipeline that runs after a settings edit would archive to a
+    different host/mount than the jobs panel is showing — the point of the
+    move-folder endpoint's build-spec-before-enqueue pattern."""
+    import pipeline_job
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    src = tmp_path / "card"
+    src.mkdir()
+
+    captured = {}
+
+    def fake_run(job, runner, db_path, workspace_id, params,
+                 thumb_cache_dir=None):
+        captured["params"] = params
+        return {}
+
+    monkeypatch.setattr(pipeline_job, "run_pipeline_job", fake_run)
+
+    client = app.test_client()
+    resp = client.post("/api/jobs/pipeline", json=_remote_pipeline_body(src))
+    assert resp.status_code == 200, resp.get_json()
+
+    from wait import wait_for_job_via_runner
+    wait_for_job_via_runner(app._job_runner, resp.get_json()["job_id"])
+
+    params = captured.get("params")
+    assert params is not None, "fake run_pipeline_job was never invoked"
+    snap = params.remote_target_snapshot
+    assert snap is not None, (
+        "PipelineParams must carry a snapshot of the resolved target so the "
+        "queued run archives to what the user picked, not to whatever the "
+        "saved target got edited to before the slot opened"
+    )
+    assert snap["id"] == "nas1"
+    assert snap["host"] == "nas"
+    assert snap["user"] == "me"
+    assert snap["remote_path"] == "/volume1/Photography"
+    assert snap["mount_path"] == str(tmp_path / "mount")

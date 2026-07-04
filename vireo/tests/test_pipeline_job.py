@@ -10022,6 +10022,7 @@ def test_pipeline_params_remote_archive_defaults():
     params = PipelineParams(collection_id=1)
     assert params.remote_target_id is None
     assert params.remote_subpath == ""
+    assert params.remote_target_snapshot is None
 
 
 class _RemoteArchiveRunner(FakeRunner):
@@ -10319,3 +10320,71 @@ def test_pipeline_remote_archive_failure_deindexes_staging(
     count = check_db.conn.execute(
         "SELECT COUNT(*) AS n FROM photos").fetchone()["n"]
     assert count == 0
+
+
+def test_pipeline_remote_archive_snapshot_wins_over_mutated_settings(
+    tmp_path, monkeypatch,
+):
+    """A queued pipeline must archive to the target the user saw at Start,
+    not whatever the saved target got edited to before the pipeline slot
+    opened. Editing ``remote_targets`` after PipelineParams is built must not
+    redirect the archive — the ``remote_target_snapshot`` wins over the
+    mutable ``cfg.get_remote_target`` lookup."""
+    import config as cfg
+    env = _remote_env(tmp_path, monkeypatch)
+    snapshot = cfg.get_remote_target("nas1")
+    assert snapshot["host"] == "nas"
+    assert snapshot["remote_path"] == "/volume1/Photography"
+
+    # Simulate a settings edit between click-Start and slot-open: same id,
+    # different host / user / remote_path / mount_path. If the job re-reads
+    # Settings the archive lands in the hijacked place.
+    hijacked_mount = str(tmp_path / "other-mount")
+    cfg.save({"remote_targets": [{
+        "id": "nas1", "name": "NAS-edited", "host": "attacker",
+        "user": "root", "remote_path": "/tmp/hijack",
+        "mount_path": hijacked_mount,
+    }]})
+
+    params = _remote_params(env, remote_target_snapshot=dict(snapshot))
+    runner = _RemoteArchiveRunner()
+    job = _make_job()
+
+    result = run_pipeline_job(
+        job, runner, env["db_path"], env["ws_id"], params)
+
+    call = env["captured"]["rsync_calls"][-1]
+    assert call["dest_spec"] == "me@nas:/volume1/Photography/2026/trip", (
+        "rsync must address the snapshot's host + remote_path, not the "
+        "post-edit target"
+    )
+    assert "attacker" not in call["dest_spec"]
+    assert "/tmp/hijack" not in call["dest_spec"]
+
+    # Catalog was repointed at the snapshot's mount path (photos stay in the
+    # user's original library), not the hijacked mount.
+    assert result["archive"]["final_destination"] == os.path.join(
+        env["mount"], "2026", "trip")
+    assert hijacked_mount not in result["archive"]["final_destination"]
+    # And the job's archive-result payload reflects the snapshot's target
+    # name, not the edited one.
+    assert result["archive"]["remote"]["target_name"] == "NAS"
+
+
+def test_pipeline_remote_archive_falls_back_to_settings_without_snapshot(
+    tmp_path, monkeypatch,
+):
+    """When no snapshot is present (older direct-call test paths) the run
+    still resolves the target from Settings so existing callers keep
+    working."""
+    env = _remote_env(tmp_path, monkeypatch)
+    runner = _RemoteArchiveRunner()
+    job = _make_job()
+
+    # Note: no ``remote_target_snapshot`` — falls back to cfg.get_remote_target.
+    result = run_pipeline_job(
+        job, runner, env["db_path"], env["ws_id"], _remote_params(env))
+
+    assert result["archive"]["moved"] == 1
+    call = env["captured"]["rsync_calls"][-1]
+    assert call["dest_spec"] == "me@nas:/volume1/Photography/2026/trip"

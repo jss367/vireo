@@ -94,6 +94,15 @@ class PipelineParams:
     # ``mount_path/subpath``, mirroring the Move page's remote folder moves.
     remote_target_id: str | None = None
     remote_subpath: str = ""
+    # Snapshot of the resolved remote target dict (from cfg.get_remote_target)
+    # captured at ENQUEUE time so a queued run archives to the destination the
+    # user saw when they clicked Start, not whatever the saved target got edited
+    # to before the pipeline slot opened. The API always populates this
+    # alongside ``remote_target_id``; when it is None, ``run_pipeline_job``
+    # falls back to re-reading the mutable target (mostly for direct-call
+    # tests). Mirrors how the move-folder endpoint builds its remote spec
+    # before enqueueing.
+    remote_target_snapshot: dict | None = None
     file_types: str = "both"
     folder_template: str = "%Y/%Y-%m-%d"
     skip_duplicates: bool = True
@@ -660,9 +669,16 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
     final_destination = params.destination if params.local_processing else None
     remote_archive = None
     if params.local_processing and params.remote_target_id:
-        import config as _cfg_mod
+        # Prefer the snapshot captured at enqueue time so a settings edit
+        # between click-Start and slot-open cannot redirect the archive to a
+        # different host/mount than the jobs panel is showing. The Settings
+        # fallback is a last resort for callers (mainly tests) that build
+        # PipelineParams by hand without pre-resolving the target.
+        target = params.remote_target_snapshot
+        if not target:
+            import config as _cfg_mod
 
-        target = _cfg_mod.get_remote_target(params.remote_target_id)
+            target = _cfg_mod.get_remote_target(params.remote_target_id)
         if not target:
             raise RuntimeError(
                 f"Remote target '{params.remote_target_id}' not found — it "
