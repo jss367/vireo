@@ -6217,6 +6217,17 @@ async function maybeShowExifSuggestion(photo) {
     // out → Cmd-click C would otherwise paint A's Accept line for {B,C}.
     if (window._detailPhotoId !== requestPhotoId) return;
     if (_locationApplyPhotoIds().indexOf(requestPhotoId) === -1) return;
+    // Third race: while we were awaiting reverse-geocode, the user saved a
+    // location for this photo (via the input, a keyword pick, or a batch
+    // op). renderLocationFilled scrubbed #locationExifSuggestion, but both
+    // guards above still pass because _detailPhotoId and the selection
+    // haven't moved. Painting into the (now-hidden) empty container would
+    // stash A's stale Accept line; a later Cmd-click preserving the
+    // suggestion for a batch would resurrect it and let Accept overwrite
+    // the saved location. Bail if #locationFilled is on screen. (Codex P2
+    // on PR #1097.)
+    var filled = document.getElementById('locationFilled');
+    if (filled && !filled.hidden) return;
 
     sugg.innerHTML = '';
     var text = document.createElement('span');
