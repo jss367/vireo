@@ -9964,3 +9964,427 @@ def test_pipeline_regroup_failure_finalizes_miss_step_row(tmp_path, monkeypatch)
     db2.set_active_workspace(ws_id)
     rows = db2.conn.execute("SELECT miss_computed_at FROM photos").fetchall()
     assert rows and all(r["miss_computed_at"] is None for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# Remote (SSH) archive destination — resolve_remote_archive unit tests plus
+# end-to-end pipeline runs with the SSH/rsync seams monkeypatched, following
+# the fake pattern in test_move_remote.py.
+# ---------------------------------------------------------------------------
+
+import pytest
+from pipeline_job import resolve_remote_archive
+
+
+def _remote_target(tmp_path, **overrides):
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas", "user": "me",
+        "port": 22, "ssh_key": "", "bwlimit_kbps": 0,
+        "remote_path": "/volume1/Photography",
+        "mount_path": str(tmp_path / "mount"),
+    }
+    target.update(overrides)
+    return target
+
+
+def test_resolve_remote_archive_joins_both_bases(tmp_path):
+    ctx = resolve_remote_archive(_remote_target(tmp_path), "2026/trip")
+    assert ctx["subpath"] == "2026/trip"
+    assert ctx["parent_subpath"] == "2026"
+    assert ctx["ssh_final"] == "/volume1/Photography/2026/trip"
+    assert ctx["mount_final"] == os.path.join(
+        str(tmp_path / "mount"), "2026", "trip")
+    assert ctx["display"] == "me@nas:/volume1/Photography/2026/trip"
+
+
+def test_resolve_remote_archive_single_segment_subpath(tmp_path):
+    ctx = resolve_remote_archive(_remote_target(tmp_path), "trip")
+    # A single segment has no parent: the move spec's bases are the target's
+    # own base paths and the staged leaf ("trip") lands directly under them.
+    assert ctx["parent_subpath"] == ""
+    assert ctx["ssh_final"] == "/volume1/Photography/trip"
+
+
+def test_resolve_remote_archive_rejects_bad_input(tmp_path):
+    with pytest.raises(ValueError, match="remote_subpath is required"):
+        resolve_remote_archive(_remote_target(tmp_path), "")
+    with pytest.raises(ValueError):
+        resolve_remote_archive(_remote_target(tmp_path), "../escape")
+    with pytest.raises(ValueError, match="mount path"):
+        resolve_remote_archive(
+            _remote_target(tmp_path, mount_path=""), "trip")
+    with pytest.raises(ValueError, match="absolute"):
+        resolve_remote_archive(
+            _remote_target(tmp_path, mount_path="Photos"), "trip")
+
+
+def test_pipeline_params_remote_archive_defaults():
+    params = PipelineParams(collection_id=1)
+    assert params.remote_target_id is None
+    assert params.remote_subpath == ""
+    assert params.remote_target_snapshot is None
+
+
+class _RemoteArchiveRunner(FakeRunner):
+    """FakeRunner + the uncancellable handshake archive_stage requires."""
+
+    def begin_uncancellable(self, job_id):
+        return True
+
+
+def _remote_env(tmp_path, monkeypatch, mount_path=None):
+    """Config + SSH/rsync seam fakes for a remote-archive pipeline run.
+
+    Every subprocess-backed seam in move.py is replaced (same seams
+    test_move_remote.py fakes) so no test ever shells out to ssh/rsync.
+    Returns a dict of captured rsync calls plus the paths the assertions
+    need.
+    """
+    import config as cfg
+    import local_processing
+    import move as move_mod
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    mount = mount_path or str(tmp_path / "mount")
+    cfg.save({"remote_targets": [{
+        "id": "nas1", "name": "NAS", "host": "nas", "user": "me",
+        "remote_path": "/volume1/Photography",
+        "mount_path": mount,
+    }]})
+
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    captured = {"rsync_calls": []}
+
+    def fake_rsync(src_path, dest_spec, flags, total, cb, rsync_bin="rsync",
+                   extra_args=None, **kw):
+        captured["rsync_calls"].append({
+            "src": src_path,
+            "dest_spec": dest_spec,
+            "flags": list(flags or []),
+            "rsync_bin": rsync_bin,
+            "extra_args": list(extra_args or []),
+        })
+        return (0, "", False)
+
+    monkeypatch.setattr(
+        move_mod, "resolve_rsync_bin", lambda configured="": "/usr/bin/rsync")
+    monkeypatch.setattr(move_mod, "is_gnu_rsync", lambda p: True)
+    monkeypatch.setattr(
+        move_mod, "test_remote_connection",
+        lambda t, r: {"ok": True, "message": "Connection OK"})
+    monkeypatch.setattr(
+        move_mod, "_remote_free_bytes", lambda t, p: 100 * 1024 ** 3)
+    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: False)
+    monkeypatch.setattr(move_mod, "_remote_mkdir_p", lambda r, p: (True, ""))
+    monkeypatch.setattr(
+        move_mod, "_find_remote_content_conflict", lambda *a, **k: None)
+    monkeypatch.setattr(
+        move_mod, "_remote_verify_complete", lambda *a, **k: None)
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
+
+    src = tmp_path / "card"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(str(src / "test.jpg"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    return {
+        "captured": captured, "src": src, "db_path": db_path, "db": db,
+        "ws_id": ws_id, "mount": mount, "tmp_path": tmp_path,
+    }
+
+
+def _remote_params(env, **overrides):
+    kwargs = {
+        "sources": [str(env["src"])],
+        "local_processing": True,
+        "remote_target_id": "nas1",
+        "remote_subpath": "2026/trip",
+        "folder_template": "",
+        "skip_classify": True,
+        "skip_extract_masks": True,
+        "skip_regroup": True,
+    }
+    kwargs.update(overrides)
+    return PipelineParams(**kwargs)
+
+
+def test_pipeline_remote_archive_end_to_end(tmp_path, monkeypatch):
+    """A local-processing run with a remote target stages locally, then
+    archives over SSH: rsync is pointed at the NAS-side subpath with
+    --partial-dir resume semantics, the catalog is repointed at the mount
+    path, and staging is cleaned up."""
+    env = _remote_env(tmp_path, monkeypatch)
+    runner = _RemoteArchiveRunner()
+    job = _make_job()
+
+    result = run_pipeline_job(
+        job, runner, env["db_path"], env["ws_id"], _remote_params(env))
+
+    mount_final = os.path.join(env["mount"], "2026", "trip")
+
+    # The archive result names both views of the destination.
+    assert result["archive"]["final_destination"] == mount_final
+    assert result["archive"]["moved"] == 1
+    assert result["archive"]["remote"]["ssh_destination"] == \
+        "/volume1/Photography/2026/trip"
+    assert result["archive"]["remote"]["target_name"] == "NAS"
+
+    # rsync addressed the NAS-side subpath, over SSH, with the same
+    # merge-on-retry transport shape the Move page uses.
+    call = env["captured"]["rsync_calls"][-1]
+    assert call["dest_spec"] == "me@nas:/volume1/Photography/2026/trip"
+    assert call["rsync_bin"] == "/usr/bin/rsync"
+    assert "-e" in call["extra_args"]
+    assert "--partial-dir=.rsync-partial" in call["extra_args"]
+    # Fresh destination — not a merge, so no --ignore-existing.
+    assert "--ignore-existing" not in call["flags"]
+
+    # Catalog repointed at the mount path (photos stay in the library).
+    from db import Database
+    check_db = Database(env["db_path"])
+    row = check_db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", (mount_final,)).fetchone()
+    assert row is not None
+    photo = check_db.conn.execute(
+        "SELECT filename FROM photos WHERE folder_id = ?", (row["id"],),
+    ).fetchone()
+    assert photo["filename"] == "test.jpg"
+
+    # Staging cleaned up (move_folder rmtree'd it after the verify).
+    staging = tmp_path / "staging"
+    assert not staging.exists() or not any(staging.rglob("*.jpg"))
+
+    # Storage-step summary reports the remote free-space check honestly.
+    storage_summaries = [
+        kw.get("summary", "") for _, sid, kw in runner.step_updates
+        if sid == "storage" and kw.get("status") == "completed"
+    ]
+    assert storage_summaries and "free at NAS" in storage_summaries[-1]
+    assert result["local_processing"]["remote"]["free_space_checked"] is True
+
+
+def test_pipeline_remote_archive_preflight_refuses_without_rsync(
+    tmp_path, monkeypatch,
+):
+    """No GNU rsync -> the storage preflight fails BEFORE anything is staged
+    or processed, with an actionable message."""
+    import move as move_mod
+    env = _remote_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        move_mod, "resolve_rsync_bin", lambda configured="": None)
+    runner = _RemoteArchiveRunner()
+    job = _make_job()
+
+    with pytest.raises(RuntimeError):
+        run_pipeline_job(
+            job, runner, env["db_path"], env["ws_id"], _remote_params(env))
+
+    assert any(
+        "[storage] Fatal" in e and "rsync" in e.lower() for e in job["errors"]
+    ), job["errors"]
+    # Nothing was staged — the refusal beat the staging mkdir/copy.
+    assert not (tmp_path / "staging").exists()
+    # And no transfer was ever attempted.
+    assert env["captured"]["rsync_calls"] == []
+
+
+def test_pipeline_remote_archive_preflight_refuses_when_connection_fails(
+    tmp_path, monkeypatch,
+):
+    import move as move_mod
+    env = _remote_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        move_mod, "test_remote_connection",
+        lambda t, r: {"ok": False, "message": "SSH connection failed - check host"})
+    runner = _RemoteArchiveRunner()
+    job = _make_job()
+
+    with pytest.raises(RuntimeError):
+        run_pipeline_job(
+            job, runner, env["db_path"], env["ws_id"], _remote_params(env))
+
+    fatal = [e for e in job["errors"] if "[storage] Fatal" in e]
+    assert fatal, job["errors"]
+    # The error names the target and carries the connection test's message.
+    assert "NAS" in fatal[0]
+    assert "SSH connection failed" in fatal[0]
+    assert not (tmp_path / "staging").exists()
+
+
+def test_pipeline_remote_archive_space_probe_failure_degrades(
+    tmp_path, monkeypatch,
+):
+    """A df probe failure must not fail (or fake) the preflight: the run
+    proceeds, the summary says the check was skipped, and the result
+    payload marks it unchecked."""
+    import move as move_mod
+    env = _remote_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(move_mod, "_remote_free_bytes", lambda t, p: None)
+    runner = _RemoteArchiveRunner()
+    job = _make_job()
+
+    result = run_pipeline_job(
+        job, runner, env["db_path"], env["ws_id"], _remote_params(env))
+
+    assert result["archive"]["moved"] == 1
+    remote_info = result["local_processing"]["remote"]
+    assert remote_info["free_space_checked"] is False
+    storage_summaries = [
+        kw.get("summary", "") for _, sid, kw in runner.step_updates
+        if sid == "storage" and kw.get("status") == "completed"
+    ]
+    assert storage_summaries, runner.step_updates
+    assert "free-space check skipped" in storage_summaries[-1]
+
+
+def test_pipeline_remote_archive_refuses_when_remote_volume_full(
+    tmp_path, monkeypatch,
+):
+    import move as move_mod
+    env = _remote_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(move_mod, "_remote_free_bytes", lambda t, p: 0)
+    runner = _RemoteArchiveRunner()
+    job = _make_job()
+
+    with pytest.raises(RuntimeError):
+        run_pipeline_job(
+            job, runner, env["db_path"], env["ws_id"], _remote_params(env))
+
+    fatal = [e for e in job["errors"] if "[storage] Fatal" in e]
+    assert fatal, job["errors"]
+    assert "Remote archive needs about" in fatal[0]
+    assert "me@nas:/volume1/Photography/2026/trip" in fatal[0]
+    # No transfer was attempted.
+    assert env["captured"]["rsync_calls"] == []
+
+
+def test_pipeline_remote_archive_merges_on_retry(tmp_path, monkeypatch):
+    """An existing remote destination (an earlier interrupted archive) makes
+    the archive move a merge/resume: --ignore-existing so already-present
+    files are never overwritten, still with --partial-dir resume."""
+    import move as move_mod
+    env = _remote_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: True)
+    runner = _RemoteArchiveRunner()
+    job = _make_job()
+
+    result = run_pipeline_job(
+        job, runner, env["db_path"], env["ws_id"], _remote_params(env))
+
+    assert result["archive"]["moved"] == 1
+    call = env["captured"]["rsync_calls"][-1]
+    assert "--ignore-existing" in call["flags"]
+    assert "--partial-dir=.rsync-partial" in call["extra_args"]
+
+
+def test_pipeline_remote_archive_failure_deindexes_staging(
+    tmp_path, monkeypatch,
+):
+    """A failed remote transfer must deindex the staged folder/photos —
+    otherwise a retry of the same source would hit ingest()'s duplicate
+    skip and publish an empty archive — while leaving the staged files on
+    disk for recovery. Mirrors the local archive-failure contract."""
+    import move as move_mod
+    env = _remote_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        move_mod, "_run_rsync_streamed",
+        lambda *a, **k: (1, "rsync error: connection reset", False))
+    runner = _RemoteArchiveRunner()
+    job = _make_job()
+
+    with pytest.raises(RuntimeError):
+        run_pipeline_job(
+            job, runner, env["db_path"], env["ws_id"], _remote_params(env))
+
+    fatal = [e for e in job["errors"] if "[archive] Fatal" in e]
+    assert fatal, job["errors"]
+    # The error names the remote destination, not just the rsync stderr.
+    assert "me@nas:/volume1/Photography/2026/trip" in fatal[0]
+    assert "connection reset" in fatal[0]
+    assert "local staging" in fatal[0]
+
+    # Staged files remain on disk for manual recovery...
+    staged = list((tmp_path / "staging").rglob("test.jpg"))
+    assert staged, "staged files must remain on disk after a failed archive"
+    # ...but the catalog rows are gone, so a retry re-ingests them.
+    from db import Database
+    check_db = Database(env["db_path"])
+    count = check_db.conn.execute(
+        "SELECT COUNT(*) AS n FROM photos").fetchone()["n"]
+    assert count == 0
+
+
+def test_pipeline_remote_archive_snapshot_wins_over_mutated_settings(
+    tmp_path, monkeypatch,
+):
+    """A queued pipeline must archive to the target the user saw at Start,
+    not whatever the saved target got edited to before the pipeline slot
+    opened. Editing ``remote_targets`` after PipelineParams is built must not
+    redirect the archive — the ``remote_target_snapshot`` wins over the
+    mutable ``cfg.get_remote_target`` lookup."""
+    import config as cfg
+    env = _remote_env(tmp_path, monkeypatch)
+    snapshot = cfg.get_remote_target("nas1")
+    assert snapshot["host"] == "nas"
+    assert snapshot["remote_path"] == "/volume1/Photography"
+
+    # Simulate a settings edit between click-Start and slot-open: same id,
+    # different host / user / remote_path / mount_path. If the job re-reads
+    # Settings the archive lands in the hijacked place.
+    hijacked_mount = str(tmp_path / "other-mount")
+    cfg.save({"remote_targets": [{
+        "id": "nas1", "name": "NAS-edited", "host": "attacker",
+        "user": "root", "remote_path": "/tmp/hijack",
+        "mount_path": hijacked_mount,
+    }]})
+
+    params = _remote_params(env, remote_target_snapshot=dict(snapshot))
+    runner = _RemoteArchiveRunner()
+    job = _make_job()
+
+    result = run_pipeline_job(
+        job, runner, env["db_path"], env["ws_id"], params)
+
+    call = env["captured"]["rsync_calls"][-1]
+    assert call["dest_spec"] == "me@nas:/volume1/Photography/2026/trip", (
+        "rsync must address the snapshot's host + remote_path, not the "
+        "post-edit target"
+    )
+    assert "attacker" not in call["dest_spec"]
+    assert "/tmp/hijack" not in call["dest_spec"]
+
+    # Catalog was repointed at the snapshot's mount path (photos stay in the
+    # user's original library), not the hijacked mount.
+    assert result["archive"]["final_destination"] == os.path.join(
+        env["mount"], "2026", "trip")
+    assert hijacked_mount not in result["archive"]["final_destination"]
+    # And the job's archive-result payload reflects the snapshot's target
+    # name, not the edited one.
+    assert result["archive"]["remote"]["target_name"] == "NAS"
+
+
+def test_pipeline_remote_archive_falls_back_to_settings_without_snapshot(
+    tmp_path, monkeypatch,
+):
+    """When no snapshot is present (older direct-call test paths) the run
+    still resolves the target from Settings so existing callers keep
+    working."""
+    env = _remote_env(tmp_path, monkeypatch)
+    runner = _RemoteArchiveRunner()
+    job = _make_job()
+
+    # Note: no ``remote_target_snapshot`` — falls back to cfg.get_remote_target.
+    result = run_pipeline_job(
+        job, runner, env["db_path"], env["ws_id"], _remote_params(env))
+
+    assert result["archive"]["moved"] == 1
+    call = env["captured"]["rsync_calls"][-1]
+    assert call["dest_spec"] == "me@nas:/volume1/Photography/2026/trip"

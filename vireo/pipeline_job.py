@@ -85,6 +85,24 @@ class PipelineParams:
     source_snapshot_id: int | None = None
     destination: str | None = None
     local_processing: bool = False
+    # Remote (SSH) archive destination for local-processing runs: the id of a
+    # saved remote target (config remote_targets) plus a required relative
+    # subpath naming the archive folder under the target's base paths.
+    # Mutually exclusive with ``destination``; resolved via
+    # ``resolve_remote_archive``. The staged tree is rsynced over SSH to
+    # ``remote_path/subpath`` and the catalog is repointed at
+    # ``mount_path/subpath``, mirroring the Move page's remote folder moves.
+    remote_target_id: str | None = None
+    remote_subpath: str = ""
+    # Snapshot of the resolved remote target dict (from cfg.get_remote_target)
+    # captured at ENQUEUE time so a queued run archives to the destination the
+    # user saw when they clicked Start, not whatever the saved target got edited
+    # to before the pipeline slot opened. The API always populates this
+    # alongside ``remote_target_id``; when it is None, ``run_pipeline_job``
+    # falls back to re-reading the mutable target (mostly for direct-call
+    # tests). Mirrors how the move-folder endpoint builds its remote spec
+    # before enqueueing.
+    remote_target_snapshot: dict | None = None
     file_types: str = "both"
     folder_template: str = "%Y/%Y-%m-%d"
     skip_duplicates: bool = True
@@ -109,6 +127,68 @@ class PipelineParams:
     exclude_paths: set | None = None
     exclude_photo_ids: set | None = None
     recursive: bool = True
+
+
+def resolve_remote_archive(target, subpath):
+    """Resolve a saved remote target + subpath into the pipeline's
+    remote-archive context.
+
+    ``target`` is a validated dict from ``config.get_remote_target``.
+    ``subpath`` names the archive folder under BOTH base paths — it is
+    required (unlike the Move page, where the moved folder's own name
+    provides the landing leaf) because ``move_folder`` lands the staged
+    folder inside a parent keeping its name: the subpath's last segment is
+    the staging root's name, so the archive lands at exactly
+    ``remote_path/subpath`` over SSH while the catalog is repointed at
+    exactly ``mount_path/subpath``.
+
+    Raises ValueError with a user-facing message when the pieces can't form
+    a safe archive destination. Returns a dict:
+
+    * ``target`` — the target passed in.
+    * ``subpath`` — the sanitized relative subpath.
+    * ``parent_subpath`` — subpath minus its last segment ("" for a single
+      segment); feed this to ``build_remote_move_spec`` so the staged leaf
+      lands at the full subpath.
+    * ``ssh_final`` — NAS-side path the archive lands at.
+    * ``mount_final`` — local mount path the catalog points at afterward.
+    * ``display`` — ``user@host:ssh_final`` for messages/UI.
+    """
+    import posixpath
+
+    from move import rsync_dest_spec, sanitize_subpath
+
+    sub = sanitize_subpath(subpath)  # raises ValueError on absolute / '..'
+    if not sub:
+        raise ValueError(
+            "remote_subpath is required — it names the archive folder under "
+            "the remote target's base path (e.g. \"2026/kenya-trip\")."
+        )
+    mount_path = (target.get("mount_path") or "").strip()
+    if not mount_path:
+        raise ValueError(
+            "This remote target has no local mount path, so archived photos "
+            "couldn't stay in your library. Add a mount path under "
+            "Settings → Remote targets."
+        )
+    if not os.path.isabs(mount_path):
+        raise ValueError(
+            "This remote target's local mount path isn't absolute "
+            f"(\"{mount_path}\"). Archived photos would be repointed to a "
+            "path relative to the server's working directory and appear "
+            "missing. Set an absolute mount path under Settings → Remote "
+            "targets."
+        )
+    ssh_final = posixpath.join(target["remote_path"], sub)
+    mount_final = os.path.join(mount_path, *sub.split("/"))
+    return {
+        "target": target,
+        "subpath": sub,
+        "parent_subpath": posixpath.dirname(sub),
+        "ssh_final": ssh_final,
+        "mount_final": mount_final,
+        "display": rsync_dest_spec(target, ssh_final),
+    }
 
 
 def _should_abort(abort_event):
@@ -587,9 +667,39 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         else os.path.dirname(db_path)
     )
     final_destination = params.destination if params.local_processing else None
+    remote_archive = None
+    if params.local_processing and params.remote_target_id:
+        # Prefer the snapshot captured at enqueue time so a settings edit
+        # between click-Start and slot-open cannot redirect the archive to a
+        # different host/mount than the jobs panel is showing. The Settings
+        # fallback is a last resort for callers (mainly tests) that build
+        # PipelineParams by hand without pre-resolving the target.
+        target = params.remote_target_snapshot
+        if not target:
+            import config as _cfg_mod
+
+            target = _cfg_mod.get_remote_target(params.remote_target_id)
+        if not target:
+            raise RuntimeError(
+                f"Remote target '{params.remote_target_id}' not found — it "
+                "may have been removed from Settings after this job was "
+                "queued. Pick a saved remote target and retry."
+            )
+        try:
+            remote_archive = resolve_remote_archive(
+                target, params.remote_subpath,
+            )
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
+        # Everything below that keys off final_destination locally — the
+        # in-flight destination reservation, the tracked-destination
+        # preflight, the staging-root name — cares about where the CATALOG
+        # will point after the archive, which for a remote destination is
+        # the target's local mount path, not the NAS-side path.
+        final_destination = remote_archive["mount_final"]
     staging_parent = None
     archive_destination_reserved = False
-    if params.local_processing and params.destination:
+    if params.local_processing and final_destination:
         from local_processing import staging_root
 
         # Reserve the final destination across the whole process BEFORE any
@@ -608,8 +718,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         archive_destination_reserved = True
 
         staging_parent = os.path.join(effective_vireo_dir, "staging", job["id"])
+        # final_destination (not params.destination, which is None for a
+        # remote archive): the staging root's basename is the leaf the
+        # archive move lands at, and for remote that's the mount-path leaf —
+        # the same last-subpath-segment as the NAS side.
         params.destination = staging_root(
-            effective_vireo_dir, job["id"], params.destination,
+            effective_vireo_dir, job["id"], final_destination,
         )
 
     try:
@@ -1080,6 +1194,46 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             scan_to_thumb.put(_SENTINEL)
 
                         try:
+                            if remote_archive is not None:
+                                import move as move_mod
+
+                                # Refuse BEFORE staging/processing hours of
+                                # work, in the same spirit as the local
+                                # archive-parent checks below: a missing GNU
+                                # rsync or an unreachable target would
+                                # otherwise only surface at the final archive
+                                # move, stranding processed results in
+                                # staging.
+                                rsync_bin = move_mod.resolve_rsync_bin(
+                                    effective_cfg.get("rsync_bin", "") or "",
+                                )
+                                if rsync_bin and not move_mod.is_gnu_rsync(
+                                    rsync_bin,
+                                ):
+                                    rsync_bin = ""
+                                if not rsync_bin:
+                                    _bail_storage(
+                                        "No GNU rsync found for the remote "
+                                        "archive — macOS's built-in rsync "
+                                        "can't drive rsync-over-SSH. Install "
+                                        "GNU rsync (e.g. `brew install "
+                                        "rsync`) or set its path under "
+                                        "Settings → Paths."
+                                    )
+                                    return
+                                conn = move_mod.test_remote_connection(
+                                    remote_archive["target"], rsync_bin,
+                                )
+                                if not conn.get("ok"):
+                                    _bail_storage(
+                                        "Remote archive target "
+                                        f"'{remote_archive['target']['name']}'"
+                                        f" ({remote_archive['display']}) "
+                                        "isn't usable: "
+                                        f"{conn.get('message') or 'connection test failed'}"
+                                    )
+                                    return
+
                             # A tracked archive destination (the import lands at
                             # or inside a folder Vireo already manages) is no
                             # longer a hard failure: the archive move opts into
@@ -1108,6 +1262,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 _path_equal_or_descends,
                                 _tracked_destination_overlap,
                             )
+                            # For a remote archive, final_destination is the
+                            # catalog-facing MOUNT path (see where
+                            # remote_archive is resolved) — the tracked check
+                            # applies there too, because a prior remote
+                            # archive to the same target leaves tracked rows
+                            # at the mount path and the archive move merges
+                            # into (or refuses around) those exactly like a
+                            # local destination.
                             preflight_tracked = _tracked_destination_overlap(
                                 thread_db, -1, final_destination,
                             )
@@ -1124,63 +1286,75 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 )
                                 return
 
-                            # Make sure the archive parent exists NOW. Otherwise
-                            # the pipeline would stage and process everything,
-                            # then fail at the final move_folder call when rsync
-                            # tries to write to a missing parent — leaving the
-                            # staged copy stranded under ~/.vireo/staging with no
-                            # archive at the final destination. Nested archive
-                            # targets like /mnt/nas/NewShoot/Photos are the
-                            # common case: the parent /mnt/nas/NewShoot may not
-                            # have been created yet by the user.
-                            archive_parent = os.path.dirname(
-                                os.path.normpath(final_destination),
-                            )
-                            # Use lexists so a broken/dangling symlink at
-                            # final_destination is caught here too. os.path
-                            # .exists returns False for a broken symlink, so
-                            # a stale link left by an unmounted or moved
-                            # archive root would slip through, let the
-                            # pipeline stage and process everything, and
-                            # only fail when move_folder/rsync tried to
-                            # create a directory at a path already occupied
-                            # by that symlink entry.
-                            if (
-                                os.path.lexists(final_destination)
-                                and not os.path.isdir(final_destination)
-                            ):
-                                _bail_storage(
-                                    f"Archive destination {final_destination} "
-                                    "already exists and is not a directory."
+                            if remote_archive is None:
+                                # Make sure the archive parent exists NOW. Otherwise
+                                # the pipeline would stage and process everything,
+                                # then fail at the final move_folder call when rsync
+                                # tries to write to a missing parent — leaving the
+                                # staged copy stranded under ~/.vireo/staging with no
+                                # archive at the final destination. Nested archive
+                                # targets like /mnt/nas/NewShoot/Photos are the
+                                # common case: the parent /mnt/nas/NewShoot may not
+                                # have been created yet by the user.
+                                #
+                                # All four checks in this branch are
+                                # local-filesystem-only. For a remote archive
+                                # the destination lives on the NAS: the SSH
+                                # connection test above already proved the
+                                # remote base is a writable directory, and
+                                # move_folder's remote path mkdir-p's the
+                                # subpath parents itself. The local mount
+                                # path deliberately isn't probed — it may
+                                # legitimately be unmounted while archiving
+                                # over SSH (that's the point of this mode).
+                                archive_parent = os.path.dirname(
+                                    os.path.normpath(final_destination),
                                 )
-                                return
-                            # Existing archive roots can be mounted volumes; new
-                            # archive leaves have to probe the existing parent.
-                            archive_space_path = (
-                                final_destination
-                                if os.path.exists(final_destination)
-                                else archive_parent
-                            )
-                            missing_mount_root = (
-                                _missing_archive_mount_root(final_destination)
-                                or _missing_archive_mount_root(archive_parent)
-                            )
-                            if missing_mount_root:
-                                _bail_storage(
-                                    f"Archive mount root {missing_mount_root} "
-                                    "is not available. Check that the "
-                                    "destination drive is mounted and writable."
+                                # Use lexists so a broken/dangling symlink at
+                                # final_destination is caught here too. os.path
+                                # .exists returns False for a broken symlink, so
+                                # a stale link left by an unmounted or moved
+                                # archive root would slip through, let the
+                                # pipeline stage and process everything, and
+                                # only fail when move_folder/rsync tried to
+                                # create a directory at a path already occupied
+                                # by that symlink entry.
+                                if (
+                                    os.path.lexists(final_destination)
+                                    and not os.path.isdir(final_destination)
+                                ):
+                                    _bail_storage(
+                                        f"Archive destination {final_destination} "
+                                        "already exists and is not a directory."
+                                    )
+                                    return
+                                # Existing archive roots can be mounted volumes; new
+                                # archive leaves have to probe the existing parent.
+                                archive_space_path = (
+                                    final_destination
+                                    if os.path.exists(final_destination)
+                                    else archive_parent
                                 )
-                                return
-                            try:
-                                os.makedirs(archive_parent, exist_ok=True)
-                            except OSError as exc:
-                                _bail_storage(
-                                    f"Archive parent {archive_parent} could "
-                                    f"not be created: {exc}. Check that the "
-                                    "destination drive is mounted and writable."
+                                missing_mount_root = (
+                                    _missing_archive_mount_root(final_destination)
+                                    or _missing_archive_mount_root(archive_parent)
                                 )
-                                return
+                                if missing_mount_root:
+                                    _bail_storage(
+                                        f"Archive mount root {missing_mount_root} "
+                                        "is not available. Check that the "
+                                        "destination drive is mounted and writable."
+                                    )
+                                    return
+                                try:
+                                    os.makedirs(archive_parent, exist_ok=True)
+                                except OSError as exc:
+                                    _bail_storage(
+                                        f"Archive parent {archive_parent} could "
+                                        f"not be created: {exc}. Check that the "
+                                        "destination drive is mounted and writable."
+                                    )
+                                    return
 
                             os.makedirs(params.destination, exist_ok=True)
                             selected_files = selected_source_files(
@@ -1301,20 +1475,34 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     )
                                 return indexed
 
-                            archive_report = archive_conflict_report(
-                                final_destination,
-                                selected_files,
-                                params.folder_template,
-                                duplicate_checker=_fresh_checker(),
-                                indexed_paths=_indexed_archive_paths(
+                            if remote_archive is None:
+                                archive_report = archive_conflict_report(
                                     final_destination,
-                                ),
-                            )
-                            archive_conflicts = (
-                                archive_report["empty"]
-                                + archive_report["partial"]
-                                + archive_report["conflicts"]
-                            )
+                                    selected_files,
+                                    params.folder_template,
+                                    duplicate_checker=_fresh_checker(),
+                                    indexed_paths=_indexed_archive_paths(
+                                        final_destination,
+                                    ),
+                                )
+                                archive_conflicts = (
+                                    archive_report["empty"]
+                                    + archive_report["partial"]
+                                    + archive_report["conflicts"]
+                                )
+                            else:
+                                # The conflict report walks the destination
+                                # tree, which for a remote archive lives on
+                                # the NAS and isn't locally walkable. The
+                                # archive move itself runs the equivalent
+                                # guard over SSH before any file is copied —
+                                # move_folder's remote merge path probes with
+                                # ``rsync -an --existing --checksum`` and
+                                # refuses on any same-path file whose bytes
+                                # differ — so a conflict still cancels
+                                # cleanly, just at archive time instead of
+                                # here.
+                                archive_conflicts = []
                             if archive_conflicts:
                                 incomplete = (
                                     archive_report["empty"]
@@ -1387,27 +1575,112 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     selected_files, _fresh_checker(),
                                 )
                             source_bytes = total_file_bytes(planning_files)
-                            # When a previous archive attempt left a partial
-                            # untracked directory at final_destination, the
-                            # retry uses move_folder(..., merge=True), which
-                            # rsyncs only the missing files. Credit the bytes
-                            # already published so the preflight doesn't
-                            # reject a retry whose remaining delta would fit.
-                            existing_bytes = existing_archive_bytes(
-                                final_destination,
-                                planning_files,
-                                params.folder_template,
-                            )
-                            plan = storage_plan(
-                                params.destination, source_bytes,
-                                archive_parent=archive_space_path,
-                                archive_existing_bytes=existing_bytes,
-                            )
+                            remote_summary_bits = []
+                            if remote_archive is None:
+                                # When a previous archive attempt left a partial
+                                # untracked directory at final_destination, the
+                                # retry uses move_folder(..., merge=True), which
+                                # rsyncs only the missing files. Credit the bytes
+                                # already published so the preflight doesn't
+                                # reject a retry whose remaining delta would fit.
+                                existing_bytes = existing_archive_bytes(
+                                    final_destination,
+                                    planning_files,
+                                    params.folder_template,
+                                )
+                                plan = storage_plan(
+                                    params.destination, source_bytes,
+                                    archive_parent=archive_space_path,
+                                    archive_existing_bytes=existing_bytes,
+                                )
+                            else:
+                                # Staging-only local plan (the archive volume
+                                # is the NAS, never the same device), then a
+                                # remote df probe for the archive side.
+                                # Probe failures degrade to "check skipped" —
+                                # logged and surfaced in the step summary and
+                                # result payload, never faked as numbers; the
+                                # archive move's own rsync failure is the
+                                # backstop if space actually runs out.
+                                from local_processing import (
+                                    RESERVED_FREE_BYTES,
+                                )
+                                from move import _remote_free_bytes
+                                plan = storage_plan(
+                                    params.destination, source_bytes,
+                                )
+                                target = remote_archive["target"]
+                                # No merge/resume credit for a remote archive:
+                                # the local resume-credit path (existing_archive_bytes)
+                                # compares each destination file's size+content
+                                # against the source, but a remote equivalent
+                                # would need a per-file walk over SSH. A
+                                # whole-tree `du` reports every byte at the
+                                # path — including unrelated files or stale
+                                # partials that rsync --ignore-existing will
+                                # still copy past — which could cancel out
+                                # source_bytes and let the preflight pass on
+                                # a nearly-full NAS. Budget the full source
+                                # here; a retry whose remaining delta would
+                                # actually fit but the full source wouldn't
+                                # is a rare batch-reject we take over the
+                                # false-positive that lets processing burn
+                                # hours before the transfer fails on space.
+                                archive_delta = source_bytes
+                                plan["archive_existing_bytes"] = 0
+                                plan["archive_required_bytes"] = archive_delta
+                                # df the configured base (just verified as an
+                                # existing writable dir by the connection
+                                # test) rather than the not-yet-created leaf.
+                                remote_free = _remote_free_bytes(
+                                    target, target["remote_path"],
+                                )
+                                plan["archive_free_bytes"] = remote_free
+                                if remote_free is None:
+                                    log.warning(
+                                        "Couldn't probe free space at %s; "
+                                        "skipping remote free-space check",
+                                        remote_archive["display"],
+                                    )
+                                    remote_summary_bits.append(
+                                        "remote free-space check skipped "
+                                        "(probe failed)"
+                                    )
+                                    plan["archive_usable_bytes"] = None
+                                else:
+                                    archive_usable = max(
+                                        0, remote_free - RESERVED_FREE_BYTES,
+                                    )
+                                    plan["archive_usable_bytes"] = archive_usable
+                                    plan["archive_enough"] = (
+                                        archive_delta <= archive_usable
+                                    )
+                                    plan["enough"] = (
+                                        plan["staging_enough"]
+                                        and plan["archive_enough"]
+                                    )
+                                    plan["batching_required"] = not plan["enough"]
+                                    remote_summary_bits.append(
+                                        f"{format_bytes(remote_free)} free at "
+                                        f"{target['name']}"
+                                    )
                             result["local_processing"] = {
                                 **plan,
                                 "staging_destination": params.destination,
                                 "final_destination": final_destination,
                             }
+                            if remote_archive is not None:
+                                target = remote_archive["target"]
+                                result["local_processing"]["remote"] = {
+                                    "target_id": target["id"],
+                                    "target_name": target["name"],
+                                    "host": target["host"],
+                                    "user": target["user"],
+                                    "ssh_destination": remote_archive["ssh_final"],
+                                    "free_space_checked": (
+                                        plan["archive_free_bytes"] is not None
+                                    ),
+                                }
                             if plan["batching_required"]:
                                 # Tell the user which volume came up short — the
                                 # destination running out of room reads as a
@@ -1415,16 +1688,29 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 # drive) than the staging volume running out
                                 # (free space on ~/.vireo or batch later).
                                 if not plan.get("archive_enough", True):
-                                    _bail_storage(
-                                        "Archive destination needs about "
-                                        f"{format_bytes(plan['archive_required_bytes'])}, "
-                                        "but only "
-                                        f"{format_bytes(plan['archive_usable_bytes'] or 0)} "
-                                        f"is free under {archive_parent} after "
-                                        "the free-space reserve. Free space at "
-                                        "the destination or pick a different "
-                                        "archive folder."
-                                    )
+                                    if remote_archive is not None:
+                                        _bail_storage(
+                                            "Remote archive needs about "
+                                            f"{format_bytes(plan['archive_required_bytes'])}, "
+                                            "but only "
+                                            f"{format_bytes(plan['archive_usable_bytes'] or 0)} "
+                                            "is free at "
+                                            f"{remote_archive['display']} after "
+                                            "the free-space reserve. Free space "
+                                            "on the remote volume or pick a "
+                                            "different target or subpath."
+                                        )
+                                    else:
+                                        _bail_storage(
+                                            "Archive destination needs about "
+                                            f"{format_bytes(plan['archive_required_bytes'])}, "
+                                            "but only "
+                                            f"{format_bytes(plan['archive_usable_bytes'] or 0)} "
+                                            f"is free under {archive_parent} after "
+                                            "the free-space reserve. Free space at "
+                                            "the destination or pick a different "
+                                            "archive folder."
+                                        )
                                 else:
                                     _bail_storage(
                                         "Local processing needs about "
@@ -1441,6 +1727,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 f"{format_bytes(plan['required_bytes'])} needed, "
                                 f"{format_bytes(plan['usable_bytes'])} available"
                             )
+                            if remote_summary_bits:
+                                summary += "; " + "; ".join(remote_summary_bits)
                             stages["storage"]["status"] = "completed"
                             runner.update_step(
                                 job["id"], "storage",
@@ -4828,6 +5116,38 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 effective_cfg = thread_db.get_effective_config(cfg.load())
                 developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
                 archive_parent = os.path.dirname(os.path.normpath(final_destination))
+                remote_spec = None
+                if remote_archive is not None:
+                    import move as move_mod
+
+                    # Re-resolve rsync at archive time: the storage preflight
+                    # verified it hours ago and the binary/config could have
+                    # changed since. move_folder refuses on a missing
+                    # rsync_bin anyway; resolving here gives the actionable
+                    # message before any SSH probing starts.
+                    rsync_bin = move_mod.resolve_rsync_bin(
+                        effective_cfg.get("rsync_bin", "") or "",
+                    )
+                    if rsync_bin and not move_mod.is_gnu_rsync(rsync_bin):
+                        rsync_bin = ""
+                    if not rsync_bin:
+                        raise RuntimeError(
+                            "No GNU rsync available to transfer the archive "
+                            f"to {remote_archive['display']}. Install GNU "
+                            "rsync (e.g. `brew install rsync`) or set its "
+                            "path under Settings → Paths"
+                        )
+                    # parent_subpath (not the full subpath): move_folder
+                    # lands the staged folder INSIDE the spec's bases keeping
+                    # its name, and the staging root is named after the
+                    # subpath's last segment — so the archive lands at
+                    # exactly remote_path/subpath and the catalog repoints
+                    # at exactly mount_path/subpath (== final_destination).
+                    remote_spec = move_mod.build_remote_move_spec(
+                        remote_archive["target"],
+                        remote_archive["parent_subpath"],
+                        rsync_bin,
+                    )
                 total_files = {"value": 0}
 
                 def archive_cb(current, total, filename, phase=None):
@@ -4862,6 +5182,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     _update_stages(runner, job["id"], stages)
                     return
 
+                # For a remote archive the destination parent comes from
+                # remote_spec (move_folder ignores the positional
+                # destination); merge/retry and tracked-merge semantics are
+                # identical to the local path — move_folder's remote branch
+                # probes existence over SSH, rsyncs with --ignore-existing +
+                # --partial-dir on a resume, checksum-verifies before
+                # deleting staging, and repoints the catalog at the mount
+                # path (final_destination).
                 move_result = move_folder(
                     thread_db,
                     folder["id"],
@@ -4871,6 +5199,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     merge=True,
                     reject_tracked_ancestor=True,
                     allow_tracked_merge=True,
+                    remote=remote_spec,
                 )
                 if move_result.get("errors"):
                     raise RuntimeError("; ".join(move_result["errors"]))
@@ -4924,6 +5253,16 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         f"{merge['merged_folders']} merged into existing, "
                         f"{merge['already_present']} already present)"
                     )
+                    if remote_archive is not None:
+                        summary += (
+                            " — transferred over SSH to "
+                            f"{remote_archive['display']}"
+                        )
+                elif remote_archive is not None:
+                    summary = (
+                        f"{moved} photos archived over SSH to "
+                        f"{remote_archive['display']}"
+                    )
                 else:
                     summary = f"{moved} photos archived"
                 if cleanup_error:
@@ -4935,13 +5274,29 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     "final_destination": final_destination,
                     "moved": moved,
                 }
+                if remote_archive is not None:
+                    target = remote_archive["target"]
+                    result["archive"]["remote"] = {
+                        "target_id": target["id"],
+                        "target_name": target["name"],
+                        "host": target["host"],
+                        "user": target["user"],
+                        "ssh_destination": remote_archive["ssh_final"],
+                    }
                 if merge:
                     result["archive"]["merge"] = merge
                 if cleanup_error:
                     result["archive"]["cleanup_error"] = cleanup_error
             except Exception as e:
+                # Name the remote target + subpath the way the local path
+                # names the directory (move_folder's own error text already
+                # covers the local case).
+                prefix = (
+                    f"Archive to {remote_archive['display']} failed: "
+                    if remote_archive is not None else ""
+                )
                 msg = (
-                    f"{e}. Processing results remain in local staging: "
+                    f"{prefix}{e}. Processing results remain in local staging: "
                     f"{params.destination}"
                 )
                 errors.append(f"[archive] Fatal: {msg}")
