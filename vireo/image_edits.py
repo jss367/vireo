@@ -544,13 +544,23 @@ def _feathered_weight(mask_img, sigma):
     return np.clip(arr, 0.0, 1.0)
 
 
-def _apply_recipe_impl(img, normalized, local_mask, native_size):
+def _apply_recipe_impl(
+    img, normalized, local_mask, native_size, detail_scale=None,
+):
     """Geometry + weighted tone. Returns (image, geometry-transformed mask).
 
     The returned mask is None whenever the local pass is disabled (no local
     section, no usable mask) — callers must then skip local detail too, so a
     degraded render fails toward "no local edits", never toward applying a
     region edit to the whole frame.
+
+    ``detail_scale`` overrides the scale used to convert ``local.mask.feather``
+    (native pixels) into a blur sigma for the tone pass. Callers that also
+    override the scale for the detail pass (e.g. the edit-preview endpoint,
+    which strips crop from the recipe but wants the saved-render scale) must
+    pass the same override here — otherwise the tone falloff uses the scale
+    computed from the crop-stripped recipe while detail uses the saved-render
+    scale, and preview mask geometry disagrees with the saved output.
     """
     local = normalized.get("local")
     fitted = None
@@ -576,7 +586,11 @@ def _apply_recipe_impl(img, normalized, local_mask, native_size):
         if mask_geo is not None else ({}, {})
     )
     if subject_tone or background_tone:
-        scale = detail_render_scale(result.size, native_size, normalized)
+        scale = (
+            detail_scale
+            if detail_scale is not None
+            else detail_render_scale(result.size, native_size, normalized)
+        )
         feather = (local["mask"].get("feather") or 0.0) * scale
         weight = _feathered_weight(mask_geo, feather)
         result = _apply_adjustments(
@@ -695,7 +709,8 @@ def apply_recipe_to_loaded_image(
         result, mask_geo = img, None
     else:
         result, mask_geo = _apply_recipe_impl(
-            img, normalized, local_mask, native_size
+            img, normalized, local_mask, native_size,
+            detail_scale=detail_scale,
         )
     if max_size and max_size > 0 and max(result.size) > max_size:
         result.thumbnail((max_size, max_size), resample=Image.Resampling.LANCZOS)

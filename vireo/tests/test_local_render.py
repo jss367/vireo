@@ -181,6 +181,35 @@ def test_feather_softens_the_transition():
     assert soft_step < hard_step * 0.6
 
 
+def test_local_tone_feather_uses_detail_scale_override():
+    # The edit-preview endpoint strips crop from the recipe and passes
+    # detail_scale computed from the crop-inclusive recipe. The local tone
+    # feather must honour that override so the preview's mask falloff matches
+    # what the saved (cropped) render will produce; otherwise the tone pass
+    # uses the crop-stripped scale while the detail pass uses the saved-render
+    # scale and preview/export disagree for cropped feathered local edits.
+    img = _gray()
+    recipe = {
+        "local": _local(
+            [{"region": "subject", "adjustments": {"exposure": 2.0}}],
+            feather=8.0,
+        )
+    }
+
+    def seam_step(detail_scale):
+        out = apply_recipe_to_loaded_image(
+            img, recipe, native_size=(80, 60), local_mask=_left_half_mask(),
+            detail_scale=detail_scale,
+        )
+        y = _luma(out)
+        return float(np.max(np.abs(np.diff(np.mean(y, axis=0)))))
+
+    default = seam_step(None)          # scale=1.0 from the uncropped recipe
+    small_scale = seam_step(0.25)      # simulates a 4x tighter saved render
+    # Smaller scale → narrower feather → harder transition (larger step).
+    assert small_scale > default * 1.5
+
+
 def test_local_detail_two_branch_blend():
     # Soft edges in both halves; subject-only sharpen must raise acutance on
     # the masked half and leave the other half at the global (unsharpened)
