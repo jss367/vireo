@@ -533,7 +533,7 @@ passes. The weight map is built once and materialized at both scales:
    and its output is served on subsequent cache-hit reads without any
    further basis check; the **pipeline preview warmup**
    (`vireo/pipeline_job.py:2220-2344`), which does the same swap-then-render
-   for the pipeline's preview cache write; and the **thumbnail
+   for the pipeline's preview cache write; the **thumbnail
    generation paths** (both the background thumbnail job's
    `_retry_thumbnail_with_companion` inside `generate_all`, at
    `vireo/thumbnails.py:80` called from `295-319`, and the on-request
@@ -544,7 +544,18 @@ passes. The weight map is built once and materialized at both scales:
    (`vireo/thumbnails.py:177-181`) and writes the result to the on-disk
    grid-thumbnail cache, so a mismatched basis here bakes shifted local
    weights into the browser's grid thumbnails until the cache is
-   deleted. All eight switches change the effective basis from
+   deleted; and the **pipeline job's own thumbnail stage**, which
+   inlines the same companion fallback via a duplicated
+   `_retry_thumbnail_with_companion` at `vireo/pipeline_job.py:175`
+   called from both the scan-driven thumbnail worker
+   (`vireo/pipeline_job.py:1884-1928`) and the collection-driven
+   thumbnail worker (`vireo/pipeline_job.py:1991-2035`), each of which
+   resolves a RAW recipe source, renders via `generate_thumbnail` with
+   preserve-highlights decoding, and on failure retries against the
+   companion JPEG — omitting these workers would let a pipeline run
+   write the same misaligned grid thumbnails the background-job path
+   was fixed to avoid, on exactly the RAW+JPEG photos whose RAW decode
+   is unsupported or undersized. All these switches change the effective basis from
    `preserve_highlights` to `standard`, so the weight-map builder
    consumes the basis that reflects the *actual* loaded image at each
    site, not the one `recipe_render_source` chose up front — every one
