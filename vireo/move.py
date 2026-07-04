@@ -654,14 +654,46 @@ def _run_rsync_streamed(src_path, dest_spec, rsync_flags, total_files,
     rsync — which the job's cancel path can't reach, since it never sees the
     subprocess — still gets reaped. The clock resets on every transferred
     file and on stderr activity, so only true silence trips it.
+
+    stdout is attached to a pty, not a pipe, wherever the platform allows.
+    Apple's openrsync block-buffers stdout when it's a pipe, so its
+    ``--out-format`` lines arrive in one burst at process exit — the parent
+    sees total silence while a healthy transfer runs, and the watchdog kills
+    any copy slower than stall_timeout (a NAS archive of a large shoot can
+    never finish). On a pty both openrsync and GNU rsync line-buffer, so
+    per-file names stream as they transfer.
     """
     cmd = [rsync_bin, "-a", "--out-format=%n"]
     cmd += list(extra_args or [])
     cmd += [f for f in (rsync_flags or []) if f]
     cmd += [src_path + "/", dest_spec + "/"]
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    )
+    master_fd = slave_fd = None
+    if hasattr(os, "openpty"):
+        try:
+            master_fd, slave_fd = os.openpty()
+        except OSError:
+            master_fd = slave_fd = None
+    stdout_arg = subprocess.PIPE if slave_fd is None else slave_fd
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=stdout_arg, stderr=subprocess.PIPE, text=True,
+        )
+    except BaseException:
+        # Popen can raise after os.openpty() succeeded (bad rsync_bin,
+        # PermissionError, KeyboardInterrupt). Close both pty fds before
+        # re-raising so a failed invocation doesn't leak two fds each time.
+        for fd in (master_fd, slave_fd):
+            if fd is not None:
+                os.close(fd)
+        raise
+    stdout_stream = proc.stdout
+    if slave_fd is not None:
+        os.close(slave_fd)
+        if stdout_stream is None:
+            stdout_stream = os.fdopen(master_fd, "r", errors="replace")
+            master_fd = None  # closed via stdout_stream below
+    if master_fd is not None:
+        os.close(master_fd)
     state = {"timed_out": False}
     # Last time rsync showed any sign of life (process start counts, so the
     # silent file-list/scan phase before the first transfer isn't a stall).
@@ -707,18 +739,28 @@ def _run_rsync_streamed(src_path, dest_spec, rsync_flags, total_files,
 
     copied = 0
     try:
-        for line in proc.stdout:
-            name = line.rstrip("\n")
-            last_activity["t"] = time.monotonic()
-            if not name or name.endswith("/"):
-                continue  # directory entry, not a file
-            copied += 1
-            if progress_cb:
-                progress_cb(copied, total_files, os.path.basename(name),
-                            "Copying files")
+        try:
+            for line in stdout_stream:
+                # The pty's line discipline translates \n to \r\n (ONLCR),
+                # so strip \r too or every filename grows a trailing CR.
+                name = line.rstrip("\r\n")
+                last_activity["t"] = time.monotonic()
+                if not name or name.endswith("/"):
+                    continue  # directory entry, not a file
+                copied += 1
+                if progress_cb:
+                    progress_cb(copied, total_files, os.path.basename(name),
+                                "Copying files")
+        except OSError:
+            # Reading the pty master after the child exits raises EIO on
+            # Linux (macOS returns plain EOF) — both just mean end-of-output.
+            pass
         proc.wait()
     finally:
         done.set()
+        if stdout_stream is not None and stdout_stream is not proc.stdout:
+            with contextlib.suppress(OSError):
+                stdout_stream.close()
     stderr_thread.join()
     watchdog.join()
     return proc.returncode, "".join(stderr_chunks), state["timed_out"]
