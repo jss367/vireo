@@ -9372,7 +9372,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     img, recipe,
                     native_size=_recipe_source_dimensions(photo),
                     local_mask=_local_masks.load_snapshot(
-                        os.path.dirname(db_path), photo["id"], recipe,
+                        vireo_dir, photo["id"], recipe,
                     ),
                 )
                 quality = cfg.load().get("working_copy_quality", 92)
@@ -9713,7 +9713,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # aged-out snapshot files (no current recipe or edit-history entry
         # points at them) are reclaimed alongside stale live masks.
         import local_masks
-        gc = local_masks.gc_edit_masks(db, os.path.dirname(db_path))
+        # Snapshots live under dirname(THUMB_CACHE_DIR) — the same root the
+        # snapshot POST endpoint writes to and every render call site reads
+        # from — which is not always dirname(db_path) when create_app is
+        # given a custom thumb-dir under a different parent.
+        gc = local_masks.gc_edit_masks(
+            db, os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        )
         if gc["deleted"]:
             log.info(
                 "Deleted %d unreferenced edit-mask snapshots", gc["deleted"]
@@ -11714,7 +11720,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 img, recipe,
                 native_size=_recipe_source_dimensions(photo),
                 local_mask=_local_masks.load_snapshot(
-                    os.path.dirname(db_path), photo["id"], recipe,
+                    vireo_dir, photo["id"], recipe,
                 ),
             )
             quality = cfg.load().get("working_copy_quality", 92)
@@ -13455,7 +13461,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                     detail_photo
                                 ),
                                 local_mask=local_masks.load_snapshot(
-                                    os.path.dirname(db_path),
+                                    vireo_dir,
                                     photo["id"], recipe,
                                 ),
                             )
@@ -18593,7 +18599,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 img, recipe, max_size=size,
                 native_size=_recipe_source_dimensions(photo),
                 local_mask=local_masks.load_snapshot(
-                    os.path.dirname(db_path), photo_id, recipe,
+                    vireo_dir, photo_id, recipe,
                 ),
             )
 

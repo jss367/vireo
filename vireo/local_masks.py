@@ -111,6 +111,17 @@ def create_snapshot(*, photo_id, mask_row, vireo_dir, native_size=None):
         with open(tmp, "wb") as f:
             f.write(data)
         os.replace(tmp, dest)
+    else:
+        # Refresh mtime so the GC grace window is measured from *this*
+        # snapshot request, not from whenever the file was first written.
+        # Otherwise an aged, currently-unreferenced snapshot (e.g. one
+        # created hours ago for a recipe that was never saved) can be
+        # swept between this call and the recipe save that re-references
+        # it, breaking the just-returned ref.
+        try:
+            os.utime(dest, None)
+        except OSError:
+            pass
     return {"ref": ref, "source_digest": source_digest(mask_row)}
 
 

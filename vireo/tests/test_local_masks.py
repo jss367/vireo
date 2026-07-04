@@ -74,6 +74,30 @@ def test_create_snapshot_copies_and_is_content_addressed(tmp_path):
     assert again["ref"] == mask["ref"]
 
 
+def test_create_snapshot_refreshes_mtime_on_reuse(tmp_path):
+    # An aged, currently-unreferenced snapshot that a new create_snapshot()
+    # returns must have its mtime bumped, so the GC grace window is measured
+    # from *this* request — otherwise a stale-mask sweep can delete the file
+    # after we returned its ref but before the recipe save re-references it.
+    src = _write_mask(str(tmp_path / "1.sam2-small.png"))
+    row = _mask_row(src)
+    mask = local_masks.create_snapshot(
+        photo_id=1, mask_row=row, vireo_dir=str(tmp_path),
+        native_size=(800, 600),
+    )
+    snap = local_masks.snapshot_path(str(tmp_path), 1, mask["ref"])
+
+    aged = time.time() - 30 * 24 * 3600
+    os.utime(snap, (aged, aged))
+    assert os.path.getmtime(snap) < time.time() - 24 * 3600
+
+    local_masks.create_snapshot(
+        photo_id=1, mask_row=row, vireo_dir=str(tmp_path),
+        native_size=(800, 600),
+    )
+    assert os.path.getmtime(snap) > time.time() - 60
+
+
 def test_source_digest_tracks_source_inputs(tmp_path):
     src = _write_mask(str(tmp_path / "1.sam2-small.png"))
     row = _mask_row(src)

@@ -2374,7 +2374,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                         detail_photo
                                     ),
                                     local_mask=local_masks.load_snapshot(
-                                        os.path.dirname(db_path),
+                                        effective_vireo_dir,
                                         photo["id"], recipe,
                                     ),
                                 )
