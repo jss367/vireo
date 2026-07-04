@@ -242,10 +242,11 @@ weights in both directions.
 
 PR 1 records working-copy provenance in a new dedicated
 `photos.working_copy_source` column (`'raw'` | `'companion'` |
-`'embedded_jpeg'`), written by **every** path that materializes
-`working_copy_path`. Scanner's happy RAW extraction writes `'raw'`
-when `_load_raw` returned a demosaiced result, or `'embedded_jpeg'`
-when it returned via the libraw-failure embedded-JPEG fallback. This
+`'embedded_jpeg'` | `'standard'`), written by **every** path that
+materializes `working_copy_path`. Scanner's happy RAW extraction
+writes `'raw'` when `_load_raw` returned a demosaiced result, or
+`'embedded_jpeg'` when it returned via the libraw-failure
+embedded-JPEG fallback. This
 must not be inferred from returned image dimensions: `extract_working_copy`
 calls `load_image(..., max_size=working_copy_max_size)`, so `load_image`
 thumbnails the RAW after decode — an ordinary 6000×4000 demosaiced RAW
@@ -260,11 +261,30 @@ downstream size heuristic. Scanner's
 RAW-then-companion fallback writes `'companion'` (alongside the
 existing `working_copy_failed_source='source'` routing marker it also
 writes), as do both on-demand `/original` companion re-extract
-branches. Weight-map basis selection reads this column directly:
-`'raw'` shares the `preserve_highlights` basis, `'companion'` shares
-`standard`, and `'embedded_jpeg'` has no snapshot basis at all
-because the embedded preview's crop/aspect against the sensor is
-per-camera and not recorded anywhere Vireo can map to. Rows migrated
+branches. **Non-RAW primaries** (ordinary JPEG/PNG source photos)
+also produce working copies — `_extract_working_copies` extracts from
+the paired companion JPEG when one exists and otherwise from the
+non-RAW primary itself (`vireo/scanner.py:908-913`), and
+`recipe_render_source` may return that working copy at render time
+for non-RAW recipes (`vireo/render_source.py:295-301`). Both branches
+decode in the same standard-decode space as the primary (no libraw
+step is involved), so the scanner writes `'standard'` for every
+non-RAW working-copy row regardless of which side extraction ran
+against; the RAW-only `'companion'` value stays reserved for the
+RAW-then-companion fallback semantics that
+`working_copy_failed_source='source'` is written alongside. Without
+this fourth value, non-RAW working-copy rows would have no
+representable provenance — they would stay NULL (and disable the
+local pass on every non-RAW working-copy render) or get mislabeled
+as `'companion'`, which would collide with the RAW-failure semantics
+above. Weight-map basis selection reads this column directly:
+`'raw'` shares the `preserve_highlights` basis, `'companion'` and
+`'standard'` both share `standard` (they differ only in the reason
+the working copy exists — RAW-failure vs. ordinary non-RAW — not in
+the pixel-grid basis, so both align against a `standard`
+`mask.decodes` entry), and `'embedded_jpeg'` has no snapshot basis
+at all because the embedded preview's crop/aspect against the sensor
+is per-camera and not recorded anywhere Vireo can map to. Rows migrated
 from before the column existed carry a NULL value and are treated as
 unknown provenance — the local pass is disabled with the same
 warn-and-hold-zero fallback as a missing snapshot. For NULL rows the
@@ -656,7 +676,11 @@ passes. The weight map is built once and materialized at both scales:
    (`photos.working_copy_source='companion'` — re-extracted from the
    companion JPEG after RAW extraction failed by scanner or by the
    on-demand `/original` route, so its pixel grid is the companion's
-   standard-decode basis), or when the photo is non-RAW. A working copy
+   standard-decode basis), when the working copy is a non-RAW
+   primary's own (`photos.working_copy_source='standard'` —
+   extracted from the non-RAW primary itself or its companion in
+   standard-decode space), or when the photo is a non-RAW rendered
+   directly from its source file. A working copy
    with `working_copy_source='embedded_jpeg'` (RAW decode fell through
    to the embedded preview inside `_load_raw`), a **direct-RAW load
    whose `_load_raw` returned `used_embedded_fallback=True`** (the
