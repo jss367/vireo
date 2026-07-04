@@ -442,15 +442,30 @@ after the enumeration for why):
   RAW-side `_load_raw` returns `used_embedded_fallback=True`, the
   `preserve_highlights` entry is **omitted from `mask.decodes`**
   while the `standard` variant on the companion still materializes.
-  The recipe carries only the `standard` entry, so direct-RAW
-  renders on that photo disable the local pass under the same
-  render-time contract, while companion and companion-derived
-  working-copy renders serve the local edit off `standard` — the
+  At render time, a direct-RAW load whose `_load_raw` returns
+  `used_embedded_fallback=True` is treated as a companion-fallback
+  trigger *when the photo's `mask.decodes` carries a `standard`
+  entry* — the same swap the pipeline already applies for
+  undersized embedded previews (`vireo/app.py:18395-18453`,
+  `vireo/export.py:307-365`): the render source is switched to the
+  companion JPEG, the basis becomes `standard`, and the local pass
+  serves off the `standard` snapshot. Without this swap, the direct-
+  RAW render would hit the `embedded_jpeg` basis and disable the
+  local pass even though a viable companion snapshot exists on
+  disk — the exact case the `standard` variant was materialized to
+  cover. Companion and companion-derived working-copy renders
+  already serve the local edit off `standard` under the standing
+  basis contract, so the swap only closes the direct-RAW hole; the
   local add is not refused as long as at least one variant is
-  viable. If both sides fail (RAW hits the fallback *and* the
-  companion is missing or itself fails to load at snapshot creation
-  time), the local add is refused with the same "No subject mask"
-  surface as the no-companion case above.
+  viable. If the swap target itself becomes unavailable later
+  (companion deleted or unreadable at render time), that direct-RAW
+  render falls back to the standing `embedded_jpeg`-disables-local
+  rule for that render only (warn-and-hold-zero) and swap-and-serve
+  resumes the next time the companion is reachable. If both sides
+  fail at snapshot creation time (RAW hits the fallback *and* the
+  companion is missing or itself fails to load), the local add is
+  refused with the same "No subject mask" surface as the no-
+  companion case above.
 
 **Darktable-developed exports bypass, they don't get their own variant.**
 Export prefers a darktable-developed output ahead of RAW / working copy /
@@ -1014,6 +1029,30 @@ No `EDIT_MATH_VERSION` bump: recipes without `local` render byte-identically.
   the user actually kept (not the placeholder the endpoint originally
   staged), so history replay and sync export both stay consistent
   with what is actually persisted on the photo.
+
+  **The XMP sync job skips `pending:*` refs so the queue row stays
+  in place for finalization to overwrite.** `sync_to_xmp` snapshots
+  `pending_changes` at job start, writes each queued
+  `edit_recipe_json` to the sidecar, and then clears the synced ids
+  in one pass. Left as-is, a `/api/jobs/sync` run that fires while
+  the bulk resnapshot is still pending would copy the
+  `pending:<placeholder_token>` recipe to the sidecar and clear the
+  queue row before finalization got to patch it — leaving the
+  sidecar carrying a disabled local ref and no queue row left to
+  rewrite. PR 1 therefore has `sync_to_xmp` skip any queue row whose
+  recipe carries a `local.mask.ref` matching a placeholder token
+  recorded on a still-`queued`/`running` `local_resnapshot_jobs`
+  row (matched against that row's `placeholder_tokens`, not the
+  `pending:` prefix in isolation, so a hypothetical unrelated user
+  string is not caught). Skipped rows stay in `pending_changes`;
+  finalization then rewrites the row's `edit_recipe_json` to the
+  finalized recipe (or, on CAS-skip / cancel / terminal failure,
+  the local-stripped variant per the same rules below) in the same
+  transaction that swaps `local.mask.ref`, and the next sync run
+  exports the correct value. The user-visible effect during the
+  pending window is a delayed XMP export for the affected targets —
+  the same wait-until-ready contract the render pipeline already
+  applies to their previews.
 
   **And it scrubs the placeholder token from every later history and
   sync record that captured it, not only the endpoint's own row.** A
