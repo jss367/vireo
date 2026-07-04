@@ -1024,25 +1024,3 @@ def test_remote_free_bytes_returns_none_on_failure(monkeypatch):
     assert move_mod._remote_free_bytes(_PROBE_REMOTE, "/p") is None
 
 
-def test_remote_tree_bytes_parses_du_and_absent_dir(monkeypatch):
-    monkeypatch.setattr(move_mod.subprocess, "run",
-                        lambda *a, **k: _FakeCompleted(0, "1234\t/volume1/x\n"))
-    assert move_mod._remote_tree_bytes(_PROBE_REMOTE, "/volume1/x") == \
-        1234 * 1024
-
-    # Absent directory: the probe's else-branch echoes 0 — a valid answer
-    # (nothing there yet), distinct from a probe failure.
-    monkeypatch.setattr(move_mod.subprocess, "run",
-                        lambda *a, **k: _FakeCompleted(0, "0\n"))
-    assert move_mod._remote_tree_bytes(_PROBE_REMOTE, "/volume1/x") == 0
-
-
-def test_remote_tree_bytes_returns_none_on_failure(monkeypatch):
-    monkeypatch.setattr(move_mod.subprocess, "run",
-                        lambda *a, **k: _FakeCompleted(255, "", "timeout"))
-    assert move_mod._remote_tree_bytes(_PROBE_REMOTE, "/p") is None
-
-    def boom(*a, **k):
-        raise OSError("ssh: not found")
-    monkeypatch.setattr(move_mod.subprocess, "run", boom)
-    assert move_mod._remote_tree_bytes(_PROBE_REMOTE, "/p") is None

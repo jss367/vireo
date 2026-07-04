@@ -1560,7 +1560,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 )
                             source_bytes = total_file_bytes(planning_files)
                             remote_summary_bits = []
-                            remote_resume_credit_checked = True
                             if remote_archive is None:
                                 # When a previous archive attempt left a partial
                                 # untracked directory at final_destination, the
@@ -1581,7 +1580,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             else:
                                 # Staging-only local plan (the archive volume
                                 # is the NAS, never the same device), then a
-                                # remote df/du probe for the archive side.
+                                # remote df probe for the archive side.
                                 # Probe failures degrade to "check skipped" —
                                 # logged and surfaced in the step summary and
                                 # result payload, never faked as numbers; the
@@ -1590,38 +1589,29 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 from local_processing import (
                                     RESERVED_FREE_BYTES,
                                 )
-                                from move import (
-                                    _remote_free_bytes,
-                                    _remote_tree_bytes,
-                                )
+                                from move import _remote_free_bytes
                                 plan = storage_plan(
                                     params.destination, source_bytes,
                                 )
                                 target = remote_archive["target"]
-                                remote_existing = _remote_tree_bytes(
-                                    target, remote_archive["ssh_final"],
-                                )
-                                if remote_existing is None:
-                                    log.warning(
-                                        "Couldn't probe existing bytes at %s; "
-                                        "skipping remote resume credit",
-                                        remote_archive["display"],
-                                    )
-                                    remote_summary_bits.append(
-                                        "remote resume-credit check skipped "
-                                        "(probe failed)"
-                                    )
-                                    remote_resume_credit_checked = False
-                                    remote_existing = 0
-                                # du reports whole-tree usage, so cap the
-                                # merge/resume credit at the source size —
-                                # unrelated content already on the NAS can't
-                                # shrink the delta below zero.
-                                existing_credit = min(
-                                    remote_existing, source_bytes,
-                                )
-                                archive_delta = source_bytes - existing_credit
-                                plan["archive_existing_bytes"] = existing_credit
+                                # No merge/resume credit for a remote archive:
+                                # the local resume-credit path (existing_archive_bytes)
+                                # compares each destination file's size+content
+                                # against the source, but a remote equivalent
+                                # would need a per-file walk over SSH. A
+                                # whole-tree `du` reports every byte at the
+                                # path — including unrelated files or stale
+                                # partials that rsync --ignore-existing will
+                                # still copy past — which could cancel out
+                                # source_bytes and let the preflight pass on
+                                # a nearly-full NAS. Budget the full source
+                                # here; a retry whose remaining delta would
+                                # actually fit but the full source wouldn't
+                                # is a rare batch-reject we take over the
+                                # false-positive that lets processing burn
+                                # hours before the transfer fails on space.
+                                archive_delta = source_bytes
+                                plan["archive_existing_bytes"] = 0
                                 plan["archive_required_bytes"] = archive_delta
                                 # df the configured base (just verified as an
                                 # existing writable dir by the connection
@@ -1674,8 +1664,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     "free_space_checked": (
                                         plan["archive_free_bytes"] is not None
                                     ),
-                                    "resume_credit_checked":
-                                        remote_resume_credit_checked,
                                 }
                             if plan["batching_required"]:
                                 # Tell the user which volume came up short — the

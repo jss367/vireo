@@ -475,33 +475,6 @@ def _remote_free_bytes(remote, path):
         return None
 
 
-def _remote_tree_bytes(remote, path):
-    """Total bytes already stored under ``path`` on the remote host, via
-    ``du -sk`` over SSH.
-
-    Returns 0 when the path doesn't exist yet, and None when the probe
-    itself couldn't run/parse (unknown — same contract as
-    ``_remote_free_bytes``). Used as the merge/resume credit for a remote
-    archive retry: unlike the local ``existing_archive_bytes`` (a per-file
-    content comparison), du reports whole-tree usage, so callers must cap
-    the credit at the source size to keep unrelated remote content from
-    extending it.
-    """
-    q = shlex.quote(path)
-    cmd = (["ssh"] + ssh_base_args(remote) + [_ssh_target(remote)]
-           + [f"if [ -d {q} ]; then du -sk {q}; else echo 0; fi"])
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if r.returncode != 0:
-        return None
-    try:
-        return int((r.stdout or "").split()[0]) * 1024
-    except (IndexError, ValueError):
-        return None
-
-
 def remote_preflight(remote, dest_path, file_cap=1000):
     """Probe a remote destination for the move UI's merge/resume prompt.
 

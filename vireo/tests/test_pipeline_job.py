@@ -10078,7 +10078,6 @@ def _remote_env(tmp_path, monkeypatch, mount_path=None):
         lambda t, r: {"ok": True, "message": "Connection OK"})
     monkeypatch.setattr(
         move_mod, "_remote_free_bytes", lambda t, p: 100 * 1024 ** 3)
-    monkeypatch.setattr(move_mod, "_remote_tree_bytes", lambda t, p: 0)
     monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: False)
     monkeypatch.setattr(move_mod, "_remote_mkdir_p", lambda r, p: (True, ""))
     monkeypatch.setattr(
@@ -10222,13 +10221,12 @@ def test_pipeline_remote_archive_preflight_refuses_when_connection_fails(
 def test_pipeline_remote_archive_space_probe_failure_degrades(
     tmp_path, monkeypatch,
 ):
-    """df/du probe failures must not fail (or fake) the preflight: the run
-    proceeds, the summary says the checks were skipped, and the result
-    payload marks them unchecked."""
+    """A df probe failure must not fail (or fake) the preflight: the run
+    proceeds, the summary says the check was skipped, and the result
+    payload marks it unchecked."""
     import move as move_mod
     env = _remote_env(tmp_path, monkeypatch)
     monkeypatch.setattr(move_mod, "_remote_free_bytes", lambda t, p: None)
-    monkeypatch.setattr(move_mod, "_remote_tree_bytes", lambda t, p: None)
     runner = _RemoteArchiveRunner()
     job = _make_job()
 
@@ -10238,14 +10236,12 @@ def test_pipeline_remote_archive_space_probe_failure_degrades(
     assert result["archive"]["moved"] == 1
     remote_info = result["local_processing"]["remote"]
     assert remote_info["free_space_checked"] is False
-    assert remote_info["resume_credit_checked"] is False
     storage_summaries = [
         kw.get("summary", "") for _, sid, kw in runner.step_updates
         if sid == "storage" and kw.get("status") == "completed"
     ]
     assert storage_summaries, runner.step_updates
     assert "free-space check skipped" in storage_summaries[-1]
-    assert "resume-credit check skipped" in storage_summaries[-1]
 
 
 def test_pipeline_remote_archive_refuses_when_remote_volume_full(
