@@ -224,6 +224,37 @@ body {
   gap: 8px;
   margin: 10px 0;
 }
+#maskOverlayImg {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+}
+.local-stale-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 8px 0;
+  padding: 6px 8px;
+  border: 1px solid var(--warning, #f0b84f);
+  border-radius: 4px;
+  color: var(--warning, #f0b84f);
+  font-size: 12px;
+}
+.local-region-title {
+  margin: 12px 0 2px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.local-unavailable-note {
+  margin: 8px 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
 .preset-row select,
 .preset-row input[type="text"] {
   width: 100%;
@@ -389,6 +420,7 @@ body {
     <div class="editor-canvas-wrap" id="editorCanvasWrap">
       <div class="editor-canvas" id="editorCanvas">
         <img id="editorImg" alt="">
+        <img id="maskOverlayImg" alt="" aria-hidden="true" style="display:none">
         <div class="crop-box" id="editorCropBox">
           <span class="crop-handle nw" data-handle="nw"></span>
           <span class="crop-handle ne" data-handle="ne"></span>
@@ -548,6 +580,32 @@ body {
         <button class="editor-btn" type="button" onclick="resetDetail()">Reset Detail</button>
       </div>
     </div>
+
+    <div class="panel-band" id="localBand" style="display:none">
+      <div class="panel-title">Local (Subject / Background)</div>
+      <div class="local-stale-banner" id="localStaleBanner" style="display:none">
+        <span>Newer subject mask available</span>
+        <button class="editor-btn" type="button" onclick="updateLocalMask()">Update</button>
+      </div>
+      <div class="button-row">
+        <button class="editor-btn" id="maskOverlayBtn" type="button" onclick="toggleMaskOverlay()">Show Mask</button>
+        <button class="editor-btn" type="button" onclick="resetLocal()">Reset Local</button>
+      </div>
+      <div class="control-row">
+        <label for="featherRange">Feather</label>
+        <input id="featherRange" type="range" min="0" max="200" step="1" value="0" oninput="setLocalFeather(this.value)">
+        <span class="control-value" id="featherValue">0</span>
+      </div>
+      <div class="local-region-title">Subject</div>
+      <div id="subjectLocalControls"></div>
+      <div class="local-region-title">Background</div>
+      <div id="backgroundLocalControls"></div>
+    </div>
+
+    <div class="panel-band" id="localUnavailableBand" style="display:none">
+      <div class="panel-title">Local (Subject / Background)</div>
+      <p class="local-unavailable-note">No subject mask for this photo &mdash; run the pipeline's mask stage to enable local adjustments.</p>
+    </div>
   </aside>
 
   <aside class="history-panel">
@@ -568,6 +626,13 @@ var editorState = {
   savedRecipe: {},
   recipe: {},
   presets: [],
+  localDraft: {subject: {}, background: {}, feather: 0},
+  localMask: null,
+  localMaskPromise: null,
+  localAvailable: false,
+  localStale: false,
+  maskOverlay: false,
+  maskOverlaySeq: 0,
   previewSeq: 0,
   previewTimer: null,
   drag: null,
@@ -862,6 +927,11 @@ function updateRecipeSummary() {
       else parts.push(key);
     });
   }
+  if (r.local && r.local.regions) {
+    r.local.regions.forEach(function(entry) {
+      parts.push('local ' + entry.region);
+    });
+  }
   document.getElementById('recipeSummary').textContent = parts.length ? parts.join(' | ') : 'No edits';
 }
 
@@ -890,6 +960,7 @@ function syncControls() {
   var straight = Number(r.straighten || 0);
   document.getElementById('straightenRange').value = String(straight);
   document.getElementById('straightenValue').textContent = straight.toFixed(1);
+  syncLocalControls();
   renderCropBox();
   updateDirtyState();
 }
@@ -1017,6 +1088,7 @@ function updatePreview() {
       : 'Preview uses the current unsaved recipe') + suffix;
     renderCropBox();
     updateHistogramFeedback();
+    refreshMaskOverlay();
   };
   img.onerror = function() {
     if (seq !== editorState.previewSeq) return;
@@ -1260,6 +1332,257 @@ async function deleteSelectedPreset() {
       showToast(e.message || 'Could not delete preset', 'error');
     }
   }
+}
+
+// --- Local (mask-weighted) adjustments --------------------------------------
+// Subject/Background deltas driven by the photo's SAM mask, frozen into an
+// edit-mask snapshot on first touch so saved renders never shift under a
+// regenerated mask. See docs/plans/2026-07-03-local-adjustments-design.md.
+
+var LOCAL_REGIONS = ['subject', 'background'];
+var LOCAL_CONTROL_DEFS = [
+  ['exposure', 'Exposure', -5, 5, 0.1, true],
+  ['shadows', 'Shadows', -100, 100, 1, false],
+  ['highlights', 'Highlights', -100, 100, 1, false],
+  ['saturation', 'Saturation', -100, 100, 1, false],
+  ['sharpen', 'Sharpen', -100, 100, 1, false],
+  ['noise_reduction', 'Denoise', -100, 100, 1, false],
+];
+
+function buildLocalControls() {
+  LOCAL_REGIONS.forEach(function(region) {
+    var host = document.getElementById(region + 'LocalControls');
+    if (!host || host.childElementCount) return;
+    LOCAL_CONTROL_DEFS.forEach(function(def) {
+      var key = def[0];
+      var id = 'local_' + region + '_' + key;
+      var row = document.createElement('div');
+      row.className = 'control-row';
+      row.innerHTML =
+        '<label for="' + id + 'Range">' + def[1] + '</label>' +
+        '<input id="' + id + 'Range" type="range" min="' + def[2] +
+        '" max="' + def[3] + '" step="' + def[4] + '" value="0">' +
+        '<span class="control-value" id="' + id + 'Value">' +
+        (def[5] ? '0.0' : '0') + '</span>';
+      host.appendChild(row);
+      row.querySelector('input').addEventListener('input', function() {
+        setLocalAdjustment(region, key, this.value, def[5]);
+      });
+    });
+  });
+}
+
+function localRegionValues(recipe) {
+  var out = {subject: {}, background: {}, feather: 0};
+  var local = recipe && recipe.local || {};
+  (local.regions || []).forEach(function(entry) {
+    if (out[entry.region]) {
+      out[entry.region] = Object.assign({}, entry.adjustments || {});
+    }
+  });
+  out.feather = Number((local.mask || {}).feather || 0);
+  return out;
+}
+
+function rebuildLocalSection() {
+  var draft = editorState.localDraft;
+  var regions = [];
+  LOCAL_REGIONS.forEach(function(region) {
+    var adj = {};
+    LOCAL_CONTROL_DEFS.forEach(function(def) {
+      var v = Number(draft[region][def[0]] || 0);
+      if (Math.abs(v) > 0.000001) adj[def[0]] = v;
+    });
+    if (Object.keys(adj).length) regions.push({region: region, adjustments: adj});
+  });
+  // Mirror normalize_recipe's canonical region order so the dirty-state
+  // comparison stays stable against the server's saved form.
+  regions.sort(function(a, b) { return a.region < b.region ? -1 : 1; });
+  if (!regions.length || !editorState.localMask) {
+    delete editorState.recipe.local;
+    return;
+  }
+  var mask = {
+    ref: editorState.localMask.ref,
+    source_digest: editorState.localMask.source_digest,
+  };
+  if (Math.abs(Number(draft.feather || 0)) > 0.000001) {
+    mask.feather = Number(draft.feather);
+  }
+  editorState.recipe.local = {mask: mask, regions: regions};
+}
+
+function syncLocalControls() {
+  var vals = localRegionValues(editorState.recipe);
+  editorState.localDraft = {
+    subject: vals.subject,
+    background: vals.background,
+    feather: vals.feather,
+  };
+  var savedMask = (editorState.recipe.local || {}).mask;
+  if (savedMask && savedMask.ref) {
+    editorState.localMask = {
+      ref: savedMask.ref,
+      source_digest: savedMask.source_digest,
+    };
+  }
+  LOCAL_REGIONS.forEach(function(region) {
+    LOCAL_CONTROL_DEFS.forEach(function(def) {
+      var id = 'local_' + region + '_' + def[0];
+      var input = document.getElementById(id + 'Range');
+      var label = document.getElementById(id + 'Value');
+      var v = Number(vals[region][def[0]] || 0);
+      if (input) input.value = String(v);
+      if (label) label.textContent = def[5] ? v.toFixed(1) : String(Math.round(v));
+    });
+  });
+  var feather = document.getElementById('featherRange');
+  if (feather) feather.value = String(vals.feather || 0);
+  var featherLabel = document.getElementById('featherValue');
+  if (featherLabel) featherLabel.textContent = String(Math.round(vals.feather || 0));
+  updateLocalBandVisibility();
+}
+
+function updateLocalBandVisibility() {
+  var available = editorState.localAvailable || !!editorState.recipe.local;
+  var band = document.getElementById('localBand');
+  var unavailable = document.getElementById('localUnavailableBand');
+  if (band) band.style.display = available ? '' : 'none';
+  if (unavailable) unavailable.style.display = available ? 'none' : '';
+  var banner = document.getElementById('localStaleBanner');
+  if (banner) banner.style.display = editorState.localStale ? '' : 'none';
+}
+
+function ensureLocalMask() {
+  if (editorState.localMask) return Promise.resolve(editorState.localMask);
+  if (!editorState.localMaskPromise) {
+    var photoId = editorState.photoId;
+    editorState.localMaskPromise = safeFetch(
+      '/api/photos/' + photoId + '/local-mask/snapshot',
+      {method: 'POST'}, {toast: false}
+    ).then(function(data) {
+      if (editorState.photoId === photoId) editorState.localMask = data.mask;
+      return data.mask;
+    }).catch(function(e) {
+      if (editorState.photoId === photoId) {
+        editorState.localMaskPromise = null;
+        editorState.localAvailable = false;
+        updateLocalBandVisibility();
+        if (typeof showToast === 'function') {
+          showToast(e.message || 'Could not snapshot the subject mask', 'error');
+        }
+      }
+      throw e;
+    });
+  }
+  return editorState.localMaskPromise;
+}
+
+function setLocalAdjustment(region, key, raw, fixed) {
+  if (editorState.loading) return;
+  var v = Number(raw) || 0;
+  editorState.localDraft[region][key] = v;
+  var label = document.getElementById('local_' + region + '_' + key + 'Value');
+  if (label) label.textContent = fixed ? v.toFixed(1) : String(Math.round(v));
+  if (editorState.localMask) {
+    rebuildLocalSection();
+    markChanged(true);
+  } else {
+    // First touch: freeze the active mask into a snapshot, then attach the
+    // pending slider state. The snapshot is content-addressed, so repeat
+    // calls are idempotent.
+    ensureLocalMask().then(function() {
+      rebuildLocalSection();
+      markChanged(true);
+    }).catch(function() {});
+  }
+}
+
+function setLocalFeather(raw) {
+  if (editorState.loading) return;
+  var v = Number(raw) || 0;
+  editorState.localDraft.feather = v;
+  var label = document.getElementById('featherValue');
+  if (label) label.textContent = String(Math.round(v));
+  if (editorState.localMask) {
+    rebuildLocalSection();
+    markChanged(true);
+  } else {
+    ensureLocalMask().then(function() {
+      rebuildLocalSection();
+      markChanged(true);
+    }).catch(function() {});
+  }
+}
+
+function resetLocal() {
+  editorState.localDraft = {subject: {}, background: {}, feather: 0};
+  delete editorState.recipe.local;
+  syncLocalControls();
+  markChanged(true);
+}
+
+async function updateLocalMask() {
+  var photoId = editorState.photoId;
+  try {
+    var data = await safeFetch(
+      '/api/photos/' + photoId + '/local-mask/snapshot',
+      {method: 'POST'}, {toast: false}
+    );
+    if (editorState.photoId !== photoId) return;
+    editorState.localMask = data.mask;
+    editorState.localStale = false;
+    rebuildLocalSection();
+    updateLocalBandVisibility();
+    markChanged(true);
+    if (typeof showToast === 'function') {
+      showToast('Subject mask updated — save to keep it', 'success');
+    }
+  } catch (e) {
+    if (typeof showToast === 'function') {
+      showToast(e.message || 'Could not update the subject mask', 'error');
+    }
+  }
+}
+
+function toggleMaskOverlay() {
+  editorState.maskOverlay = !editorState.maskOverlay;
+  setButtonActive('maskOverlayBtn', editorState.maskOverlay);
+  refreshMaskOverlay();
+}
+
+function refreshMaskOverlay() {
+  var overlay = document.getElementById('maskOverlayImg');
+  if (!overlay) return;
+  var recipe = editorState.showBefore
+    ? previewRecipeFor(editorState.savedRecipe)
+    : previewRecipe();
+  if (!editorState.maskOverlay || !recipe.local) {
+    overlay.style.display = 'none';
+    overlay.removeAttribute('src');
+    return;
+  }
+  var size = editorState.zoomMode === 'actual' ? 3840 : 1920;
+  var seq = ++editorState.maskOverlaySeq;
+  overlay.onload = function() {
+    if (seq !== editorState.maskOverlaySeq) return;
+    positionMaskOverlay();
+    overlay.style.display = '';
+  };
+  overlay.onerror = function() {
+    if (seq !== editorState.maskOverlaySeq) return;
+    overlay.style.display = 'none';
+  };
+  overlay.src = '/photos/' + editorState.photoId + '/edit-mask-preview?size=' +
+    size + '&recipe=' + encodeURIComponent(JSON.stringify(recipe)) + '&v=' + seq;
+}
+
+function positionMaskOverlay() {
+  var img = document.getElementById('editorImg');
+  var overlay = document.getElementById('maskOverlayImg');
+  if (!img || !overlay) return;
+  overlay.style.width = img.clientWidth + 'px';
+  overlay.style.height = img.clientHeight + 'px';
 }
 
 function resetDetail() {
@@ -1774,6 +2097,27 @@ async function loadPhoto(photoId, opts) {
     editorState.savedRecipe = cloneRecipe(photo.edit_recipe || {});
     editorState.recipe = cloneRecipe(photo.edit_recipe || {});
     ensureCrop(editorState.recipe);
+    editorState.localMask = null;
+    editorState.localMaskPromise = null;
+    editorState.localAvailable = false;
+    editorState.localStale = false;
+    editorState.maskOverlay = false;
+    setButtonActive('maskOverlayBtn', false);
+    refreshMaskOverlay();
+    safeFetch('/api/photos/' + photoId + '/masks', {}, {toast: false})
+      .then(function(d) {
+        if (editorState.photoId !== photoId) return;
+        editorState.localAvailable = !!d.active;
+        updateLocalBandVisibility();
+      }).catch(function() {});
+    if (photo.edit_recipe && photo.edit_recipe.local) {
+      safeFetch('/api/photos/' + photoId + '/edit-recipe', {}, {toast: false})
+        .then(function(d) {
+          if (editorState.photoId !== photoId) return;
+          editorState.localStale = !!d.local_mask_stale;
+          updateLocalBandVisibility();
+        }).catch(function() {});
+    }
     document.getElementById('editorFilename').textContent = photo.filename || ('Photo ' + photoId);
     var dim = photo.width && photo.height ? photo.width + ' x ' + photo.height : 'Photo ' + photoId;
     document.getElementById('editorSubhead').textContent = dim;
@@ -1804,6 +2148,7 @@ function initEditorKeyboard() {
 async function initEditor() {
   initCropDrag();
   initEditorKeyboard();
+  buildLocalControls();
   clearHistogramFeedback();
   setZoomMode('fit');
   loadPresets();
