@@ -156,7 +156,7 @@ def resolve_strategy(name):
 
 **Step 2:** Run — expect FAIL (unexpected keyword).
 
-**Step 3:** Add `miss_enabled: bool | None = None` to `PipelineParams` (None = defer to config, preserving today's behavior). At the misses gate, change to:
+**Step 3:** Add `miss_enabled: bool | None = None` to `PipelineParams` (None = defer to config, preserving today's behavior). At the misses gate, compute the effective value **and inject it into the config that `compute_misses_for_workspace` sees** — the misses module gates internally on `pipeline_config.get("miss_enabled", True)` at `vireo/misses.py:299` and `:381`, so shadowing a local variable alone would still let the stage run whenever the workspace override left it True:
 
 ```python
 miss_enabled = (
@@ -164,11 +164,26 @@ miss_enabled = (
     if params.miss_enabled is not None
     else pipeline_cfg.get("miss_enabled", True)
 )
+# Pass a copy with the effective value so misses.py's own early-return
+# fires when a strategy sets miss_enabled=False on top of a workspace
+# config that has it True. Mutating pipeline_cfg in place would leak the
+# override into any later stage/reader that shares the dict.
+misses_cfg = {**pipeline_cfg, "miss_enabled": miss_enabled}
+
+n = compute_misses_for_workspace(
+    thread_db,
+    misses_cfg,
+    collection_id=collection_id,
+    exclude_photo_ids=params.exclude_photo_ids,
+    now=now_ts,
+)
 ```
+
+The local `miss_enabled` still gates the `miss_computed_at` cache marker at `pipeline_job.py:4991` — that must not fire when a per-run override disables misses, or `pipeline_review`'s "current-run misses" shortcut would treat stale flags as fresh.
 
 Do the same shape for `skip_detect` if Task 1.0 concluded it's needed.
 
-**Step 4:** Run — PASS. Also run the full `test_pipeline_job.py` file.
+**Step 4:** Run — PASS. Also run the full `test_pipeline_job.py` file. Add a second assertion to the failing test (or a peer test) that with workspace `miss_enabled: True` and `PipelineParams(miss_enabled=False)`, no `miss` rows are written for the run's collection and `miss_computed_at` is not stamped — this pins the "override actually reaches the compute function" property that a local-variable-only fix would silently break.
 
 **Step 5: Commit** — `feat: per-run miss_enabled override on PipelineParams`
 
@@ -225,11 +240,19 @@ Match the file's existing fixture/client conventions rather than inventing new o
 - Modify: `vireo/app.py` (`api_job_pipeline`)
 - Test: `vireo/tests/test_jobs_api.py`
 
-**Step 1: Failing test** — POST `{"folder_ids": [fid], "strategy": "quick_look"}` (no `collection_id`, no `source`). Expect 200; expect the created job's config to carry a `collection_id` for an ad-hoc collection whose photos are exactly the folder's photos. Also: folder not linked to the active workspace → 404 (mirror the guard in `api_folder_rescan`, `app.py:12700`).
+**Step 1: Failing tests** — cover both the flat and recursive cases so a flat `folder_id IN (...)` implementation cannot pass:
+
+- POST `{"folder_ids": [fid], "strategy": "quick_look"}` (no `collection_id`, no `source`). Expect 200; the created job's config carries a `collection_id` for an ad-hoc collection whose photos are exactly the folder's photos.
+- Build a fixture with a workspace root folder and at least one child folder (both linked to the workspace) holding its own photos. POST `{"folder_ids": [<root_id>], ...}`. Expect the ad-hoc collection's photo set to include **both** the root's direct photos and every descendant's photos — matching how the rest of the app treats folder scopes (see `Database.get_workspace_folder_roots` at `vireo/db.py:1669` and the recursive expansion in `get_folder_subtree_ids` at `vireo/db.py:2106`, which is what folder-scoped missing-photo checks and workspace-root counting use).
+- Folder not linked to the active workspace → 404 (mirror the guard in `api_folder_rescan`, `app.py:12700`; note that `get_folder_subtree_ids` itself already refuses to walk out of the active workspace, so unrelated descendants can never leak in).
 
 **Step 2:** Run — FAIL.
 
-**Step 3:** Implement in the route: resolve `folder_ids` → photo ids (`SELECT id FROM photos WHERE folder_id IN (...)`), reject folders not linked to the active workspace, then create the collection exactly like `pipeline_job.py:2124` does (`add_collection(name, json.dumps([{"field": "photo_ids", "value": ids}]))`, name like `"Process <folder basename> <timestamp>"`), and proceed as a collection run. No new pipeline machinery.
+**Step 3:** Implement in the route:
+- Reject any folder not linked to the active workspace (before subtree expansion, using the same guard shape as `api_folder_rescan`).
+- For each requested folder, expand to its active-workspace subtree with `db.get_folder_subtree_ids(folder_id)` and union the results (dedup — a workspace can link both a root and a nested folder, so the same descendant can appear twice).
+- Resolve photo ids off the unioned set: `SELECT id FROM photos WHERE folder_id IN (...)` scoped by the workspace. A flat `folder_id IN (:folder_ids)` over the raw request would only catch photos hanging directly off the selected folders and miss the bulk of a normal dated archive tree.
+- Create the ad-hoc collection exactly like `pipeline_job.py:2124` does (`add_collection(name, json.dumps([{"field": "photo_ids", "value": ids}]))`, name like `"Process <folder basename> <timestamp>"`), and proceed as a collection run. No new pipeline machinery.
 
 **Step 4:** Run — PASS.
 
