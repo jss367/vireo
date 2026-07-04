@@ -833,8 +833,11 @@ No `EDIT_MATH_VERSION` bump: recipes without `local` render byte-identically.
   and per-workspace scoping): the endpoint validates the incoming
   recipe once, immediately writes each target's `local`-stripped
   recipe with a placeholder ref that renders as missing-snapshot
-  (warn-and-hold-zero — no partial local edits leak out), enqueues one
-  job whose payload is `(source_recipe, target_ids, active_workspace)`,
+  (warn-and-hold-zero — no partial local edits leak out), durably
+  persists a `local_resnapshot_jobs` row carrying the payload
+  `(source_recipe, target_ids, active_workspace, placeholder_tokens)`
+  inside the same transaction as the placeholder writes and only then
+  enqueues the in-memory JobRunner closure that consumes that row,
   and returns synchronously with the job id plus a `pending` list of
   target ids whose resnapshot is queued. The job runs the same
   strip-and-resnapshot helper per target, rewrites each target's
@@ -855,6 +858,66 @@ No `EDIT_MATH_VERSION` bump: recipes without `local` render byte-identically.
   resnapshotted recipes in the response (rare — the UI always
   refreshes per-target state on the completion SSE) can poll the same
   per-target recipe fetch the editor already uses.
+
+  **The `local_resnapshot_jobs` row is what makes the job crash-safe.**
+  `JobRunner` today keeps non-pipeline work closures only in memory,
+  and startup marks every persisted queued/running row failed rather
+  than rebuilding its closure (`vireo/jobs.py:51-57`,
+  `vireo/jobs.py:106-119`); a naive enqueue-then-write order would
+  strand a whole selection in the missing-snapshot state after any
+  crash between the placeholder writes and the job finishing. PR 1
+  therefore inserts the `local_resnapshot_jobs` row inside the same
+  DB transaction that stamps the per-target placeholder recipes, and
+  only after commit does the in-memory JobRunner closure start
+  consuming it. Startup reconciles by **re-enqueueing** (not failing)
+  any `local_resnapshot_jobs` row in `queued` or `running` state — the
+  row is the recovery record, the generic mark-failed sweep in
+  `JobRunner` skips this job type, and each row's payload
+  (`source_recipe`, `target_ids`, `active_workspace`,
+  `placeholder_tokens`) is enough to rebuild the work closure
+  end-to-end. Any restart therefore resumes pending resnapshots
+  against the same placeholder-marked targets rather than leaving
+  them stranded.
+
+  **Each placeholder ref is a compare-and-swap token.** The
+  placeholder's `local.mask.ref` is a `pending:<placeholder_token>`
+  sentinel — unique per `(job_id, target_id)` and recorded in the
+  durable row's `placeholder_tokens` field. Finalization CAS's on it:
+  under the same per-`photo_id` publish-lock as single-photo Update,
+  the job reads the target's current `local.mask.ref` and substitutes
+  the finalized ref only if the read equals the expected
+  `pending:<placeholder_token>`. If the user (or any other write path)
+  has cleared, re-pasted, or otherwise overwritten the target's
+  recipe in the meantime, the read differs and the target is dropped
+  from the per-target work — SSE emits `finalize_skipped` and the id
+  moves to the response's `skipped` list on completion — so an older
+  bulk job can never silently reintroduce local adjustments into a
+  newer recipe. A `pending:*` ref also fails `mask.decodes` lookup by
+  construction (no on-disk snapshot filename matches), so a target
+  still holding a placeholder renders as missing-snapshot
+  (warn-and-hold-zero) exactly as intended during the pending window,
+  and cache-invalidation on the finalization transaction flips it
+  atomically to the completed local render.
+
+  **Finalization patches the edit-history and XMP sync records the
+  endpoint wrote from the placeholder.** The bulk endpoint's own
+  edit-history insert (`vireo/app.py:4084-4097`) and XMP-sync queue
+  entry both record the recipe value written *before* the response
+  returned — i.e. the placeholder — and redo replays
+  `edit_history_items.new_value` verbatim (`vireo/db.py:11303-11308`)
+  while XMP sync exports the queued recipe verbatim. Without a patch
+  step, undo→redo on a bulk-pasted target would reinstate the
+  placeholder recipe (local pass disabled) even after the background
+  job succeeded, and the same photo's XMP sidecar would export a
+  disabled `local` block. The finalization step therefore updates
+  each target's edit-history `new_value` and its pending XMP sync
+  entry in the same transaction that swaps `local.mask.ref` to its
+  finalized value; a target dropped by the CAS above has its
+  edit-history / sync entries rewritten to the current-recipe value
+  the user actually kept (not the placeholder the endpoint originally
+  staged), so history replay and sync export both stay consistent
+  with what is actually persisted on the photo.
+
   This matters because the paste UI in `vireo/templates/browse.html`
   currently caches `data.recipe` for every applied id
   (`vireo/templates/browse.html:4282-4285`) — with a singular response,
