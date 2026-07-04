@@ -1314,6 +1314,160 @@ def test_exif_suggestion_bails_when_slow_geocode_resolves_after_batch_clear(
         assert row is None, f"photo {pid} should not have gained a location"
 
 
+def test_exif_suggestion_bails_when_slow_geocode_resolves_after_batch_location_saved(
+    live_server, page
+):
+    """Codex P2 (PR #1097, 17:39Z): the earlier post-await guard bailed only
+    if #locationFilled was visible right when the reverse-geocode resolved.
+    That misses the batch save: after POST /api/batch/location{,/text}
+    succeeds, renderLocationFilled briefly shows #locationFilled, then
+    _afterLocationMutation runs renderBatchInspector which calls
+    renderLocationEmpty and rehides #locationFilled — so the DOM check sees
+    "not filled" and the completion path repaints A's stale Accept line
+    into the batch inspector. Clicking Accept then posts A's EXIF place to
+    the whole batch, overwriting the just-saved batch location.
+
+    Fixed by bumping window._locationMutationEpoch at the top of
+    _afterLocationMutation and comparing against the epoch captured at
+    fetch time. Any successful save/clear/accept between the fetch and the
+    post-await paint moves the epoch and the paint bails.
+
+    Sequence: open A (reverse-geocode held) → Cmd-click B (batch mode) →
+    type a batch free-text location and hit Enter (renderBatchInspector
+    rehides #locationFilled after the save) → release the held response.
+    The suggestion must stay hidden/empty and both A and B must keep the
+    just-saved batch location — not A's held EXIF place.
+    """
+    photo_ids = live_server["data"]["photos"][:2]
+    anchor, other_b = photo_ids
+    # Only the anchor has GPS. If B shared it, B's own maybeShowExifSuggestion
+    # would fire on entry to batch mode (renderBatchInspector doesn't fetch,
+    # but a prior render might have) and confuse the assertion.
+    _seed_exif_photos(live_server, [anchor])
+    _set_api_key()
+
+    db = live_server["db"]
+
+    held_routes = []
+
+    def _hold_reverse_geocode(route):
+        held_routes.append(route)
+
+    page.route("**/api/places/reverse-geocode**", _hold_reverse_geocode)
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+
+    page.locator(f".grid-card[data-id='{anchor}']").click()
+    _wait_for_detail_loaded(page)
+
+    for _ in range(50):
+        if held_routes:
+            break
+        page.wait_for_timeout(100)
+    assert held_routes, "reverse-geocode fetch was never issued"
+
+    # Grow the selection to {A, B}. A stays the ambient _detailPhotoId, so
+    # without the fix the post-await guard's owner/selection checks still
+    # pass when the held response resolves.
+    page.locator(f".grid-card[data-id='{other_b}']").click(modifiers=["Meta"])
+    page.wait_for_function(
+        "(id) => selectedPhotos.size === 2 && selectedPhotos.has(id)",
+        arg=anchor,
+    )
+
+    # Save a batch free-text location. This is the mutation window: the
+    # POST returns, renderLocationFilled briefly shows the filled row, then
+    # _afterLocationMutation → renderBatchInspector rehides it. The
+    # completion path in maybeShowExifSuggestion would otherwise see
+    # #locationFilled hidden and repaint.
+    saved_text = "the shared batch meadow"
+    inp = page.locator("#locationInput")
+    inp.wait_for(state="visible")
+    inp.fill(saved_text)
+    inp.press("Enter")
+
+    # Wait for the batch save to complete: A and B both persisted, and the
+    # batch inspector has re-rendered (so #locationFilled is hidden again).
+    page.wait_for_function(
+        "() => selectedPhotos.size === 2"
+        " && document.getElementById('locationFilled').hidden === true"
+    )
+    for _ in range(50):
+        row_a = db.conn.execute(
+            "SELECT k.name FROM photo_keywords pk "
+            "JOIN keywords k ON k.id = pk.keyword_id "
+            "WHERE pk.photo_id = ? AND k.type = 'location'",
+            (anchor,),
+        ).fetchone()
+        row_b = db.conn.execute(
+            "SELECT k.name FROM photo_keywords pk "
+            "JOIN keywords k ON k.id = pk.keyword_id "
+            "WHERE pk.photo_id = ? AND k.type = 'location'",
+            (other_b,),
+        ).fetchone()
+        if row_a is not None and row_b is not None:
+            break
+        page.wait_for_timeout(100)
+    assert row_a is not None and row_a[0] == saved_text, (
+        f"anchor should have the batch-saved location, got {row_a!r}"
+    )
+    assert row_b is not None and row_b[0] == saved_text, (
+        f"other photo should have the batch-saved location, got {row_b!r}"
+    )
+
+    # renderLocationFilled scrubbed the suggestion inline (before the batch
+    # inspector re-render), so it's already clean here.
+    assert page.evaluate(
+        "() => document.getElementById('locationExifSuggestion').dataset.photoId || ''"
+    ) == ""
+    assert page.evaluate(
+        "() => document.getElementById('locationExifSuggestion').innerHTML"
+    ) == ""
+
+    # Now release the held reverse-geocode response. Without the epoch
+    # bump, the completion path repaints A's suggestion because
+    # _detailPhotoId is still A, the selection {A,B} still includes A, and
+    # #locationFilled is hidden.
+    held_routes[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps({
+            "place_id": _CANNED_PLACE_ID,
+            "summary": _CANNED_DETAILS["name"],
+            "lat": _CANNED_DETAILS["lat"],
+            "lng": _CANNED_DETAILS["lng"],
+            "cached": False,
+        }),
+    )
+    page.wait_for_timeout(300)
+
+    # Suggestion must stay scrubbed — no stale owner id, no Accept line.
+    expect(page.locator("#locationExifSuggestion")).to_be_hidden()
+    assert page.evaluate(
+        "() => document.getElementById('locationExifSuggestion').innerHTML"
+    ) == ""
+    assert page.evaluate(
+        "() => document.getElementById('locationExifSuggestion').dataset.photoId || ''"
+    ) == ""
+
+    # And the just-saved batch location must survive — no photo may end up
+    # with A's held EXIF place.
+    for pid, label in ((anchor, "anchor"), (other_b, "other")):
+        rows = db.conn.execute(
+            "SELECT k.name FROM photo_keywords pk "
+            "JOIN keywords k ON k.id = pk.keyword_id "
+            "WHERE pk.photo_id = ? AND k.type = 'location'",
+            (pid,),
+        ).fetchall()
+        assert len(rows) == 1, (
+            f"{label} should have exactly one location keyword, got {rows!r}"
+        )
+        assert rows[0][0] == saved_text, (
+            f"{label}'s location should still be {saved_text!r}, got {rows[0][0]!r}"
+        )
+
+
 def test_exif_suggestion_cleared_by_loaddetail_before_select_all(
     live_server, page, monkeypatch
 ):

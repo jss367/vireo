@@ -5978,6 +5978,15 @@ function _locationApplyPhotoIds() {
 }
 
 async function _afterLocationMutation(photoIds, detailPhotoId) {
+  // Bump the location-mutation epoch so any in-flight reverse-geocode from an
+  // earlier maybeShowExifSuggestion(A) bails out of its post-await paint. Every
+  // save/clear/accept path funnels through here, so this is the single choke
+  // point where the batch-save-during-pending-geocode race can be closed.
+  // Codex P2 on PR #1097 (17:39Z): open A → Cmd-click B → save batch location
+  // for {A,B} → geocode resolves. renderBatchInspector rehides #locationFilled,
+  // so the DOM-only guard in maybeShowExifSuggestion can't tell the batch was
+  // just given a location and repaints A's stale Accept line.
+  window._locationMutationEpoch = (window._locationMutationEpoch || 0) + 1;
   invalidateKeywordAutocompleteCache();
   loadKeywords();
   scheduleCollectionCountsRefresh();
@@ -6257,13 +6266,19 @@ async function maybeShowExifSuggestion(photo) {
   if (photo.location) return;
   if (photo.latitude == null || photo.longitude == null) return;
 
-  await _cfgPromise;
-  var apiKey = (window.GOOGLE_MAPS_API_KEY || '').trim();
-  if (!apiKey) return;
-
   // Capture the photo id at request time so a slow reverse-geocode for an
   // older photo doesn't paint into the suggestion line for a newer one.
   var requestPhotoId = photo.id;
+  // Capture the location-mutation epoch BEFORE the first await, so any
+  // save/clear/accept during _cfgPromise or the reverse-geocode fetch bumps
+  // the counter past what we captured. The post-await guard bails on any
+  // mismatch. Closes the batch-save-during-pending-geocode race that the
+  // DOM `!filled.hidden` check alone can't catch (see below).
+  var requestEpoch = window._locationMutationEpoch || 0;
+
+  await _cfgPromise;
+  var apiKey = (window.GOOGLE_MAPS_API_KEY || '').trim();
+  if (!apiKey) return;
   try {
     var params = new URLSearchParams({lat: photo.latitude, lng: photo.longitude});
     var r = await fetch('/api/places/reverse-geocode?' + params.toString());
@@ -6293,13 +6308,18 @@ async function maybeShowExifSuggestion(photo) {
     if (_locationApplyPhotoIds().indexOf(requestPhotoId) === -1) return;
     // Fourth race: while we were awaiting reverse-geocode, the user saved
     // a location for this photo (via the input, a keyword pick, or a batch
-    // op). renderLocationFilled scrubbed #locationExifSuggestion, but both
-    // guards above still pass because _detailPhotoId and the selection
-    // haven't moved. Painting into the (now-hidden) empty container would
-    // stash A's stale Accept line; a later Cmd-click preserving the
-    // suggestion for a batch would resurrect it and let Accept overwrite
-    // the saved location. Bail if #locationFilled is on screen. (Codex P2
-    // on PR #1097.)
+    // op). Every mutation path funnels through _afterLocationMutation, which
+    // bumps _locationMutationEpoch. If it moved, bail. (Codex P2 on PR #1097
+    // at 17:39Z: save-batch-location-during-pending-geocode overwriting the
+    // just-saved batch location. The DOM `!filled.hidden` check below alone
+    // can't catch that — after a batch save, _afterLocationMutation runs
+    // renderBatchInspector → renderLocationEmpty, which rehides
+    // #locationFilled, so the paint sneaks through.)
+    if ((window._locationMutationEpoch || 0) !== requestEpoch) return;
+    // Defense-in-depth: if a filled row is on screen right now, whoever
+    // painted it wanted the suggestion gone. The epoch check above already
+    // covers the batch race; this catches any future save site that renders
+    // filled without funneling through _afterLocationMutation.
     var filled = document.getElementById('locationFilled');
     if (filled && !filled.hidden) return;
 
