@@ -1192,6 +1192,29 @@ No `EDIT_MATH_VERSION` bump: recipes without `local` render byte-identically.
   the resnapshotted recipe under the RAW primary's id. Edit-history
   items reassigned in the same block get the same resnapshot treatment
   (their stored `recipe_json`, if any, is re-snapshotted the same way).
+  **Queued XMP sync payloads reassigned by pairing get the same
+  treatment.** Pairing already transfers `pending_changes` rows from the
+  companion to the RAW primary verbatim
+  (`vireo/scanner.py:458-465` — a blind `UPDATE pending_changes SET
+  photo_id`), so a companion `edit_recipe` row queued for XMP sync
+  arrives at the RAW primary still carrying the companion's
+  `<companion_id>.<ref>.{decode}.png` snapshot family in its
+  `local.mask.ref`. The next `sync_to_xmp` run would then write a
+  sidecar for the RAW primary that references a snapshot family living
+  under the companion id — files that do not exist under the RAW
+  primary — so external consumers and any later import that reads the
+  sidecar would see the local block disabled on a photo whose in-Vireo
+  render is happily using the freshly resnapshotted RAW-primary
+  family. The pairing helper therefore includes `pending_changes.value`
+  entries whose `change_type='edit_recipe'` in the same
+  strip-and-resnapshot pass: each such row is loaded, its recipe is run
+  through the same helper against the RAW primary's active mask (or
+  the consumed-companion-mask path below when the primary has none),
+  and the row is rewritten with the resnapshotted recipe before the
+  `photo_id` reassignment commits. On the same "no viable basis"
+  terminal case that drops `local` from the persisted recipe, the
+  queued row's `local` block is stripped the same way so the sidecar
+  export matches the on-disk render.
   **When the RAW primary has no usable mask of its own, pairing
   consumes the companion's mask before deleting the companion row**
   rather than dropping `local` outright. Concretely, the pairing
