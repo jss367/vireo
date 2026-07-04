@@ -6206,7 +6206,17 @@ async function maybeShowExifSuggestion(photo) {
     if (!r.ok) return;
     var data = await r.json();
     if (!data || !data.place_id || !data.summary) return;
+    // Two races the post-await guard must handle. The first (a stale
+    // response for a photo the detail already navigated away from) is
+    // caught by _detailPhotoId. The second (a slow response for an anchor
+    // the user has since dropped from a batch) needs a selection check:
+    // batch mode doesn't move _detailPhotoId when a member is removed, so
+    // the anchor pointer can still match while getActiveSelection() no
+    // longer includes it — and Accept posts to getActiveSelection(). Codex
+    // P1 on PR #1097: open A (slow geocode) → Cmd-click B → Cmd-click A
+    // out → Cmd-click C would otherwise paint A's Accept line for {B,C}.
     if (window._detailPhotoId !== requestPhotoId) return;
+    if (_locationApplyPhotoIds().indexOf(requestPhotoId) === -1) return;
 
     sugg.innerHTML = '';
     var text = document.createElement('span');

@@ -618,6 +618,117 @@ def test_exif_suggestion_cleared_by_filled_location_render(
     assert row is not None, "photo B should keep its saved location"
 
 
+def test_exif_suggestion_bails_when_slow_geocode_resolves_after_anchor_dropped(
+    live_server, page, monkeypatch
+):
+    """Codex P1 (PR #1097, commit 9d06366c): the post-await path in
+    maybeShowExifSuggestion only guarded on window._detailPhotoId, which
+    batch mode does NOT update when the anchor is dropped from the
+    selection. A slow reverse-geocode for photo A could still stamp and
+    show A's Accept line for a selection that no longer includes A, and
+    clicking it would apply A's place to unrelated photos.
+
+    Sequence: open A (reverse-geocode is intercepted and held) →
+    Cmd-click B → Cmd-click A out → Cmd-click C (selection is now
+    {B, C}) → release A's reverse-geocode response. The suggestion must
+    stay hidden and no other photo may gain a location.
+    """
+    photo_ids = live_server["data"]["photos"][:3]
+    anchor, other_b, other_c = photo_ids
+    # Only the anchor has GPS. B and C have no lat/lng, so their own
+    # maybeShowExifSuggestion calls bail immediately and never race with
+    # ours. If they shared A's canned place_id the bug would be masked.
+    _seed_exif_photos(live_server, [anchor])
+    _set_api_key()
+
+    import places
+    monkeypatch.setattr(
+        places, "place_details", lambda pid, key: _CANNED_DETAILS,
+    )
+
+    db = live_server["db"]
+
+    # Intercept the reverse-geocode call and hold it. Playwright dispatches
+    # the route handler on a background task, so page interactions below
+    # can proceed while the fetch stays pending in the browser.
+    held_routes = []
+
+    def _hold_reverse_geocode(route):
+        held_routes.append(route)
+
+    page.route("**/api/places/reverse-geocode**", _hold_reverse_geocode)
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+
+    page.locator(f".grid-card[data-id='{anchor}']").click()
+    _wait_for_detail_loaded(page)
+
+    # Wait for the browser to actually issue the reverse-geocode fetch.
+    # maybeShowExifSuggestion awaits _cfgPromise before fetching, so this
+    # is not synchronous with the click.
+    for _ in range(50):
+        if held_routes:
+            break
+        page.wait_for_timeout(100)
+    assert held_routes, "reverse-geocode fetch was never issued"
+
+    # While the response is held, drive the anchor-dropped batch sequence.
+    page.locator(f".grid-card[data-id='{other_b}']").click(modifiers=["Meta"])
+    page.wait_for_function(
+        "(id) => selectedPhotos.size === 2 && selectedPhotos.has(id)",
+        arg=anchor,
+    )
+    page.locator(f".grid-card[data-id='{anchor}']").click(modifiers=["Meta"])
+    page.wait_for_function(
+        "(id) => selectedPhotos.size === 1 && !selectedPhotos.has(id)",
+        arg=anchor,
+    )
+    page.locator(f".grid-card[data-id='{other_c}']").click(modifiers=["Meta"])
+    page.wait_for_function(
+        "(id) => selectedPhotos.size === 2 && !selectedPhotos.has(id)",
+        arg=anchor,
+    )
+
+    # Now release the response. Without the fix, the completion path would
+    # stamp #locationExifSuggestion with A's place because _detailPhotoId
+    # still equals A.
+    held_routes[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps({
+            "place_id": _CANNED_PLACE_ID,
+            "summary": _CANNED_DETAILS["name"],
+            "lat": _CANNED_DETAILS["lat"],
+            "lng": _CANNED_DETAILS["lng"],
+            "cached": False,
+        }),
+    )
+
+    # Give the async completion a chance to run. If it were going to paint
+    # the suggestion, it would happen synchronously after the fetch/JSON
+    # awaits resolve.
+    page.wait_for_timeout(300)
+
+    expect(page.locator("#locationExifSuggestion")).to_be_hidden()
+    assert page.evaluate(
+        "() => document.getElementById('locationExifSuggestion').innerHTML"
+    ) == ""
+    assert page.evaluate(
+        "() => document.getElementById('locationExifSuggestion').dataset.photoId || ''"
+    ) == ""
+
+    # And no photo in the surviving selection may have gained a location.
+    for pid in (other_b, other_c):
+        row = db.conn.execute(
+            "SELECT 1 FROM photo_keywords pk "
+            "JOIN keywords k ON k.id = pk.keyword_id "
+            "WHERE pk.photo_id = ? AND k.type = 'location'",
+            (pid,),
+        ).fetchone()
+        assert row is None, f"photo {pid} should not have gained a location"
+
+
 def test_freetext_location_batches_selection_and_refreshes_smart_collection(
     live_server, page
 ):
