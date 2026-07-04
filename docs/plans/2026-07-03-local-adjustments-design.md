@@ -298,7 +298,33 @@ photo recovers as soon as it is next rendered, not only after the
 background sweep gets to it. Until either path has run for a row,
 that render treats the working copy as unknown provenance and
 disables the local pass with warn-and-hold-zero, matching the
-missing-snapshot fallback. `'embedded_jpeg'` rows stay
+missing-snapshot fallback.
+
+**Both paths invalidate the photo's tracked render caches whenever
+they touch a working copy.** Backfill and lazy classification only
+mutate `photos.working_copy_source` or `working_copy_path`, not
+`recipe_json` or `EDIT_MATH_VERSION`, so preview caches keyed off
+those signals will happily keep serving pre-backfill bytes with the
+local pass disabled (or, worse, applied against a
+misidentified basis). `_serve_preview` returns tracked preview
+caches before rendering (`vireo/app.py:18314-18323`), and
+`generate_thumbnail`'s cached-output check has the same shape, so a
+render taken during the NULL-provenance window survives across the
+backfill fix. The contract is: **whenever the backfill or lazy path
+either (a) transitions `working_copy_source` from NULL to a
+definite value, or (b) rewrites `working_copy_path` on disk, it
+invalidates the photo's tracked preview and thumbnail cache
+entries** — the same invalidation `record_working_copy_failure` /
+scanner file-changed paths already run for stale-marker
+transitions — before returning from the row's update. The render
+whose call triggered lazy classification then re-renders once
+inline (equivalent to a cache miss on the invalidated key) and the
+background sweep does the same for every row it flips. Skipping
+this step would leave RAW+JPEG libraries with a permanent split
+between the DB (correct basis) and the cache (rendered with local
+disabled) until the user forced a preview/thumbnail regeneration by
+hand, which is exactly the "silent, deferred correctness bug"
+failure mode this feature is meant to avoid. `'embedded_jpeg'` rows stay
 disabled after backfill by design — that's the honest signal for RAWs
 whose only decode is a camera preview of unknown crop, and the
 alternative (materializing an `embedded_jpeg` snapshot variant whose
