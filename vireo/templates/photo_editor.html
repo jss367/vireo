@@ -1564,6 +1564,12 @@ function refreshMaskOverlay() {
     ? previewRecipeFor(editorState.savedRecipe)
     : previewRecipe();
   if (!editorState.maskOverlay || !recipe.local) {
+    // Bump the sequence and clear handlers so any in-flight preview load
+    // can't win the race and re-show an overlay the user just hid (or one
+    // from a previous photo during navigation).
+    editorState.maskOverlaySeq++;
+    overlay.onload = null;
+    overlay.onerror = null;
     overlay.style.display = 'none';
     overlay.removeAttribute('src');
     return;
@@ -1771,6 +1777,10 @@ async function autoTone() {
     var sampleCrop = cloneRecipe({crop: ensureCrop(editorState.recipe)}).crop;
     var base = previewRecipeFor(editorState.recipe);
     delete base.adjustments;
+    // Strip local (Subject/Background) edits too — otherwise the analysis
+    // render samples pixels the user has already locally edited, and Auto
+    // Tone compensates for those, computing wrong global exposure/highlights.
+    delete base.local;
     var src = '/photos/' + editorState.photoId + '/edit-preview?size=1024&analysis=1&recipe=' +
       encodeURIComponent(JSON.stringify(base));
     var img = await _loadImage(src);
