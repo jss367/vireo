@@ -446,6 +446,62 @@ def _remote_dir_exists(remote, path):
     return None
 
 
+def _remote_free_bytes(remote, path):
+    """Free bytes on the remote filesystem holding ``path``, via ``df -Pk``
+    over SSH.
+
+    Returns None when the probe couldn't run or parse — callers must treat
+    that as "unknown, skip the check", never as 0 or "plenty", so a flaky
+    link can't fabricate an out-of-space refusal or wave through a full
+    volume. ``df -P`` (POSIX output format) pins the layout: one header
+    line, then one line per filesystem with available KiB in column 4 —
+    GNU, BusyBox, and Synology's df all honor it. ``path`` must exist on
+    the remote (probe the configured base, not a not-yet-created leaf).
+    """
+    cmd = (["ssh"] + ssh_base_args(remote) + [_ssh_target(remote)]
+           + [f"df -Pk {shlex.quote(path)}"])
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return None
+    try:
+        return int(lines[-1].split()[3]) * 1024
+    except (IndexError, ValueError):
+        return None
+
+
+def _remote_tree_bytes(remote, path):
+    """Total bytes already stored under ``path`` on the remote host, via
+    ``du -sk`` over SSH.
+
+    Returns 0 when the path doesn't exist yet, and None when the probe
+    itself couldn't run/parse (unknown — same contract as
+    ``_remote_free_bytes``). Used as the merge/resume credit for a remote
+    archive retry: unlike the local ``existing_archive_bytes`` (a per-file
+    content comparison), du reports whole-tree usage, so callers must cap
+    the credit at the source size to keep unrelated remote content from
+    extending it.
+    """
+    q = shlex.quote(path)
+    cmd = (["ssh"] + ssh_base_args(remote) + [_ssh_target(remote)]
+           + [f"if [ -d {q} ]; then du -sk {q}; else echo 0; fi"])
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        return int((r.stdout or "").split()[0]) * 1024
+    except (IndexError, ValueError):
+        return None
+
+
 def remote_preflight(remote, dest_path, file_cap=1000):
     """Probe a remote destination for the move UI's merge/resume prompt.
 

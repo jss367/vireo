@@ -16439,6 +16439,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         destination = body.get("destination")
         local_processing = bool(body.get("local_processing"))
+        remote_target_id = (body.get("remote_target_id") or "").strip()
+        remote_subpath = body.get("remote_subpath", "")
+        if remote_subpath and not isinstance(remote_subpath, str):
+            return json_error("remote_subpath must be a string")
         # Copy-ingest ("destination") is incompatible with snapshot runs:
         # ingest would copy entire source folders, then snapshot filtering
         # would drop the destination-scanned photo ids, producing empty
@@ -16449,8 +16453,57 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         if destination and not os.path.isabs(destination):
             return json_error("destination must be an absolute path")
-        if local_processing and not destination:
-            return json_error("local_processing requires a destination")
+        # Remote (SSH) archive destination — mirrors the Move page's
+        # remote-target request shape (remote_target_id + subpath). It only
+        # makes sense with local_processing: files must be staged and
+        # processed on local disk, then rsynced to the NAS by the archive
+        # stage; a plain copy-mode ingest writes through the local
+        # filesystem and can't target an SSH path.
+        remote_archive_config = None
+        if remote_target_id and destination:
+            return json_error(
+                "destination and remote_target_id are mutually exclusive — "
+                "pick a local archive path or a saved remote target, not both"
+            )
+        if remote_subpath and not remote_target_id:
+            return json_error("remote_subpath requires remote_target_id")
+        if remote_target_id and not local_processing:
+            return json_error(
+                "remote_target_id requires local_processing — files are "
+                "staged and processed locally, then archived to the remote "
+                "target over SSH"
+            )
+        if remote_target_id:
+            import config as cfg
+            import move as move_mod
+            from pipeline_job import resolve_remote_archive
+
+            target = cfg.get_remote_target(remote_target_id)
+            if not target:
+                return json_error("Remote target not found", status=404)
+            try:
+                remote_archive_config = resolve_remote_archive(
+                    target, remote_subpath,
+                )
+            except ValueError as exc:
+                return json_error(str(exc))
+            # Refuse at request time when no GNU rsync exists, matching the
+            # move-folder endpoint — starting a job that is guaranteed to
+            # fail its storage preflight helps nobody.
+            effective_cfg = db.get_effective_config(cfg.load())
+            rsync_bin = move_mod.resolve_rsync_bin(
+                effective_cfg.get("rsync_bin", "") or "")
+            if not rsync_bin:
+                return json_error(
+                    "No GNU rsync found for remote archiving — macOS's "
+                    "built-in rsync can't drive rsync-over-SSH. Install GNU "
+                    "rsync (e.g. `brew install rsync`) or set its path under "
+                    "Settings → Paths."
+                )
+        if local_processing and not destination and not remote_target_id:
+            return json_error(
+                "local_processing requires a destination or a remote target"
+            )
         if local_processing and destination:
             from local_processing import final_destination_name
 
@@ -16484,7 +16537,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
 
         folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
-        if destination and folder_template:
+        # A remote archive still ingests through local staging, so the
+        # template gets applied there too — validate it for both shapes.
+        if (destination or remote_target_id) and folder_template:
             from ingest import _is_unsafe_path
             if _is_unsafe_path(folder_template):
                 return json_error("folder_template must be a relative path without '..' or backslashes")
@@ -16496,6 +16551,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             source_snapshot_id=source_snapshot_id,
             destination=destination,
             local_processing=local_processing,
+            remote_target_id=remote_target_id or None,
+            remote_subpath=remote_subpath or "",
             file_types=body.get("file_types", "both"),
             folder_template=folder_template,
             skip_duplicates=body.get("skip_duplicates", True),
@@ -16607,18 +16664,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # ``status='queued'`` until the slot opens. Callers receive the
         # same {"job_id": ...} response either way; clients learn about
         # the queued state via /api/jobs/<id> polling or the SSE stream.
+        job_config = {
+            "source": source,
+            "sources": sources,
+            "collection_id": collection_id,
+            "destination": destination,
+            "local_processing": local_processing,
+            "skip_classify": params.skip_classify,
+            "skip_extract_masks": params.skip_extract_masks,
+            "skip_regroup": params.skip_regroup,
+        }
+        if remote_archive_config is not None:
+            # Surface that the archive goes over SSH (and to where) so the
+            # jobs panel can show it, per the UI-transparency rule.
+            target = remote_archive_config["target"]
+            job_config["remote_archive"] = {
+                "target_id": target["id"],
+                "target_name": target["name"],
+                "host": target["host"],
+                "user": target["user"],
+                "subpath": remote_archive_config["subpath"],
+                "ssh_destination": remote_archive_config["ssh_final"],
+                "display": remote_archive_config["display"],
+            }
         job_id = runner.enqueue_pipeline(
             work,
-            config={
-                "source": source,
-                "sources": sources,
-                "collection_id": collection_id,
-                "destination": destination,
-                "local_processing": local_processing,
-                "skip_classify": params.skip_classify,
-                "skip_extract_masks": params.skip_extract_masks,
-                "skip_regroup": params.skip_regroup,
-            },
+            config=job_config,
             workspace_id=active_ws,
             runtime_warning=runtime_warning,
         )

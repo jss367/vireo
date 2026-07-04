@@ -2179,3 +2179,173 @@ def test_cancel_queued_endpoint_leaves_other_workspaces_alone(app_and_db):
         # Cancel the surviving queued job so the test fixture's
         # teardown isn't waiting on a pipeline that will never run.
         runner.cancel_job(queued_b)
+
+
+# ---------------------------------------------------------------------------
+# Remote (SSH) archive destination for /api/jobs/pipeline — request
+# validation. These must all reject BEFORE any job starts, so no SSH/rsync
+# seams need faking here; end-to-end runs live in test_pipeline_job.py.
+# ---------------------------------------------------------------------------
+
+def _save_remote_target(monkeypatch, tmp_path, **overrides):
+    """Save one valid remote target into the test-isolated config and make
+    the POST-time GNU-rsync resolution succeed without touching the host."""
+    import config as cfg
+    import move as move_mod
+
+    entry = {
+        "id": "nas1", "name": "NAS", "host": "nas", "user": "me",
+        "remote_path": "/volume1/Photography",
+        "mount_path": str(tmp_path / "mount"),
+    }
+    entry.update(overrides)
+    cfg.save({"remote_targets": [entry]})
+    monkeypatch.setattr(
+        move_mod, "resolve_rsync_bin", lambda configured="": "/usr/bin/rsync",
+    )
+    return entry
+
+
+def _remote_pipeline_body(src, **overrides):
+    body = {
+        "sources": [str(src)],
+        "remote_target_id": "nas1",
+        "remote_subpath": "2026/trip",
+        "local_processing": True,
+        "skip_classify": True,
+        "skip_extract_masks": True,
+        "skip_regroup": True,
+    }
+    body.update(overrides)
+    return body
+
+
+def test_pipeline_remote_archive_rejects_both_destinations(
+    app_and_db, tmp_path, monkeypatch,
+):
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    src = tmp_path / "card"
+    src.mkdir()
+    client = app.test_client()
+    resp = client.post("/api/jobs/pipeline", json=_remote_pipeline_body(
+        src, destination=str(tmp_path / "archive"),
+    ))
+    assert resp.status_code == 400
+    assert "mutually exclusive" in resp.get_json()["error"]
+
+
+def test_pipeline_remote_archive_unknown_target_404(
+    app_and_db, tmp_path, monkeypatch,
+):
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    src = tmp_path / "card"
+    src.mkdir()
+    client = app.test_client()
+    resp = client.post("/api/jobs/pipeline", json=_remote_pipeline_body(
+        src, remote_target_id="nope",
+    ))
+    assert resp.status_code == 404
+    assert "not found" in resp.get_json()["error"].lower()
+
+
+def test_pipeline_remote_archive_requires_local_processing(
+    app_and_db, tmp_path, monkeypatch,
+):
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    src = tmp_path / "card"
+    src.mkdir()
+    client = app.test_client()
+    resp = client.post("/api/jobs/pipeline", json=_remote_pipeline_body(
+        src, local_processing=False,
+    ))
+    assert resp.status_code == 400
+    assert "local_processing" in resp.get_json()["error"]
+
+
+def test_pipeline_remote_archive_requires_subpath(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """No subpath means no archive-folder name: move_folder lands the staged
+    folder inside a parent keeping its name, and the subpath's last segment
+    IS that name. An empty subpath must 400, not silently merge the import
+    into the target's base directory."""
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    src = tmp_path / "card"
+    src.mkdir()
+    client = app.test_client()
+    resp = client.post("/api/jobs/pipeline", json=_remote_pipeline_body(
+        src, remote_subpath="",
+    ))
+    assert resp.status_code == 400
+    assert "remote_subpath" in resp.get_json()["error"]
+
+
+def test_pipeline_remote_archive_rejects_traversal_subpath(
+    app_and_db, tmp_path, monkeypatch,
+):
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    src = tmp_path / "card"
+    src.mkdir()
+    client = app.test_client()
+    for bad in ("../escape", "/absolute/path"):
+        resp = client.post("/api/jobs/pipeline", json=_remote_pipeline_body(
+            src, remote_subpath=bad,
+        ))
+        assert resp.status_code == 400, bad
+
+
+def test_pipeline_remote_archive_requires_mount_path(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """A target with no local mount path can't keep archived photos in the
+    library (the catalog is repointed at the mount path after the move) —
+    mirror the move-folder endpoint's refusal."""
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path, mount_path="")
+    src = tmp_path / "card"
+    src.mkdir()
+    client = app.test_client()
+    resp = client.post("/api/jobs/pipeline", json=_remote_pipeline_body(src))
+    assert resp.status_code == 400
+    assert "mount path" in resp.get_json()["error"]
+
+
+def test_pipeline_remote_archive_requires_gnu_rsync(
+    app_and_db, tmp_path, monkeypatch,
+):
+    import move as move_mod
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        move_mod, "resolve_rsync_bin", lambda configured="": None,
+    )
+    src = tmp_path / "card"
+    src.mkdir()
+    client = app.test_client()
+    resp = client.post("/api/jobs/pipeline", json=_remote_pipeline_body(src))
+    assert resp.status_code == 400
+    assert "rsync" in resp.get_json()["error"].lower()
+
+
+def test_pipeline_local_processing_requires_destination_or_remote(
+    app_and_db, tmp_path,
+):
+    app, _ = app_and_db
+    src = tmp_path / "card"
+    src.mkdir()
+    client = app.test_client()
+    resp = client.post("/api/jobs/pipeline", json={
+        "sources": [str(src)],
+        "local_processing": True,
+        "skip_classify": True,
+        "skip_extract_masks": True,
+        "skip_regroup": True,
+    })
+    assert resp.status_code == 400
+    err = resp.get_json()["error"]
+    assert "destination" in err and "remote target" in err
