@@ -4225,7 +4225,10 @@ function updateSelectionPanel(ids) {
   panel.classList.remove('hidden');
   document.getElementById('selectionCount').textContent = ids.length.toLocaleString() + ' photos selected';
   updatePasteEditSection(ids);
-  renderBatchInspector(ids);
+  // Keep any EXIF suggestion fetched for the anchor photo: Accept is
+  // batch-aware (_locationApplyPhotoIds), so growing the selection is the
+  // designed way to apply one suggestion to many photos.
+  renderBatchInspector(ids, { preserveExifSuggestion: true });
   if (ids.length > 1000) {
     selectionKeywordKey = selectionIdsKey(ids);
     selectionKeywordMissingById = {};
@@ -5692,7 +5695,7 @@ function renderBatchInspector(ids, opts) {
   // (e.g. a /api/photos/color_labels fetch resolving, a batch rating shortcut)
   // triggers _refreshBatchInspectorIfActive, and we'd otherwise erase it.
   if (!opts.preserveLocation) {
-    renderLocationEmpty();
+    renderLocationEmpty({ preserveExifSuggestion: opts.preserveExifSuggestion });
   }
 }
 
@@ -6125,7 +6128,8 @@ function renderLocationFilled(loc) {
   if (input) input.value = '';
 }
 
-function renderLocationEmpty() {
+function renderLocationEmpty(opts) {
+  opts = opts || {};
   var filled = document.getElementById('locationFilled');
   var empty = document.getElementById('locationEmpty');
   if (!filled || !empty) return;
@@ -6137,11 +6141,15 @@ function renderLocationEmpty() {
   hideLocationKeywordSuggestions();
   // Reset any prior EXIF suggestion. The caller (renderDetail) re-runs
   // maybeShowExifSuggestion(photo) after this, which decides whether to
-  // populate the line for the new photo.
-  var sugg = document.getElementById('locationExifSuggestion');
-  if (sugg) {
-    sugg.hidden = true;
-    sugg.innerHTML = '';
+  // populate the line for the new photo. Entering batch mode preserves it
+  // instead (preserveExifSuggestion) so the anchor's suggestion stays
+  // acceptable for the whole selection.
+  if (!opts.preserveExifSuggestion) {
+    var sugg = document.getElementById('locationExifSuggestion');
+    if (sugg) {
+      sugg.hidden = true;
+      sugg.innerHTML = '';
+    }
   }
 }
 
