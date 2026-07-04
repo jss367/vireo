@@ -237,6 +237,39 @@ def test_pipeline_unknown_strategy_400(client, ...):
     assert "unknown strategy" in resp.get_json()["error"]
 
 
+def test_pipeline_null_strategy_400(client, ...):
+    # Scope Note (Task 1.1): the "no process" case is expressed by
+    # NOT calling /api/jobs/pipeline. A present-but-null strategy must
+    # 400 so the server never silently falls through to default/full
+    # processing when a caller thought they were opting out. Distinct
+    # from "unknown strategy" — null is a shape error, not a name error.
+    resp = client.post("/api/jobs/pipeline", json={
+        "collection_id": cid, "strategy": None,
+    })
+    assert resp.status_code == 400
+
+
+def test_pipeline_none_string_strategy_400(client, ...):
+    # The literal string "none" is not a valid strategy name either
+    # (STRATEGIES only holds full / cull_ready / quick_look). This pins
+    # the "strict whitelist" half of the Scope Note.
+    resp = client.post("/api/jobs/pipeline", json={
+        "collection_id": cid, "strategy": "none",
+    })
+    assert resp.status_code == 400
+
+
+def test_pipeline_omitted_strategy_uses_body_params(client, ...):
+    # No `strategy` key at all -> the route builds PipelineParams from
+    # the body as usual (this is how folder/collection runs without a
+    # preset keep working). Distinguishing "omitted" from "null" is
+    # exactly why Task 1.3 Step 3 must check key presence, not truthiness.
+    resp = client.post("/api/jobs/pipeline", json={"collection_id": cid})
+    assert resp.status_code == 200
+    job = get_job_config(resp.get_json()["job_id"])
+    assert job.get("strategy") is None
+
+
 def test_pipeline_explicit_flags_beat_strategy(client, ...):
     # A caller may pin one flag on top of a strategy; explicit wins.
     resp = client.post("/api/jobs/pipeline", json={
@@ -250,7 +283,11 @@ Match the file's existing fixture/client conventions rather than inventing new o
 
 **Step 2:** Run — FAIL.
 
-**Step 3:** In `api_job_pipeline`, before `PipelineParams` is built: if `body.get("strategy")`, call `resolve_strategy` (400 on `ValueError` via the route's existing `json_error` helper), apply the expansion as *defaults*, then let any explicitly-present body keys override. Record `strategy` in the job config for history/UI.
+**Step 3:** In `api_job_pipeline`, before `PipelineParams` is built:
+
+- **Check key presence, not truthiness.** Use `if "strategy" in body:` — *not* `if body.get("strategy"):`. `body.get("strategy")` treats `strategy: null`, `strategy: ""`, and an omitted key identically, which would silently enqueue the default/full processing path for a caller who sent `strategy: null` thinking it meant "no process." The Scope Note above promises `strategy: null` is a 400; only omission means "use body params directly."
+- **When the key is present:** reject non-strings (including `None`) with 400 via the route's existing `json_error` helper (message shape: `"strategy must be a string, got null"` / `"...got int"`), then call `resolve_strategy` — which 400s on unknown names, including the literal string `"none"`. Apply the expansion as *defaults*, then let any explicitly-present body keys override (that's the `test_pipeline_explicit_flags_beat_strategy` contract).
+- Record `strategy` in the job config for history/UI (still `None` when the key was omitted).
 
 **Step 4:** Run — PASS.
 
@@ -286,9 +323,14 @@ Match the file's existing fixture/client conventions rather than inventing new o
 - Modify: `vireo/app.py` (wherever workspace config overrides are saved — grep `config_overrides` routes)
 - Test: `vireo/tests/test_config.py` or `tests/test_workspaces.py` (follow where `sam2_variant` override tests live)
 
-**Step 1: Failing test** — set `{"pipeline": {"default_strategy": "cull_ready"}}` in workspace overrides; assert `get_effective_config` surfaces it and that an invalid name is rejected at save time (400).
+**Step 1: Failing tests** — cover the nullable-default contract from the Task 1.1 Scope Note (the workspace default is what PR 3's completion hook reads to decide whether to enqueue processing at all):
 
-**Step 2–4:** standard TDD loop. Validation at save reuses `resolve_strategy`.
+- Set `{"pipeline": {"default_strategy": "cull_ready"}}` in workspace overrides; assert `get_effective_config` surfaces it.
+- Set `{"pipeline": {"default_strategy": None}}` (or omit the key entirely — both mean "no automatic processing after import"); assert the save succeeds and `get_effective_config` returns `None` for `default_strategy`. This is the property PR 3's chaining hook depends on to short-circuit before calling `/api/jobs/pipeline`; if it 400s, the "import only" user flow is unreachable.
+- Set `{"pipeline": {"default_strategy": "yolo"}}`; assert 400 at save.
+- Set `{"pipeline": {"default_strategy": "none"}}`; assert 400 — the string `"none"` is *not* the null sentinel. The "no process" case uses JSON `null`, matching the `/api/jobs/pipeline` contract from Task 1.3 (which also rejects `strategy: "none"`). A single vocabulary keeps the workspace default, the API body, and PR 3's chaining hook consistent.
+
+**Step 2–4:** standard TDD loop. Validation at save short-circuits `None` before the whitelist check (`resolve_strategy(None)` raises `ValueError` because `None not in STRATEGIES` — do not pass `None` through it; treat `None` as a boundary sentinel meaning "unset," accept it, and call `resolve_strategy` only when a real string was supplied). Everything else reuses `resolve_strategy`.
 
 **Step 5: Commit** — `feat: per-workspace default process strategy`
 
