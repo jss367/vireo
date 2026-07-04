@@ -926,6 +926,98 @@ def test_exif_suggestion_cleared_by_close_detail(
         assert row is None, f"photo {pid} should not have gained a location"
 
 
+def test_exif_suggestion_cleared_by_anchor_drop_then_select_all(
+    live_server, page, monkeypatch
+):
+    """Codex P2 (PR #1097): Cmd/Ctrl-click that drops the focused anchor out
+    of a non-empty selection bypasses closeDetail. selectPhoto hides the
+    detail panel and nulls selectedPhotoId, but the previous scrub only ran
+    inside closeDetail — so #locationExifSuggestion kept its data-photo-id
+    and Accept button. A later Select All that still contained the dropped
+    anchor would then satisfy renderLocationEmpty's owner-in-selection check
+    and resurrect the anchor's Accept line for the whole batch, letting one
+    click apply the dropped anchor's GPS-derived place to every selected
+    photo.
+
+    Sequence: open A (suggestion appears) → Cmd-click B (batch mode, A still
+    the focused anchor, suggestion preserved) → Cmd-click A to drop the
+    anchor (selectedPhotos={B}, focus dropped, detail panel hidden, but
+    closeDetail is not called) → Select All / Ctrl+A (batch inspector opens
+    with A back in the selection). The suggestion must stay hidden and
+    dropped from the DOM, and no photo in the batch may gain a location.
+    """
+    photo_ids = live_server["data"]["photos"][:3]
+    anchor, other_b, other_c = photo_ids
+    _seed_exif_photos(live_server, [anchor])
+    _seed_reverse_geocode_cache(
+        live_server, 40.785091, -73.968285, _CANNED_PLACE_ID, _CANNED_DETAILS,
+    )
+    _set_api_key()
+
+    import places
+    monkeypatch.setattr(
+        places, "place_details", lambda pid, key: _CANNED_DETAILS,
+    )
+
+    db = live_server["db"]
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+
+    page.locator(f".grid-card[data-id='{anchor}']").click()
+    _wait_for_detail_loaded(page)
+    accept = page.locator("#locationExifSuggestion button.accept-btn")
+    expect(accept).to_be_visible()
+    assert page.evaluate(
+        "() => document.getElementById('locationExifSuggestion').dataset.photoId"
+    ) == str(anchor)
+
+    # Grow to batch {A, B} — A is still the focused anchor, so the suggestion
+    # is preserved by design.
+    page.locator(f".grid-card[data-id='{other_b}']").click(modifiers=["Meta"])
+    page.wait_for_function(
+        "(id) => selectedPhotos.size === 2 && selectedPhotos.has(id)",
+        arg=anchor,
+    )
+    expect(accept).to_be_visible()
+
+    # Drop the anchor out of the selection via Cmd-click. selectPhoto's
+    # metaKey branch fires — not closeDetail — so this is the code path the
+    # fix targets. After this, selectedPhotos={B} but the suggestion element
+    # is what we care about: it must not carry A's data-photo-id/innerHTML
+    # into the next batch that includes A.
+    page.locator(f".grid-card[data-id='{anchor}']").click(modifiers=["Meta"])
+    page.wait_for_function(
+        "(id) => selectedPhotos.size === 1 && !selectedPhotos.has(id) && "
+        "window.selectedPhotoId == null",
+        arg=anchor,
+    )
+
+    # Select All — includes the dropped anchor, so the batch inspector opens
+    # with A back in ids. Without the fix, keepSugg would be true and A's
+    # Accept line would flash back into the batch panel.
+    page.evaluate("() => selectAllMatchingPhotos()")
+    page.wait_for_function("() => selectedPhotos.size >= 3")
+
+    expect(page.locator("#locationExifSuggestion")).to_be_hidden()
+    assert page.evaluate(
+        "() => document.getElementById('locationExifSuggestion').innerHTML"
+    ) == ""
+    assert page.evaluate(
+        "() => document.getElementById('locationExifSuggestion').dataset.photoId || ''"
+    ) == ""
+
+    # No photo in the batch may have gained a location.
+    for pid in (anchor, other_b, other_c):
+        row = db.conn.execute(
+            "SELECT 1 FROM photo_keywords pk "
+            "JOIN keywords k ON k.id = pk.keyword_id "
+            "WHERE pk.photo_id = ? AND k.type = 'location'",
+            (pid,),
+        ).fetchone()
+        assert row is None, f"photo {pid} should not have gained a location"
+
+
 def test_freetext_location_batches_selection_and_refreshes_smart_collection(
     live_server, page
 ):

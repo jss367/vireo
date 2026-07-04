@@ -3879,6 +3879,20 @@ function selectPhoto(e, id, idx) {
         if (summary) summary.classList.remove('hidden');
         loadSummary();
       }
+      // Same reason as closeDetail: the dropped anchor's EXIF suggestion is
+      // still tagged with its data-photo-id (hidden along with the detail
+      // panel). This path bypasses closeDetail entirely, so without an
+      // explicit scrub a later Select All (or any batch that still contains
+      // the dropped photo) would satisfy renderLocationEmpty's owner-in-
+      // selection check and resurrect the anchor's Accept line for the
+      // whole batch — clicking it would apply the dropped anchor's GPS
+      // place to every selected photo. Codex P2 on PR #1097.
+      var sugg = document.getElementById('locationExifSuggestion');
+      if (sugg) {
+        sugg.hidden = true;
+        sugg.innerHTML = '';
+        if (sugg.dataset) delete sugg.dataset.photoId;
+      }
     }
   } else {
     // Normal click: single select
