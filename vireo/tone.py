@@ -126,7 +126,17 @@ def _luma(rgb):
 
 
 def _blend_range(rgb, amount, mask):
-    """Move masked pixels toward white or black without hard clipping."""
+    """Move masked pixels toward white or black without hard clipping.
+
+    ``amount`` is a scalar in [-100, 100], or a per-pixel array of the same
+    (broadcastable) shape for local (mask-weighted) adjustments.
+    """
+    if np.ndim(amount) > 0:
+        amount = np.asarray(amount, dtype=np.float32) / 100.0
+        scaled = mask * np.abs(amount)
+        return np.where(
+            amount > 0, rgb + (1.0 - rgb) * scaled, rgb - rgb * scaled
+        )
     amount = float(amount) / 100.0
     if abs(amount) < 1e-9:
         return rgb
@@ -143,9 +153,9 @@ def apply_range_adjustments(
     out = np.asarray(rgb, dtype=np.float32)
     lum = _luma(out)
 
-    if shadows:
+    if np.any(shadows):
         out = _blend_range(out, shadows, (1.0 - smoothstep(0.05, 0.65, lum)) * 0.48)
-    if highlights:
+    if np.any(highlights):
         out = _blend_range(out, highlights, smoothstep(0.35, 0.95, lum) * 0.42)
     if blacks:
         out = _blend_range(out, blacks, (1.0 - smoothstep(0.00, 0.30, lum)) * 0.34)
@@ -183,6 +193,9 @@ def apply_adjustments(
     contrast=0.0,
     vibrance=0.0,
     saturation=0.0,
+    local_weight=None,
+    local_subject=None,
+    local_background=None,
 ):
     """Apply tonal adjustments to an sRGB float image and return sRGB float.
 
@@ -200,8 +213,38 @@ def apply_adjustments(
 
     Returns:
         float32 array, same shape, sRGB-encoded and clipped to [0,1].
+
+    Local (mask-weighted) adjustments: ``local_weight`` is a per-pixel
+    subject weight shaped ``(..., )`` matching the image's spatial dims;
+    ``local_subject`` / ``local_background`` are dicts of *deltas* on top of
+    the global values (keys: exposure, highlights, shadows, contrast,
+    saturation). Effective per-pixel amounts are
+    ``global + subject·w + background·(1−w)``, clamped to each control's
+    global range. The weight is an extra per-pixel *input*, not a
+    neighborhood op, so this pipeline (and its future shader transcription)
+    stays strictly per-pixel. When no local inputs are given, execution
+    takes the original global-only path unchanged — byte-identical output.
     """
     rgb = np.asarray(rgb, dtype=np.float32)
+
+    subject = local_subject or {}
+    background = local_background or {}
+    if local_weight is not None and (subject or background):
+        return _apply_adjustments_weighted(
+            rgb,
+            weight=np.asarray(local_weight, dtype=np.float32),
+            subject=subject,
+            background=background,
+            exposure=exposure,
+            white_balance=white_balance,
+            highlights=highlights,
+            shadows=shadows,
+            whites=whites,
+            blacks=blacks,
+            contrast=contrast,
+            vibrance=vibrance,
+            saturation=saturation,
+        )
 
     # --- scene-referred ops, in linear light ---
     lin_pre = srgb_to_linear(rgb)
@@ -247,6 +290,101 @@ def apply_adjustments(
     if vibrance:
         disp = apply_vibrance(disp, vibrance)
     if saturation:
+        s = np.float32(max(0.0, 1.0 + float(saturation) / 100.0))
+        luma = _luma(disp)
+        disp = luma + (disp - luma) * s
+
+    return np.clip(disp, 0.0, 1.0)
+
+
+# Global ranges the weighted amounts clamp to — the local composition
+# contract is `clamp(global + subject·w + background·(1−w))` per control.
+_LOCAL_CLAMPS = {
+    "exposure": (-5.0, 5.0),
+    "highlights": (-100.0, 100.0),
+    "shadows": (-100.0, 100.0),
+    "contrast": (-100.0, 100.0),
+    "saturation": (-100.0, 100.0),
+}
+
+
+def _apply_adjustments_weighted(
+    rgb, *, weight, subject, background, exposure, white_balance,
+    highlights, shadows, whites, blacks, contrast, vibrance, saturation,
+):
+    """Local (mask-weighted) variant of :func:`apply_adjustments`.
+
+    Kept as a separate branch so the global-only path above stays literally
+    unchanged (its byte-exactness backs the no-cache-purge guarantee and the
+    shader-parity test). Controls without local deltas run the same scalar
+    math as the global path; controls with deltas run the identical formulas
+    with a per-pixel amount map.
+    """
+    w = weight[..., None]
+
+    def amount_map(name, global_value):
+        """Per-pixel amount for a control, or None to use the scalar path."""
+        s = float(subject.get(name) or 0.0)
+        b = float(background.get(name) or 0.0)
+        if abs(s) < 1e-9 and abs(b) < 1e-9:
+            return None
+        lo, hi = _LOCAL_CLAMPS[name]
+        return np.clip(
+            np.float32(global_value) + np.float32(s) * w + np.float32(b) * (1.0 - w),
+            lo, hi,
+        )
+
+    # --- scene-referred ops, in linear light ---
+    lin_pre = srgb_to_linear(rgb)
+    lin = lin_pre
+    ev_map = amount_map("exposure", exposure)
+    if ev_map is not None:
+        lin = lin * np.exp2(ev_map)
+        max_gain = 2.0 ** float(np.max(ev_map))
+    else:
+        exp_gain = 2.0 ** float(exposure)
+        if exposure:
+            lin = lin * np.float32(exp_gain)
+        max_gain = exp_gain
+    gr = gg = gb = 1.0
+    if white_balance:
+        gr, gg, gb = white_balance_gains(white_balance)
+        lin = lin * np.array([gr, gg, gb], dtype=np.float32)
+    # Same push-gate and monotonicity clamp as the global path; with a
+    # per-pixel gain the clamp is already per-pixel-correct, and gating on
+    # the maximum gain only controls whether the shoulder runs at all.
+    if max_gain * max(gr, gg, gb) > 1.0 + 1e-6:
+        rolled = highlight_rolloff(lin)
+        lin = np.maximum(rolled, np.minimum(lin_pre, lin))
+
+    # --- display-referred ops, in sRGB ---
+    disp = linear_to_srgb(lin)
+    hi_amt = amount_map("highlights", highlights)
+    sh_amt = amount_map("shadows", shadows)
+    hi_arg = highlights if hi_amt is None else hi_amt
+    sh_arg = shadows if sh_amt is None else sh_amt
+    if np.any(hi_arg) or np.any(sh_arg) or whites or blacks:
+        disp = apply_range_adjustments(
+            disp,
+            highlights=hi_arg,
+            shadows=sh_arg,
+            whites=whites,
+            blacks=blacks,
+        )
+    c_amt = amount_map("contrast", contrast)
+    if c_amt is not None:
+        disp = (disp - 0.5) * (1.0 + c_amt / 100.0) + 0.5
+    elif contrast:
+        c = np.float32(1.0 + float(contrast) / 100.0)
+        disp = (disp - 0.5) * c + 0.5
+    if vibrance:
+        disp = apply_vibrance(disp, vibrance)
+    s_amt = amount_map("saturation", saturation)
+    if s_amt is not None:
+        s = np.maximum(0.0, 1.0 + s_amt / 100.0).astype(np.float32)
+        luma = _luma(disp)
+        disp = luma + (disp - luma) * s
+    elif saturation:
         s = np.float32(max(0.0, 1.0 + float(saturation) / 100.0))
         luma = _luma(disp)
         disp = luma + (disp - luma) * s

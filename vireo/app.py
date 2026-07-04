@@ -3969,10 +3969,54 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         photo = db.get_photo(photo_id, verify_workspace=True)
         if not photo:
             return json_error("not found", 404)
-        return jsonify({
-            "photo_id": photo_id,
-            "recipe": db.get_photo_edit_recipe(photo_id),
-        })
+        recipe = db.get_photo_edit_recipe(photo_id)
+        payload = {"photo_id": photo_id, "recipe": recipe}
+        if recipe and recipe.get("local"):
+            import local_masks
+            variant_row = db.conn.execute(
+                "SELECT active_mask_variant FROM photos WHERE id=?",
+                (photo_id,),
+            ).fetchone()
+            variant = variant_row["active_mask_variant"] if variant_row else None
+            mask_row = (
+                db.get_photo_mask(photo_id, variant) if variant else None
+            )
+            payload["local_mask_stale"] = local_masks.is_stale(
+                recipe, mask_row
+            )
+        return jsonify(payload)
+
+    @app.route(
+        "/api/photos/<int:photo_id>/local-mask/snapshot", methods=["POST"]
+    )
+    def api_create_local_mask_snapshot(photo_id):
+        """Freeze the photo's active SAM mask into an edit-mask snapshot.
+
+        Returns the recipe ``local.mask`` fields the editor embeds when
+        saving local adjustments. Renders read only the snapshot, so the
+        live mask can regenerate without silently changing committed edits.
+        """
+        db = _get_db()
+        photo = db.get_photo(photo_id, verify_workspace=True)
+        if not photo:
+            return json_error("not found", 404)
+        import local_masks
+        variant_row = db.conn.execute(
+            "SELECT active_mask_variant FROM photos WHERE id=?",
+            (photo_id,),
+        ).fetchone()
+        variant = variant_row["active_mask_variant"] if variant_row else None
+        mask_row = db.get_photo_mask(photo_id, variant) if variant else None
+        try:
+            mask = local_masks.create_snapshot(
+                photo_id=photo_id,
+                mask_row=mask_row,
+                vireo_dir=os.path.dirname(app.config["THUMB_CACHE_DIR"]),
+                native_size=_recipe_source_dimensions(photo),
+            )
+        except ValueError as e:
+            return json_error(str(e))
+        return jsonify({"mask": mask, "stale": False})
 
     @app.route("/api/photos/<int:photo_id>/edit-recipe", methods=["PUT", "POST"])
     def api_set_photo_edit_recipe(photo_id):
@@ -3989,7 +4033,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         photo = db.get_photo(photo_id, verify_workspace=True)
         if not photo:
             return json_error("not found", 404)
-        from image_edits import RecipeError, recipe_to_json
+        from image_edits import RecipeError, normalize_recipe, recipe_to_json
+        try:
+            normalized = normalize_recipe(recipe)
+        except RecipeError as e:
+            return json_error(str(e))
+        local = (normalized or {}).get("local")
+        if local:
+            import local_masks
+            snap = local_masks.snapshot_path(
+                os.path.dirname(app.config["THUMB_CACHE_DIR"]),
+                photo_id, local["mask"]["ref"],
+            )
+            if not os.path.exists(snap):
+                return json_error(
+                    "unknown edit-mask snapshot for this photo; create one "
+                    "via POST /api/photos/<id>/local-mask/snapshot first"
+                )
         old_recipe = db.get_photo_edit_recipe(photo_id)
         try:
             old_value = recipe_to_json(old_recipe) or ""
@@ -4050,6 +4110,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         recipe = body.get("recipe")
         if not isinstance(recipe, dict):
             return json_error("recipe must be a JSON object")
+        if recipe.get("local"):
+            return json_error(
+                "local adjustments cannot be bulk-applied: they reference a "
+                "photo-specific mask snapshot"
+            )
         raw_ids = body.get("photo_ids")
         if not isinstance(raw_ids, list) or not raw_ids:
             return json_error("photo_ids must be a non-empty list")
@@ -9182,6 +9247,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if not recipe:
                 return fallback_path, None
 
+            import local_masks as _local_masks
             from image_edits import (
                 EDIT_MATH_VERSION,
                 apply_recipe_to_loaded_image,
@@ -9305,6 +9371,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 rendered = apply_recipe_to_loaded_image(
                     img, recipe,
                     native_size=_recipe_source_dimensions(photo),
+                    local_mask=_local_masks.load_snapshot(
+                        vireo_dir, photo["id"], recipe,
+                    ),
                 )
                 quality = cfg.load().get("working_copy_quality", 92)
                 fd, tmp_path = tempfile.mkstemp(
@@ -9640,7 +9709,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         n = db.delete_stale_masks(detector_confidence=min_detector_conf)
         log.info("Deleted %d stale masks", n)
-        return jsonify({"ok": True, "deleted": n})
+        # Edit-mask snapshots piggyback on the same sweep: unreferenced,
+        # aged-out snapshot files (no current recipe or edit-history entry
+        # points at them) are reclaimed alongside stale live masks.
+        import local_masks
+        # Snapshots live under dirname(THUMB_CACHE_DIR) — the same root the
+        # snapshot POST endpoint writes to and every render call site reads
+        # from — which is not always dirname(db_path) when create_app is
+        # given a custom thumb-dir under a different parent.
+        gc = local_masks.gc_edit_masks(
+            db, os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        )
+        if gc["deleted"]:
+            log.info(
+                "Deleted %d unreferenced edit-mask snapshots", gc["deleted"]
+            )
+        return jsonify({
+            "ok": True, "deleted": n, "snapshots_deleted": gc["deleted"],
+        })
 
     @app.route("/api/storage/files")
     def api_storage_files():
@@ -11517,6 +11603,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not recipe:
             return fallback_path, None
 
+        import local_masks as _local_masks
         from image_edits import (
             EDIT_MATH_VERSION,
             apply_recipe_to_loaded_image,
@@ -11632,6 +11719,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             rendered = apply_recipe_to_loaded_image(
                 img, recipe,
                 native_size=_recipe_source_dimensions(photo),
+                local_mask=_local_masks.load_snapshot(
+                    vireo_dir, photo["id"], recipe,
+                ),
             )
             quality = cfg.load().get("working_copy_quality", 92)
             fd, tmp_path = tempfile.mkstemp(
@@ -13364,10 +13454,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                     canonical = companion_abs
                     if img:
                         if recipe:
+                            import local_masks
                             img = apply_recipe_to_loaded_image(
                                 img, recipe, max_size=max_size,
                                 native_size=_recipe_source_dimensions(
                                     detail_photo
+                                ),
+                                local_mask=local_masks.load_snapshot(
+                                    vireo_dir,
+                                    photo["id"], recipe,
                                 ),
                             )
                         img.save(cache_path, format="JPEG", quality=preview_quality)
@@ -18579,10 +18674,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             _record_working_copy_failure(db, photo, canonical)
             return "Could not load image", 500
         if recipe:
+            import local_masks
             from image_edits import apply_recipe_to_loaded_image
             img = apply_recipe_to_loaded_image(
                 img, recipe, max_size=size,
                 native_size=_recipe_source_dimensions(photo),
+                local_mask=local_masks.load_snapshot(
+                    vireo_dir, photo_id, recipe,
+                ),
             )
 
         preview_quality = cfg.load().get("preview_quality", 90)
@@ -18836,10 +18935,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         native_dims,
                         recipe,
                     )
+            import local_masks
             img = apply_recipe_to_loaded_image(
                 img, recipe_json, max_size=size,
                 native_size=native_dims,
                 detail_scale=preview_detail_scale,
+                local_mask=local_masks.load_snapshot(
+                    vireo_dir, photo_id, recipe_json,
+                ),
             )
         except RecipeError as e:
             return str(e), 400
@@ -19099,10 +19202,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if img is None:
                 _record_working_copy_failure(db, photo, image_path)
                 return "Could not load image", 500
+            import local_masks
             from image_edits import apply_recipe_to_loaded_image
             img = apply_recipe_to_loaded_image(
                 img, recipe,
                 native_size=_recipe_source_dimensions(photo),
+                local_mask=local_masks.load_snapshot(
+                    vireo_dir, photo_id, recipe,
+                ),
             )
             originals_dir = os.path.join(vireo_dir, "originals")
             cache_path = os.path.join(originals_dir, f"{photo_id}.jpg")

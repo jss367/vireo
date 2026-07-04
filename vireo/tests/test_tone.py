@@ -146,3 +146,97 @@ def test_positive_vibrance_prefers_less_saturated_colors():
     low_gain = float(np.max(low_out) - np.min(low_out)) / float(np.max(low) - np.min(low))
     high_gain = float(np.max(high_out) - np.min(high_out)) / float(np.max(high) - np.min(high))
     assert low_gain > high_gain
+
+
+# --- local (mask-weighted) tone -------------------------------------------
+
+
+def _halves_weight(height=4, width=8):
+    """Weight 1.0 on the left half, 0.0 on the right."""
+    w = np.zeros((height, width), dtype=np.float32)
+    w[:, : width // 2] = 1.0
+    return w
+
+
+def test_local_weight_none_matches_global_only():
+    rng = np.random.default_rng(9)
+    px = rng.random((4, 8, 3)).astype(np.float32)
+    a = apply_adjustments(px, exposure=0.7, shadows=20)
+    b = apply_adjustments(
+        px, exposure=0.7, shadows=20,
+        local_weight=None, local_subject=None, local_background=None,
+    )
+    assert np.array_equal(a, b)
+
+
+def test_local_exposure_applies_only_inside_weight():
+    px = np.full((4, 8, 3), 0.2, dtype=np.float32)
+    w = _halves_weight()
+
+    out = apply_adjustments(
+        px, local_weight=w, local_subject={"exposure": 1.0},
+    )
+    global_only = apply_adjustments(px)
+
+    # Right half (w=0) identical to the no-local render.
+    assert np.allclose(out[:, 4:], global_only[:, 4:], atol=1e-6)
+    # Left half brightened by ~one stop in linear light.
+    left_lin = srgb_to_linear(out[:, :4, 0])
+    base_lin = srgb_to_linear(px[:, :4, 0])
+    assert np.allclose(left_lin, base_lin * 2.0, rtol=0.02)
+
+
+def test_local_background_applies_to_inverse_weight():
+    px = np.full((4, 8, 3), 0.5, dtype=np.float32)
+    w = _halves_weight()
+
+    out = apply_adjustments(
+        px, local_weight=w, local_background={"exposure": -1.0},
+    )
+
+    # Subject half untouched, background half darkened.
+    assert np.allclose(out[:, :4], px[:, :4], atol=1e-3)
+    assert np.all(out[:, 4:, 0] < 0.4)
+
+
+def test_local_deltas_compose_with_global():
+    # Global +40 shadows, subject delta -40: subject area nets to no shadow
+    # lift, background keeps the global lift.
+    px = np.full((4, 8, 3), 0.15, dtype=np.float32)
+    w = _halves_weight()
+
+    out = apply_adjustments(
+        px, shadows=40, local_weight=w, local_subject={"shadows": -40},
+    )
+    no_lift = apply_adjustments(px)
+    lifted = apply_adjustments(px, shadows=40)
+
+    assert np.allclose(out[:, :4], no_lift[:, :4], atol=1e-3)
+    assert np.allclose(out[:, 4:], lifted[:, 4:], atol=1e-3)
+
+
+def test_local_saturation_weighted():
+    px = np.zeros((2, 2, 3), dtype=np.float32)
+    px[..., 0] = 0.7
+    px[..., 1] = 0.3
+    px[..., 2] = 0.3
+    w = np.array([[1.0, 0.0], [1.0, 0.0]], dtype=np.float32)
+
+    out = apply_adjustments(
+        px, local_weight=w, local_subject={"saturation": -100},
+    )
+
+    # w=1 column fully desaturated (channels equal), w=0 column unchanged.
+    assert np.allclose(out[:, 0, 0], out[:, 0, 1], atol=1e-4)
+    assert np.allclose(out[:, 1], px[:, 1], atol=1e-4)
+
+
+def test_local_fractional_weight_is_between():
+    px = np.full((1, 3, 3), 0.25, dtype=np.float32)
+    w = np.array([[0.0, 0.5, 1.0]], dtype=np.float32)
+
+    out = apply_adjustments(
+        px, local_weight=w, local_subject={"exposure": 1.5},
+    )
+
+    assert out[0, 0, 0] < out[0, 1, 0] < out[0, 2, 0]
