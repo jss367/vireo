@@ -273,17 +273,32 @@ scanner's existing `_working_copy_candidate_predicate` skips them
 has a working copy on disk) and the on-demand `/original` route
 trusts an existing full-res working copy without regenerating
 (`vireo/app.py:18789-18793`), so the column would stay NULL
-indefinitely. PR 1 therefore adds an explicit backfill: on the same
-schema migration that adds the column, a one-time job walks every row
-where `working_copy_path IS NOT NULL AND working_copy_source IS NULL`
-and re-runs the extraction logic against the current
-source/companion state to write both the working copy (replacing the
-existing file only if the fresh extraction changed the pixel grid) and
-the new column. The job reuses `_extract_working_copies`' machinery
-via a temporary predicate that ignores the `working_copy_path IS
-NULL` clause, so all three flavors are labelled correctly on the
-next startup after the migration, and the local pass recovers
-without waiting for user-driven scans. `'embedded_jpeg'` rows stay
+indefinitely. PR 1 therefore adds an explicit backfill, but keeps it
+**off the blocking migration path**: the schema migration itself only
+adds the (initially NULL) column and is DDL-only, so first launch
+after upgrade completes in DB-init time regardless of library size.
+The re-extraction work is deferred to a **resumable background job**
+scheduled after `Database` init finishes (queued onto the existing
+`JobRunner` alongside scan/classify/thumbnail jobs), which walks every
+row where `working_copy_path IS NOT NULL AND working_copy_source IS
+NULL` in chunks — checkpointing progress per row so it survives
+restarts and can be paused/resumed like other long-running jobs — and
+re-runs the extraction logic against the current source/companion
+state to write both the working copy (replacing the existing file
+only if the fresh extraction changed the pixel grid) and the new
+column. The job reuses `_extract_working_copies`' machinery via a
+temporary predicate that ignores the `working_copy_path IS NULL`
+clause. To avoid a "wait for the sweep to reach my photo" cliff
+between upgrade and full backfill, a NULL row also **classifies
+lazily on first use**: when a recipe render is about to consume a
+working copy whose `working_copy_source` is still NULL, the render
+path re-runs the same classification for that single row inline,
+updates the column, and proceeds — so the local pass on any given
+photo recovers as soon as it is next rendered, not only after the
+background sweep gets to it. Until either path has run for a row,
+that render treats the working copy as unknown provenance and
+disables the local pass with warn-and-hold-zero, matching the
+missing-snapshot fallback. `'embedded_jpeg'` rows stay
 disabled after backfill by design — that's the honest signal for RAWs
 whose only decode is a camera preview of unknown crop, and the
 alternative (materializing an `embedded_jpeg` snapshot variant whose
@@ -643,7 +658,27 @@ No `EDIT_MATH_VERSION` bump: recipes without `local` render byte-identically.
 - Copy Settings / presets: local adjustments are **not** included in presets
   (they reference a photo-specific mask); Copy Settings to a group copies
   the local slider values and re-snapshots each target photo's own active
-  mask, skipping (and reporting) photos without one.
+  mask, skipping (and reporting) photos without one. This contract lives
+  in the **backend**, not the UI: the existing bulk-apply endpoint
+  `/api/photos/edit-recipe/apply` (`vireo/app.py:4057-4084`) validates one
+  recipe and writes it to every target verbatim, and once PR 1 makes
+  `local` a valid recipe field the same endpoint could otherwise copy a
+  source photo's `local.mask.ref` to every target — leaving each target
+  pointing at a snapshot filename (`<target_id>.<ref>.{decode}.png`)
+  that does not exist, so every copied render disables the local pass.
+  PR 1 therefore updates the bulk endpoint to intercept `local`
+  server-side: for each target, strip the incoming `local.mask.ref` /
+  `mask.decodes`, look up the target's own `photos.active_mask_variant`,
+  materialize a fresh snapshot family in the target's decode bases (as if
+  local adjustments had been added to the target photo directly), and
+  substitute the new ref into the per-target recipe before writing. The
+  region entries and shared feather carry over unchanged (they are
+  slider values, not mask-identity). Targets with no usable mask are
+  skipped and reported in the response, matching the UI behavior. Direct
+  recipe writes to a single photo (the normal editor save path) keep the
+  ref they were given — the resnapshot is a bulk-only concern, because
+  that is the only path where one incoming ref is applied to more than
+  one photo.
 
 ### Editor preview
 
@@ -655,8 +690,11 @@ previewed today.
 ## Phasing
 
 1. **PR 1 — renderer + schema.** `local` normalization, mask snapshot
-   plumbing + GC, weight-map builder, weighted tone + detail, API round-trip.
-   Fully testable without UI (synthetic masks in tests).
+   plumbing + GC, weight-map builder, weighted tone + detail, API round-trip
+   (including the bulk `/api/photos/edit-recipe/apply` per-target
+   resnapshot described under Copy Settings, so the endpoint stays
+   consistent from day one even before the PR 2 UI). Fully testable
+   without UI (synthetic masks in tests).
 2. **PR 2 — editor UI.** Subject/Background bands, feather, overlay toggle,
    stale-mask update flow, copy-to-group behavior.
 3. **PR 3 (optional) — live preview.** Mask texture in the lightbox WebGL
