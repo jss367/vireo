@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import re
 
 from PIL import Image
 
@@ -47,6 +48,18 @@ SHARPEN_RADIUS_DEFAULT = 1.0
 # per-pixel tone pipeline. A recipe containing only these must not run the
 # tone pass at all (so a detail-only edit stays byte-exact outside detail).
 _DETAIL_KEYS = frozenset({"sharpen", "sharpen_radius", "noise_reduction"})
+
+# Local (mask-weighted) adjustments — see
+# docs/plans/2026-07-03-local-adjustments-design.md. Region values are deltas
+# on top of the global adjustments and share the global ranges; the v1 set
+# deliberately excludes whites/blacks/vibrance/white-balance.
+_LOCAL_REGION_NAMES = ("subject", "background")
+_LOCAL_ADJUSTMENT_KEYS = frozenset({
+    "exposure", "highlights", "shadows", "contrast", "saturation",
+    "sharpen", "noise_reduction",
+})
+LOCAL_FEATHER_RANGE = (0.0, 200.0)
+_LOCAL_MASK_REF_RE = re.compile(r"^[0-9a-f]{12}$")
 
 _WHITE_BALANCE_RANGES = {
     "temperature": (-100.0, 100.0),
@@ -223,7 +236,120 @@ def normalize_recipe(recipe):
     if normalized_adjustments:
         out["adjustments"] = normalized_adjustments
 
+    local = recipe.get("local")
+    if local not in (None, "", {}):
+        normalized_local = _normalize_local(local)
+        if normalized_local is not None:
+            out["local"] = normalized_local
+
     return out if len(out) > 1 else None
+
+
+def _normalize_local(local):
+    """Validate and canonicalize the local (mask-weighted) section.
+
+    Returns None when every region normalizes away — the shared mask never
+    persists without at least one active region referencing it.
+    """
+    if not isinstance(local, dict):
+        raise RecipeError("local must be an object")
+
+    regions_in = local.get("regions")
+    if regions_in in (None, ""):
+        regions_in = []
+    if not isinstance(regions_in, list):
+        raise RecipeError("local.regions must be an array")
+
+    normalized_regions = []
+    seen = set()
+    for entry in regions_in:
+        if not isinstance(entry, dict):
+            raise RecipeError("local.regions entries must be objects")
+        region = entry.get("region")
+        if region not in _LOCAL_REGION_NAMES:
+            raise RecipeError("local region must be 'subject' or 'background'")
+        if region in seen:
+            raise RecipeError(f"duplicate local region '{region}'")
+        seen.add(region)
+
+        adjustments_in = entry.get("adjustments")
+        if adjustments_in is None:
+            adjustments_in = {}
+        if not isinstance(adjustments_in, dict):
+            raise RecipeError("local adjustments must be an object")
+        normalized_adj = {}
+        for name, raw in adjustments_in.items():
+            if raw in (None, ""):
+                continue
+            if name == "sharpen_radius":
+                # A region radius is an absolute override of the effective
+                # branch radius (which may come from global sharpen), so it
+                # is kept even without a region sharpen delta and its 1.0
+                # value is meaningful — no default-drop like the global key.
+                if isinstance(raw, bool) or not isinstance(raw, int | float):
+                    raise RecipeError(
+                        "sharpen_radius adjustment must be numeric"
+                    )
+                radius = float(raw)
+                lo, hi = SHARPEN_RADIUS_RANGE
+                if not math.isfinite(radius) or radius < lo or radius > hi:
+                    raise RecipeError(
+                        f"sharpen_radius adjustment must be between "
+                        f"{lo:g} and {hi:g}"
+                    )
+                normalized_adj[name] = round(radius, 6)
+                continue
+            if name not in _LOCAL_ADJUSTMENT_KEYS:
+                raise RecipeError(
+                    f"{name} adjustment is not supported in local regions"
+                )
+            if isinstance(raw, bool) or not isinstance(raw, int | float):
+                raise RecipeError(f"{name} adjustment must be numeric")
+            val = float(raw)
+            lo, hi = _ADJUSTMENT_RANGES[name]
+            if not math.isfinite(val) or val < lo or val > hi:
+                raise RecipeError(
+                    f"{name} adjustment must be between {lo:g} and {hi:g}"
+                )
+            if abs(val) > 1e-9:
+                normalized_adj[name] = round(val, 6)
+        if normalized_adj:
+            normalized_regions.append(
+                {"region": region, "adjustments": normalized_adj}
+            )
+
+    if not normalized_regions:
+        return None
+
+    mask_in = local.get("mask")
+    if not isinstance(mask_in, dict):
+        raise RecipeError("local.mask is required when regions are present")
+    ref = mask_in.get("ref")
+    if not isinstance(ref, str) or not _LOCAL_MASK_REF_RE.match(ref):
+        raise RecipeError(
+            "local.mask.ref must be a 12-character lowercase hex id"
+        )
+    digest = mask_in.get("source_digest")
+    if not isinstance(digest, str) or not digest.strip() or len(digest) > 128:
+        raise RecipeError("local.mask.source_digest is required")
+    normalized_mask = {"ref": ref, "source_digest": digest}
+
+    feather = mask_in.get("feather", 0)
+    if feather in (None, ""):
+        feather = 0
+    if isinstance(feather, bool) or not isinstance(feather, int | float):
+        raise RecipeError("local.mask.feather must be numeric")
+    feather = float(feather)
+    lo, hi = LOCAL_FEATHER_RANGE
+    if not math.isfinite(feather) or feather < lo or feather > hi:
+        raise RecipeError(
+            f"local.mask.feather must be between {lo:g} and {hi:g}"
+        )
+    if abs(feather) > 1e-9:
+        normalized_mask["feather"] = round(feather, 4)
+
+    normalized_regions.sort(key=lambda entry: entry["region"])
+    return {"mask": normalized_mask, "regions": normalized_regions}
 
 
 def recipe_to_json(recipe):
