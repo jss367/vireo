@@ -1020,6 +1020,44 @@ No `EDIT_MATH_VERSION` bump: recipes without `local` render byte-identically.
   memory. The scrub is idempotent: a token that no longer appears
   anywhere is a valid terminal state.
 
+  **Cancel and terminal-failure paths run the same cleanup.**
+  `JobRunner.cancel_job` exposes cancellation for queued/running rows,
+  and per-target work can fail terminally after retries (image load
+  failure, mask store corruption, disk full). The crash-recovery and
+  CAS-skip paths above cover restart and user-overwrite; a cancelled
+  or terminally failed job would otherwise leave every unreached
+  target rendering `pending:<placeholder_token>` — missing-snapshot
+  local edits indefinitely, the same permanent landmine those paths
+  were written to prevent, arriving via a third terminal state. PR 1
+  therefore treats cancel and terminal failure as **the CAS-skip
+  cleanup applied to every remaining pending target for that job**:
+  the durable `local_resnapshot_jobs` row's terminal handler walks
+  its `placeholder_tokens` list, and for each target whose current
+  `local.mask.ref` still equals its recorded
+  `pending:<placeholder_token>` (read under the same per-`photo_id`
+  publish-lock as single-photo Update) strips the `local` block from
+  the placeholder recipe — leaving all non-local adjustments
+  intact — and then runs the same later-history / XMP-sync scrub the
+  CAS-skip branch defines above, replacing every remaining occurrence
+  of the token with the local-stripped recipe and dropping any queued
+  XMP sync rows that still carry it. The `local_resnapshot_jobs` row
+  transitions to `cancelled` / `failed` in the same DB transaction as
+  those writes so startup reconciliation stops re-enqueueing it;
+  targets that already finalized under their own per-photo
+  publish-lock before the terminal event stay finalized (their refs
+  are no longer `pending:*` and the cleanup no-ops them). SSE emits
+  `finalize_skipped` per cleaned-up target with the terminal reason
+  (`cancelled` / `failed:<error>`), and the completion event surfaces
+  "resnapshot cancelled — local adjustments dropped from N photos"
+  so the user learns which targets lost their local block instead of
+  discovering missing-snapshot state photo-by-photo. This is
+  deliberately not a retry path: a cancelled job stays cancelled and
+  terminally-failed target work is not silently re-attempted, because
+  both cases require user attention (fixing a mask, freeing disk,
+  deciding whether to re-paste) and reintroducing local edits under
+  the same placeholder token would race any intervening edits the
+  user made against the cleaned-up recipe.
+
   This matters because the paste UI in `vireo/templates/browse.html`
   currently caches `data.recipe` for every applied id
   (`vireo/templates/browse.html:4282-4285`) — with a singular response,
