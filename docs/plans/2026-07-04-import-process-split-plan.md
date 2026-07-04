@@ -88,6 +88,13 @@ def test_unknown_strategy_raises():
 
 Note the deliberate deviation from the design table: `cull_ready` keeps **regroup** (cheap, no GPU, and `pipeline_review` requires encounters to render) — record this in the module docstring.
 
+**Scope note — the design doc's "None" / import-only choice is *not* a process strategy.** `STRATEGIES` only enumerates *processing* presets. "Do nothing after import" is a decision at the import→process boundary, not a stage-flag preset, and does not belong in this whitelist. It is represented as `None` (nullable) in two places that this PR touches:
+
+- **Workspace default (Task 1.5):** `pipeline.default_strategy` accepts `None` (unset). `None` means "no automatic processing after import"; the save-time validator accepts `None` and any name in `STRATEGIES`, and rejects everything else.
+- **Import→process chaining (PR 3, Task 3.1):** the import job stores the after-import choice in its own config; the completion hook only enqueues `/api/jobs/pipeline` when that choice is a real strategy name. `None` short-circuits the hook and never reaches `/api/jobs/pipeline`, so the strategy whitelist there can stay strict (a request with `strategy: null` or `strategy: "none"` is still a 400 — the "no process" case is expressed by not calling the endpoint at all).
+
+This keeps the strategy vocabulary strict for the process job while preserving the import-only path the design doc calls out.
+
 **Step 2: Run it — expect FAIL** (`ModuleNotFoundError`).
 
 Run: `python -m pytest vireo/tests/test_process_strategies.py -v`
@@ -156,21 +163,27 @@ def resolve_strategy(name):
 
 **Step 2:** Run — expect FAIL (unexpected keyword).
 
-**Step 3:** Add `miss_enabled: bool | None = None` to `PipelineParams` (None = defer to config, preserving today's behavior). At the misses gate, compute the effective value and **short-circuit before calling `compute_misses_for_workspace` when disabled** — mirror the existing skip pattern at `pipeline_job.py:4943-4946` so the stage records `skipped` (not `completed / 0 photos evaluated`). Just injecting the value into the config the helper sees would still trip the "completed" path, because `compute_misses_for_workspace` returns 0 rather than raising when `miss_enabled` is False (`vireo/misses.py:381`) and the current stage code stamps completion using that count.
+**Step 3:** Add `miss_enabled: bool | None = None` to `PipelineParams` (None = defer to config, preserving today's behavior). The override must be **bidirectional** — it has to work in both directions:
+
+- **strategy disables + workspace enables** (e.g. `cull_ready` on a default workspace): short-circuit *before* `compute_misses_for_workspace` so the stage records `skipped`. A local variable alone would only gate the cache marker at `pipeline_job.py:4991`; the compute call still reads `pipeline_cfg["miss_enabled"]` from workspace config (`vireo/misses.py:381`) and would evaluate + write miss flags anyway.
+- **strategy enables + workspace disables** (a user runs `full` on a workspace where misses are turned off): the guard doesn't fire (effective value is True), so we fall through to the existing compute path — but that path reads `pipeline_cfg["miss_enabled"]`, which is still False from workspace config, and `compute_misses_for_workspace` returns 0. The stage would then stamp `completed / 0 photos evaluated`, which reads as "misses ran and found none." Fix by **also injecting the effective value into `pipeline_cfg` before the guard**, so both the guard and the downstream compute call see the same effective value.
 
 Insert the guard **immediately after** the existing `if params.skip_regroup or params.skip_classify or ... :` block at `pipeline_job.py:4936-4946` (still before the `stages["misses"]["status"] = "running"` at :4948, so the "skipped" record wins over any transient "running" write):
 
 ```python
 # effective miss_enabled: per-run PipelineParams override wins over
 # workspace config, mirroring how other skip_* flags override
-# workspace defaults.
+# workspace defaults. Inject the effective value into pipeline_cfg
+# *before* the guard so both branches — short-circuit-skip AND
+# fall-through-to-compute — see the same value: compute_misses_for_workspace
+# reads pipeline_cfg["miss_enabled"] itself (vireo/misses.py:381), so a
+# strategy that enables misses on a workspace where they're disabled
+# would otherwise get a silent 0 from compute.
 effective_cfg = thread_db.get_effective_config(cfg.load())
 pipeline_cfg = effective_cfg.get("pipeline", {})
-miss_enabled = (
-    params.miss_enabled
-    if params.miss_enabled is not None
-    else pipeline_cfg.get("miss_enabled", True)
-)
+if params.miss_enabled is not None:
+    pipeline_cfg = {**pipeline_cfg, "miss_enabled": params.miss_enabled}
+miss_enabled = pipeline_cfg.get("miss_enabled", True)
 if not miss_enabled:
     # Match the "skipped" contract used at :4943 for skip_regroup /
     # skip_classify: stage status = "skipped", step summary = "Skipped".
@@ -185,11 +198,14 @@ if not miss_enabled:
     return
 ```
 
-Because the guard returns before `compute_misses_for_workspace` is reached, no `miss` rows are written and the `miss_computed_at` cache marker at `pipeline_job.py:4991` is never stamped — which is what `pipeline_review`'s "current-run misses" shortcut needs (a stale marker would surface old miss flags as fresh). The existing `pipeline_cfg`/`thread_db` reads that happen inside the current `try:` block (`:4959-4963`) move up above the guard so both branches share them; alternatively, keep them inside `try:` and duplicate the two-line load — pick whichever the harness style in `test_pipeline_job.py` reads cleaner against.
+Because the guard returns before `compute_misses_for_workspace` is reached, no `miss` rows are written and the `miss_computed_at` cache marker at `pipeline_job.py:4991` is never stamped — which is what `pipeline_review`'s "current-run misses" shortcut needs (a stale marker would surface old miss flags as fresh). The existing `pipeline_cfg`/`thread_db` reads that happen inside the current `try:` block (`:4959-4963`) must be **replaced** by the effective-value `pipeline_cfg` computed above (thread the injected dict through, or hoist the load and delete the duplicate); do not leave the original two-line load in place, or the compute call will still see the un-overridden workspace value in the strategy-enables-but-workspace-disables case.
 
 Do the same shape for `skip_detect` if Task 1.0 concluded it's needed.
 
-**Step 4:** Run — PASS. Also run the full `test_pipeline_job.py` file. Add a second assertion to the failing test (or a peer test) that with workspace `miss_enabled: True` and `PipelineParams(miss_enabled=False)`, `compute_misses_for_workspace` is not invoked at all (patch/spy it), no `miss` rows are written for the run's collection, and `miss_computed_at` is not stamped — this pins the "override short-circuits before compute" property that a local-variable-only fix would silently break.
+**Step 4:** Run — PASS. Also run the full `test_pipeline_job.py` file. Add two peer assertions that pin the *bidirectional* override contract:
+
+- **Skip direction:** workspace `miss_enabled: True` + `PipelineParams(miss_enabled=False)` → `compute_misses_for_workspace` is not invoked at all (patch/spy it), no `miss` rows are written for the run's collection, and `miss_computed_at` is not stamped. This pins the "override short-circuits before compute" property that a local-variable-only fix would silently break.
+- **Enable direction:** workspace `miss_enabled: False` + `PipelineParams(miss_enabled=True)` → `compute_misses_for_workspace` IS invoked, and the `pipeline_cfg` it receives has `miss_enabled: True` (assert on the call args). This pins the injection property — without it, the compute call reads workspace-False, returns 0, and the stage reports "0 photos evaluated" for a run the user explicitly asked to include misses in.
 
 **Step 5: Commit** — `feat: per-run miss_enabled override on PipelineParams`
 
