@@ -529,7 +529,31 @@ new-ref family on disk that no recipe references — again harmless. A
 render that starts before the DB commit sees the old ref and its
 still-intact files; a render that starts after the DB commit sees the
 new ref and its complete new family. There is no window where
-`local.mask.ref` points at an incomplete family. The old ref's files
+`local.mask.ref` points at an incomplete family.
+
+**Publish is atomic against a concurrent GC sweep, not only against
+crashes.** Between steps (d) and (e) the new-ref family exists on disk
+but no `local.mask.ref` yet points at it, so a naive "unreferenced =>
+deletable" sweep running in the same window would delete a complete
+new family before the DB commit exposes it and the very next render
+against the new ref would see missing files and fall back to
+warn-and-hold-zero. Snapshot GC therefore treats a file as reachable
+whenever **either** a recipe references its ref **or** the ref is held
+by an in-flight publish. Concretely, publish takes a per-`photo_id`
+publish lock at step (a) and releases it after step (e); the sweep
+acquires the same lock (non-blocking `try_acquire`) before evaluating
+any of that photo's refs and skips the photo entirely if the lock is
+held, deferring it to the next sweep. A backstop grace period —
+files (including both `.tmp` and finalized `.<ref>.<decode>.png`) whose
+mtime is within the sweep's configured GC grace window are not eligible
+for deletion — covers the case where a publish crashes between (d) and
+(e) with the lock held: the lock is per-process, so it releases on
+process exit, but the grace period keeps the orphaned new-ref files
+alive long enough for the next process to either reissue the publish
+(if the caller retries) or let the normal orphan-file GC reclaim them
+once the grace window elapses. The lock is scoped to `photo_id`, not
+to a global mask-family lock, so unrelated photos' GC keeps running in
+parallel with a slow publish. The old ref's files
 stay intact on disk (they are not deleted or overwritten by Update);
 they are still referenced by any edit-history recipe whose snapshot
 they were made for, so re-rendering those historical recipes remains
@@ -795,11 +819,42 @@ No `EDIT_MATH_VERSION` bump: recipes without `local` render byte-identically.
   substitute the new ref into the per-target recipe before writing. The
   region entries and shared feather carry over unchanged (they are
   slider values, not mask-identity). Targets with no usable mask are
-  skipped and reported in the response, matching the UI behavior. The
-  response shape changes with this: instead of the current single
-  `recipe` field, `/api/photos/edit-recipe/apply` returns a map keyed
-  by target `photo_id` to that target's own resnapshotted recipe (plus
-  the same top-level `applied` / `skipped` id lists it returns today).
+  skipped and reported in the response, matching the UI behavior.
+
+  **The resnapshot itself does not run inside the request.** A single
+  snapshot family costs a few seconds per `(photo, decode)` — image
+  load + detection + SAM — and RAW+companion targets pay it twice; the
+  bulk paste flow can hit dozens or hundreds of targets in one POST,
+  so materializing them inline would tie up the Flask worker (already
+  a scarce resource with the SSE panel) for minutes and time the UI
+  out before the response landed. PR 1 instead queues the per-target
+  resnapshot as a **`JobRunner` background job** (same runner as scan
+  / classify / thumbnails, so it inherits SSE progress, pause/resume,
+  and per-workspace scoping): the endpoint validates the incoming
+  recipe once, immediately writes each target's `local`-stripped
+  recipe with a placeholder ref that renders as missing-snapshot
+  (warn-and-hold-zero — no partial local edits leak out), enqueues one
+  job whose payload is `(source_recipe, target_ids, active_workspace)`,
+  and returns synchronously with the job id plus a `pending` list of
+  target ids whose resnapshot is queued. The job runs the same
+  strip-and-resnapshot helper per target, rewrites each target's
+  `local.mask.ref` / `mask.decodes` in-place under the same
+  publish-lock protocol as single-photo Update (so an in-flight
+  snapshot GC never races the family the job just wrote), and emits
+  an SSE event per target as its snapshot finalizes. The response
+  shape changes accordingly: instead of the current single `recipe`
+  field, `/api/photos/edit-recipe/apply` returns a map keyed by
+  target `photo_id` to that target's `local`-stripped placeholder
+  recipe (plus the same top-level `applied` / `skipped` id lists it
+  returns today, and a new `pending` list of ids the resnapshot job
+  will finish asynchronously, plus the `job_id` the UI can subscribe
+  to for completion). Recipes with **no** `local` block keep the
+  fully synchronous path — the job is only enqueued when the incoming
+  recipe carries `local`, so the common "paste global adjustments to
+  10 photos" case still responds inline. Callers that need the
+  resnapshotted recipes in the response (rare — the UI always
+  refreshes per-target state on the completion SSE) can poll the same
+  per-target recipe fetch the editor already uses.
   This matters because the paste UI in `vireo/templates/browse.html`
   currently caches `data.recipe` for every applied id
   (`vireo/templates/browse.html:4282-4285`) — with a singular response,
@@ -808,9 +863,15 @@ No `EDIT_MATH_VERSION` bump: recipes without `local` render byte-identically.
   those targets would persist that wrong ref back to the server (its
   snapshot family only exists under the source's photo id, so the
   render would then disable the local pass). Per-target recipes in the
-  response let the UI install each target's own resnapshotted recipe
-  into its cache, matching what was actually written. Skipped targets
-  omit a per-target recipe (they appear only in the `skipped` list). Direct
+  response let the UI install each target's own placeholder recipe
+  into its cache immediately — matching what the server just wrote —
+  and the resnapshot job's SSE completion events update the same
+  cache entries with the finalized `local.mask.ref` / `mask.decodes`
+  as each target's snapshot family materializes. Skipped targets omit
+  a per-target recipe (they appear only in the `skipped` list); pending
+  targets appear in both the per-target map (with their placeholder
+  recipe) and the top-level `pending` list, and the UI treats a pending
+  target's local pass as disabled-until-ready. Direct
   recipe writes to a single photo (the normal editor save path) keep the
   ref they were given — the resnapshot is one instance of a more general
   contract: **any code path that transfers a `recipe_json` from one
