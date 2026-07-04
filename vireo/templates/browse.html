@@ -5695,7 +5695,10 @@ function renderBatchInspector(ids, opts) {
   // (e.g. a /api/photos/color_labels fetch resolving, a batch rating shortcut)
   // triggers _refreshBatchInspectorIfActive, and we'd otherwise erase it.
   if (!opts.preserveLocation) {
-    renderLocationEmpty({ preserveExifSuggestion: opts.preserveExifSuggestion });
+    renderLocationEmpty({
+      preserveExifSuggestion: opts.preserveExifSuggestion,
+      selectionIds: ids,
+    });
   }
 }
 
@@ -6143,13 +6146,24 @@ function renderLocationEmpty(opts) {
   // maybeShowExifSuggestion(photo) after this, which decides whether to
   // populate the line for the new photo. Entering batch mode preserves it
   // instead (preserveExifSuggestion) so the anchor's suggestion stays
-  // acceptable for the whole selection.
-  if (!opts.preserveExifSuggestion) {
-    var sugg = document.getElementById('locationExifSuggestion');
-    if (sugg) {
-      sugg.hidden = true;
-      sugg.innerHTML = '';
-    }
+  // acceptable for the whole selection — but only while the photo that
+  // produced it is still in the selection. Otherwise Accept would apply
+  // that anchor's GPS-derived location to unrelated photos (Codex P1 on
+  // PR #1097: open A → Cmd-click B → Cmd-click A to drop → Cmd-click C).
+  var sugg = document.getElementById('locationExifSuggestion');
+  if (!sugg) return;
+  var keepSugg = false;
+  if (opts.preserveExifSuggestion) {
+    var ownerAttr = sugg.dataset ? sugg.dataset.photoId : '';
+    var owner = ownerAttr ? parseInt(ownerAttr, 10) : NaN;
+    keepSugg = !isNaN(owner)
+      && Array.isArray(opts.selectionIds)
+      && opts.selectionIds.indexOf(owner) !== -1;
+  }
+  if (!keepSugg) {
+    sugg.hidden = true;
+    sugg.innerHTML = '';
+    if (sugg.dataset) delete sugg.dataset.photoId;
   }
 }
 
@@ -6162,6 +6176,7 @@ async function maybeShowExifSuggestion(photo) {
   if (!sugg) return;
   sugg.hidden = true;
   sugg.innerHTML = '';
+  if (sugg.dataset) delete sugg.dataset.photoId;
 
   if (!photo) return;
   if (photo.location) return;
@@ -6195,6 +6210,7 @@ async function maybeShowExifSuggestion(photo) {
     });
     sugg.appendChild(text);
     sugg.appendChild(btn);
+    sugg.dataset.photoId = String(requestPhotoId);
     sugg.hidden = false;
   } catch (e) {
     console.warn('reverse-geocode suggestion failed:', e);
@@ -6226,6 +6242,7 @@ async function acceptExifSuggestion(placeId) {
     if (sugg) {
       sugg.hidden = true;
       sugg.innerHTML = '';
+      if (sugg.dataset) delete sugg.dataset.photoId;
     }
     await _afterLocationMutation(useBatch ? ids : [photoId], photoId);
   } catch(e) {

@@ -480,6 +480,84 @@ def test_exif_accept_batches_selection_and_refreshes_smart_collection(
     assert db.count_collection_photos(collection_id) == 0
 
 
+def test_exif_suggestion_clears_when_anchor_leaves_selection(
+    live_server, page, monkeypatch
+):
+    """Codex P1 (PR #1097): if the photo that produced the EXIF suggestion is
+    removed from the selection before Accept is clicked, the suggestion must
+    not survive to apply that anchor's GPS-derived location to unrelated
+    photos still in the selection.
+
+    Sequence: open A (suggestion appears) → Cmd-click B (suggestion stays,
+    anchor still in selection) → Cmd-click A to remove → Cmd-click C. Now the
+    selection is {B, C} and A is gone; the suggestion (which is A's) must be
+    cleared so batch Accept can't silently push A's place to B and C.
+    """
+    photo_ids = live_server["data"]["photos"][:3]
+    anchor, other_b, other_c = photo_ids
+    # Give only the anchor EXIF GPS. If every photo shared the same canned
+    # place_id, the bug would be invisible even without the fix.
+    _seed_exif_photos(live_server, [anchor])
+    _seed_reverse_geocode_cache(
+        live_server, 40.785091, -73.968285, _CANNED_PLACE_ID, _CANNED_DETAILS,
+    )
+    _set_api_key()
+
+    import places
+    monkeypatch.setattr(
+        places, "place_details", lambda pid, key: _CANNED_DETAILS,
+    )
+
+    db = live_server["db"]
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+
+    page.locator(f".grid-card[data-id='{anchor}']").click()
+    _wait_for_detail_loaded(page)
+    accept = page.locator("#locationExifSuggestion button.accept-btn")
+    expect(accept).to_be_visible()
+    assert page.evaluate(
+        "() => document.getElementById('locationExifSuggestion').dataset.photoId"
+    ) == str(anchor)
+
+    page.locator(f".grid-card[data-id='{other_b}']").click(modifiers=["Meta"])
+    page.wait_for_function(
+        "(id) => selectedPhotos.size === 2 && selectedPhotos.has(id)",
+        arg=anchor,
+    )
+    expect(accept).to_be_visible()
+
+    page.locator(f".grid-card[data-id='{anchor}']").click(modifiers=["Meta"])
+    page.wait_for_function(
+        "(id) => selectedPhotos.size === 1 && !selectedPhotos.has(id)",
+        arg=anchor,
+    )
+
+    page.locator(f".grid-card[data-id='{other_c}']").click(modifiers=["Meta"])
+    page.wait_for_function(
+        "(id) => selectedPhotos.size === 2 && !selectedPhotos.has(id)",
+        arg=anchor,
+    )
+
+    expect(page.locator("#locationExifSuggestion")).to_be_hidden()
+    assert page.evaluate(
+        "() => document.getElementById('locationExifSuggestion').innerHTML"
+    ) == ""
+    assert page.evaluate(
+        "() => document.getElementById('locationExifSuggestion').dataset.photoId || ''"
+    ) == ""
+
+    for pid in (other_b, other_c):
+        row = db.conn.execute(
+            "SELECT 1 FROM photo_keywords pk "
+            "JOIN keywords k ON k.id = pk.keyword_id "
+            "WHERE pk.photo_id = ? AND k.type = 'location'",
+            (pid,),
+        ).fetchone()
+        assert row is None, f"photo {pid} should not have gained a location"
+
+
 def test_freetext_location_batches_selection_and_refreshes_smart_collection(
     live_server, page
 ):
