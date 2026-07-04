@@ -195,8 +195,21 @@ try:
     effective_cfg = thread_db.get_effective_config(cfg.load())
     pipeline_cfg = effective_cfg.get("pipeline", {})
 except Exception as e:
+    # Preserve the failed-stage recording contract used by the
+    # existing try/except at ~:4997 — mark the stage failed BEFORE
+    # returning. The transient "running" write is *below* this guard,
+    # so without stamping "failed" here the stage would stay
+    # "pending"; the pipeline finalizer treats absence-of-failed as
+    # success and would wrongly mark the whole job completed despite
+    # a fatal setup error (cfg.load, Database(...), or any import
+    # raising). Mirror the three writes the old handler did:
+    # stages[...] status, runner.update_step(status="failed", error),
+    # and _update_stages so the SSE/UI stream matches.
+    stages["misses"]["status"] = "failed"
+    runner.update_step(job["id"], "misses", status="failed", error=str(e))
     errors.append(f"[misses] Fatal: {e}")
     log.exception("Pipeline miss-detection setup failed")
+    _update_stages(runner, job["id"], stages)
     return
 
 # effective miss_enabled: per-run PipelineParams override wins over
@@ -238,6 +251,7 @@ Do the same shape for `skip_detect` if Task 1.0 concluded it's needed.
 
 - **Skip direction:** workspace `miss_enabled: True` + `PipelineParams(miss_enabled=False)` → `compute_misses_for_workspace` is not invoked at all (patch/spy it), no `miss` rows are written for the run's collection, and `miss_computed_at` is not stamped. This pins the "override short-circuits before compute" property that a local-variable-only fix would silently break.
 - **Enable direction:** workspace `miss_enabled: False` + `PipelineParams(miss_enabled=True)` → `compute_misses_for_workspace` IS invoked, and the `pipeline_cfg` it receives has `miss_enabled: True` (assert on the call args). This pins the injection property — without it, the compute call reads workspace-False, returns 0, and the stage reports "0 photos evaluated" for a run the user explicitly asked to include misses in.
+- **Setup-failure direction:** patch one of the hoisted setup calls (e.g. `Database.__init__`, `cfg.load`, or `thread_db.set_active_workspace`) to raise. Assert that the misses stage records `status == "failed"` (not "pending"), `runner.update_step` was called with `status="failed"` and the exception text as `error`, and the pipeline finalizer marks the whole job failed. Without this, a fatal setup exception silently produces a "successful" job with a pending misses stage — the regression this bidirectional guard would otherwise introduce compared to the original inline try/except.
 
 **Step 5: Commit** — `feat: per-run miss_enabled override on PipelineParams`
 
