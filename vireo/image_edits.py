@@ -58,6 +58,16 @@ _LOCAL_ADJUSTMENT_KEYS = frozenset({
     "exposure", "highlights", "shadows", "contrast", "saturation",
     "sharpen", "noise_reduction",
 })
+# Region values are deltas layered on top of the global adjustments, so
+# sharpen and noise_reduction — whose globals are [0, 100] — need to accept
+# negative deltas here (e.g. background sharpen -70 against global sharpen 70
+# zeroes sharpen in the background). ``_combine_detail`` clamps the sum back
+# into the global range before rendering.
+_LOCAL_ADJUSTMENT_RANGES = {
+    **_ADJUSTMENT_RANGES,
+    "sharpen": (-100.0, 100.0),
+    "noise_reduction": (-100.0, 100.0),
+}
 LOCAL_FEATHER_RANGE = (0.0, 200.0)
 _LOCAL_MASK_REF_RE = re.compile(r"^[0-9a-f]{12}$")
 
@@ -306,7 +316,7 @@ def _normalize_local(local):
             if isinstance(raw, bool) or not isinstance(raw, int | float):
                 raise RecipeError(f"{name} adjustment must be numeric")
             val = float(raw)
-            lo, hi = _ADJUSTMENT_RANGES[name]
+            lo, hi = _LOCAL_ADJUSTMENT_RANGES[name]
             if not math.isfinite(val) or val < lo or val > hi:
                 raise RecipeError(
                     f"{name} adjustment must be between {lo:g} and {hi:g}"

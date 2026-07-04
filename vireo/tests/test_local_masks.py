@@ -347,3 +347,49 @@ def test_gc_respects_references_history_and_grace(tmp_path, monkeypatch):
         # app layer, not db.set_photo_edit_recipe) — then it must collect.
         assert not os.path.exists(referenced)
     db.close()
+
+
+def test_gc_rechecks_mtime_before_deleting(tmp_path, monkeypatch):
+    """A concurrent POST /local-mask/snapshot that reuses an unreferenced
+    file refreshes its mtime between the sweep's initial mtime check and the
+    ``os.remove()`` call. Without a second stat, the sweep would still delete
+    the just-touched file and break the ref before the recipe save can pin
+    it. The recheck must catch that refresh."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder(str(tmp_path), name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, width=800, height=600,
+    )
+
+    orphan = local_masks.snapshot_path(str(tmp_path), pid, "0123456789ab")
+    os.makedirs(os.path.dirname(orphan), exist_ok=True)
+    _write_mask(orphan, box=(1, 1, 10, 10))
+    old = time.time() - 30 * 24 * 3600
+    os.utime(orphan, (old, old))
+
+    real_getmtime = os.path.getmtime
+    calls = {"n": 0}
+
+    def flaky_getmtime(path):
+        calls["n"] += 1
+        # First stat: aged, so the sweep decides to delete. Simulate a
+        # concurrent create_snapshot() refreshing the mtime in between.
+        if calls["n"] == 1:
+            return old
+        os.utime(path, None)
+        return real_getmtime(path)
+
+    monkeypatch.setattr(local_masks.os.path, "getmtime", flaky_getmtime)
+    result = local_masks.gc_edit_masks(db, str(tmp_path))
+
+    assert os.path.exists(orphan), (
+        "recheck should have caught the mtime refresh and skipped delete"
+    )
+    assert result["deleted"] == 0
+    assert result["kept"] == 1
+    db.close()

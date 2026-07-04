@@ -280,6 +280,18 @@ def gc_edit_masks(db, vireo_dir, grace_seconds=GC_GRACE_SECONDS):
             if os.path.getmtime(path) > cutoff:
                 kept += 1
                 continue
+            # Re-stat immediately before deleting. Between the first mtime
+            # check above and here, a concurrent POST /local-mask/snapshot
+            # can reuse this file, refresh its mtime via os.utime, and
+            # return its ref — deleting after that would break the
+            # just-returned ref before the recipe save can pin it. The
+            # window remains non-zero (an os.utime after this check still
+            # loses), but rechecking shrinks it to the syscall gap and
+            # catches every refresh that lands after the initial listdir
+            # walk.
+            if os.path.getmtime(path) > cutoff:
+                kept += 1
+                continue
             os.remove(path)
             deleted += 1
         except OSError:

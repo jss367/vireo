@@ -487,6 +487,48 @@ def test_normalize_recipe_rejects_invalid_local(local, message):
         normalize_recipe({"local": local})
 
 
+def test_normalize_recipe_accepts_negative_local_detail_deltas():
+    # Region values are deltas layered on top of the globals; a background
+    # sharpen -70 against global sharpen 70 legitimately zeroes sharpen in the
+    # background. Rejecting negative deltas would force users to drop the
+    # global sharpen entirely instead of just excluding the background from it.
+    out = normalize_recipe(
+        {
+            "adjustments": {"sharpen": 70, "noise_reduction": 30},
+            "local": {
+                "mask": {"ref": "a1b2c3d4e5f6", "source_digest": "d"},
+                "regions": [
+                    {
+                        "region": "background",
+                        "adjustments": {"sharpen": -70, "noise_reduction": -30},
+                    },
+                ],
+            },
+        }
+    )
+    assert out["local"]["regions"] == [
+        {
+            "region": "background",
+            "adjustments": {"sharpen": -70.0, "noise_reduction": -30.0},
+        }
+    ]
+    # Out-of-range deltas still rejected: -100 is the floor.
+    with pytest.raises(RecipeError, match="sharpen"):
+        normalize_recipe(
+            {
+                "local": {
+                    "mask": {"ref": "a1b2c3d4e5f6", "source_digest": "d"},
+                    "regions": [
+                        {
+                            "region": "subject",
+                            "adjustments": {"sharpen": -150},
+                        },
+                    ],
+                },
+            }
+        )
+
+
 def test_local_recipe_json_is_canonical_and_stable():
     recipe = {
         "local": {
