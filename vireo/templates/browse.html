@@ -3887,12 +3887,7 @@ function selectPhoto(e, id, idx) {
       // selection check and resurrect the anchor's Accept line for the
       // whole batch — clicking it would apply the dropped anchor's GPS
       // place to every selected photo. Codex P2 on PR #1097.
-      var sugg = document.getElementById('locationExifSuggestion');
-      if (sugg) {
-        sugg.hidden = true;
-        sugg.innerHTML = '';
-        if (sugg.dataset) delete sugg.dataset.photoId;
-      }
+      clearExifSuggestion();
     }
   } else {
     // Normal click: single select
@@ -5073,6 +5068,14 @@ function clearSelection() {
   selectedPhotos.clear();
   selectedPhotoId = null;
   selectedIndex = -1;
+  // Batch-bar Clear (and every other caller) has to scrub the EXIF suggestion
+  // too. Without this, the suggestion element keeps its data-photo-id and
+  // Accept button after clearing, so a later Select All that still contains
+  // the previously-open anchor satisfies renderLocationEmpty's owner-in-
+  // selection check and resurrects the anchor's Accept line for the whole
+  // batch — one click would apply the anchor's GPS-derived place to every
+  // selected photo. Codex P2 on PR #1097.
+  clearExifSuggestion();
   document.querySelectorAll('.grid-card').forEach(function(el) {
     el.classList.remove('selected');
   });
@@ -5422,12 +5425,7 @@ function closeDetail() {
   // renderLocationEmpty's owner-in-selection check and resurrect the anchor's
   // Accept line for the whole batch — clicking it would apply the anchor's
   // GPS-derived place to every selected photo. Codex P2 on PR #1097.
-  var sugg = document.getElementById('locationExifSuggestion');
-  if (sugg) {
-    sugg.hidden = true;
-    sugg.innerHTML = '';
-    if (sugg.dataset) delete sugg.dataset.photoId;
-  }
+  clearExifSuggestion();
   // Re-highlight any cmd/shift-click selections that survive detail close.
   // A blanket .remove('selected') would leave selectedPhotos armed for batch
   // actions with no visible indicator — e.g. click A -> cmd-click B -> cmd-click
@@ -6131,6 +6129,18 @@ async function clearPhotoLocation() {
   }
 }
 
+// Scrub the inline EXIF suggestion line (hide, empty innerHTML, drop the
+// data-photo-id owner tag). Every scrub site must go through this helper so
+// they can't silently diverge — e.g. if a future scrub also needs to clear a
+// stored placeId. Codex nitpick on PR #1097.
+function clearExifSuggestion() {
+  var sugg = document.getElementById('locationExifSuggestion');
+  if (!sugg) return;
+  sugg.hidden = true;
+  sugg.innerHTML = '';
+  if (sugg.dataset) delete sugg.dataset.photoId;
+}
+
 function renderLocationFilled(loc) {
   var filled = document.getElementById('locationFilled');
   var empty = document.getElementById('locationEmpty');
@@ -6160,12 +6170,7 @@ function renderLocationFilled(loc) {
   // (suggestion fetched) → open B with a saved location → Cmd-click A would
   // otherwise resurrect A's Accept line for the {B, A} batch and overwrite
   // B's location (Codex P2 on PR #1097). Clear it at the source instead.
-  var sugg = document.getElementById('locationExifSuggestion');
-  if (sugg) {
-    sugg.hidden = true;
-    sugg.innerHTML = '';
-    if (sugg.dataset) delete sugg.dataset.photoId;
-  }
+  clearExifSuggestion();
 }
 
 function renderLocationEmpty(opts) {
@@ -6197,11 +6202,7 @@ function renderLocationEmpty(opts) {
       && Array.isArray(opts.selectionIds)
       && opts.selectionIds.indexOf(owner) !== -1;
   }
-  if (!keepSugg) {
-    sugg.hidden = true;
-    sugg.innerHTML = '';
-    if (sugg.dataset) delete sugg.dataset.photoId;
-  }
+  if (!keepSugg) clearExifSuggestion();
 }
 
 /* When a photo with EXIF GPS but no location keyword is opened, fetch a
@@ -6209,11 +6210,9 @@ function renderLocationEmpty(opts) {
    silently when there's no key or no coords; the proxy returns null when
    Google has no match for the cell. */
 async function maybeShowExifSuggestion(photo) {
+  clearExifSuggestion();
   var sugg = document.getElementById('locationExifSuggestion');
   if (!sugg) return;
-  sugg.hidden = true;
-  sugg.innerHTML = '';
-  if (sugg.dataset) delete sugg.dataset.photoId;
 
   if (!photo) return;
   if (photo.location) return;
@@ -6296,12 +6295,7 @@ async function acceptExifSuggestion(placeId) {
     if (resp && resp.location) {
       renderLocationFilled(resp.location);
     }
-    var sugg = document.getElementById('locationExifSuggestion');
-    if (sugg) {
-      sugg.hidden = true;
-      sugg.innerHTML = '';
-      if (sugg.dataset) delete sugg.dataset.photoId;
-    }
+    clearExifSuggestion();
     await _afterLocationMutation(useBatch ? ids : [photoId], photoId);
   } catch(e) {
     _showLocationError('Could not save location.');
