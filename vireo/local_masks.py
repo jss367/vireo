@@ -155,7 +155,20 @@ def create_snapshot(*, photo_id, mask_row, vireo_dir, native_size=None):
         try:
             with os.fdopen(fd, "wb") as f:
                 f.write(data)
-            os.replace(tmp, dest)
+            try:
+                os.replace(tmp, dest)
+            except PermissionError:
+                # Windows: concurrent os.replace() calls targeting the
+                # same destination can raise PermissionError even after
+                # another writer has already published the same content
+                # (MoveFileExW serializes and the loser sees "Access is
+                # denied"). Every writer for this (photo, ref) writes
+                # byte-identical bytes, so "dest exists" IS a successful
+                # publish — clean up our tmp and treat it as done.
+                if not os.path.exists(dest):
+                    raise
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp)
         except OSError:
             with contextlib.suppress(OSError):
                 os.unlink(tmp)
