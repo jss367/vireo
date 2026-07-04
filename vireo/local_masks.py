@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import io
 import json
 import logging
 import os
 import re
+import tempfile
 import time
 
 from PIL import Image
@@ -50,14 +52,7 @@ def snapshot_path(vireo_dir, photo_id, ref):
     return os.path.join(edit_masks_dir(vireo_dir), f"{photo_id}.{ref}.png")
 
 
-def source_digest(mask_row):
-    """Digest over the snapshot's source inputs: mask file bytes + the
-    prompt/detector metadata that produced it. This is the staleness signal —
-    the snapshot's own pixels are never compared."""
-    h = hashlib.sha1()
-    with open(mask_row["path"], "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
+def _mix_source_meta(h, mask_row):
     meta = json.dumps(
         {
             "variant": mask_row.get("variant"),
@@ -70,6 +65,33 @@ def source_digest(mask_row):
         sort_keys=True,
     )
     h.update(meta.encode("utf-8"))
+
+
+def _source_digest_from_bytes(mask_bytes, mask_row):
+    """Digest from an already-read mask buffer + prompt/detector metadata.
+
+    Used by ``create_snapshot`` so the ``ref`` (hash of the snapshotted
+    bytes) and ``source_digest`` (staleness signal) describe the SAME
+    bytes, even if a mask-extraction job rewrites the live mask file
+    between the initial read and the digest — otherwise the recipe would
+    record ``source_digest`` over new bytes while the snapshot file holds
+    the old ones, and ``is_stale()`` would silently report "current" for
+    a stale render.
+    """
+    h = hashlib.sha1(mask_bytes)
+    _mix_source_meta(h, mask_row)
+    return f"sha1:{h.hexdigest()}"
+
+
+def source_digest(mask_row):
+    """Digest over the snapshot's source inputs: mask file bytes + the
+    prompt/detector metadata that produced it. This is the staleness signal —
+    the snapshot's own pixels are never compared."""
+    h = hashlib.sha1()
+    with open(mask_row["path"], "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    _mix_source_meta(h, mask_row)
     return f"sha1:{h.hexdigest()}"
 
 
@@ -90,7 +112,12 @@ def create_snapshot(*, photo_id, mask_row, vireo_dir, native_size=None):
 
     with open(src_path, "rb") as f:
         data = f.read()
-    with Image.open(src_path) as img:
+    # Open the image from the copied buffer, not the live path — a
+    # mask-extraction job rewriting src_path between the read above and
+    # the size check would otherwise let us aspect-check different bytes
+    # than we snapshot, and could pass a validation that the snapshotted
+    # bytes should have failed.
+    with Image.open(io.BytesIO(data)) as img:
         mask_w, mask_h = img.size
     if native_size:
         native_w, native_h = native_size
@@ -108,10 +135,23 @@ def create_snapshot(*, photo_id, mask_row, vireo_dir, native_size=None):
     dest = snapshot_path(vireo_dir, photo_id, ref)
     if not os.path.exists(dest):
         os.makedirs(os.path.dirname(dest), exist_ok=True)
-        tmp = dest + ".tmp"
-        with open(tmp, "wb") as f:
-            f.write(data)
-        os.replace(tmp, dest)
+        # Per-call tempfile so concurrent POSTs for the same
+        # (photo, ref) don't race on a shared ``dest + ".tmp"``: with a
+        # deterministic name, one writer's ``os.replace()`` can steal the
+        # other's tmp path out from under it, causing the loser to raise
+        # FileNotFoundError. mkstemp gives each writer a unique name.
+        fd, tmp = tempfile.mkstemp(
+            prefix=f".{photo_id}.{ref}.", suffix=".png.tmp",
+            dir=os.path.dirname(dest),
+        )
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            os.replace(tmp, dest)
+        except OSError:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
     else:
         # Refresh mtime so the GC grace window is measured from *this*
         # snapshot request, not from whenever the file was first written.
@@ -121,7 +161,14 @@ def create_snapshot(*, photo_id, mask_row, vireo_dir, native_size=None):
         # it, breaking the just-returned ref.
         with contextlib.suppress(OSError):
             os.utime(dest, None)
-    return {"ref": ref, "source_digest": source_digest(mask_row)}
+    # Digest the same bytes we snapshotted — never re-open src_path —
+    # so a mask-extraction job rewriting the live file mid-snapshot
+    # can't cause us to record source_digest over NEW bytes while the
+    # returned ref points at OLD ones.
+    return {
+        "ref": ref,
+        "source_digest": _source_digest_from_bytes(data, mask_row),
+    }
 
 
 def load_snapshot(vireo_dir, photo_id, recipe):

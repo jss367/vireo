@@ -5,8 +5,10 @@ staleness, loading, and grace-window GC. See
 docs/plans/2026-07-03-local-adjustments-design.md (trimmed v1 scope).
 """
 
+import hashlib
 import os
 import sys
+import threading
 import time
 
 import numpy as np
@@ -114,6 +116,107 @@ def test_source_digest_tracks_source_inputs(tmp_path):
     # Different file bytes -> different digest.
     _write_mask(src, box=(5, 5, 20, 20))
     assert local_masks.source_digest(_mask_row(src)) != base
+
+
+def test_create_snapshot_digest_matches_snapshotted_bytes(tmp_path):
+    """The returned ``source_digest`` must describe the bytes actually
+    frozen into the snapshot file. If it were computed by re-reading the
+    live mask path, a mask-extraction job rewriting the file mid-snapshot
+    could leave ``ref`` (snapshot bytes) and ``source_digest`` (live bytes)
+    describing different content — ``is_stale()`` would report ``False`` for
+    a snapshot that no longer matches its source, and the render would use
+    stale pixels while claiming to be current."""
+    src = _write_mask(str(tmp_path / "1.sam2-small.png"))
+    row = _mask_row(src)
+    mask = local_masks.create_snapshot(
+        photo_id=1, mask_row=row, vireo_dir=str(tmp_path),
+        native_size=(800, 600),
+    )
+    snap = local_masks.snapshot_path(str(tmp_path), 1, mask["ref"])
+    with open(snap, "rb") as f:
+        snap_bytes = f.read()
+    assert mask["source_digest"] == local_masks._source_digest_from_bytes(
+        snap_bytes, row
+    )
+
+
+def test_create_snapshot_digest_survives_concurrent_source_rewrite(tmp_path, monkeypatch):
+    """When a mask-extraction job rewrites the live mask between the
+    snapshot copy and the digest, ``source_digest`` must describe the
+    bytes we snapshotted, not the new live bytes — otherwise ``is_stale()``
+    would report ``False`` for a snapshot that no longer matches, and the
+    render would silently use stale pixels while claiming to be current."""
+    src = str(tmp_path / "1.sam2-small.png")
+    _write_mask(src, box=(20, 10, 40, 40))
+    row = _mask_row(src)
+    original_digest = local_masks.source_digest(row)
+
+    real_image_open = local_masks.Image.open
+    rewritten = {"done": False}
+
+    def rewrite_and_open(*args, **kwargs):
+        # ``Image.open`` runs after ``data = f.read()`` in create_snapshot,
+        # so mutating the live file here reproduces the TOCTOU: with the
+        # old code the subsequent source_digest() call would re-read the
+        # (now different) live bytes and disagree with ``ref``.
+        if not rewritten["done"]:
+            _write_mask(src, box=(5, 5, 10, 10))
+            rewritten["done"] = True
+        return real_image_open(*args, **kwargs)
+
+    monkeypatch.setattr(local_masks.Image, "open", rewrite_and_open)
+    mask = local_masks.create_snapshot(
+        photo_id=1, mask_row=row, vireo_dir=str(tmp_path),
+        native_size=(80, 60),
+    )
+    # Sanity: the live file's digest really did change during the call.
+    assert local_masks.source_digest(row) != original_digest
+    # But the recorded source_digest describes the snapshotted bytes.
+    assert mask["source_digest"] == original_digest
+
+
+def test_create_snapshot_concurrent_publishes_dont_race_on_shared_tempfile(tmp_path):
+    """Two POSTs for the same (photo, mask) racing on snapshot creation
+    must both succeed. With a deterministic ``dest + ".tmp"`` path both
+    writers would name the same tmp file; whichever ``os.replace()`` lands
+    first steals the other's tmp path, and the loser raises
+    ``FileNotFoundError`` (500 to the client). A per-call ``mkstemp`` name
+    keeps the writers isolated."""
+    src = _write_mask(str(tmp_path / "1.sam2-small.png"))
+    row = _mask_row(src)
+
+    barrier = threading.Barrier(8)
+    errors: list[BaseException] = []
+
+    def worker():
+        try:
+            barrier.wait(timeout=5)
+            local_masks.create_snapshot(
+                photo_id=1, mask_row=row, vireo_dir=str(tmp_path),
+                native_size=(80, 60),
+            )
+        except BaseException as exc:  # includes threading errors
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"concurrent create_snapshot raised: {errors!r}"
+    with open(src, "rb") as f:
+        expected_ref = hashlib.sha1(f.read()).hexdigest()[:12]
+    assert os.path.exists(
+        local_masks.snapshot_path(str(tmp_path), 1, expected_ref)
+    )
+    # No leftover *.png.tmp files — every writer either publishes or
+    # cleans up its own tmp.
+    leftover = sorted(
+        n for n in os.listdir(local_masks.edit_masks_dir(str(tmp_path)))
+        if n.endswith(".tmp")
+    )
+    assert leftover == [], f"leaked tempfiles: {leftover!r}"
 
 
 def test_create_snapshot_rejects_aspect_mismatch(tmp_path):
