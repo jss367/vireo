@@ -285,23 +285,51 @@ the pixel-grid basis, so both align against a `standard`
 `mask.decodes` entry), and `'embedded_jpeg'` has no snapshot basis
 at all because the embedded preview's crop/aspect against the sensor
 is per-camera and not recorded anywhere Vireo can map to. Rows migrated
-from before the column existed carry a NULL value and are treated as
-unknown provenance — the local pass is disabled with the same
-warn-and-hold-zero fallback as a missing snapshot. For NULL rows the
+from before the column existed start NULL, but the schema migration
+itself fills the value in immediately for every row whose provenance
+is unambiguous from cheap DB-only signals — no source re-extraction
+needed. Concretely, the same DDL migration that adds the column runs
+a follow-up `UPDATE` that sets `working_copy_source='standard'` for
+every row whose primary file is a **non-RAW extension** (JPEG/PNG/
+HEIC/etc. — the same set `_is_raw_file` in the scanner excludes) and
+whose `working_copy_path IS NOT NULL`. This is safe to do without
+touching the filesystem because non-RAW working copies are always
+decoded in the same standard-decode space as their source (either
+the paired companion JPEG or the primary itself — no libraw step is
+involved, so there is no second decode basis a non-RAW working copy
+could have come from), and their pixel-grid basis is therefore known
+from the primary's extension alone. Without this DB-only step, non-RAW
+legacy rows would stay NULL until the backfill/lazy path re-extracted
+them — but re-extraction needs the source file to be reachable, so an
+oversized non-RAW library whose originals live on an offline drive
+would keep rendering local adjustments as missing-basis indefinitely,
+even though the design already commits to `'standard'` for every non-
+RAW working copy the scanner ever writes. Any other row — a RAW
+primary whose `working_copy_path` was written before the column
+existed — stays NULL after the DDL: for RAWs the working-copy basis
+genuinely depends on which decode branch produced the on-disk pixels
+(demosaic vs. embedded fallback vs. companion re-extraction), and the
+migration cannot know that from DB state alone. Those still-NULL RAW
+rows are treated as unknown provenance — the local pass is disabled
+with the same warn-and-hold-zero fallback as a missing snapshot —
+until the recovery paths below run. For RAW NULL rows the
 scanner's existing `_working_copy_candidate_predicate` skips them
 (its `working_copy_path IS NULL` clause excludes any row that already
 has a working copy on disk) and the on-demand `/original` route
 trusts an existing full-res working copy without regenerating
-(`vireo/app.py:18789-18793`), so the column would stay NULL
-indefinitely. PR 1 therefore adds an explicit backfill, but keeps it
+(`vireo/app.py:18789-18793`), so their column would stay NULL
+indefinitely. PR 1 therefore adds an explicit backfill for those RAW
+rows, but keeps it
 **off the blocking migration path**: the schema migration itself only
-adds the (initially NULL) column and is DDL-only, so first launch
-after upgrade completes in DB-init time regardless of library size.
+adds the (initially NULL) column and the cheap non-RAW UPDATE, both
+DDL/DB-only, so first launch after upgrade completes in DB-init time
+regardless of library size.
 The re-extraction work is deferred to a **resumable background job**
 scheduled after `Database` init finishes (queued onto the existing
 `JobRunner` alongside scan/classify/thumbnail jobs), which walks every
-row where `working_copy_path IS NOT NULL AND working_copy_source IS
-NULL` in chunks — checkpointing progress per row so it survives
+remaining row where `working_copy_path IS NOT NULL AND
+working_copy_source IS NULL` (RAW primaries after the DDL's non-RAW
+UPDATE) in chunks — checkpointing progress per row so it survives
 restarts and can be paused/resumed like other long-running jobs — and
 re-runs the extraction logic against the current source/companion
 state to write both the working copy (replacing the existing file
@@ -309,7 +337,7 @@ only if the fresh extraction changed the pixel grid) and the new
 column. The job reuses `_extract_working_copies`' machinery via a
 temporary predicate that ignores the `working_copy_path IS NULL`
 clause. To avoid a "wait for the sweep to reach my photo" cliff
-between upgrade and full backfill, a NULL row also **classifies
+between upgrade and full backfill, a still-NULL RAW row also **classifies
 lazily on first use**: when a recipe render is about to consume a
 working copy whose `working_copy_source` is still NULL, the render
 path re-runs the same classification for that single row inline,
@@ -333,16 +361,27 @@ render taken during the NULL-provenance window survives across the
 backfill fix. The contract is: **whenever the backfill or lazy path
 either (a) transitions `working_copy_source` from NULL to a
 definite value, or (b) rewrites `working_copy_path` on disk, it
-invalidates the photo's tracked preview and thumbnail cache
-entries** — the same invalidation `record_working_copy_failure` /
-scanner file-changed paths already run for stale-marker
-transitions — before returning from the row's update. The render
+invalidates every one of the photo's tracked render caches** —
+preview *and* thumbnail *and* external-edit handoff caches, using
+the same full render-cache invalidator `record_working_copy_failure`
+/ scanner file-changed paths already run for stale-marker
+transitions — before returning from the row's update. The external
+handoff cache matters here because `_external_edit_handoff_path`
+returns a cached `external-edits/<id>.jpg` when the recipe,
+source path, source mtime, and edit-math metadata still match
+(`vireo/app.py:9173-9184`), and a RAW-offline handoff rendered
+during the NULL-provenance window is keyed only by those signals —
+none of which change when the backfill/lazy path later fixes the
+basis, so a stale local-disabled handoff would keep going out to
+the external editor on every subsequent open until the cache was
+cleared by hand. The render
 whose call triggered lazy classification then re-renders once
 inline (equivalent to a cache miss on the invalidated key) and the
 background sweep does the same for every row it flips. Skipping
 this step would leave RAW+JPEG libraries with a permanent split
 between the DB (correct basis) and the cache (rendered with local
-disabled) until the user forced a preview/thumbnail regeneration by
+disabled) until the user forced a preview/thumbnail/handoff
+regeneration by
 hand, which is exactly the "silent, deferred correctness bug"
 failure mode this feature is meant to avoid. `'embedded_jpeg'` rows stay
 disabled after backfill by design — that's the honest signal for RAWs
