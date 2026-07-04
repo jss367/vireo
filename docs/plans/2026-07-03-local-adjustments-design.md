@@ -434,13 +434,30 @@ variant against the inputs *that variant was actually built from*:
   preserve basis (e.g., a highlight-recovered demosaic that changes
   the bird's box slightly) even when the JPEG-first source mask is
   unchanged.
-- `standard` (RAW+JPEG only) — a hash over the companion JPEG's
-  file identity (mtime + size + sha1), the prompt/detector version used
-  when detection re-ran on the companion, and the active SAM
-  variant/model name used to segment that re-run. Switching SAM variants
-  (`sam2-small` → `sam2-large`) with unchanged companion bytes must
-  invalidate this entry, so the SAM variant is a first-class digest input
-  on both bases.
+- `standard` — the digest inputs depend on which non-preserve source
+  produced the on-disk pixels for this variant:
+  - **RAW+JPEG companion** — a hash over the companion JPEG's
+    file identity (mtime + size + sha1), the prompt/detector version used
+    when detection re-ran on the companion, and the active SAM
+    variant/model name used to segment that re-run.
+  - **Non-RAW (ordinary JPEG/PNG source)** — a hash over the primary
+    photo's `photos.file_hash` (mtime + size + sha1 the scanner already
+    maintains, and which changes when the source file is edited or
+    replaced), the current `photos.active_mask_variant` row's source
+    mask file bytes, its stored detection prompt, the detector version
+    that produced it, and the active SAM variant/model name. This is
+    the same shape as the preserve digest with the RAW-specific
+    preserve-space prompt/detector fields dropped, because for a
+    non-RAW source there is no second decode basis to re-run detection
+    against — the standard variant is byte-for-byte the active mask
+    resampled/transformed to snapshot storage.
+  Switching SAM variants (`sam2-small` → `sam2-large`) with unchanged
+  source bytes must invalidate this entry on either path, so the SAM
+  variant is a first-class digest input on every basis. Without a
+  non-RAW definition, PR 1 would have no specified digest to compare
+  when an ordinary JPEG's source mask is regenerated or its
+  `photos.active_mask_variant` changes, and the editor could never
+  surface Update on non-RAW photos.
 Staleness for a variant means the current inputs' re-computed digest
 differs from that entry's `source_digest`; the editor surfaces "Newer
 subject mask available — Update" whenever **any** variant is stale, and
@@ -626,6 +643,16 @@ passes. The weight map is built once and materialized at both scales:
 2. **Local tone** runs inside the existing tone pass with per-pixel strength:
    e.g. exposure becomes `lin * 2^(ev_global + ev_subject·w + ev_bg·(1−w))`;
    range/saturation controls interpolate their amounts by `w` the same way.
+   Each field's resolved per-pixel amount is **clamped to that field's
+   validated global range** (the same ranges `vireo/image_edits.py`
+   enforces on the global recipe) *before* the per-pixel op consumes it —
+   the local pass explicitly matches detail's clamp-after-resolution
+   contract. Without this clamp a same-signed global + region_delta pair
+   pushes the resolved amount outside the range the tone pipeline was
+   written for: e.g. global `contrast=-100` plus background
+   `contrast=-100` resolves to `-200`, and `vireo/tone.py` computes
+   `1 + contrast/100`, producing a **negative** contrast factor
+   (image inversion) instead of the intended minimum-contrast render.
    This keeps every op per-pixel — it adds a weight *input*, not a
    neighborhood — so the WebGL live preview can adopt it later by sampling
    the mask as a second texture (out of scope for v1; the lightbox preview
@@ -697,9 +724,37 @@ No `EDIT_MATH_VERSION` bump: recipes without `local` render byte-identically.
   slider values, not mask-identity). Targets with no usable mask are
   skipped and reported in the response, matching the UI behavior. Direct
   recipe writes to a single photo (the normal editor save path) keep the
-  ref they were given — the resnapshot is a bulk-only concern, because
-  that is the only path where one incoming ref is applied to more than
-  one photo.
+  ref they were given — the resnapshot is one instance of a more general
+  contract: **any code path that transfers a `recipe_json` from one
+  `photo_id` to another must go through the same strip-and-resnapshot
+  helper.** The bulk-apply endpoint is the obvious case, but not the
+  only one — RAW/JPEG pairing in `vireo/scanner.py:481-488` copies the
+  companion JPEG's `recipe_json` verbatim into the RAW primary (via
+  `INSERT OR IGNORE INTO photo_edit_recipes ... SELECT ... FROM ... WHERE
+  photo_id = companion.id`) and then reassigns the companion's
+  edit-history items to the RAW; if that companion's recipe already
+  carries `local.mask.ref = "abcd"`, the on-disk snapshot family lives
+  at `<companion_id>.abcd.{decode}.png`, and after pairing the RAW
+  primary's renderer will look for `<raw_id>.abcd.{decode}.png` — which
+  does not exist — and disable the local pass on every subsequent
+  render of that recipe (and on every history entry that was reassigned).
+  PR 1 therefore routes the pairing transfer through the same helper as
+  bulk apply: the SELECT/INSERT is replaced with a Python-side load of
+  the companion's `recipe_json`, strip-and-resnapshot against the RAW
+  primary's own active mask (in the primary's decode bases), and write
+  the resnapshotted recipe under the RAW primary's id. Edit-history
+  items reassigned in the same block get the same resnapshot treatment
+  (their stored `recipe_json`, if any, is re-snapshotted the same way);
+  if the RAW primary has no usable mask, `local` is dropped from the
+  transferred recipe (the same "skip and report" behavior the bulk
+  endpoint uses) so pairing never leaves an orphaned ref behind. The
+  contract is: no cross-photo transfer of a recipe carrying `local` may
+  bypass the resnapshot helper, so a future new transfer site
+  (auto-stack promotion, split-photo tooling, workspace copies) inherits
+  the same guarantee by construction. This is a bulk-only concern only
+  in the sense that a normal single-photo editor save writes the recipe
+  under the same photo id that made the snapshot, so the ref already
+  points at a valid on-disk family.
 
 ### Editor preview
 
