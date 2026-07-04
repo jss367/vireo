@@ -234,6 +234,30 @@ def test_create_snapshot_rejects_corrupt_mask_file(tmp_path):
         )
 
 
+def test_create_snapshot_rejects_valid_header_truncated_body(tmp_path):
+    # A mask-extraction job interrupted mid-write can leave a file with a
+    # valid PNG header (Image.open() succeeds, .size is readable) but a
+    # truncated IDAT body that only fails when Pillow actually decodes.
+    # Without a forced decode the snapshot endpoint would accept the file,
+    # copy it verbatim, and every subsequent render would silently disable
+    # local adjustments when load_snapshot() hits the same decode error.
+    good = str(tmp_path / "good.png")
+    _write_mask(good, width=80, height=60)
+    full = open(good, "rb").read()
+    # Slice off half the file — the PNG header and IHDR chunk are intact,
+    # so Image.open() reports width/height, but decoding the pixel stream
+    # will fail.
+    truncated = str(tmp_path / "1.sam2-small.png")
+    with open(truncated, "wb") as f:
+        f.write(full[: len(full) // 2])
+
+    with pytest.raises(ValueError, match="not a readable image"):
+        local_masks.create_snapshot(
+            photo_id=1, mask_row=_mask_row(truncated),
+            vireo_dir=str(tmp_path), native_size=(800, 600),
+        )
+
+
 def test_create_snapshot_rejects_aspect_mismatch(tmp_path):
     # 80x60 mask (4:3) against a 16:9 photo must refuse rather than
     # misalign local weights.

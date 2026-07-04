@@ -119,6 +119,15 @@ def create_snapshot(*, photo_id, mask_row, vireo_dir, native_size=None):
     # bytes should have failed.
     try:
         with Image.open(io.BytesIO(data)) as img:
+            # Force a full decode on this buffer — Image.open only reads
+            # the header, so a mask-extraction job interrupted after
+            # writing a valid PNG header but before the IDAT chunks
+            # completed would otherwise pass this check, get snapshotted
+            # and hashed, and then silently disable every render's local
+            # pass when load_snapshot() later fails on the truncated body.
+            # img.load() decodes here so the same truncated bytes turn
+            # into a recoverable 400 at snapshot time.
+            img.load()
             mask_w, mask_h = img.size
     except (OSError, ValueError) as e:
         # Truncated/non-image bytes → UnidentifiedImageError (subclass of
