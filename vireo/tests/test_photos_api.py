@@ -7693,3 +7693,157 @@ def test_edit_presets_api_validation(app_and_db):
         assert resp.status_code == 400, payload
 
     assert client.get("/api/edit-presets").get_json() == {"presets": []}
+
+
+def _register_active_mask(db, photo_id, mask_dir, width=800, height=600):
+    """Write a left-half subject mask PNG and make it the photo's active mask."""
+    import numpy as np
+    from PIL import Image as PILImage
+
+    path = os.path.join(mask_dir, f"{photo_id}.sam2-small.png")
+    arr = np.zeros((height, width), dtype=np.uint8)
+    arr[:, : width // 2] = 255
+    PILImage.fromarray(arr, "L").save(path, "PNG")
+    db.upsert_photo_mask(
+        photo_id, "sam2-small", path, "megadetector-v6",
+        0.0, 0.0, 0.5, 1.0,
+    )
+    db.set_active_mask_variant(photo_id, "sam2-small")
+    return path
+
+
+def _local_recipe_payload(mask, regions=None):
+    return {
+        "recipe": {
+            "local": {
+                "mask": mask,
+                "regions": regions or [
+                    {"region": "subject", "adjustments": {"exposure": 2.0}},
+                ],
+            }
+        }
+    }
+
+
+def test_local_mask_snapshot_endpoint_requires_active_mask(client_with_photo):
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    resp = client.post(f"/api/photos/{photo_id}/local-mask/snapshot")
+    assert resp.status_code == 400
+    assert "mask" in resp.get_json()["error"].lower()
+
+    assert client.post("/api/photos/999999/local-mask/snapshot").status_code == 404
+
+
+def test_local_mask_snapshot_and_recipe_roundtrip(client_with_photo):
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute("SELECT path FROM folders").fetchone()
+    _register_active_mask(db, photo_id, folder["path"])
+
+    resp = client.post(f"/api/photos/{photo_id}/local-mask/snapshot")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    mask = body["mask"]
+    assert set(mask) == {"ref", "source_digest"}
+    assert body["stale"] is False
+
+    resp = client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json=_local_recipe_payload(mask),
+    )
+    assert resp.status_code == 200
+    saved = resp.get_json()["recipe"]
+    assert saved["local"]["mask"]["ref"] == mask["ref"]
+
+    got = client.get(f"/api/photos/{photo_id}/edit-recipe").get_json()
+    assert got["recipe"]["local"]["mask"]["ref"] == mask["ref"]
+    assert got["local_mask_stale"] is False
+
+
+def test_local_recipe_stale_flag_tracks_live_mask(client_with_photo):
+    import numpy as np
+    from PIL import Image as PILImage
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute("SELECT path FROM folders").fetchone()
+    mask_path = _register_active_mask(db, photo_id, folder["path"])
+
+    mask = client.post(
+        f"/api/photos/{photo_id}/local-mask/snapshot"
+    ).get_json()["mask"]
+    client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json=_local_recipe_payload(mask),
+    )
+
+    # Rewrite the live mask (as a detector/SAM re-run would).
+    arr = np.zeros((600, 800), dtype=np.uint8)
+    arr[:300, :] = 255
+    PILImage.fromarray(arr, "L").save(mask_path, "PNG")
+
+    got = client.get(f"/api/photos/{photo_id}/edit-recipe").get_json()
+    assert got["local_mask_stale"] is True
+
+
+def test_local_recipe_rejects_unknown_snapshot_ref(client_with_photo):
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    resp = client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json=_local_recipe_payload(
+            {"ref": "eeeeeeeeeeee", "source_digest": "d"}
+        ),
+    )
+    assert resp.status_code == 400
+    assert "snapshot" in resp.get_json()["error"].lower()
+
+
+def test_bulk_apply_rejects_local_sections(client_with_photo):
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/photos/edit-recipe/apply",
+        json={
+            "photo_ids": [photo_id],
+            "recipe": _local_recipe_payload(
+                {"ref": "eeeeeeeeeeee", "source_digest": "d"}
+            )["recipe"],
+        },
+    )
+    assert resp.status_code == 400
+    assert "local" in resp.get_json()["error"].lower()
+
+
+def test_edit_preview_renders_local_adjustments(client_with_photo):
+    import io
+    import json
+
+    import numpy as np
+    from PIL import Image as PILImage
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute("SELECT path FROM folders").fetchone()
+    _register_active_mask(db, photo_id, folder["path"])
+
+    mask = client.post(
+        f"/api/photos/{photo_id}/local-mask/snapshot"
+    ).get_json()["mask"]
+    recipe = _local_recipe_payload(mask)["recipe"]
+
+    resp = client.get(
+        f"/photos/{photo_id}/edit-preview",
+        query_string={"size": "800", "recipe": json.dumps(recipe)},
+    )
+    assert resp.status_code == 200
+    with PILImage.open(io.BytesIO(resp.data)) as img:
+        arr = np.asarray(img.convert("RGB")).astype(np.float32)
+
+    left = float(np.mean(arr[:, :360]))
+    right = float(np.mean(arr[:, 440:]))
+    assert left > right + 40  # subject half brightened by +2 EV

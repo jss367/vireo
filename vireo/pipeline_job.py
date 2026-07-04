@@ -2367,10 +2367,15 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                         canonical = companion_abs
                         if img:
                             if recipe:
+                                import local_masks
                                 img = apply_recipe_to_loaded_image(
                                     img, recipe, max_size=max_size,
                                     native_size=_recipe_source_dimensions(
                                         detail_photo
+                                    ),
+                                    local_mask=local_masks.load_snapshot(
+                                        os.path.dirname(db_path),
+                                        photo["id"], recipe,
                                     ),
                                 )
                             # Atomic write: with SLOT_CAP > 1 two pipelines
