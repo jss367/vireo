@@ -1045,10 +1045,22 @@ No `EDIT_MATH_VERSION` bump: recipes without `local` render byte-identically.
   each target's edit-history `new_value` and its pending XMP sync
   entry in the same transaction that swaps `local.mask.ref` to its
   finalized value; a target dropped by the CAS above has its
-  edit-history / sync entries rewritten to the current-recipe value
-  the user actually kept (not the placeholder the endpoint originally
-  staged), so history replay and sync export both stay consistent
-  with what is actually persisted on the photo.
+  edit-history / sync entries rewritten to the **local-stripped
+  bulk-paste recipe** — the placeholder recipe with its `local` block
+  removed — never the target's *current* recipe and never the
+  placeholder itself. This is the only rewrite target that keeps
+  history semantics honest: mirroring the current recipe would make
+  redo of the bulk paste (which replays `edit_history_items.new_value`
+  verbatim, `vireo/db.py:11303-11308`) reapply whatever the user
+  happens to have kept in the interim rather than the paste's
+  original intent, so after undoing the later edit and redoing the
+  bulk entry the target would jump to the later edit's recipe instead
+  of the local-stripped bulk state — a landmine dressed as a redo.
+  Rewriting to the local-stripped recipe instead makes redo replay
+  the paste's non-local adjustments (a no-op if the paste had no
+  non-local content), so history replay and sync export both stay
+  consistent with what is actually persisted on the photo *and* with
+  the bulk paste's original intent on the skipped target.
 
   **The XMP sync job skips `pending:*` refs so the queue row stays
   in place for finalization to overwrite.** `sync_to_xmp` snapshots
@@ -1102,10 +1114,20 @@ No `EDIT_MATH_VERSION` bump: recipes without `local` render byte-identically.
     remaining occurrence has its `local` block stripped (the
     placeholder is replaced with the same recipe minus `local`),
     and any queued XMP sync rows still carrying the token are
-    dropped from the queue by the same scan. The bulk paste
-    becomes a retroactive no-op on that target — matching the
-    response's `skipped` list — instead of leaving a landmine in
-    history that only detonates on undo.
+    **rewritten in place to that same local-stripped recipe**, not
+    dropped from the queue. `_queue_edit_recipe_sync` deletes any
+    prior `edit_recipe` row for the photo before inserting the
+    placeholder value (one queued `edit_recipe` per photo by
+    construction), so the placeholder row is the *only* pending
+    export of any non-local adjustments the bulk paste also carried;
+    dropping it would leave the sidecar out of date on exactly those
+    non-local edits after the photo's on-disk recipe has already lost
+    only the `local` block. Rewriting keeps the queue row aligned
+    with the persisted recipe on skip. The bulk paste becomes a
+    retroactive no-op on that target's local edits — matching the
+    response's `skipped` list — while any non-local adjustments the
+    same paste carried still export on the next sync run, instead of
+    leaving a landmine in history that only detonates on undo.
   The scan is bounded and deterministic: `placeholder_tokens` is
   unique per `(job_id, target_id)`, the search is scoped to the
   single target's `photo_id`, and the durable `local_resnapshot_jobs`
@@ -1134,8 +1156,15 @@ No `EDIT_MATH_VERSION` bump: recipes without `local` render byte-identically.
   the placeholder recipe — leaving all non-local adjustments
   intact — and then runs the same later-history / XMP-sync scrub the
   CAS-skip branch defines above, replacing every remaining occurrence
-  of the token with the local-stripped recipe and dropping any queued
-  XMP sync rows that still carry it. The `local_resnapshot_jobs` row
+  of the token with the local-stripped recipe and **rewriting any
+  queued XMP sync rows that still carry it to that same local-stripped
+  recipe**, never dropping them. The rationale is the same as the
+  CAS-skip path: the placeholder queue row is the only pending
+  export of any non-local adjustments the bulk paste also carried
+  (because `_queue_edit_recipe_sync` had already deleted any prior
+  `edit_recipe` row for that photo), so dropping it on
+  cancel/failure would strand those non-local edits unsynced even
+  though they remain on the photo. The `local_resnapshot_jobs` row
   transitions to `cancelled` / `failed` in the same DB transaction as
   those writes so startup reconciliation stops re-enqueueing it;
   targets that already finalized under their own per-photo
