@@ -380,7 +380,31 @@ after the enumeration for why):
   render would silently pick the `preserve_highlights` variant and
   blend it into embedded-preview pixels of unknown crop/aspect —
   exactly the failure mode the working-copy case was written to
-  prevent, just on a different call path.
+  prevent, just on a different call path. **Snapshot creation uses
+  the same signal.** The load that materializes the
+  `preserve_highlights` variant when the user adds the first local
+  adjustment goes through `_load_raw` too, and if that call returns
+  `used_embedded_fallback=True` the on-disk pixels would be the
+  embedded JPEG rather than a demosaic — labeling them
+  `mode: preserve_highlights` in `mask.decodes` would be a lie, and
+  every later render on the same photo would call `_load_raw` again,
+  see the same fallback, treat the load as `embedded_jpeg` basis,
+  and disable the local pass because nothing in `mask.decodes`
+  matches. Materializing the variant under an `embedded_jpeg` label
+  instead is also rejected: that basis has no matching `mask.decodes`
+  entry at render time by design, so the snapshot would sit on disk
+  but be dead on arrival for every render. So no `preserve_highlights`
+  entry is written when snapshot creation hits the fallback. For a
+  RAW with no companion that means the whole snapshot family fails
+  to materialize and the local add is **refused at creation time**
+  with the same "No subject mask — run the pipeline's mask stage"
+  surface the UI shows for a missing mask (a distinct log line keeps
+  the two failures separable in diagnostics), rather than leaving
+  the user with a saved recipe whose local pass every subsequent
+  render silently disables. The RAW+JPEG case below inherits the
+  same rule for its `preserve_highlights` variant — see there for
+  how the `standard` variant on the companion keeps the local add
+  viable when the RAW-side snapshot creation hits the fallback.
 - **RAWs with a companion JPEG:** two variants —
   `preserve_highlights` (for the primary RAW path *and* working copies
   with `photos.working_copy_source='raw'`) *and* `standard` (for the
@@ -394,6 +418,19 @@ after the enumeration for why):
   RAW+JPEG pairs when the companion route was not taken for reasons
   unrelated to RAW decode — e.g., the caller resolved to the RAW
   original first and hit the silent embedded fallback inside libraw).
+  Snapshot creation applies the same signal per-variant: if the
+  RAW-side `_load_raw` returns `used_embedded_fallback=True`, the
+  `preserve_highlights` entry is **omitted from `mask.decodes`**
+  while the `standard` variant on the companion still materializes.
+  The recipe carries only the `standard` entry, so direct-RAW
+  renders on that photo disable the local pass under the same
+  render-time contract, while companion and companion-derived
+  working-copy renders serve the local edit off `standard` — the
+  local add is not refused as long as at least one variant is
+  viable. If both sides fail (RAW hits the fallback *and* the
+  companion is missing or itself fails to load at snapshot creation
+  time), the local add is refused with the same "No subject mask"
+  surface as the no-companion case above.
 
 **Darktable-developed exports bypass, they don't get their own variant.**
 Export prefers a darktable-developed output ahead of RAW / working copy /
@@ -917,6 +954,47 @@ No `EDIT_MATH_VERSION` bump: recipes without `local` render byte-identically.
   the user actually kept (not the placeholder the endpoint originally
   staged), so history replay and sync export both stay consistent
   with what is actually persisted on the photo.
+
+  **And it scrubs the placeholder token from every later history and
+  sync record that captured it, not only the endpoint's own row.** A
+  target the user edits *while the bulk resnapshot is still
+  pending* — clearing the local block, pasting a different recipe,
+  opening the editor and saving — records the placeholder recipe as
+  the new edit-history row's `old_value` (that later edit's
+  "state before this change"), and any pending XMP sync entry it
+  queues captures the same token; `_apply_undo` replays `old_value`
+  verbatim (`vireo/db.py`'s undo path). If the finalization / CAS-skip
+  step only patched the bulk endpoint's own row, undoing that later
+  edit would resurrect the `pending:<placeholder_token>` ref after
+  the job had already CAS-skipped, and the photo would go back into
+  the missing-snapshot state permanently — the failure mode the CAS
+  was written to prevent, moved one edit downstream. So the same
+  transaction that either finalizes or drops the endpoint's own row
+  also scans `edit_history_items.old_value` / `new_value` **and** the
+  pending XMP sync queue for that `photo_id`, and rewrites every
+  remaining occurrence of the token:
+  - **On CAS match (job finalized normally):** every occurrence of
+    `pending:<placeholder_token>` in later history rows or queued
+    sync payloads for that photo is rewritten to the finalized
+    `local.mask.ref` / `mask.decodes`, so undo/redo of any later
+    edit restores the local block against the real on-disk snapshot
+    family.
+  - **On CAS skip (target overwritten before finalize):** every
+    remaining occurrence has its `local` block stripped (the
+    placeholder is replaced with the same recipe minus `local`),
+    and any queued XMP sync rows still carrying the token are
+    dropped from the queue by the same scan. The bulk paste
+    becomes a retroactive no-op on that target — matching the
+    response's `skipped` list — instead of leaving a landmine in
+    history that only detonates on undo.
+  The scan is bounded and deterministic: `placeholder_tokens` is
+  unique per `(job_id, target_id)`, the search is scoped to the
+  single target's `photo_id`, and the durable `local_resnapshot_jobs`
+  row is the authoritative index of which tokens ever existed — so
+  recovery after a restart runs the same scan against the recovered
+  token list rather than trusting whatever happens to still be in
+  memory. The scrub is idempotent: a token that no longer appears
+  anywhere is a valid terminal state.
 
   This matters because the paste UI in `vireo/templates/browse.html`
   currently caches `data.recipe` for every applied id
