@@ -657,8 +657,23 @@ warn-and-hold-zero forever. The expected set is the same list §Snapshot
 creation enumerates against the current source state — one `standard`
 for non-RAW primaries; one `preserve_highlights` for RAWs whose folder
 has no companion; both for RAWs with a companion — with the persisted
-`photos.working_copy_source='embedded_jpeg'` gate dropping
-`preserve_highlights` from the expected set on unsupported RAWs.
+`photos.working_copy_source` gate dropping `preserve_highlights` from
+the expected set whenever the column is `'embedded_jpeg'` (libraw
+can't demosaic) or `'companion'` (scanner tried the RAW, extraction
+failed, and the working copy was re-extracted from the companion JPEG
+instead — `vireo/scanner.py:973-987`). Both values are cheap DB
+signals that the preserve-highlights basis is not viable on this
+photo *right now*: a preserve snapshot creation attempted against
+either state would immediately hit the same `used_embedded_fallback`
+or extraction-failed condition and refuse to materialize (see
+§Snapshot decode basis), so surfacing Update against an
+absent-but-"expected" `preserve_highlights` variant would leave the
+photo in a permanent stale/update loop — Update fires, snapshot
+creation refuses, the expected-set gap remains, and the stale banner
+re-lights on the next open. Dropping `preserve_highlights` from the
+expected set on both values keeps the loop from starting: no
+"materializable" variant is surfaced for a decodability state that
+snapshot creation cannot honor.
 **`working_copy_source` is the only signal the stale check consults for
 decodability; `used_embedded_fallback` is a live decode return from
 `_load_raw` that the stale check never invokes.** That keeps the
@@ -669,19 +684,21 @@ signal — intact for the expected-set rule as well: computing whether
 keeps `working_copy_source` current: on any RAW `file_hash` change the
 scanner re-extracts the working copy and rewrites `working_copy_source`
 to the new decodability outcome (`'raw'` when `_load_raw` demosaiced,
-`'embedded_jpeg'` when it fell through), so a repaired or replaced RAW
-whose libraw now demosaics has its `working_copy_source` column
-transition from `'embedded_jpeg'` to `'raw'` before any editor open —
-and the next stale check reads that transition without touching the
-RAW itself. Concretely this covers: a RAW-only recipe whose folder
-later gains a companion JPEG (a `standard` variant is now expected
-because the companion-fallback render path exists — Update materializes
-it against the companion), and a RAW+JPEG recipe whose original
-snapshot skipped `preserve_highlights` because the initial extraction
-recorded `working_copy_source='embedded_jpeg'` and whose RAW is later
-replaced/repaired so the next scan flips `working_copy_source` to
-`'raw'` (a `preserve_highlights` variant is now expected — Update
-materializes it against the demosaiced load). A recipe on a RAW whose
+`'embedded_jpeg'` when it fell through, `'companion'` when RAW
+extraction failed outright and the companion re-extraction ran
+instead), so a repaired or replaced RAW whose libraw now demosaics
+has its `working_copy_source` column transition out of either
+non-viable state to `'raw'` before any editor open — and the next
+stale check reads that transition without touching the RAW itself.
+Concretely this covers: a RAW-only recipe whose folder later gains a
+companion JPEG (a `standard` variant is now expected because the
+companion-fallback render path exists — Update materializes it
+against the companion), and a RAW+JPEG recipe whose original snapshot
+skipped `preserve_highlights` because the initial extraction recorded
+`working_copy_source='embedded_jpeg'` or `'companion'` and whose RAW
+is later replaced/repaired so the next scan flips
+`working_copy_source` to `'raw'` (a `preserve_highlights` variant is
+now expected — Update materializes it against the demosaiced load). A recipe on a RAW whose
 `working_copy_source` is still NULL (no scan or lazy-classification
 pass has extracted the working copy yet) is treated as *unknown*
 decodability by the stale check, not as *materializable*: a NULL row
@@ -691,13 +708,14 @@ would immediately fall back to embedded-JPEG and refuse to
 materialize. As soon as either the backfill or the lazy classification
 sweep sets that column to a definite value, the next stale check sees
 the correct expected set. It does not cover transitioning **out** of
-the embedded-fallback state solely because libraw was upgraded
+`'embedded_jpeg'` or `'companion'` solely because libraw was upgraded
 server-side without a source-file change: nothing bumps `file_hash`,
 so the scanner never re-runs extraction and `working_copy_source`
-stays `'embedded_jpeg'`; the user has to trigger a re-scan or an
-explicit "regenerate local snapshots" action for that state
-transition, and PR 1's Update rule catches it the first time the
-source-side inputs (or `working_copy_source`) do change. It also
+stays at whichever non-viable value it recorded; the user has to
+trigger a re-scan or an explicit "regenerate local snapshots" action
+for that state transition, and PR 1's Update rule catches it the
+first time the source-side inputs (or `working_copy_source`) do
+change. It also
 does not cover companion-JPEG removal: when the source state now
 expects **fewer** variants than `mask.decodes` currently holds, the
 extra entry is left in place rather than pruned, so any render still
@@ -1298,16 +1316,37 @@ No `EDIT_MATH_VERSION` bump: recipes without `local` render byte-identically.
   therefore treats cancel and terminal failure as **the CAS-skip
   cleanup applied to every remaining pending target for that job**:
   the durable `local_resnapshot_jobs` row's terminal handler walks
-  its `placeholder_tokens` list, and for each target whose current
-  `local.mask.ref` still equals its recorded
-  `pending:<placeholder_token>` (read under the same per-`photo_id`
-  publish-lock as single-photo Update) strips the `local` block from
-  the placeholder recipe — leaving all non-local adjustments
-  intact — and then runs the same later-history / XMP-sync scrub the
-  CAS-skip branch defines above, replacing every remaining occurrence
-  of the token with the local-stripped recipe and **rewriting any
-  queued XMP sync rows that still carry it to that same local-stripped
-  recipe**, never dropping them. The rationale is the same as the
+  its `placeholder_tokens` list once, and for each recorded token
+  performs two independently-gated steps under the same
+  per-`photo_id` publish-lock as single-photo Update.
+  1. **Current-recipe strip is CAS-gated.** If the target's current
+     `local.mask.ref` still equals `pending:<placeholder_token>`,
+     the `local` block is stripped from the placeholder recipe on
+     the photo row — leaving all non-local adjustments intact. If
+     the CAS misses (the user cleared, re-pasted, or otherwise
+     overwrote the target's recipe between endpoint response and
+     terminal event), this step no-ops on the current row — the
+     newer recipe is authoritative and must not be rewritten.
+  2. **Later-history / XMP-sync scrub is unconditional.** Regardless
+     of whether the CAS above matched, the terminal handler still
+     runs the same later-history / XMP-sync scrub the CAS-skip
+     branch defines above for every recorded placeholder token,
+     replacing every remaining occurrence of the token in
+     `edit_history_items.old_value` / `new_value` and in the
+     pending XMP sync queue with the local-stripped bulk-paste
+     recipe, and **rewriting any queued XMP sync rows that still
+     carry it to that same local-stripped recipe**, never dropping
+     them. Gating this scrub on the current-recipe CAS the way
+     step 1 does would leave a user-edited target's history rows
+     and any queued sync payload still holding
+     `pending:<placeholder_token>` after the job terminated, so
+     `_apply_undo` on a later edit would resurrect the placeholder
+     ref on the current recipe (and `sync_to_xmp` would eventually
+     export it to the sidecar) — the exact permanent-missing-snapshot
+     landmine the terminal cleanup was written to prevent, one undo
+     downstream of a user edit. The scrub is idempotent, so running
+     it against a target whose history never captured the token is
+     a cheap no-op. The rationale is the same as the
   CAS-skip path: the placeholder queue row is the only pending
   export of any non-local adjustments the bulk paste also carried
   (because `_queue_edit_recipe_sync` had already deleted any prior
