@@ -21,6 +21,7 @@ dependencies = [
     "exifread>=3.0",
     "send2trash>=1.8.0",
     "tokenizers>=0.21.0",
+    "waitress>=3.0.2",
 ]
 
 [project.optional-dependencies]

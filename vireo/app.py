@@ -19523,7 +19523,13 @@ def main():
         token=api_token, mode=mode,
     )
 
-    app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
+    # Waitress uses a fixed thread pool (default 4). Each open SSE stream
+    # (bottom-panel logs, job progress, import duplicate check) pins one
+    # thread for its whole lifetime, so the pool must be sized well above
+    # the plausible number of concurrent streams or page loads queue
+    # behind them and the app appears frozen.
+    from waitress import serve as waitress_serve
+    waitress_serve(app, host="127.0.0.1", port=port, threads=16)
 
 
 if __name__ == "__main__":
