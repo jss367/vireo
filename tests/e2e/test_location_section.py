@@ -1314,6 +1314,139 @@ def test_exif_suggestion_bails_when_slow_geocode_resolves_after_batch_clear(
         assert row is None, f"photo {pid} should not have gained a location"
 
 
+def test_exif_suggestion_cleared_by_loaddetail_before_select_all(
+    live_server, page, monkeypatch
+):
+    """Codex P2 (PR #1097, 17:23Z): loadDetail(B) hides the panel and awaits
+    /api/photos/B before renderDetail runs — the maybeShowExifSuggestion call
+    that scrubs #locationExifSuggestion only fires once that response
+    resolves. If the user clicks B and quickly hits Select All while B's
+    fetch is still in flight, the previous photo's stale suggestion (with
+    data-photo-id=A) is still in the DOM. renderBatchInspector's
+    preserveExifSuggestion check sees A in the Select All ids and
+    resurrects A's Accept line for the whole batch — clicking it applies
+    A's EXIF place to every selected photo.
+
+    Sequence: open A (suggestion appears, tagged for A) → intercept and
+    hold /api/photos/B → click B (loadDetail starts, fetch held) → Select
+    All (batch inspector opens with A back in ids). The suggestion must
+    stay hidden and no photo may gain a location.
+    """
+    photo_ids = live_server["data"]["photos"][:3]
+    anchor, other_b, other_c = photo_ids
+    # Only the anchor has GPS. B and C have no lat/lng, so their own
+    # maybeShowExifSuggestion calls bail immediately and can't race with
+    # ours (which would mask the bug).
+    _seed_exif_photos(live_server, [anchor])
+    _seed_reverse_geocode_cache(
+        live_server, 40.785091, -73.968285, _CANNED_PLACE_ID, _CANNED_DETAILS,
+    )
+    _set_api_key()
+
+    import places
+    monkeypatch.setattr(
+        places, "place_details", lambda pid, key: _CANNED_DETAILS,
+    )
+
+    db = live_server["db"]
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+
+    page.locator(f".grid-card[data-id='{anchor}']").click()
+    _wait_for_detail_loaded(page)
+    accept = page.locator("#locationExifSuggestion button.accept-btn")
+    expect(accept).to_be_visible()
+    assert page.evaluate(
+        "() => document.getElementById('locationExifSuggestion').dataset.photoId"
+    ) == str(anchor)
+
+    # Hold B's detail fetch. This is the code path the fix targets — the
+    # DOM scrubs inside renderDetail (via renderLocationEmpty /
+    # renderLocationFilled) only run once /api/photos/B resolves, so any
+    # Select All that lands during the await used to see A's stale
+    # data-photo-id and resurrect A's Accept line for the batch.
+    held_routes = []
+
+    def _hold_photo_b(route):
+        held_routes.append(route)
+
+    page.route(f"**/api/photos/{other_b}", _hold_photo_b)
+
+    page.locator(f".grid-card[data-id='{other_b}']").click()
+
+    # Wait for loadDetail(B) to have actually started and issued the held
+    # fetch. Once it has, the pre-await scrub in loadDetail must have run
+    # synchronously — the ambient owner pointer is nulled and the DOM tag
+    # is dropped even though B's response hasn't arrived yet.
+    for _ in range(50):
+        if held_routes:
+            break
+        page.wait_for_timeout(100)
+    assert held_routes, "/api/photos/B fetch was never issued"
+    assert page.evaluate("() => window._detailPhotoId") is None
+    assert page.evaluate(
+        "() => document.getElementById('locationExifSuggestion').dataset.photoId || ''"
+    ) == ""
+
+    # Select All while B's detail is still stalled. Without the pre-await
+    # scrub, keepSugg would be true (A's data-photo-id still present, A in
+    # the Select All ids) and A's Accept line would flash back into the
+    # batch inspector.
+    page.evaluate("() => selectAllMatchingPhotos()")
+    page.wait_for_function("() => selectedPhotos.size >= 3")
+
+    expect(page.locator("#locationExifSuggestion")).to_be_hidden()
+    assert page.evaluate(
+        "() => document.getElementById('locationExifSuggestion').innerHTML"
+    ) == ""
+    assert page.evaluate(
+        "() => document.getElementById('locationExifSuggestion').dataset.photoId || ''"
+    ) == ""
+
+    # Release B's held detail response so nothing dangles at teardown.
+    # loadDetail's post-await guard (`selectedPhotos.size <= 1`) will drop
+    # this render anyway now that Select All has promoted the selection,
+    # but we still want the network layer to complete cleanly.
+    held_routes[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps({
+            "id": other_b,
+            "filename": f"photo_{other_b}.jpg",
+            "rating": 0,
+            "flag": None,
+            "color_label": None,
+            "keywords": [],
+            "xmp_keywords": [],
+            "xmp_exists": False,
+            "metadata": {},
+            "location": None,
+            "latitude": None,
+            "longitude": None,
+        }),
+    )
+    page.wait_for_timeout(200)
+
+    # After the response drains, the suggestion must still be gone — the
+    # post-await guard in loadDetail must skip renderDetail while the
+    # batch selection is active.
+    expect(page.locator("#locationExifSuggestion")).to_be_hidden()
+    assert page.evaluate(
+        "() => document.getElementById('locationExifSuggestion').dataset.photoId || ''"
+    ) == ""
+
+    # No photo in the batch may have gained a location.
+    for pid in (anchor, other_b, other_c):
+        row = db.conn.execute(
+            "SELECT 1 FROM photo_keywords pk "
+            "JOIN keywords k ON k.id = pk.keyword_id "
+            "WHERE pk.photo_id = ? AND k.type = 'location'",
+            (pid,),
+        ).fetchone()
+        assert row is None, f"photo {pid} should not have gained a location"
+
+
 def test_freetext_location_batches_selection_and_refreshes_smart_collection(
     live_server, page
 ):

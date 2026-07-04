@@ -5158,6 +5158,21 @@ async function loadDetail(id) {
   if (detail) detail.classList.remove('batch-mode');
   if (detail) detail.classList.toggle('visible', window._detailPhotoId === id);
 
+  // Kill any stale EXIF suggestion tagged for a *different* photo before the
+  // fetch returns. Otherwise: open A (suggestion shown, data-photo-id=A) →
+  // click B → Select All lands before B's /api/photos response resolves.
+  // renderBatchInspector's preserveExifSuggestion check finds A's stale
+  // data-photo-id, sees A is in the Select All ids, and resurrects A's
+  // Accept line for the whole batch — clicking it applies A's GPS place to
+  // every selected photo. Also null _detailPhotoId so any in-flight
+  // reverse-geocode for A can't repaint through maybeShowExifSuggestion's
+  // post-await guard once the batch inspector is on screen. Codex P2 on
+  // PR #1097 (17:23Z).
+  if (window._detailPhotoId !== id) {
+    clearExifSuggestion();
+    window._detailPhotoId = null;
+  }
+
   try {
     var photo = await safeFetch('/api/photos/' + id, {}, { toast: false });
     // Re-check after the fetch: a Cmd/Ctrl-click landing during the await can
