@@ -633,6 +633,7 @@ var editorState = {
   localStale: false,
   maskOverlay: false,
   maskOverlaySeq: 0,
+  maskOverlayTimer: null,
   previewSeq: 0,
   previewTimer: null,
   drag: null,
@@ -1108,6 +1109,20 @@ function schedulePreview() {
   }, 140);
 }
 
+function scheduleMaskOverlayRefresh() {
+  // Debounced counterpart to schedulePreview() for crop-only edits that
+  // don't schedule a preview: /edit-mask-preview reads the current crop
+  // to compute the saved-render feather scale, so dragging/resetting/
+  // changing crop aspect changes the halo the overlay is meant to show.
+  // Without this the visible mask lags until an unrelated slider or zoom
+  // forces a reload.
+  if (editorState.maskOverlayTimer) clearTimeout(editorState.maskOverlayTimer);
+  editorState.maskOverlayTimer = setTimeout(function() {
+    editorState.maskOverlayTimer = null;
+    refreshMaskOverlay();
+  }, 140);
+}
+
 function renderCropBox() {
   var img = document.getElementById('editorImg');
   var box = document.getElementById('editorCropBox');
@@ -1133,6 +1148,11 @@ function markChanged(render) {
   updateDirtyState();
   renderCropBox();
   if (render || wasShowingBefore) schedulePreview();
+  // Crop-only edits (resetCrop, setAspect, drag pointermove) pass
+  // render=false, so the preview isn't rescheduled — but the mask
+  // overlay depends on the current crop for its feather scale, so it
+  // must reload too whenever it's currently on.
+  else if (editorState.maskOverlay) scheduleMaskOverlayRefresh();
 }
 
 function rotateRecipe(delta) {
