@@ -1045,10 +1045,27 @@ No `EDIT_MATH_VERSION` bump: recipes without `local` render byte-identically.
   row is the recovery record, the generic mark-failed sweep in
   `JobRunner` skips this job type, and each row's payload
   (`source_recipe`, `target_ids`, `active_workspace`,
-  `placeholder_tokens`) is enough to rebuild the work closure
-  end-to-end. Any restart therefore resumes pending resnapshots
-  against the same placeholder-marked targets rather than leaving
-  them stranded.
+  `placeholder_tokens`, `completed_target_ids`) is enough to rebuild
+  the work closure end-to-end. **`completed_target_ids` is a
+  per-target completion set** — each target that either finalizes
+  under CAS or runs the CAS-skip / cancel / terminal-failure cleanup
+  writes its id into this JSON array in the same DB transaction as
+  its ref swap / scrub, and recovery re-processes only
+  `target_ids - completed_target_ids`. Without this set, a target
+  whose finalization already committed (its `local.mask.ref` is no
+  longer `pending:<token>` and the placeholder token has already been
+  scrubbed from history / sync) would look identical on restart to a
+  target whose placeholder was overwritten by a later user edit
+  before finalization: the CAS above would mismatch in both cases,
+  and the scrub rule below would then rewrite the already-finalized
+  target's history / sync entries to the local-stripped bulk recipe,
+  retroactively undoing a successful finalization one crash later.
+  The completion set makes the two cases distinguishable: an
+  already-completed target is skipped outright by recovery and only
+  still-pending targets are re-processed, so any restart resumes
+  pending resnapshots against the same placeholder-marked targets
+  rather than leaving them stranded *or* rewriting finalized history
+  back to the placeholder-less bulk state.
 
   **Each placeholder ref is a compare-and-swap token.** The
   placeholder's `local.mask.ref` is a `pending:<placeholder_token>`
@@ -1299,10 +1316,21 @@ No `EDIT_MATH_VERSION` bump: recipes without `local` render byte-identically.
   equals the target's current ref (a no-op re-save from the editor)
   or is already recorded in the target's snapshot family under
   `<photo_id>.<ref>.{decode}.png` (an ownership check against the
-  target's own on-disk snapshot files, not just the DB). Any other
-  supplied ref — including a `pending:*` placeholder token, which
-  is never a valid single-photo save target — is rejected with a
-  409 (`local ref not owned by this photo`) and the recipe is not
+  target's own on-disk snapshot files, not just the DB). `pending:*`
+  placeholder tokens are one carve-out on that rule: an incoming
+  `pending:<token>` is accepted only when it matches the target's
+  *own* currently-recorded pending token — i.e. `<token>` appears in
+  a still-`queued`/`running` `local_resnapshot_jobs` row's
+  `placeholder_tokens` scoped to this `photo_id` — so the "user opens
+  the editor and saves while the placeholder is current" scenario
+  the placeholder-scrub contract above (§CAS-skip / cancel cleanup)
+  is written to handle can round-trip through the single-photo save
+  path without a 409, and the same later-history / XMP-sync scrub
+  still covers the resulting rows. Any other supplied ref — a
+  foreign photo's ref, a stale ref whose snapshot files no longer
+  exist under this photo id, or a `pending:*` token that does not
+  match this target's own current row — is rejected with a 409
+  (`local ref not owned by this photo`) and the recipe is not
   persisted; the client is expected to route foreign refs through
   the bulk-apply endpoint (which will resnapshot them) instead of
   bypassing the strip-and-resnapshot helper. This closes the last
@@ -1330,8 +1358,18 @@ No `EDIT_MATH_VERSION` bump: recipes without `local` render byte-identically.
   the companion's `recipe_json`, strip-and-resnapshot against the RAW
   primary's own active mask (in the primary's decode bases), and write
   the resnapshotted recipe under the RAW primary's id. Edit-history
-  items reassigned in the same block get the same resnapshot treatment
-  (their stored `recipe_json`, if any, is re-snapshotted the same way).
+  items reassigned in the same block get the same resnapshot treatment,
+  and — because `edit_history_items` stores recipes in the `old_value`
+  and `new_value` columns (schema: `vireo/db.py:682-687`) and undo /
+  redo replay those columns verbatim (`_apply_undo` / `_apply_redo`) —
+  **both `old_value` and `new_value` are resnapshotted (or stripped
+  together under the same "no viable basis" terminal case), not just
+  one**. Rewriting only `new_value` would let undo restore the
+  companion's `<companion_id>.<ref>...` reference on the RAW primary
+  and re-hit the same "ref whose files live under someone else's photo
+  id" state the pairing helper is written to prevent, one undo
+  downstream of pairing; rewriting both keeps every reachable point in
+  history against the RAW primary's own snapshot family.
   **Queued XMP sync payloads reassigned by pairing get the same
   treatment.** Pairing already transfers `pending_changes` rows from the
   companion to the RAW primary verbatim
