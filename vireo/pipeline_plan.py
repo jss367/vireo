@@ -58,6 +58,12 @@ class PipelinePlanParams:
     # at plan time, since hashing thousands of files synchronously inside
     # a plan request would block the UI on every settings change.
     hash_duplicate_paths: list | None = None
+    # True when the import run stages files on local disk first (copy mode
+    # with the "Use local disk while processing" toggle on). This changes
+    # what the post-ingest scan walks — the local staging root instead of
+    # the real destination — which is why _import_without_new_files() is
+    # only safe to assert in this mode (see its docstring).
+    local_processing: bool = False
     # Optional API override for the preview tier. Normal pipeline runs leave
     # this unset so the previews substage uses the workspace-effective
     # preview_max_size setting. Explicit 0 means "serve originals"; the
@@ -168,9 +174,23 @@ def _import_without_new_files(params, photo_ids, new_count):
     at other, already-cataloged paths). The per-photo stages will all
     execute over an empty set, so their "Will run" summaries must say the
     run imports 0 new photos instead of implying work is coming.
+
+    Only asserted for local-processing imports. In plain copy mode the
+    claim isn't airtight: when ingest copies nothing (everything
+    deduplicated), the post-ingest scan runs with ``restrict=None`` over
+    the REAL destination tree, and ``scanner.scan`` fires the photo
+    callback for existing cataloged rows there — so downstream
+    workspace-scoped stages (classify/extract/regroup) can still find
+    real work among previously-unprocessed destination photos. With
+    local processing on, the post-ingest scan targets the local staging
+    root instead, which stays empty when every file deduplicates (ingest
+    creates the staging dir but copies nothing into it), so "nothing
+    to …" is genuinely true. Copy mode keeps the pre-existing
+    forward-looking summaries and lets Group see upstream will-run.
     """
     return (
-        params.source_paths is not None
+        params.local_processing
+        and params.source_paths is not None
         and new_count == 0
         and not photo_ids
     )

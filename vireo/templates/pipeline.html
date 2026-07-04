@@ -908,7 +908,7 @@ body { padding-bottom: 36px; }
           <div class="setting-row">
             <div class="setting-item">
               <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
-                <input type="checkbox" id="chkLocalProcessing" style="accent-color:var(--accent);" onchange="updateStartButton()" data-testid="local-processing-toggle"> Use local disk while processing
+                <input type="checkbox" id="chkLocalProcessing" style="accent-color:var(--accent);" onchange="updateStartButton(); schedulePlanRefresh()" data-testid="local-processing-toggle"> Use local disk while processing
               </label>
               <div style="font-size:11px;color:var(--text-dim);margin-top:4px;line-height:1.4;">
                 Files are staged locally for faster processing, then archived to the destination after verification.
@@ -4876,6 +4876,18 @@ function _buildPlanBody() {
         if (_duplicateResults[p]) hashDupPaths.push(p);
       });
       if (hashDupPaths.length) body.hash_duplicate_paths = hashDupPaths;
+    }
+
+    // The planner's "0 new photos to import, nothing to …" claim for an
+    // all-duplicates selection is only true in local-processing mode:
+    // the post-ingest scan then walks the local staging root (empty when
+    // everything deduplicated), while plain copy mode re-scans the real
+    // destination and can surface existing unprocessed rows as downstream
+    // work. Send the toggle state so the backend can tell the modes
+    // apart — mirrors how /api/jobs/pipeline carries local_processing.
+    if (_sourceMode === 'import' && _copyMode) {
+      var lp = document.getElementById('chkLocalProcessing');
+      body.local_processing = !!(lp && lp.checked);
     }
   }
 
