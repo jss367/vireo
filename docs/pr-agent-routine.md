@@ -127,8 +127,9 @@ re-asserts this at handling time.
   to resolve conflicts. If GitHub still reports mergeability as `UNKNOWN` after
   retries, the workflow sends that PR to the routine so a real conflict is not
   missed.
-- Approved `claude-agent` PRs, trusted `+1` comments, or trusted `+1`
-  reactions after the latest PR activity: enables squash auto-merge.
+- A trusted approving review, trusted `+1` comment, or trusted `+1` reaction
+  after the latest PR activity: enables squash auto-merge on any open PR
+  targeting `main` (not limited to `claude-agent`-labeled PRs).
 
 Auto-merge calls use `gh pr merge --match-head-commit` so approval applies to
 the expected PR head commit rather than a newer unreviewed push. Auto-merge

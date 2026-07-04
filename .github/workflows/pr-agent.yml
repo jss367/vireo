@@ -348,12 +348,13 @@ jobs:
             Task: resolve-conflicts
             PRs: ${{ steps.conflicts.outputs.pr_csv }}
 
-  # Enable squash auto-merge after an approving review on an agent PR.
+  # Enable squash auto-merge after an approving review from a trusted actor.
+  # Not gated on the claude-agent label — a trusted approval should be
+  # sufficient regardless of how the PR was created.
   merge-on-approval:
     if: >-
       github.event_name == 'pull_request_review'
       && github.event.review.state == 'approved'
-      && contains(github.event.pull_request.labels.*.name, 'claude-agent')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -401,14 +402,14 @@ jobs:
             --subject "${title} (#${PR})"
           echo "Auto-merge enabled on PR #${PR}. GitHub will merge when CI passes."
 
-  # Enable squash auto-merge after a trusted thumbs-up comment on an agent PR.
+  # Enable squash auto-merge after a trusted thumbs-up comment. Not gated on
+  # the claude-agent label — see merge-on-approval above.
   merge-on-thumbsup:
     if: >-
       github.event_name == 'issue_comment'
       && github.event.issue.pull_request
       && (github.event.comment.body == '+1'
           || github.event.comment.body == '👍')
-      && contains(github.event.issue.labels.*.name, 'claude-agent')
       && (github.event.comment.author_association == 'OWNER'
           || github.event.comment.author_association == 'COLLABORATOR'
           || github.actor == 'chatgpt-codex-connector[bot]')
@@ -423,7 +424,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.issue.number }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
         run: |
+          if [[ " $TRUSTED_ACTORS " != *" $COMMENT_AUTHOR "* ]]; then
+            echo "PR #${PR}: +1 from ${COMMENT_AUTHOR} is not in TRUSTED_ACTORS; skipping auto-merge."
+            exit 0
+          fi
+
           base=$(gh pr view "$PR" --repo "$REPO" --json baseRefName -q .baseRefName)
           head=$(gh pr view "$PR" --repo "$REPO" --json headRefName -q .headRefName)
           head_sha=$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q .headRefOid)
@@ -472,9 +479,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Not gated on the claude-agent label — a trusted reaction should
+          # be sufficient regardless of how the PR was created.
           prs=$(gh pr list --repo "${{ github.repository }}" \
             --state open \
-            --label "$AGENT_LABEL" \
             --limit 1000 \
             --json number -q '.[].number')
 
