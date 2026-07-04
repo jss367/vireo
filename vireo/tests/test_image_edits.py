@@ -358,3 +358,184 @@ def test_edit_math_version_template_constant_matches_python():
         'could not find `var _VIREO_EDIT_MATH_VERSION = ...;` in _navbar.html'
     )
     assert int(match.group(1)) == image_edits.EDIT_MATH_VERSION
+
+
+def test_normalize_recipe_accepts_local_section():
+    assert normalize_recipe(
+        {
+            "adjustments": {"exposure": 0.3},
+            "local": {
+                "mask": {
+                    "ref": "a1b2c3d4e5f6",
+                    "source_digest": "sha1:0011223344556677",
+                    "feather": 12.5,
+                },
+                "regions": [
+                    {
+                        "region": "subject",
+                        "adjustments": {"exposure": 0.6, "sharpen": 30},
+                    },
+                    {
+                        "region": "background",
+                        "adjustments": {"saturation": -15, "noise_reduction": 40},
+                    },
+                ],
+            },
+        }
+    ) == {
+        "version": 1,
+        "adjustments": {"exposure": 0.3},
+        "local": {
+            "mask": {
+                "ref": "a1b2c3d4e5f6",
+                "source_digest": "sha1:0011223344556677",
+                "feather": 12.5,
+            },
+            # Canonical order: sorted by region name.
+            "regions": [
+                {
+                    "region": "background",
+                    "adjustments": {"saturation": -15.0, "noise_reduction": 40.0},
+                },
+                {
+                    "region": "subject",
+                    "adjustments": {"exposure": 0.6, "sharpen": 30.0},
+                },
+            ],
+        },
+    }
+
+
+def test_normalize_recipe_drops_empty_local_sections():
+    # No regions at all, empty regions, and all-zero regions each drop the
+    # entire local block (the shared mask never persists alone).
+    mask = {"ref": "a1b2c3d4e5f6", "source_digest": "d"}
+    assert normalize_recipe({"local": {}}) is None
+    assert normalize_recipe({"local": {"mask": mask, "regions": []}}) is None
+    assert normalize_recipe(
+        {
+            "local": {
+                "mask": mask,
+                "regions": [
+                    {"region": "subject", "adjustments": {"exposure": 0}},
+                ],
+            }
+        }
+    ) is None
+
+
+def test_normalize_recipe_drops_local_feather_at_zero():
+    out = normalize_recipe(
+        {
+            "local": {
+                "mask": {
+                    "ref": "a1b2c3d4e5f6",
+                    "source_digest": "d",
+                    "feather": 0,
+                },
+                "regions": [
+                    {"region": "subject", "adjustments": {"exposure": 1}},
+                ],
+            }
+        }
+    )
+    assert "feather" not in out["local"]["mask"]
+
+
+@pytest.mark.parametrize(
+    ("local", "message"),
+    [
+        ([], "local must be an object"),
+        ({"mask": {"ref": "a1b2c3d4e5f6", "source_digest": "d"},
+          "regions": "subject"}, "regions must be an array"),
+        ({"regions": [{"region": "subject", "adjustments": {"exposure": 1}}]},
+         "local.mask"),
+        ({"mask": {"source_digest": "d"},
+          "regions": [{"region": "subject", "adjustments": {"exposure": 1}}]},
+         "mask.ref"),
+        ({"mask": {"ref": "NOT-HEX-12ch", "source_digest": "d"},
+          "regions": [{"region": "subject", "adjustments": {"exposure": 1}}]},
+         "mask.ref"),
+        ({"mask": {"ref": "a1b2c3d4e5f6"},
+          "regions": [{"region": "subject", "adjustments": {"exposure": 1}}]},
+         "source_digest"),
+        ({"mask": {"ref": "a1b2c3d4e5f6", "source_digest": "d", "feather": -1},
+          "regions": [{"region": "subject", "adjustments": {"exposure": 1}}]},
+         "feather"),
+        ({"mask": {"ref": "a1b2c3d4e5f6", "source_digest": "d", "feather": 999},
+          "regions": [{"region": "subject", "adjustments": {"exposure": 1}}]},
+         "feather"),
+        ({"mask": {"ref": "a1b2c3d4e5f6", "source_digest": "d"},
+          "regions": [{"region": "sky", "adjustments": {"exposure": 1}}]},
+         "region"),
+        ({"mask": {"ref": "a1b2c3d4e5f6", "source_digest": "d"},
+          "regions": [
+              {"region": "subject", "adjustments": {"exposure": 1}},
+              {"region": "subject", "adjustments": {"exposure": 2}},
+          ]}, "duplicate"),
+        ({"mask": {"ref": "a1b2c3d4e5f6", "source_digest": "d"},
+          "regions": [{"region": "subject", "adjustments": {"exposure": 99}}]},
+         "exposure"),
+        ({"mask": {"ref": "a1b2c3d4e5f6", "source_digest": "d"},
+          "regions": [{"region": "subject",
+                       "adjustments": {"whites": 20}}]},
+         "whites"),
+    ],
+)
+def test_normalize_recipe_rejects_invalid_local(local, message):
+    with pytest.raises(RecipeError, match=message):
+        normalize_recipe({"local": local})
+
+
+def test_normalize_recipe_accepts_negative_local_detail_deltas():
+    # Region values are deltas layered on top of the globals; a background
+    # sharpen -70 against global sharpen 70 legitimately zeroes sharpen in the
+    # background. Rejecting negative deltas would force users to drop the
+    # global sharpen entirely instead of just excluding the background from it.
+    out = normalize_recipe(
+        {
+            "adjustments": {"sharpen": 70, "noise_reduction": 30},
+            "local": {
+                "mask": {"ref": "a1b2c3d4e5f6", "source_digest": "d"},
+                "regions": [
+                    {
+                        "region": "background",
+                        "adjustments": {"sharpen": -70, "noise_reduction": -30},
+                    },
+                ],
+            },
+        }
+    )
+    assert out["local"]["regions"] == [
+        {
+            "region": "background",
+            "adjustments": {"sharpen": -70.0, "noise_reduction": -30.0},
+        }
+    ]
+    # Out-of-range deltas still rejected: -100 is the floor.
+    with pytest.raises(RecipeError, match="sharpen"):
+        normalize_recipe(
+            {
+                "local": {
+                    "mask": {"ref": "a1b2c3d4e5f6", "source_digest": "d"},
+                    "regions": [
+                        {
+                            "region": "subject",
+                            "adjustments": {"sharpen": -150},
+                        },
+                    ],
+                },
+            }
+        )
+
+
+def test_local_recipe_json_is_canonical_and_stable():
+    recipe = {
+        "local": {
+            "mask": {"ref": "a1b2c3d4e5f6", "source_digest": "d"},
+            "regions": [
+                {"region": "subject", "adjustments": {"exposure": 1}},
+            ],
+        }
+    }
+    assert recipe_to_json(recipe) == recipe_to_json(normalize_recipe(recipe))

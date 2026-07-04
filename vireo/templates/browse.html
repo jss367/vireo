@@ -3879,6 +3879,22 @@ function selectPhoto(e, id, idx) {
         if (summary) summary.classList.remove('hidden');
         loadSummary();
       }
+      // Same reason as closeDetail: the dropped anchor's EXIF suggestion is
+      // still tagged with its data-photo-id (hidden along with the detail
+      // panel). This path bypasses closeDetail entirely, so without an
+      // explicit scrub a later Select All (or any batch that still contains
+      // the dropped photo) would satisfy renderLocationEmpty's owner-in-
+      // selection check and resurrect the anchor's Accept line for the
+      // whole batch — clicking it would apply the dropped anchor's GPS
+      // place to every selected photo. Codex P2 on PR #1097.
+      clearExifSuggestion();
+      // And null the ambient detail-photo pointer maybeShowExifSuggestion's
+      // post-await guard reads. If A's reverse-geocode is still in flight
+      // when we drop A here, the completion runs later; leaving
+      // _detailPhotoId pointing at A means a subsequent Select All that
+      // contains A would let the async paint path resurrect A's Accept line
+      // into the batch inspector. Codex P2 on PR #1097 (17:04Z follow-up).
+      window._detailPhotoId = null;
     }
   } else {
     // Normal click: single select
@@ -4225,7 +4241,10 @@ function updateSelectionPanel(ids) {
   panel.classList.remove('hidden');
   document.getElementById('selectionCount').textContent = ids.length.toLocaleString() + ' photos selected';
   updatePasteEditSection(ids);
-  renderBatchInspector(ids);
+  // Keep any EXIF suggestion fetched for the anchor photo: Accept is
+  // batch-aware (_locationApplyPhotoIds), so growing the selection is the
+  // designed way to apply one suggestion to many photos.
+  renderBatchInspector(ids, { preserveExifSuggestion: true });
   if (ids.length > 1000) {
     selectionKeywordKey = selectionIdsKey(ids);
     selectionKeywordMissingById = {};
@@ -5056,6 +5075,23 @@ function clearSelection() {
   selectedPhotos.clear();
   selectedPhotoId = null;
   selectedIndex = -1;
+  // Batch-bar Clear (and every other caller) has to scrub the EXIF suggestion
+  // too. Without this, the suggestion element keeps its data-photo-id and
+  // Accept button after clearing, so a later Select All that still contains
+  // the previously-open anchor satisfies renderLocationEmpty's owner-in-
+  // selection check and resurrects the anchor's Accept line for the whole
+  // batch — one click would apply the anchor's GPS-derived place to every
+  // selected photo. Codex P2 on PR #1097.
+  clearExifSuggestion();
+  // Also drop the ambient detail-photo pointer maybeShowExifSuggestion's
+  // post-await path uses as its owner check. Scrubbing the DOM alone isn't
+  // enough: a reverse-geocode fetch that was in flight when the user clicked
+  // Clear still resolves later, and if _detailPhotoId still points at the
+  // departed anchor a subsequent Select All that contains that photo
+  // re-satisfies both async guards and repaints A's Accept line into the
+  // batch inspector — clicking it would apply A's EXIF place to every
+  // selected photo. Codex P2 on PR #1097 (17:04Z follow-up).
+  window._detailPhotoId = null;
   document.querySelectorAll('.grid-card').forEach(function(el) {
     el.classList.remove('selected');
   });
@@ -5121,6 +5157,21 @@ async function loadDetail(id) {
   // Loading a single photo's detail always exits batch mode.
   if (detail) detail.classList.remove('batch-mode');
   if (detail) detail.classList.toggle('visible', window._detailPhotoId === id);
+
+  // Kill any stale EXIF suggestion tagged for a *different* photo before the
+  // fetch returns. Otherwise: open A (suggestion shown, data-photo-id=A) →
+  // click B → Select All lands before B's /api/photos response resolves.
+  // renderBatchInspector's preserveExifSuggestion check finds A's stale
+  // data-photo-id, sees A is in the Select All ids, and resurrects A's
+  // Accept line for the whole batch — clicking it applies A's GPS place to
+  // every selected photo. Also null _detailPhotoId so any in-flight
+  // reverse-geocode for A can't repaint through maybeShowExifSuggestion's
+  // post-await guard once the batch inspector is on screen. Codex P2 on
+  // PR #1097 (17:23Z).
+  if (window._detailPhotoId !== id) {
+    clearExifSuggestion();
+    window._detailPhotoId = null;
+  }
 
   try {
     var photo = await safeFetch('/api/photos/' + id, {}, { toast: false });
@@ -5399,6 +5450,21 @@ function closeDetail() {
   hideDetailPanel();
   selectedPhotoId = null;
   selectedIndex = -1;
+  // Drop any lingering EXIF suggestion attached to the closed detail photo.
+  // Without this, the element keeps its data-photo-id and Accept button; a
+  // later Ctrl+A (or any batch that still contains that photo) would satisfy
+  // renderLocationEmpty's owner-in-selection check and resurrect the anchor's
+  // Accept line for the whole batch — clicking it would apply the anchor's
+  // GPS-derived place to every selected photo. Codex P2 on PR #1097.
+  clearExifSuggestion();
+  // Null the ambient detail-photo pointer for the same reason. maybeShowExif
+  // Suggestion's post-await guard uses window._detailPhotoId as its owner
+  // check: if a reverse-geocode was in flight when we closed the panel, the
+  // fetch keeps running and later resolves. With the pointer still set, a
+  // Ctrl+A that includes the departed photo would satisfy both async guards
+  // and repaint A's Accept line into the batch inspector. Codex P2 on
+  // PR #1097 (17:04Z follow-up).
+  window._detailPhotoId = null;
   // Re-highlight any cmd/shift-click selections that survive detail close.
   // A blanket .remove('selected') would leave selectedPhotos armed for batch
   // actions with no visible indicator — e.g. click A -> cmd-click B -> cmd-click
@@ -5692,7 +5758,10 @@ function renderBatchInspector(ids, opts) {
   // (e.g. a /api/photos/color_labels fetch resolving, a batch rating shortcut)
   // triggers _refreshBatchInspectorIfActive, and we'd otherwise erase it.
   if (!opts.preserveLocation) {
-    renderLocationEmpty();
+    renderLocationEmpty({
+      preserveExifSuggestion: opts.preserveExifSuggestion,
+      selectionIds: ids,
+    });
   }
 }
 
@@ -5909,6 +5978,15 @@ function _locationApplyPhotoIds() {
 }
 
 async function _afterLocationMutation(photoIds, detailPhotoId) {
+  // Bump the location-mutation epoch so any in-flight reverse-geocode from an
+  // earlier maybeShowExifSuggestion(A) bails out of its post-await paint. Every
+  // save/clear/accept path funnels through here, so this is the single choke
+  // point where the batch-save-during-pending-geocode race can be closed.
+  // Codex P2 on PR #1097 (17:39Z): open A → Cmd-click B → save batch location
+  // for {A,B} → geocode resolves. renderBatchInspector rehides #locationFilled,
+  // so the DOM-only guard in maybeShowExifSuggestion can't tell the batch was
+  // just given a location and repaints A's stale Accept line.
+  window._locationMutationEpoch = (window._locationMutationEpoch || 0) + 1;
   invalidateKeywordAutocompleteCache();
   loadKeywords();
   scheduleCollectionCountsRefresh();
@@ -6099,6 +6177,18 @@ async function clearPhotoLocation() {
   }
 }
 
+// Scrub the inline EXIF suggestion line (hide, empty innerHTML, drop the
+// data-photo-id owner tag). Every scrub site must go through this helper so
+// they can't silently diverge — e.g. if a future scrub also needs to clear a
+// stored placeId. Codex nitpick on PR #1097.
+function clearExifSuggestion() {
+  var sugg = document.getElementById('locationExifSuggestion');
+  if (!sugg) return;
+  sugg.hidden = true;
+  sugg.innerHTML = '';
+  if (sugg.dataset) delete sugg.dataset.photoId;
+}
+
 function renderLocationFilled(loc) {
   var filled = document.getElementById('locationFilled');
   var empty = document.getElementById('locationEmpty');
@@ -6123,9 +6213,16 @@ function renderLocationFilled(loc) {
   // Reset the input value for next time.
   var input = document.getElementById('locationInput');
   if (input) input.value = '';
+  // Once a saved location is on screen any pending EXIF suggestion is moot,
+  // and leaving it (hidden) in #locationEmpty makes it stale state: open A
+  // (suggestion fetched) → open B with a saved location → Cmd-click A would
+  // otherwise resurrect A's Accept line for the {B, A} batch and overwrite
+  // B's location (Codex P2 on PR #1097). Clear it at the source instead.
+  clearExifSuggestion();
 }
 
-function renderLocationEmpty() {
+function renderLocationEmpty(opts) {
+  opts = opts || {};
   var filled = document.getElementById('locationFilled');
   var empty = document.getElementById('locationEmpty');
   if (!filled || !empty) return;
@@ -6137,12 +6234,23 @@ function renderLocationEmpty() {
   hideLocationKeywordSuggestions();
   // Reset any prior EXIF suggestion. The caller (renderDetail) re-runs
   // maybeShowExifSuggestion(photo) after this, which decides whether to
-  // populate the line for the new photo.
+  // populate the line for the new photo. Entering batch mode preserves it
+  // instead (preserveExifSuggestion) so the anchor's suggestion stays
+  // acceptable for the whole selection — but only while the photo that
+  // produced it is still in the selection. Otherwise Accept would apply
+  // that anchor's GPS-derived location to unrelated photos (Codex P1 on
+  // PR #1097: open A → Cmd-click B → Cmd-click A to drop → Cmd-click C).
   var sugg = document.getElementById('locationExifSuggestion');
-  if (sugg) {
-    sugg.hidden = true;
-    sugg.innerHTML = '';
+  if (!sugg) return;
+  var keepSugg = false;
+  if (opts.preserveExifSuggestion) {
+    var ownerAttr = sugg.dataset ? sugg.dataset.photoId : '';
+    var owner = ownerAttr ? parseInt(ownerAttr, 10) : NaN;
+    keepSugg = !isNaN(owner)
+      && Array.isArray(opts.selectionIds)
+      && opts.selectionIds.indexOf(owner) !== -1;
   }
+  if (!keepSugg) clearExifSuggestion();
 }
 
 /* When a photo with EXIF GPS but no location keyword is opened, fetch a
@@ -6150,29 +6258,70 @@ function renderLocationEmpty() {
    silently when there's no key or no coords; the proxy returns null when
    Google has no match for the cell. */
 async function maybeShowExifSuggestion(photo) {
+  clearExifSuggestion();
   var sugg = document.getElementById('locationExifSuggestion');
   if (!sugg) return;
-  sugg.hidden = true;
-  sugg.innerHTML = '';
 
   if (!photo) return;
   if (photo.location) return;
   if (photo.latitude == null || photo.longitude == null) return;
 
-  await _cfgPromise;
-  var apiKey = (window.GOOGLE_MAPS_API_KEY || '').trim();
-  if (!apiKey) return;
-
   // Capture the photo id at request time so a slow reverse-geocode for an
   // older photo doesn't paint into the suggestion line for a newer one.
   var requestPhotoId = photo.id;
+  // Capture the location-mutation epoch BEFORE the first await, so any
+  // save/clear/accept during _cfgPromise or the reverse-geocode fetch bumps
+  // the counter past what we captured. The post-await guard bails on any
+  // mismatch. Closes the batch-save-during-pending-geocode race that the
+  // DOM `!filled.hidden` check alone can't catch (see below).
+  var requestEpoch = window._locationMutationEpoch || 0;
+
+  await _cfgPromise;
+  var apiKey = (window.GOOGLE_MAPS_API_KEY || '').trim();
+  if (!apiKey) return;
   try {
     var params = new URLSearchParams({lat: photo.latitude, lng: photo.longitude});
     var r = await fetch('/api/places/reverse-geocode?' + params.toString());
     if (!r.ok) return;
     var data = await r.json();
     if (!data || !data.place_id || !data.summary) return;
+    // Three races the post-await guards must handle.
+    //   1. Stale response for a photo the detail already navigated away
+    //      from (open A → open B): caught by _detailPhotoId, which
+    //      renderDetail overwrites on every open.
+    //   2. Slow response for an anchor the user has since dropped from a
+    //      batch (open A → Cmd-click B → Cmd-click A out → Cmd-click C):
+    //      renderBatchInspector never touches _detailPhotoId, so the anchor
+    //      pointer could still match while getActiveSelection() no longer
+    //      includes A. Accept posts to getActiveSelection(), so the guard
+    //      must recheck selection membership too. Codex P1 on PR #1097.
+    //   3. Slow response for a photo the user has left behind by closing
+    //      the detail panel, clearing the batch, or Cmd-click-dropping the
+    //      anchor, then Select All that brings the departed photo back
+    //      into the batch. The DOM scrub in each of those sites isn't
+    //      enough on its own: without also nulling _detailPhotoId the
+    //      pointer keeps matching after Select All re-includes the photo,
+    //      and Accept would apply the departed anchor's EXIF place to the
+    //      whole batch. Those sites now null _detailPhotoId, so the first
+    //      guard catches this race too. Codex P2 on PR #1097 (17:04Z).
     if (window._detailPhotoId !== requestPhotoId) return;
+    if (_locationApplyPhotoIds().indexOf(requestPhotoId) === -1) return;
+    // Fourth race: while we were awaiting reverse-geocode, the user saved
+    // a location for this photo (via the input, a keyword pick, or a batch
+    // op). Every mutation path funnels through _afterLocationMutation, which
+    // bumps _locationMutationEpoch. If it moved, bail. (Codex P2 on PR #1097
+    // at 17:39Z: save-batch-location-during-pending-geocode overwriting the
+    // just-saved batch location. The DOM `!filled.hidden` check below alone
+    // can't catch that — after a batch save, _afterLocationMutation runs
+    // renderBatchInspector → renderLocationEmpty, which rehides
+    // #locationFilled, so the paint sneaks through.)
+    if ((window._locationMutationEpoch || 0) !== requestEpoch) return;
+    // Defense-in-depth: if a filled row is on screen right now, whoever
+    // painted it wanted the suggestion gone. The epoch check above already
+    // covers the batch race; this catches any future save site that renders
+    // filled without funneling through _afterLocationMutation.
+    var filled = document.getElementById('locationFilled');
+    if (filled && !filled.hidden) return;
 
     sugg.innerHTML = '';
     var text = document.createElement('span');
@@ -6187,6 +6336,7 @@ async function maybeShowExifSuggestion(photo) {
     });
     sugg.appendChild(text);
     sugg.appendChild(btn);
+    sugg.dataset.photoId = String(requestPhotoId);
     sugg.hidden = false;
   } catch (e) {
     console.warn('reverse-geocode suggestion failed:', e);
@@ -6214,11 +6364,7 @@ async function acceptExifSuggestion(placeId) {
     if (resp && resp.location) {
       renderLocationFilled(resp.location);
     }
-    var sugg = document.getElementById('locationExifSuggestion');
-    if (sugg) {
-      sugg.hidden = true;
-      sugg.innerHTML = '';
-    }
+    clearExifSuggestion();
     await _afterLocationMutation(useBatch ? ids : [photoId], photoId);
   } catch(e) {
     _showLocationError('Could not save location.');

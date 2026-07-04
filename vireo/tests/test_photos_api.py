@@ -7693,3 +7693,257 @@ def test_edit_presets_api_validation(app_and_db):
         assert resp.status_code == 400, payload
 
     assert client.get("/api/edit-presets").get_json() == {"presets": []}
+
+
+def _register_active_mask(db, photo_id, mask_dir, width=800, height=600):
+    """Write a left-half subject mask PNG and make it the photo's active mask."""
+    import numpy as np
+    from PIL import Image as PILImage
+
+    path = os.path.join(mask_dir, f"{photo_id}.sam2-small.png")
+    arr = np.zeros((height, width), dtype=np.uint8)
+    arr[:, : width // 2] = 255
+    PILImage.fromarray(arr, "L").save(path, "PNG")
+    db.upsert_photo_mask(
+        photo_id, "sam2-small", path, "megadetector-v6",
+        0.0, 0.0, 0.5, 1.0,
+    )
+    db.set_active_mask_variant(photo_id, "sam2-small")
+    return path
+
+
+def _local_recipe_payload(mask, regions=None):
+    return {
+        "recipe": {
+            "local": {
+                "mask": mask,
+                "regions": regions or [
+                    {"region": "subject", "adjustments": {"exposure": 2.0}},
+                ],
+            }
+        }
+    }
+
+
+def test_local_mask_snapshot_endpoint_requires_active_mask(client_with_photo):
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    resp = client.post(f"/api/photos/{photo_id}/local-mask/snapshot")
+    assert resp.status_code == 400
+    assert "mask" in resp.get_json()["error"].lower()
+
+    assert client.post("/api/photos/999999/local-mask/snapshot").status_code == 404
+
+
+def test_local_mask_snapshot_and_recipe_roundtrip(client_with_photo):
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute("SELECT path FROM folders").fetchone()
+    _register_active_mask(db, photo_id, folder["path"])
+
+    resp = client.post(f"/api/photos/{photo_id}/local-mask/snapshot")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    mask = body["mask"]
+    assert set(mask) == {"ref", "source_digest"}
+    assert body["stale"] is False
+
+    resp = client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json=_local_recipe_payload(mask),
+    )
+    assert resp.status_code == 200
+    saved = resp.get_json()["recipe"]
+    assert saved["local"]["mask"]["ref"] == mask["ref"]
+
+    got = client.get(f"/api/photos/{photo_id}/edit-recipe").get_json()
+    assert got["recipe"]["local"]["mask"]["ref"] == mask["ref"]
+    assert got["local_mask_stale"] is False
+
+
+def test_local_recipe_stale_flag_tracks_live_mask(client_with_photo):
+    import numpy as np
+    from PIL import Image as PILImage
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute("SELECT path FROM folders").fetchone()
+    mask_path = _register_active_mask(db, photo_id, folder["path"])
+
+    mask = client.post(
+        f"/api/photos/{photo_id}/local-mask/snapshot"
+    ).get_json()["mask"]
+    client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json=_local_recipe_payload(mask),
+    )
+
+    # Rewrite the live mask (as a detector/SAM re-run would).
+    arr = np.zeros((600, 800), dtype=np.uint8)
+    arr[:300, :] = 255
+    PILImage.fromarray(arr, "L").save(mask_path, "PNG")
+
+    got = client.get(f"/api/photos/{photo_id}/edit-recipe").get_json()
+    assert got["local_mask_stale"] is True
+
+
+def test_local_recipe_rejects_unknown_snapshot_ref(client_with_photo):
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    resp = client.put(
+        f"/api/photos/{photo_id}/edit-recipe",
+        json=_local_recipe_payload(
+            {"ref": "eeeeeeeeeeee", "source_digest": "d"}
+        ),
+    )
+    assert resp.status_code == 400
+    assert "snapshot" in resp.get_json()["error"].lower()
+
+
+def test_bulk_apply_rejects_local_sections(client_with_photo):
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/photos/edit-recipe/apply",
+        json={
+            "photo_ids": [photo_id],
+            "recipe": _local_recipe_payload(
+                {"ref": "eeeeeeeeeeee", "source_digest": "d"}
+            )["recipe"],
+        },
+    )
+    assert resp.status_code == 400
+    assert "local" in resp.get_json()["error"].lower()
+
+
+def test_edit_preview_renders_local_adjustments(client_with_photo):
+    import io
+    import json
+
+    import numpy as np
+    from PIL import Image as PILImage
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute("SELECT path FROM folders").fetchone()
+    _register_active_mask(db, photo_id, folder["path"])
+
+    mask = client.post(
+        f"/api/photos/{photo_id}/local-mask/snapshot"
+    ).get_json()["mask"]
+    recipe = _local_recipe_payload(mask)["recipe"]
+
+    resp = client.get(
+        f"/photos/{photo_id}/edit-preview",
+        query_string={"size": "800", "recipe": json.dumps(recipe)},
+    )
+    assert resp.status_code == 200
+    with PILImage.open(io.BytesIO(resp.data)) as img:
+        arr = np.asarray(img.convert("RGB")).astype(np.float32)
+
+    left = float(np.mean(arr[:, :360]))
+    right = float(np.mean(arr[:, 440:]))
+    assert left > right + 40  # subject half brightened by +2 EV
+
+
+def test_local_snapshot_root_matches_thumb_cache_dir(tmp_path, monkeypatch):
+    """Regression: renders must read snapshots from the same root the
+    snapshot endpoint writes to.
+
+    When ``create_app`` is given a ``thumb_cache_dir`` whose parent
+    differs from ``dirname(db_path)``, snapshots land under
+    ``dirname(THUMB_CACHE_DIR)/edit-masks`` but earlier revisions of
+    every render call site looked in ``dirname(db_path)/edit-masks`` and
+    silently rendered without the local pass. This test lays out that
+    split-directory topology and asserts the local adjustment actually
+    lands in the preview.
+    """
+    import io
+    import json
+
+    import numpy as np
+    from PIL import Image as PILImage
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    import models
+    from app import create_app
+    from db import Database
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(
+        models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"),
+    )
+    monkeypatch.setattr(
+        models, "CONFIG_PATH", str(tmp_path / "models.json"),
+    )
+
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    src = photos_dir / "test.jpg"
+    PILImage.new("RGB", (800, 600), (180, 90, 40)).save(
+        str(src), "JPEG", quality=85,
+    )
+
+    # Key: db_root and cache_root have distinct parents. dirname(db_path)
+    # is now unrelated to dirname(thumb_cache_dir); the app must not use
+    # the former to find snapshots the endpoint saved under the latter.
+    db_root = tmp_path / "db_root"
+    db_root.mkdir()
+    cache_root = tmp_path / "cache_root"
+    cache_root.mkdir()
+    thumb_dir = cache_root / "thumbnails"
+    thumb_dir.mkdir()
+    db_path = str(db_root / "vireo.db")
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(photos_dir), name="photos")
+    photo_id = db.add_photo(
+        folder_id=fid, filename="test.jpg", extension=".jpg",
+        file_size=os.path.getsize(src),
+        file_mtime=os.path.getmtime(src),
+        width=800, height=600,
+    )
+
+    _register_active_mask(db, photo_id, str(photos_dir))
+
+    app = create_app(
+        db_path=db_path, thumb_cache_dir=str(thumb_dir),
+        api_token="test-token-123",
+    )
+    client = app.test_client()
+
+    mask = client.post(
+        f"/api/photos/{photo_id}/local-mask/snapshot"
+    ).get_json()["mask"]
+
+    # Snapshot must have been written under the thumb-cache root, not
+    # under the db root.
+    assert (cache_root / "edit-masks").is_dir()
+    assert not (db_root / "edit-masks").exists()
+
+    recipe = _local_recipe_payload(mask)["recipe"]
+    resp = client.get(
+        f"/photos/{photo_id}/edit-preview",
+        query_string={"size": "800", "recipe": json.dumps(recipe)},
+    )
+    assert resp.status_code == 200
+    with PILImage.open(io.BytesIO(resp.data)) as img:
+        arr = np.asarray(img.convert("RGB")).astype(np.float32)
+
+    left = float(np.mean(arr[:, :360]))
+    right = float(np.mean(arr[:, 440:]))
+    # If the renderer used dirname(db_path) for the snapshot root the
+    # local pass would silently no-op and both halves would match.
+    assert left > right + 40, (
+        f"local adjustment did not apply (left={left:.1f}, "
+        f"right={right:.1f}); snapshot root likely disagrees with the "
+        "endpoint's write root"
+    )
+
+    db.close()

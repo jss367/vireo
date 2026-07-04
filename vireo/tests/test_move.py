@@ -2556,3 +2556,37 @@ def test_rsync_streamed_survives_block_buffered_rsync(tmp_path):
     assert timed_out is False
     assert rc == 0
     assert seen == [f"DSC_{i:04d}.NEF" for i in range(4)]
+
+
+@pytest.mark.skipif(not hasattr(os, "openpty"), reason="pty is POSIX-only")
+def test_rsync_streamed_closes_pty_fds_when_popen_fails(monkeypatch):
+    """If Popen raises after os.openpty() succeeded (e.g. a bad rsync_bin),
+    both pty fds must be closed before the exception propagates — otherwise
+    every failed invocation leaks two fds and eventually exhausts the table.
+    """
+    import move as move_mod
+
+    opened = []
+    real_openpty = os.openpty
+
+    def _tracking_openpty():
+        master, slave = real_openpty()
+        opened.extend((master, slave))
+        return master, slave
+
+    monkeypatch.setattr(move_mod.os, "openpty", _tracking_openpty)
+
+    def _boom(*_a, **_k):
+        raise FileNotFoundError("no such rsync binary")
+
+    monkeypatch.setattr(move_mod.subprocess, "Popen", _boom)
+
+    with pytest.raises(FileNotFoundError):
+        move_mod._run_rsync_streamed(
+            "/src", "/dst", [], 4, None, rsync_bin="/nonexistent/rsync",
+        )
+
+    assert len(opened) == 2  # openpty ran, so there are fds to worry about
+    for fd in opened:
+        with pytest.raises(OSError):
+            os.fstat(fd)  # closed: fstat on a closed fd raises EBADF

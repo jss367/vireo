@@ -2806,6 +2806,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             reclassify=bool(body.get("reclassify")),
             source_paths=source_paths,
             hash_duplicate_paths=hash_duplicate_paths,
+            # Mirrors /api/jobs/pipeline's local_processing flag. The
+            # planner needs it to know what the post-ingest scan walks:
+            # only local-processing imports may claim "0 new photos to
+            # import, nothing to …" for an all-duplicates selection —
+            # plain copy mode re-scans the real destination, which can
+            # surface existing unprocessed rows as downstream work.
+            local_processing=bool(body.get("local_processing")),
             preview_max_size=body.get("preview_max_size"),
         )
         db = _get_db()
@@ -3962,10 +3969,54 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         photo = db.get_photo(photo_id, verify_workspace=True)
         if not photo:
             return json_error("not found", 404)
-        return jsonify({
-            "photo_id": photo_id,
-            "recipe": db.get_photo_edit_recipe(photo_id),
-        })
+        recipe = db.get_photo_edit_recipe(photo_id)
+        payload = {"photo_id": photo_id, "recipe": recipe}
+        if recipe and recipe.get("local"):
+            import local_masks
+            variant_row = db.conn.execute(
+                "SELECT active_mask_variant FROM photos WHERE id=?",
+                (photo_id,),
+            ).fetchone()
+            variant = variant_row["active_mask_variant"] if variant_row else None
+            mask_row = (
+                db.get_photo_mask(photo_id, variant) if variant else None
+            )
+            payload["local_mask_stale"] = local_masks.is_stale(
+                recipe, mask_row
+            )
+        return jsonify(payload)
+
+    @app.route(
+        "/api/photos/<int:photo_id>/local-mask/snapshot", methods=["POST"]
+    )
+    def api_create_local_mask_snapshot(photo_id):
+        """Freeze the photo's active SAM mask into an edit-mask snapshot.
+
+        Returns the recipe ``local.mask`` fields the editor embeds when
+        saving local adjustments. Renders read only the snapshot, so the
+        live mask can regenerate without silently changing committed edits.
+        """
+        db = _get_db()
+        photo = db.get_photo(photo_id, verify_workspace=True)
+        if not photo:
+            return json_error("not found", 404)
+        import local_masks
+        variant_row = db.conn.execute(
+            "SELECT active_mask_variant FROM photos WHERE id=?",
+            (photo_id,),
+        ).fetchone()
+        variant = variant_row["active_mask_variant"] if variant_row else None
+        mask_row = db.get_photo_mask(photo_id, variant) if variant else None
+        try:
+            mask = local_masks.create_snapshot(
+                photo_id=photo_id,
+                mask_row=mask_row,
+                vireo_dir=os.path.dirname(app.config["THUMB_CACHE_DIR"]),
+                native_size=_recipe_source_dimensions(photo),
+            )
+        except ValueError as e:
+            return json_error(str(e))
+        return jsonify({"mask": mask, "stale": False})
 
     @app.route("/api/photos/<int:photo_id>/edit-recipe", methods=["PUT", "POST"])
     def api_set_photo_edit_recipe(photo_id):
@@ -3982,7 +4033,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         photo = db.get_photo(photo_id, verify_workspace=True)
         if not photo:
             return json_error("not found", 404)
-        from image_edits import RecipeError, recipe_to_json
+        from image_edits import RecipeError, normalize_recipe, recipe_to_json
+        try:
+            normalized = normalize_recipe(recipe)
+        except RecipeError as e:
+            return json_error(str(e))
+        local = (normalized or {}).get("local")
+        if local:
+            import local_masks
+            snap = local_masks.snapshot_path(
+                os.path.dirname(app.config["THUMB_CACHE_DIR"]),
+                photo_id, local["mask"]["ref"],
+            )
+            if not os.path.exists(snap):
+                return json_error(
+                    "unknown edit-mask snapshot for this photo; create one "
+                    "via POST /api/photos/<id>/local-mask/snapshot first"
+                )
         old_recipe = db.get_photo_edit_recipe(photo_id)
         try:
             old_value = recipe_to_json(old_recipe) or ""
@@ -4043,6 +4110,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         recipe = body.get("recipe")
         if not isinstance(recipe, dict):
             return json_error("recipe must be a JSON object")
+        if recipe.get("local"):
+            return json_error(
+                "local adjustments cannot be bulk-applied: they reference a "
+                "photo-specific mask snapshot"
+            )
         raw_ids = body.get("photo_ids")
         if not isinstance(raw_ids, list) or not raw_ids:
             return json_error("photo_ids must be a non-empty list")
@@ -9175,6 +9247,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if not recipe:
                 return fallback_path, None
 
+            import local_masks as _local_masks
             from image_edits import (
                 EDIT_MATH_VERSION,
                 apply_recipe_to_loaded_image,
@@ -9298,6 +9371,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 rendered = apply_recipe_to_loaded_image(
                     img, recipe,
                     native_size=_recipe_source_dimensions(photo),
+                    local_mask=_local_masks.load_snapshot(
+                        vireo_dir, photo["id"], recipe,
+                    ),
                 )
                 quality = cfg.load().get("working_copy_quality", 92)
                 fd, tmp_path = tempfile.mkstemp(
@@ -9633,7 +9709,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         n = db.delete_stale_masks(detector_confidence=min_detector_conf)
         log.info("Deleted %d stale masks", n)
-        return jsonify({"ok": True, "deleted": n})
+        # Edit-mask snapshots piggyback on the same sweep: unreferenced,
+        # aged-out snapshot files (no current recipe or edit-history entry
+        # points at them) are reclaimed alongside stale live masks.
+        import local_masks
+        # Snapshots live under dirname(THUMB_CACHE_DIR) — the same root the
+        # snapshot POST endpoint writes to and every render call site reads
+        # from — which is not always dirname(db_path) when create_app is
+        # given a custom thumb-dir under a different parent.
+        gc = local_masks.gc_edit_masks(
+            db, os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        )
+        if gc["deleted"]:
+            log.info(
+                "Deleted %d unreferenced edit-mask snapshots", gc["deleted"]
+            )
+        return jsonify({
+            "ok": True, "deleted": n, "snapshots_deleted": gc["deleted"],
+        })
 
     @app.route("/api/storage/files")
     def api_storage_files():
@@ -11510,6 +11603,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not recipe:
             return fallback_path, None
 
+        import local_masks as _local_masks
         from image_edits import (
             EDIT_MATH_VERSION,
             apply_recipe_to_loaded_image,
@@ -11625,6 +11719,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             rendered = apply_recipe_to_loaded_image(
                 img, recipe,
                 native_size=_recipe_source_dimensions(photo),
+                local_mask=_local_masks.load_snapshot(
+                    vireo_dir, photo["id"], recipe,
+                ),
             )
             quality = cfg.load().get("working_copy_quality", 92)
             fd, tmp_path = tempfile.mkstemp(
@@ -13357,10 +13454,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                     canonical = companion_abs
                     if img:
                         if recipe:
+                            import local_masks
                             img = apply_recipe_to_loaded_image(
                                 img, recipe, max_size=max_size,
                                 native_size=_recipe_source_dimensions(
                                     detail_photo
+                                ),
+                                local_mask=local_masks.load_snapshot(
+                                    vireo_dir,
+                                    photo["id"], recipe,
                                 ),
                             )
                         img.save(cache_path, format="JPEG", quality=preview_quality)
@@ -16432,6 +16534,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         destination = body.get("destination")
         local_processing = bool(body.get("local_processing"))
+        remote_target_id = (body.get("remote_target_id") or "").strip()
+        remote_subpath = body.get("remote_subpath", "")
+        if remote_subpath and not isinstance(remote_subpath, str):
+            return json_error("remote_subpath must be a string")
         # Copy-ingest ("destination") is incompatible with snapshot runs:
         # ingest would copy entire source folders, then snapshot filtering
         # would drop the destination-scanned photo ids, producing empty
@@ -16442,8 +16548,57 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         if destination and not os.path.isabs(destination):
             return json_error("destination must be an absolute path")
-        if local_processing and not destination:
-            return json_error("local_processing requires a destination")
+        # Remote (SSH) archive destination — mirrors the Move page's
+        # remote-target request shape (remote_target_id + subpath). It only
+        # makes sense with local_processing: files must be staged and
+        # processed on local disk, then rsynced to the NAS by the archive
+        # stage; a plain copy-mode ingest writes through the local
+        # filesystem and can't target an SSH path.
+        remote_archive_config = None
+        if remote_target_id and destination:
+            return json_error(
+                "destination and remote_target_id are mutually exclusive — "
+                "pick a local archive path or a saved remote target, not both"
+            )
+        if remote_subpath and not remote_target_id:
+            return json_error("remote_subpath requires remote_target_id")
+        if remote_target_id and not local_processing:
+            return json_error(
+                "remote_target_id requires local_processing — files are "
+                "staged and processed locally, then archived to the remote "
+                "target over SSH"
+            )
+        if remote_target_id:
+            import config as cfg
+            import move as move_mod
+            from pipeline_job import resolve_remote_archive
+
+            target = cfg.get_remote_target(remote_target_id)
+            if not target:
+                return json_error("Remote target not found", status=404)
+            try:
+                remote_archive_config = resolve_remote_archive(
+                    target, remote_subpath,
+                )
+            except ValueError as exc:
+                return json_error(str(exc))
+            # Refuse at request time when no GNU rsync exists, matching the
+            # move-folder endpoint — starting a job that is guaranteed to
+            # fail its storage preflight helps nobody.
+            effective_cfg = db.get_effective_config(cfg.load())
+            rsync_bin = move_mod.resolve_rsync_bin(
+                effective_cfg.get("rsync_bin", "") or "")
+            if not rsync_bin:
+                return json_error(
+                    "No GNU rsync found for remote archiving — macOS's "
+                    "built-in rsync can't drive rsync-over-SSH. Install GNU "
+                    "rsync (e.g. `brew install rsync`) or set its path under "
+                    "Settings → Paths."
+                )
+        if local_processing and not destination and not remote_target_id:
+            return json_error(
+                "local_processing requires a destination or a remote target"
+            )
         if local_processing and destination:
             from local_processing import final_destination_name
 
@@ -16477,11 +16632,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
 
         folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
-        if destination and folder_template:
+        # A remote archive still ingests through local staging, so the
+        # template gets applied there too — validate it for both shapes.
+        if (destination or remote_target_id) and folder_template:
             from ingest import _is_unsafe_path
             if _is_unsafe_path(folder_template):
                 return json_error("folder_template must be a relative path without '..' or backslashes")
 
+        # Snapshot the resolved target dict so the queued run archives to the
+        # host/mount the user saw at click-Start, not whatever the saved target
+        # gets edited to while another pipeline holds the slot. Mirrors how the
+        # move-folder endpoint captures its remote spec at enqueue rather than
+        # re-reading Settings at execution.
+        remote_target_snapshot = (
+            dict(remote_archive_config["target"])
+            if remote_archive_config is not None else None
+        )
         params = PipelineParams(
             collection_id=collection_id,
             source=source,
@@ -16489,6 +16655,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             source_snapshot_id=source_snapshot_id,
             destination=destination,
             local_processing=local_processing,
+            remote_target_id=remote_target_id or None,
+            remote_subpath=remote_subpath or "",
+            remote_target_snapshot=remote_target_snapshot,
             file_types=body.get("file_types", "both"),
             folder_template=folder_template,
             skip_duplicates=body.get("skip_duplicates", True),
@@ -16600,18 +16769,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # ``status='queued'`` until the slot opens. Callers receive the
         # same {"job_id": ...} response either way; clients learn about
         # the queued state via /api/jobs/<id> polling or the SSE stream.
+        job_config = {
+            "source": source,
+            "sources": sources,
+            "collection_id": collection_id,
+            "destination": destination,
+            "local_processing": local_processing,
+            "skip_classify": params.skip_classify,
+            "skip_extract_masks": params.skip_extract_masks,
+            "skip_regroup": params.skip_regroup,
+        }
+        if remote_archive_config is not None:
+            # Surface that the archive goes over SSH (and to where) so the
+            # jobs panel can show it, per the UI-transparency rule.
+            target = remote_archive_config["target"]
+            job_config["remote_archive"] = {
+                "target_id": target["id"],
+                "target_name": target["name"],
+                "host": target["host"],
+                "user": target["user"],
+                "subpath": remote_archive_config["subpath"],
+                "ssh_destination": remote_archive_config["ssh_final"],
+                "display": remote_archive_config["display"],
+            }
         job_id = runner.enqueue_pipeline(
             work,
-            config={
-                "source": source,
-                "sources": sources,
-                "collection_id": collection_id,
-                "destination": destination,
-                "local_processing": local_processing,
-                "skip_classify": params.skip_classify,
-                "skip_extract_masks": params.skip_extract_masks,
-                "skip_regroup": params.skip_regroup,
-            },
+            config=job_config,
             workspace_id=active_ws,
             runtime_warning=runtime_warning,
         )
@@ -18491,10 +18674,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             _record_working_copy_failure(db, photo, canonical)
             return "Could not load image", 500
         if recipe:
+            import local_masks
             from image_edits import apply_recipe_to_loaded_image
             img = apply_recipe_to_loaded_image(
                 img, recipe, max_size=size,
                 native_size=_recipe_source_dimensions(photo),
+                local_mask=local_masks.load_snapshot(
+                    vireo_dir, photo_id, recipe,
+                ),
             )
 
         preview_quality = cfg.load().get("preview_quality", 90)
@@ -18748,10 +18935,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         native_dims,
                         recipe,
                     )
+            import local_masks
             img = apply_recipe_to_loaded_image(
                 img, recipe_json, max_size=size,
                 native_size=native_dims,
                 detail_scale=preview_detail_scale,
+                local_mask=local_masks.load_snapshot(
+                    vireo_dir, photo_id, recipe_json,
+                ),
             )
         except RecipeError as e:
             return str(e), 400
@@ -19011,10 +19202,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if img is None:
                 _record_working_copy_failure(db, photo, image_path)
                 return "Could not load image", 500
+            import local_masks
             from image_edits import apply_recipe_to_loaded_image
             img = apply_recipe_to_loaded_image(
                 img, recipe,
                 native_size=_recipe_source_dimensions(photo),
+                local_mask=local_masks.load_snapshot(
+                    vireo_dir, photo_id, recipe,
+                ),
             )
             originals_dir = os.path.join(vireo_dir, "originals")
             cache_path = os.path.join(originals_dir, f"{photo_id}.jpg")
@@ -19516,7 +19711,13 @@ def main():
         token=api_token, mode=mode,
     )
 
-    app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
+    # Waitress uses a fixed thread pool (default 4). Each open SSE stream
+    # (bottom-panel logs, job progress, import duplicate check) pins one
+    # thread for its whole lifetime, so the pool must be sized well above
+    # the plausible number of concurrent streams or page loads queue
+    # behind them and the app appears frozen.
+    from waitress import serve as waitress_serve
+    waitress_serve(app, host="127.0.0.1", port=port, threads=16)
 
 
 if __name__ == "__main__":

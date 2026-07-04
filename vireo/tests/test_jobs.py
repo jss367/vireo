@@ -528,7 +528,6 @@ def test_job_steps_tracking(tmp_path):
 def test_job_history_persists_steps_tree(tmp_path):
     """Completed jobs persist their step tree to job_history."""
     import json
-    import time
 
     from db import Database
     from jobs import JobRunner
@@ -551,9 +550,10 @@ def test_job_history_persists_steps_tree(tmp_path):
 
     job_id = runner.start("scan", work, workspace_id=ws_id)
 
-    wait_for_job_via_runner(runner, job_id)
-
-    time.sleep(0.5)
+    # wait_for_history=True blocks until the worker thread has flushed the
+    # job_history row; the previous fixed time.sleep(0.5) raced the worker
+    # on slower Windows I/O and left get_history returning [].
+    wait_for_job_via_runner(runner, job_id, wait_for_history=True)
 
     history = runner.get_history(db, limit=1)
     assert len(history) > 0

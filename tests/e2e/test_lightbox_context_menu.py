@@ -72,7 +72,12 @@ def test_lightbox_right_click_opens_menu(live_server, page):
 
 
 def test_lightbox_overlay_toggles_persist_and_context_restores(live_server, page):
-    """Lightbox overlay visibility toggles persist and stay recoverable."""
+    """Lightbox overlay visibility toggles persist and stay recoverable.
+
+    Defaults with no stored preference: boxes/eye/info/chrome visible, masks
+    hidden (PR #1083). One click on each toggle therefore flips boxes, eye,
+    info and chrome OFF but flips masks ON.
+    """
     url = live_server["url"]
     page.goto(f"{url}/browse")
     page.evaluate(
@@ -109,7 +114,7 @@ def test_lightbox_overlay_toggles_persist_and_context_restores(live_server, page
         timeout=2000,
     )
     assert page.evaluate("localStorage.getItem('vireo.lb.boxesVisible')") == "0"
-    assert page.evaluate("localStorage.getItem('vireo.lb.masksVisible')") == "0"
+    assert page.evaluate("localStorage.getItem('vireo.lb.masksVisible')") == "1"
     assert page.evaluate("localStorage.getItem('vireo.lb.eyeVisible')") == "0"
     assert page.evaluate("localStorage.getItem('vireo.lb.infoVisible')") == "0"
     assert page.evaluate("localStorage.getItem('vireo.lb.chromeVisible')") == "0"
@@ -138,7 +143,7 @@ def test_lightbox_overlay_toggles_persist_and_context_restores(live_server, page
         timeout=2000,
     )
     assert page.locator("#lightboxToggleBoxes").inner_text() == "Show Boxes"
-    assert page.locator("#lightboxToggleMasks").inner_text() == "Show Masks"
+    assert page.locator("#lightboxToggleMasks").inner_text() == "Hide Masks"
     assert page.locator("#lightboxToggleEye").inner_text() == "Show Eye"
 
 

@@ -175,9 +175,16 @@ def generate_thumbnail(
             img.close()
             return None
     if recipe:
+        import local_masks
         from image_edits import apply_recipe_to_loaded_image
+        # cache_dir is <vireo_dir>/thumbnails, the same root derivation the
+        # app uses (dirname of THUMB_CACHE_DIR), so snapshots resolve here
+        # without threading vireo_dir through every caller.
         img = apply_recipe_to_loaded_image(
             img, recipe, max_size=size, native_size=native_size,
+            local_mask=local_masks.load_snapshot(
+                os.path.dirname(os.path.abspath(cache_dir)), photo_id, recipe,
+            ),
         )
 
     os.makedirs(cache_dir, exist_ok=True)

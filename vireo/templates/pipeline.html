@@ -880,15 +880,30 @@ body { padding-bottom: 36px; }
           <div class="setting-row">
             <div class="setting-item">
               <div class="setting-label">Destination</div>
-              <div style="display:flex;gap:6px;">
-                <input type="text" class="setting-select" id="cfgDestination" list="volumeDatalist"
-                       placeholder="/path/to/photo/library" style="font-family:inherit;flex:1;"
-                       oninput="updateStartButton();markFolderPreviewStale()">
-                <button onclick="openFolderBrowser('destination')" class="btn btn-secondary" style="white-space:nowrap;">Browse&hellip;</button>
+              <div style="margin-bottom:6px;">
+                <select id="cfgDestMode" class="setting-select" style="font-family:inherit;max-width:340px;"
+                        onchange="onDestModeChange()" data-testid="dest-mode-select">
+                  <option value="local">Local path</option>
+                </select>
               </div>
-              <div id="recentDestinations" style="display:none;margin-top:6px;" data-testid="recent-destinations">
-                <div style="font-size:11px;color:var(--text-dim);margin-bottom:4px;">Recent</div>
-                <div id="recentDestList" style="display:flex;flex-wrap:wrap;gap:4px;"></div>
+              <div id="destLocalRows">
+                <div style="display:flex;gap:6px;">
+                  <input type="text" class="setting-select" id="cfgDestination" list="volumeDatalist"
+                         placeholder="/path/to/photo/library" style="font-family:inherit;flex:1;"
+                         oninput="updateStartButton();markFolderPreviewStale()">
+                  <button onclick="openFolderBrowser('destination')" class="btn btn-secondary" style="white-space:nowrap;">Browse&hellip;</button>
+                </div>
+                <div id="recentDestinations" style="display:none;margin-top:6px;" data-testid="recent-destinations">
+                  <div style="font-size:11px;color:var(--text-dim);margin-bottom:4px;">Recent</div>
+                  <div id="recentDestList" style="display:flex;flex-wrap:wrap;gap:4px;"></div>
+                </div>
+              </div>
+              <div id="destRemoteRows" style="display:none;">
+                <input type="text" class="setting-select" id="cfgRemoteSubpath"
+                       placeholder="Archive folder under the target (e.g. 2026/kenya-trip)"
+                       style="font-family:inherit;width:100%;"
+                       oninput="updateRemoteDestPreview();updateStartButton()" data-testid="remote-subpath-input">
+                <div id="remoteDestPreview" style="font-size:11px;margin-top:4px;line-height:1.5;color:var(--text-dim);" data-testid="remote-dest-preview"></div>
               </div>
             </div>
           </div>
@@ -908,10 +923,13 @@ body { padding-bottom: 36px; }
           <div class="setting-row">
             <div class="setting-item">
               <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
-                <input type="checkbox" id="chkLocalProcessing" style="accent-color:var(--accent);" onchange="updateStartButton()" data-testid="local-processing-toggle"> Use local disk while processing
+                <input type="checkbox" id="chkLocalProcessing" style="accent-color:var(--accent);" onchange="updateStartButton(); schedulePlanRefresh()" data-testid="local-processing-toggle"> Use local disk while processing
               </label>
               <div style="font-size:11px;color:var(--text-dim);margin-top:4px;line-height:1.4;">
                 Files are staged locally for faster processing, then archived to the destination after verification.
+              </div>
+              <div id="remoteLocalProcessingNote" style="display:none;font-size:11px;color:var(--text-dim);margin-top:4px;line-height:1.4;" data-testid="remote-local-processing-note">
+                Required for SSH targets &mdash; files are staged and processed locally, then transferred over SSH.
               </div>
             </div>
           </div>
@@ -1381,6 +1399,7 @@ function initPipelinePage() {
     refreshPipelinePlan();
   });
   loadVolumes();
+  loadRemoteTargets();
 
   // Pre-fill folders from query params (e.g., from audit panel)
   var urlParams = new URLSearchParams(window.location.search);
@@ -2156,9 +2175,172 @@ function renderSourceFolders() {
 function selectRecentDestination(path) {
   document.getElementById('chkCopyPhotos').checked = true;
   onCopyModeChange();
+  // Recents are local paths — switch back out of any remote mode.
+  document.getElementById('cfgDestMode').value = 'local';
+  onDestModeChange();
   document.getElementById('cfgDestination').value = path;
   updateStartButton();
   markFolderPreviewStale();
+}
+
+/* ---------- Remote (SSH) archive targets ----------
+   Mirrors the Move page's saved-remote-target picker: the archive
+   destination becomes a saved SSH target plus a required subpath naming
+   the archive folder under it. Requires local processing (files are
+   staged locally, then rsynced over SSH by the archive stage). */
+var _remoteTargets = [];
+var _rsyncAvailable = false;
+
+async function loadRemoteTargets() {
+  try {
+    var data = await safeFetch('/api/remote-targets', {}, { toast: false });
+    _remoteTargets = (data && data.targets) || [];
+    _rsyncAvailable = !!(data && data.rsync_available);
+  } catch (e) {
+    _remoteTargets = [];
+    _rsyncAvailable = false;
+  }
+  var sel = document.getElementById('cfgDestMode');
+  if (!sel) return;
+  // Rebuild remote options, keeping the "Local path" option at index 0.
+  while (sel.options.length > 1) sel.remove(1);
+  _remoteTargets.forEach(function(t) {
+    var opt = document.createElement('option');
+    opt.value = 'remote:' + t.id;
+    opt.textContent = t.name + ' — ' + t.user + '@' + t.host + ' (SSH)';
+    sel.appendChild(opt);
+  });
+}
+
+// The remote target id when the destination mode is a remote target, else ''.
+function pipelineRemoteTargetId() {
+  var el = document.getElementById('cfgDestMode');
+  var v = el ? el.value : 'local';
+  return v.indexOf('remote:') === 0 ? v.slice(7) : '';
+}
+
+function pipelineRemoteTarget() {
+  var id = pipelineRemoteTargetId();
+  if (!id) return null;
+  return _remoteTargets.find(function(t) { return t.id === id; }) || null;
+}
+
+function onDestModeChange() {
+  var remoteId = pipelineRemoteTargetId();
+  document.getElementById('destLocalRows').style.display = remoteId ? 'none' : '';
+  document.getElementById('destRemoteRows').style.display = remoteId ? '' : 'none';
+  // SSH targets require the local staging flow: photos can't be processed
+  // in place over SSH, so the archive stage rsyncs the staged tree to the
+  // NAS. Lock the toggle on so its state always matches what the job does.
+  var lp = document.getElementById('chkLocalProcessing');
+  var note = document.getElementById('remoteLocalProcessingNote');
+  if (remoteId) {
+    if (lp) { lp.checked = true; lp.disabled = true; }
+    if (note) note.style.display = '';
+  } else {
+    if (lp) lp.disabled = false;
+    if (note) note.style.display = 'none';
+  }
+  updateRemoteDestPreview();
+  markFolderPreviewStale();
+  updateStartButton();
+  schedulePlanRefresh();
+}
+
+// Normalize a remote-target subpath the same way move.py sanitize_subpath
+// does (see move.html's copy of this helper): trim, fold backslashes,
+// reject absolute paths and '..' traversal, drop empty/'.' segments.
+// Sharing the backend's rules means the path the UI previews is the path
+// the archive will actually write — a UI-transparency requirement.
+function normalizeRemoteSubpath(raw) {
+  var trimmed = (raw || '').trim();
+  if (!trimmed) return {value: '', error: ''};
+  var s = trimmed.replace(/\\/g, '/');
+  if (s.charAt(0) === '/' || /^[A-Za-z]:/.test(s)) {
+    return {value: '', error: 'Subpath must be relative.'};
+  }
+  var parts = [];
+  var segs = s.split('/');
+  for (var i = 0; i < segs.length; i++) {
+    var seg = segs[i];
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') return {value: '', error: "Subpath may not contain '..'."};
+    parts.push(seg);
+  }
+  return {value: parts.join('/'), error: ''};
+}
+
+// True if `p` looks absolute on either backend OS (POSIX, Windows drive,
+// or UNC). Used to warn before the backend refuses a relative mount path.
+function _isAbsolutePath(p) {
+  if (!p) return false;
+  return p.charAt(0) === '/' || /^[A-Za-z]:[\\\/]/.test(p) || /^\\\\/.test(p);
+}
+
+// Mirror move.py rsync_dest_spec(): bracket IPv6-literal hosts so the
+// preview shows the exact spec rsync will be handed.
+function rsyncDestSpec(user, host, path) {
+  var hostToken = host && host.indexOf(':') !== -1 ? '[' + host + ']' : host;
+  return user + '@' + hostToken + ':' + path;
+}
+
+function _remoteDestWarn(text) {
+  var d = document.createElement('div');
+  d.style.color = 'var(--warning,#f0ad4e)';
+  d.textContent = text;
+  return d;
+}
+
+function updateRemoteDestPreview() {
+  var el = document.getElementById('remoteDestPreview');
+  if (!el) return;
+  el.textContent = '';
+  var t = pipelineRemoteTarget();
+  if (!t) return;
+  var subResult = normalizeRemoteSubpath(
+    document.getElementById('cfgRemoteSubpath').value);
+  if (subResult.error) {
+    el.appendChild(_remoteDestWarn('⚠ ' + subResult.error));
+  } else if (!subResult.value) {
+    var hint = document.createElement('div');
+    hint.textContent = 'Name the archive folder under ' + t.remote_path
+      + ' — e.g. 2026/kenya-trip.';
+    el.appendChild(hint);
+  } else {
+    var line = document.createElement('div');
+    line.textContent = 'Staged locally, then archived over SSH to: ';
+    var span = document.createElement('span');
+    span.style.fontFamily = 'monospace';
+    span.textContent = rsyncDestSpec(
+      t.user, t.host, t.remote_path.replace(/\/+$/, '') + '/' + subResult.value);
+    line.appendChild(span);
+    el.appendChild(line);
+  }
+  if (!_rsyncAvailable) {
+    el.appendChild(_remoteDestWarn('⚠ No GNU rsync found — remote archiving '
+      + 'needs it. Install GNU rsync or set its path under Settings → Paths.'));
+  }
+  if (!t.mount_path) {
+    el.appendChild(_remoteDestWarn('⚠ This target has no local mount path, so '
+      + 'archived photos couldn’t stay in your library. Add one in Settings → '
+      + 'Remote targets.'));
+  } else if (!_isAbsolutePath(t.mount_path)) {
+    el.appendChild(_remoteDestWarn('⚠ This target’s local mount path must be '
+      + 'absolute (e.g. "/Volumes/Photos"). Fix it under Settings → Remote '
+      + 'targets.'));
+  }
+}
+
+// True when the remote archive selection is complete and usable. Mirrors
+// the backend's POST validation so Start is only enabled for a request
+// that would be accepted.
+function remoteArchiveSelectionReady() {
+  var t = pipelineRemoteTarget();
+  if (!t || !_rsyncAvailable) return false;
+  if (!t.mount_path || !_isAbsolutePath(t.mount_path)) return false;
+  var subResult = normalizeRemoteSubpath(
+    document.getElementById('cfgRemoteSubpath').value);
+  return !subResult.error && !!subResult.value;
 }
 
 function onCopyModeChange() {
@@ -2339,9 +2521,11 @@ function markFolderPreviewStale() {
   document.getElementById('folderPreviewStale').style.display = '';
   var btn = document.getElementById('btnPreviewFolders');
   btn.textContent = 'Refresh preview';
-  // Only enable if prerequisites are still met (sources + destination)
+  // Only enable if prerequisites are still met (sources + a LOCAL
+  // destination — the preview can't walk an SSH target).
   var hasSources = _sourceFolders.length > 0;
-  var hasDest = document.getElementById('cfgDestination').value.trim();
+  var hasDest = !pipelineRemoteTargetId()
+    && document.getElementById('cfgDestination').value.trim();
   btn.disabled = !(hasSources && hasDest);
 }
 
@@ -2561,8 +2745,12 @@ function updateStartButton() {
       if (!wsName) btn.disabled = true;
     }
     if (_sourceMode === 'import' && _copyMode) {
-      var dest = document.getElementById('cfgDestination').value.trim();
-      if (!dest) btn.disabled = true;
+      if (pipelineRemoteTargetId()) {
+        if (!remoteArchiveSelectionReady()) btn.disabled = true;
+      } else {
+        var dest = document.getElementById('cfgDestination').value.trim();
+        if (!dest) btn.disabled = true;
+      }
     }
   }
 
@@ -2612,13 +2800,21 @@ function updateStartButton() {
   var previewHint = document.getElementById('previewFoldersHint');
   if (previewBtn) {
     var hasSources = _sourceFolders.length > 0;
-    var hasDest = _copyMode && document.getElementById('cfgDestination').value.trim();
+    var remoteMode = _copyMode && !!pipelineRemoteTargetId();
+    var hasDest = _copyMode && !remoteMode
+      && document.getElementById('cfgDestination').value.trim();
     if (hasSources && hasDest) {
       if (!_folderPreviewShown) previewBtn.disabled = false;
       previewHint.textContent = '';
     } else {
       previewBtn.disabled = true;
-      previewHint.textContent = 'Select source and destination to preview';
+      // The preview walks the destination on the local filesystem; an SSH
+      // target isn't locally walkable, so say the check doesn't run rather
+      // than pretending it did (existing remote files are still handled —
+      // the archive stage merges and refuses on content conflicts).
+      previewHint.textContent = remoteMode && hasSources
+        ? 'Folder preview isn’t available for SSH targets — existing remote files are checked at archive time'
+        : 'Select source and destination to preview';
     }
   }
 
@@ -2867,12 +3063,24 @@ async function startPipeline() {
       if (excluded.length > 0) body.exclude_paths = excluded;
     }
     if (_copyMode) {
-      body.destination = document.getElementById('cfgDestination').value.trim();
+      var remoteTargetId = pipelineRemoteTargetId();
+      if (remoteTargetId) {
+        // Remote (SSH) archive: same request shape as the Move page —
+        // saved target id + relative subpath — and always local processing
+        // (the backend rejects anything else).
+        var subResult = normalizeRemoteSubpath(
+          document.getElementById('cfgRemoteSubpath').value);
+        body.remote_target_id = remoteTargetId;
+        body.remote_subpath = subResult.value;
+        body.local_processing = true;
+      } else {
+        body.destination = document.getElementById('cfgDestination').value.trim();
+        var localProcessing = document.getElementById('chkLocalProcessing');
+        body.local_processing = !!(localProcessing && localProcessing.checked);
+      }
       body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
       body.verify_by_hash = document.getElementById('chkVerifyByHash').checked;
       body.folder_template = getSelectedFolderTemplate();
-      var localProcessing = document.getElementById('chkLocalProcessing');
-      body.local_processing = !!(localProcessing && localProcessing.checked);
     }
   } else if (_sourceMode === 'new_images') {
     body.source_snapshot_id = newImagesSnapshotId;
@@ -3071,6 +3279,23 @@ function _formatETA(seconds) {
   return h + 'h ' + m + 'm';
 }
 
+// Ingest is the only stage that ever reads the source (SD card/etc.) — every
+// later stage works off the copy it made. Once it reports success, surface
+// that explicitly instead of leaving the user to guess whether the card is
+// still in use (`ingestInfo.copied` is absent entirely in scan-in-place mode,
+// where there was never a copy and the card stays needed for the whole run).
+function _showSourceEjectSafe(ingestInfo) {
+  if (!ingestInfo || typeof ingestInfo.copied !== 'number') return;
+  var statusSourceEl = document.getElementById('statusSource');
+  if (!statusSourceEl) return;
+  var parts = [ingestInfo.copied.toLocaleString() + ' copied'];
+  if (ingestInfo.skipped_duplicate) {
+    parts.push(ingestInfo.skipped_duplicate.toLocaleString() + ' already present');
+  }
+  statusSourceEl.textContent = parts.join(', ') + ' — the card is safe to eject.';
+  statusSourceEl.className = 'status-msg ok';
+}
+
 function _updatePipelineStageUI(p) {
   var stages = p.stages || {};
 
@@ -3145,6 +3370,7 @@ function _updatePipelineStageUI(p) {
       if (a.completed > 0) {
         _stageOutcomes[cardSuffix2] = 'done';
         _setPill(cardSuffix2, 'done');
+        if (cardSuffix2 === 'Source') _showSourceEjectSafe(stages['ingest']);
       } else {
         // Every substage was skipped. Backend 'skipped' covers both
         // user-disabled stages and auto-skip; pick the right label so a
@@ -3294,8 +3520,12 @@ function _onPipelineComplete(result) {
     var fillSource = document.getElementById('fillSource');
     if (fillSource && fillSource.style.width && fillSource.style.width !== '0%') {
       fillSource.style.width = '100%';
-      var statusSourceEl = document.getElementById('statusSource');
-      if (statusSourceEl) { statusSourceEl.textContent = 'Done!'; statusSourceEl.className = 'status-msg ok'; }
+      if (stageResults.ingest && typeof stageResults.ingest.copied === 'number') {
+        _showSourceEjectSafe(stageResults.ingest);
+      } else {
+        var statusSourceEl = document.getElementById('statusSource');
+        if (statusSourceEl) { statusSourceEl.textContent = 'Done!'; statusSourceEl.className = 'status-msg ok'; }
+      }
     }
   }
 
@@ -4876,6 +5106,18 @@ function _buildPlanBody() {
         if (_duplicateResults[p]) hashDupPaths.push(p);
       });
       if (hashDupPaths.length) body.hash_duplicate_paths = hashDupPaths;
+    }
+
+    // The planner's "0 new photos to import, nothing to …" claim for an
+    // all-duplicates selection is only true in local-processing mode:
+    // the post-ingest scan then walks the local staging root (empty when
+    // everything deduplicated), while plain copy mode re-scans the real
+    // destination and can surface existing unprocessed rows as downstream
+    // work. Send the toggle state so the backend can tell the modes
+    // apart — mirrors how /api/jobs/pipeline carries local_processing.
+    if (_sourceMode === 'import' && _copyMode) {
+      var lp = document.getElementById('chkLocalProcessing');
+      body.local_processing = !!(lp && lp.checked);
     }
   }
 
