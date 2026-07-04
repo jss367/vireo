@@ -1125,6 +1125,46 @@ No `EDIT_MATH_VERSION` bump: recipes without `local` render byte-identically.
   the same wait-until-ready contract the render pipeline already
   applies to their previews.
 
+  **Rendered-output paths refuse to bake `pending:*` refs into
+  permanent artifacts.** Previews and grid thumbnails only cache
+  regenerable bytes — a pending target reads as warn-and-hold-zero
+  during the pending window and flips to the finalized render as
+  soon as the resnapshot job invalidates its cache — so treating a
+  missing snapshot as "render without local" is safe there. But
+  three rendered-output paths write bytes that survive the pending
+  window and cannot be repaired by finalization after the fact:
+  `export_photos` (`vireo/export.py:166-380`) reads the current
+  recipe and calls `apply_recipe_to_loaded_image` before writing
+  the file to disk under a user-chosen location; the Open External
+  handoff (`_external_edit_recipe_source` → `apply_recipe_to_loaded_image`,
+  `vireo/app.py:9195-9257`) renders once into `external-edits/<id>.jpg`
+  and hands the path to another application which then owns the file;
+  and the iNat upload path (`vireo/app.py:11540-11585`) renders
+  and POSTs the bytes to a remote server. If any of these ran
+  against a target still holding `pending:<placeholder_token>`,
+  the resulting file / upload would permanently omit the local
+  edits the user pasted, and no later finalization event could
+  reach the on-disk export, the editor the user already opened, or
+  the iNat observation the server already accepted. PR 1 therefore
+  has each of these paths gate on the placeholder-token check
+  before rendering: any recipe whose `local.mask.ref` matches a
+  placeholder recorded on a still-`queued`/`running`
+  `local_resnapshot_jobs` row is treated as **not-ready** —
+  `export_photos` skips the photo with a per-photo reason
+  (`local adjustments pending`), records it in the job's skipped
+  list so the user learns which photos to re-export after the
+  resnapshot finishes, and continues with the rest of the
+  selection; Open External and iNat return a 409 with the same
+  reason and the UI surfaces "wait for the local resnapshot to
+  finish" rather than opening or uploading. Same detection surface
+  as XMP sync (matched against `local_resnapshot_jobs.placeholder_tokens`,
+  not the `pending:` prefix alone), same wait-until-ready contract,
+  and the render invalidation on finalization already re-arms the
+  next attempt. This deliberately errs on the side of skipping a
+  handful of targets over silently exporting local-disabled bytes:
+  the "warn-and-hold-zero" fallback exists for regenerable caches,
+  not for artifacts that leave Vireo's control.
+
   **And it scrubs the placeholder token from every later history and
   sync record that captured it, not only the endpoint's own row.** A
   target the user edits *while the bulk resnapshot is still
@@ -1237,9 +1277,41 @@ No `EDIT_MATH_VERSION` bump: recipes without `local` render byte-identically.
   a per-target recipe (they appear only in the `skipped` list); pending
   targets appear in both the per-target map (with their placeholder
   recipe) and the top-level `pending` list, and the UI treats a pending
-  target's local pass as disabled-until-ready. Direct
-  recipe writes to a single photo (the normal editor save path) keep the
-  ref they were given — the resnapshot is one instance of a more general
+  target's local pass as disabled-until-ready.
+
+  **Single-photo recipe writes verify the ref belongs to that photo.**
+  The normal editor save path (`POST /api/photos/<int:photo_id>/edit-recipe`,
+  `vireo/app.py:3968-3986`) accepts an arbitrary recipe payload and
+  stores it via `db.set_photo_edit_recipe`; nothing today ties the
+  incoming `local.mask.ref` to `photo_id`. If a client — a scripted
+  caller, a browser extension, or a hand-crafted request — POSTs a
+  recipe copied from another photo (or lifted from the paste UI's
+  cache before finalization), the endpoint would happily persist a
+  foreign `<other_id>.<ref>...` reference on this photo's row,
+  and every subsequent render would look for
+  `<photo_id>.<ref>.{decode}.png` on disk, find nothing, and disable
+  the local pass — the same silent-failure the bulk and pairing
+  paths were rewritten to prevent, arriving via the single-photo
+  door. PR 1 therefore has the single-photo write path validate
+  ownership before storing the recipe: if the payload carries a
+  `local` block, the endpoint loads the target's current recipe
+  and accepts the incoming `local.mask.ref` only if it either
+  equals the target's current ref (a no-op re-save from the editor)
+  or is already recorded in the target's snapshot family under
+  `<photo_id>.<ref>.{decode}.png` (an ownership check against the
+  target's own on-disk snapshot files, not just the DB). Any other
+  supplied ref — including a `pending:*` placeholder token, which
+  is never a valid single-photo save target — is rejected with a
+  409 (`local ref not owned by this photo`) and the recipe is not
+  persisted; the client is expected to route foreign refs through
+  the bulk-apply endpoint (which will resnapshot them) instead of
+  bypassing the strip-and-resnapshot helper. This closes the last
+  same-shape hole: recipe writes to a single photo now either
+  keep the ref they were given (because it was already this
+  photo's ref) or refuse it, and never persist a ref whose
+  snapshot family lives under someone else's photo id.
+
+  The resnapshot is one instance of a more general
   contract: **any code path that transfers a `recipe_json` from one
   `photo_id` to another must go through the same strip-and-resnapshot
   helper.** The bulk-apply endpoint is the obvious case, but not the
