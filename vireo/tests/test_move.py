@@ -2520,3 +2520,39 @@ def test_rsync_streamed_runs_as_long_as_it_progresses(monkeypatch):
     assert timed_out is False
     assert rc == 0
     assert len(seen) == 8  # progress reported for every transferred file
+
+
+@pytest.mark.skipif(not hasattr(os, "openpty"), reason="pty is POSIX-only")
+def test_rsync_streamed_survives_block_buffered_rsync(tmp_path):
+    """A real child that block-buffers stdout (as Apple's openrsync does when
+    writing to a pipe) must still stream per-file lines to the parent and
+    survive the stall watchdog. Regression test: over a pipe, openrsync's
+    --out-format lines all arrive in one burst at exit, so the watchdog saw
+    pure silence and killed healthy NAS transfers slower than the stall
+    window. The pty keeps the child line-buffered."""
+    import move as move_mod
+
+    fake_rsync = tmp_path / "fake_rsync"
+    fake_rsync.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys, time\n"
+        "for i in range(4):\n"
+        # No flush: block-buffered when stdout is a pipe, line-buffered
+        # when stdout is a tty — same behavior split as openrsync.
+        "    sys.stdout.write('DSC_%04d.NEF\\n' % i)\n"
+        "    time.sleep(0.4)\n"
+    )
+    fake_rsync.chmod(0o755)
+
+    seen = []
+    rc, stderr, timed_out = move_mod._run_rsync_streamed(
+        str(tmp_path / "src"), str(tmp_path / "dst"), [], 4,
+        lambda cur, tot, name, phase: seen.append(name),
+        rsync_bin=str(fake_rsync),
+        # Total runtime (4 x 0.4s = 1.6s) exceeds the stall window, so the
+        # watchdog only stays quiet if lines genuinely stream one by one.
+        stall_timeout=1.2,
+    )
+    assert timed_out is False
+    assert rc == 0
+    assert seen == [f"DSC_{i:04d}.NEF" for i in range(4)]
