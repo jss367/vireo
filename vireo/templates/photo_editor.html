@@ -1560,9 +1560,16 @@ function toggleMaskOverlay() {
 function refreshMaskOverlay() {
   var overlay = document.getElementById('maskOverlayImg');
   if (!overlay) return;
-  var recipe = editorState.showBefore
-    ? previewRecipeFor(editorState.savedRecipe)
-    : previewRecipe();
+  // Keep crop in the overlay recipe. /edit-mask-preview strips crop only
+  // for geometry alignment with the uncropped editor preview, but still
+  // uses the ORIGINAL cropped recipe to compute the saved-render feather
+  // scale (mirroring what /edit-preview passes to
+  // apply_recipe_to_loaded_image). Sending a crop-stripped recipe here
+  // would let the endpoint recompute the scale from the uncropped
+  // dimensions and the overlay halo would drift from the pixels the
+  // saved cropped render actually weights.
+  var source = editorState.showBefore ? editorState.savedRecipe : editorState.recipe;
+  var recipe = recipeForSave(source || {});
   if (!editorState.maskOverlay || !recipe.local) {
     // Bump the sequence and clear handlers so any in-flight preview load
     // can't win the race and re-show an overlay the user just hid (or one
