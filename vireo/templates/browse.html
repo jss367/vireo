@@ -5402,6 +5402,18 @@ function closeDetail() {
   hideDetailPanel();
   selectedPhotoId = null;
   selectedIndex = -1;
+  // Drop any lingering EXIF suggestion attached to the closed detail photo.
+  // Without this, the element keeps its data-photo-id and Accept button; a
+  // later Ctrl+A (or any batch that still contains that photo) would satisfy
+  // renderLocationEmpty's owner-in-selection check and resurrect the anchor's
+  // Accept line for the whole batch — clicking it would apply the anchor's
+  // GPS-derived place to every selected photo. Codex P2 on PR #1097.
+  var sugg = document.getElementById('locationExifSuggestion');
+  if (sugg) {
+    sugg.hidden = true;
+    sugg.innerHTML = '';
+    if (sugg.dataset) delete sugg.dataset.photoId;
+  }
   // Re-highlight any cmd/shift-click selections that survive detail close.
   // A blanket .remove('selected') would leave selectedPhotos armed for batch
   // actions with no visible indicator — e.g. click A -> cmd-click B -> cmd-click
