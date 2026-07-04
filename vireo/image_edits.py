@@ -791,13 +791,24 @@ def apply_recipe_to_loaded_image(
     return result
 
 
-def local_weight_map(local_mask, source_size, recipe, native_size=None):
+def local_weight_map(
+    local_mask, source_size, recipe, native_size=None, detail_scale=None,
+):
     """The local-adjustment weight map exactly as the renderer computes it.
 
     For overlay/preview consumers: fit the snapshot to the render source,
     ride the recipe's geometry, feather at this resolution. Returns a float
     [0,1] array, or None when the recipe has no local section or the mask
     cannot be trusted to line up (same disable conditions as rendering).
+
+    ``detail_scale`` overrides the scale used to convert the recipe's
+    feather amount into pixels. Use it when the caller has already
+    stripped crop from ``recipe`` to align with an uncropped preview
+    (the edit-mask-preview endpoint does this) so the feather still
+    matches the halo the saved cropped render will actually produce —
+    otherwise the overlay recomputes the scale from the crop-stripped
+    recipe and disagrees with what /edit-preview passes to
+    :func:`apply_recipe_to_loaded_image`.
     """
     normalized = normalize_recipe(recipe)
     local = (normalized or {}).get("local")
@@ -807,7 +818,11 @@ def local_weight_map(local_mask, source_size, recipe, native_size=None):
     if fitted is None:
         return None
     mask_geo = _apply_geometry(fitted, normalized)
-    scale = detail_render_scale(mask_geo.size, native_size, normalized)
+    scale = (
+        detail_scale
+        if detail_scale is not None
+        else detail_render_scale(mask_geo.size, native_size, normalized)
+    )
     feather = (local["mask"].get("feather") or 0.0) * scale
     return _feathered_weight(mask_geo, feather)
 

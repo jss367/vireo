@@ -18827,9 +18827,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         import local_masks
         from image_edits import (
             RecipeError,
+            detail_render_scale,
             local_weight_map,
             normalize_recipe,
         )
+        from render_source import rendered_recipe_long_edge
         try:
             normalized = normalize_recipe(recipe) or {}
         except RecipeError as e:
@@ -18847,9 +18849,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         source_dims = _scaled_recipe_source_dimensions(photo, size)
         if not source_dims[0] or not source_dims[1]:
             source_dims = snapshot.size
+        # Feather scale must reflect the SAVED (cropped) render even though
+        # the overlay is aligned with the uncropped preview — mirrors what
+        # /edit-preview passes to apply_recipe_to_loaded_image. Otherwise
+        # a cropped recipe's overlay halo drifts from the pixels the saved
+        # render actually weights.
+        native_dims = _recipe_source_dimensions(photo)
+        preview_detail_scale = None
+        if native_dims and native_dims[0] and native_dims[1]:
+            saved_native_long = float(rendered_recipe_long_edge(
+                native_dims[0], native_dims[1], normalized,
+            ))
+            if saved_native_long > 0:
+                saved_rendered_long = min(float(size), saved_native_long)
+                preview_detail_scale = detail_render_scale(
+                    (saved_rendered_long, saved_rendered_long),
+                    native_dims,
+                    normalized,
+                )
         weight = local_weight_map(
             snapshot, source_dims, display_recipe,
-            native_size=_recipe_source_dimensions(photo),
+            native_size=native_dims,
+            detail_scale=preview_detail_scale,
         )
         if weight is None:
             return "Mask does not fit this photo", 404

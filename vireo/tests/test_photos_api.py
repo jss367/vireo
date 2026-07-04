@@ -8022,6 +8022,73 @@ def test_edit_mask_preview_serves_transformed_weight_map(client_with_photo):
         assert img.size == (800, 600)
 
 
+def test_edit_mask_preview_feather_scale_matches_saved_render(client_with_photo):
+    """Overlay feather uses the SAVED (cropped) render's scale.
+
+    Regression: the endpoint strips crop before calling ``local_weight_map``
+    so the overlay lines up with the uncropped editor preview, but the
+    feather scale must still come from the original (cropped) recipe —
+    that is what ``/edit-preview`` passes to
+    ``apply_recipe_to_loaded_image`` as ``detail_scale``. Otherwise a
+    cropped recipe's overlay halo drifts from the pixels the saved render
+    actually weights.
+    """
+    import io
+    import json
+
+    import numpy as np
+    from PIL import Image as PILImage
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute("SELECT path FROM folders").fetchone()
+    _register_active_mask(db, photo_id, folder["path"])
+    mask = client.post(
+        f"/api/photos/{photo_id}/local-mask/snapshot"
+    ).get_json()["mask"]
+
+    # Large feather + tight crop so the crop-derived scale doubles the
+    # crop-stripped one: photo native = 800x600, size = 400.
+    #   Old (buggy) scale = 400/800 = 0.5 (crop-stripped, uncropped long)
+    #   New scale         = 320/320 = 1.0 (saved cropped render)
+    # so the fix should ~2x the Gaussian-feather sigma.
+    payload = _local_recipe_payload(dict(mask, feather=50.0))
+    payload["recipe"]["crop"] = {"x": 0.1, "y": 0.1, "w": 0.4, "h": 0.4}
+    recipe_cropped = payload["recipe"]
+    recipe_full = dict(recipe_cropped)
+    recipe_full.pop("crop")
+
+    def _overlay_alpha(recipe):
+        resp = client.get(
+            f"/photos/{photo_id}/edit-mask-preview",
+            query_string={"size": "400", "recipe": json.dumps(recipe)},
+        )
+        assert resp.status_code == 200
+        with PILImage.open(io.BytesIO(resp.data)) as img:
+            assert img.size == (400, 300)
+            return np.asarray(img)[..., 3].astype(np.float32)
+
+    alpha_cropped = _overlay_alpha(recipe_cropped)
+    alpha_full = _overlay_alpha(recipe_full)
+
+    # Both overlays are aligned with the uncropped preview (400x300), so
+    # the mask's left/right split sits at the same column in each. The
+    # difference is only the feather sigma.
+    def _transition_width(alpha):
+        # Count columns whose mid-row alpha lies in the Gaussian
+        # transition band around the step edge at x ~ 200.
+        row = alpha[150]
+        return int(np.count_nonzero((row > 5) & (row < 145)))
+
+    w_cropped = _transition_width(alpha_cropped)
+    w_full = _transition_width(alpha_full)
+    assert w_cropped > w_full + 20, (
+        f"cropped-recipe overlay halo ({w_cropped}px) should be materially "
+        f"wider than the uncropped ({w_full}px) — the endpoint likely used "
+        "the crop-stripped recipe's scale instead of the saved-render scale."
+    )
+
+
 def test_edit_mask_preview_missing_snapshot_404s(client_with_photo):
     import json
 
