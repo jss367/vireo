@@ -656,25 +656,48 @@ the missing snapshot family instead of leaving fallback renders with
 warn-and-hold-zero forever. The expected set is the same list §Snapshot
 creation enumerates against the current source state — one `standard`
 for non-RAW primaries; one `preserve_highlights` for RAWs whose folder
-has no companion; both for RAWs with a companion — with the same
-`used_embedded_fallback` / `working_copy_source='embedded_jpeg'` gates
-that drop `preserve_highlights` from the expected set on unsupported
-RAWs. Concretely this covers: a RAW-only recipe whose folder later
-gains a companion JPEG (a `standard` variant is now expected because
-the companion-fallback render path exists — Update materializes it
-against the companion), and a RAW+JPEG recipe whose original snapshot
-skipped `preserve_highlights` because `_load_raw` hit the embedded
-fallback and whose RAW is later replaced/repaired so `_load_raw` now
-demosaics (a `preserve_highlights` variant is now expected — Update
-materializes it against the demosaiced load). It does not cover
-transitioning **out** of the embedded-fallback state solely because
-libraw was upgraded server-side without a source-file change: the
-`preserve_highlights` variant's expected inputs (RAW `file_hash` and
-the preserve-space re-detection prompt) haven't changed, so nothing on
-the source-digest side flags it either; the user has to trigger a
-re-scan or an explicit "regenerate local snapshots" action for that
-state transition, and PR 1's Update rule catches it the first time
-the source-side inputs (or `working_copy_source`) do change. It also
+has no companion; both for RAWs with a companion — with the persisted
+`photos.working_copy_source='embedded_jpeg'` gate dropping
+`preserve_highlights` from the expected set on unsupported RAWs.
+**`working_copy_source` is the only signal the stale check consults for
+decodability; `used_embedded_fallback` is a live decode return from
+`_load_raw` that the stale check never invokes.** That keeps the
+guarantee above — every digest input is a cheap DB/file-metadata
+signal — intact for the expected-set rule as well: computing whether
+`preserve_highlights` is materializable is a single column read on
+`photos`, not a RAW decode. The scanner's file-changed path is what
+keeps `working_copy_source` current: on any RAW `file_hash` change the
+scanner re-extracts the working copy and rewrites `working_copy_source`
+to the new decodability outcome (`'raw'` when `_load_raw` demosaiced,
+`'embedded_jpeg'` when it fell through), so a repaired or replaced RAW
+whose libraw now demosaics has its `working_copy_source` column
+transition from `'embedded_jpeg'` to `'raw'` before any editor open —
+and the next stale check reads that transition without touching the
+RAW itself. Concretely this covers: a RAW-only recipe whose folder
+later gains a companion JPEG (a `standard` variant is now expected
+because the companion-fallback render path exists — Update materializes
+it against the companion), and a RAW+JPEG recipe whose original
+snapshot skipped `preserve_highlights` because the initial extraction
+recorded `working_copy_source='embedded_jpeg'` and whose RAW is later
+replaced/repaired so the next scan flips `working_copy_source` to
+`'raw'` (a `preserve_highlights` variant is now expected — Update
+materializes it against the demosaiced load). A recipe on a RAW whose
+`working_copy_source` is still NULL (no scan or lazy-classification
+pass has extracted the working copy yet) is treated as *unknown*
+decodability by the stale check, not as *materializable*: a NULL row
+does not flag `preserve_highlights` as expected-but-absent, so the
+editor doesn't spuriously invite the user to Update a variant that
+would immediately fall back to embedded-JPEG and refuse to
+materialize. As soon as either the backfill or the lazy classification
+sweep sets that column to a definite value, the next stale check sees
+the correct expected set. It does not cover transitioning **out** of
+the embedded-fallback state solely because libraw was upgraded
+server-side without a source-file change: nothing bumps `file_hash`,
+so the scanner never re-runs extraction and `working_copy_source`
+stays `'embedded_jpeg'`; the user has to trigger a re-scan or an
+explicit "regenerate local snapshots" action for that state
+transition, and PR 1's Update rule catches it the first time the
+source-side inputs (or `working_copy_source`) do change. It also
 does not cover companion-JPEG removal: when the source state now
 expects **fewer** variants than `mask.decodes` currently holds, the
 extra entry is left in place rather than pruned, so any render still
@@ -1436,7 +1459,31 @@ No `EDIT_MATH_VERSION` bump: recipes without `local` render byte-identically.
   variant is generated against the companion pixels *before* the
   companion file itself is removed, and remains valid afterwards
   because it lives under the RAW primary's photo id and its own
-  content-addressed ref). Only when both sides fail — the RAW
+  content-addressed ref). **The consumed `photo_masks` rows and
+  `active_mask_variant` are copied onto the RAW primary in the same
+  transaction that writes the resnapshotted recipe**, so the RAW
+  primary ends pairing with its own coherent mask state: its
+  `photos.active_mask_variant` names the variant the snapshot family
+  was built from, and the `photo_masks` row for that variant lives
+  under the RAW primary's photo id (with `photo_masks.path` rewritten
+  to a mask file the RAW primary owns — either moved out of the
+  companion's mask directory into the RAW primary's, or re-emitted
+  from the in-memory mask array — so the mask file survives the
+  companion row's delete cascade). Without that copy the RAW primary
+  would render fine against the on-disk snapshot family but present as
+  maskless to every DB-driven consumer: the editor's usable-mask gate
+  would refuse to open the local panel, and the `source_digest` for
+  the newly written `preserve_highlights` / `standard` entries has no
+  `photos.active_mask_variant` row to hash — a subsequent stale check
+  couldn't recompute the digest and Update could never fire against
+  the pairing-produced family. Copying the mask over makes those
+  entries indistinguishable from a snapshot family the RAW primary
+  built for itself: the digest inputs enumerated in §Staleness resolve
+  the same way (companion-JPEG-space source mask bytes and prompt for
+  `standard`; RAW-side re-detection prompt for `preserve_highlights`,
+  which was computed against the RAW primary during materialization
+  and stored at that point), and Update can regenerate them if the
+  RAW ever gets its own detection later. Only when both sides fail — the RAW
   primary has no usable mask *and* the companion has none either, or
   the companion's mask exists but no viable decode basis remains for
   the RAW primary (e.g. RAW-only recipe with `used_embedded_fallback`
