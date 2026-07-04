@@ -565,11 +565,47 @@ variant against the inputs *that variant was actually built from*:
   `photos.active_mask_variant` changes, and the editor could never
   surface Update on non-RAW photos.
 Staleness for a variant means the current inputs' re-computed digest
-differs from that entry's `source_digest`; the editor surfaces "Newer
-subject mask available — Update" whenever **any** variant is stale, and
-Update **always rotates `local.mask.ref` to a fresh content-addressed
-value** and writes a complete new family under it — regenerating the
-variants whose digests changed and **copying the untouched variant files
+differs from that entry's `source_digest`. A **decode basis the current
+source state now expects but which has no entry in `mask.decodes`** is
+also treated as stale (a "materializable" variant), so Update can add
+the missing snapshot family instead of leaving fallback renders with
+warn-and-hold-zero forever. The expected set is the same list §Snapshot
+creation enumerates against the current source state — one `standard`
+for non-RAW primaries; one `preserve_highlights` for RAWs whose folder
+has no companion; both for RAWs with a companion — with the same
+`used_embedded_fallback` / `working_copy_source='embedded_jpeg'` gates
+that drop `preserve_highlights` from the expected set on unsupported
+RAWs. Concretely this covers: a RAW-only recipe whose folder later
+gains a companion JPEG (a `standard` variant is now expected because
+the companion-fallback render path exists — Update materializes it
+against the companion), and a RAW+JPEG recipe whose original snapshot
+skipped `preserve_highlights` because `_load_raw` hit the embedded
+fallback and whose RAW is later replaced/repaired so `_load_raw` now
+demosaics (a `preserve_highlights` variant is now expected — Update
+materializes it against the demosaiced load). It does not cover
+transitioning **out** of the embedded-fallback state solely because
+libraw was upgraded server-side without a source-file change: the
+`preserve_highlights` variant's expected inputs (RAW `file_hash` and
+the preserve-space re-detection prompt) haven't changed, so nothing on
+the source-digest side flags it either; the user has to trigger a
+re-scan or an explicit "regenerate local snapshots" action for that
+state transition, and PR 1's Update rule catches it the first time
+the source-side inputs (or `working_copy_source`) do change. It also
+does not cover companion-JPEG removal: when the source state now
+expects **fewer** variants than `mask.decodes` currently holds, the
+extra entry is left in place rather than pruned, so any render still
+resolving to that decode keeps rendering off the existing snapshot;
+GC eventually reclaims it once no recipe (current or history)
+references its ref. Update's job is to add missing coverage, not to
+delete coverage that some historical recipe or edge-case render path
+may still legitimately use. The editor surfaces "Newer subject mask
+available — Update" whenever **any** variant is stale (digest-drift
+or materializable), and Update **always rotates `local.mask.ref` to a
+fresh content-addressed value** and writes a complete new family
+under it — regenerating the variants whose digests changed,
+**materializing** the ones expected-but-absent (fresh
+detection/segmentation against that decode's own load, same as first
+snapshot creation), and **copying the untouched variant files
 byte-for-byte** to the new ref's filenames. The ref rotation is
 **atomic against readers**: the publish order is (a) write every
 regenerated variant to
