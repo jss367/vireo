@@ -522,9 +522,30 @@ passes. The weight map is built once and materialized at both scales:
    `'embedded_jpeg'` rows stay disabled by design. `recipe_render_source` already
    distinguishes these paths internally, so it returns the effective basis
    alongside the source path for the weight-map builder to consume.
-   `recipe_render_source`'s return value is only the *initial* basis, and
-   **every** recipe render call site that can late-swap the loaded image
-   has to update the basis in lock-step with the swap. Today those sites
+   The Open External and iNaturalist handoff paths do **not** go through
+   `_recipe_render_source` for the initial source pick unless the recipe
+   has a crop: `_external_edit_recipe_source`
+   (`vireo/app.py:9086-9139`) and `_inat_edit_recipe_source`
+   (`vireo/app.py:11428-11472`) each re-implement the RAW-offline
+   fallback (swap in the working copy or companion JPEG when the RAW
+   original is missing) in their own no-crop branches, so the initial
+   basis for those handoffs is set inside those resolvers — not by
+   `_recipe_render_source`. Both resolvers therefore return an
+   effective basis alongside the source path, mirroring
+   `_recipe_render_source`'s contract and applying the same
+   `working_copy_source` / companion-vs-RAW rules from the enumeration
+   above (companion → `standard`; working copy → whichever basis the
+   row's `working_copy_source` column names; RAW original →
+   `preserve_highlights` for a RAW primary, `standard` otherwise).
+   Without that, an offline-RAW handoff or upload would render a
+   preserve-highlights basis against companion-standard pixels for
+   exactly the RAW+JPEG cases the fallback exists to serve — a
+   misalignment that would happen at *initial* resolution, before any
+   late swap runs, so the late-swap contract below cannot rescue it.
+   Whichever resolver produced it, the initial basis is only the
+   *starting* value, and **every** recipe render call site that can
+   late-swap the loaded image after initial resolution has to update
+   the basis in lock-step with the swap. Today those sites
    are: `serve_preview` and the edit-preview route, which drop an
    undersized embedded-JPEG or failed RAW decode in favor of the
    companion JPEG (`vireo/app.py:18395-18453`, `18630-18691`); the
