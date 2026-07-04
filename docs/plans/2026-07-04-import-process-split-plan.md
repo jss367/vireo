@@ -170,9 +170,35 @@ def resolve_strategy(name):
 - **strategy disables + workspace enables** (e.g. `cull_ready` on a default workspace): short-circuit *before* `compute_misses_for_workspace` so the stage records `skipped`. A local variable alone would only gate the cache marker at `pipeline_job.py:4991`; the compute call still reads `pipeline_cfg["miss_enabled"]` from workspace config (`vireo/misses.py:381`) and would evaluate + write miss flags anyway.
 - **strategy enables + workspace disables** (a user runs `full` on a workspace where misses are turned off): the guard doesn't fire (effective value is True), so we fall through to the existing compute path — but that path reads `pipeline_cfg["miss_enabled"]`, which is still False from workspace config, and `compute_misses_for_workspace` returns 0. The stage would then stamp `completed / 0 photos evaluated`, which reads as "misses ran and found none." Fix by **also injecting the effective value into `pipeline_cfg` before the guard**, so both the guard and the downstream compute call see the same effective value.
 
-Insert the guard **immediately after** the existing `if params.skip_regroup or params.skip_classify or ... :` block at `pipeline_job.py:4936-4946` (still before the `stages["misses"]["status"] = "running"` at :4948, so the "skipped" record wins over any transient "running" write):
+Insert the guard **immediately after** the existing `if params.skip_regroup or params.skip_classify or ... :` block at `pipeline_job.py:4936-4946`, still before the `stages["misses"]["status"] = "running"` at :4948 so the "skipped" record wins over any transient "running" write.
+
+The guard reads `thread_db.get_effective_config(cfg.load())`, but in the current `miss_stage` **neither `thread_db` nor `cfg` are in scope at :4946** — they are only constructed and imported inside the later `try:` block (`import config as cfg` at :4955; `thread_db = Database(db_path)` at :4959; `thread_db.set_active_workspace(workspace_id)` at :4960; `effective_cfg = thread_db.get_effective_config(cfg.load())` at :4962). Inserting the guard as-is would `NameError` on every collection-scoped run that reached it. This task therefore **hoists the imports and DB/config setup above the transient "running" write** (wrapped in their own try/except so a setup failure is recorded via `errors.append` exactly as the existing block does) and **deletes** the now-duplicated lines from the later try block. The full replacement for lines 4948-4963 is:
 
 ```python
+# Hoisted from the try: block below so the miss_enabled guard can
+# read effective config before the transient "running" status is
+# written. The existing try/except at ~:4997 no longer needs these
+# imports/loads — delete lines 4955-4963 in that block after this
+# insert (do NOT leave the original load in place, or the compute
+# call further down will still see the un-overridden workspace value
+# in the strategy-enables-but-workspace-disables case).
+try:
+    from datetime import UTC, datetime
+
+    import config as cfg
+    from misses import compute_misses_for_workspace
+    from pipeline import load_results_raw, save_results_raw
+
+    thread_db = Database(db_path)
+    thread_db.set_active_workspace(workspace_id)
+
+    effective_cfg = thread_db.get_effective_config(cfg.load())
+    pipeline_cfg = effective_cfg.get("pipeline", {})
+except Exception as e:
+    errors.append(f"[misses] Fatal: {e}")
+    log.exception("Pipeline miss-detection setup failed")
+    return
+
 # effective miss_enabled: per-run PipelineParams override wins over
 # workspace config, mirroring how other skip_* flags override
 # workspace defaults. Inject the effective value into pipeline_cfg
@@ -181,8 +207,6 @@ Insert the guard **immediately after** the existing `if params.skip_regroup or p
 # reads pipeline_cfg["miss_enabled"] itself (vireo/misses.py:381), so a
 # strategy that enables misses on a workspace where they're disabled
 # would otherwise get a silent 0 from compute.
-effective_cfg = thread_db.get_effective_config(cfg.load())
-pipeline_cfg = effective_cfg.get("pipeline", {})
 if params.miss_enabled is not None:
     pipeline_cfg = {**pipeline_cfg, "miss_enabled": params.miss_enabled}
 miss_enabled = pipeline_cfg.get("miss_enabled", True)
@@ -198,9 +222,15 @@ if not miss_enabled:
                        summary="Skipped")
     _update_stages(runner, job["id"], stages)
     return
+
+stages["misses"]["status"] = "running"
+runner.update_step(job["id"], "misses", status="running")
+_update_stages(runner, job["id"], stages)
 ```
 
-Because the guard returns before `compute_misses_for_workspace` is reached, no `miss` rows are written and the `miss_computed_at` cache marker at `pipeline_job.py:4991` is never stamped — which is what `pipeline_review`'s "current-run misses" shortcut needs (a stale marker would surface old miss flags as fresh). The existing `pipeline_cfg`/`thread_db` reads that happen inside the current `try:` block (`:4959-4963`) must be **replaced** by the effective-value `pipeline_cfg` computed above (thread the injected dict through, or hoist the load and delete the duplicate); do not leave the original two-line load in place, or the compute call will still see the un-overridden workspace value in the strategy-enables-but-workspace-disables case.
+Then in the existing try block that starts at :4952, delete the hoisted lines (`import config as cfg`, `from misses import ...`, `from pipeline import ...`, `from datetime import ...`, `thread_db = Database(...)`, `thread_db.set_active_workspace(...)`, `effective_cfg = ...`, `pipeline_cfg = ...`) — they now live above the guard. The `miss_enabled = pipeline_cfg.get("miss_enabled", True)` at :4970 is also gone (the effective value was computed above the guard and is still in scope). The `compute_misses_for_workspace(thread_db, pipeline_cfg, ...)` call at :4972 stays as-is; it now sees the injected `pipeline_cfg`.
+
+Because the guard returns before `compute_misses_for_workspace` is reached, no `miss` rows are written and the `miss_computed_at` cache marker at `pipeline_job.py:4991` is never stamped — which is what `pipeline_review`'s "current-run misses" shortcut needs (a stale marker would surface old miss flags as fresh).
 
 Do the same shape for `skip_detect` if Task 1.0 concluded it's needed.
 
