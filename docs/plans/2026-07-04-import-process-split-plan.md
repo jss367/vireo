@@ -12,9 +12,11 @@
 
 **Test command (run before each PR):**
 ```bash
-python -m pytest tests/test_workspaces.py vireo/tests/test_db.py vireo/tests/test_app.py vireo/tests/test_photos_api.py vireo/tests/test_edits_api.py vireo/tests/test_jobs_api.py vireo/tests/test_darktable_api.py vireo/tests/test_config.py -v
+python -m pytest tests/test_workspaces.py vireo/tests/test_db.py vireo/tests/test_app.py vireo/tests/test_photos_api.py vireo/tests/test_edits_api.py vireo/tests/test_jobs_api.py vireo/tests/test_darktable_api.py vireo/tests/test_config.py vireo/tests/test_process_strategies.py vireo/tests/test_pipeline_job.py -v
 ```
 (Some tests on main are known-flaky as of 2026-04-22 — compare failures against a clean main run before blaming your change.)
+
+`vireo/tests/test_process_strategies.py` is created in Task 1.1 and `vireo/tests/test_pipeline_job.py` gains new coverage in Tasks 1.2 and 1.6. Both files are in the command above so Task 1.7's gate exercises the contracts this plan is trying to pin — omit either and PR 1 can green-light a change that breaks the new strategy module or the pipeline-stage resume/`miss_enabled` invariants. Until Task 1.1 lands, `test_process_strategies.py` doesn't exist yet; pytest reports it as an error, which is expected and disappears once the module is committed.
 
 **Key existing code to know:**
 - `vireo/pipeline_job.py:79` — `PipelineParams`. Skip flags that exist today: `skip_extract_masks`, `skip_regroup`, `skip_classify`, `skip_eye_keypoints`. There is **no** `skip_detect` or `skip_misses`; misses are gated by `pipeline_cfg["miss_enabled"]` (line ~4970).
@@ -367,7 +369,7 @@ The import job copies card → archive directly, verifies, and catalogs incremen
 
 ## Phase 3 — PR 3: Chaining + page split (task-level)
 
-- **Task 3.1** — import-completion hook enqueues `/api/jobs/pipeline` with `{collection_id: <ad-hoc collection of imported photo ids>, strategy: <after-import choice>}`. Two rows in job history; the import result links to the process job id.
+- **Task 3.1** — import-completion hook. The after-import choice comes from the import job's config (defaulting to the workspace's `pipeline.default_strategy` from Task 1.5, which is nullable per the Task 1.1 Scope Note). **Short-circuit before enqueueing when the choice is `None`** — this is the "import only" path; the hook logs the skip and returns without calling `/api/jobs/pipeline`. This is required because Task 1.3 makes `strategy: null` a 400, so a naive "always enqueue with the raw choice" would either fail the completion hook or create a failed follow-up job for every import-only run. **Only when the choice is a real strategy name** does the hook POST `/api/jobs/pipeline` with `{collection_id: <ad-hoc collection of imported photo ids>, strategy: <name>}`. Two rows in job history when processing runs; one row (the import) when the import-only path is taken. When enqueued, the import result links to the process job id. Test both branches: `after_import: null` → no follow-up job, no failed job, hook records "skipped: import-only"; `after_import: "cull_ready"` → follow-up job appears with the expected strategy and collection id.
 - **Task 3.2** — Import page: extract the wizard's Stage-1 import path from `pipeline.html` into `import.html` (source, destination, template, duplicate preview via `/api/import/check-duplicates`, "After import" strategy menu defaulting to the workspace default, per-folder progress, safe-to-format pill).
 - **Task 3.3** — Process page: scope picker (folders / collection / new-images snapshot), strategy menu, per-stage rows with honest cached counts. Status text follows CORE_PHILOSOPHY — "Already done" must mean the next run is a no-op *given the current selections* (reuse the readiness endpoints that already take selections).
 - **Task 3.4** — workspace `tabs` config: replace the `pipeline` tab with `import` + `process` (solo-user app: just change the default and update Julius's workspaces in place, no migration shim).
