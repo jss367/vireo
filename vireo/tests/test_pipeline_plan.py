@@ -2453,8 +2453,11 @@ def test_import_plan_all_duplicates_reports_zero_new_photos(
     over an empty set — the post-ingest scan walks the local staging root,
     which stays empty when everything deduplicated.
     The summaries must say that outright — "no photos in scope yet" and
-    "MegaDetector will run first" read as "work is coming" when none is —
-    and Group must not claim upstream stages have new work to do."""
+    "MegaDetector will run first" read as "work is coming" when none is.
+    Group must report "Will skip": with 0 collected photos the job never
+    creates a collection, and regroup_stage skips on `not collection_id` —
+    so any "Will run" claim (upstream work, no cached grouping, stale
+    cache) would promise a Group run the job cannot perform."""
     import pipeline as pipeline_mod
     from pipeline_plan import compute_plan
     db, _ = _make_db(tmp_path)
@@ -2483,7 +2486,12 @@ def test_import_plan_all_duplicates_reports_zero_new_photos(
         assert "0 new photos to import" in stage["summary"], (suffix, stage)
         assert stage["detail"]["import_no_new"] is True, (suffix, stage)
     group = plan["stages"]["Group"]
-    assert "upstream stages have new work" not in group["summary"], group
+    assert group["state"] == "will-skip", group
+    assert "nothing to group" in group["summary"], group
+    assert "0 new photos to import" in group["summary"], group
+    assert group["detail"]["import_no_new"] is True, group
+    assert group["detail"]["upstream_will_run"] is False, group
+    assert "cache_exists" in group["detail"], group
 
 
 def test_import_plan_all_duplicates_copy_mode_keeps_forward_summaries(
