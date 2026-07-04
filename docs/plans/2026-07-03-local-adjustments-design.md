@@ -618,6 +618,36 @@ variant against the inputs *that variant was actually built from*:
   when an ordinary JPEG's source mask is regenerated or its
   `photos.active_mask_variant` changes, and the editor could never
   surface Update on non-RAW photos.
+
+**Every digest input is a cheap DB/file-metadata signal, so the
+staleness check never runs MegaDetector or SAM.** The inputs above
+are either scanner-maintained file identities (`photos.file_hash`
+already stored as mtime + size + sha1; companion JPEG mtime + size +
+sha1 read via `os.stat` + one file hash), row-level DB fields (the
+`photos.active_mask_variant` row's stored detection prompt and
+detector version, the `photos.active_mask_variant` name itself), or
+mask-file bytes read straight off disk. Recomputing the current
+digest is a hash over those signals — no image decode, no
+MegaDetector inference, no SAM inference — so opening the editor
+or evaluating the stale banner on a RAW+JPEG local recipe adds a
+handful of `stat`s and a small sha1 per variant, not the
+few-seconds-per-`(photo, decode)` cost that snapshot **creation**
+carries. The "preserve-space detection prompt/detector version that
+actually produced this snapshot" digest input is not a live
+re-detection: at snapshot creation time PR 1 records those bytes
+alongside the snapshot as part of the `source_digest`, and the
+live check hashes the same recorded values back — its purpose in
+the digest is to capture *what the last preserve-space detection
+produced* so a subsequent Update can tell it apart from a fresh
+run, not to demand a new detection pass. The upstream inputs the
+preserve-space prompt is a deterministic function of (RAW
+`file_hash`, detector version) are already in the digest on their
+own, so a live check that sees those upstream inputs unchanged
+proves the preserve-space prompt would recompute to the same
+value without having to run detection to verify. Detection only
+runs when Update actually regenerates a variant, which is the
+same cost the snapshot section already commits to.
+
 Staleness for a variant means the current inputs' re-computed digest
 differs from that entry's `source_digest`. A **decode basis the current
 source state now expects but which has no entry in `mask.decodes`** is
