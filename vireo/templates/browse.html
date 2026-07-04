@@ -3888,6 +3888,13 @@ function selectPhoto(e, id, idx) {
       // whole batch — clicking it would apply the dropped anchor's GPS
       // place to every selected photo. Codex P2 on PR #1097.
       clearExifSuggestion();
+      // And null the ambient detail-photo pointer maybeShowExifSuggestion's
+      // post-await guard reads. If A's reverse-geocode is still in flight
+      // when we drop A here, the completion runs later; leaving
+      // _detailPhotoId pointing at A means a subsequent Select All that
+      // contains A would let the async paint path resurrect A's Accept line
+      // into the batch inspector. Codex P2 on PR #1097 (17:04Z follow-up).
+      window._detailPhotoId = null;
     }
   } else {
     // Normal click: single select
@@ -5076,6 +5083,15 @@ function clearSelection() {
   // batch — one click would apply the anchor's GPS-derived place to every
   // selected photo. Codex P2 on PR #1097.
   clearExifSuggestion();
+  // Also drop the ambient detail-photo pointer maybeShowExifSuggestion's
+  // post-await path uses as its owner check. Scrubbing the DOM alone isn't
+  // enough: a reverse-geocode fetch that was in flight when the user clicked
+  // Clear still resolves later, and if _detailPhotoId still points at the
+  // departed anchor a subsequent Select All that contains that photo
+  // re-satisfies both async guards and repaints A's Accept line into the
+  // batch inspector — clicking it would apply A's EXIF place to every
+  // selected photo. Codex P2 on PR #1097 (17:04Z follow-up).
+  window._detailPhotoId = null;
   document.querySelectorAll('.grid-card').forEach(function(el) {
     el.classList.remove('selected');
   });
@@ -5426,6 +5442,14 @@ function closeDetail() {
   // Accept line for the whole batch — clicking it would apply the anchor's
   // GPS-derived place to every selected photo. Codex P2 on PR #1097.
   clearExifSuggestion();
+  // Null the ambient detail-photo pointer for the same reason. maybeShowExif
+  // Suggestion's post-await guard uses window._detailPhotoId as its owner
+  // check: if a reverse-geocode was in flight when we closed the panel, the
+  // fetch keeps running and later resolves. With the pointer still set, a
+  // Ctrl+A that includes the departed photo would satisfy both async guards
+  // and repaint A's Accept line into the batch inspector. Codex P2 on
+  // PR #1097 (17:04Z follow-up).
+  window._detailPhotoId = null;
   // Re-highlight any cmd/shift-click selections that survive detail close.
   // A blanket .remove('selected') would leave selectedPhotos armed for batch
   // actions with no visible indicator — e.g. click A -> cmd-click B -> cmd-click
@@ -6231,19 +6255,29 @@ async function maybeShowExifSuggestion(photo) {
     if (!r.ok) return;
     var data = await r.json();
     if (!data || !data.place_id || !data.summary) return;
-    // Two races the post-await guard must handle. The first (a stale
-    // response for a photo the detail already navigated away from) is
-    // caught by _detailPhotoId. The second (a slow response for an anchor
-    // the user has since dropped from a batch) needs a selection check:
-    // batch mode doesn't move _detailPhotoId when a member is removed, so
-    // the anchor pointer can still match while getActiveSelection() no
-    // longer includes it — and Accept posts to getActiveSelection(). Codex
-    // P1 on PR #1097: open A (slow geocode) → Cmd-click B → Cmd-click A
-    // out → Cmd-click C would otherwise paint A's Accept line for {B,C}.
+    // Three races the post-await guards must handle.
+    //   1. Stale response for a photo the detail already navigated away
+    //      from (open A → open B): caught by _detailPhotoId, which
+    //      renderDetail overwrites on every open.
+    //   2. Slow response for an anchor the user has since dropped from a
+    //      batch (open A → Cmd-click B → Cmd-click A out → Cmd-click C):
+    //      renderBatchInspector never touches _detailPhotoId, so the anchor
+    //      pointer could still match while getActiveSelection() no longer
+    //      includes A. Accept posts to getActiveSelection(), so the guard
+    //      must recheck selection membership too. Codex P1 on PR #1097.
+    //   3. Slow response for a photo the user has left behind by closing
+    //      the detail panel, clearing the batch, or Cmd-click-dropping the
+    //      anchor, then Select All that brings the departed photo back
+    //      into the batch. The DOM scrub in each of those sites isn't
+    //      enough on its own: without also nulling _detailPhotoId the
+    //      pointer keeps matching after Select All re-includes the photo,
+    //      and Accept would apply the departed anchor's EXIF place to the
+    //      whole batch. Those sites now null _detailPhotoId, so the first
+    //      guard catches this race too. Codex P2 on PR #1097 (17:04Z).
     if (window._detailPhotoId !== requestPhotoId) return;
     if (_locationApplyPhotoIds().indexOf(requestPhotoId) === -1) return;
-    // Third race: while we were awaiting reverse-geocode, the user saved a
-    // location for this photo (via the input, a keyword pick, or a batch
+    // Fourth race: while we were awaiting reverse-geocode, the user saved
+    // a location for this photo (via the input, a keyword pick, or a batch
     // op). renderLocationFilled scrubbed #locationExifSuggestion, but both
     // guards above still pass because _detailPhotoId and the selection
     // haven't moved. Painting into the (now-hidden) empty container would
