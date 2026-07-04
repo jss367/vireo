@@ -733,19 +733,39 @@ passes. The weight map is built once and materialized at both scales:
    standard-decode space), or when the photo is a non-RAW rendered
    directly from its source file. A working copy
    with `working_copy_source='embedded_jpeg'` (RAW decode fell through
-   to the embedded preview inside `_load_raw`), a **direct-RAW load
-   whose `_load_raw` returned `used_embedded_fallback=True`** (the
-   same libraw-failure fallthrough on the primary render path,
-   `vireo/image_loader.py:577-600`), or a NULL value (a legacy row
-   from before the column existed and before the migration backfill
-   has run) is treated as unknown basis and the local pass is disabled
-   with warn-and-hold-zero, exactly as with a missing snapshot. The
+   to the embedded preview inside `_load_raw`) or a NULL value (a
+   legacy row from before the column existed and before the migration
+   backfill has run) is treated as unknown basis and the local pass is
+   disabled with warn-and-hold-zero, exactly as with a missing
+   snapshot. A **direct-RAW load whose `_load_raw` returned
+   `used_embedded_fallback=True`** (the same libraw-failure
+   fallthrough on the primary render path,
+   `vireo/image_loader.py:577-600`) is routed through the same
+   swap-and-serve rule §Snapshot decode basis defines for that
+   signal, not classified as embedded_jpeg-and-disabled here:
+   **when the photo's `mask.decodes` carries a `standard` entry**
+   (RAW+JPEG pair whose companion side materialized), the render
+   source is switched to the companion JPEG, the effective basis
+   becomes `standard`, and the weight-map builder picks the
+   `standard` entry — the same swap the pipeline already applies for
+   undersized embedded previews (`vireo/app.py:18395-18453`,
+   `vireo/export.py:307-365`). Only when no `standard` entry exists
+   (RAW-only recipe, or the companion side of the snapshot family
+   failed to materialize, or the companion has since become
+   unreadable at render time) does the direct-RAW
+   `used_embedded_fallback=True` path fall back to the
+   `embedded_jpeg`-disables-local rule above. Without this the two
+   sections would contradict each other on the same signal — the
+   snapshot section would materialize a `standard` variant to cover
+   the direct-RAW fallback while the rendering pass would still
+   disable local on that variant's whole reason to exist. The
    `used_embedded_fallback` signal is returned by `load_image` on
    every direct-RAW render call site — not just extraction — so the
-   basis check catches embedded-preview loads at render time even when
-   no working-copy row exists to consult. NULL rows recover automatically once the migration
-   backfill described in §Snapshot decode basis populates the column;
-   `'embedded_jpeg'` rows stay disabled by design. `recipe_render_source` already
+   basis check (and the swap decision) catches embedded-preview loads
+   at render time even when no working-copy row exists to consult.
+   NULL rows recover automatically once the migration backfill
+   described in §Snapshot decode basis populates the column;
+   `'embedded_jpeg'` working-copy rows stay disabled by design. `recipe_render_source` already
    distinguishes these paths internally, so it returns the effective basis
    alongside the source path for the weight-map builder to consume.
    The Open External and iNaturalist handoff paths do **not** go through
@@ -1171,10 +1191,33 @@ No `EDIT_MATH_VERSION` bump: recipes without `local` render byte-identically.
   primary's own active mask (in the primary's decode bases), and write
   the resnapshotted recipe under the RAW primary's id. Edit-history
   items reassigned in the same block get the same resnapshot treatment
-  (their stored `recipe_json`, if any, is re-snapshotted the same way);
-  if the RAW primary has no usable mask, `local` is dropped from the
+  (their stored `recipe_json`, if any, is re-snapshotted the same way).
+  **When the RAW primary has no usable mask of its own, pairing
+  consumes the companion's mask before deleting the companion row**
+  rather than dropping `local` outright. Concretely, the pairing
+  helper reads the companion's `photo_masks` rows before the delete,
+  and if the primary has none, it runs the same strip-and-resnapshot
+  against the *companion's* active mask — materializing only the
+  bases the primary's render chain can actually consume against a
+  RAW-primary source (a `preserve_highlights` variant is skipped if
+  the primary's `_load_raw` hits `used_embedded_fallback=True` at
+  materialization time, matching §Snapshot decode basis; a `standard`
+  variant is generated against the companion pixels *before* the
+  companion file itself is removed, and remains valid afterwards
+  because it lives under the RAW primary's photo id and its own
+  content-addressed ref). Only when both sides fail — the RAW
+  primary has no usable mask *and* the companion has none either, or
+  the companion's mask exists but no viable decode basis remains for
+  the RAW primary (e.g. RAW-only recipe with `used_embedded_fallback`
+  and the companion is being removed as part of pairing so no
+  `standard` basis will survive) — is `local` dropped from the
   transferred recipe (the same "skip and report" behavior the bulk
-  endpoint uses) so pairing never leaves an orphaned ref behind. The
+  endpoint uses, reported per-photo in the pairing job's SSE stream
+  so the user learns which pairings lost their local block). This
+  keeps the "add a RAW to a JPEG with local edits" flow from silently
+  discarding the local adjustments in the common case where the
+  companion is the only side that ever had a mask, while still
+  guaranteeing pairing never leaves an orphaned ref behind. The
   contract is: no cross-photo transfer of a recipe carrying `local` may
   bypass the resnapshot helper, so a future new transfer site
   (auto-stack promotion, split-photo tooling, workspace copies) inherits
