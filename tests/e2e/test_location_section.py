@@ -558,6 +558,66 @@ def test_exif_suggestion_clears_when_anchor_leaves_selection(
         assert row is None, f"photo {pid} should not have gained a location"
 
 
+def test_exif_suggestion_cleared_by_filled_location_render(
+    live_server, page
+):
+    """Codex P2 (PR #1097): opening a photo with a saved location renders the
+    filled state without running maybeShowExifSuggestion, so a suggestion
+    fetched for the previous photo used to survive (hidden) in #locationEmpty.
+    Cmd-clicking that previous photo back into a batch would then resurrect
+    its Accept line for a selection whose other member already has a location.
+
+    Sequence: open A (suggestion appears) → open B with a saved location
+    (filled render must clear A's suggestion) → Cmd-click A ({B, A} batch).
+    The suggestion must stay gone.
+    """
+    photo_ids = live_server["data"]["photos"][:2]
+    photo_a, photo_b = photo_ids
+    _seed_exif_photos(live_server, [photo_a])
+    _seed_reverse_geocode_cache(
+        live_server, 40.785091, -73.968285, _CANNED_PLACE_ID, _CANNED_DETAILS,
+    )
+    _set_api_key()
+
+    db = live_server["db"]
+    existing_location_id = db.get_or_create_text_location("Existing Spot")
+    db.set_photo_location(photo_b, existing_location_id)
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+
+    page.locator(f".grid-card[data-id='{photo_a}']").click()
+    _wait_for_detail_loaded(page)
+    expect(page.locator("#locationExifSuggestion button.accept-btn")).to_be_visible()
+
+    page.locator(f".grid-card[data-id='{photo_b}']").click()
+    expect(page.locator("#locationFilled")).to_be_visible()
+    expect(page.locator("#locationFilled .filled-place")).to_have_text("Existing Spot")
+    # The filled render must scrub the previous photo's suggestion entirely,
+    # not just rely on #locationEmpty being hidden.
+    assert page.evaluate(
+        "() => document.getElementById('locationExifSuggestion').innerHTML"
+    ) == ""
+    assert page.evaluate(
+        "() => document.getElementById('locationExifSuggestion').dataset.photoId || ''"
+    ) == ""
+
+    page.locator(f".grid-card[data-id='{photo_a}']").click(modifiers=["Meta"])
+    page.wait_for_function("() => selectedPhotos.size === 2")
+
+    expect(page.locator("#locationExifSuggestion")).to_be_hidden()
+    assert page.evaluate(
+        "() => document.getElementById('locationExifSuggestion').innerHTML"
+    ) == ""
+
+    # B's saved location is untouched.
+    row = db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (photo_b, existing_location_id),
+    ).fetchone()
+    assert row is not None, "photo B should keep its saved location"
+
+
 def test_freetext_location_batches_selection_and_refreshes_smart_collection(
     live_server, page
 ):

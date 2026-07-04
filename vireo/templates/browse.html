@@ -6129,6 +6129,17 @@ function renderLocationFilled(loc) {
   // Reset the input value for next time.
   var input = document.getElementById('locationInput');
   if (input) input.value = '';
+  // Once a saved location is on screen any pending EXIF suggestion is moot,
+  // and leaving it (hidden) in #locationEmpty makes it stale state: open A
+  // (suggestion fetched) → open B with a saved location → Cmd-click A would
+  // otherwise resurrect A's Accept line for the {B, A} batch and overwrite
+  // B's location (Codex P2 on PR #1097). Clear it at the source instead.
+  var sugg = document.getElementById('locationExifSuggestion');
+  if (sugg) {
+    sugg.hidden = true;
+    sugg.innerHTML = '';
+    if (sugg.dataset) delete sugg.dataset.photoId;
+  }
 }
 
 function renderLocationEmpty(opts) {
