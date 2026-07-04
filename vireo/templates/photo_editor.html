@@ -1425,6 +1425,12 @@ function syncLocalControls() {
       ref: savedMask.ref,
       source_digest: savedMask.source_digest,
     };
+  } else {
+    // No saved local recipe: clear the cached snapshot so the next local
+    // slider touch re-freezes the CURRENT active mask instead of taking the
+    // stale-ref fast path in ensureLocalMask().
+    editorState.localMask = null;
+    editorState.localMaskPromise = null;
   }
   LOCAL_REGIONS.forEach(function(region) {
     LOCAL_CONTROL_DEFS.forEach(function(def) {
