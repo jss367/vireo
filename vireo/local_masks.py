@@ -245,6 +245,42 @@ def is_stale(recipe, active_mask_row):
         return True
 
 
+def transfer_snapshots(vireo_dir, old_photo_id, new_photo_id):
+    """Rename a photo's snapshot files to a new photo id.
+
+    Snapshot files are named ``<photo_id>.<ref>.png`` and looked up by
+    ``snapshot_path(vireo_dir, photo_id, ref)``. When the scanner folds a
+    JPEG companion into a RAW primary (see ``_pair_raw_jpeg_companions``),
+    the recipe rows and edit-history rows get reassigned from the
+    companion's photo_id to the primary's, but the file names still carry
+    the companion's id — so ``load_snapshot`` for the transferred recipe
+    silently misses the file and every render disables the local pass.
+    Move the files here so lookups by the new id find them.
+
+    Byte-identical snapshots for the same ref hash to the same file name,
+    so ``os.replace`` on a pre-existing destination is safe (same content).
+    """
+    directory = edit_masks_dir(vireo_dir)
+    if not os.path.isdir(directory):
+        return
+    prefix = f"{int(old_photo_id)}."
+    for name in os.listdir(directory):
+        if not name.startswith(prefix):
+            continue
+        match = _SNAPSHOT_FILE_RE.match(name)
+        if not match or int(match.group(1)) != int(old_photo_id):
+            continue
+        src = os.path.join(directory, name)
+        dst = snapshot_path(vireo_dir, int(new_photo_id), match.group(2))
+        try:
+            os.replace(src, dst)
+        except OSError:
+            log.warning(
+                "Could not transfer edit-mask snapshot %s -> %s",
+                src, dst, exc_info=True,
+            )
+
+
 def _referenced_refs(db):
     """Every local.mask.ref reachable from current recipes or edit history."""
     refs = set()

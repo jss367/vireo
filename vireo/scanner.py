@@ -498,6 +498,12 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
                 (primary["id"], companion["id"]),
             )
             if vireo_dir:
+                # Local-adjustment mask snapshots are looked up by
+                # (photo_id, ref); the transferred recipe now points at
+                # primary["id"], so the files must move with it or every
+                # render silently disables the local pass.
+                from local_masks import transfer_snapshots
+                transfer_snapshots(vireo_dir, companion["id"], primary["id"])
                 _invalidate_derived_caches(
                     db, vireo_dir, primary["id"],
                     thumb_cache_dir=thumb_cache_dir,

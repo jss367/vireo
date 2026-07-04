@@ -1060,6 +1060,64 @@ def test_pairing_transfers_edit_recipe_from_companion(tmp_path):
     assert db.get_photo_edit_recipe(photo["id"]) is None
 
 
+def test_pairing_transfers_local_mask_snapshot_files(tmp_path):
+    """Pairing raw+JPEG must move edit-mask snapshot files to the primary id.
+
+    Snapshot lookup uses ``<photo_id>.<ref>.png``. Without renaming the
+    files when the recipe row's photo_id changes, ``load_snapshot`` misses
+    the file and every render silently disables the local pass.
+    """
+    from db import Database
+    from local_masks import edit_masks_dir, snapshot_path
+    from scanner import _pair_raw_jpeg_companions
+
+    img_dir = tmp_path / "photos"
+    img_dir.mkdir()
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(img_dir), name="photos")
+    jpeg_id = db.add_photo(
+        folder_id=fid, filename="IMG_002.jpg", extension=".jpg",
+        file_size=1000, file_mtime=1.0,
+    )
+    raw_id = db.add_photo(
+        folder_id=fid, filename="IMG_002.cr3", extension=".cr3",
+        file_size=2000, file_mtime=1.0,
+    )
+
+    # Set a recipe on the JPEG (any recipe — this test is about the file
+    # rename, not recipe schema). The pairing code moves the row to the RAW.
+    db.set_photo_edit_recipe(jpeg_id, {"rotation": 90})
+
+    # Drop a snapshot file at <jpeg_id>.<ref>.png as if we'd called the
+    # snapshot endpoint on the JPEG before pairing.
+    ref = "abcdef012345"
+    os.makedirs(edit_masks_dir(str(tmp_path)), exist_ok=True)
+    src_snap = snapshot_path(str(tmp_path), jpeg_id, ref)
+    with open(src_snap, "wb") as f:
+        f.write(b"snapshot-bytes")
+    # Also leave a decoy file for a different photo_id so the transfer
+    # doesn't over-match.
+    decoy = os.path.join(edit_masks_dir(str(tmp_path)), f"99999.{ref}.png")
+    with open(decoy, "wb") as f:
+        f.write(b"decoy-bytes")
+
+    _pair_raw_jpeg_companions(db, vireo_dir=str(tmp_path))
+
+    photo = db.conn.execute(
+        "SELECT id, filename FROM photos"
+    ).fetchone()
+    assert photo["filename"] == "IMG_002.cr3"
+    primary_id = photo["id"]
+    assert primary_id == raw_id
+
+    # The companion's snapshot file must have moved to the primary id.
+    assert not os.path.exists(src_snap)
+    assert os.path.exists(snapshot_path(str(tmp_path), primary_id, ref))
+    # Decoy for an unrelated photo id must not be touched.
+    assert os.path.exists(decoy)
+
+
 def test_pairing_does_not_copy_rejected_flag_to_raw(tmp_path):
     """A companion JPEG's 'rejected' flag (e.g. set by the duplicate
     auto-resolver when the JPEG has a byte-identical twin) must not be
