@@ -424,7 +424,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.issue.number }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
         run: |
+          if [[ " $TRUSTED_ACTORS " != *" $COMMENT_AUTHOR "* ]]; then
+            echo "PR #${PR}: +1 from ${COMMENT_AUTHOR} is not in TRUSTED_ACTORS; skipping auto-merge."
+            exit 0
+          fi
+
           base=$(gh pr view "$PR" --repo "$REPO" --json baseRefName -q .baseRefName)
           head=$(gh pr view "$PR" --repo "$REPO" --json headRefName -q .headRefName)
           head_sha=$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q .headRefOid)
