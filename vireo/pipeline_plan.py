@@ -58,6 +58,12 @@ class PipelinePlanParams:
     # at plan time, since hashing thousands of files synchronously inside
     # a plan request would block the UI on every settings change.
     hash_duplicate_paths: list | None = None
+    # True when the import run stages files on local disk first (copy mode
+    # with the "Use local disk while processing" toggle on). This changes
+    # what the post-ingest scan walks — the local staging root instead of
+    # the real destination — which is why _import_without_new_files() is
+    # only safe to assert in this mode (see its docstring).
+    local_processing: bool = False
     # Optional API override for the preview tier. Normal pipeline runs leave
     # this unset so the previews substage uses the workspace-effective
     # preview_max_size setting. Explicit 0 means "serve originals"; the
@@ -157,6 +163,37 @@ def _resolve_labels_for_models(models, labels_files, db):
                 "n": len(labels),
             }
     return out
+
+
+def _import_without_new_files(params, photo_ids, new_count):
+    """True when import mode is active but the run brings no per-photo work.
+
+    Every selected file is already imported (``new_count == 0``, typically
+    via the hash/metadata duplicate gate) and none of the known copies fall
+    into scope at the selected paths (``photo_ids`` empty — the copies live
+    at other, already-cataloged paths). The per-photo stages will all
+    execute over an empty set, so their "Will run" summaries must say the
+    run imports 0 new photos instead of implying work is coming.
+
+    Only asserted for local-processing imports. In plain copy mode the
+    claim isn't airtight: when ingest copies nothing (everything
+    deduplicated), the post-ingest scan runs with ``restrict=None`` over
+    the REAL destination tree, and ``scanner.scan`` fires the photo
+    callback for existing cataloged rows there — so downstream
+    workspace-scoped stages (classify/extract/regroup) can still find
+    real work among previously-unprocessed destination photos. With
+    local processing on, the post-ingest scan targets the local staging
+    root instead, which stays empty when every file deduplicates (ingest
+    creates the staging dir but copies nothing into it), so "nothing
+    to …" is genuinely true. Copy mode keeps the pre-existing
+    forward-looking summaries and lets Group see upstream will-run.
+    """
+    return (
+        params.local_processing
+        and params.source_paths is not None
+        and new_count == 0
+        and not photo_ids
+    )
 
 
 def _classify_plan(db, params, photo_ids, new_count=0):
@@ -268,10 +305,18 @@ def _classify_plan(db, params, photo_ids, new_count=0):
                     "fingerprint_reason": fingerprint_reason,
                 },
             }
+        import_no_new = _import_without_new_files(params, photo_ids, new_count)
         if new_count > 0:
             summary = (
                 f"Will run — {new_count} new photo{_plural(new_count)} "
                 f"to detect & classify (MegaDetector runs first)"
+            )
+        elif import_no_new:
+            # All-duplicates import: MegaDetector will get 0 photos, so
+            # "will run first" would falsely promise detection work.
+            summary = (
+                "Will run — 0 new photos to import, nothing to "
+                "detect or classify"
             )
         else:
             summary = (
@@ -291,6 +336,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
                 "stale": stale_total,
                 "fingerprint_outdated": fingerprint_outdated,
                 "fingerprint_reason": fingerprint_reason,
+                "import_no_new": import_no_new,
             },
         }
 
@@ -466,14 +512,22 @@ def _extract_plan(db, params, photo_ids, pipeline_cfg, new_count=0):
                     "stale": 0, "fingerprint_outdated": False,
                 },
             }
-        return {
-            "state": "will-run",
-            "summary": (
+        import_no_new = _import_without_new_files(params, photo_ids, new_count)
+        if import_no_new:
+            # All-duplicates import: classify has 0 photos to produce
+            # detections from, so nothing will ever become eligible here.
+            summary = "Will run — 0 new photos to import, nothing to extract"
+        else:
+            summary = (
                 "Will run after classify produces detections "
                 "(no eligible photos yet)"
-            ),
+            )
+        return {
+            "state": "will-run",
+            "summary": summary,
             "detail": {"eligible": 0, "pending": 0,
-                       "stale": 0, "fingerprint_outdated": False},
+                       "stale": 0, "fingerprint_outdated": False,
+                       "import_no_new": import_no_new},
         }
     if pending == 0 and stale == 0 and new_count == 0:
         return {
@@ -563,17 +617,25 @@ def _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg, new_count=0):
                     "fingerprint_outdated": stale > 0,
                 },
             }
-        return {
-            "state": "will-run",
-            "summary": (
+        import_no_new = _import_without_new_files(params, photo_ids, new_count)
+        if import_no_new:
+            # All-duplicates import: upstream stages run over 0 photos, so
+            # no masks or predictions are coming for this stage to consume.
+            summary = "Will run — 0 new photos to import, nothing to process"
+        else:
+            summary = (
                 "Will run after upstream produces masks + species "
                 "predictions (no eligible photos yet)"
-            ),
+            )
+        return {
+            "state": "will-run",
+            "summary": summary,
             "detail": {
                 "eligible": 0,
                 "pending": 0,
                 "stale": stale,
                 "fingerprint_outdated": stale > 0,
+                "import_no_new": import_no_new,
             },
         }
     if pending == 0 and new_count == 0:
@@ -663,13 +725,26 @@ def _previews_plan(db, params, photo_ids, new_count, effective_cfg):
 
     if eligible == 0 and new_count == 0:
         # Empty scope. The stages will run (the loop is just empty), but
-        # there's nothing to count. Be honest about that.
-        summary = (
-            "Will run — no photos in scope yet"
-            if not previews_skipped
-            else "Will run for thumbnails — no photos in scope (previews "
-                 "skipped: serves originals at full resolution)"
-        )
+        # there's nothing to count. Be honest about that — and when the
+        # emptiness comes from an all-duplicates import, say so outright:
+        # "no photos in scope yet" reads as "photos are coming", but this
+        # run will import 0 new photos.
+        import_no_new = _import_without_new_files(params, photo_ids, new_count)
+        if import_no_new:
+            summary = (
+                "Will run — 0 new photos to import, nothing to process"
+                if not previews_skipped
+                else "Will run for thumbnails — 0 new photos to import, "
+                     "nothing to process (previews skipped: serves "
+                     "originals at full resolution)"
+            )
+        else:
+            summary = (
+                "Will run — no photos in scope yet"
+                if not previews_skipped
+                else "Will run for thumbnails — no photos in scope (previews "
+                     "skipped: serves originals at full resolution)"
+            )
         return {
             "state": "will-run",
             "summary": summary,
@@ -681,6 +756,7 @@ def _previews_plan(db, params, photo_ids, new_count, effective_cfg):
                 "preview_size": preview_size,
                 "previews_skipped": previews_skipped,
                 "new_photos": 0,
+                "import_no_new": import_no_new,
             },
         }
 
@@ -787,7 +863,8 @@ def _previews_plan(db, params, photo_ids, new_count, effective_cfg):
     }
 
 
-def _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg):
+def _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg,
+                  import_no_new=False):
     if params.skip_regroup:
         return {
             "state": "will-skip",
@@ -797,6 +874,23 @@ def _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg):
         os.path.dirname(db_path), f"pipeline_results_ws{ws_id}.json",
     )
     cache_exists = os.path.exists(cache_path)
+    if import_no_new:
+        # All-duplicates local-processing import: ingest copies nothing into
+        # the staging root, the post-ingest scan collects 0 photos, so the
+        # job never creates a collection (collection_stage returns on
+        # `if not collected_photo_ids`) and regroup_stage skips on
+        # `not collection_id` (pipeline_job.py). The cache/fingerprint
+        # checks below would promise a Group run the job cannot perform —
+        # say the truth instead.
+        return {
+            "state": "will-skip",
+            "summary": "Will skip — 0 new photos to import, nothing to group",
+            "detail": {
+                "cache_exists": cache_exists,
+                "upstream_will_run": False,
+                "import_no_new": True,
+            },
+        }
     if upstream_will_run:
         return {
             "state": "will-run",
@@ -1132,10 +1226,21 @@ def compute_plan(db, params, db_path):
     extract = _extract_plan(db, params, photo_ids, pipeline_cfg, new_count)
     eye = _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg, new_count)
     previews = _previews_plan(db, params, photo_ids, new_count, effective_cfg)
-    upstream_will_run = any(
-        s["state"] == "will-run" for s in (classify, extract, eye)
+    # An all-duplicates import leaves every upstream stage "will-run" over
+    # an empty photo set — that is not new work, and letting it force the
+    # Group stage into "upstream stages have new work to do" would be a
+    # false claim. It also means the job never builds a collection, so
+    # regroup_stage itself will skip — _regroup_plan reports "Will skip"
+    # instead of falling through to its cache/fingerprint check.
+    import_no_new = _import_without_new_files(params, photo_ids, new_count)
+    upstream_will_run = (
+        not import_no_new
+        and any(s["state"] == "will-run" for s in (classify, extract, eye))
     )
-    regroup = _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg)
+    regroup = _regroup_plan(
+        db, params, db_path, ws_id, upstream_will_run, effective_cfg,
+        import_no_new=import_no_new,
+    )
 
     stages = {
         "Previews": previews,

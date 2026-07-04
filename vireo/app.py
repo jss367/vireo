@@ -2806,6 +2806,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             reclassify=bool(body.get("reclassify")),
             source_paths=source_paths,
             hash_duplicate_paths=hash_duplicate_paths,
+            # Mirrors /api/jobs/pipeline's local_processing flag. The
+            # planner needs it to know what the post-ingest scan walks:
+            # only local-processing imports may claim "0 new photos to
+            # import, nothing to …" for an all-duplicates selection —
+            # plain copy mode re-scans the real destination, which can
+            # surface existing unprocessed rows as downstream work.
+            local_processing=bool(body.get("local_processing")),
             preview_max_size=body.get("preview_max_size"),
         )
         db = _get_db()

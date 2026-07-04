@@ -2444,6 +2444,133 @@ def test_import_plan_deduplicates_source_paths(tmp_path, monkeypatch):
     assert plan_mixed["stages"]["Scan"]["detail"]["already_known"] == 1
 
 
+def test_import_plan_all_duplicates_reports_zero_new_photos(
+    tmp_path, monkeypatch
+):
+    """The re-inserted SD card (local-processing mode): every selected
+    file is already in the library via the hash/metadata duplicate gate,
+    so the run will import 0 new photos and every per-photo stage executes
+    over an empty set — the post-ingest scan walks the local staging root,
+    which stays empty when everything deduplicated.
+    The summaries must say that outright — "no photos in scope yet" and
+    "MegaDetector will run first" read as "work is coming" when none is.
+    Group must report "Will skip": with 0 collected photos the job never
+    creates a collection, and regroup_stage skips on `not collection_id` —
+    so any "Will run" claim (upstream work, no cached grouping, stale
+    cache) would promise a Group run the job cannot perform."""
+    import pipeline as pipeline_mod
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+    _stub_models(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    paths = ["/cards/SD/IMG_001.NEF", "/cards/SD/IMG_002.NEF"]
+    plan = compute_plan(
+        db,
+        _import_params(
+            paths,
+            model_ids=["m1"],
+            hash_duplicate_paths=list(paths),
+            local_processing=True,
+            skip_eye_keypoints=False,
+            skip_regroup=False,
+        ),
+        str(tmp_path / "test.db"),
+    )
+    assert plan["scope"]["new_count"] == 0
+    assert plan["scope"]["known_count"] == 2
+    for suffix in ("Previews", "Classify", "Extract", "EyeKeypoints"):
+        stage = plan["stages"][suffix]
+        assert stage["state"] == "will-run", (suffix, stage)
+        assert "0 new photos to import" in stage["summary"], (suffix, stage)
+        assert stage["detail"]["import_no_new"] is True, (suffix, stage)
+    group = plan["stages"]["Group"]
+    assert group["state"] == "will-skip", group
+    assert "nothing to group" in group["summary"], group
+    assert "0 new photos to import" in group["summary"], group
+    assert group["detail"]["import_no_new"] is True, group
+    assert group["detail"]["upstream_will_run"] is False, group
+    assert "cache_exists" in group["detail"], group
+
+
+def test_import_plan_all_duplicates_copy_mode_keeps_forward_summaries(
+    tmp_path, monkeypatch
+):
+    """Contrast case for the above: same all-duplicates selection but in
+    plain copy mode (local_processing off). Here "nothing to …" would
+    overclaim: with no copied paths the post-ingest scan runs with
+    restrict=None over the REAL destination, and scanner.scan fires the
+    photo callback for existing cataloged rows there — so downstream
+    workspace-scoped stages can still find real work among
+    previously-unprocessed destination photos. The plan must keep the
+    pre-existing forward-looking summaries and let Group see upstream
+    as will-run."""
+    import pipeline as pipeline_mod
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+    _stub_models(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    paths = ["/cards/SD/IMG_001.NEF", "/cards/SD/IMG_002.NEF"]
+    plan = compute_plan(
+        db,
+        _import_params(
+            paths,
+            model_ids=["m1"],
+            hash_duplicate_paths=list(paths),
+            skip_eye_keypoints=False,
+            skip_regroup=False,
+        ),
+        str(tmp_path / "test.db"),
+    )
+    assert plan["scope"]["new_count"] == 0
+    assert plan["scope"]["known_count"] == 2
+    for suffix in ("Previews", "Classify", "Extract", "EyeKeypoints"):
+        stage = plan["stages"][suffix]
+        assert stage["state"] == "will-run", (suffix, stage)
+        assert "0 new photos to import" not in stage["summary"], (suffix, stage)
+        assert not stage["detail"].get("import_no_new"), (suffix, stage)
+    assert "no photos in scope yet" in plan["stages"]["Previews"]["summary"]
+    group = plan["stages"]["Group"]
+    assert group["state"] == "will-run"
+    assert "upstream stages have new work" in group["summary"], group
+
+
+def test_import_plan_with_new_files_keeps_forward_looking_summaries(
+    tmp_path, monkeypatch
+):
+    """Contrast case: an import that DOES bring new files must keep the
+    counting summaries and never claim "0 new photos to import" — even in
+    local-processing mode, where the all-duplicates wording is allowed."""
+    import pipeline as pipeline_mod
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+    _stub_models(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    plan = compute_plan(
+        db,
+        _import_params(
+            ["/cards/SD/IMG_001.NEF", "/cards/SD/IMG_002.NEF"],
+            model_ids=["m1"],
+            local_processing=True,
+            skip_eye_keypoints=False,
+            skip_regroup=False,
+        ),
+        str(tmp_path / "test.db"),
+    )
+    assert plan["scope"]["new_count"] == 2
+    for suffix in ("Previews", "Classify", "Extract", "EyeKeypoints"):
+        stage = plan["stages"][suffix]
+        assert stage["state"] == "will-run", (suffix, stage)
+        assert "0 new photos to import" not in stage["summary"], (suffix, stage)
+        assert not stage["detail"].get("import_no_new"), (suffix, stage)
+    assert plan["stages"]["Group"]["state"] == "will-run"
+
+
 def test_import_plan_all_known_scan_is_done_prior(tmp_path):
     """If every preview file is already in the DB, Scan reports done-prior
     (the run will be a no-op for the scan step). Other stages reflect
@@ -2606,6 +2733,36 @@ def test_api_pipeline_plan_rejects_non_string_source_paths_elements(app_and_db):
         },
     )
     assert resp.status_code == 400
+
+
+def test_api_pipeline_plan_parses_local_processing(app_and_db):
+    """The route must thread local_processing through to the planner: an
+    all-duplicates import only gets the "0 new photos to import" wording
+    when the flag is true (staging-root scan), never in plain copy mode
+    (destination re-scan can surface real downstream work)."""
+    app, _ = app_and_db
+    client = app.test_client()
+    body = {
+        "source_paths": ["/cards/SD/IMG_001.NEF", "/cards/SD/IMG_002.NEF"],
+        "hash_duplicate_paths": [
+            "/cards/SD/IMG_001.NEF", "/cards/SD/IMG_002.NEF",
+        ],
+        "skip_classify": True, "skip_extract_masks": True,
+        "skip_eye_keypoints": True, "skip_regroup": True,
+    }
+    resp = client.post(
+        "/api/pipeline/plan", json={**body, "local_processing": True},
+    )
+    assert resp.status_code == 200
+    previews = resp.get_json()["stages"]["Previews"]
+    assert previews["detail"]["import_no_new"] is True
+    assert "0 new photos to import" in previews["summary"]
+
+    resp = client.post("/api/pipeline/plan", json=body)  # copy mode
+    assert resp.status_code == 200
+    previews = resp.get_json()["stages"]["Previews"]
+    assert not previews["detail"].get("import_no_new")
+    assert "0 new photos to import" not in previews["summary"]
 
 
 def test_import_plan_empty_source_paths_is_no_op(tmp_path, monkeypatch):

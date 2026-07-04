@@ -306,6 +306,72 @@ def test_pipeline_local_processing_archives_to_final_destination(
     assert job["result"]["archive"]["final_destination"] == str(final_dest)
 
 
+def test_pipeline_local_processing_all_duplicates_is_clean_noop(
+    setup, tmp_path, monkeypatch
+):
+    """Re-running a local-processing import whose files are ALL already in
+    the library must complete as a clean no-op: ingest skips every file,
+    nothing reaches staging, and the archive stage merges the empty staging
+    root into the existing archive without failing or duplicating photos.
+    Regression guard for the "restart a failed import by re-running it"
+    flow — the retry must stay a safe no-op when everything already made
+    it across on the earlier attempt."""
+    app, db_path = setup
+    src = tmp_path / "card"
+    src.mkdir()
+    final_parent = tmp_path / "nas"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+
+    img = Image.new("RGB", (16, 16), "white")
+    img.save(src / "test.jpg")
+
+    import local_processing
+
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    body = {
+        "sources": [str(src)],
+        "destination": str(final_dest),
+        "local_processing": True,
+        "folder_template": "",
+        "skip_duplicates": True,
+        "skip_classify": True,
+        "skip_extract_masks": True,
+        "skip_regroup": True,
+    }
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json=body)
+        assert resp.status_code == 200
+        first = wait_for_job_via_client(c, resp.get_json()["job_id"])
+        assert first["status"] == "completed", first
+
+        # Second run: the same card, every file now a known duplicate.
+        resp = c.post("/api/jobs/pipeline", json=body)
+        assert resp.status_code == 200
+        second = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert second["status"] == "completed", second
+    assert second["result"]["archive"]["moved"] == 0, second
+    # Pin the path under test: the file must have been SKIPPED by the
+    # duplicate gate, not re-copied and then deduplicated at the merge.
+    ingest_step = next(
+        s for s in second.get("steps", []) if s.get("id") == "ingest"
+    )
+    assert "skipped" in (ingest_step.get("summary") or ""), ingest_step
+    assert "copied" not in (ingest_step.get("summary") or ""), ingest_step
+    # The first run's archived file is untouched and still cataloged once.
+    assert (final_dest / "test.jpg").is_file()
+    from db import Database
+    db = Database(db_path)
+    n = db.conn.execute(
+        "SELECT COUNT(*) FROM photos WHERE filename = 'test.jpg'"
+    ).fetchone()[0]
+    db.close()
+    assert n == 1
+
+
 def test_pipeline_local_processing_merges_into_tracked_destination(
     setup, tmp_path, monkeypatch
 ):
