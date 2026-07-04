@@ -7802,7 +7802,10 @@ def test_local_recipe_rejects_unknown_snapshot_ref(client_with_photo):
     assert "snapshot" in resp.get_json()["error"].lower()
 
 
-def test_bulk_apply_rejects_local_sections(client_with_photo):
+def test_bulk_apply_local_skips_photos_without_masks(client_with_photo):
+    """Bulk apply with a local section re-snapshots per target (PR 2);
+    targets without a usable active mask are skipped and reported instead
+    of silently receiving a wrong mask."""
     app, db, photo_id = client_with_photo
     client = app.test_client()
 
@@ -7815,8 +7818,12 @@ def test_bulk_apply_rejects_local_sections(client_with_photo):
             )["recipe"],
         },
     )
-    assert resp.status_code == 400
-    assert "local" in resp.get_json()["error"].lower()
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["applied"] == []
+    assert data["skipped"] == [photo_id]
+    assert "mask" in data["local_errors"][str(photo_id)].lower()
+    assert db.get_photo_edit_recipe(photo_id) is None
 
 
 def test_edit_preview_renders_local_adjustments(client_with_photo):
@@ -7947,3 +7954,146 @@ def test_local_snapshot_root_matches_thumb_cache_dir(tmp_path, monkeypatch):
     )
 
     db.close()
+
+
+def test_edit_mask_preview_requires_local_recipe(client_with_photo):
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    resp = client.get(
+        f"/photos/{photo_id}/edit-mask-preview",
+        query_string={"recipe": '{"rotation":90}'},
+    )
+    assert resp.status_code == 404
+    assert client.get("/photos/999999/edit-mask-preview").status_code == 404
+
+
+def test_edit_mask_preview_serves_transformed_weight_map(client_with_photo):
+    import io
+    import json
+
+    import numpy as np
+    from PIL import Image as PILImage
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute("SELECT path FROM folders").fetchone()
+    _register_active_mask(db, photo_id, folder["path"])
+    mask = client.post(
+        f"/api/photos/{photo_id}/local-mask/snapshot"
+    ).get_json()["mask"]
+
+    recipe = _local_recipe_payload(mask)["recipe"]
+    resp = client.get(
+        f"/photos/{photo_id}/edit-mask-preview",
+        query_string={"size": "800", "recipe": json.dumps(recipe)},
+    )
+    assert resp.status_code == 200
+    assert resp.mimetype == "image/png"
+    with PILImage.open(io.BytesIO(resp.data)) as img:
+        assert img.mode == "RGBA"
+        assert img.size == (800, 600)
+        alpha = np.asarray(img)[..., 3].astype(np.float32)
+
+    # Left (subject) half opaque-ish, right transparent.
+    assert np.mean(alpha[:, :360]) > 60
+    assert np.mean(alpha[:, 440:]) < 5
+
+    # Geometry rides along: flipping horizontally moves the weight.
+    recipe_flipped = dict(recipe)
+    recipe_flipped["flip"] = {"horizontal": True}
+    resp = client.get(
+        f"/photos/{photo_id}/edit-mask-preview",
+        query_string={"size": "800", "recipe": json.dumps(recipe_flipped)},
+    )
+    with PILImage.open(io.BytesIO(resp.data)) as img:
+        alpha = np.asarray(img)[..., 3].astype(np.float32)
+    assert np.mean(alpha[:, 440:]) > 60
+    assert np.mean(alpha[:, :360]) < 5
+
+    # The editor preview is uncropped, so the overlay ignores crop too.
+    recipe_cropped = dict(recipe)
+    recipe_cropped["crop"] = {"x": 0.5, "y": 0.0, "w": 0.5, "h": 1.0}
+    resp = client.get(
+        f"/photos/{photo_id}/edit-mask-preview",
+        query_string={"size": "800", "recipe": json.dumps(recipe_cropped)},
+    )
+    with PILImage.open(io.BytesIO(resp.data)) as img:
+        assert img.size == (800, 600)
+
+
+def test_edit_mask_preview_missing_snapshot_404s(client_with_photo):
+    import json
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    recipe = _local_recipe_payload(
+        {"ref": "eeeeeeeeeeee", "source_digest": "d"}
+    )["recipe"]
+    resp = client.get(
+        f"/photos/{photo_id}/edit-mask-preview",
+        query_string={"recipe": json.dumps(recipe)},
+    )
+    assert resp.status_code == 404
+
+
+def test_bulk_apply_resnapshots_local_per_target(client_with_photo):
+    import numpy as np
+    from PIL import Image as PILImage
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute("SELECT path FROM folders").fetchone()
+
+    # Second photo with its own (different) mask; third with no mask at all.
+    src2 = os.path.join(folder["path"], "second.jpg")
+    PILImage.new("RGB", (800, 600), (90, 120, 60)).save(src2, "JPEG")
+    pid2 = db.add_photo(
+        folder_id=db.conn.execute("SELECT id FROM folders").fetchone()["id"],
+        filename="second.jpg", extension=".jpg",
+        file_size=os.path.getsize(src2), file_mtime=os.path.getmtime(src2),
+        width=800, height=600,
+    )
+    src3 = os.path.join(folder["path"], "third.jpg")
+    PILImage.new("RGB", (800, 600), (10, 20, 30)).save(src3, "JPEG")
+    pid3 = db.add_photo(
+        folder_id=db.conn.execute("SELECT id FROM folders").fetchone()["id"],
+        filename="third.jpg", extension=".jpg",
+        file_size=os.path.getsize(src3), file_mtime=os.path.getmtime(src3),
+        width=800, height=600,
+    )
+
+    _register_active_mask(db, photo_id, folder["path"])
+    # pid2 gets a top-half mask so its snapshot differs from pid1's.
+    path2 = os.path.join(folder["path"], f"{pid2}.sam2-small.png")
+    arr = np.zeros((600, 800), dtype=np.uint8)
+    arr[:300, :] = 255
+    PILImage.fromarray(arr, "L").save(path2, "PNG")
+    db.upsert_photo_mask(
+        pid2, "sam2-small", path2, "megadetector-v6", 0.0, 0.0, 1.0, 0.5,
+    )
+    db.set_active_mask_variant(pid2, "sam2-small")
+
+    source_mask = client.post(
+        f"/api/photos/{photo_id}/local-mask/snapshot"
+    ).get_json()["mask"]
+    recipe = _local_recipe_payload(source_mask)["recipe"]
+
+    resp = client.post(
+        "/api/photos/edit-recipe/apply",
+        json={"photo_ids": [photo_id, pid2, pid3], "recipe": recipe},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert sorted(data["applied"]) == sorted([photo_id, pid2])
+    assert pid3 in data["skipped"]
+    assert str(pid3) in {str(k) for k in data.get("local_errors", {})}
+
+    # Each target references its OWN snapshot, not the source photo's.
+    r1 = db.get_photo_edit_recipe(photo_id)
+    r2 = db.get_photo_edit_recipe(pid2)
+    assert r1["local"]["mask"]["ref"] == source_mask["ref"]
+    assert r2["local"]["mask"]["ref"] != source_mask["ref"]
+    assert r2["local"]["regions"] == r1["local"]["regions"]
+    assert db.get_photo_edit_recipe(pid3) is None

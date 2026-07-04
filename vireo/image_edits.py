@@ -791,6 +791,27 @@ def apply_recipe_to_loaded_image(
     return result
 
 
+def local_weight_map(local_mask, source_size, recipe, native_size=None):
+    """The local-adjustment weight map exactly as the renderer computes it.
+
+    For overlay/preview consumers: fit the snapshot to the render source,
+    ride the recipe's geometry, feather at this resolution. Returns a float
+    [0,1] array, or None when the recipe has no local section or the mask
+    cannot be trusted to line up (same disable conditions as rendering).
+    """
+    normalized = normalize_recipe(recipe)
+    local = (normalized or {}).get("local")
+    if not local or local_mask is None:
+        return None
+    fitted = _fit_mask_to_source(local_mask, source_size)
+    if fitted is None:
+        return None
+    mask_geo = _apply_geometry(fitted, normalized)
+    scale = detail_render_scale(mask_geo.size, native_size, normalized)
+    feather = (local["mask"].get("feather") or 0.0) * scale
+    return _feathered_weight(mask_geo, feather)
+
+
 def copy_recipe(recipe):
     """Return a detached normalized recipe dict for API responses."""
     normalized = normalize_recipe(recipe)

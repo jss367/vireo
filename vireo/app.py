@@ -6,6 +6,7 @@ Usage:
 
 import argparse
 import contextlib
+import copy
 import json
 import logging
 import logging.handlers
@@ -4110,11 +4111,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         recipe = body.get("recipe")
         if not isinstance(recipe, dict):
             return json_error("recipe must be a JSON object")
-        if recipe.get("local"):
-            return json_error(
-                "local adjustments cannot be bulk-applied: they reference a "
-                "photo-specific mask snapshot"
-            )
         raw_ids = body.get("photo_ids")
         if not isinstance(raw_ids, list) or not raw_ids:
             return json_error("photo_ids must be a non-empty list")
@@ -4141,18 +4137,57 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             description = "Pasted edit settings"
         description = description.strip()
 
+        has_local = bool(recipe.get("local"))
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+
         items = []
         applied = []
         skipped = []
+        local_errors = {}
         for pid in ids:
             photo = db.get_photo(pid, verify_workspace=True)
             if not photo:
                 skipped.append(pid)
                 continue
+            target_recipe = recipe
+            if has_local:
+                # Local adjustments reference a photo-specific mask, so each
+                # target gets its OWN snapshot (frozen from its active mask);
+                # the slider values copy, the mask does not. Photos without a
+                # usable mask are skipped and reported, not silently given a
+                # wrong mask.
+                import local_masks
+                variant_row = db.conn.execute(
+                    "SELECT active_mask_variant FROM photos WHERE id=?",
+                    (pid,),
+                ).fetchone()
+                variant = (
+                    variant_row["active_mask_variant"] if variant_row else None
+                )
+                mask_row = (
+                    db.get_photo_mask(pid, variant) if variant else None
+                )
+                try:
+                    target_mask = local_masks.create_snapshot(
+                        photo_id=pid,
+                        mask_row=mask_row,
+                        vireo_dir=vireo_dir,
+                        native_size=_recipe_source_dimensions(photo),
+                    )
+                except ValueError as e:
+                    skipped.append(pid)
+                    local_errors[str(pid)] = str(e)
+                    continue
+                target_recipe = copy.deepcopy(recipe)
+                target_local_mask = dict(
+                    target_recipe["local"].get("mask") or {}
+                )
+                target_local_mask.update(target_mask)
+                target_recipe["local"]["mask"] = target_local_mask
             old_recipe = db.get_photo_edit_recipe(pid)
             old_value = recipe_to_json(old_recipe) or ""
             try:
-                new_recipe = db.set_photo_edit_recipe(pid, recipe, verify_workspace=True)
+                new_recipe = db.set_photo_edit_recipe(pid, target_recipe, verify_workspace=True)
             except (RecipeError, ValueError):
                 skipped.append(pid)
                 continue
@@ -4170,13 +4205,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             _invalidate_photo_render_cache(db, applied)
         if items:
             db.record_edit("edit_recipe", description, target_json, items, is_batch=True)
-        return jsonify({
+        payload = {
             "ok": True,
             "applied": applied,
             "skipped": skipped,
             "count": len(applied),
             "recipe": db.get_photo_edit_recipe(applied[0]) if applied else None,
-        })
+        }
+        if local_errors:
+            payload["local_errors"] = local_errors
+        return jsonify(payload)
 
     @app.route("/api/edit-presets", methods=["GET", "POST"])
     def api_edit_presets():
@@ -18751,6 +18789,81 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if size not in allowed_preview_sizes():
             return "Unsupported size", 400
         return _serve_preview(photo_id, size)
+
+    @app.route("/photos/<int:photo_id>/edit-mask-preview")
+    def serve_edit_mask_preview(photo_id):
+        """Serve a recipe's transformed, feathered local-weight map as a
+        tinted RGBA PNG aligned with the (uncropped) editor preview.
+
+        The existing lightbox mask endpoint serves the live photo_masks file
+        untouched; this one shows the pixels the renderer actually weights —
+        the recipe's snapshot after geometry and feathering — so the editor
+        overlay can never disagree with the saved render.
+        """
+        import io
+
+        import numpy as np
+        from PIL import Image
+
+        db = _get_db()
+        photo = db.get_photo(photo_id, verify_workspace=True)
+        if not photo:
+            return "Not found", 404
+        try:
+            size = int(request.args.get("size", "1920"))
+        except ValueError:
+            return "Invalid size", 400
+        size = max(256, min(3840, size))
+
+        raw_recipe = request.args.get("recipe")
+        if raw_recipe:
+            try:
+                recipe = json.loads(raw_recipe)
+            except (TypeError, ValueError):
+                return "Invalid recipe", 400
+        else:
+            recipe = db.get_photo_edit_recipe(photo_id) or {}
+
+        import local_masks
+        from image_edits import (
+            RecipeError,
+            local_weight_map,
+            normalize_recipe,
+        )
+        try:
+            normalized = normalize_recipe(recipe) or {}
+        except RecipeError as e:
+            return str(e), 400
+        if not normalized.get("local"):
+            return "Recipe has no local adjustments", 404
+        # The editor preview is uncropped; the overlay must align with it.
+        display_recipe = dict(normalized)
+        display_recipe.pop("crop", None)
+
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        snapshot = local_masks.load_snapshot(vireo_dir, photo_id, normalized)
+        if snapshot is None:
+            return "No usable edit-mask snapshot", 404
+        source_dims = _scaled_recipe_source_dimensions(photo, size)
+        if not source_dims[0] or not source_dims[1]:
+            source_dims = snapshot.size
+        weight = local_weight_map(
+            snapshot, source_dims, display_recipe,
+            native_size=_recipe_source_dimensions(photo),
+        )
+        if weight is None:
+            return "Mask does not fit this photo", 404
+
+        height, width = weight.shape
+        rgba = np.zeros((height, width, 4), dtype=np.uint8)
+        # Accent teal at up to ~60% opacity where the subject weight is 1.
+        rgba[..., 0] = 112
+        rgba[..., 1] = 199
+        rgba[..., 2] = 186
+        rgba[..., 3] = np.clip(weight * 150.0 + 0.5, 0, 255).astype(np.uint8)
+        buf = io.BytesIO()
+        Image.fromarray(rgba, "RGBA").save(buf, format="PNG")
+        return Response(buf.getvalue(), mimetype="image/png")
 
     @app.route("/photos/<int:photo_id>/edit-preview")
     def serve_photo_edit_preview(photo_id):
