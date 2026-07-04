@@ -2770,10 +2770,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         else:
             source_paths = None
         # hash_duplicate_paths is the frontend's pre-computed set of source
-        # paths that ingest() will skip via the file_hash global-dedup gate
-        # (copy mode + skip_duplicates=True). Same shape/limits as
+        # paths that ingest() will skip via the global duplicate gate (copy
+        # mode + skip_duplicates=True; metadata-first matching or content
+        # hashes depending on the verify-by-hash toggle — the preview and
+        # ingest share import_dedup.DuplicateChecker, so the set matches
+        # what ingest will actually skip). Same shape/limits as
         # source_paths; the planner subtracts these from new_count so the
-        # plan doesn't overstate work for hash-skipped files.
+        # plan doesn't overstate work for duplicate-skipped files.
         if "hash_duplicate_paths" in body:
             hash_duplicate_paths = body.get("hash_duplicate_paths")
             if not isinstance(hash_duplicate_paths, list):
@@ -10515,21 +10518,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_import_check_duplicates():
         """Stream duplicate detection results via SSE.
 
-        Accepts {"paths": [...]}, hashes each file, checks against DB,
-        and streams batches of duplicate paths back to the client.
+        Accepts {"paths": [...], "verify_by_hash": bool} and streams
+        batches of duplicate paths back to the client. Uses the same
+        DuplicateChecker as ingest() — metadata-first with a content-hash
+        fallback by default, hash-everything when verify_by_hash — so the
+        preview's DUPLICATE badges and count are exactly the files the
+        import step will skip.
         """
         body = request.get_json(silent=True) or {}
         paths = body.get("paths", [])
+        verify_by_hash = bool(body.get("verify_by_hash"))
         if not paths:
             return json_error("paths required", 400)
 
-        from scanner import EMPTY_FILE_SHA256, compute_file_hash
+        from import_dedup import CatalogIndex, DuplicateChecker
 
         db = _get_db()
-        rows = db.conn.execute(
-            "SELECT file_hash FROM photos WHERE file_hash IS NOT NULL"
-        ).fetchall()
-        known_hashes = {r["file_hash"] for r in rows}
+        checker = DuplicateChecker(
+            CatalogIndex.from_db(db), verify_by_hash=verify_by_hash,
+        )
 
         BATCH_SIZE = 20
 
@@ -10537,30 +10544,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             total = len(paths)
             duplicate_count = 0
             batch_duplicates = []
-            # Also track hashes seen in this run so identical source files
-            # (not yet in DB) are reported as duplicates of each other,
-            # matching the behaviour of the actual import step.
-            seen_hashes = set()
+            # Batch the EXIF header reads once up front (no-op in
+            # verify_by_hash mode). Intra-run duplicate tracking lives in
+            # the checker: identical source files not yet in the DB are
+            # reported as duplicates of each other, matching the actual
+            # import step.
+            checker.prepare([Path(p) for p in paths])
 
             for checked, path in enumerate(paths, 1):
+                # Zero-byte placeholders are non-duplicates (the checker
+                # gives them no identity), and unreadable/missing files
+                # are skipped; both fall through so the batch-yield block
+                # below still runs. A `continue` would swallow any
+                # already-queued `batch_duplicates` whenever such a file
+                # landed on the last path or on a batch boundary, leaving
+                # the UI unable to deselect those known dupes.
                 try:
-                    file_hash = compute_file_hash(path)
-                    # Treat zero-byte placeholders as non-duplicates, but fall
-                    # through so the batch-yield block below still runs.
-                    # A `continue` here would swallow any already-queued
-                    # `batch_duplicates` whenever an empty file landed on the
-                    # last path or on a `checked % BATCH_SIZE == 0` boundary,
-                    # leaving the UI unable to deselect those known dupes.
-                    is_empty_placeholder = (
-                        file_hash == EMPTY_FILE_SHA256
-                        and os.path.getsize(path) == 0
-                    )
-                    if not is_empty_placeholder:
-                        if file_hash in known_hashes or file_hash in seen_hashes:
-                            batch_duplicates.append(path)
-                            duplicate_count += 1
-                        else:
-                            seen_hashes.add(file_hash)
+                    if checker.check_and_record(Path(path)):
+                        batch_duplicates.append(path)
+                        duplicate_count += 1
                 except OSError:
                     pass  # Skip unreadable/missing files
 
@@ -13400,6 +13402,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         file_types = body.get("file_types", "both")
         folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
         skip_duplicates = body.get("skip_duplicates", True)
+        verify_by_hash = bool(body.get("verify_by_hash"))
 
         if not source or not destination:
             return json_error("source and destination are required")
@@ -13454,6 +13457,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 file_types=file_types,
                 folder_template=folder_template,
                 skip_duplicates=skip_duplicates,
+                verify_by_hash=verify_by_hash,
                 progress_callback=progress_cb,
             )
             return result
@@ -14269,6 +14273,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         file_types = body.get("file_types", "both")
         folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
         skip_duplicates = body.get("skip_duplicates", True)
+        verify_by_hash = bool(body.get("verify_by_hash"))
         copy = body.get("copy", True)
         exclude_paths = set(body.get("exclude_paths", []))
 
@@ -14348,6 +14353,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     file_types=file_types,
                     folder_template=folder_template,
                     skip_duplicates=skip_duplicates,
+                    verify_by_hash=verify_by_hash,
                     progress_callback=ingest_cb,
                     skip_paths=exclude_paths or None,
                 )
@@ -16486,6 +16492,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             file_types=body.get("file_types", "both"),
             folder_template=folder_template,
             skip_duplicates=body.get("skip_duplicates", True),
+            verify_by_hash=bool(body.get("verify_by_hash")),
             labels_file=body.get("labels_file"),
             labels_files=body.get("labels_files"),
             model_id=body.get("model_id"),

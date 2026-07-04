@@ -1603,7 +1603,8 @@ def test_pipeline_local_processing_preflight_filters_duplicates(
     db.add_workspace_folder(ws_id, folder_id)
     db.add_photo(
         folder_id=folder_id, filename="dup.jpg", extension=".jpg",
-        file_size=10, file_mtime=1.0, file_hash=dup_hash,
+        file_size=(src / "dup.jpg").stat().st_size, file_mtime=1.0,
+        file_hash=dup_hash,
     )
     db.close()
 
@@ -1685,7 +1686,8 @@ def test_pipeline_local_processing_plans_archive_credit_after_duplicate_filter(
     db.add_workspace_folder(ws_id, folder_id)
     db.add_photo(
         folder_id=folder_id, filename="dup.jpg", extension=".jpg",
-        file_size=10, file_mtime=1.0, file_hash=dup_hash,
+        file_size=(src / "dup.jpg").stat().st_size, file_mtime=1.0,
+        file_hash=dup_hash,
     )
     db.close()
 
@@ -2097,7 +2099,8 @@ def test_pipeline_local_processing_conflict_preflight_skips_known_duplicates(
     db.add_workspace_folder(ws_id, folder_id)
     db.add_photo(
         folder_id=folder_id, filename="dup.jpg", extension=".jpg",
-        file_size=10, file_mtime=1.0, file_hash=dup_hash,
+        file_size=dup_path.stat().st_size, file_mtime=1.0,
+        file_hash=dup_hash,
     )
     db.close()
 
