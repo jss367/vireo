@@ -4144,6 +4144,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         applied = []
         skipped = []
         local_errors = {}
+        applied_recipes = {}
         for pid in ids:
             photo = db.get_photo(pid, verify_workspace=True)
             if not photo:
@@ -4174,7 +4175,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         vireo_dir=vireo_dir,
                         native_size=_recipe_source_dimensions(photo),
                     )
-                except ValueError as e:
+                except (ValueError, OSError) as e:
+                    # OSError covers disk-write failures inside create_snapshot
+                    # (os.makedirs, f.write, os.replace) so a transient I/O
+                    # hiccup on one target doesn't abort the whole batch.
                     skipped.append(pid)
                     local_errors[str(pid)] = str(e)
                     continue
@@ -4193,6 +4197,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 continue
             new_value = recipe_to_json(new_recipe) or ""
             applied.append(pid)
+            applied_recipes[str(pid)] = new_recipe
             if old_value != new_value:
                 _queue_edit_recipe_sync(db, pid, new_value)
                 items.append({
@@ -4205,12 +4210,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             _invalidate_photo_render_cache(db, applied)
         if items:
             db.record_edit("edit_recipe", description, target_json, items, is_batch=True)
+        # ``recipes`` maps each applied id to the recipe actually stored for
+        # it — critical when ``has_local`` is true because each target has
+        # its own mask snapshot ref, so callers cannot reuse the pasted
+        # recipe (or the first applied recipe) for every id. ``recipe`` is
+        # kept as the first applied recipe for backwards compatibility.
         payload = {
             "ok": True,
             "applied": applied,
             "skipped": skipped,
             "count": len(applied),
-            "recipe": db.get_photo_edit_recipe(applied[0]) if applied else None,
+            "recipe": applied_recipes[str(applied[0])] if applied else None,
+            "recipes": applied_recipes,
         }
         if local_errors:
             payload["local_errors"] = local_errors

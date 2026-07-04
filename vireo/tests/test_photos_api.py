@@ -8164,3 +8164,13 @@ def test_bulk_apply_resnapshots_local_per_target(client_with_photo):
     assert r2["local"]["mask"]["ref"] != source_mask["ref"]
     assert r2["local"]["regions"] == r1["local"]["regions"]
     assert db.get_photo_edit_recipe(pid3) is None
+
+    # The response exposes a per-photo recipe map so the client cache stays
+    # in sync — reusing `data.recipe` (the first applied) for every id
+    # would silently poison non-first photos with the wrong mask ref until
+    # a full refetch.
+    recipes = data["recipes"]
+    assert set(recipes) == {str(photo_id), str(pid2)}
+    assert recipes[str(photo_id)]["local"]["mask"]["ref"] == r1["local"]["mask"]["ref"]
+    assert recipes[str(pid2)]["local"]["mask"]["ref"] == r2["local"]["mask"]["ref"]
+    assert recipes[str(pid2)]["local"]["mask"]["ref"] != recipes[str(photo_id)]["local"]["mask"]["ref"]
