@@ -2444,6 +2444,76 @@ def test_import_plan_deduplicates_source_paths(tmp_path, monkeypatch):
     assert plan_mixed["stages"]["Scan"]["detail"]["already_known"] == 1
 
 
+def test_import_plan_all_duplicates_reports_zero_new_photos(
+    tmp_path, monkeypatch
+):
+    """The re-inserted SD card: every selected file is already in the
+    library via the hash/metadata duplicate gate, so the run will import
+    0 new photos and every per-photo stage executes over an empty set.
+    The summaries must say that outright — "no photos in scope yet" and
+    "MegaDetector will run first" read as "work is coming" when none is —
+    and Group must not claim upstream stages have new work to do."""
+    import pipeline as pipeline_mod
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+    _stub_models(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    paths = ["/cards/SD/IMG_001.NEF", "/cards/SD/IMG_002.NEF"]
+    plan = compute_plan(
+        db,
+        _import_params(
+            paths,
+            model_ids=["m1"],
+            hash_duplicate_paths=list(paths),
+            skip_eye_keypoints=False,
+            skip_regroup=False,
+        ),
+        str(tmp_path / "test.db"),
+    )
+    assert plan["scope"]["new_count"] == 0
+    assert plan["scope"]["known_count"] == 2
+    for suffix in ("Previews", "Classify", "Extract", "EyeKeypoints"):
+        stage = plan["stages"][suffix]
+        assert stage["state"] == "will-run", (suffix, stage)
+        assert "0 new photos to import" in stage["summary"], (suffix, stage)
+        assert stage["detail"]["import_no_new"] is True, (suffix, stage)
+    group = plan["stages"]["Group"]
+    assert "upstream stages have new work" not in group["summary"], group
+
+
+def test_import_plan_with_new_files_keeps_forward_looking_summaries(
+    tmp_path, monkeypatch
+):
+    """Contrast case: an import that DOES bring new files must keep the
+    counting summaries and never claim "0 new photos to import"."""
+    import pipeline as pipeline_mod
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+    _stub_models(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    plan = compute_plan(
+        db,
+        _import_params(
+            ["/cards/SD/IMG_001.NEF", "/cards/SD/IMG_002.NEF"],
+            model_ids=["m1"],
+            skip_eye_keypoints=False,
+            skip_regroup=False,
+        ),
+        str(tmp_path / "test.db"),
+    )
+    assert plan["scope"]["new_count"] == 2
+    for suffix in ("Previews", "Classify", "Extract", "EyeKeypoints"):
+        stage = plan["stages"][suffix]
+        assert stage["state"] == "will-run", (suffix, stage)
+        assert "0 new photos to import" not in stage["summary"], (suffix, stage)
+        assert not stage["detail"].get("import_no_new"), (suffix, stage)
+    assert plan["stages"]["Group"]["state"] == "will-run"
+
+
 def test_import_plan_all_known_scan_is_done_prior(tmp_path):
     """If every preview file is already in the DB, Scan reports done-prior
     (the run will be a no-op for the scan step). Other stages reflect

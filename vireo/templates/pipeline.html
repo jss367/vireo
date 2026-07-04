@@ -4658,6 +4658,10 @@ function _formatPillLabel(stage, planEntry, state) {
   if (eligible === null || eligible === 0) {
     if (state === 'will-run' && labelSetChanged) return 'Different label set';
     if (state === 'will-run' && outdated) return 'Outdated';
+    // All-duplicates import: the stage executes but processes nothing.
+    // A bare "Will run" pill reads as "work will happen" — put the zero
+    // on the pill itself so the user doesn't have to open the card.
+    if (state === 'will-run' && detail.import_no_new) return 'Will run (0 photos)';
     return state === 'done-prior' ? 'Already done' : 'Will run';
   }
 
