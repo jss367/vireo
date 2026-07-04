@@ -336,7 +336,25 @@ after the enumeration for why):
   local pass is disabled on that render (warn-and-hold-zero) rather
   than reusing the preserve-highlights variant, because the embedded
   preview's crop and aspect against the sensor are per-camera unknowns
-  and no snapshot basis can be trusted to line up.
+  and no snapshot basis can be trusted to line up. The same
+  fallthrough can happen on the **primary direct-RAW render** too:
+  `load_image(..., RAW_DECODE_PRESERVE_HIGHLIGHTS)` calls `_load_raw`,
+  and `_load_raw` returns the embedded JPEG in the same libraw-failure
+  branch (`vireo/image_loader.py:577-600`) — so a "successful" direct
+  RAW load can still be embedded-preview pixels on unsupported RAWs
+  with no usable companion. The `used_embedded_fallback` flag PR 1
+  plumbs out of `_load_raw` for `extract_working_copy` is threaded
+  through the same call at **every** direct-RAW render site
+  (previews, thumbnails, exports, handoffs, warmups — the same list
+  §Rendering enumerates for the basis contract) and returned alongside
+  the loaded image. Render code treats a `used_embedded_fallback=True`
+  direct-RAW load as `embedded_jpeg` basis (no `mask.decodes` entry
+  matches) and disables the local pass with warn-and-hold-zero, the
+  same as an `embedded_jpeg` working copy. Without this the direct-RAW
+  render would silently pick the `preserve_highlights` variant and
+  blend it into embedded-preview pixels of unknown crop/aspect —
+  exactly the failure mode the working-copy case was written to
+  prevent, just on a different call path.
 - **RAWs with a companion JPEG:** two variants —
   `preserve_highlights` (for the primary RAW path *and* working copies
   with `photos.working_copy_source='raw'`) *and* `standard` (for the
@@ -344,7 +362,12 @@ after the enumeration for why):
   `photos.working_copy_source='companion'`, where the working copy was
   re-extracted from the companion JPEG after RAW extraction failed).
   `working_copy_source='embedded_jpeg'` rows disable the local pass
-  the same way as above.
+  the same way as above; a direct-RAW render whose `_load_raw`
+  returned `used_embedded_fallback=True` disables it the same way, on
+  the same `embedded_jpeg` basis rationale (this can happen on
+  RAW+JPEG pairs when the companion route was not taken for reasons
+  unrelated to RAW decode — e.g., the caller resolved to the RAW
+  original first and hit the silent embedded fallback inside libraw).
 
 **Darktable-developed exports bypass, they don't get their own variant.**
 Export prefers a darktable-developed output ahead of RAW / working copy /
@@ -464,12 +487,28 @@ subject mask available — Update" whenever **any** variant is stale, and
 Update **always rotates `local.mask.ref` to a fresh content-addressed
 value** and writes a complete new family under it — regenerating the
 variants whose digests changed and **copying the untouched variant files
-byte-for-byte** to the new ref's filenames. The old ref's files stay
-intact on disk (they are not deleted or overwritten by Update); they are
-still referenced by any edit-history recipe whose snapshot they were
-made for, so re-rendering those historical recipes remains deterministic
-and byte-identical. The old ref eventually GCs away on its own once no
-current or history recipe references it. Rotating in place — mutating
+byte-for-byte** to the new ref's filenames. The ref rotation is
+**atomic against readers**: the publish order is (a) write every
+regenerated variant to
+`<db_dir>/edit-masks/<photo_id>.<new_ref>.<decode>.png.tmp`, (b) copy
+every untouched variant to its `.<new_ref>.<decode>.png.tmp` sibling,
+(c) fsync each `.tmp` file, (d) atomically rename each `.tmp` to its
+final `.png` name, (e) only then commit the recipe's new
+`local.mask.ref` / `mask.decodes` via the existing DB write. A crash
+between (a) and (d) leaves an incomplete family of `.tmp` files under
+the new ref, but no recipe row references that ref yet, so no render
+consults them — GC treats orphaned `.tmp` and unreferenced `.<ref>.png`
+files the same way. A crash between (d) and (e) leaves a complete
+new-ref family on disk that no recipe references — again harmless. A
+render that starts before the DB commit sees the old ref and its
+still-intact files; a render that starts after the DB commit sees the
+new ref and its complete new family. There is no window where
+`local.mask.ref` points at an incomplete family. The old ref's files
+stay intact on disk (they are not deleted or overwritten by Update);
+they are still referenced by any edit-history recipe whose snapshot
+they were made for, so re-rendering those historical recipes remains
+deterministic and byte-identical. The old ref eventually GCs away on
+its own once no current or history recipe references it. Rotating in place — mutating
 `{photo_id}.{ref}.{decode}.png` under an unchanged ref — was
 considered and rejected: snapshot GC explicitly keeps files while any
 current or edit-history recipe still references them, so an undo/redo
@@ -519,22 +558,30 @@ passes. The weight map is built once and materialized at both scales:
 
 1. **Weight map.** Pick the `mask.decodes` entry whose `mode` matches the
    current render source's **effective decode basis** — `preserve_highlights`
-   when the RAW decoded successfully *or* when the render fell back to a
-   RAW-derived working-copy JPEG (`photos.working_copy_source='raw'`:
-   `extract_working_copy` decoded the RAW with
-   `RAW_DECODE_PRESERVE_HIGHLIGHTS`, so its pixel grid shares the
-   preserve-highlights basis); `standard` when the render fell back to
-   the companion JPEG, when the working copy is companion-derived
+   when the RAW decoded successfully via libraw's demosaic (`_load_raw`
+   returned `used_embedded_fallback=False`) *or* when the render fell
+   back to a RAW-derived working-copy JPEG
+   (`photos.working_copy_source='raw'`: `extract_working_copy` decoded
+   the RAW with `RAW_DECODE_PRESERVE_HIGHLIGHTS` and libraw actually
+   demosaiced, so its pixel grid shares the preserve-highlights basis);
+   `standard` when the render fell back to the companion JPEG, when the
+   working copy is companion-derived
    (`photos.working_copy_source='companion'` — re-extracted from the
    companion JPEG after RAW extraction failed by scanner or by the
    on-demand `/original` route, so its pixel grid is the companion's
    standard-decode basis), or when the photo is non-RAW. A working copy
    with `working_copy_source='embedded_jpeg'` (RAW decode fell through
-   to the embedded preview inside `_load_raw`) or a NULL value (a
-   legacy row from before the column existed and before the migration
-   backfill has run) is treated as unknown basis and the local pass is
-   disabled with warn-and-hold-zero, exactly as with a missing
-   snapshot. NULL rows recover automatically once the migration
+   to the embedded preview inside `_load_raw`), a **direct-RAW load
+   whose `_load_raw` returned `used_embedded_fallback=True`** (the
+   same libraw-failure fallthrough on the primary render path,
+   `vireo/image_loader.py:577-600`), or a NULL value (a legacy row
+   from before the column existed and before the migration backfill
+   has run) is treated as unknown basis and the local pass is disabled
+   with warn-and-hold-zero, exactly as with a missing snapshot. The
+   `used_embedded_fallback` signal is returned by `load_image` on
+   every direct-RAW render call site — not just extraction — so the
+   basis check catches embedded-preview loads at render time even when
+   no working-copy row exists to consult. NULL rows recover automatically once the migration
    backfill described in §Snapshot decode basis populates the column;
    `'embedded_jpeg'` rows stay disabled by design. `recipe_render_source` already
    distinguishes these paths internally, so it returns the effective basis
@@ -722,7 +769,22 @@ No `EDIT_MATH_VERSION` bump: recipes without `local` render byte-identically.
   substitute the new ref into the per-target recipe before writing. The
   region entries and shared feather carry over unchanged (they are
   slider values, not mask-identity). Targets with no usable mask are
-  skipped and reported in the response, matching the UI behavior. Direct
+  skipped and reported in the response, matching the UI behavior. The
+  response shape changes with this: instead of the current single
+  `recipe` field, `/api/photos/edit-recipe/apply` returns a map keyed
+  by target `photo_id` to that target's own resnapshotted recipe (plus
+  the same top-level `applied` / `skipped` id lists it returns today).
+  This matters because the paste UI in `vireo/templates/browse.html`
+  currently caches `data.recipe` for every applied id
+  (`vireo/templates/browse.html:4282-4285`) — with a singular response,
+  every target's client-side cache would end up holding the source
+  photo's `local.mask.ref`, and the next UI edit or copy from any of
+  those targets would persist that wrong ref back to the server (its
+  snapshot family only exists under the source's photo id, so the
+  render would then disable the local pass). Per-target recipes in the
+  response let the UI install each target's own resnapshotted recipe
+  into its cache, matching what was actually written. Skipped targets
+  omit a per-target recipe (they appear only in the `skipped` list). Direct
   recipe writes to a single photo (the normal editor save path) keep the
   ref they were given — the resnapshot is one instance of a more general
   contract: **any code path that transfers a `recipe_json` from one
