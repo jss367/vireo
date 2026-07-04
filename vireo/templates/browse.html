@@ -4299,8 +4299,16 @@ async function pasteEditSettingsToSelection() {
     var count = data.count || 0;
     var skipped = Array.isArray(data.skipped) ? data.skipped.length : 0;
     if (typeof window.vireoRefreshEditRecipeCache === 'function' && Array.isArray(data.applied)) {
+      // Prefer the server's per-id recipe map: with local adjustments each
+      // target now carries its own mask-snapshot ref, so reusing the copied
+      // recipe (or the first applied one) would cache wrong refs on all
+      // non-first ids until a full refetch.
+      var recipes = data.recipes && typeof data.recipes === 'object' ? data.recipes : null;
       var updates = {};
-      data.applied.forEach(function(pid) { updates[String(pid)] = data.recipe || copied.recipe; });
+      data.applied.forEach(function(pid) {
+        var key = String(pid);
+        updates[key] = (recipes && recipes[key]) || data.recipe || copied.recipe;
+      });
       window.vireoRefreshEditRecipeCache(updates);
     }
     var appliedMsg = 'Pasted edit settings to ' + count.toLocaleString() + ' photo' + (count === 1 ? '' : 's');

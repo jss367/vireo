@@ -7802,7 +7802,10 @@ def test_local_recipe_rejects_unknown_snapshot_ref(client_with_photo):
     assert "snapshot" in resp.get_json()["error"].lower()
 
 
-def test_bulk_apply_rejects_local_sections(client_with_photo):
+def test_bulk_apply_local_skips_photos_without_masks(client_with_photo):
+    """Bulk apply with a local section re-snapshots per target (PR 2);
+    targets without a usable active mask are skipped and reported instead
+    of silently receiving a wrong mask."""
     app, db, photo_id = client_with_photo
     client = app.test_client()
 
@@ -7815,8 +7818,12 @@ def test_bulk_apply_rejects_local_sections(client_with_photo):
             )["recipe"],
         },
     )
-    assert resp.status_code == 400
-    assert "local" in resp.get_json()["error"].lower()
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["applied"] == []
+    assert data["skipped"] == [photo_id]
+    assert "mask" in data["local_errors"][str(photo_id)].lower()
+    assert db.get_photo_edit_recipe(photo_id) is None
 
 
 def test_edit_preview_renders_local_adjustments(client_with_photo):
@@ -7947,3 +7954,223 @@ def test_local_snapshot_root_matches_thumb_cache_dir(tmp_path, monkeypatch):
     )
 
     db.close()
+
+
+def test_edit_mask_preview_requires_local_recipe(client_with_photo):
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    resp = client.get(
+        f"/photos/{photo_id}/edit-mask-preview",
+        query_string={"recipe": '{"rotation":90}'},
+    )
+    assert resp.status_code == 404
+    assert client.get("/photos/999999/edit-mask-preview").status_code == 404
+
+
+def test_edit_mask_preview_serves_transformed_weight_map(client_with_photo):
+    import io
+    import json
+
+    import numpy as np
+    from PIL import Image as PILImage
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute("SELECT path FROM folders").fetchone()
+    _register_active_mask(db, photo_id, folder["path"])
+    mask = client.post(
+        f"/api/photos/{photo_id}/local-mask/snapshot"
+    ).get_json()["mask"]
+
+    recipe = _local_recipe_payload(mask)["recipe"]
+    resp = client.get(
+        f"/photos/{photo_id}/edit-mask-preview",
+        query_string={"size": "800", "recipe": json.dumps(recipe)},
+    )
+    assert resp.status_code == 200
+    assert resp.mimetype == "image/png"
+    with PILImage.open(io.BytesIO(resp.data)) as img:
+        assert img.mode == "RGBA"
+        assert img.size == (800, 600)
+        alpha = np.asarray(img)[..., 3].astype(np.float32)
+
+    # Left (subject) half opaque-ish, right transparent.
+    assert np.mean(alpha[:, :360]) > 60
+    assert np.mean(alpha[:, 440:]) < 5
+
+    # Geometry rides along: flipping horizontally moves the weight.
+    recipe_flipped = dict(recipe)
+    recipe_flipped["flip"] = {"horizontal": True}
+    resp = client.get(
+        f"/photos/{photo_id}/edit-mask-preview",
+        query_string={"size": "800", "recipe": json.dumps(recipe_flipped)},
+    )
+    with PILImage.open(io.BytesIO(resp.data)) as img:
+        alpha = np.asarray(img)[..., 3].astype(np.float32)
+    assert np.mean(alpha[:, 440:]) > 60
+    assert np.mean(alpha[:, :360]) < 5
+
+    # The editor preview is uncropped, so the overlay ignores crop too.
+    recipe_cropped = dict(recipe)
+    recipe_cropped["crop"] = {"x": 0.5, "y": 0.0, "w": 0.5, "h": 1.0}
+    resp = client.get(
+        f"/photos/{photo_id}/edit-mask-preview",
+        query_string={"size": "800", "recipe": json.dumps(recipe_cropped)},
+    )
+    with PILImage.open(io.BytesIO(resp.data)) as img:
+        assert img.size == (800, 600)
+
+
+def test_edit_mask_preview_feather_scale_matches_saved_render(client_with_photo):
+    """Overlay feather uses the SAVED (cropped) render's scale.
+
+    Regression: the endpoint strips crop before calling ``local_weight_map``
+    so the overlay lines up with the uncropped editor preview, but the
+    feather scale must still come from the original (cropped) recipe —
+    that is what ``/edit-preview`` passes to
+    ``apply_recipe_to_loaded_image`` as ``detail_scale``. Otherwise a
+    cropped recipe's overlay halo drifts from the pixels the saved render
+    actually weights.
+    """
+    import io
+    import json
+
+    import numpy as np
+    from PIL import Image as PILImage
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute("SELECT path FROM folders").fetchone()
+    _register_active_mask(db, photo_id, folder["path"])
+    mask = client.post(
+        f"/api/photos/{photo_id}/local-mask/snapshot"
+    ).get_json()["mask"]
+
+    # Large feather + tight crop so the crop-derived scale doubles the
+    # crop-stripped one: photo native = 800x600, size = 400.
+    #   Old (buggy) scale = 400/800 = 0.5 (crop-stripped, uncropped long)
+    #   New scale         = 320/320 = 1.0 (saved cropped render)
+    # so the fix should ~2x the Gaussian-feather sigma.
+    payload = _local_recipe_payload(dict(mask, feather=50.0))
+    payload["recipe"]["crop"] = {"x": 0.1, "y": 0.1, "w": 0.4, "h": 0.4}
+    recipe_cropped = payload["recipe"]
+    recipe_full = dict(recipe_cropped)
+    recipe_full.pop("crop")
+
+    def _overlay_alpha(recipe):
+        resp = client.get(
+            f"/photos/{photo_id}/edit-mask-preview",
+            query_string={"size": "400", "recipe": json.dumps(recipe)},
+        )
+        assert resp.status_code == 200
+        with PILImage.open(io.BytesIO(resp.data)) as img:
+            assert img.size == (400, 300)
+            return np.asarray(img)[..., 3].astype(np.float32)
+
+    alpha_cropped = _overlay_alpha(recipe_cropped)
+    alpha_full = _overlay_alpha(recipe_full)
+
+    # Both overlays are aligned with the uncropped preview (400x300), so
+    # the mask's left/right split sits at the same column in each. The
+    # difference is only the feather sigma.
+    def _transition_width(alpha):
+        # Count columns whose mid-row alpha lies in the Gaussian
+        # transition band around the step edge at x ~ 200.
+        row = alpha[150]
+        return int(np.count_nonzero((row > 5) & (row < 145)))
+
+    w_cropped = _transition_width(alpha_cropped)
+    w_full = _transition_width(alpha_full)
+    assert w_cropped > w_full + 20, (
+        f"cropped-recipe overlay halo ({w_cropped}px) should be materially "
+        f"wider than the uncropped ({w_full}px) — the endpoint likely used "
+        "the crop-stripped recipe's scale instead of the saved-render scale."
+    )
+
+
+def test_edit_mask_preview_missing_snapshot_404s(client_with_photo):
+    import json
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    recipe = _local_recipe_payload(
+        {"ref": "eeeeeeeeeeee", "source_digest": "d"}
+    )["recipe"]
+    resp = client.get(
+        f"/photos/{photo_id}/edit-mask-preview",
+        query_string={"recipe": json.dumps(recipe)},
+    )
+    assert resp.status_code == 404
+
+
+def test_bulk_apply_resnapshots_local_per_target(client_with_photo):
+    import numpy as np
+    from PIL import Image as PILImage
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute("SELECT path FROM folders").fetchone()
+
+    # Second photo with its own (different) mask; third with no mask at all.
+    src2 = os.path.join(folder["path"], "second.jpg")
+    PILImage.new("RGB", (800, 600), (90, 120, 60)).save(src2, "JPEG")
+    pid2 = db.add_photo(
+        folder_id=db.conn.execute("SELECT id FROM folders").fetchone()["id"],
+        filename="second.jpg", extension=".jpg",
+        file_size=os.path.getsize(src2), file_mtime=os.path.getmtime(src2),
+        width=800, height=600,
+    )
+    src3 = os.path.join(folder["path"], "third.jpg")
+    PILImage.new("RGB", (800, 600), (10, 20, 30)).save(src3, "JPEG")
+    pid3 = db.add_photo(
+        folder_id=db.conn.execute("SELECT id FROM folders").fetchone()["id"],
+        filename="third.jpg", extension=".jpg",
+        file_size=os.path.getsize(src3), file_mtime=os.path.getmtime(src3),
+        width=800, height=600,
+    )
+
+    _register_active_mask(db, photo_id, folder["path"])
+    # pid2 gets a top-half mask so its snapshot differs from pid1's.
+    path2 = os.path.join(folder["path"], f"{pid2}.sam2-small.png")
+    arr = np.zeros((600, 800), dtype=np.uint8)
+    arr[:300, :] = 255
+    PILImage.fromarray(arr, "L").save(path2, "PNG")
+    db.upsert_photo_mask(
+        pid2, "sam2-small", path2, "megadetector-v6", 0.0, 0.0, 1.0, 0.5,
+    )
+    db.set_active_mask_variant(pid2, "sam2-small")
+
+    source_mask = client.post(
+        f"/api/photos/{photo_id}/local-mask/snapshot"
+    ).get_json()["mask"]
+    recipe = _local_recipe_payload(source_mask)["recipe"]
+
+    resp = client.post(
+        "/api/photos/edit-recipe/apply",
+        json={"photo_ids": [photo_id, pid2, pid3], "recipe": recipe},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert sorted(data["applied"]) == sorted([photo_id, pid2])
+    assert pid3 in data["skipped"]
+    assert str(pid3) in {str(k) for k in data.get("local_errors", {})}
+
+    # Each target references its OWN snapshot, not the source photo's.
+    r1 = db.get_photo_edit_recipe(photo_id)
+    r2 = db.get_photo_edit_recipe(pid2)
+    assert r1["local"]["mask"]["ref"] == source_mask["ref"]
+    assert r2["local"]["mask"]["ref"] != source_mask["ref"]
+    assert r2["local"]["regions"] == r1["local"]["regions"]
+    assert db.get_photo_edit_recipe(pid3) is None
+
+    # The response exposes a per-photo recipe map so the client cache stays
+    # in sync — reusing `data.recipe` (the first applied) for every id
+    # would silently poison non-first photos with the wrong mask ref until
+    # a full refetch.
+    recipes = data["recipes"]
+    assert set(recipes) == {str(photo_id), str(pid2)}
+    assert recipes[str(photo_id)]["local"]["mask"]["ref"] == r1["local"]["mask"]["ref"]
+    assert recipes[str(pid2)]["local"]["mask"]["ref"] == r2["local"]["mask"]["ref"]
+    assert recipes[str(pid2)]["local"]["mask"]["ref"] != recipes[str(photo_id)]["local"]["mask"]["ref"]
