@@ -55,6 +55,13 @@ from process_strategies import STRATEGIES, resolve_strategy
 
 
 def test_known_strategies():
+    # The whitelist is deliberately narrow: only *processing* presets.
+    # The design doc's "None" / import-only choice is NOT a fourth
+    # entry here — see the "Scope note" further down in this task for
+    # where it lives (workspace default in Task 1.5, chaining hook in
+    # PR 3 Task 3.1). Adding an entry like "none" here would make the
+    # process-job API accept it and enqueue a no-op run instead of
+    # letting the chaining hook short-circuit, which is the wrong shape.
     assert set(STRATEGIES) == {"full", "cull_ready", "quick_look"}
 
 
@@ -275,6 +282,27 @@ def test_pipeline_strategy_expands_flags(client, ...):
     assert job["skip_classify"] is True
 
 
+def test_pipeline_cull_ready_pins_miss_enabled_false(client, ...):
+    # quick_look alone can't prove miss_enabled reached PipelineParams:
+    # it also sets skip_classify=True, and the misses stage is downstream
+    # of classify, so an implementation that never wires the strategy's
+    # miss_enabled through to params would still produce a run without
+    # misses (by dint of skip_classify) and this test would go green.
+    # cull_ready has skip_classify=False + miss_enabled=False, so the
+    # only way misses can be suppressed is if the strategy's miss_enabled
+    # actually reaches PipelineParams — that's the property we pin here.
+    # Assert on the persisted job config (mirrors how skip_classify is
+    # asserted above) so the check works without stubbing the runner.
+    resp = client.post("/api/jobs/pipeline", json={
+        "collection_id": cid, "strategy": "cull_ready",
+    })
+    assert resp.status_code == 200
+    job = get_job_config(resp.get_json()["job_id"])
+    assert job["strategy"] == "cull_ready"
+    assert job["miss_enabled"] is False
+    assert job["skip_classify"] is False  # cull_ready keeps classify on
+
+
 def test_pipeline_unknown_strategy_400(client, ...):
     resp = client.post("/api/jobs/pipeline", json={
         "collection_id": cid, "strategy": "yolo",
@@ -407,7 +435,7 @@ The import job copies card → archive directly, verifies, and catalogs incremen
 - **Task 2.2** — per-file commit loop: copy (rsync per batch or `_copy_and_verify` from `move.py` per file), hash-verify, then index *that file* through the scanner's single-file path so folder rows + workspace links + working copy happen exactly as a rescan would. The photo row must not exist before verification passes (the design's core invariant). Photos gain nothing new: `file_hash`, `hash_checked_at`, `hash_status` columns already exist.
 - **Task 2.3** — working-copy extraction during import reads from the *source* (card) path while writing the archive copy, so the NAS is never re-read. Verify `scanner`'s working-copy extractor can be pointed at an alternate read path; if not, extract first, move into place keyed by the new photo id.
 - **Task 2.4** — job type `"import"` in `JobRunner` + `POST /api/jobs/import` (source(s), destination or remote target, template, file_types, after-import strategy name stored in config for PR 3). Progress = per-folder copied/verified counts.
-- **Task 2.5** — "safe to format card" result field: true iff every discovered source file is either hash-verified at the destination or was skipped as a verified duplicate.
+- **Task 2.5** — "safe to format card" result field: true iff every discovered source file is either (a) hash-verified at the destination as a fresh copy, or (b) skipped as a **hash-backed** duplicate — i.e. `DuplicateChecker.match()` returned a `("hash", ...)` token, not `("key", ...)`. Metadata-only `("key", ...)` matches do NOT count as verified: the card's bytes were never compared to anything, so a renamed-but-otherwise-plausible card file could match by (filename, size, EXIF) against a cataloged photo whose bytes differ, and the safe-to-format pill would go green while the card still holds the only copy. Two acceptable implementations: (i) run the import job with `verify_by_hash=True` end-to-end (reads every card byte; matches historical behavior), or (ii) keep the default metadata-first fast path but, for every file that got a `("key", ...)` match and is claimed by safe-to-format, do a second-pass hash verification (hash the card file, hash the cataloged twin at its archive path, require equality) before counting it as safe. Whichever path is chosen, test with a fixture that has a `("key", ...)` match against a cataloged twin whose bytes differ and assert safe_to_format is False.
 - **Task 2.6** — interruption tests: kill the job mid-run (cancel), assert the catalog contains only verified files, then re-run and assert the dedup gate skips exactly what landed and copies the rest. This is the test that proves `_deindex_staging` is unnecessary for the new path.
 - **Task 2.7** — remote (SSH) destination: reuse `build_remote_move_spec` / `rsync_dest_spec` from `move.py`; catalog at `mount_path` per `resolve_remote_archive`'s mapping. Verification via the existing `--checksum` dry-run (`_remote_verify_complete`) — resolve the design doc's open question on cost here.
 
