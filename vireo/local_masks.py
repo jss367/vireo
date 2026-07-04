@@ -15,6 +15,7 @@ simple grace-window GC instead of a publish/GC lock protocol.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -118,10 +119,8 @@ def create_snapshot(*, photo_id, mask_row, vireo_dir, native_size=None):
         # created hours ago for a recipe that was never saved) can be
         # swept between this call and the recipe save that re-references
         # it, breaking the just-returned ref.
-        try:
+        with contextlib.suppress(OSError):
             os.utime(dest, None)
-        except OSError:
-            pass
     return {"ref": ref, "source_digest": source_digest(mask_row)}
 
 
