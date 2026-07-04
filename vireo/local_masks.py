@@ -117,8 +117,16 @@ def create_snapshot(*, photo_id, mask_row, vireo_dir, native_size=None):
     # the size check would otherwise let us aspect-check different bytes
     # than we snapshot, and could pass a validation that the snapshotted
     # bytes should have failed.
-    with Image.open(io.BytesIO(data)) as img:
-        mask_w, mask_h = img.size
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            mask_w, mask_h = img.size
+    except (OSError, ValueError) as e:
+        # Truncated/non-image bytes → UnidentifiedImageError (subclass of
+        # OSError) or a decode OSError. Surface as ValueError so the
+        # snapshot endpoint returns a recoverable 400 rather than a 500.
+        raise ValueError(
+            f"active subject mask is not a readable image: {e}"
+        ) from e
     if native_size:
         native_w, native_h = native_size
         if native_w and native_h and mask_w and mask_h:

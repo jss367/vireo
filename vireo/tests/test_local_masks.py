@@ -219,6 +219,21 @@ def test_create_snapshot_concurrent_publishes_dont_race_on_shared_tempfile(tmp_p
     assert leftover == [], f"leaked tempfiles: {leftover!r}"
 
 
+def test_create_snapshot_rejects_corrupt_mask_file(tmp_path):
+    # A truncated / non-image mask file must surface as ValueError, not
+    # PIL's UnidentifiedImageError, so the snapshot endpoint returns a
+    # recoverable 400 ("regenerate the mask") instead of a 500.
+    src = str(tmp_path / "1.sam2-small.png")
+    with open(src, "wb") as f:
+        f.write(b"not a real png")
+
+    with pytest.raises(ValueError, match="not a readable image"):
+        local_masks.create_snapshot(
+            photo_id=1, mask_row=_mask_row(src), vireo_dir=str(tmp_path),
+            native_size=(800, 600),
+        )
+
+
 def test_create_snapshot_rejects_aspect_mismatch(tmp_path):
     # 80x60 mask (4:3) against a 16:9 photo must refuse rather than
     # misalign local weights.
