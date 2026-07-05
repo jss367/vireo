@@ -1274,7 +1274,6 @@ def test_deferred_extraction_skipped_when_already_cancelled(
     and the returned status must remain ``cancelled``. See PR #1107
     Codex review on commit 7dc0cce (import_job.py:1296).
     """
-    import import_job
     import scanner
     from import_job import ImportParams
 
@@ -1320,7 +1319,6 @@ def test_deferred_extraction_threads_cancel_check(tmp_path, monkeypatch):
     per-row loop instead of decoding every RAW to completion. See PR
     #1107 Codex review on commit 7dc0cce (import_job.py:1296).
     """
-    import import_job
     import scanner
     from import_job import ImportParams
 
