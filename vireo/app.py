@@ -14802,6 +14802,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not os.path.isabs(destination):
             return json_error("destination must be an absolute path")
 
+        # Reject destinations that are equal to, or nested under, any source
+        # (after realpath so a symlink can't slip past). The importer copies
+        # every card file into the destination and marks the card safe to
+        # format once ``copied + skipped_duplicate == discovered``; if the
+        # destination lives inside the card, formatting the card also erases
+        # the supposed archive copy, so allowing this is a data-loss trap.
+        try:
+            dest_real = os.path.realpath(destination)
+        except OSError as e:
+            return json_error(f"destination cannot be resolved: {e}")
+        for s in sources:
+            try:
+                source_real = os.path.realpath(s)
+            except OSError:
+                # Source unresolvable — the os.path.isdir check above
+                # already handled non-existent sources; nothing more to say.
+                continue
+            if dest_real == source_real or dest_real.startswith(
+                source_real.rstrip(os.sep) + os.sep
+            ):
+                return json_error(
+                    f"destination cannot be inside a source directory "
+                    f"(destination={destination!r}, source={s!r}); "
+                    f"formatting the card would erase the archive copy"
+                )
+
         folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
         if folder_template and _is_unsafe_path(folder_template):
             return json_error(

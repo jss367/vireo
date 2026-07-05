@@ -1263,3 +1263,86 @@ def test_dup_link_scan_failure_marks_unsafe(tmp_path, monkeypatch):
     )
     # The seeded folder still isn't linked (that was the whole point).
     assert str(dest_dir) not in _ws_linked_folder_paths(db, ws_id)
+
+
+def test_wc_extraction_falls_back_to_archive_when_card_vanishes(
+        tmp_path, monkeypatch):
+    """When the deferred working-copy pass runs after copying and the
+    card has been unmounted, ``source_paths`` still points at the card's
+    dead path; the extractor must NOT read from that missing path and
+    record a failure marker. It must fall back to the verified archive
+    copy, so the extraction reads a live file.
+    """
+    import import_job
+    import scanner
+
+    # A RAW file (fake .NEF) is what makes the row a working-copy
+    # extraction candidate — a bare small JPEG is skipped by the
+    # candidate predicate. Same trick as
+    # ``test_wc_extraction_deferred_to_after_last_batch``: bytes that
+    # scanner's metadata reader accepts as an image, extra bytes past
+    # the end to distinguish RAW from JPEG.
+    card = tmp_path / "card"
+    card.mkdir()
+    Image.new("RGB", (16, 16), "red").save(str(card / "DSC_1001.jpg"))
+    raw_bytes = (card / "DSC_1001.jpg").read_bytes() + b"RAW-SENSOR-DATA"
+    (card / "DSC_1001.NEF").write_bytes(raw_bytes)
+    (card / "DSC_1001.jpg").unlink()  # RAW-only, no companion
+    ts = datetime(2026, 7, 4, 10, 0, 0).timestamp()
+    os.utime(str(card / "DSC_1001.NEF"), (ts, ts))
+
+    # Track every extract_working_copy call's source path.
+    calls = []
+
+    def fake_extract(source_path, output_path, max_size=4096, quality=92):
+        calls.append(str(source_path))
+        if not os.path.isfile(source_path):
+            return False
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "wb") as f:
+            f.write(b"jpeg-bytes")
+        return True
+
+    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+
+    vireo_dir = tmp_path / "vireo"
+    (vireo_dir / "working").mkdir(parents=True)
+    dest = str(tmp_path / "archive")
+
+    # Unmount the card BETWEEN copy and end-of-run extraction: patch
+    # ``scanner._extract_working_copies`` to unlink card files first,
+    # then delegate to the real extractor.
+    real_extract_wc = scanner._extract_working_copies
+
+    def unmount_then_extract(*a, **kw):
+        for card_file in list(card.iterdir()):
+            card_file.unlink()
+        card.rmdir()
+        return real_extract_wc(*a, **kw)
+
+    monkeypatch.setattr(
+        "scanner._extract_working_copies", unmount_then_extract,
+    )
+
+    _db, _ws_id, result = _run_import(tmp_path, import_job.ImportParams(
+        sources=[str(card)], destination=dest,
+        vireo_dir=str(vireo_dir),
+    ))
+
+    assert result["copied"] == 1
+    assert result["safe_to_format"] is True
+
+    # The extractor was asked to read the archive path (which exists),
+    # not the vanished card path. Without the fallback the extractor
+    # would read only the dead card path and return False.
+    assert calls, "extractor should have run"
+    live_reads = [c for c in calls if os.path.isfile(c)]
+    assert live_reads, (
+        f"extractor should have read a live path (archive fallback), "
+        f"got calls={calls}"
+    )
+    dead_reads = [c for c in calls if str(card) in c]
+    assert not dead_reads, (
+        f"extractor should not have read the vanished card path, "
+        f"got dead reads={dead_reads}"
+    )

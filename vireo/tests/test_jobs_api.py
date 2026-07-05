@@ -3246,3 +3246,52 @@ def test_import_photos_validation_400s(app_and_db, tmp_path):
         "folder_template": "../escape",
     })
     assert resp.status_code == 400
+
+
+def test_import_photos_rejects_destination_inside_source(app_and_db, tmp_path):
+    """Destinations equal to or nested under any source path are rejected
+    at enqueue. Otherwise the importer copies card files into the same
+    tree it's importing, ``safe_to_format`` still flips green once
+    ``copied + skipped_duplicate == discovered``, and formatting the card
+    erases the supposed archive copy — silent data loss.
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+    card = _import_card(tmp_path)
+
+    # Destination equal to source.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": card,
+    })
+    assert resp.status_code == 400
+    assert "inside a source" in resp.get_json()["error"]
+
+    # Destination nested under source.
+    nested = os.path.join(card, "archive")
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": nested,
+    })
+    assert resp.status_code == 400
+    assert "inside a source" in resp.get_json()["error"]
+
+    # A symlink that resolves back inside the source must also be
+    # rejected — otherwise the rule is trivially bypassed.
+    symlinked_dest = tmp_path / "symlinked-archive"
+    try:
+        os.symlink(card, str(symlinked_dest))
+    except (OSError, NotImplementedError):
+        # Windows filesystems without symlink support: skip that leg.
+        pass
+    else:
+        resp = client.post("/api/jobs/import-photos", json={
+            "sources": [card], "destination": str(symlinked_dest),
+        })
+        assert resp.status_code == 400
+        assert "inside a source" in resp.get_json()["error"]
+
+    # A sibling destination NOT nested under the source is fine.
+    sibling = str(tmp_path / "archive")
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": sibling,
+    })
+    assert resp.status_code == 200, resp.get_json()

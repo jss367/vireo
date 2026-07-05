@@ -909,17 +909,33 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
         # clipped highlights — but if libraw cannot decode this RAW variant
         # (and the embedded thumb is unusable too) we still fall back to the
         # companion so an extractable JPEG copy isn't refused outright.
-        primary_path = os.path.join(row["folder_path"], row["filename"])
+        catalog_primary = os.path.join(row["folder_path"], row["filename"])
+        primary_path = catalog_primary
         if source_paths:
-            primary_path = source_paths.get(primary_path, primary_path)
+            # ``source_paths`` overrides the catalog path with the card-side
+            # source so extraction reads local card bytes instead of the
+            # just-written archive copy over a slow NAS. But if the card was
+            # unmounted between copy and the end-of-run extraction pass, the
+            # override points at a dead path — reading it would record a
+            # failure marker even though the verified archive copy is
+            # available. Only substitute the alternate source when it still
+            # exists on disk; otherwise keep the catalog path.
+            override = source_paths.get(catalog_primary)
+            if override and os.path.isfile(override):
+                primary_path = override
         primary_is_raw = (
             os.path.splitext(row["filename"])[1].lower() in RAW_EXTENSIONS
         )
         companion_path = None
         if row["companion_path"]:
-            candidate = os.path.join(row["folder_path"], row["companion_path"])
+            catalog_companion = os.path.join(
+                row["folder_path"], row["companion_path"],
+            )
+            candidate = catalog_companion
             if source_paths:
-                candidate = source_paths.get(candidate, candidate)
+                override = source_paths.get(catalog_companion)
+                if override and os.path.isfile(override):
+                    candidate = override
             if os.path.isfile(candidate):
                 companion_path = candidate
 
