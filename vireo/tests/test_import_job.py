@@ -1646,6 +1646,90 @@ def test_dup_link_scan_failure_marks_unsafe(tmp_path, monkeypatch):
     assert str(dest_dir) not in _ws_linked_folder_paths(db, ws_id)
 
 
+def test_dup_link_scan_non_cancel_runtime_error_marks_unsafe(
+        tmp_path, monkeypatch):
+    """A non-cancellation ``RuntimeError`` from the dup-link scan (a
+    library-level RuntimeError, or a RecursionError which inherits from
+    RuntimeError) must not be routed to the cancellation branch — the
+    runner was never cancelled, and treating the job as cancelled would
+    hide the workspace-link failure from ``ok``/``safe_to_format`` and
+    let the UI serve an import result that looks successful even though
+    the imported duplicates never became visible. See PR #1107 review.
+    """
+    import scanner as scanner_mod
+    from import_dedup import compute_file_hash
+    from import_job import ImportParams, run_import_job
+
+    archive = tmp_path / "archive"
+    dest_dir = archive / "2026" / "2026-08-06"
+    dest_dir.mkdir(parents=True)
+    dest_file = dest_dir / "IMG_0B81.jpg"
+    Image.new("RGB", (16, 16), "green").save(str(dest_file))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES (?, ?, 'ok')",
+        (str(dest_dir), dest_dir.name),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, extension, file_size,"
+        " file_hash) VALUES (?, ?, '.jpg', ?, ?)",
+        (
+            fid,
+            "IMG_0B81.jpg",
+            os.path.getsize(str(dest_file)),
+            compute_file_hash(str(dest_file)),
+        ),
+    )
+    db.conn.commit()
+
+    card = tmp_path / "card"
+    card.mkdir()
+    import shutil
+    shutil.copy2(str(dest_file), str(card / "IMG_0B81.jpg"))
+
+    real_scan = scanner_mod.scan
+
+    def flaky_scan(root, db_arg, **kwargs):
+        restrict_dirs = kwargs.get("restrict_dirs") or []
+        if (
+            "restrict_files" not in kwargs
+            or kwargs["restrict_files"] is None
+        ) and any(
+            os.path.normpath(str(d)) == str(dest_dir)
+            for d in restrict_dirs
+        ):
+            # A non-sentinel RuntimeError — the runner was never
+            # cancelled. RecursionError (a RuntimeError subclass) or a
+            # library-level RuntimeError bubbling out of the scan would
+            # look like this at the handler.
+            raise RuntimeError("library exploded during scan")
+        return real_scan(root, db_arg, **kwargs)
+
+    monkeypatch.setattr(scanner_mod, "scan", flaky_scan)
+
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(sources=[str(card)], destination=str(archive)),
+    )
+
+    assert result["skipped_duplicate"] == 1
+    # The whole point: not routed to cancellation; instead reported as a
+    # dup-link failure so ``safe_to_format`` reflects reality.
+    assert result["cancelled"] is False
+    assert result["safe_to_format"] is False
+    assert result["ok"] is False
+    assert any(
+        str(dest_dir) in u["path"] for u in result["unsafe_files"]
+    ), (
+        "expected the failing dup-link folder in unsafe_files; got "
+        f"{result['unsafe_files']!r}"
+    )
+    assert str(dest_dir) not in _ws_linked_folder_paths(db, ws_id)
+
+
 def test_wc_extraction_falls_back_to_archive_when_card_vanishes(
         tmp_path, monkeypatch):
     """When the deferred working-copy pass runs after copying and the

@@ -1535,8 +1535,6 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                     # scan branch above). Invalidate every touched dup dir.
                     for d in sorted(lex_dup_dirs):
                         _invalidate_new_images(db, d)
-                except RuntimeError:
-                    cancelled = True
                 except Exception as e:
                     # A duplicate-only batch's ONLY workspace-visibility
                     # step is this scan — swallowing the error would leave
@@ -1545,18 +1543,38 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                     # force safe_to_format false; the file(s) are on disk
                     # (import succeeded), but the operation as a whole is
                     # not safe.
-                    log.exception(
-                        "Linking duplicate-matched folders failed: %s",
-                        sorted(lex_dup_dirs),
-                    )
-                    dup_link_failed = True
-                    for d in sorted(lex_dup_dirs):
-                        unsafe_files.append({
-                            "path": d,
-                            "reason": (
-                                f"duplicate-folder link scan failed: {e}"
-                            ),
-                        })
+                    #
+                    # scanner.scan raises ``RuntimeError("scan cancelled")``
+                    # at cancellation checkpoints when ``cancel_check``
+                    # returns truthy. Match on BOTH the sentinel message
+                    # AND the runner's cancelled state before routing to
+                    # the cancellation branch — a bare RuntimeError catch
+                    # would also swallow real runtime failures (a
+                    # ``RecursionError`` inherits from RuntimeError, or a
+                    # library-level RuntimeError bubbling out of the scan)
+                    # and report the job as cancelled even though nothing
+                    # was cancelled and the workspace-link step actually
+                    # failed. Mirrors pipeline_job.py's convention. See
+                    # PR #1107 review.
+                    if (
+                        isinstance(e, RuntimeError)
+                        and str(e) == "scan cancelled"
+                        and runner.is_cancelled(job["id"])
+                    ):
+                        cancelled = True
+                    else:
+                        log.exception(
+                            "Linking duplicate-matched folders failed: %s",
+                            sorted(lex_dup_dirs),
+                        )
+                        dup_link_failed = True
+                        for d in sorted(lex_dup_dirs):
+                            unsafe_files.append({
+                                "path": d,
+                                "reason": (
+                                    f"duplicate-folder link scan failed: {e}"
+                                ),
+                            })
 
         _emit(
             f"{rel}: {_counts(rel)['copied']} copied · "
