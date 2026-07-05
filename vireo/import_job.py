@@ -303,8 +303,15 @@ def run_import_job(job, runner, db_path, workspace_id, params):
             cancelled = True
             break
 
+        # Normalize so the "/" strftime puts in ``rel`` (e.g. "2026/07-03")
+        # lines up with what scanner stores. Scanner wraps paths in
+        # ``Path(...)`` before writing the folder row and building its
+        # restrict_files set, which on Windows rewrites mid-path "/" to
+        # "\\"; a raw os.path.join here would leave copied files invisible
+        # to the restricted scan and unfindable in the post-scan lookup.
         dest_folder = (
-            os.path.join(destination, rel) if rel != "." else destination
+            os.path.normpath(os.path.join(destination, rel))
+            if rel != "." else destination
         )
         os.makedirs(dest_folder, exist_ok=True)
 
