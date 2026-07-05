@@ -713,7 +713,9 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                 # twice.
                 _sh_cache = [False, None]
 
-                def _src_hash_cached():
+                def _src_hash_cached(
+                    _sh_cache=_sh_cache, source_file=source_file,
+                ):
                     if not _sh_cache[0]:
                         _sh_cache[0] = True
                         _sh_cache[1] = (
