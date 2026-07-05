@@ -953,6 +953,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             thread_db = None
             try:
                 import config as cfg
+                from scanner import ScanCancelled
                 from scanner import scan as do_scan
 
                 thread_db = Database(db_path)
@@ -1107,7 +1108,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 cancel_check=cancel_check,
                             )
                         except (OSError, RuntimeError) as e:
-                            if str(e) == "scan cancelled" and (
+                            if isinstance(e, ScanCancelled) and (
                                 _should_abort(abort) or runner.is_cancelled(job["id"])
                             ):
                                 abort.set()
@@ -2040,7 +2041,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     runner.update_step(job["id"], "scan", status="completed",
                                        summary=scan_summary)
             except Exception as e:
-                if str(e) == "scan cancelled" and (
+                if isinstance(e, ScanCancelled) and (
                     _should_abort(abort) or runner.is_cancelled(job["id"])
                 ):
                     abort.set()

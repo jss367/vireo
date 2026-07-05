@@ -33,6 +33,11 @@ from xmp import read_hierarchical_keywords, read_keywords
 log = logging.getLogger(__name__)
 EMPTY_FILE_SHA256 = hashlib.sha256(b"").hexdigest()
 
+
+class ScanCancelled(RuntimeError):
+    """Raised when a caller cancels scanner.scan via cancel_check."""
+
+
 # scan() runs inside JobRunner/pipeline_job background threads, so the
 # default POSIX "fork" start method is unsafe here: forking a
 # multithreaded process can deadlock. In a PyInstaller bundle, forkserver
@@ -1274,7 +1279,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             — a "Found 0 images" black box from the user's perspective.
         cancel_check: optional callable returning truthy when the caller
             wants scanning to stop promptly. When set, scan raises
-            RuntimeError("scan cancelled") at cancellation checkpoints.
+            ScanCancelled at cancellation checkpoints.
         skip_working_copies: if True, suppress the end-of-scan
             ``_extract_working_copies`` pass while still running
             ``_pair_raw_jpeg_companions`` (with cache context) and
@@ -1312,7 +1317,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
 
     def _check_cancelled():
         if cancel_check is not None and cancel_check():
-            raise RuntimeError("scan cancelled")
+            raise ScanCancelled("scan cancelled")
 
     def _emit_status(message, phase_current=None, phase_total=None, phase_label=None):
         if not status_callback:
