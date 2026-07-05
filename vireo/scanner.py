@@ -1560,11 +1560,27 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         else:
             is_ws_root = (folder_path == root_path)
 
+        # In restricted mode, the scan root (``root_path``) and every
+        # intermediate ancestor between it and ``restrict_dirs`` exist
+        # only to satisfy the ``folders.parent_id`` chain — they are not
+        # part of what the user asked to import. Linking them to the
+        # workspace would fire ``_add_workspace_folder_no_commit`` and
+        # its path-prefix subtree cascade, pulling every pre-existing
+        # cataloged descendant of ``root_path`` (unrelated archive
+        # subtrees from prior scans / other workspaces) into the active
+        # workspace. Only the ``_restrict_root_paths`` themselves should
+        # link. See PR #1107 review (line 1186).
+        link_to_ws = (
+            _restrict_root_paths is None
+            or os.path.normpath(folder_str) in _restrict_root_paths
+        )
+
         folder_id = db.add_folder(
             path=folder_str,
             name=folder_path.name,
             parent_id=parent_id,
             workspace_root=is_ws_root,
+            link_to_workspace=link_to_ws,
         )
         folder_cache[folder_str] = folder_id
         return folder_id

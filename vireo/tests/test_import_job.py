@@ -3507,11 +3507,10 @@ def test_key_duplicate_links_only_byte_verified_twin_folder(tmp_path):
     # card. Before the fix, it was passed to the duplicate-link scan
     # as a restrict_dir and workspace-linked as its own top-level root
     # (``is_root=1``), pulling an unrelated archive folder into the
-    # workspace UI. It must NOT surface as a workspace root here.
-    # (It may still appear with ``is_root=0`` via the destination
-    # cascade, which is a separate pre-existing behavior of
-    # ``add_workspace_folder``.)
-    assert ws_folder_is_root.get(str(collision_dir), 0) == 0
+    # workspace UI. It must NOT surface as a workspace root here, and
+    # after the restricted-scan cascade fix (PR #1107, line 1186) it
+    # must not appear in ``workspace_folders`` at all.
+    assert str(collision_dir) not in ws_folder_is_root
 
     # Stronger: the collision folder was never scanned this run, so
     # its pre-seeded row's ``file_hash`` is still NULL. Before the
@@ -3630,5 +3629,83 @@ def test_hash_duplicate_links_only_byte_verified_twin_folder(tmp_path):
     # that ``photos.file_hash`` is authoritative, so this folder was
     # workspace-linked as its own top-level root, pulling an unrelated
     # archive folder into the workspace UI. It must NOT surface as a
-    # workspace root here.
-    assert ws_folder_is_root.get(str(stale_dir), 0) == 0
+    # workspace root here, and after the restricted-scan cascade fix
+    # (PR #1107, line 1186) it must not appear in ``workspace_folders``
+    # at all.
+    assert str(stale_dir) not in ws_folder_is_root
+
+
+def test_restricted_scan_does_not_link_unrelated_archive_subtrees(tmp_path):
+    """The per-batch restricted ``scan()`` call in ``run_import_job``
+    passes the broad archive ``destination`` as ``root`` and the templated
+    ``dest_folder`` as the only ``restrict_dir``. Before the fix,
+    scanner's eager ``_ensure_folder(root_path)`` (and every parent-chain
+    step between the two) called ``db.add_folder(..., workspace_root=
+    False)``, which still fires ``add_workspace_folder`` — and its
+    path-prefix subtree cascade in ``_add_workspace_folder_no_commit``
+    would link every pre-existing cataloged descendant of ``destination``
+    into the active workspace. A one-folder import would therefore make
+    unrelated archive subtrees (e.g. shoots from a different card or a
+    different workspace) suddenly visible in the current workspace UI.
+
+    See PR #1107 review at line 1186:
+    "Avoid linking the whole archive during restricted scans."
+    """
+    from import_job import ImportParams
+
+    # Card: one file. Templates to <archive>/2026/2026-07-05/.
+    card = _make_card(tmp_path, [
+        ("DSC_9001.jpg", datetime(2026, 7, 5, 12, 0, 0), "orange"),
+    ])
+    archive = tmp_path / "archive"
+    archive.mkdir()
+
+    # Pre-existing archive tree: two unrelated folders already cataloged
+    # in ``folders`` (as if scanned by a prior workspace or a previous
+    # session on this workspace), NOT currently linked to the active
+    # workspace. We insert them via raw SQL to bypass ``add_folder``'s
+    # auto-link so the "unlinked descendants of destination" precondition
+    # holds cleanly at the start of the run.
+    unrelated_a = archive / "2024" / "2024-01-15-kenya-trip"
+    unrelated_a.mkdir(parents=True)
+    unrelated_b = archive / "2025" / "2025-09-02-yosemite"
+    unrelated_b.mkdir(parents=True)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    for folder_dir in (unrelated_a, unrelated_b):
+        db.conn.execute(
+            "INSERT INTO folders (path, name, status) VALUES (?, ?, 'ok')",
+            (str(folder_dir), folder_dir.name),
+        )
+    db.conn.commit()
+    unrelated_paths = {str(unrelated_a), str(unrelated_b)}
+    # Precondition: neither pre-existing folder is workspace-linked yet.
+    assert unrelated_paths.isdisjoint(_ws_linked_folder_paths(db, ws_id))
+
+    # Run the import into ONE new templated dest_folder.
+    from import_job import run_import_job
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(sources=[str(card)], destination=str(archive)),
+    )
+    assert result["copied"] == 1
+    assert result["failed"] == 0
+
+    linked = _ws_linked_folder_paths(db, ws_id)
+    # The newly-imported dest_folder must be linked (that's the whole
+    # point of the import).
+    dest_folder = archive / "2026" / "2026-07-05"
+    assert str(dest_folder) in linked, (
+        "the imported dest_folder must be visible in the active workspace"
+    )
+    # Neither pre-existing unrelated archive subtree should have been
+    # dragged into the active workspace by the restricted scan.
+    for path in unrelated_paths:
+        assert path not in linked, (
+            f"unrelated pre-existing archive folder {path} was linked "
+            f"into the active workspace by the restricted scan — the "
+            f"cascade in ``_add_workspace_folder_no_commit`` fired for "
+            f"``destination`` even though it was not the user's target"
+        )
