@@ -4,7 +4,7 @@
 
 **Goal:** A first-class import job that copies card → archive directly (no staging), hash-verifies every file, and catalogs photos at their final paths incrementally — so folders appear in the workspace *during* the import and a dead run leaves a valid partial catalog that a retry resumes.
 
-**Architecture:** New `vireo/import_job.py` implementing a per-batch commit loop that reuses the existing primitives — `ingest.discover_source_files` / `build_destination_path`, `import_dedup.DuplicateChecker`, `scanner.scan(restrict_dirs=…, restrict_files=…)` — but **not** `ingest()`'s monolithic loop (that stays untouched for the legacy pipeline until PR 4 deletes it). The core invariant from the design doc: *a photo row is created only when its file verifiably exists at its final archive path.* Exposed as job type `"import"` via `POST /api/jobs/import`. API-only in this PR; the Import page and chaining come in PR 3.
+**Architecture:** New `vireo/import_job.py` implementing a per-batch commit loop that reuses the existing primitives — `ingest.discover_source_files` / `build_destination_path`, `import_dedup.DuplicateChecker`, `scanner.scan(restrict_dirs=…, restrict_files=…)` — but **not** `ingest()`'s monolithic loop (that stays untouched for the legacy pipeline until PR 4 deletes it). The core invariant from the design doc: *a photo row is created only when its file verifiably exists at its final archive path.* Exposed as job type `"import"` via `POST /api/jobs/import-photos`; the existing `POST /api/jobs/import` Lightroom catalog route remains unchanged. API-only in this PR; the Import page and chaining come in PR 3.
 
 **Tech Stack:** Python 3, Flask, SQLite (raw cursor), pytest.
 
@@ -70,9 +70,8 @@ def test_copy_and_hash_verify_roundtrip(tmp_path):
 
 
 def test_copy_and_hash_verify_detects_corruption(tmp_path, monkeypatch):
-    """A copy whose destination bytes differ must fail AND remove the bad
-    destination file so a retry re-copies instead of tripping the
-    same-name-different-content collision path."""
+    """A copy whose destination bytes differ must fail without deleting any
+    previously verified archive file at the destination path."""
     import shutil
 
     from import_job import copy_and_hash_verify
@@ -81,6 +80,8 @@ def test_copy_and_hash_verify_detects_corruption(tmp_path, monkeypatch):
     src.parent.mkdir()
     src.write_bytes(b"good bytes")
     dst = tmp_path / "archive" / "DSC_0002.jpg"
+    dst.parent.mkdir()
+    dst.write_bytes(b"existing verified archive bytes")
 
     real_copy2 = shutil.copy2
 
@@ -92,15 +93,17 @@ def test_copy_and_hash_verify_detects_corruption(tmp_path, monkeypatch):
     monkeypatch.setattr("import_job.shutil.copy2", corrupting_copy2)
     ok, file_hash = copy_and_hash_verify(str(src), str(dst))
     assert ok is False
-    assert not dst.exists()
+    assert dst.read_bytes() == b"existing verified archive bytes"
+    assert not list(dst.parent.glob(".DSC_0002.jpg.*.tmp"))
 ```
 
 **Step 2:** Run `python -m pytest vireo/tests/test_import_job.py -v` — expect `ModuleNotFoundError`.
 
 **Step 3:** Implement `copy_and_hash_verify(src, dst, *, src_hash=None)`:
-- `os.makedirs(dirname, exist_ok=True)`; `shutil.copy2`; hash the destination with `compute_file_hash`; compare against `src_hash` (caller may pass the DuplicateChecker's cached hash) or a fresh source hash.
-- On mismatch: remove the destination, return `(False, None)`. On match: return `(True, file_hash)`.
-- fsync is not required (rsync-style temp+rename is overkill here — the hash re-read after copy is the integrity gate, and a torn file fails it).
+- `os.makedirs(dirname, exist_ok=True)`; copy to a sibling temp path such as `.DSC_0002.jpg.<uuid>.tmp` with `shutil.copy2`; hash that temp copy with `compute_file_hash`; compare against `src_hash` (caller may pass the DuplicateChecker's cached hash) or a fresh source hash.
+- On mismatch: remove only the temp copy, leave any existing `dst` untouched, and return `(False, None)`.
+- On match: replace/promote the temp copy into `dst` with `os.replace`, preserving the verified file's metadata from `shutil.copy2`, and return `(True, file_hash)`.
+- fsync is not required (the hash re-read after copy is the integrity gate, and a torn temp file fails it before it can replace the archive path).
 
 **Step 4:** Run — PASS. **Step 5: Commit** — `feat: hash-verified copy primitive for the import job`
 
@@ -123,6 +126,7 @@ def _make_card(tmp_path, names):
 - Fixture: card with 4 JPEGs (2 destined for one template folder, 2 for another via distinct mtimes), archive destination inside tmp_path, `Database` with active workspace.
 - Call `run_import_job(job, runner, db_path, ws_id, ImportParams(sources=[card], destination=str(archive), folder_template="%Y/%Y-%m-%d"))` (mirror `run_pipeline_job`'s calling convention and the FakeRunner from test_pipeline_job.py).
 - Assert: every discovered file exists under the archive at its template path; a photo row exists **for each copied file at its final path** (join folders on path); each row has `file_hash` set, `hash_status = 'verified'`, `hash_checked_at` non-NULL; the result dict reports `{discovered, copied, verified, skipped_duplicate, failed}` consistently; folders are linked to the active workspace.
+- Duplicate-only variant: pre-catalog files at the archive destination without linking their folders to the active workspace, import a card containing only those duplicates, and assert the matched destination folders are scanned and linked even though no fresh files were copied.
 - **Invariant assertion:** no photo row exists whose file is missing on disk (catalog ⊆ verified files).
 
 **Step 2:** Run — FAIL (no `run_import_job`).
@@ -131,8 +135,8 @@ def _make_card(tmp_path, names):
 - `ImportParams` dataclass: `sources`, `destination`, `folder_template="%Y/%Y-%m-%d"`, `file_types="both"`, `skip_duplicates=True`, `verify_by_hash=False`, `recursive=True`, `after_import=None` (stored, unused until PR 3).
 - Discover all files across sources (`discover_source_files`), resolve capture times (`source_capture_timestamps`), group into batches by destination folder (Task 2.0's batch unit), template order.
 - One shared `DuplicateChecker(CatalogIndex.from_db(db), verify_by_hash=params.verify_by_hash)` across the whole run.
-- Per file in a batch: dedup `match()` → record skip with its token (Task 2.3 consumes these); else `copy_and_hash_verify` (pass the checker's cached hash when it has one); collision handling mirrors `ingest()` (numeric suffix when same name + different content at destination; skip when the destination file is byte-identical — reuse `ingest()`'s existing check shape).
-- Per batch, after all copies: `scan(root=destination, db, restrict_dirs=[batch dest dir], restrict_files=[verified dest paths], vireo_dir=…, thumb_cache_dir=…, cancel_check=…)`, collecting `(photo_id, path)` via `photo_callback`; then `UPDATE photos SET file_hash=?, hash_status='verified', hash_checked_at=? WHERE id=?` for each.
+- Per file in a batch: dedup `match()` → record skip with its token and the matched archive folder path (Task 2.3 consumes the token; this task consumes the folder for workspace linking); else `copy_and_hash_verify` (pass the checker's cached hash when it has one); collision handling mirrors `ingest()` (numeric suffix when same name + different content at destination; skip when the destination file is byte-identical — reuse `ingest()`'s existing check shape).
+- Per batch, after all copies: `scan(root=destination, db, restrict_dirs=[batch dest dir plus any duplicate-match destination dirs], restrict_files=[verified dest paths], vireo_dir=…, thumb_cache_dir=…, cancel_check=…)`, collecting `(photo_id, path)` via `photo_callback`; then `UPDATE photos SET file_hash=?, hash_status='verified', hash_checked_at=? WHERE id=?` for each freshly verified copy. This keeps duplicate-only imports from reporting success while leaving an unlinked workspace empty.
 - `checker.record()` after each verified copy so intra-run duplicates (two cards, same shot) skip correctly.
 - Progress: `runner.update_step`/`push_event` per batch with `"<folder>: copied/verified counts"` (per-folder progress is the PR 3 UI's data source).
 
@@ -157,14 +161,15 @@ def _make_card(tmp_path, names):
 
 **Step 4:** Run — PASS. **Step 5: Commit** — `feat: hash-backed safe-to-format ledger`
 
-### Task 2.4: Job type + `POST /api/jobs/import`
+### Task 2.4: Job type + `POST /api/jobs/import-photos`
 
 **Files:**
 - Modify: `vireo/app.py`
 - Test: `vireo/tests/test_jobs_api.py`
 
 **Step 1: Failing tests** (mirror the pipeline route's validation tests):
-- Happy path: POST `{sources: [card], destination, after_import: "cull_ready"}` → 200, `job_id` starts with `import-`; job config records sources/destination/template/`after_import`; after completion (use `wait_for_job_via_client`) the result carries the Task 2.2/2.3 counts.
+- Existing Lightroom route remains intact: `POST /api/jobs/import` with `{catalogs, strategy, write_xmp}` still starts the Lightroom catalog import job and is not shadowed by the new photo import route.
+- Happy path: POST `/api/jobs/import-photos` with `{sources: [card], destination, after_import: "cull_ready"}` → 200, `job_id` starts with `import-`; job config records sources/destination/template/`after_import`; after completion (use `wait_for_job_via_client`) the result carries the Task 2.2/2.3 counts.
 - `after_import: null` → 200 (import-only; PR 3's hook short-circuits — same nullable vocabulary as `pipeline.default_strategy`).
 - `after_import: "yolo"` and `"none"` → 400 via `resolve_strategy` (validate at enqueue, not at completion — failing the chain hours later is the old pipeline's mistake).
 - Missing sources / missing destination / relative destination / `.photoslibrary` source / unsafe template → 400 (reuse the pipeline route's guards verbatim).
@@ -172,9 +177,9 @@ def _make_card(tmp_path, names):
 
 **Step 2:** Run — FAIL.
 
-**Step 3:** Implement the route: validations, then `runner.start("import", work, config=job_config, workspace_id=active_ws)` where `work` calls `run_import_job`. No pipeline slot involvement — imports are I/O-bound and must not queue behind a GPU run (that coupling is exactly what the split removes). Record `after_import` in `job_config`.
+**Step 3:** Implement `POST /api/jobs/import-photos`: validations, then `runner.start("import", work, config=job_config, workspace_id=active_ws)` where `work` calls `run_import_job`. Do not reuse or rename the existing `POST /api/jobs/import` Lightroom route; PR 3 can update the photo Import page to call the new endpoint. No pipeline slot involvement — imports are I/O-bound and must not queue behind a GPU run (that coupling is exactly what the split removes). Record `after_import` in `job_config`.
 
-**Step 4:** Run — PASS. **Step 5: Commit** — `feat: POST /api/jobs/import`
+**Step 4:** Run — PASS. **Step 5: Commit** — `feat: add photo import job endpoint`
 
 ### Task 2.5: Working copies read from the card
 
