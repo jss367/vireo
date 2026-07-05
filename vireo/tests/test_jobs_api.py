@@ -2,6 +2,7 @@ import json
 import os
 import time
 
+import pytest
 from PIL import Image
 from wait import wait_for_job_via_client, wait_for_job_via_runner
 
@@ -2632,3 +2633,69 @@ def test_pipeline_folder_ids_with_collection_id_400(app_and_db):
             "folder_ids": [root_id], "collection_id": col_id,
         })
         assert resp.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"source": "/tmp/foo"},
+        {"sources": ["/tmp/foo", "/tmp/bar"]},
+        {"source_snapshot_id": 999},
+    ],
+)
+def test_pipeline_folder_ids_with_other_scope_400(app_and_db, extra):
+    """Reject folder_ids combined with *any* other scope — not just
+    collection_id. Otherwise run_pipeline_job silently ignores the source
+    (because collection_id skips scanning) or clears the folder-derived
+    collection_id when a snapshot is present, and the job processes a
+    different scope than the request implied. Also verifies no stray
+    ad-hoc collection was inserted before the rejection: the check must
+    fire before ``add_collection`` runs."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    before = len(db.get_collections())
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/jobs/pipeline",
+            json={"folder_ids": [root_id], **extra},
+        )
+        assert resp.status_code == 400
+        assert "folder_ids cannot be combined with" in resp.get_json()["error"]
+    assert len(db.get_collections()) == before
+
+
+@pytest.mark.parametrize(
+    "extra,fragment",
+    [
+        # Relative destination — 400 fires at the destination validation.
+        ({"destination": "relative/path", "local_processing": False}, "absolute"),
+        # local_processing + folder scope — 400 fires at the scope check.
+        (
+            {"local_processing": True, "destination": "/abs/dest"},
+            "local_processing",
+        ),
+        # folder_template with '..' — 400 fires at the folder_template check.
+        (
+            {"destination": "/abs/dest", "folder_template": "../%Y"},
+            "folder_template",
+        ),
+    ],
+)
+def test_pipeline_folder_ids_leaves_no_stray_collection_on_400(
+    app_and_db, extra, fragment,
+):
+    """A rejected folder-scope request must not leave a "Process …"
+    collection sitting in the workspace. The ad-hoc insert has to happen
+    after every other request check has passed, otherwise the workspace
+    accumulates junk every time the caller trips a later validation."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    before = len(db.get_collections())
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/jobs/pipeline",
+            json={"folder_ids": [root_id], **extra},
+        )
+        assert resp.status_code == 400, resp.get_json()
+        assert fragment in resp.get_json()["error"]
+    assert len(db.get_collections()) == before

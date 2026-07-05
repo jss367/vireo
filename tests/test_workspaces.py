@@ -2093,6 +2093,25 @@ def test_workspace_default_strategy_none_string_400(client):
     assert resp.status_code == 400
 
 
+@pytest.mark.parametrize("bad", [5, True, ["cull_ready"], {"name": "full"}])
+def test_workspace_default_strategy_non_string_400(client, bad):
+    """A JSON client sending a number, bool, list, or dict for
+    ``pipeline.default_strategy`` must get a 400 validation error, not a
+    500. Before ``resolve_strategy`` guarded non-string inputs, an
+    array/dict here hit ``name not in STRATEGIES`` and raised
+    ``TypeError: unhashable type`` — which the endpoint didn't catch, so
+    it escaped as a 500. Regression tripwire."""
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({"name": f"StratBadType-{type(bad).__name__}"}),
+        content_type="application/json",
+    )
+    ws_id = resp.get_json()["id"]
+    resp = _put_default_strategy(client, ws_id, bad)
+    assert resp.status_code == 400
+    assert "strategy must be a string" in resp.get_json()["error"]
+
+
 def test_config_default_strategy_default_is_none():
     import os
     import sys

@@ -16576,11 +16576,37 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # collection_stage). The rest of the app treats a folder scope as
         # its subtree, so a workspace root must include every descendant's
         # photos, not just the ones hanging directly off the root.
+        #
+        # The ad-hoc collection is *not* inserted here: it is deferred to
+        # ``_materialize_folder_scope_collection`` below, which runs only
+        # after every other request check has passed. If we inserted up
+        # front, a later 400 (relative destination, remote_target_id
+        # mismatch, local_processing conflict, folder_template with '..')
+        # would leave a stray "Process …" collection in the workspace even
+        # though no job was queued.
         folder_ids = body.get("folder_ids")
+        pending_folder_collection = None
         if folder_ids is not None:
-            if collection_id is not None:
+            # A folder scope is itself a scope — combining it with any other
+            # scope selector is ambiguous. Reject *all* other scopes, not
+            # just ``collection_id``: with ``source``/``sources``, later
+            # ``skip_scan`` handling would silently ignore them; with
+            # ``source_snapshot_id``, run_pipeline_job would clear the
+            # folder-derived ``collection_id`` and run the snapshot scope
+            # instead — the job would process a different scope than the
+            # request implies.
+            other_scopes = [
+                name for name, value in (
+                    ("collection_id", collection_id),
+                    ("source", source),
+                    ("sources", sources),
+                    ("source_snapshot_id", source_snapshot_id),
+                ) if value is not None
+            ]
+            if other_scopes:
                 return json_error(
-                    "folder_ids cannot be combined with collection_id"
+                    "folder_ids cannot be combined with "
+                    + ", ".join(other_scopes)
                 )
             if (
                 not isinstance(folder_ids, list)
@@ -16622,17 +16648,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             leaf = os.path.basename(
                 (first["path"] or "").rstrip("/\\")
             ) or "folders"
-            from datetime import datetime as _dt
+            pending_folder_collection = {
+                "leaf": leaf, "photo_ids": photo_ids,
+            }
 
-            collection_id = db.add_collection(
-                "Process {} {}".format(
-                    leaf, _dt.now().strftime("%Y-%m-%d %H:%M"),
-                ),
-                json.dumps([{"field": "photo_ids", "value": photo_ids}]),
+        if (
+            not source and not sources and not collection_id
+            and not source_snapshot_id and pending_folder_collection is None
+        ):
+            return json_error(
+                "source, sources, collection_id, source_snapshot_id, "
+                "or folder_ids required"
             )
-
-        if not source and not sources and not collection_id and not source_snapshot_id:
-            return json_error("source, sources, collection_id, or source_snapshot_id required")
 
         # Validate type before touching SQLite. Non-integer bodies (objects,
         # arrays, non-numeric strings, floats, bools) would otherwise reach
@@ -16770,16 +16797,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # photos and then fail in archive_stage with "local staging folder
         # was not indexed". Snapshot-scoped runs are likewise rejected: they
         # also bypass ingest because the snapshot's existing files drive
-        # scan_roots directly. Reject whenever collection_id or
-        # source_snapshot_id is set — a stale source/sources field in the
-        # same request must not slip past, because run_pipeline_job keys
-        # skip_scan off collection_id alone and would still skip ingest.
+        # scan_roots directly. Folder-scope runs materialize a collection
+        # (below) and share the collection contract, so reject them here
+        # too — otherwise the check would fire on the derived collection_id
+        # after we'd already inserted the collection row. Reject whenever
+        # collection_id, source_snapshot_id, or folder_ids is set — a stale
+        # source/sources field in the same request must not slip past,
+        # because run_pipeline_job keys skip_scan off collection_id alone
+        # and would still skip ingest.
         if local_processing and (
-            collection_id is not None or source_snapshot_id is not None
+            collection_id is not None
+            or source_snapshot_id is not None
+            or pending_folder_collection is not None
         ):
             return json_error(
-                "local_processing cannot be combined with collection_id or "
-                "source_snapshot_id — it requires source or sources"
+                "local_processing cannot be combined with collection_id, "
+                "source_snapshot_id, or folder_ids — it requires source "
+                "or sources"
             )
         if local_processing and not source and not sources:
             return json_error(
@@ -16793,6 +16827,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             from ingest import _is_unsafe_path
             if _is_unsafe_path(folder_template):
                 return json_error("folder_template must be a relative path without '..' or backslashes")
+
+        # All request validation has passed — safe to materialize the
+        # folder-scope collection row now. Deferring this insert avoids the
+        # stray "Process …" collection that would linger in the workspace
+        # if any earlier check above returned 400 after add_collection had
+        # already committed.
+        if pending_folder_collection is not None:
+            from datetime import datetime as _dt
+
+            collection_id = db.add_collection(
+                "Process {} {}".format(
+                    pending_folder_collection["leaf"],
+                    _dt.now().strftime("%Y-%m-%d %H:%M"),
+                ),
+                json.dumps([{
+                    "field": "photo_ids",
+                    "value": pending_folder_collection["photo_ids"],
+                }]),
+            )
 
         # Snapshot the resolved target dict so the queued run archives to the
         # host/mount the user saw at click-Start, not whatever the saved target

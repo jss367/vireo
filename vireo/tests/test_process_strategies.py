@@ -41,3 +41,14 @@ def test_quick_look_is_thumbs_and_previews_only():
 def test_unknown_strategy_raises():
     with pytest.raises(ValueError, match="unknown strategy"):
         resolve_strategy("yolo")
+
+
+@pytest.mark.parametrize("bad", [None, 5, True, ["cull_ready"], {"name": "full"}])
+def test_non_string_strategy_raises_value_error(bad):
+    """Both callers surface ``ValueError`` as 400 (``/api/jobs/pipeline`` and
+    ``api_update_workspace`` for ``pipeline.default_strategy``). A dict/list
+    reaching ``name not in STRATEGIES`` would otherwise raise ``TypeError``
+    (unhashable type) and escape as a 500 from the workspace endpoint, which
+    lacks the string type-guard the pipeline route has."""
+    with pytest.raises(ValueError, match="strategy must be a string"):
+        resolve_strategy(bad)

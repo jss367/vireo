@@ -63,7 +63,18 @@ STRATEGIES = {
 
 
 def resolve_strategy(name):
-    """Expand a strategy name into stage-flag overrides. Raises ValueError."""
+    """Expand a strategy name into stage-flag overrides. Raises ValueError.
+
+    Non-string inputs (list, dict, int, bool, None) also raise ``ValueError``
+    rather than ``TypeError``: callers that surface ValueError as 400 (both
+    ``/api/jobs/pipeline`` and ``api_update_workspace``'s workspace-override
+    validation) then handle malformed JSON bodies uniformly instead of one
+    path 400ing and the other escaping as a 500.
+    """
+    if not isinstance(name, str):
+        raise ValueError(
+            f"strategy must be a string, got {type(name).__name__}"
+        )
     if name not in STRATEGIES:
         raise ValueError(
             f"unknown strategy: {name!r} (expected one of {sorted(STRATEGIES)})"
