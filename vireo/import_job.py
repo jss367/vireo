@@ -368,6 +368,41 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         unsafe_files.append({"path": str(source_file), "reason": reason})
         log.warning("Import failed for %s: %s", source_file, reason)
 
+    def _record_checker(source_file, dest_folder, file_hash):
+        """Register a landed file's identity with the intra-run checker.
+
+        ``DuplicateChecker.record`` re-``os.stat``s the source path — on
+        removable media that was yanked just after ``copy_and_hash_verify``
+        succeeded, that raises ``OSError`` and would kill the whole
+        background job even though this file's bytes are already
+        verified at ``dest_folder``. Swallow the error, keep the copy in
+        the ledger, and accept that later intra-run tokens for this
+        file's identity won't dedupe: the archive is intact, the run
+        just loses a small cache-hit optimization.
+        """
+        if checker is None:
+            return
+        try:
+            tokens = checker.record(source_file)
+        except OSError as e:
+            log.warning(
+                "Duplicate-checker record() failed for %s after landing "
+                "at %s: %s",
+                source_file, dest_folder, e,
+            )
+            return
+        for tok in tokens:
+            run_dest_folders[tok] = dest_folder
+            run_verified_hashes[tok] = file_hash
+
+    # Dup-folder linking runs in a SEPARATE ``scan(restrict_dirs=…)`` call
+    # after the duplicate skip; its exception was previously logged and
+    # swallowed, leaving safe_to_format true while the imported
+    # duplicates never became visible in the active workspace. Track it
+    # explicitly so safe_to_format reflects "workspace can actually see
+    # these bytes" and not just "the bytes are somewhere on disk".
+    dup_link_failed = False
+
     for rel, batch in batches:
         if runner.is_cancelled(job["id"]):
             cancelled = True
@@ -517,10 +552,9 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                             landed.append(
                                 (dest_file, src_hash, str(source_file)),
                             )
-                            if checker is not None:
-                                for tok in checker.record(source_file):
-                                    run_dest_folders[tok] = dest_folder
-                                    run_verified_hashes[tok] = src_hash
+                            _record_checker(
+                                source_file, dest_folder, src_hash,
+                            )
                             continue
                     # Different content, same name — numeric suffix.
                     stem, suffix = os.path.splitext(source_file.name)
@@ -552,10 +586,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
             verified += 1
             _counts(rel)["copied"] += 1
             landed.append((dest_file, file_hash, str(source_file)))
-            if checker is not None:
-                for tok in checker.record(source_file):
-                    run_dest_folders[tok] = dest_folder
-                    run_verified_hashes[tok] = file_hash
+            _record_checker(source_file, dest_folder, file_hash)
 
         # --- Catalog this batch (even when cancelled mid-batch: what
         # landed on disk must be cataloged before we stop, so every
@@ -658,11 +689,25 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                 linked_dup_dirs.update(new_dup_dirs)
             except RuntimeError:
                 cancelled = True
-            except Exception:
+            except Exception as e:
+                # A duplicate-only batch's ONLY workspace-visibility step
+                # is this scan — swallowing the error would leave
+                # safe_to_format green while the imported duplicates are
+                # invisible in the active workspace. Record it and force
+                # safe_to_format false; the file(s) are on disk (import
+                # succeeded), but the operation as a whole is not safe.
                 log.exception(
                     "Linking duplicate-matched folders failed: %s",
                     sorted(new_dup_dirs),
                 )
+                dup_link_failed = True
+                for d in sorted(new_dup_dirs):
+                    unsafe_files.append({
+                        "path": d,
+                        "reason": (
+                            f"duplicate-folder link scan failed: {e}"
+                        ),
+                    })
 
         _emit(
             f"{rel}: {_counts(rel)['copied']} copied · "
@@ -724,13 +769,16 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     # Safe to format iff every discovered file reached a verified
     # terminal bucket: hash-verified fresh copy, or duplicate whose bytes
     # verifiably exist (hash-backed match, or key match re-hashed against
-    # its cataloged twin), AND every source was walked cleanly. A
-    # cancelled run leaves unprocessed files, so it is never safe. This
-    # pill means exactly what it says.
+    # its cataloged twin), AND every source was walked cleanly, AND every
+    # duplicate-only batch's workspace-link scan succeeded (otherwise the
+    # imported duplicates are on disk but not visible in the workspace).
+    # A cancelled run leaves unprocessed files, so it is never safe.
+    # This pill means exactly what it says.
     safe_to_format = (
         not cancelled
         and failed == 0
         and not discovery_errors
+        and not dup_link_failed
         and (copied + skipped_duplicate) == discovered
     )
     result = {
@@ -744,10 +792,15 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         "folders": folder_counts,
         "cancelled": cancelled,
         "discovery_errors": len(discovery_errors),
-        # JobRunner's mixed-outcome convention: a run with any failed file
-        # or unseen source subtree is recorded "failed" (with per-file
-        # reasons), never "completed".
-        "ok": failed == 0 and not discovery_errors,
+        # JobRunner's mixed-outcome convention: a run with any failed
+        # file, unseen source subtree, or workspace-link scan failure is
+        # recorded "failed" (with per-file / per-operation reasons),
+        # never "completed".
+        "ok": (
+            failed == 0
+            and not discovery_errors
+            and not dup_link_failed
+        ),
         "errors": [f"{u['path']}: {u['reason']}" for u in unsafe_files],
     }
     return result

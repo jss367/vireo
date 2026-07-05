@@ -1126,3 +1126,140 @@ def test_wc_extraction_deferred_to_after_last_batch(tmp_path, monkeypatch):
     assert all(str(card) in c for c in jpeg_reads), (
         f"companion extraction should read from the card, got {jpeg_reads}"
     )
+
+
+# --- Codex 2026-07-05 followups: two findings not addressed by 9e0834af ----
+
+def test_checker_record_oserror_does_not_kill_job(tmp_path, monkeypatch):
+    """If ``DuplicateChecker.record`` re-``os.stat``s the source after a
+    verified ``copy_and_hash_verify`` succeeded and the card has since
+    been pulled, the OSError must not escape and kill the background
+    job — the file is already verified at the archive, so the ledger
+    keeps the copy and the run continues to catalog what landed."""
+    import import_dedup
+    from import_job import ImportParams, run_import_job
+
+    card = _make_card(tmp_path, [
+        ("DSC_0A60.jpg", datetime(2026, 8, 4, 10, 0, 0), "red"),
+        ("DSC_0A61.jpg", datetime(2026, 8, 4, 10, 5, 0), "green"),
+    ])
+
+    real_record = import_dedup.DuplicateChecker.record
+    calls = {"n": 0}
+
+    def flaky_record(self, source_file):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # First file lands, then card "goes away" — record's re-stat
+            # raises. The file itself is on the archive already.
+            raise OSError("card yanked after copy")
+        return real_record(self, source_file)
+
+    monkeypatch.setattr(
+        import_dedup.DuplicateChecker, "record", flaky_record,
+    )
+
+    archive = tmp_path / "archive"
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(sources=[str(card)], destination=str(archive)),
+    )
+
+    # Both files landed and were cataloged (the record OSError was a
+    # bookkeeping optimization; the archive is the source of truth).
+    assert result["copied"] == 2
+    assert result["failed"] == 0
+    assert result["safe_to_format"] is True
+    rows = _photo_rows(db)
+    assert {r["filename"] for r in rows} == {
+        "DSC_0A60.jpg", "DSC_0A61.jpg",
+    }
+    for r in rows:
+        assert os.path.isfile(os.path.join(r["folder_path"], r["filename"]))
+        assert r["hash_status"] == "ok"
+
+
+def test_dup_link_scan_failure_marks_unsafe(tmp_path, monkeypatch):
+    """When the workspace-linking scan for a duplicate-only batch raises,
+    swallowing it would leave safe_to_format=true even though the
+    imported duplicates are not visible in the active workspace. The
+    failure must surface: safe_to_format false, ok false, and the
+    failing folder(s) recorded in unsafe_files."""
+    import scanner as scanner_mod
+    from import_dedup import compute_file_hash
+    from import_job import ImportParams, run_import_job
+
+    # Pre-catalog a photo at the archive destination WITHOUT linking its
+    # folder to the active workspace (raw SQL, no workspace_folders rows).
+    archive = tmp_path / "archive"
+    dest_dir = archive / "2026" / "2026-08-05"
+    dest_dir.mkdir(parents=True)
+    dest_file = dest_dir / "IMG_0A80.jpg"
+    Image.new("RGB", (16, 16), "red").save(str(dest_file))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES (?, ?, 'ok')",
+        (str(dest_dir), dest_dir.name),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, extension, file_size,"
+        " file_hash) VALUES (?, ?, '.jpg', ?, ?)",
+        (
+            fid,
+            "IMG_0A80.jpg",
+            os.path.getsize(str(dest_file)),
+            compute_file_hash(str(dest_file)),
+        ),
+    )
+    db.conn.commit()
+
+    # Card holds a byte-identical copy → duplicate-only batch.
+    card = tmp_path / "card"
+    card.mkdir()
+    import shutil
+    shutil.copy2(str(dest_file), str(card / "IMG_0A80.jpg"))
+
+    real_scan = scanner_mod.scan
+
+    def flaky_scan(root, db_arg, **kwargs):
+        # The dup-link scan is called WITHOUT restrict_files, with a
+        # restrict_dirs pointing at our seeded dest_dir. Anything else
+        # (the fresh-copy path) passes through untouched.
+        restrict_dirs = kwargs.get("restrict_dirs") or []
+        if (
+            "restrict_files" not in kwargs
+            or kwargs["restrict_files"] is None
+        ) and any(
+            os.path.normpath(str(d)) == str(dest_dir)
+            for d in restrict_dirs
+        ):
+            # Not RuntimeError — that's reserved for cancellation
+            # (``scanner.scan`` raises ``RuntimeError("scan cancelled")``).
+            # A dup-link scan crash is a distinct failure mode.
+            raise OSError("simulated dup-link scan failure")
+        return real_scan(root, db_arg, **kwargs)
+
+    monkeypatch.setattr(scanner_mod, "scan", flaky_scan)
+
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(sources=[str(card)], destination=str(archive)),
+    )
+
+    assert result["skipped_duplicate"] == 1
+    assert result["safe_to_format"] is False
+    assert result["ok"] is False
+    assert any(
+        str(dest_dir) in u["path"] for u in result["unsafe_files"]
+    ), (
+        "expected the failing dup-link folder in unsafe_files; got "
+        f"{result['unsafe_files']!r}"
+    )
+    # The seeded folder still isn't linked (that was the whole point).
+    assert str(dest_dir) not in _ws_linked_folder_paths(db, ws_id)
