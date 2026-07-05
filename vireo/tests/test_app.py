@@ -6830,14 +6830,10 @@ def test_import_page_returns_200(app_and_db):
 def test_import_page_defaults_after_import_from_workspace(app_and_db):
     """The menu's preselected value must reflect the active workspace's
     pipeline.default_strategy — not a hardcoded default."""
-    import json as json_mod
-
     app, db = app_and_db
     db.update_workspace(
         db._active_workspace_id,
-        config_overrides=json_mod.dumps(
-            {"pipeline": {"default_strategy": "cull_ready"}}
-        ),
+        config_overrides={"pipeline": {"default_strategy": "cull_ready"}},
     )
     client = app.test_client()
     html = client.get("/import").data.decode()
