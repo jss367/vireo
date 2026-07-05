@@ -175,6 +175,13 @@ def test_database_repairs_parentless_folder_rows_on_open(tmp_path):
             (ws_id, 103, 0),
         ],
     )
+    # Simulate a truly legacy database whose ``__init__`` never had a chance
+    # to set the repair marker: clear it before reopen so the one-shot repair
+    # actually runs on the next open.
+    seed.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (Database._FOLDER_PARENT_REPAIR_DONE_KEY,),
+    )
     seed.conn.commit()
     seed.close()
 
@@ -188,6 +195,54 @@ def test_database_repairs_parentless_folder_rows_on_open(tmp_path):
     assert tree[101]["parent_id"] is None
     assert tree[102]["parent_id"] == 101
     assert tree[103]["parent_id"] == 102
+
+
+def test_folder_parent_repair_is_gated_by_one_shot_marker(tmp_path):
+    """After the one-shot repair marker is set, subsequent opens must skip
+    the full ``folders`` scan.
+
+    ``_get_db()`` in ``app.py`` builds a fresh ``Database`` per Flask
+    request, so an unconditional scan would make cheap endpoints
+    O(folders). Regression guard for PR #1115 Codex feedback: verify by
+    inserting a fresh orphan row after the first init, then confirming a
+    reopen does NOT rewrite it — which proves the scan was skipped.
+    """
+    from db import Database
+
+    db_path = str(tmp_path / "test.db")
+    first = Database(db_path)
+    # Marker gets set even on an empty folders table so that no future open
+    # needs to walk it.
+    assert first.get_meta(first._FOLDER_PARENT_REPAIR_DONE_KEY) == "1"
+    first.conn.executemany(
+        "INSERT INTO folders (id, path, name, parent_id) VALUES (?, ?, ?, ?)",
+        [
+            (201, "/x", "x", None),
+            (202, "/x/y", "y", None),
+        ],
+    )
+    first.conn.commit()
+    first.close()
+
+    reopened = Database(db_path)
+    try:
+        # If repair had re-scanned, folder 202's parent_id would now be 201.
+        row = reopened.conn.execute(
+            "SELECT parent_id FROM folders WHERE id = 202"
+        ).fetchone()
+        assert row["parent_id"] is None, (
+            "repair_missing_folder_parents must skip the folders scan when "
+            "its db_meta marker is set; orphan row was unexpectedly repaired."
+        )
+        # ``force=True`` bypasses the marker so tests / manual invocations
+        # can still run the repair on demand.
+        reopened.repair_missing_folder_parents(force=True)
+        row = reopened.conn.execute(
+            "SELECT parent_id FROM folders WHERE id = 202"
+        ).fetchone()
+        assert row["parent_id"] == 201
+    finally:
+        reopened.close()
 
 
 def test_workspace_root_hides_materialized_descendant_when_parent_has_photos(db):

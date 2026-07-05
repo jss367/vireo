@@ -1124,8 +1124,24 @@ class Database:
             )
         self.conn.commit()
 
-    def repair_missing_folder_parents(self):
-        """Fill parent_id for legacy folder rows whose parent path is known."""
+    _FOLDER_PARENT_REPAIR_DONE_KEY = "folder_parent_repair_done"
+
+    def repair_missing_folder_parents(self, force=False):
+        """Fill parent_id for legacy folder rows whose parent path is known.
+
+        Gated by a ``db_meta`` marker so the full ``folders`` scan runs at
+        most once per database. ``Database.__init__`` constructs a fresh
+        connection per Flask request via ``_get_db()``, so an unconditional
+        scan would make every cheap endpoint (e.g. ``/api/workspaces/active``)
+        O(number of folders). Ongoing correctness is maintained by
+        ``add_folder``, which fills a missing ``parent_id`` in-place when it
+        reuses an existing standalone row.
+
+        Args:
+            force: re-run even if the marker is set. Used by tests.
+        """
+        if not force and self.get_meta(self._FOLDER_PARENT_REPAIR_DONE_KEY) == "1":
+            return
         rows = self.conn.execute(
             "SELECT id, path, parent_id FROM folders"
         ).fetchall()
@@ -1139,12 +1155,12 @@ class Database:
             if parent_id is None or parent_id == row["id"]:
                 continue
             updates.append((parent_id, row["id"]))
-        if not updates:
-            return
-        self.conn.executemany(
-            "UPDATE folders SET parent_id = ? WHERE id = ?",
-            updates,
-        )
+        if updates:
+            self.conn.executemany(
+                "UPDATE folders SET parent_id = ? WHERE id = ?",
+                updates,
+            )
+        self.set_meta(self._FOLDER_PARENT_REPAIR_DONE_KEY, "1", _commit=False)
         self.conn.commit()
 
     # -- Workspaces --
