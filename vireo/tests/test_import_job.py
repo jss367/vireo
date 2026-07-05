@@ -2152,11 +2152,52 @@ def test_copy_and_hash_verify_fallback_still_refuses_to_overwrite(
     assert ok is False
     assert file_hash is None
     # The pre-existing verified copy must survive both the os.link race
-    # AND the fallback path — O_EXCL fails with FileExistsError and we
-    # never touch dst.
+    # AND the fallback path — the existence check fires and we never
+    # touch dst.
     assert dst.read_bytes() == b"already-verified archive bytes"
     # And the temp file must be cleaned up.
     assert not list(dst.parent.glob(".DSC_9501.jpg.*.tmp"))
+
+
+def test_copy_and_hash_verify_fallback_leaves_no_placeholder_at_dst_on_promote_failure(
+        tmp_path, monkeypatch):
+    """Crash-safety on hardlinkless destinations: if the promote step
+    fails after the temp file has verified, the fallback path must NOT
+    leave a zero-byte file at ``dst``. Otherwise the intended archive
+    name is occupied by a stray empty file, retry treats it as an
+    existing archive, suffixes the real photo to ``name_1.ext``, and
+    the invariant that a dead run leaves only valid archive copies or
+    hidden temps breaks. See PR #1107 review.
+    """
+    import errno as errno_mod
+
+    from import_job import copy_and_hash_verify
+
+    src = tmp_path / "card" / "DSC_9502.jpg"
+    src.parent.mkdir()
+    src.write_bytes(b"card-file-bytes" * 100)
+    dst = tmp_path / "archive" / "DSC_9502.jpg"
+
+    def unsupported_link(a, b):
+        raise OSError(errno_mod.EPERM, "operation not permitted")
+
+    def failing_rename(a, b):
+        raise OSError(errno_mod.EIO, "simulated FS I/O error during promote")
+
+    monkeypatch.setattr("import_job.os.link", unsupported_link)
+    monkeypatch.setattr("import_job.os.rename", failing_rename)
+
+    ok, file_hash = copy_and_hash_verify(str(src), str(dst))
+    assert ok is False
+    assert file_hash is None
+    # No zero-byte placeholder at final dst — that was the specific
+    # crash-recovery hole this fix closes.
+    assert not dst.exists(), (
+        f"fallback promote failure must not leave any file at {dst}; "
+        f"a zero-byte stray would trip crash-recovery retries"
+    )
+    # And the hidden temp must be cleaned up too.
+    assert not list(dst.parent.glob(".DSC_9502.jpg.*.tmp"))
 
 
 def test_landed_file_failed_after_scan_is_not_double_counted(

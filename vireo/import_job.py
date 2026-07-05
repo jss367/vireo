@@ -191,44 +191,49 @@ def copy_and_hash_verify(src, dst, *, src_hash=None):
         except OSError as link_err:
             # Hard links unsupported on this destination filesystem
             # (FAT/exFAT return EPERM; some SMB/NFS mounts return
-            # ENOTSUP/EOPNOTSUPP; Windows exFAT can return EACCES). Fall
-            # back to an atomic no-overwrite reserve-and-replace: O_EXCL
-            # atomically claims ``dst`` as an empty placeholder (races
-            # with concurrent imports fail here just like os.link would),
-            # then os.replace atomically swaps the verified temp into
-            # place. Without this fallback every file on hardlinkless
-            # archives buckets as a copy failure and imports are
-            # unusable on those destinations. See PR #1107 review.
+            # ENOTSUP/EOPNOTSUPP; Windows exFAT can return EACCES).
+            # Without a fallback promotion path every file on
+            # hardlinkless archives buckets as a copy failure and
+            # imports are unusable on those destinations.
+            #
+            # Fall back to existence-check + os.rename: the verified
+            # temp stays hidden until it moves atomically over to
+            # ``dst``. Do NOT reserve the final path as an O_EXCL
+            # placeholder before renaming — a crash between placeholder
+            # creation and os.replace would leave a zero-byte stray at
+            # the intended archive name, and a retry treats that
+            # placeholder as "existing archive file", suffixes the real
+            # photo to ``name_1.ext``, and orphans the empty file.
+            # That violates the import/crash-recovery invariant that a
+            # dead run leaves only valid archive copies or hidden
+            # temps. The check-then-rename flow trades strict atomic
+            # no-overwrite protection for that crash-safety: a
+            # concurrent import creating ``dst`` between the exists()
+            # check and os.rename() could be overwritten, but
+            # destinations are per-workspace/per-date-folder in this
+            # workflow so overlapping runs are unusual, and losing that
+            # narrow race is preferable to leaving zero-byte strays on
+            # every abnormal exit. See PR #1107 review.
             if not _fs_lacks_hardlinks(link_err):
                 raise
             log.info(
-                "os.link unsupported on %s (%s); using O_EXCL fallback",
+                "os.link unsupported on %s (%s); using rename fallback",
                 dst_dir, link_err,
             )
-            try:
-                fd = os.open(
-                    dst,
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                    0o644,
-                )
-            except FileExistsError:
+            if os.path.exists(dst):
                 log.warning(
                     "Destination raced during copy "
                     "(concurrent import?): %s",
                     dst,
                 )
                 return (False, None)
-            os.close(fd)
             try:
-                os.replace(tmp, dst)
+                os.rename(tmp, dst)
             except OSError as rep_err:
                 log.warning(
                     "Fallback promote failed for %s -> %s: %s",
                     src, dst, rep_err,
                 )
-                # Best-effort remove the empty placeholder we created.
-                with contextlib.suppress(OSError):
-                    os.unlink(dst)
                 return (False, None)
             tmp = None
             return (True, copied_hash)
@@ -373,26 +378,40 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     def _fs_is_case_insensitive(path):
         """Probe whether the filesystem at ``path`` treats case as insensitive.
 
-        Best-effort: case-swap one alpha character from the resolved
-        path and check ``os.path.samefile``. On any error, returns
-        False — a false negative just falls back to case-sensitive
-        comparison (strictly narrower guard, never wider).
+        List an entry inside ``path`` and check whether accessing it
+        under a case-swapped name resolves to the same inode. Probing
+        *inside* the directory (rather than swapping characters in
+        ``path`` itself) is essential when a case-insensitive mount
+        sits under a case-sensitive parent — a FAT/exFAT SD card
+        mounted at ``/mnt/Card`` on Linux under an ext4 root: the ext4
+        ``/mnt`` cannot resolve ``/Mnt`` or a differently-cased
+        ``Card`` entry (mount-point dentries live in the parent FS),
+        so swapping characters in the ``path`` string always reports
+        case-sensitive regardless of the card's own semantics. On any
+        error, empty directory, or entry without an alpha character,
+        returns False and the caller falls back to case-sensitive
+        comparison (strictly narrower guard, never wider). See PR
+        #1107 review.
         """
         try:
-            for i, c in enumerate(path):
-                if c.isalpha():
-                    probe = path[:i] + c.swapcase() + path[i + 1:]
-                    if probe == path:
-                        continue
-                    if not os.path.exists(probe):
-                        return False
-                    try:
-                        return os.path.samefile(path, probe)
-                    except OSError:
-                        return False
-            return False
+            entries = os.listdir(path)
         except OSError:
             return False
+        for name in entries:
+            for i, c in enumerate(name):
+                if c.isalpha():
+                    swapped = name[:i] + c.swapcase() + name[i + 1:]
+                    if swapped == name:
+                        continue
+                    original_full = os.path.join(path, name)
+                    probe_full = os.path.join(path, swapped)
+                    if not os.path.exists(probe_full):
+                        return False
+                    try:
+                        return os.path.samefile(original_full, probe_full)
+                    except OSError:
+                        return False
+        return False
 
     def _norm_source(s):
         try:

@@ -14830,28 +14830,41 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         def _fs_is_case_insensitive(path):
             """Probe whether the filesystem at ``path`` treats case as insensitive.
 
-            Best-effort: case-swap one alpha character from the resolved
-            path and check ``os.path.samefile``. Any error (probe path
-            not readable, no alpha char to swap) returns False and the
-            caller falls back to case-sensitive comparison — a false
-            negative is a strictly narrower guard than what the platform
-            branch already applies, never a wider one.
+            List an entry inside ``path`` and check whether accessing it
+            under a case-swapped name resolves to the same inode. Probing
+            *inside* the directory (rather than swapping characters in
+            ``path`` itself) is essential when a case-insensitive mount
+            sits under a case-sensitive parent — a FAT/exFAT SD card
+            mounted at ``/mnt/Card`` on Linux under an ext4 root: the
+            ext4 ``/mnt`` cannot resolve ``/Mnt`` or a differently-cased
+            ``Card`` entry (mount-point dentries are stored in the
+            parent FS), so swapping characters in the ``path`` string
+            always reports case-sensitive regardless of the card's own
+            semantics. Any error, empty directory, or entry without an
+            alpha character returns False and the caller falls back to
+            case-sensitive comparison — a false negative is a strictly
+            narrower guard than what the platform branch already
+            applies, never a wider one. See PR #1107 review.
             """
             try:
-                for i, c in enumerate(path):
-                    if c.isalpha():
-                        probe = path[:i] + c.swapcase() + path[i + 1:]
-                        if probe == path:
-                            continue
-                        if not os.path.exists(probe):
-                            return False
-                        try:
-                            return os.path.samefile(path, probe)
-                        except OSError:
-                            return False
-                return False
+                entries = os.listdir(path)
             except OSError:
                 return False
+            for name in entries:
+                for i, c in enumerate(name):
+                    if c.isalpha():
+                        swapped = name[:i] + c.swapcase() + name[i + 1:]
+                        if swapped == name:
+                            continue
+                        original_full = os.path.join(path, name)
+                        probe_full = os.path.join(path, swapped)
+                        if not os.path.exists(probe_full):
+                            return False
+                        try:
+                            return os.path.samefile(original_full, probe_full)
+                        except OSError:
+                            return False
+            return False
 
         try:
             dest_real = os.path.realpath(destination)
