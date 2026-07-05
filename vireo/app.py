@@ -12499,6 +12499,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 runner.update_step(job["id"], "scan", current_file=message)
                 runner.push_event(job["id"], "progress", progress_payload)
 
+            def cancel_check():
+                return runner.is_cancelled(job["id"])
+
             vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
 
             # Per-root failures are caught and recorded rather than
@@ -12516,7 +12519,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             root_errors = []
             scan_failed_roots = set()
             cache_failed_roots = set()
+            cancelled = False
             for idx, root in enumerate(roots_list, 1):
+                if cancel_check():
+                    cancelled = True
+                    break
                 phase = (
                     f"Scanning root {idx} of {len(roots_list)}: {root}"
                     if len(roots_list) > 1
@@ -12538,8 +12545,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         status_callback=status_cb,
                         vireo_dir=vireo_dir,
                         thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
+                        cancel_check=cancel_check,
                     )
                 except Exception as exc:
+                    if str(exc) == "scan cancelled" and cancel_check():
+                        log.info("Scan job %s cancelled during root %s", job["id"], root)
+                        cancelled = True
+                        break
                     log.exception("Scan failed for root %s", root)
                     scan_failed_roots.add(root)
                     msg = f"[{root}] {exc}"
@@ -12572,6 +12584,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         if cache_msg not in job["errors"]:
                             job["errors"].append(cache_msg)
                     advance_scan_acc()
+
+            if cancelled or cancel_check():
+                photo_count = job["progress"].get("current", 0)
+                runner.update_step(
+                    job["id"], "scan", status="cancelled",
+                    summary=f"{photo_count} photos (cancelled)",
+                )
+                runner.update_step(
+                    job["id"], "thumbnails", status="skipped",
+                    summary="skipped (cancelled)",
+                )
+                return {"photos_indexed": photo_count, "cancelled": True}
 
             # Use cumulative processed count, not planned total — on a
             # clean run they're equal; on mixed-outcome runs "current"
