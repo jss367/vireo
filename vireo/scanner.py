@@ -1231,7 +1231,7 @@ def backfill_working_copies(db, vireo_dir, progress_callback=None,
     }
 
 
-def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None, thumb_cache_dir=None, permission_error_callback=None, cancel_check=None):
+def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None, thumb_cache_dir=None, permission_error_callback=None, cancel_check=None, skip_working_copies=False):
     """Walk a folder tree, discover photos, read metadata, populate database.
 
     Args:
@@ -1275,6 +1275,19 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         cancel_check: optional callable returning truthy when the caller
             wants scanning to stop promptly. When set, scan raises
             RuntimeError("scan cancelled") at cancellation checkpoints.
+        skip_working_copies: if True, suppress the end-of-scan
+            ``_extract_working_copies`` pass while still running
+            ``_pair_raw_jpeg_companions`` (with cache context) and
+            ``_invalidate_derived_caches`` on content changes. Used by
+            the per-batch import scan: the import job runs one deferred
+            end-of-run extraction pass over all touched folders (a
+            per-batch pass would race RAW+JPEG pairing across batch
+            boundaries), but pairing itself still needs ``vireo_dir`` /
+            ``thumb_cache_dir`` to move local-mask snapshots when a
+            newly imported RAW pairs with an already-cataloged JPEG that
+            has an edit recipe. Passing ``vireo_dir=None`` to suppress
+            extraction would also silently drop those masks. See PR
+            #1107 review.
     """
     root_path = Path(root)
     # Don't open the root at all if the root is, or sits inside, an
@@ -2117,7 +2130,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         # (current, total) through the same callback would overwrite the
         # scan total with the working-copy total and visually jump the bar
         # backward. ``status_callback`` still announces the phase.
-        if vireo_dir:
+        if vireo_dir and not skip_working_copies:
             if restrict_dirs is not None:
                 # Use the bundle-filtered list — see ``effective_restrict_dirs``
                 # above. Reusing the raw ``restrict_dirs`` here would let a

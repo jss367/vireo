@@ -14886,7 +14886,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         runner = app._job_runner
         active_ws = db._active_workspace_id
-        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        thumb_cache_dir = app.config["THUMB_CACHE_DIR"]
+        vireo_dir = os.path.dirname(thumb_cache_dir)
 
         job_config = {
             "sources": sources,
@@ -14912,6 +14913,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 recursive=recursive,
                 after_import=after_import,
                 vireo_dir=vireo_dir,
+                thumb_cache_dir=thumb_cache_dir,
             )
             return run_import_job(job, runner, db_path, active_ws, params)
 

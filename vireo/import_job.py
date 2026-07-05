@@ -113,6 +113,15 @@ class ImportParams:
     # Vireo data dir for working-copy extraction (Task 2.5). None skips
     # extraction (tests, or callers that defer to the scanner backfill).
     vireo_dir: str | None = None
+    # Configured thumbnail cache directory (``--thumb-dir``). Independently
+    # configurable from ``vireo_dir``: defaulting to ``vireo_dir/thumbnails``
+    # silently misses the real cache when they diverge, so an import that
+    # replaces bytes at an existing archive path would clear working copies
+    # and previews but leave a stale thumbnail served by the UI. Callers with
+    # the configured value (Flask ``/api/jobs/import-photos``) should pass
+    # it; ``None`` falls back to the default location downstream. See PR
+    # #1107 review.
+    thumb_cache_dir: str | None = None
 
 
 def copy_and_hash_verify(src, dst, *, src_hash=None):
@@ -911,20 +920,18 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         if landed:
             landed_paths = {entry[0] for entry in landed}
             # Capture the pre-scan (photo_id, file_hash) for every landed
-            # dest_path. The batch scan below is invoked with
-            # ``vireo_dir=None`` because per-batch working-copy extraction
-            # would run before RAW+JPEG companions across batch boundaries
-            # are paired (see the "Working-copy extraction is DEFERRED"
-            # comment above). But that also disables the scanner's own
-            # ``_invalidate_derived_caches`` call for existing rows whose
-            # bytes just changed — so a copy/adopt that replaces a stale
-            # archive file at a path whose row already had a
-            # ``working_copy_path``/thumbnail/preview would leave those
-            # derived files pointing at the previous bytes, and the
-            # end-of-run ``_extract_working_copies`` skips rows with
-            # ``working_copy_path IS NOT NULL``. Snapshot the pre-scan
-            # hash here so the hash-stamping loop below can invalidate any
-            # landed row whose bytes changed. See PR #1107 review.
+            # dest_path. Scanner's own ``_invalidate_derived_caches``
+            # fires on content-changed rows during the batch scan below
+            # (now that ``vireo_dir`` is passed through so pairing keeps
+            # its cache context), but the manual invalidation loop below
+            # remains as defense-in-depth for the batch-scan's
+            # ``skip_working_copies=True`` path: the deferred end-of-run
+            # ``_extract_working_copies`` still skips rows with
+            # ``working_copy_path IS NOT NULL``, so any stale WC pointer
+            # left behind by scanner's own path (e.g. a codepath change,
+            # or a legacy row scanner declines to invalidate) would
+            # otherwise persist. Idempotent with scanner's call. See PR
+            # #1107 review.
             pre_scan_hashes = {}
             for entry in landed:
                 dest_path = entry[0]
@@ -940,11 +947,24 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                 if row is not None:
                     pre_scan_hashes[dest_path] = row["file_hash"]
             try:
+                # ``vireo_dir`` / ``thumb_cache_dir`` are threaded through
+                # so ``_pair_raw_jpeg_companions`` has cache context: when
+                # a newly imported RAW pairs with an already-cataloged
+                # JPEG that carries an edit recipe with local-mask
+                # snapshots, pairing only moves those snapshots to the
+                # RAW primary when ``vireo_dir`` is set — passing ``None``
+                # silently loses the local pass. ``skip_working_copies``
+                # keeps the per-batch WC extraction deferred to the
+                # end-of-run pass below (per-batch extraction would race
+                # RAW+JPEG pairing across batch boundaries). See PR
+                # #1107 review.
                 scan(
                     destination, db,
                     restrict_dirs=[dest_folder],
                     restrict_files=landed_paths,
-                    vireo_dir=None,
+                    vireo_dir=params.vireo_dir,
+                    thumb_cache_dir=params.thumb_cache_dir,
+                    skip_working_copies=True,
                 )
             except Exception as e:  # scan failure fails the whole batch
                 # Each entry was already booked into copied or
@@ -1139,6 +1159,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                         continue
                     _invalidate_derived_caches(
                         db, params.vireo_dir, row["id"],
+                        thumb_cache_dir=params.thumb_cache_dir,
                     )
                     invalidated_photo_ids.add(row["id"])
 
@@ -1207,10 +1228,16 @@ def run_import_job(job, runner, db_path, workspace_id, params):
             )
             db.conn.commit()
             try:
+                # Same rationale as the fresh-batch scan above: pass
+                # ``vireo_dir`` / ``thumb_cache_dir`` so pairing keeps
+                # cache context, and defer per-batch WC extraction to the
+                # end-of-run pass. See PR #1107 review.
                 scan(
                     destination, db,
                     restrict_dirs=sorted(new_dup_dirs),
-                    vireo_dir=None,
+                    vireo_dir=params.vireo_dir,
+                    thumb_cache_dir=params.thumb_cache_dir,
+                    skip_working_copies=True,
                     cancel_check=lambda: runner.is_cancelled(job["id"]),
                 )
                 linked_dup_dirs.update(new_dup_dirs)
