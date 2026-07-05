@@ -1611,7 +1611,7 @@ def test_scan_extracts_working_copy_for_raw(tmp_path, monkeypatch):
     nef_file.write_bytes(b"fake raw data")
 
     # Mock ExifTool to return empty metadata
-    monkeypatch.setattr(scanner, "extract_metadata", lambda paths: {})
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **_kwargs: {})
 
     # Mock extract_working_copy to actually create a file (simulates success)
     def fake_extract(source, output, max_size=4096, quality=92):
@@ -1650,7 +1650,7 @@ def test_scan_skips_working_copy_for_jpeg(tmp_path, monkeypatch):
     jpg_file = photo_dir / "IMG_001.jpg"
     Image.new("RGB", (3000, 2000)).save(str(jpg_file), "JPEG")
 
-    monkeypatch.setattr(scanner, "extract_metadata", lambda paths: {})
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **_kwargs: {})
 
     # Mock extract_working_copy -- should never be called for JPEGs
     calls = []
@@ -1693,7 +1693,7 @@ def test_scan_uses_raw_primary_for_raw_working_copy(tmp_path, monkeypatch):
     Image.new("RGB", (6000, 4000), color=(255, 0, 0)).save(str(jpg_file), "JPEG")
 
     # Mock ExifTool
-    monkeypatch.setattr(scanner, "extract_metadata", lambda paths: {})
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **_kwargs: {})
 
     # Track which source file extract_working_copy is called with
     sources_used = []
@@ -1750,7 +1750,7 @@ def test_scan_falls_back_to_companion_when_raw_extraction_fails(
     jpg_file = photo_dir / "IMG_002.jpg"
     Image.new("RGB", (6000, 4000), color=(0, 255, 0)).save(str(jpg_file), "JPEG")
 
-    monkeypatch.setattr(scanner, "extract_metadata", lambda paths: {})
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **_kwargs: {})
 
     sources_used = []
 
@@ -1819,7 +1819,7 @@ def test_scan_falls_back_when_raw_working_copy_short_edge_is_smaller(
     jpg_file = photo_dir / "IMG_004.jpg"
     Image.new("RGB", (6000, 4000), color=(0, 255, 0)).save(str(jpg_file), "JPEG")
 
-    monkeypatch.setattr(scanner, "extract_metadata", lambda paths: {})
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **_kwargs: {})
 
     sources_used = []
 
@@ -1873,7 +1873,7 @@ def test_scan_accepts_near_full_raw_working_copy(tmp_path, monkeypatch):
     jpg_file = photo_dir / "IMG_006.jpg"
     Image.new("RGB", (6000, 4000), color=(0, 255, 0)).save(str(jpg_file), "JPEG")
 
-    monkeypatch.setattr(scanner, "extract_metadata", lambda paths: {})
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **_kwargs: {})
 
     sources_used = []
 
@@ -1945,7 +1945,7 @@ def test_scan_accepts_portrait_raw_working_copy_with_exif_orientation(
         },
     }
 
-    def fake_metadata(paths):
+    def fake_metadata(paths, restricted_tags=None, progress_callback=None):
         return {str(p): portrait_meta for p in paths}
 
     monkeypatch.setattr(scanner, "extract_metadata", fake_metadata)
@@ -2010,7 +2010,7 @@ def test_scan_marks_source_failure_when_raw_and_companion_both_fail(
     jpg_file = photo_dir / "IMG_003.jpg"
     Image.new("RGB", (6000, 4000), color=(0, 0, 255)).save(str(jpg_file), "JPEG")
 
-    monkeypatch.setattr(scanner, "extract_metadata", lambda paths: {})
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **_kwargs: {})
 
     def fake_extract(source, output, max_size=4096, quality=92):
         # Both RAW and companion fail (e.g. RAW unsupported + companion
@@ -2092,7 +2092,7 @@ def _setup_scanned_photo(tmp_path, pil_size=(640, 480)):
     db = Database(str(tmp_path / "test.db"))
     # Mock ExifTool so the first scan populates exif_data with real
     # dimensions, independent of whether exiftool is installed.
-    def fake_extract(paths, restricted_tags=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None):
         return {
             p: {"File": {"ImageWidth": pil_size[0], "ImageHeight": pil_size[1]},
                 "EXIF": {}, "Composite": {}}
@@ -2128,7 +2128,7 @@ def test_incremental_rescan_reextracts_when_timestamp_null(tmp_path, monkeypatch
     )
     db.conn.commit()
 
-    def fake_extract(paths, restricted_tags=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None):
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {}, "Composite": {}} for p in paths}
     monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
@@ -2160,7 +2160,7 @@ def test_incremental_rescan_reextracts_when_raw_dims_suspect(tmp_path, monkeypat
     )
     db.conn.commit()
 
-    def fake_extract(paths, restricted_tags=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None):
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {}, "Composite": {}} for p in paths}
     monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
@@ -2192,7 +2192,7 @@ def test_incremental_rescan_skips_small_jpeg_dims_not_raw(tmp_path, monkeypatch)
     db.conn.commit()
 
     called_with = []
-    def fake_extract(paths, restricted_tags=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None):
         called_with.append(list(paths))
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {}, "Composite": {}} for p in paths}
@@ -2225,7 +2225,7 @@ def test_scan_restrict_files_ignores_files_not_in_list(tmp_path, monkeypatch):
 
     db = Database(str(tmp_path / "test.db"))
 
-    def fake_extract(paths, restricted_tags=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None):
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {}, "Composite": {}} for p in paths}
     monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
@@ -2277,7 +2277,7 @@ def test_incremental_rescan_respects_exif_extracted_guard(tmp_path, monkeypatch)
     db.conn.commit()
 
     called_with = []
-    def fake_extract(paths, restricted_tags=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None):
         called_with.append(list(paths))
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {}, "Composite": {}} for p in paths}
