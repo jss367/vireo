@@ -6874,6 +6874,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         return resp
 
+    def _life_list_csv_cell(value):
+        if value is None:
+            return ""
+        text = str(value)
+        stripped = text.lstrip(" \t\r\n")
+        if stripped[:1] in {"=", "+", "-", "@"}:
+            return "'" + text
+        return text
+
     def _life_list_species_csv(payload):
         out = io.StringIO()
         fieldnames = [
@@ -6894,15 +6903,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             best = entry.get("best") or {}
             writer.writerow({
                 "number": entry.get("number") or "",
-                "species": entry.get("species") or "",
-                "scientific_name": entry.get("scientific_name") or "",
-                "common_name": entry.get("common_name") or "",
+                "species": _life_list_csv_cell(entry.get("species")),
+                "scientific_name": _life_list_csv_cell(entry.get("scientific_name")),
+                "common_name": _life_list_csv_cell(entry.get("common_name")),
                 "photo_count": entry.get("photo_count") or 0,
-                "first_seen": entry.get("first_seen") or "",
-                "last_seen": entry.get("last_seen") or "",
-                "locations": "; ".join(entry.get("locations") or []),
+                "first_seen": _life_list_csv_cell(entry.get("first_seen")),
+                "last_seen": _life_list_csv_cell(entry.get("last_seen")),
+                "locations": _life_list_csv_cell(
+                    "; ".join(entry.get("locations") or [])
+                ),
                 "best_photo_id": best.get("id") or "",
-                "best_filename": best.get("filename") or "",
+                "best_filename": _life_list_csv_cell(best.get("filename")),
             })
         return out.getvalue()
 
@@ -6926,16 +6937,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             for photo in _life_list_export_photos(entry, photo_mode):
                 writer.writerow({
                     "number": entry.get("number") or "",
-                    "species": entry.get("species") or "",
-                    "scientific_name": entry.get("scientific_name") or "",
-                    "common_name": entry.get("common_name") or "",
+                    "species": _life_list_csv_cell(entry.get("species")),
+                    "scientific_name": _life_list_csv_cell(entry.get("scientific_name")),
+                    "common_name": _life_list_csv_cell(entry.get("common_name")),
                     "photo_id": photo.get("id") or "",
-                    "filename": photo.get("filename") or "",
-                    "timestamp": photo.get("timestamp") or "",
+                    "filename": _life_list_csv_cell(photo.get("filename")),
+                    "timestamp": _life_list_csv_cell(photo.get("timestamp")),
                     "is_life_list_photo": "yes" if photo.get("is_life_list_photo") else "no",
                     "quality_score": photo.get("quality_score")
                     if photo.get("quality_score") is not None else "",
-                    "locations": "; ".join(entry.get("locations") or []),
+                    "locations": _life_list_csv_cell(
+                        "; ".join(entry.get("locations") or [])
+                    ),
                 })
         return out.getvalue()
 

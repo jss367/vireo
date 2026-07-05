@@ -303,6 +303,39 @@ def test_life_list_export_species_csv_with_locations(life_app):
     assert cardinal["best_filename"] == "card2.jpg"
 
 
+def test_life_list_export_csv_escapes_formula_leading_cells(life_app):
+    app, db, ids = life_app
+    p_formula = db.add_photo(
+        folder_id=ids["folder"],
+        filename="@formula.jpg",
+        extension=".jpg",
+        file_size=1000,
+        file_mtime=10.0,
+        timestamp="2024-06-01T08:00:00",
+    )
+    k_species = db.add_keyword("=2+2", is_species=True)
+    k_location = db.add_keyword("+Backyard", kw_type="location")
+    db.tag_photo(p_formula, k_species)
+    db.tag_photo(p_formula, k_location)
+
+    resp = app.test_client().get(
+        "/api/life-list/export?format=csv&include_locations=1"
+    )
+    rows = list(csv.DictReader(io.StringIO(resp.get_data(as_text=True))))
+    formula_row = next(r for r in rows if r["species"] == "'=2+2")
+    assert formula_row["locations"] == "'+Backyard"
+    assert formula_row["best_filename"] == "'@formula.jpg"
+
+    photo_resp = app.test_client().get(
+        "/api/life-list/export?format=csv&detail=photos&photos=all"
+        "&include_locations=1"
+    )
+    photo_rows = list(csv.DictReader(io.StringIO(photo_resp.get_data(as_text=True))))
+    photo_row = next(r for r in photo_rows if r["species"] == "'=2+2")
+    assert photo_row["filename"] == "'@formula.jpg"
+    assert photo_row["locations"] == "'+Backyard"
+
+
 def test_life_list_export_photo_csv_all_photos(life_app):
     app, _, ids = life_app
     resp = app.test_client().get(
