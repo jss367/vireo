@@ -997,6 +997,26 @@ def run_import_job(job, runner, db_path, workspace_id, params):
             # rest of the app sees at the archive path. See PR #1107 review.
             reclassified_landed_paths = set()
 
+            # RAW rows whose derived caches need invalidation because a
+            # newly-landed JPEG became (or already was) their companion.
+            # Pair-scan merges the JPEG's identity into the RAW row and
+            # deletes the JPEG's own photos row, so the JPEG's landed
+            # entry has ``row is None`` and never enters the
+            # ``pre_scan_hashes`` diff loop below. But the RAW's
+            # ``working_copy_path``/thumb/preview may have been built
+            # from stale companion bytes (JPEG was deleted then this
+            # import restored it with different content, or the RAW was
+            # standalone before and pairing now changes preview
+            # strategy), and the deferred ``_extract_working_copies``
+            # skips rows whose ``working_copy_path IS NOT NULL``. Without
+            # invalidation the UI keeps serving derived files for the
+            # previous companion state. Skip when the JPEG was adopted
+            # (``origin == "skipped_duplicate"``): its bytes were already
+            # at the archive path before this run, so any RAW cache
+            # derived from them is by construction consistent. See PR
+            # #1107 review.
+            raw_companion_invalidations = set()
+
             def _rehash_dest_or_none(path):
                 """Re-hash the archive file, returning None on read failure.
 
@@ -1048,6 +1068,19 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                     if companion is not None:
                         actual = _rehash_dest_or_none(dest_path)
                         if actual is not None and actual == verified_hash:
+                            # Fresh-copy JPEG landed as companion to an
+                            # existing RAW row. The RAW's derived caches
+                            # may reflect the pre-import state (RAW-only
+                            # preview strategy, or a deleted/replaced
+                            # prior companion); invalidate so the
+                            # deferred WC pass rebuilds from the just-
+                            # verified JPEG. Adoption (bytes already at
+                            # this path) doesn't need invalidation. See
+                            # PR #1107 review.
+                            if entry[3] == "copied":
+                                raw_companion_invalidations.add(
+                                    companion["id"],
+                                )
                             continue
                         _reclassify_landed_failed(
                             rel, entry,
@@ -1162,6 +1195,17 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                         thumb_cache_dir=params.thumb_cache_dir,
                     )
                     invalidated_photo_ids.add(row["id"])
+
+                # RAW rows whose companion JPEG we just landed fresh —
+                # covered by the same untracked-preview sweep below so
+                # orphaned preview files from the prior companion state
+                # don't get lazy-adopted on the next request.
+                for raw_id in raw_companion_invalidations:
+                    _invalidate_derived_caches(
+                        db, params.vireo_dir, raw_id,
+                        thumb_cache_dir=params.thumb_cache_dir,
+                    )
+                    invalidated_photo_ids.add(raw_id)
 
             db.conn.commit()
 

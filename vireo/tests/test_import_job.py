@@ -2849,3 +2849,98 @@ def test_import_invalidates_derived_caches_when_pre_row_had_null_hash(tmp_path):
     assert not fake_wc.exists(), (
         "NULL-hash pre-scan row must have its stale WC file unlinked"
     )
+
+
+def test_import_invalidates_raw_caches_when_new_jpeg_pairs(tmp_path):
+    """RAW+JPEG companion restore: when a freshly copied JPEG lands as
+    companion to an existing RAW row (pair-merge deletes the JPEG's own
+    row), the RAW row's derived caches may reflect the pre-pair state
+    (RAW-only preview, or a deleted/replaced prior companion). The
+    hash-stamping loop treats ``row is None`` as a fresh insert with no
+    diff to invalidate, so without an explicit companion-invalidation
+    pass the deferred WC pass skips the RAW (working_copy_path is set)
+    and the UI keeps serving stale derived files. See PR #1107 review.
+    """
+    from import_job import ImportParams, run_import_job
+
+    archive = tmp_path / "archive"
+    dest_dir = archive / "2026" / "2026-07-03"
+    dest_dir.mkdir(parents=True)
+
+    vireo_dir = tmp_path / "vireo_data"
+    (vireo_dir / "working").mkdir(parents=True)
+
+    # Pre-existing RAW file at the archive path, cataloged standalone
+    # with a stale working_copy_path from a prior RAW-only extraction.
+    raw_archive = dest_dir / "DSC_0800.NEF"
+    Image.new("RGB", (16, 16), "red").save(str(dest_dir / "_seed.jpg"))
+    raw_bytes = (dest_dir / "_seed.jpg").read_bytes() + b"RAW-SENSOR-DATA"
+    raw_archive.write_bytes(raw_bytes)
+    (dest_dir / "_seed.jpg").unlink()
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES (?, ?, 'ok')",
+        (str(dest_dir), dest_dir.name),
+    ).lastrowid
+    # WC file must live at working/{photo_id}.jpg — that's the layout
+    # _invalidate_derived_caches unlinks.
+    raw_photo_id = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, extension, file_size,"
+        " file_hash, working_copy_path) VALUES (?, ?, '.nef', ?, ?, 'placeholder')",
+        (fid, "DSC_0800.NEF", len(raw_bytes),
+         "deadbeef" * 8),
+    ).lastrowid
+    fake_wc = vireo_dir / "working" / f"{raw_photo_id}.jpg"
+    Image.new("RGB", (8, 8), "orange").save(str(fake_wc))
+    stale_wc_bytes = fake_wc.read_bytes()
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path = ? WHERE id = ?",
+        (str(fake_wc), raw_photo_id),
+    )
+    db.conn.commit()
+
+    # Card holds a NEW JPEG that will land at DSC_0800.jpg and pair with
+    # the existing RAW during the batch scan.
+    card = _make_card(tmp_path, [
+        ("DSC_0800.jpg", datetime(2026, 7, 3, 10, 0, 0), "green"),
+    ])
+
+    result = run_import_job(_make_job(), FakeRunner(), db_path, ws_id,
+                            ImportParams(sources=[str(card)],
+                                         destination=str(archive),
+                                         skip_duplicates=False,
+                                         vireo_dir=str(vireo_dir)))
+    assert result["copied"] == 1
+    assert result["failed"] == 0
+
+    # The RAW row's stale WC path was cleared (invalidation ran) and
+    # the on-disk stale WC file was unlinked. The deferred end-of-run
+    # ``_extract_working_copies`` then either succeeds with a fresh WC
+    # (path differs from the stale one) or leaves working_copy_path
+    # NULL for the scanner's later backfill; either way the row no
+    # longer points at the pre-pair bytes.
+    row = db.conn.execute(
+        "SELECT working_copy_path, companion_path FROM photos WHERE id = ?",
+        (raw_photo_id,),
+    ).fetchone()
+    assert row["companion_path"] == "DSC_0800.jpg", (
+        "pair-merge must record the newly landed JPEG as the RAW's "
+        "companion_path"
+    )
+    # If invalidation didn't run the row would still point at the
+    # pre-pair WC path (which the extractor's candidate predicate would
+    # then skip, since working_copy_path is set). Invalidation resets
+    # the path, and the deferred WC pass rebuilds fresh: even when the
+    # extractor happens to reuse the same on-disk slot
+    # (``working/{id}.jpg``), the bytes at that path must differ from
+    # the stale orange placeholder we seeded, because the WC now comes
+    # from the just-verified companion JPEG.
+    if fake_wc.exists():
+        assert fake_wc.read_bytes() != stale_wc_bytes, (
+            "RAW's stale WC bytes must not survive the import — either "
+            "the file is unlinked or overwritten with a fresh WC from "
+            "the verified companion JPEG"
+        )
