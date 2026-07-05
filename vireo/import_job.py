@@ -1285,7 +1285,13 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     # recovery adopted files whose card is gone, later backfill retries)
     # falls back to the cataloged archive path. Per-row failures mark the
     # photo for the scanner's later backfill and never fail the import.
-    if params.vireo_dir and wc_dest_folders:
+    #
+    # If the run was already cancelled at a batch boundary, skip the pass
+    # entirely — otherwise Stop appears hung for minutes on large RAW
+    # imports while the extractor decodes what the user asked us to
+    # abort. During the pass, poll ``runner.is_cancelled`` so cancellation
+    # aborts extraction row-by-row too.
+    if params.vireo_dir and wc_dest_folders and not cancelled:
         from scanner import _extract_working_copies
 
         try:
@@ -1293,12 +1299,15 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                 db, params.vireo_dir,
                 scope=[(d, "exact") for d in sorted(wc_dest_folders)],
                 source_paths=wc_source_paths,
+                cancel_check=lambda: runner.is_cancelled(job["id"]),
             )
         except Exception:
             log.exception(
                 "Working-copy extraction failed for %s",
                 sorted(wc_dest_folders),
             )
+        if runner.is_cancelled(job["id"]):
+            cancelled = True
 
     status = "cancelled" if cancelled else (
         "failed" if failed else "completed"
@@ -1332,21 +1341,24 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     # its cataloged twin), AND every source was walked cleanly, AND every
     # duplicate-only batch's workspace-link scan succeeded (otherwise the
     # imported duplicates are on disk but not visible in the workspace),
-    # AND the run enumerated the card's full supported-file set (a
-    # narrowed ``file_types`` — "raw", "jpeg", or a custom extension list
-    # — leaves the un-selected supported photos on the card entirely
-    # unseen; ``discovered`` covers only the requested subset, so the
-    # naive ``copied + skipped_duplicate == discovered`` check would go
-    # green even though the card still holds files the pill is expected
-    # to cover). A cancelled run leaves unprocessed files, so it is
-    # never safe. This pill means exactly what it says.
-    filtered_import = params.file_types != "both"
+    # AND the run enumerated the card's full supported-file set. Any
+    # narrowing of the walk falls into ``partial_scope``: a narrowed
+    # ``file_types`` ("raw", "jpeg", or a custom extension list) leaves
+    # the un-selected supported photos on the card entirely unseen, and
+    # ``recursive=False`` skips every subdirectory of every source root.
+    # In both cases ``discovered`` covers only a subset of what the card
+    # actually holds, so the naive ``copied + skipped_duplicate ==
+    # discovered`` check would go green even though the card still holds
+    # files the pill is expected to cover. A cancelled run leaves
+    # unprocessed files, so it is never safe. This pill means exactly
+    # what it says.
+    partial_scope = params.file_types != "both" or not params.recursive
     safe_to_format = (
         not cancelled
         and failed == 0
         and not discovery_errors
         and not dup_link_failed
-        and not filtered_import
+        and not partial_scope
         and (copied + skipped_duplicate) == discovered
     )
     result = {

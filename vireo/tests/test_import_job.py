@@ -1228,6 +1228,141 @@ def test_custom_file_types_list_is_never_safe_to_format(tmp_path):
     assert result["safe_to_format"] is False
 
 
+def test_non_recursive_import_is_never_safe_to_format(tmp_path):
+    """``recursive=False`` only enumerates top-level files, so any card
+    with photos in subdirectories has files ``discovered`` never saw.
+    ``copied + skipped_duplicate == discovered`` would still pass and the
+    pill would tell the user it's safe to format a card that still holds
+    unimported photos in subfolders. See PR #1107 Codex review on commit
+    7dc0cce (import_job.py:1350).
+    """
+    from import_job import ImportParams
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+    # A photo tucked in a subdirectory the non-recursive walk cannot see.
+    subdir = card / "subfolder"
+    subdir.mkdir()
+    Image.new("RGB", (16, 16), "blue").save(str(subdir / "DSC_0002.jpg"))
+    ts = datetime(2026, 7, 3, 11, 0, 0).timestamp()
+    os.utime(str(subdir / "DSC_0002.jpg"), (ts, ts))
+    archive = tmp_path / "archive"
+
+    db, ws_id, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)],
+        destination=str(archive),
+        recursive=False,
+    ))
+
+    # The top-level file copied cleanly, so the naive equality check
+    # (copied + skipped == discovered) would otherwise flip green.
+    assert result["copied"] == 1
+    assert result["failed"] == 0
+    assert result["discovered"] == 1
+    # But the non-recursive walk never saw ``subfolder/DSC_0002.jpg``;
+    # formatting the card would delete an unimported photo.
+    assert result["safe_to_format"] is False
+
+
+def test_deferred_extraction_skipped_when_already_cancelled(
+    tmp_path, monkeypatch,
+):
+    """If the run was cancelled at a batch boundary before the deferred
+    working-copy pass, don't spend minutes decoding RAWs the user has
+    already asked us to abort. The extractor must not be called at all,
+    and the returned status must remain ``cancelled``. See PR #1107
+    Codex review on commit 7dc0cce (import_job.py:1296).
+    """
+    import import_job
+    import scanner
+    from import_job import ImportParams
+
+    calls = []
+
+    def spy_extract(*args, **kwargs):
+        calls.append((args, kwargs))
+
+    monkeypatch.setattr(scanner, "_extract_working_copies", spy_extract)
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+    archive = tmp_path / "archive"
+
+    runner = FakeRunner()
+    job = _make_job()
+    # Cancel before the run starts. The first batch-boundary check flips
+    # ``cancelled`` on, and the deferred pass must then be skipped.
+    runner.cancelled_ids.add(job["id"])
+
+    db, ws_id, result = _run_import(
+        tmp_path,
+        ImportParams(
+            sources=[str(card)],
+            destination=str(archive),
+            vireo_dir=str(tmp_path / "vireo_dir"),
+        ),
+        runner=runner,
+        job=job,
+    )
+
+    assert result["cancelled"] is True
+    assert result["safe_to_format"] is False
+    assert calls == [], (
+        "deferred _extract_working_copies must be skipped when cancelled"
+    )
+
+
+def test_deferred_extraction_threads_cancel_check(tmp_path, monkeypatch):
+    """When the deferred working-copy pass does run, it must receive a
+    ``cancel_check`` callable so a cancel issued mid-pass aborts the
+    per-row loop instead of decoding every RAW to completion. See PR
+    #1107 Codex review on commit 7dc0cce (import_job.py:1296).
+    """
+    import import_job
+    import scanner
+    from import_job import ImportParams
+
+    captured = {}
+
+    def spy_extract(*args, **kwargs):
+        captured["cancel_check"] = kwargs.get("cancel_check")
+        captured["source_paths"] = kwargs.get("source_paths")
+
+    monkeypatch.setattr(scanner, "_extract_working_copies", spy_extract)
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+    archive = tmp_path / "archive"
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    _run_import(
+        tmp_path,
+        ImportParams(
+            sources=[str(card)],
+            destination=str(archive),
+            vireo_dir=str(tmp_path / "vireo_dir"),
+        ),
+        runner=runner,
+        job=job,
+    )
+
+    cancel_check = captured.get("cancel_check")
+    assert callable(cancel_check), (
+        "deferred pass must receive a cancel_check callable"
+    )
+    # Not cancelled yet → callable returns falsy.
+    assert not cancel_check()
+    # Once the runner records a cancel, the callable flips to truthy so
+    # ``_extract_working_copies`` bails out on the next row check.
+    runner.cancelled_ids.add(job["id"])
+    assert cancel_check()
+
+
 def test_wc_extraction_deferred_to_after_last_batch(tmp_path, monkeypatch):
     """A RAW+JPEG companion pair that straddles a batch boundary must not
     trigger per-batch working-copy extraction while the JPEG's row is
