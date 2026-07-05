@@ -2674,17 +2674,30 @@ _ABS_DEST = os.path.abspath("/abs/dest")
 @pytest.mark.parametrize(
     "extra,fragment",
     [
-        # Relative destination — 400 fires at the destination validation.
-        ({"destination": "relative/path", "local_processing": False}, "absolute"),
-        # local_processing + folder scope — 400 fires at the scope check.
+        # Any destination is rejected outright for folder scope — the
+        # scope check fires before the absolute-path guard, because
+        # collection scope skips ingest and a copy destination would never
+        # be written. Both a relative and an absolute path trip this.
+        (
+            {"destination": "relative/path", "local_processing": False},
+            "destination is not allowed with collection_id or folder_ids",
+        ),
+        (
+            {"destination": _ABS_DEST, "local_processing": False},
+            "destination is not allowed with collection_id or folder_ids",
+        ),
+        # local_processing + destination + folder scope: same reject —
+        # destination check runs before the local_processing scope check.
         (
             {"local_processing": True, "destination": _ABS_DEST},
-            "local_processing",
+            "destination is not allowed with collection_id or folder_ids",
         ),
-        # folder_template with '..' — 400 fires at the folder_template check.
+        # local_processing + folder scope without destination: this
+        # trips the "requires a destination or a remote target" guard
+        # (which fires before the local_processing + scope check).
         (
-            {"destination": _ABS_DEST, "folder_template": "../%Y"},
-            "folder_template",
+            {"local_processing": True},
+            "local_processing requires a destination or a remote target",
         ),
     ],
 )
@@ -2706,6 +2719,46 @@ def test_pipeline_folder_ids_leaves_no_stray_collection_on_400(
         assert resp.status_code == 400, resp.get_json()
         assert fragment in resp.get_json()["error"]
     assert len(db.get_collections()) == before
+
+
+def test_pipeline_folder_ids_rejects_plain_destination(app_and_db):
+    """Regression for the Codex review on commit 459e092: a folder-scoped
+    request with ``destination`` and ``local_processing=False`` was
+    previously accepted, materializing the ad-hoc collection and queuing a
+    job whose ingest step could never run (``collection_id`` sets
+    ``skip_scan``). Reject at request time so the user gets a clean 400
+    instead of a queued-but-broken run."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    before = len(db.get_collections())
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [root_id],
+            "destination": _ABS_DEST,
+            "local_processing": False,
+        })
+        assert resp.status_code == 400, resp.get_json()
+        assert "destination" in resp.get_json()["error"]
+        assert "folder_ids" in resp.get_json()["error"]
+    assert len(db.get_collections()) == before
+
+
+def test_pipeline_collection_id_rejects_plain_destination(app_and_db):
+    """Same reasoning as the folder-scope regression above, applied to
+    the equivalent ``collection_id + destination`` case: any collection
+    scope sets ``skip_scan`` in run_pipeline_job, so the ingest block
+    that would copy to ``destination`` never runs."""
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id,
+            "destination": _ABS_DEST,
+            "local_processing": False,
+        })
+        assert resp.status_code == 400, resp.get_json()
+        assert "destination" in resp.get_json()["error"]
+        assert "collection_id" in resp.get_json()["error"]
 
 
 def test_pipeline_folder_ids_chunks_wide_subtree(app_and_db, monkeypatch):

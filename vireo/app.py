@@ -16739,6 +16739,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(
                 "destination is not allowed when source_snapshot_id is set"
             )
+        # Same reasoning for collection- and folder-scope runs: any
+        # ``collection_id`` (whether supplied directly or derived from
+        # ``folder_ids`` below) sets ``skip_scan`` in run_pipeline_job, so
+        # ``scanner_stage`` returns before the ingest block that would copy
+        # to ``destination``. The job's step list still includes ingest for
+        # ``params.destination``, so the user would see a queued process run
+        # that ignores the requested copy target and leaves ingest pending.
+        # Local-processing runs with these scopes are rejected below with a
+        # dedicated message; this guards the plain-``destination`` case that
+        # otherwise slips through when ``local_processing`` is false.
+        if destination and (
+            collection_id is not None or folder_ids is not None
+        ):
+            return json_error(
+                "destination is not allowed with collection_id or folder_ids "
+                "— collection and folder scopes skip ingest, so a copy "
+                "destination would never be written"
+            )
         if destination and not os.path.isabs(destination):
             return json_error("destination must be an absolute path")
         # Remote (SSH) archive destination — mirrors the Move page's
