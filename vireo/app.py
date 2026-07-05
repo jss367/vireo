@@ -14812,20 +14812,51 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # macOS's default APFS/HFS+ volumes and Windows NTFS are
         # case-INSENSITIVE, so ``/Volumes/Card`` and ``/volumes/card`` are
         # the same directory but ``realpath`` doesn't case-normalize on
-        # POSIX (macOS reports as POSIX). Compare case-folded on those
-        # platforms so a differently cased spelling can't bypass the
-        # containment check; on Linux we keep case-sensitive comparison
-        # because ext4/xfs really do distinguish case.
+        # POSIX (macOS reports as POSIX). On Linux, a platform-wide
+        # case-sensitivity assumption misses FAT/exFAT/NTFS-mounted
+        # removable media (typical SD-card setup) that sit under a
+        # case-sensitive ext4 parent — the user's real card mount point
+        # can be case-insensitive even when the root filesystem isn't.
+        # Compare case-folded on darwin/win32 unconditionally, and on
+        # Linux probe each source's actual filesystem: if the resolved
+        # path with an alpha character case-swapped still stat's to the
+        # same inode, the mount is case-insensitive and both sides of
+        # the containment comparison need case-folding for that source.
         _case_insensitive_platform = sys.platform in ("darwin", "win32")
 
         def _casenorm(p):
             return p.casefold() if _case_insensitive_platform else p
 
+        def _fs_is_case_insensitive(path):
+            """Probe whether the filesystem at ``path`` treats case as insensitive.
+
+            Best-effort: case-swap one alpha character from the resolved
+            path and check ``os.path.samefile``. Any error (probe path
+            not readable, no alpha char to swap) returns False and the
+            caller falls back to case-sensitive comparison — a false
+            negative is a strictly narrower guard than what the platform
+            branch already applies, never a wider one.
+            """
+            try:
+                for i, c in enumerate(path):
+                    if c.isalpha():
+                        probe = path[:i] + c.swapcase() + path[i + 1:]
+                        if probe == path:
+                            continue
+                        if not os.path.exists(probe):
+                            return False
+                        try:
+                            return os.path.samefile(path, probe)
+                        except OSError:
+                            return False
+                return False
+            except OSError:
+                return False
+
         try:
             dest_real = os.path.realpath(destination)
         except OSError as e:
             return json_error(f"destination cannot be resolved: {e}")
-        dest_cmp = _casenorm(dest_real)
         for s in sources:
             try:
                 source_real = os.path.realpath(s)
@@ -14833,7 +14864,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # Source unresolvable — the os.path.isdir check above
                 # already handled non-existent sources; nothing more to say.
                 continue
-            source_cmp = _casenorm(source_real).rstrip(os.sep)
+            # Per-source case-fold decision: platform is enough on
+            # darwin/win32; on Linux, probe the actual source mount.
+            per_source_ci = _case_insensitive_platform or (
+                not _case_insensitive_platform
+                and _fs_is_case_insensitive(source_real)
+            )
+            if per_source_ci:
+                source_cmp = source_real.casefold().rstrip(os.sep)
+                dest_cmp = dest_real.casefold()
+            else:
+                source_cmp = source_real.rstrip(os.sep)
+                dest_cmp = dest_real
             if dest_cmp == source_cmp or dest_cmp.startswith(
                 source_cmp + os.sep
             ):

@@ -363,22 +363,48 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     # previously scanned mounted card. That twin's re-hash just re-reads
     # the very card file being imported, so accepting it as duplicate
     # proof would flip ``safe_to_format`` green over a card whose bytes
-    # never made it to the archive. Case-fold on darwin/win32 so a
-    # differently-cased spelling of the source path can't slip a twin
-    # through the containment check; ext4/xfs on Linux really do
-    # distinguish case. See PR #1107 review.
+    # never made it to the archive. Case-fold on darwin/win32
+    # unconditionally; on Linux probe each source's actual filesystem
+    # because a FAT/exFAT/NTFS-mounted SD card is case-insensitive even
+    # under a case-sensitive ext4 parent — a platform-wide check would
+    # miss a differently-cased twin path there. See PR #1107 review.
     _case_insensitive_platform = sys.platform in ("darwin", "win32")
 
-    def _casenorm_path(p):
-        return p.casefold() if _case_insensitive_platform else p
+    def _fs_is_case_insensitive(path):
+        """Probe whether the filesystem at ``path`` treats case as insensitive.
+
+        Best-effort: case-swap one alpha character from the resolved
+        path and check ``os.path.samefile``. On any error, returns
+        False — a false negative just falls back to case-sensitive
+        comparison (strictly narrower guard, never wider).
+        """
+        try:
+            for i, c in enumerate(path):
+                if c.isalpha():
+                    probe = path[:i] + c.swapcase() + path[i + 1:]
+                    if probe == path:
+                        continue
+                    if not os.path.exists(probe):
+                        return False
+                    try:
+                        return os.path.samefile(path, probe)
+                    except OSError:
+                        return False
+            return False
+        except OSError:
+            return False
 
     def _norm_source(s):
         try:
             real = os.path.realpath(s)
         except OSError:
             real = str(s)
-        return _casenorm_path(real).rstrip(os.sep)
+        ci = _case_insensitive_platform or _fs_is_case_insensitive(real)
+        return (real.casefold() if ci else real).rstrip(os.sep), ci
 
+    # (normalized_root, is_case_insensitive) per source. Per-source ci is
+    # stored so ``_path_under_any_source`` case-folds the candidate path
+    # exactly when the source lives on a case-insensitive filesystem.
     source_roots = [_norm_source(s) for s in params.sources]
 
     def _path_under_any_source(path):
@@ -386,10 +412,11 @@ def run_import_job(job, runner, db_path, workspace_id, params):
             real = os.path.realpath(path)
         except OSError:
             real = str(path)
-        cmp = _casenorm_path(real)
-        for root in source_roots:
+        real_folded = real.casefold()
+        for root, ci in source_roots:
             if not root:
                 continue
+            cmp = real_folded if ci else real
             if cmp == root or cmp.startswith(root + os.sep):
                 return True
         return False
@@ -1068,19 +1095,31 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                     if companion is not None:
                         actual = _rehash_dest_or_none(dest_path)
                         if actual is not None and actual == verified_hash:
-                            # Fresh-copy JPEG landed as companion to an
-                            # existing RAW row. The RAW's derived caches
-                            # may reflect the pre-import state (RAW-only
-                            # preview strategy, or a deleted/replaced
-                            # prior companion); invalidate so the
-                            # deferred WC pass rebuilds from the just-
-                            # verified JPEG. Adoption (bytes already at
-                            # this path) doesn't need invalidation. See
-                            # PR #1107 review.
-                            if entry[3] == "copied":
-                                raw_companion_invalidations.add(
-                                    companion["id"],
-                                )
+                            # Landed JPEG paired with an existing RAW
+                            # row. Invalidate the RAW's derived caches
+                            # regardless of origin: adoption
+                            # (``skipped_duplicate``) only proves the
+                            # JPEG bytes were already at the archive
+                            # path, NOT that the RAW row already carried
+                            # ``companion_path`` for this JPEG. A prior
+                            # partial run or backfill may have left the
+                            # RAW as RAW-only (with a
+                            # ``working_copy_path`` or
+                            # ``working_copy_failed_at`` built without
+                            # knowing this companion existed); the
+                            # deferred end-of-run
+                            # ``_extract_working_copies`` skips RAWs
+                            # whose ``working_copy_path IS NOT NULL``,
+                            # so a stale RAW-only cache would persist
+                            # past this import and the UI would keep
+                            # serving derived files for the pre-pair
+                            # state. Fresh-copy JPEGs need this too
+                            # (RAW may have been standalone or paired
+                            # with a since-deleted companion). See PR
+                            # #1107 review.
+                            raw_companion_invalidations.add(
+                                companion["id"],
+                            )
                             continue
                         _reclassify_landed_failed(
                             rel, entry,
