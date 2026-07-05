@@ -10594,3 +10594,132 @@ def test_miss_stage_setup_failure_marks_stage_failed(tmp_path, monkeypatch):
     assert str(job.get("_fatal_error", "")).startswith("[misses] Fatal:"), (
         job.get("_fatal_error"), job.get("errors")
     )
+
+
+# ---------------------------------------------------------------------------
+# per-photo resume contract (import/process split PR 1)
+# ---------------------------------------------------------------------------
+
+
+def test_collection_rerun_redoes_only_missing_work(tmp_path, monkeypatch):
+    """The process job's core promise: re-running the same strategy over the
+    same photos re-does only what's missing. Second run must report zero
+    generated thumbnails/previews and a fully cache-hit classify. If this
+    fails, the failure is the finding — fix the specific stage's skip
+    check rather than loosening the assertion."""
+    import json as json_mod
+
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    import numpy as np
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    photo_ids = []
+    for i, name in enumerate(("a.jpg", "b.jpg")):
+        pid = db.add_photo(folder_id, name, ".jpg", 1000 + i, 1_000_000.0 + i)
+        _drop_jpeg(folder_path, name)
+        # Pre-seed one detection per photo so the classify loop has a
+        # primary detection to classify (and, on run 2, to find cached
+        # predictions for). Mirrors the reclassify tests' setup.
+        db.save_detections(
+            pid,
+            [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+              "confidence": 0.9, "category": "animal"}],
+            detector_model="MegaDetector",
+        )
+        photo_ids.append(pid)
+    col_id = db.add_collection(
+        "Resume test",
+        json_mod.dumps([{"field": "photo_ids", "value": photo_ids}]),
+    )
+
+    _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
+        det_map = {}
+        for p in batch:
+            # The classify loop expects plain dicts (the real _detect_batch
+            # returns them); sqlite3.Row has no .get.
+            dets = [dict(d) for d in db_.get_detections(p["id"])]
+            if dets:
+                det_map[p["id"]] = dets
+        return det_map, 0, {p["id"] for p in batch}
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    inference_calls = []
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def encode_image(self, *args, **kwargs):
+            inference_calls.append("encode_image")
+            return np.zeros(512, dtype=np.float32)
+
+        def classify_with_embedding(self, img, threshold=0):
+            inference_calls.append("classify_with_embedding")
+            return (
+                [{"species": "Robin", "score": 0.9}],
+                np.zeros(512, dtype=np.float32),
+            )
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            inference_calls.append("classify_batch_with_embedding")
+            zero = np.zeros(512, dtype=np.float32)
+            return [([{"species": "Robin", "score": 0.9}], zero)
+                    for _ in images]
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    def run_once():
+        params = PipelineParams(
+            collection_id=col_id,
+            skip_extract_masks=True,
+            skip_regroup=True,
+        )
+        runner = FakeRunner()
+        job = _make_job()
+        return run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    first = run_once()
+    n = len(photo_ids)
+    assert first["stages"]["thumbnails"]["generated"] == n, first["stages"]
+    assert first["stages"]["previews"]["generated"] == n, first["stages"]
+    assert first["stages"]["classify"]["predictions_stored"] == n, (
+        first["stages"]
+    )
+    assert inference_calls, "first run never invoked the classifier"
+
+    inference_calls.clear()
+    second = run_once()
+    assert second["stages"]["thumbnails"] == {
+        "generated": 0, "skipped": n, "failed": 0,
+    }, second["stages"]
+    assert second["stages"]["previews"]["generated"] == 0, second["stages"]
+    assert second["stages"]["previews"]["skipped"] == n, second["stages"]
+    assert second["stages"]["previews"]["failed"] == 0, second["stages"]
+    assert second["stages"]["classify"]["already_classified"] == n, (
+        second["stages"]
+    )
+    # NOTE: predictions_stored is NOT asserted to be 0 on the rerun — the
+    # cached branch deliberately re-surfaces cached predictions into
+    # raw_results so downstream grouping/storage sees them, and storage
+    # re-upserts the same rows (idempotent, cheap). The expensive contract
+    # is that no model inference happens at all on a fully-cached rerun:
+    assert inference_calls == [], (
+        f"rerun invoked the classifier: {inference_calls}"
+    )
