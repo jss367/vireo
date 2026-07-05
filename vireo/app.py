@@ -22,7 +22,7 @@ import time
 import webbrowser
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import places
 from db import (
@@ -11581,21 +11581,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # rejects it and nothing opens.
         params = []
         if scientific:
-            params.append("taxon_name=" + quote(scientific))
+            params.append(("taxon_name", scientific))
         elif species:
-            params.append("taxon_name=" + quote(species))
+            params.append(("taxon_name", species))
         if photo["timestamp"]:
-            params.append("observed_on=" + quote(photo["timestamp"][:10]))
+            params.append(("observed_on", photo["timestamp"][:10]))
         loc = db.get_effective_photo_location(photo_id)
         lat = loc["latitude"] if loc else None
         lng = loc["longitude"] if loc else None
         if lat is not None and lng is not None:
-            params.append("lat=" + quote(str(lat)))
-            params.append("lng=" + quote(str(lng)))
+            params.append(("lat", str(lat)))
+            params.append(("lng", str(lng)))
 
         upload_url = "https://www.inaturalist.org/observations/upload"
         if params:
-            upload_url += "?" + "&".join(params)
+            upload_url += "?" + urlencode(params)
 
         # Check submission history
         subs = db.get_inat_submissions([photo_id])
@@ -11924,6 +11924,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         except inat.InatAuthError as e:
             return json_error(str(e), 401)
+        except inat.InatPartialUploadError as e:
+            return jsonify({
+                "error": str(e),
+                "partial": True,
+                "observation_id": e.observation_id,
+                "observation_url": e.observation_url,
+            }), 502
         except inat.InatApiError as e:
             return json_error(str(e), 502)
 
@@ -12012,6 +12019,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 )
                 db.record_inat_submission(photo_id, obs_id, obs_url)
                 results.append({"photo_id": photo_id, "observation_id": obs_id, "observation_url": obs_url})
+            except inat.InatPartialUploadError as e:
+                results.append({
+                    "photo_id": photo_id,
+                    "error": str(e),
+                    "partial": True,
+                    "observation_id": e.observation_id,
+                    "observation_url": e.observation_url,
+                })
             except (inat.InatAuthError, inat.InatApiError) as e:
                 results.append({"photo_id": photo_id, "error": str(e)})
 

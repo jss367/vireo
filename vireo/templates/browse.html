@@ -3723,7 +3723,11 @@ async function loadInatStatus(photoIds) {
 
 function batchSubmitInat() {
   var ids = getActiveSelection();
-  if (ids.length === 0) return;
+  if (ids.length === 0) {
+    if (typeof showToast === 'function') showToast('Select one or more photos to send to iNaturalist.', 'error');
+    else alert('Select one or more photos to send to iNaturalist.');
+    return;
+  }
   submitToInatBatch(ids);
 }
 
