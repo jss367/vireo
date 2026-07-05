@@ -1,6 +1,7 @@
 """Smart ingest: copy and organize photos from external source to destination."""
 
 import contextlib
+import errno
 import logging
 import os
 import posixpath
@@ -215,7 +216,9 @@ def preview_destination(sources, destination, folder_template="%Y/%Y-%m-%d",
     }
 
 
-def discover_source_files(source_dir, file_types="both", recursive=True):
+def discover_source_files(
+    source_dir, file_types="both", recursive=True, onerror=None,
+):
     """Discover image files in source directory.
 
     Args:
@@ -223,6 +226,13 @@ def discover_source_files(source_dir, file_types="both", recursive=True):
         file_types: "raw", "jpeg", "both", or a list of extensions
             (e.g. [".jpg", ".nef"])
         recursive: if True (default), scan subfolders; if False, only scan root
+        onerror: optional callable ``onerror(OSError)`` invoked when the
+            underlying walk cannot enter or list a directory (permission
+            denied, TCC block, unreadable removable-media subtree, etc.).
+            Silently swallowing these hides sources from the enumeration
+            and lets ``safe_to_format`` go green over a card whose files
+            were never seen; the import job passes a collector that flips
+            the ledger unsafe.
 
     Returns:
         Sorted list of Path objects for matching files
@@ -237,8 +247,34 @@ def discover_source_files(source_dir, file_types="both", recursive=True):
     # symlinks and stat's the target, so for a directly selected bundle
     # (or a symlink to one) the existence test alone is enough to trip TCC.
     if is_excluded_scan_path(source_path):
+        # Root is an excluded data-bundle. Legacy ingest() and the
+        # UI-preview callers silently drop these (they picked the wrong
+        # thing; no user contract to enumerate it). But when import_job
+        # passes an ``onerror`` collector it is holding safe_to_format
+        # against every enumeration being provably clean; a source root
+        # we refuse to walk is exactly the case where the pill would
+        # otherwise go green over a card whose files were never seen.
+        # Emit a synthetic OSError so the ledger records it as a
+        # discovery failure. See PR #1107 review (P1 line 927).
+        if onerror is not None:
+            onerror(PermissionError(
+                errno.EACCES,
+                "source is an excluded data bundle",
+                str(source_path),
+            ))
         return []
     if not source_path.is_dir():
+        # Root does not resolve to a directory: nonexistent, unmounted
+        # removable media, permission-denied on the root, or a plain
+        # file. Same reasoning as above — silent [] hides "we saw
+        # nothing" from safe_to_format. Emit a synthetic OSError for
+        # onerror callers so discover'd == 0 is treated as unsafe.
+        if onerror is not None:
+            onerror(FileNotFoundError(
+                errno.ENOENT,
+                "source is not an accessible directory",
+                str(source_path),
+            ))
         return []
 
     if isinstance(file_types, list):
@@ -265,7 +301,9 @@ def discover_source_files(source_dir, file_types="both", recursive=True):
         # previous Path.rglob path was likewise consumed lazily by
         # ``sorted()``.
         def _candidate_paths():
-            for dirpath, _dirnames, filenames in safe_scan_walk(str(source_path)):
+            for dirpath, _dirnames, filenames in safe_scan_walk(
+                str(source_path), onerror=onerror,
+            ):
                 for name in filenames:
                     yield Path(dirpath) / name
         candidates = _candidate_paths()
@@ -280,7 +318,7 @@ def discover_source_files(source_dir, file_types="both", recursive=True):
         # would have rejected it afterwards. ``safe_iter_dir`` is itself
         # a generator — pass it straight through to the filter so we
         # don't materialize the directory listing twice.
-        candidates = safe_iter_dir(str(source_path))
+        candidates = safe_iter_dir(str(source_path), onerror=onerror)
     return sorted(
         f
         for f in candidates

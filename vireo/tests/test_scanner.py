@@ -3537,10 +3537,18 @@ def test_restricted_scan_roots_subfolders_not_destination_base(tmp_path):
 
     root_paths = [f["path"] for f in db.get_workspace_folder_roots(ws_id)]
     linked_paths = {f["path"] for f in db.get_workspace_folders(ws_id)}
-    # The imported leaf is the user-facing root; the archive base is linked
-    # (for the folder hierarchy) but is NOT a root.
+    # The imported leaf is the user-facing root; the archive base is
+    # NOT linked to the workspace. Before PR #1107's line-1186 fix the
+    # base was linked as a non-root, which fired ``add_workspace_
+    # folder``'s subtree cascade and would pull every pre-existing
+    # cataloged descendant of the base into the workspace UI (unrelated
+    # archive subtrees from prior scans / other workspaces). Now the
+    # parent chain up to the scan root just exists in ``folders`` for
+    # ``parent_id`` integrity, and ``get_folder_tree`` walks up through
+    # the non-visible base via its recursive CTE so the imported leaf
+    # still renders as a top-level sidebar entry.
     assert root_paths == [imported]
-    assert base in linked_paths
+    assert base not in linked_paths
     # Ingestion stayed scoped to the restricted dir — the sibling shoot's
     # files were never pulled in.
     photo_paths = {
