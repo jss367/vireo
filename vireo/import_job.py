@@ -299,13 +299,20 @@ def _linkable_twin_dirs(rows, destination):
     Only folders under the import destination are scanned/linked after a
     duplicate skip (a twin in some other library root is none of this
     import's business). Mirrors ingest()'s dup_token_folders guards:
-    folder status ok/partial, path under destination, and still a real
-    directory on disk.
+    path under destination and still a real directory on disk. Status
+    ``ok``/``partial`` is trusted as-is; ``missing`` is accepted too when
+    the path is still a real directory (a reattached archive drive whose
+    row hasn't been refreshed yet), and ``run_import_job`` promotes it
+    to ``ok`` before the dup-link scan runs — otherwise a duplicate-only
+    batch that matches a missing-marked twin folder would drop it from
+    ``dup_dirs``, safe_to_format could go green, and the imported
+    duplicates would stay filtered out of workspace queries. See PR
+    #1107 review.
     """
     dirs = set()
     for r in rows:
         folder_path = r["folder_path"]
-        if r["folder_status"] not in ("ok", "partial"):
+        if r["folder_status"] not in ("ok", "partial", "missing"):
             continue
         if not _path_under_root(folder_path, destination):
             continue
@@ -903,6 +910,35 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         # size, so no cancel_check is passed — it runs to completion.
         if landed:
             landed_paths = {entry[0] for entry in landed}
+            # Capture the pre-scan (photo_id, file_hash) for every landed
+            # dest_path. The batch scan below is invoked with
+            # ``vireo_dir=None`` because per-batch working-copy extraction
+            # would run before RAW+JPEG companions across batch boundaries
+            # are paired (see the "Working-copy extraction is DEFERRED"
+            # comment above). But that also disables the scanner's own
+            # ``_invalidate_derived_caches`` call for existing rows whose
+            # bytes just changed — so a copy/adopt that replaces a stale
+            # archive file at a path whose row already had a
+            # ``working_copy_path``/thumbnail/preview would leave those
+            # derived files pointing at the previous bytes, and the
+            # end-of-run ``_extract_working_copies`` skips rows with
+            # ``working_copy_path IS NOT NULL``. Snapshot the pre-scan
+            # hash here so the hash-stamping loop below can invalidate any
+            # landed row whose bytes changed. See PR #1107 review.
+            pre_scan_hashes = {}
+            for entry in landed:
+                dest_path = entry[0]
+                row = db.conn.execute(
+                    """SELECT p.id, p.file_hash FROM photos p
+                       JOIN folders f ON f.id = p.folder_id
+                       WHERE f.path = ? AND p.filename = ?""",
+                    (
+                        os.path.dirname(dest_path),
+                        os.path.basename(dest_path),
+                    ),
+                ).fetchone()
+                if row is not None:
+                    pre_scan_hashes[dest_path] = row["file_hash"]
             try:
                 scan(
                     destination, db,
@@ -1049,7 +1085,64 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                         "catalog scan (hash mismatch)",
                     )
                     reclassified_landed_paths.add(dest_path)
+
+            # Invalidate derived caches for any landed row whose bytes
+            # differ from what was there pre-scan. The batch scan ran with
+            # ``vireo_dir=None`` (per-batch WC extraction would race
+            # RAW+JPEG pairing across batch boundaries), so scanner's own
+            # ``_invalidate_derived_caches`` on content change was
+            # bypassed. Do it here for the same set of rows the scanner
+            # would have caught: existing rows whose new hash differs from
+            # the pre-scan hash. Without this, imports that restore a
+            # replaced-then-deleted archive file leave stale
+            # ``working_copy_path``/thumb/preview files pointing at the
+            # previous bytes, and the deferred end-of-run
+            # ``_extract_working_copies`` skips rows whose
+            # ``working_copy_path`` is already set — so the WC never
+            # rebuilds against the new archive bytes. See PR #1107 review.
+            invalidated_photo_ids = set()
+            if params.vireo_dir:
+                from scanner import _invalidate_derived_caches
+                for entry in landed:
+                    dest_path = entry[0]
+                    if dest_path in reclassified_landed_paths:
+                        continue
+                    pre_hash = pre_scan_hashes.get(dest_path)
+                    if pre_hash is None:
+                        # Row didn't exist pre-scan (fresh insert), or
+                        # pre-existing row's hash was NULL. Either way,
+                        # there are no derived caches to invalidate.
+                        continue
+                    verified_hash = entry[1]
+                    if pre_hash == verified_hash:
+                        continue
+                    row = db.conn.execute(
+                        """SELECT p.id FROM photos p
+                           JOIN folders f ON f.id = p.folder_id
+                           WHERE f.path = ? AND p.filename = ?""",
+                        (
+                            os.path.dirname(dest_path),
+                            os.path.basename(dest_path),
+                        ),
+                    ).fetchone()
+                    if row is None:
+                        continue
+                    _invalidate_derived_caches(
+                        db, params.vireo_dir, row["id"],
+                    )
+                    invalidated_photo_ids.add(row["id"])
+
             db.conn.commit()
+
+            if invalidated_photo_ids:
+                # Mirror scanner.scan()'s post-loop untracked-preview
+                # sweep: orphan preview files with no preview_cache row
+                # would be lazy-adopted on the next request and served as
+                # stale bytes for the just-replaced archive file.
+                from scanner import _sweep_untracked_previews_for_photos
+                _sweep_untracked_previews_for_photos(
+                    db, params.vireo_dir, invalidated_photo_ids,
+                )
 
             # Accumulate the card-source mapping for the deferred
             # end-of-run ``_extract_working_copies`` call. Extraction
@@ -1087,6 +1180,22 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         # self-healed into the catalog.
         new_dup_dirs = dup_dirs - linked_dup_dirs
         if new_dup_dirs:
+            # Mirror the fresh-batch ``dest_folder`` promotion (see the
+            # UPDATE at the top of this loop): a twin folder that survived
+            # ``_linkable_twin_dirs`` is real on disk (``os.path.isdir``
+            # passed), and if its row is still ``'missing'`` — a
+            # reattached archive drive whose row hasn't been refreshed —
+            # ``scanner.scan()``'s success stamp only clears ``'partial'``.
+            # Without promoting here, safe_to_format could go green while
+            # the duplicate twin's folder stays ``'missing'`` and its
+            # photos are filtered out of workspace queries. Preserve
+            # ``'partial'`` (a real prior-scan signal). See PR #1107 review.
+            db.conn.executemany(
+                "UPDATE folders SET status = 'ok' "
+                "WHERE path = ? AND status = 'missing'",
+                [(d,) for d in sorted(new_dup_dirs)],
+            )
+            db.conn.commit()
             try:
                 scan(
                     destination, db,

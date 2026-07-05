@@ -2502,3 +2502,150 @@ def test_import_missing_promotion_narrow_status_guard(tmp_path):
     assert status == "missing", (
         "the missing→ok promotion must be scoped to this batch's dest_folder"
     )
+
+
+def test_duplicate_only_import_promotes_missing_twin_folder(tmp_path):
+    """A duplicate-only import that matches a cataloged twin whose folder
+    row is stale-marked ``'missing'`` (but the folder is still on disk
+    under the import destination) must promote that folder to ``'ok'``
+    before its dup-link scan runs — otherwise the archive stays filtered
+    out of workspace queries even though safe_to_format goes green.
+    See PR #1107 review.
+    """
+    from import_dedup import compute_file_hash
+    from import_job import ImportParams
+
+    archive = tmp_path / "archive"
+    twin_dir = archive / "2026" / "2026-07-03"
+    twin_dir.mkdir(parents=True)
+    twin_file = twin_dir / "IMG_0300.jpg"
+    Image.new("RGB", (16, 16), "red").save(str(twin_file))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    # Pre-catalog the twin at MISSING status (simulates a health check
+    # that flipped the folder to missing right before a reattach).
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES (?, ?, 'missing')",
+        (str(twin_dir), twin_dir.name),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, extension, file_size,"
+        " file_hash) VALUES (?, ?, '.jpg', ?, ?)",
+        (
+            fid,
+            "IMG_0300.jpg",
+            os.path.getsize(str(twin_file)),
+            compute_file_hash(str(twin_file)),
+        ),
+    )
+    db.conn.commit()
+
+    card = tmp_path / "card"
+    card.mkdir()
+    import shutil
+    shutil.copy2(str(twin_file), str(card / "IMG_0300.jpg"))
+
+    from import_job import run_import_job
+    result = run_import_job(_make_job(), FakeRunner(), db_path, ws_id,
+                            ImportParams(sources=[str(card)],
+                                         destination=str(archive)))
+    assert result["copied"] == 0
+    assert result["skipped_duplicate"] == 1
+    assert result["failed"] == 0
+    assert result["safe_to_format"] is True
+
+    # Folder status was promoted so workspace queries can see it.
+    status = db.conn.execute(
+        "SELECT status FROM folders WHERE path = ?", (str(twin_dir),),
+    ).fetchone()["status"]
+    assert status == "ok", (
+        "duplicate-only import must promote a matched 'missing'-marked "
+        "twin folder to 'ok' before its dup-link scan runs"
+    )
+    # And the folder is linked to the active workspace.
+    assert str(twin_dir) in _ws_linked_folder_paths(db, ws_id)
+
+
+def test_import_invalidates_derived_caches_on_content_change(tmp_path):
+    """When a landed file replaces bytes at a path whose catalog row already
+    has ``working_copy_path`` set (from a prior scan of an older archive
+    file at the same path), the import must invalidate that WC — the
+    deferred end-of-run ``_extract_working_copies`` skips rows with
+    ``working_copy_path IS NOT NULL``, so without invalidation the WC
+    persists pointing at bytes the archive no longer holds. See PR #1107
+    review.
+    """
+    from import_dedup import compute_file_hash
+    from import_job import ImportParams
+
+    archive = tmp_path / "archive"
+    dest_dir = archive / "2026" / "2026-07-03"
+    dest_dir.mkdir(parents=True)
+    # A stale archive file present before the import; its catalog row
+    # captures its OLD hash + a fake WC path (as if a prior scan
+    # extracted a WC for it).
+    stale_archive = dest_dir / "DSC_0700.jpg"
+    Image.new("RGB", (16, 16), "blue").save(str(stale_archive))
+    stale_hash = compute_file_hash(str(stale_archive))
+
+    vireo_dir = tmp_path / "vireo_data"
+    (vireo_dir / "working").mkdir(parents=True)
+    fake_wc = vireo_dir / "working" / "1.jpg"
+    Image.new("RGB", (8, 8), "yellow").save(str(fake_wc))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES (?, ?, 'ok')",
+        (str(dest_dir), dest_dir.name),
+    ).lastrowid
+    photo_id = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, extension, file_size,"
+        " file_hash, working_copy_path) VALUES (?, ?, '.jpg', ?, ?, ?)",
+        (
+            fid,
+            "DSC_0700.jpg",
+            os.path.getsize(str(stale_archive)),
+            stale_hash,
+            str(fake_wc),
+        ),
+    ).lastrowid
+    db.conn.commit()
+
+    # Overwrite the archive file with DIFFERENT bytes (simulates: the
+    # archive file was deleted/replaced between the prior scan and this
+    # import, and the import restores the same filename with new bytes).
+    stale_archive.unlink()
+
+    # Card holds the NEW bytes at the same filename/date, which will land
+    # at the same dest_path.
+    card = _make_card(tmp_path, [
+        ("DSC_0700.jpg", datetime(2026, 7, 3, 10, 0, 0), "green"),
+    ])
+    # Force skip_duplicates False so the card's new bytes actually get
+    # copied over even though the stale row's hash still exists.
+    from import_job import run_import_job
+    result = run_import_job(_make_job(), FakeRunner(), db_path, ws_id,
+                            ImportParams(sources=[str(card)],
+                                         destination=str(archive),
+                                         skip_duplicates=False,
+                                         vireo_dir=str(vireo_dir)))
+    assert result["copied"] == 1
+    assert result["failed"] == 0
+
+    # The row's WC path was cleared so the deferred extractor / later
+    # backfill can rebuild against the new archive bytes.
+    row = db.conn.execute(
+        "SELECT working_copy_path FROM photos WHERE id = ?", (photo_id,),
+    ).fetchone()
+    assert row["working_copy_path"] is None, (
+        "content change on a landed row must clear working_copy_path so "
+        "the deferred WC pass rebuilds it against the new archive bytes"
+    )
+    # The stale WC file was also unlinked from disk.
+    assert not fake_wc.exists(), (
+        "content change on a landed row must delete the stale WC file"
+    )
