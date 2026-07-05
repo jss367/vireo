@@ -4691,3 +4691,256 @@ def test_remote_import_paired_jpeg_verify_fails_on_mount_hash_mismatch(
         "paired companion mount bytes" in u["reason"]
         for u in result["unsafe_files"]
     ), result["unsafe_files"]
+
+
+def test_remote_import_rejects_dest_folder_under_source(
+        tmp_path, monkeypatch):
+    """When the mount base is an ancestor of a selected source and the
+    folder template maps back into that source folder, ``dest_folder``
+    (and every ``cand_mount`` under it) resolves inside a source root.
+    The per-file collision loop would otherwise hash those source-backed
+    ``cand_mount`` files, byte-match them against the card, and count
+    them as ``skipped_duplicate`` — with ``verify_by_hash=True`` that
+    would let ``safe_to_format`` flip green over a card whose bytes
+    never crossed the network. The batch-level guard (mirroring the
+    local path at ``_path_under_any_source(dest_folder)``) must reject
+    the whole batch before makedirs and before any duplicate-adopt
+    hashing runs. See PR #1113 review."""
+    import move as _move
+    from import_job import ImportParams, run_import_job
+
+    # Set up a card that ALSO serves as the mount base — the folder
+    # template ``2026/2026-07-03`` under the card is the dest_folder.
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+
+    # Build a remote-archive dict whose mount_base points at the card
+    # itself. rsync should never be invoked in this scenario because the
+    # batch is rejected before makedirs.
+    from move import build_remote_move_spec
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas", "user": "me",
+        "port": 22, "ssh_key": "", "bwlimit_kbps": 0,
+        "remote_path": "/volume1/Photography",
+        "mount_path": str(card),
+    }
+    spec = build_remote_move_spec(target, "", "/usr/bin/rsync")
+    ra = {
+        "target": target,
+        "rsync_bin": "/usr/bin/rsync",
+        "remote": spec,
+        "ssh_base": target["remote_path"],
+        "mount_base": str(card),
+    }
+    calls = {
+        "rsync": [], "verify": 0, "verify_src_specs": [],
+        "_ssh_base": ra["ssh_base"], "_mount_base": ra["mount_base"],
+    }
+    _install_fake_remote_rsync(monkeypatch, calls, verify=None)
+    # A stat-refusing OSError never needed: the guard runs before any
+    # duplicate-adopt hashing that would touch cand_mount.
+
+    # Also monkeypatch compute_file_hash to blow up if reached — the
+    # guard's job is to prevent us ever hashing a source-backed
+    # cand_mount as "already at destination".
+    import import_job as _ij
+
+    def _refuse_hash(path):
+        raise AssertionError(
+            f"unexpected hash of {path!r} — dest-under-source guard "
+            "should have rejected the batch before this call"
+        )
+
+    orig_hash = _ij.compute_file_hash
+    monkeypatch.setattr(_ij, "compute_file_hash", _refuse_hash)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra, verify_by_hash=True,
+        ),
+    )
+    # Restore hash for any later use in this test.
+    monkeypatch.setattr(_ij, "compute_file_hash", orig_hash)
+    monkeypatch.setattr(_move, "_run_rsync_streamed", lambda *a, **kw: (
+        (_ for _ in ()).throw(AssertionError("rsync should not run"))
+    ))
+
+    # No rsync invocation happened — the batch was rejected up front.
+    assert calls["rsync"] == [], calls["rsync"]
+    # Every file lands in ``failed`` with the dest-under-source reason.
+    assert result["failed"] == 1, result
+    assert result["copied"] == 0, result
+    assert result["skipped_duplicate"] == 0, result
+    assert result["safe_to_format"] is False, result
+    assert any(
+        "destination folder resolves inside a source directory"
+        in u["reason"]
+        for u in result["unsafe_files"]
+    ), result["unsafe_files"]
+
+
+def test_remote_import_no_verify_fails_on_mount_hash_mismatch(
+        tmp_path, monkeypatch):
+    """Catalog-integrity guard on the no-verify path: when
+    ``verify_by_hash=False`` and the mount base is stale/misconfigured
+    (or an ``--ignore-existing``-blocked race left a different file at
+    the same mount path), the row-presence check alone would let
+    ``run_import_job`` return ``copied`` while the catalog row points
+    at the wrong bytes. The scanned row's ``file_hash`` must be
+    cross-checked against ``src_hash`` regardless of ``verify_by_hash``,
+    with only the ``hash_status='ok'`` stamp still gated on the
+    checksum-verification path. See PR #1113 review."""
+    import move as _move
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+
+    def fake_rsync_writes_wrong_bytes(
+            src_path, dest_spec, rsync_flags, total_files,
+            progress_cb, rsync_bin="rsync", extra_args=None,
+            src_specs=None, src_specs_dest_is_dir=True, **kw):
+        calls["rsync"].append({
+            "src_specs": list(src_specs or []),
+            "extra_args": list(extra_args or []),
+        })
+        ssh_path = dest_spec.split(":", 1)[1]
+        rel = os.path.relpath(ssh_path, ra["ssh_base"])
+        if src_specs_dest_is_dir:
+            mount_dst = os.path.join(ra["mount_base"], rel)
+            os.makedirs(mount_dst, exist_ok=True)
+            for s in src_specs:
+                Image.new("RGB", (16, 16), "yellow").save(
+                    os.path.join(mount_dst, os.path.basename(s)))
+        else:
+            mount_file = os.path.join(ra["mount_base"], rel)
+            os.makedirs(os.path.dirname(mount_file), exist_ok=True)
+            Image.new("RGB", (16, 16), "yellow").save(mount_file)
+        return (0, "", False)
+
+    monkeypatch.setattr(_move, "_run_rsync_streamed",
+                        fake_rsync_writes_wrong_bytes)
+    monkeypatch.setattr(_move, "_remote_mkdir_p", lambda r, p: (True, ""))
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra, verify_by_hash=False,
+        ),
+    )
+
+    # The mismatch must be detected even without verify_by_hash — the
+    # catalog cannot silently point at unrelated bytes.
+    assert result["copied"] == 0, result
+    assert result["failed"] == 1, result
+    assert result["safe_to_format"] is False, result
+    assert any(
+        "scanned mount row hash" in u["reason"]
+        for u in result["unsafe_files"]
+    ), result["unsafe_files"]
+    # No hash_status='ok' stamp on the no-verify path even if the row
+    # survived — that stamp remains gated on the checksum path.
+    rows = {r["filename"]: r for r in _photo_rows(db)}
+    if "DSC_0001.jpg" in rows:
+        assert rows["DSC_0001.jpg"]["hash_status"] != "ok", dict(
+            rows["DSC_0001.jpg"])
+
+
+def test_remote_import_dup_only_batch_records_failure_when_scan_raises(
+        tmp_path, monkeypatch):
+    """A duplicate-only remote batch (every card file matched a
+    cataloged twin) still needs ``scan()`` to link the twin folder into
+    the workspace. If ``landed`` is empty (no fresh copies) but
+    ``dup_skipped > 0`` and ``scan()`` raises, no per-file failure was
+    recorded and ``safe_to_format`` could flip green while the duplicate
+    folder never became visible in the workspace. The exception handler
+    must record a batch-level failure for that case, mirroring the local
+    path's ``dup_link_failed`` gate. See PR #1113 review."""
+    import scanner as _scanner
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+    _install_fake_remote_rsync(monkeypatch, calls, verify=None)
+
+    # Card holds one file whose bytes already exist on the archive at a
+    # pre-seeded twin folder — the duplicate gate will match and skip.
+    from import_dedup import compute_file_hash as _hash
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+    card_file = str(card / "DSC_0001.jpg")
+    src_hash = _hash(card_file)
+
+    # Seed an archive folder that owns the byte-identical twin (outside
+    # any import source — the check that Codex asked for filters
+    # source-backed twins, so we need a real off-card twin).
+    archive_twin_dir = tmp_path / "archive_twin"
+    archive_twin_dir.mkdir()
+    twin_path = archive_twin_dir / "DSC_0001.jpg"
+    import shutil as _shutil
+    _shutil.copy2(card_file, str(twin_path))
+    # scan the twin folder into the DB so DuplicateChecker sees a hash
+    # match token.
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    _scanner.scan(str(archive_twin_dir), db)
+    # Sanity: the twin row is present with the right hash.
+    twin_rows = db.conn.execute(
+        "SELECT p.file_hash, f.path FROM photos p "
+        "JOIN folders f ON f.id = p.folder_id "
+        "WHERE p.filename = 'DSC_0001.jpg'",
+    ).fetchall()
+    assert twin_rows and twin_rows[0]["file_hash"] == src_hash, [
+        dict(r) for r in twin_rows]
+
+    # Now monkeypatch scan() to raise ONLY on the import job's
+    # per-batch call (the dup-only batch's twin-folder link scan). The
+    # patched scan is bound after the pre-seed above, so it doesn't
+    # interfere with our own setup.
+    orig_scan = _scanner.scan
+
+    def failing_scan(*args, **kwargs):
+        raise RuntimeError("scan blew up (simulated NAS mount error)")
+
+    monkeypatch.setattr(_scanner, "scan", failing_scan)
+
+    try:
+        result = run_import_job(
+            _make_job(), FakeRunner(), db_path, ws_id,
+            ImportParams(
+                sources=[str(card)], destination=ra["mount_base"],
+                remote_target=ra, verify_by_hash=True,
+            ),
+        )
+    finally:
+        monkeypatch.setattr(_scanner, "scan", orig_scan)
+
+    # rsync never ran — the file was accepted as a duplicate against the
+    # off-card twin.
+    assert calls["rsync"] == [], calls["rsync"]
+    # A duplicate-only batch whose scan() raised must NOT report
+    # safe_to_format=True. The batch-level failure marker forces
+    # failed>0, which flips safe_to_format False.
+    assert result["failed"] >= 1, result
+    assert result["safe_to_format"] is False, result
+    assert result["skipped_duplicate"] == 1, result
+    assert any(
+        "duplicate-only batch" in u["reason"]
+        for u in result["unsafe_files"]
+    ), result["unsafe_files"]

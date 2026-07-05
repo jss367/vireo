@@ -626,6 +626,34 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
             posixpath.join(ssh_base, *rel.split("/")) if rel != "."
             else ssh_base
         )
+        # Reject the whole batch before creating any directories on the card
+        # or hashing candidate files below. When the mount base is an
+        # ancestor of a selected source and the folder template maps back
+        # into that source folder, ``dest_folder`` (and therefore every
+        # ``cand_mount`` under it) resolves inside a source root. The
+        # per-file collision loop below would hash those source-backed
+        # ``cand_mount`` files, byte-match them against the card, and count
+        # them as ``skipped_duplicate`` — with ``verify_by_hash=true`` that
+        # would let ``safe_to_format`` go green over a card whose bytes
+        # never crossed the network. Mirrors the local path's batch-level
+        # dest-under-source guard (formatting the card would erase the
+        # archive copy). See PR #1113 review.
+        if _path_under_any_source(dest_folder):
+            for source_file in batch:
+                emitted += 1
+                _fail(
+                    rel, source_file,
+                    "destination folder resolves inside a source directory "
+                    "(dest_folder would be created under the card being "
+                    "imported); formatting the card would erase the archive "
+                    "copy",
+                )
+            _emit(
+                f"{rel}: {_counts(rel)['copied']} copied · "
+                f"{_counts(rel)['skipped_duplicate']} already present",
+                emitted, discovered,
+            )
+            continue
         os.makedirs(dest_folder, exist_ok=True)
 
         # Promote any pre-existing folder row for this destination out of
@@ -945,6 +973,23 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                     if params.verify_by_hash:
                         verified -= 1
                     _fail(rel, dest_path, f"catalog scan failed: {e}")
+                # A duplicate-only batch (all files matched cataloged
+                # twins) still needs the scan() call to link the twin
+                # folder into the workspace. If landed is empty (no fresh
+                # copies) but dup_skipped > 0 and scan() raised, no
+                # per-file failure was recorded above and safe_to_format
+                # could go green while the duplicate folder never became
+                # visible in the workspace. Record a batch-level failure
+                # for that case so ``failed`` reflects "the workspace
+                # cannot see these bytes" and safe_to_format goes False.
+                # Mirrors the local path's ``dup_link_failed`` gate. See
+                # PR #1113 review.
+                if not landed and dup_skipped > 0:
+                    _fail(
+                        rel, dest_folder,
+                        f"catalog scan failed for duplicate-only batch "
+                        f"(twin folder not linked): {e}",
+                    )
                 landed = []
             else:
                 _invalidate_new_images(db, dest_folder)
@@ -975,51 +1020,65 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                      os.path.basename(dest_path)),
                 ).fetchone()
                 if row is not None:
-                    if params.verify_by_hash:
-                        # Cross-check the scanned MOUNT row's hash against
-                        # the source hash that remote_verify_files just
-                        # confirmed at the NAS. remote_verify_files ran
-                        # card -> ssh_base (the NAS); scan() reads whatever
-                        # is under the mount base. If the mount is stale
-                        # or misconfigured but happens to already contain
-                        # the same <folder>/<filename> we transferred, scan
-                        # populates ``file_hash`` from the mount's (wrong)
-                        # bytes. Stamping ``hash_status='ok'`` on that row
-                        # would let ``safe_to_format`` go green over
-                        # storage we never actually touched. Require the
-                        # scanned row's file_hash to match the verified
-                        # source hash; otherwise fail this file. Mirrors
-                        # the local path's cross-check against
-                        # ``verified_hash``. See PR #1113 review.
-                        #
-                        # Normalize zero-byte convention on both sides:
-                        # scan() writes NULL for zero-byte files;
-                        # ``checker.content_hash`` returns None; a
-                        # checker-less ``compute_file_hash`` returns
-                        # ``EMPTY_FILE_SHA256``. Treat all three as
-                        # equivalent so an empty card file matches its
-                        # empty catalog row.
-                        scan_h = row["file_hash"]
-                        if scan_h == EMPTY_FILE_SHA256:
-                            scan_h = None
-                        src_h_norm = (
-                            None if src_hash == EMPTY_FILE_SHA256
-                            else src_hash
-                        )
-                        if scan_h != src_h_norm:
-                            copied -= 1
+                    # Cross-check the scanned MOUNT row's hash against the
+                    # source hash (the bytes we intended to land). This
+                    # runs even without ``verify_by_hash`` because catalog
+                    # integrity is a separate concern from the format
+                    # honesty gate: a stale/misconfigured mount that
+                    # happens to already contain ``<folder>/<filename>``
+                    # for a name we ``--ignore-existing``-transferred, or
+                    # a receiver-side race that left a different file at
+                    # that path, would otherwise be cataloged against
+                    # unrelated bytes while ``safe_to_format=False``
+                    # (correct on the format side, but the workspace
+                    # catalog now points at the wrong photo). The
+                    # ``hash_status='ok'`` stamp still runs ONLY behind
+                    # ``verify_by_hash`` — that stamp is the independent
+                    # card→NAS attestation, not just "scan and source
+                    # agree on the mount view". Mirrors the local path's
+                    # cross-check against ``verified_hash``. See PR #1113
+                    # review.
+                    #
+                    # Normalize zero-byte convention on both sides:
+                    # scan() writes NULL for zero-byte files;
+                    # ``checker.content_hash`` returns None; a
+                    # checker-less ``compute_file_hash`` returns
+                    # ``EMPTY_FILE_SHA256``. Treat all three as
+                    # equivalent so an empty card file matches its
+                    # empty catalog row.
+                    scan_h = row["file_hash"]
+                    if scan_h == EMPTY_FILE_SHA256:
+                        scan_h = None
+                    src_h_norm = (
+                        None if src_hash == EMPTY_FILE_SHA256
+                        else src_hash
+                    )
+                    # scan() can legitimately leave ``file_hash`` NULL
+                    # (large files, prior partial scan, tests that stub
+                    # the hash step). Only fail on a positive mismatch —
+                    # two set hashes that disagree. A missing scan hash
+                    # doesn't prove anything, so don't turn it into a
+                    # spurious failure.
+                    if scan_h is not None and scan_h != src_h_norm:
+                        copied -= 1
+                        if params.verify_by_hash:
                             verified -= 1
-                            _counts(rel)["copied"] -= 1
-                            _fail(
-                                rel, dest_path,
-                                "scanned mount row hash does not match "
-                                "the hash verified on the NAS (mount "
-                                "base is likely stale or misconfigured)",
-                            )
-                            landed = [
-                                e for e in landed if e[0] != dest_path
-                            ]
-                            continue
+                        _counts(rel)["copied"] -= 1
+                        _fail(
+                            rel, dest_path,
+                            "scanned mount row hash does not match "
+                            "the source hash (mount base is likely "
+                            "stale or misconfigured)"
+                            if not params.verify_by_hash else
+                            "scanned mount row hash does not match "
+                            "the hash verified on the NAS (mount "
+                            "base is likely stale or misconfigured)",
+                        )
+                        landed = [
+                            e for e in landed if e[0] != dest_path
+                        ]
+                        continue
+                    if params.verify_by_hash:
                         db.update_photo_hash_check(
                             row["id"], "ok", commit=False,
                         )
