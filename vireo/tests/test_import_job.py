@@ -538,3 +538,143 @@ def test_failed_extraction_leaves_working_copy_null(tmp_path, monkeypatch):
         (rows[0]["id"],),
     ).fetchone()["working_copy_path"]
     assert wc is None
+
+
+# --- interruption + resume contract (Task 2.6) ---------------------------
+# These tests prove _deindex_staging has no equivalent here: every stopping
+# point leaves a valid catalog, and a retry resumes instead of redoing.
+
+class CancelAfterFirstBatchRunner(FakeRunner):
+    """Flips to cancelled once progress reports a file in the second
+    destination folder (i.e. the second batch has started)."""
+
+    def __init__(self, trigger_fragment):
+        super().__init__()
+        self.trigger_fragment = trigger_fragment
+
+    def push_event(self, job_id, event_type, data):
+        super().push_event(job_id, event_type, data)
+        if (
+            event_type == "progress"
+            and self.trigger_fragment in (data.get("phase") or "")
+        ):
+            self.cancelled_ids.add(job_id)
+
+
+def test_cancel_leaves_valid_partial_catalog(tmp_path):
+    from import_job import ImportParams
+
+    card = _make_card(tmp_path, [
+        ("DSC_0030.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+        ("DSC_0031.jpg", datetime(2026, 7, 3, 11, 0, 0), "green"),
+        ("DSC_0032.jpg", datetime(2026, 7, 4, 9, 0, 0), "blue"),
+        ("DSC_0033.jpg", datetime(2026, 7, 4, 9, 5, 0), "white"),
+    ])
+    archive = tmp_path / "archive"
+    runner = CancelAfterFirstBatchRunner("2026/2026-07-04")
+
+    db, ws_id, result = _run_import(
+        tmp_path,
+        ImportParams(sources=[str(card)], destination=str(archive)),
+        runner=runner,
+    )
+
+    assert result["cancelled"] is True
+    assert result["safe_to_format"] is False
+    # Partial progress: all of batch 1, some of batch 2 — never zero,
+    # never everything.
+    assert 0 < result["copied"] < 4
+    assert result["failed"] == 0
+
+    # The catalog is valid: every row's file exists on disk, verified.
+    rows = _photo_rows(db)
+    assert len(rows) == result["copied"]
+    for r in rows:
+        full = os.path.join(r["folder_path"], r["filename"])
+        assert os.path.isfile(full)
+        assert r["hash_status"] == "ok"
+
+
+def test_rerun_resumes_and_completes(tmp_path):
+    """Re-running the same import after a cancel skips exactly what landed
+    and copies the rest — no unwinding, no redo."""
+    from import_job import ImportParams
+
+    card = _make_card(tmp_path, [
+        ("DSC_0030.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+        ("DSC_0031.jpg", datetime(2026, 7, 3, 11, 0, 0), "green"),
+        ("DSC_0032.jpg", datetime(2026, 7, 4, 9, 0, 0), "blue"),
+        ("DSC_0033.jpg", datetime(2026, 7, 4, 9, 5, 0), "white"),
+    ])
+    archive = tmp_path / "archive"
+    params = ImportParams(sources=[str(card)], destination=str(archive))
+
+    runner = CancelAfterFirstBatchRunner("2026/2026-07-04")
+    db, ws_id, first = _run_import(tmp_path, params, runner=runner)
+    landed_first = first["copied"]
+    assert 0 < landed_first < 4
+
+    # Second run: same card, same params, fresh runner/job.
+    from import_job import run_import_job
+    second = run_import_job(
+        _make_job("import-test-2"), FakeRunner(),
+        str(tmp_path / "test.db"), ws_id, params,
+    )
+
+    assert second["cancelled"] is False
+    assert second["failed"] == 0
+    # Everything already landed is skipped; only the remainder copies.
+    assert second["copied"] == 4 - landed_first
+    assert second["copied"] + second["skipped_duplicate"] == 4
+    assert second["safe_to_format"] is True
+
+    # Combined catalog: exactly one row per card file, all verified.
+    rows = _photo_rows(db)
+    assert len(rows) == 4
+    names = sorted(r["filename"] for r in rows)
+    assert names == [
+        "DSC_0030.jpg", "DSC_0031.jpg", "DSC_0032.jpg", "DSC_0033.jpg",
+    ]
+    for r in rows:
+        assert os.path.isfile(os.path.join(r["folder_path"], r["filename"]))
+
+
+def test_crash_shaped_copies_are_adopted_not_suffixed(tmp_path):
+    """Files that landed on disk but died before their batch's scan (no
+    catalog rows) must be adopted as already-present on re-run — cataloged
+    without creating numeric-suffix duplicates. This is the 'rescan
+    self-heals' story from the design doc."""
+    import shutil
+
+    from import_job import ImportParams
+
+    card = _make_card(tmp_path, [
+        ("DSC_0040.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+        ("DSC_0041.jpg", datetime(2026, 7, 3, 11, 0, 0), "green"),
+    ])
+    archive = tmp_path / "archive"
+
+    # Simulate the crash: both files already at the destination,
+    # byte-identical, with NO catalog rows.
+    dest_dir = archive / "2026" / "2026-07-03"
+    dest_dir.mkdir(parents=True)
+    for name in ("DSC_0040.jpg", "DSC_0041.jpg"):
+        shutil.copy2(str(card / name), str(dest_dir / name))
+
+    db, ws_id, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)], destination=str(archive),
+    ))
+
+    # Adopted as already-present, cataloged, no re-copy, no suffixes.
+    assert result["copied"] == 0
+    assert result["skipped_duplicate"] == 2
+    assert result["failed"] == 0
+    assert result["safe_to_format"] is True
+    assert sorted(os.listdir(str(dest_dir))) == [
+        "DSC_0040.jpg", "DSC_0041.jpg",
+    ]
+    rows = _photo_rows(db)
+    assert len(rows) == 2
+    for r in rows:
+        assert r["hash_status"] == "ok"
+        assert os.path.isfile(os.path.join(r["folder_path"], r["filename"]))
