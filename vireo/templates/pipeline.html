@@ -1583,7 +1583,7 @@ async function loadFolderScopeList() {
       cb.dataset.path = f.path;
       cb.style.accentColor = 'var(--accent)';
       cb.checked = _prefillFolderPaths.indexOf(f.path) !== -1;
-      cb.onchange = function() { updateSourceSummary(); updateStartButton(); };
+      cb.onchange = function() { updateSourceSummary(); updateStartButton(); schedulePlanRefresh(); };
       var span = document.createElement('span');
       var count = f.workspace_photo_count != null
         ? f.workspace_photo_count : f.photo_count;
@@ -3105,7 +3105,7 @@ async function startPipeline() {
     // its active-workspace subtree and pins the run to an ad-hoc
     // collection (import/process split PR 1).
     body.folder_ids = selectedFolderIds();
-  } else if (_sourceMode === 'new_images') {  } else if (_sourceMode === 'new_images') {
+  } else if (_sourceMode === 'new_images') {
     body.source_snapshot_id = newImagesSnapshotId;
     delete body.source;
     delete body.sources;

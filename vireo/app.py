@@ -2813,6 +2813,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db = _get_db()
             ws_for_folders = db._active_workspace_id
             subtree_ids = set()
+            # Mirror the /api/jobs/pipeline folder resolution exactly so the
+            # plan describes the same photos the run will process. Without
+            # the path-based fallback, legacy folders with parent_id=NULL
+            # (whose paths sit under the selected root) are silently omitted
+            # from the plan even though the run walks them via
+            # _folder_subtree_ids_by_path.
+            from db import _chunks  # noqa: PLC0415
             for fid in folder_ids:
                 linked = db.conn.execute(
                     "SELECT 1 FROM workspace_folders "
@@ -2822,13 +2829,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if not linked:
                     return json_error("folder not found", 404)
                 subtree_ids.update(db.get_folder_subtree_ids(fid))
-            marks = ",".join("?" for _ in subtree_ids)
-            scope_photo_ids = [
-                r["id"] for r in db.conn.execute(
-                    f"SELECT id FROM photos WHERE folder_id IN ({marks})",
-                    tuple(subtree_ids),
+                # Intersect the path-based descendants with the workspace's
+                # folder set so nothing leaks in from another workspace that
+                # happens to share a path prefix.
+                for chunk in _chunks(db._folder_subtree_ids_by_path(fid)):
+                    marks = ",".join("?" for _ in chunk)
+                    rows = db.conn.execute(
+                        f"SELECT folder_id FROM workspace_folders "
+                        f"WHERE workspace_id = ? AND folder_id IN ({marks})",
+                        [ws_for_folders] + list(chunk),
+                    )
+                    subtree_ids.update(r["folder_id"] for r in rows)
+            scope_photo_ids = []
+            for chunk in _chunks(list(subtree_ids)):
+                marks = ",".join("?" for _ in chunk)
+                scope_photo_ids.extend(
+                    r["id"] for r in db.conn.execute(
+                        f"SELECT id FROM photos WHERE folder_id IN ({marks})",
+                        tuple(chunk),
+                    )
                 )
-            ]
         params = PipelinePlanParams(
             collection_id=body.get("collection_id"),
             photo_ids=scope_photo_ids,
