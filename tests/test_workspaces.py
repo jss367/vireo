@@ -118,6 +118,78 @@ def test_workspace_root_materializes_existing_path_descendants(db):
     assert [p["filename"] for p in photos] == ["bird.jpg"]
 
 
+def test_existing_folder_is_reparented_when_surrounding_root_is_added(db):
+    """A standalone folder root should nest once its parent is known."""
+    ws_id = db._active_workspace_id
+    db.set_active_workspace(None)
+    usa_id = db.add_folder("/photos/USA", name="USA")
+    year_id = db.add_folder("/photos/USA/2026", name="2026")
+    date_id = db.add_folder(
+        "/photos/USA/2026/2026-01-19",
+        name="2026-01-19",
+        parent_id=year_id,
+    )
+    db.set_active_workspace(ws_id)
+
+    db.add_workspace_folder(ws_id, year_id)
+    db.add_workspace_folder(ws_id, usa_id)
+
+    # A later scan/import walks the full parent chain and now knows 2026's
+    # parent. Reusing the row must fill in the missing parent_id.
+    assert db.add_folder(
+        "/photos/USA/2026",
+        name="2026",
+        parent_id=usa_id,
+        workspace_root=False,
+    ) == year_id
+
+    tree = {f["id"]: f for f in db.get_folder_tree()}
+    roots = [f for f in tree.values() if f["parent_id"] is None]
+
+    assert [f["id"] for f in roots] == [usa_id]
+    assert tree[year_id]["parent_id"] == usa_id
+    assert tree[date_id]["parent_id"] == year_id
+
+
+def test_database_repairs_parentless_folder_rows_on_open(tmp_path):
+    """Existing databases with parentless path-children should self-heal."""
+    from db import Database
+
+    db_path = str(tmp_path / "test.db")
+    seed = Database(db_path)
+    ws_id = seed._active_workspace_id
+    seed.conn.executemany(
+        "INSERT INTO folders (id, path, name, parent_id) VALUES (?, ?, ?, ?)",
+        [
+            (101, "/photos/USA", "USA", None),
+            (102, "/photos/USA/2026", "2026", None),
+            (103, "/photos/USA/2026/2026-01-19", "2026-01-19", 102),
+        ],
+    )
+    seed.conn.executemany(
+        "INSERT INTO workspace_folders (workspace_id, folder_id, is_root) "
+        "VALUES (?, ?, ?)",
+        [
+            (ws_id, 101, 1),
+            (ws_id, 102, 0),
+            (ws_id, 103, 0),
+        ],
+    )
+    seed.conn.commit()
+    seed.close()
+
+    reopened = Database(db_path)
+    reopened.set_active_workspace(ws_id)
+    try:
+        tree = {f["id"]: f for f in reopened.get_folder_tree()}
+    finally:
+        reopened.close()
+
+    assert tree[101]["parent_id"] is None
+    assert tree[102]["parent_id"] == 101
+    assert tree[103]["parent_id"] == 102
+
+
 def test_workspace_root_hides_materialized_descendant_when_parent_has_photos(db):
     ws_id = db._active_workspace_id
     db.set_active_workspace(None)
