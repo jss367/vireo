@@ -49,6 +49,7 @@ import contextlib
 import errno
 import logging
 import os
+import posixpath
 import shutil
 import sys
 import uuid
@@ -120,6 +121,18 @@ class ImportParams:
     # After-import process strategy name. Stored in the job config for the
     # PR 3 chaining hook; unused by the import job itself.
     after_import: str | None = None
+    # Remote (SSH) archive destination (Task 2.7). When set, the card is
+    # rsynced to ``remote_path/subpath`` over SSH instead of copied locally,
+    # and photos are cataloged at ``mount_path/subpath`` (which ``destination``
+    # is set to). The dict shape (built by ``/api/jobs/import-photos`` from
+    # ``config.get_remote_target`` + ``build_remote_move_spec``):
+    #   {"rsync_bin": str,
+    #    "remote": <build_remote_move_spec dict: host/user/port/ssh_key/
+    #               bwlimit_kbps/rsync_bin/ssh_dest_base/mount_dest_base>,
+    #    "ssh_base": remote_path/subpath (NAS-side),
+    #    "mount_base": mount_path/subpath (== destination)}
+    # ``None`` keeps the local copy path unchanged.
+    remote_target: dict | None = None
     # Vireo data dir for working-copy extraction (Task 2.5). None skips
     # extraction (tests, or callers that defer to the scanner backfill).
     vireo_dir: str | None = None
@@ -379,6 +392,542 @@ def _linkable_twin_dirs(rows, under_destination):
     return dirs
 
 
+def _run_remote_import_job(job, runner, db, workspace_id, params):
+    """Import to a remote (SSH) archive destination (Task 2.7).
+
+    Groups the card into destination-folder batches exactly like the local
+    path, but transfers each batch with a single per-batch rsync to
+    ``remote_path/subpath/<rel>`` over SSH (``move.py`` plumbing) instead of
+    ``copy_and_hash_verify``. Photos are cataloged at
+    ``mount_path/subpath/<rel>`` — ``params.destination`` is the local mount
+    base, so ``scan()`` walks the just-rsynced files exactly as it would a
+    local copy.
+
+    Verification: rsync's own transfer integrity by default; a ``--checksum``
+    dry-run (``move._remote_verify_complete``) only when
+    ``params.verify_by_hash``. Catalog rows get ``hash_status='ok'`` +
+    ``hash_checked_at`` ONLY on the checksum path; otherwise both stay NULL
+    (no invented status values). Consequently a remote import without
+    ``verify_by_hash`` honestly reports ``safe_to_format=False`` with the
+    reason ``"enable verify_by_hash for remote verification"`` — the card is
+    off-loaded but its landing wasn't independently hash-confirmed.
+    """
+    from scanner import scan
+
+    rt = params.remote_target
+    remote = rt["remote"]                 # build_remote_move_spec dict
+    rsync_bin = rt.get("rsync_bin") or remote.get("rsync_bin")
+    ssh_base = rt["ssh_base"]             # remote_path/subpath (NAS side)
+    # The catalog/mount base is params.destination (the route sets it to
+    # mount_path/subpath). Normalize identically to the local path.
+    try:
+        destination = os.path.realpath(os.path.normpath(str(params.destination)))
+    except OSError:
+        destination = os.path.normpath(str(params.destination))
+
+    import move as move_mod
+
+    runner.set_steps(job["id"], [
+        {"id": "import", "label": "Copy & catalog"},
+    ])
+    runner.update_step(job["id"], "import", status="running")
+
+    def _emit(phase, current, total, current_file=""):
+        job["progress"]["current"] = current
+        job["progress"]["total"] = total
+        job["progress"]["current_file"] = current_file
+        runner.update_step(
+            job["id"], "import",
+            current_file=current_file,
+            progress={"current": current, "total": total},
+        )
+        runner.push_event(job["id"], "progress", {
+            "phase": phase, "current": current, "total": total,
+            "current_file": current_file,
+        })
+
+    # --- Discover (same enumeration-error handling as the local path) ---
+    _emit("Discovering files", 0, 0)
+    files = []
+    discovery_errors = []
+
+    def _discovery_onerror(exc):
+        discovery_errors.append(exc)
+        log.warning("Import discovery error: %s", exc)
+
+    for src in params.sources:
+        files.extend(discover_source_files(
+            src, params.file_types, recursive=params.recursive,
+            onerror=_discovery_onerror,
+        ))
+    discovered = len(files)
+
+    checker = None
+    if params.skip_duplicates:
+        checker = DuplicateChecker(
+            CatalogIndex.from_db(db), verify_by_hash=params.verify_by_hash,
+        )
+        checker.prepare(files)
+
+    timestamps = _source_file_timestamps(
+        files,
+        capture_times=(
+            {str(f): checker.capture_time(f) for f in files}
+            if checker is not None and not checker.verify_by_hash
+            else None
+        ),
+    )
+
+    groups = {}
+    for f in files:
+        rel = build_destination_path(
+            timestamps.get(f), params.folder_template,
+        ) or "."
+        groups.setdefault(rel, []).append(f)
+    batches = []
+    for rel in sorted(groups):
+        group = groups[rel]
+        for i in range(0, len(group), IMPORT_BATCH_SIZE):
+            batches.append((rel, group[i:i + IMPORT_BATCH_SIZE]))
+
+    # --- Ledger ---------------------------------------------------------
+    copied = 0
+    verified = 0            # count of files independently checksum-verified
+    skipped_duplicate = 0
+    failed = 0
+    unsafe_files = []
+    folder_counts = {}
+    emitted = 0
+    cancelled = False
+    wc_source_paths = {}
+    wc_dest_folders = set()
+
+    def _counts(rel):
+        return folder_counts.setdefault(
+            rel, {"copied": 0, "skipped_duplicate": 0, "failed": 0},
+        )
+
+    def _fail(rel, source_file, reason):
+        nonlocal failed
+        failed += 1
+        _counts(rel)["failed"] += 1
+        unsafe_files.append({"path": str(source_file), "reason": reason})
+        log.warning("Remote import failed for %s: %s", source_file, reason)
+
+    for rel, batch in batches:
+        if runner.is_cancelled(job["id"]):
+            cancelled = True
+            break
+
+        dest_folder = (
+            os.path.normpath(os.path.join(destination, rel))
+            if rel != "." else destination
+        )
+        ssh_dest = (
+            posixpath.join(ssh_base, *rel.split("/")) if rel != "."
+            else ssh_base
+        )
+        os.makedirs(dest_folder, exist_ok=True)
+
+        # Duplicate gate. A remote duplicate skip is only honest when the
+        # cataloged twin's bytes are confirmed at the destination; the local
+        # path re-hashes the twin's archive file. On the mount that file is
+        # locally readable, so reuse the same on-disk re-hash contract.
+        to_transfer = []           # (source_file, dest_basename)
+        dup_skipped = 0
+        # dest basename -> src_hash, for intra-batch same-basename collision
+        # resolution (FIX 2). Populated as files are queued/skipped.
+        claimed_basenames = {}
+        for source_file in batch:
+            if runner.is_cancelled(job["id"]):
+                cancelled = True
+                break
+            emitted += 1
+            _emit(f"{rel}: importing", emitted, discovered, source_file.name)
+            if checker is not None:
+                try:
+                    token = checker.match(source_file)
+                except OSError as e:
+                    _fail(rel, source_file, f"duplicate check failed: {e}")
+                    continue
+                if token is not None:
+                    # Confirm against a cataloged twin's on-disk bytes (mount
+                    # side is locally readable). Only a byte-verified twin
+                    # backs a skip; otherwise import the file normally.
+                    if token[0] == "hash":
+                        twin_rows = _hash_twin_rows(db, token[1])
+                        src_hash = token[1]
+                    else:
+                        twin_rows = _key_twin_rows(db, token[1])
+                        try:
+                            src_hash = checker.content_hash(source_file)
+                        except OSError as e:
+                            _fail(rel, source_file,
+                                  f"duplicate check failed: {e}")
+                            continue
+                    accept = False
+                    for twin in twin_rows:
+                        twin_path = os.path.join(
+                            twin["folder_path"], twin["filename"],
+                        )
+                        try:
+                            twin_hash = compute_file_hash(twin_path)
+                        except OSError:
+                            continue
+                        if twin_hash is not None and twin_hash == src_hash:
+                            accept = True
+                            break
+                    if accept:
+                        skipped_duplicate += 1
+                        dup_skipped += 1
+                        _counts(rel)["skipped_duplicate"] += 1
+                        continue
+            # Collision parity (FIX 2): rsync lands files flat by basename,
+            # so two different card files with the same basename in one batch
+            # would clobber on the NAS. Assign a distinct dest basename per
+            # colliding file, mirroring ingest()/the local path: a byte-
+            # identical file already at the destination (a prior run's copy,
+            # or an earlier card file this batch) is a skip; a different one
+            # advances through numeric suffixes. ``claimed_basenames`` tracks
+            # names taken by earlier files IN THIS BATCH; the mount is
+            # locally readable so already-landed bytes are checked on disk.
+            dest_basename = source_file.name
+            try:
+                src_hash = (
+                    checker.content_hash(source_file)
+                    if checker is not None
+                    else compute_file_hash(str(source_file))
+                )
+            except OSError as e:
+                _fail(rel, source_file, str(e))
+                continue
+            stem, suffix = os.path.splitext(source_file.name)
+            counter = 0
+            adopted = False
+            while True:
+                candidate = (
+                    source_file.name if counter == 0
+                    else f"{stem}_{counter}{suffix}"
+                )
+                cand_mount = os.path.join(dest_folder, candidate)
+                if candidate in claimed_basenames:
+                    # Claimed earlier in this batch (a same-basename sibling
+                    # already queued). If that sibling has our exact bytes,
+                    # skip as an intra-batch duplicate; otherwise advance.
+                    if claimed_basenames[candidate] == src_hash:
+                        skipped_duplicate += 1
+                        dup_skipped += 1
+                        _counts(rel)["skipped_duplicate"] += 1
+                        adopted = True
+                        break
+                    counter += 1
+                    continue
+                if os.path.exists(cand_mount):
+                    # Already on disk (crash-recovery/resume). Byte-identical
+                    # -> skip; different -> advance to the next suffix.
+                    try:
+                        on_disk = compute_file_hash(cand_mount)
+                    except OSError:
+                        on_disk = None
+                    if on_disk is not None and on_disk == src_hash:
+                        skipped_duplicate += 1
+                        dup_skipped += 1
+                        _counts(rel)["skipped_duplicate"] += 1
+                        claimed_basenames[candidate] = src_hash
+                        adopted = True
+                        break
+                    counter += 1
+                    continue
+                dest_basename = candidate
+                break
+            if adopted:
+                continue
+            claimed_basenames[dest_basename] = src_hash
+            to_transfer.append((source_file, dest_basename))
+
+        # --- Per-batch rsync -------------------------------------------
+        landed = []   # (dest_path, card_source, src_size, src_mtime_ns)
+        if to_transfer:
+            extra_args = [
+                "-e", move_mod._ssh_rsh_string(remote),
+                "--partial-dir=.rsync-partial",
+            ]
+            if remote.get("bwlimit_kbps"):
+                extra_args.append(f"--bwlimit={int(remote['bwlimit_kbps'])}")
+            rsync_target = move_mod.rsync_dest_spec(remote, ssh_dest)
+            # rsync creates the leaf itself but not intermediate parents.
+            ok_mkdir, mkdir_detail = move_mod._remote_mkdir_p(remote, ssh_dest)
+            if not ok_mkdir:
+                for sf, _bn in to_transfer:
+                    _fail(rel, sf,
+                          f"remote mkdir failed for {ssh_dest}: {mkdir_detail}")
+            else:
+                # Split into the flat fast path (dest basename == card
+                # basename) and collision-renamed files (transferred and
+                # verified individually to an explicit NAS filename, since a
+                # flat --files-from list to one dir can't rename).
+                flat = [
+                    (sf, bn) for sf, bn in to_transfer
+                    if bn == sf.name
+                ]
+                renamed = [
+                    (sf, bn) for sf, bn in to_transfer
+                    if bn != sf.name
+                ]
+
+                def _do_rsync(src_specs, target, dest_is_dir, extra_args):
+                    try:
+                        rc, stderr, timed_out = move_mod._run_rsync_streamed(
+                            None, target, [], len(src_specs), None,
+                            rsync_bin=rsync_bin, extra_args=extra_args,
+                            src_specs=src_specs,
+                            src_specs_dest_is_dir=dest_is_dir,
+                        )
+                        return rc, stderr, timed_out
+                    except OSError as exc:
+                        return 1, str(exc), False
+
+                transferred = []   # (sf, dest_basename, nas_full_path)
+                # Flat batch: one rsync into the dir.
+                if flat:
+                    rc, stderr, timed_out = _do_rsync(
+                        [str(sf) for sf, _bn in flat], rsync_target, True,
+                        extra_args)
+                    if timed_out:
+                        for sf, _bn in flat:
+                            _fail(rel, sf, "rsync stalled (no progress)")
+                    elif rc != 0:
+                        for sf, _bn in flat:
+                            _fail(rel, sf, f"rsync failed: {stderr.strip()}")
+                    else:
+                        for sf, bn in flat:
+                            transferred.append((
+                                sf, bn, posixpath.join(ssh_dest, bn)))
+                # Renamed files: one rsync each to the explicit NAS file
+                # path (rsync <card> user@host:/dir/DSC_0001_1.jpg).
+                for sf, bn in renamed:
+                    nas_full = posixpath.join(ssh_dest, bn)
+                    rc, stderr, timed_out = _do_rsync(
+                        [str(sf)],
+                        move_mod.rsync_dest_spec(remote, nas_full), False,
+                        extra_args)
+                    if timed_out:
+                        _fail(rel, sf, "rsync stalled (no progress)")
+                    elif rc != 0:
+                        _fail(rel, sf, f"rsync failed: {stderr.strip()}")
+                    else:
+                        transferred.append((sf, bn, nas_full))
+
+                for sf, bn, nas_full in transferred:
+                    dest_path = os.path.join(dest_folder, bn)
+                    # Independent verification (Task 2.7 FIX 1): card -> NAS,
+                    # opt-in behind ``verify_by_hash`` (it reads every NAS
+                    # byte; same knob the local path uses). This compares the
+                    # actual CARD file against its NAS counterpart — the only
+                    # check that confirms the card's bytes landed intact;
+                    # comparing the SMB mount view against the NAS would be
+                    # near-tautological (same physical storage). By default
+                    # the transfer relies on rsync's own integrity checking
+                    # and the run reports ``safe_to_format=False`` (honesty
+                    # gate below) because no independent hash was made.
+                    if params.verify_by_hash:
+                        if bn == sf.name:
+                            v = move_mod.remote_verify_files(
+                                rsync_bin, [str(sf)], rsync_target,
+                                remote, dest_is_dir=True)
+                        else:
+                            # Collision-renamed: verify against the explicit
+                            # NAS name (file->file), not the card basename.
+                            v = move_mod.remote_verify_files(
+                                rsync_bin, [str(sf)],
+                                move_mod.rsync_dest_spec(remote, nas_full),
+                                remote, dest_is_dir=False)
+                        if v is not None:
+                            name, detail = v
+                            reason = (
+                                f"remote verification failed "
+                                f"({detail or name})"
+                                if name == "__ERROR__"
+                                else f"remote verification: '{name}' missing "
+                                     f"or differs at destination"
+                            )
+                            _fail(rel, sf, reason)
+                            continue
+                    try:
+                        st = sf.stat()
+                        sz, mt = st.st_size, st.st_mtime_ns
+                    except OSError:
+                        sz, mt = None, None
+                    copied += 1
+                    _counts(rel)["copied"] += 1
+                    if params.verify_by_hash:
+                        verified += 1
+                    landed.append((dest_path, str(sf), sz, mt))
+
+        # --- Catalog this batch ----------------------------------------
+        # Fresh copies AND duplicate skips both need the mount folder
+        # cataloged+linked (a duplicate-only batch would otherwise leave the
+        # mount folder invisible). scan() over the mount is the same call the
+        # local path makes; the mount is locally walkable.
+        if landed or dup_skipped:
+            landed_paths = {entry[0] for entry in landed}
+            try:
+                scan(
+                    destination, db,
+                    restrict_dirs=[dest_folder],
+                    restrict_files=(landed_paths or None),
+                    vireo_dir=params.vireo_dir,
+                    thumb_cache_dir=params.thumb_cache_dir,
+                    skip_working_copies=True,
+                )
+            except Exception as e:
+                for dest_path, _sf, _sz, _mt in landed:
+                    # Roll back the copied count and fail.
+                    copied -= 1
+                    _counts(rel)["copied"] -= 1
+                    if params.verify_by_hash:
+                        verified -= 1
+                    _fail(rel, dest_path, f"catalog scan failed: {e}")
+                landed = []
+            else:
+                _invalidate_new_images(db, dest_folder)
+
+            # Hash stamping: ONLY on the checksum-verification path. Without
+            # verify_by_hash the rows keep NULL hash_status/hash_checked_at
+            # (scan may set file_hash, but we don't claim an integrity
+            # verdict we didn't independently make). A landed file with no
+            # catalog row after scan is failed rather than silently left
+            # unstamped — otherwise it would stay counted as ``copied`` and
+            # flip ``safe_to_format`` green without a stamped ``ok`` verdict.
+            # (A RAW+JPEG pair whose JPEG row was merged into the RAW is the
+            # main "no row" case; the RAW carries the bytes, so failing the
+            # JPEG here is conservative but keeps the pill honest.)
+            if params.verify_by_hash:
+                for dest_path, _sf, _sz, _mt in list(landed):
+                    row = db.conn.execute(
+                        """SELECT p.id FROM photos p
+                           JOIN folders f ON f.id = p.folder_id
+                           WHERE f.path = ? AND p.filename = ?""",
+                        (os.path.dirname(dest_path),
+                         os.path.basename(dest_path)),
+                    ).fetchone()
+                    if row is not None:
+                        db.update_photo_hash_check(
+                            row["id"], "ok", commit=False,
+                        )
+                    else:
+                        copied -= 1
+                        verified -= 1
+                        _counts(rel)["copied"] -= 1
+                        _fail(rel, dest_path,
+                              "not cataloged after scan (no photo row)")
+                        landed = [
+                            e for e in landed if e[0] != dest_path
+                        ]
+            db.conn.commit()
+
+            if params.vireo_dir:
+                for dest_path, sf, sz, mt in landed:
+                    wc_source_paths[dest_path] = (sf, sz, mt)
+                wc_dest_folders.add(dest_folder)
+
+        _emit(
+            f"{rel}: {_counts(rel)['copied']} copied · "
+            f"{_counts(rel)['skipped_duplicate']} already present",
+            emitted, discovered,
+        )
+        if cancelled:
+            break
+
+    # --- Deferred working-copy extraction ------------------------------
+    if params.vireo_dir and wc_dest_folders and not cancelled:
+        from scanner import _extract_working_copies
+
+        try:
+            _extract_working_copies(
+                db, params.vireo_dir,
+                scope=[(d, "exact") for d in sorted(wc_dest_folders)],
+                source_paths=wc_source_paths,
+                cancel_check=lambda: runner.is_cancelled(job["id"]),
+            )
+        except Exception:
+            log.exception(
+                "Working-copy extraction failed for %s",
+                sorted(wc_dest_folders),
+            )
+        if runner.is_cancelled(job["id"]):
+            cancelled = True
+
+    status = "cancelled" if cancelled else (
+        "failed" if failed else "completed"
+    )
+    runner.update_step(
+        job["id"], "import",
+        status="failed" if status == "failed" else "completed",
+        summary=(
+            f"{copied} copied, {skipped_duplicate} already present, "
+            f"{failed} failed of {discovered} discovered"
+        ),
+    )
+
+    for exc in discovery_errors:
+        unsafe_files.append({
+            "path": str(getattr(exc, "filename", None) or "<discovery>"),
+            "reason": f"source enumeration failed: {exc}",
+        })
+
+    # Scope narrowing (same rules as the local path).
+    partial_scope = not params.recursive
+    if params.file_types != "both":
+        if isinstance(params.file_types, list):
+            normalized_types = {
+                ("." + e.lower().lstrip("."))
+                for e in params.file_types
+                if isinstance(e, str) and e
+            }
+            partial_scope = partial_scope or not SUPPORTED_EXTENSIONS.issubset(
+                normalized_types,
+            )
+        else:
+            partial_scope = True
+
+    # Honesty gate: a remote import is only safe to format when every
+    # discovered file was INDEPENDENTLY hash-confirmed at the destination —
+    # which only happens on the checksum-verification path. Without
+    # verify_by_hash the transfer relied on rsync's own integrity checking,
+    # which we do not surface as a format-the-card guarantee. Report exactly
+    # that with the plan's reason string.
+    remote_unverified = not params.verify_by_hash
+    if remote_unverified and discovered > 0:
+        unsafe_files.append({
+            "path": "<remote>",
+            "reason": "enable verify_by_hash for remote verification",
+        })
+    safe_to_format = (
+        not cancelled
+        and failed == 0
+        and not discovery_errors
+        and not partial_scope
+        and not remote_unverified
+        and (copied + skipped_duplicate) == discovered
+    )
+    result = {
+        "discovered": discovered,
+        "copied": copied,
+        "verified": verified,
+        "skipped_duplicate": skipped_duplicate,
+        "failed": failed,
+        "safe_to_format": safe_to_format,
+        "unsafe_files": unsafe_files,
+        "folders": folder_counts,
+        "cancelled": cancelled,
+        "discovery_errors": len(discovery_errors),
+        "ok": (failed == 0 and not discovery_errors),
+        "errors": [f"{u['path']}: {u['reason']}" for u in unsafe_files],
+    }
+    return result
+
+
 def run_import_job(job, runner, db_path, workspace_id, params):
     """Copy card(s) -> archive, hash-verify, and catalog incrementally.
 
@@ -390,6 +939,13 @@ def run_import_job(job, runner, db_path, workspace_id, params):
 
     db = Database(db_path)
     db.set_active_workspace(workspace_id)
+
+    if params.remote_target is not None:
+        # Remote (SSH) archive: card -> remote_path/subpath over rsync,
+        # cataloged at mount_path/subpath (== params.destination). Kept in a
+        # separate function so the local copy path stays byte-for-byte
+        # unchanged. See Task 2.7.
+        return _run_remote_import_job(job, runner, db, workspace_id, params)
 
     # Normalize once — the raw destination string is passed as ``root`` to
     # both the copy layout (``os.path.normpath(os.path.join(destination,

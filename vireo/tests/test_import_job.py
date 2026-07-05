@@ -3709,3 +3709,416 @@ def test_restricted_scan_does_not_link_unrelated_archive_subtrees(tmp_path):
             f"cascade in ``_add_workspace_folder_no_commit`` fired for "
             f"``destination`` even though it was not the user's target"
         )
+
+
+# --------------------------------------------------------------------------
+# Task 2.7: Remote (SSH) archive destination.
+#
+# The card is rsynced to ``remote_path/subpath`` over SSH and cataloged at
+# ``mount_path/subpath`` (resolve_remote_archive's mapping). The SSH/rsync
+# transport seams are monkeypatched — the fake rsync writes the batch's
+# files into the local mount (standing in for the NAS as seen through the
+# SMB mount), so ``scan()`` catalogs them at the mount path exactly as it
+# would against a real mounted NAS. No network is touched.
+# --------------------------------------------------------------------------
+
+def _remote_archive_for(tmp_path, subpath="2026/2026-07-03"):
+    """Build a resolved remote-archive dict (resolve_remote_archive shape)
+    plus the local mount base. The mount is a real tmp_path dir so scan()
+    can walk the cataloged files after the fake rsync lands them there."""
+    from move import build_remote_move_spec
+
+    mount_base = tmp_path / "mount"
+    mount_base.mkdir(exist_ok=True)
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas", "user": "me",
+        "port": 22, "ssh_key": "", "bwlimit_kbps": 0,
+        "remote_path": "/volume1/Photography",
+        "mount_path": str(mount_base),
+    }
+    spec = build_remote_move_spec(target, "", "/usr/bin/rsync")
+    return {
+        "target": target,
+        "rsync_bin": "/usr/bin/rsync",
+        "remote": spec,  # host/user/port/ssh_key/bwlimit/ssh_dest_base/...
+        "ssh_base": target["remote_path"],
+        "mount_base": str(mount_base),
+    }
+
+
+def _install_fake_remote_rsync(monkeypatch, calls, *, verify=None):
+    """Monkeypatch move's transport seams so a remote import never touches
+    the network. The fake rsync copies the explicit source files into the
+    local mount dir derived from the SSH dest path, recording every
+    invocation in ``calls`` (list of dicts). ``verify`` overrides
+    _remote_verify_complete's return (None == fully verified)."""
+    import os as _os
+    import shutil as _shutil
+
+    import move as _move
+
+    def fake_rsync(src_path, dest_spec, rsync_flags, total_files,
+                   progress_cb, rsync_bin="rsync", extra_args=None,
+                   src_specs=None, src_specs_dest_is_dir=True, **kw):
+        # dest_spec is ``user@host:/volume1/Photography/2026/2026-07-03``
+        # (a NAS dir) or, for a collision-renamed single file,
+        # ``user@host:/.../DSC_0001_1.jpg`` (a NAS FILE). Map the NAS path
+        # back to the local mount by swapping the SSH base prefix.
+        ssh_path = dest_spec.split(":", 1)[1]
+        if src_specs_dest_is_dir:
+            rel = _os.path.relpath(ssh_path, calls["_ssh_base"])
+            mount_dir = _os.path.join(calls["_mount_base"], rel)
+            _os.makedirs(mount_dir, exist_ok=True)
+            for s in src_specs:
+                _shutil.copy2(
+                    s, _os.path.join(mount_dir, _os.path.basename(s)))
+        else:
+            # File dest: exactly one source, landing under the chosen name.
+            rel = _os.path.relpath(ssh_path, calls["_ssh_base"])
+            mount_file = _os.path.join(calls["_mount_base"], rel)
+            _os.makedirs(_os.path.dirname(mount_file), exist_ok=True)
+            _shutil.copy2(src_specs[0], mount_file)
+        calls["rsync"].append({
+            "src_specs": list(src_specs), "dest_spec": dest_spec,
+            "rsync_bin": rsync_bin, "extra_args": list(extra_args or []),
+            "flags": list(rsync_flags or []),
+            "dest_is_dir": src_specs_dest_is_dir,
+        })
+        return (0, "", False)
+
+    monkeypatch.setattr(_move, "_run_rsync_streamed", fake_rsync)
+    monkeypatch.setattr(_move, "_remote_mkdir_p", lambda r, p: (True, ""))
+
+    # Card -> NAS verification seam (Task 2.7 FIX 1). ``verify`` may be a
+    # plain return value, or a callable ``fn(src_specs) -> return`` so a
+    # test can fail one specific card file by basename.
+    def fake_verify_files(rsync_bin, src_specs, rsync_target, remote,
+                          **kw):
+        calls["verify"] += 1
+        calls["verify_src_specs"].append(list(src_specs))
+        if callable(verify):
+            return verify(src_specs)
+        return verify
+
+    monkeypatch.setattr(_move, "remote_verify_files", fake_verify_files)
+
+
+def _remote_calls(remote_archive):
+    return {
+        "rsync": [], "verify": 0, "verify_src_specs": [],
+        "_ssh_base": remote_archive["ssh_base"],
+        "_mount_base": remote_archive["mount_base"],
+    }
+
+
+def test_remote_import_rsyncs_to_remote_and_catalogs_at_mount(
+        tmp_path, monkeypatch):
+    """A remote destination rsyncs the card into ``remote_path/subpath`` and
+    catalogs the resulting rows at ``mount_path/subpath`` — the catalog
+    paths are the local mount, never the NAS path."""
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+    _install_fake_remote_rsync(monkeypatch, calls, verify=None)
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+        ("DSC_0002.jpg", datetime(2026, 7, 3, 11, 0, 0), "green"),
+    ])
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra,
+        ),
+    )
+
+    assert result["failed"] == 0
+    assert result["copied"] == 2
+    # rsync addressed the SSH target with the NAS-side path.
+    assert calls["rsync"], "no rsync invocation captured"
+    dests = {c["dest_spec"] for c in calls["rsync"]}
+    assert dests == {"me@nas:/volume1/Photography/2026/2026-07-03"}
+    for c in calls["rsync"]:
+        assert c["rsync_bin"] == "/usr/bin/rsync"
+
+    # Catalog rows point at the LOCAL MOUNT path, not the NAS path.
+    rows = _photo_rows(db)
+    row_paths = {os.path.join(r["folder_path"], r["filename"]) for r in rows}
+    mount_dir = os.path.join(ra["mount_base"], "2026", "2026-07-03")
+    assert row_paths == {
+        os.path.join(mount_dir, "DSC_0001.jpg"),
+        os.path.join(mount_dir, "DSC_0002.jpg"),
+    }
+    for r in row_paths:
+        assert "/volume1/Photography" not in r
+    # The mount folder is linked to the active workspace.
+    assert mount_dir in _ws_linked_folder_paths(db, ws_id)
+
+
+def test_remote_import_per_batch_rsync_invocation(tmp_path, monkeypatch):
+    """Each destination-folder batch issues its own rsync invocation (the
+    per-batch commit unit), captured by the fake harness."""
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+    _install_fake_remote_rsync(monkeypatch, calls, verify=None)
+
+    # Two distinct template folders -> two batches -> two rsync calls.
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+        ("DSC_0002.jpg", datetime(2026, 7, 4, 9, 0, 0), "blue"),
+    ])
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra,
+        ),
+    )
+
+    dests = sorted(c["dest_spec"] for c in calls["rsync"])
+    assert dests == [
+        "me@nas:/volume1/Photography/2026/2026-07-03",
+        "me@nas:/volume1/Photography/2026/2026-07-04",
+    ]
+
+
+def test_remote_import_without_verify_leaves_hashes_null_and_unsafe(
+        tmp_path, monkeypatch):
+    """Without verify_by_hash the transfer relies on rsync's own integrity
+    checking only: catalog rows keep NULL hash_status/hash_checked_at (no
+    invented status values) and the run honestly reports safe_to_format
+    False with the exact remote-verification reason."""
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+    _install_fake_remote_rsync(monkeypatch, calls, verify=None)
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra, verify_by_hash=False,
+        ),
+    )
+
+    assert result["failed"] == 0
+    assert result["copied"] == 1
+    # No checksum verification ran.
+    assert calls["verify"] == 0
+    # Rows have NULL hash_status / hash_checked_at (not a fabricated value).
+    rows = _photo_rows(db)
+    assert rows
+    for r in rows:
+        assert r["hash_status"] is None
+        assert r["hash_checked_at"] is None
+    # Honest pill: not safe to format, exact reason string.
+    assert result["safe_to_format"] is False
+    assert any(
+        u["reason"] == "enable verify_by_hash for remote verification"
+        for u in result["unsafe_files"]
+    ), result["unsafe_files"]
+
+
+def test_remote_import_with_verify_stamps_ok_and_can_be_safe(
+        tmp_path, monkeypatch):
+    """With verify_by_hash a card->NAS --checksum dry-run runs; when it
+    confirms every file, rows get hash_status='ok' and the run may report
+    safe_to_format True."""
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+    _install_fake_remote_rsync(monkeypatch, calls, verify=None)
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+        ("DSC_0002.jpg", datetime(2026, 7, 3, 11, 0, 0), "green"),
+    ])
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra, verify_by_hash=True,
+        ),
+    )
+
+    assert result["failed"] == 0
+    assert result["copied"] == 2
+    # The checksum dry-run ran (at least once).
+    assert calls["verify"] >= 1
+    rows = _photo_rows(db)
+    assert rows
+    for r in rows:
+        assert r["hash_status"] == "ok"
+        assert r["hash_checked_at"] is not None
+        assert r["file_hash"] is not None
+    assert result["safe_to_format"] is True
+    assert result["unsafe_files"] == []
+
+
+def test_remote_verify_checks_card_files_not_mount(tmp_path, monkeypatch):
+    """FIX 1: verification must be genuinely card -> NAS. The verify seam's
+    source args must be the CARD file paths, never the local mount folder
+    (which is the same physical storage as the NAS, making that comparison
+    tautological)."""
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+    _install_fake_remote_rsync(monkeypatch, calls, verify=None)
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+        ("DSC_0002.jpg", datetime(2026, 7, 3, 11, 0, 0), "green"),
+    ])
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra, verify_by_hash=True,
+        ),
+    )
+
+    assert calls["verify_src_specs"], "verify seam was never called"
+    verified_sources = {
+        os.path.realpath(s)
+        for batch in calls["verify_src_specs"] for s in batch
+    }
+    expected_card = {
+        os.path.realpath(str(card / "DSC_0001.jpg")),
+        os.path.realpath(str(card / "DSC_0002.jpg")),
+    }
+    assert verified_sources == expected_card, verified_sources
+    # And NOT the mount folder / mount files.
+    for s in verified_sources:
+        assert ra["mount_base"] not in s
+
+
+def test_remote_import_verify_failure_fails_specific_file(
+        tmp_path, monkeypatch):
+    """FIX 1: when the card->NAS verify reports a specific card file
+    missing/different at the NAS, only THAT file fails (no hash_status='ok'
+    row for it) and safe_to_format is False; a sibling that verified is
+    stamped ok."""
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+
+    def verify_fn(src_specs):
+        # Report DSC_0001.jpg as still differing/absent at the NAS.
+        for s in src_specs:
+            if os.path.basename(s) == "DSC_0001.jpg":
+                return ("DSC_0001.jpg", None)
+        return None
+
+    _install_fake_remote_rsync(monkeypatch, calls, verify=verify_fn)
+
+    # Both files land in the SAME date folder -> one batch, so the batch's
+    # verify sees both and reports one bad.
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+        ("DSC_0002.jpg", datetime(2026, 7, 3, 10, 5, 0), "green"),
+    ])
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra, verify_by_hash=True,
+        ),
+    )
+
+    assert result["failed"] == 1
+    assert result["safe_to_format"] is False
+    assert any(
+        "DSC_0001.jpg" in u["path"] or "DSC_0001.jpg" in u["reason"]
+        for u in result["unsafe_files"]
+    ), result["unsafe_files"]
+
+    # The failed file must NOT carry an 'ok' hash verdict; the sibling that
+    # verified must.
+    rows = {r["filename"]: r for r in _photo_rows(db)}
+    if "DSC_0001.jpg" in rows:
+        assert rows["DSC_0001.jpg"]["hash_status"] != "ok"
+    assert rows["DSC_0002.jpg"]["hash_status"] == "ok"
+
+
+def test_remote_import_same_basename_collision_parity(tmp_path, monkeypatch):
+    """FIX 2: two DIFFERENT card files with the same basename destined for
+    one date folder must both land under distinct names on the NAS and be
+    cataloged as distinct photos — never silently clobber."""
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+    _install_fake_remote_rsync(monkeypatch, calls, verify=None)
+
+    # Same basename, different content, in two card subdirs, same mtime
+    # (same date folder). Distinct colors -> distinct bytes.
+    card = tmp_path / "card"
+    (card / "DCIM" / "100").mkdir(parents=True)
+    (card / "DCIM" / "101").mkdir(parents=True)
+    from PIL import Image as _Image
+    p1 = card / "DCIM" / "100" / "DSC_0001.jpg"
+    p2 = card / "DCIM" / "101" / "DSC_0001.jpg"
+    _Image.new("RGB", (16, 16), "red").save(str(p1))
+    _Image.new("RGB", (16, 16), "blue").save(str(p2))
+    ts = datetime(2026, 7, 3, 10, 0, 0).timestamp()
+    for p in (p1, p2):
+        os.utime(str(p), (ts, ts))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra,
+        ),
+    )
+
+    assert result["failed"] == 0, result["unsafe_files"]
+    # Both cataloged as distinct photos.
+    rows = _photo_rows(db)
+    assert len(rows) == 2, [dict(r) for r in rows]
+    filenames = sorted(r["filename"] for r in rows)
+    # Distinct on-disk names: the second landed under a numeric suffix.
+    assert filenames == ["DSC_0001.jpg", "DSC_0001_1.jpg"], filenames
+    # Both files physically exist at the mount, distinct content.
+    mount_dir = os.path.join(ra["mount_base"], "2026", "2026-07-03")
+    b0 = open(os.path.join(mount_dir, "DSC_0001.jpg"), "rb").read()
+    b1 = open(os.path.join(mount_dir, "DSC_0001_1.jpg"), "rb").read()
+    assert b0 != b1

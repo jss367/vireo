@@ -3342,3 +3342,135 @@ def test_import_photos_inconclusive_case_probe_rejects_case_collision(
     })
     assert resp.status_code == 400
     assert "inside a source" in resp.get_json()["error"]
+
+
+# --- POST /api/jobs/import-photos remote (SSH) archive target ------------
+#
+# Mirror the pipeline route's remote-target guards: accept a saved
+# remote_target_id + remote_subpath, reject the bad shapes.
+
+def _remote_import_body(card, **overrides):
+    body = {
+        "sources": [card],
+        "remote_target_id": "nas1",
+        "remote_subpath": "2026/trip",
+    }
+    body.update(overrides)
+    return body
+
+
+def test_import_photos_remote_happy_path(app_and_db, tmp_path, monkeypatch):
+    """A valid remote target + subpath enqueues an import job whose config
+    records the target and subpath and whose destination is the resolved
+    mount path (mount_path/subpath)."""
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    client = app.test_client()
+    card = _import_card(tmp_path)
+
+    resp = client.post(
+        "/api/jobs/import-photos", json=_remote_import_body(card))
+    assert resp.status_code == 200, resp.get_json()
+    job_id = resp.get_json()["job_id"]
+    assert job_id.startswith("import-")
+
+    config = _job_config(client, job_id)
+    assert config["remote_target_id"] == "nas1"
+    assert config["remote_subpath"] == "2026/trip"
+    # Destination recorded as the resolved local mount path.
+    expected_dest = os.path.join(str(tmp_path / "mount"), "2026", "trip")
+    assert config["destination"] == expected_dest
+
+
+def test_import_photos_remote_and_destination_mutually_exclusive(
+        app_and_db, tmp_path, monkeypatch):
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    resp = client.post("/api/jobs/import-photos", json=_remote_import_body(
+        card, destination=str(tmp_path / "archive"),
+    ))
+    assert resp.status_code == 400
+    assert "mutually exclusive" in resp.get_json()["error"]
+
+
+def test_import_photos_remote_unknown_target_404(
+        app_and_db, tmp_path, monkeypatch):
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    resp = client.post("/api/jobs/import-photos", json=_remote_import_body(
+        card, remote_target_id="nope",
+    ))
+    assert resp.status_code == 404
+    assert "not found" in resp.get_json()["error"].lower()
+
+
+def test_import_photos_remote_requires_subpath(
+        app_and_db, tmp_path, monkeypatch):
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    resp = client.post("/api/jobs/import-photos", json=_remote_import_body(
+        card, remote_subpath="",
+    ))
+    assert resp.status_code == 400
+    assert "remote_subpath" in resp.get_json()["error"]
+
+
+def test_import_photos_remote_subpath_requires_target(
+        app_and_db, tmp_path, monkeypatch):
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "remote_subpath": "2026/trip",
+    })
+    assert resp.status_code == 400
+    assert "remote_subpath requires remote_target_id" in \
+        resp.get_json()["error"]
+
+
+def test_import_photos_remote_rejects_traversal_subpath(
+        app_and_db, tmp_path, monkeypatch):
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    for bad in ("../escape", "/absolute/path"):
+        resp = client.post(
+            "/api/jobs/import-photos",
+            json=_remote_import_body(card, remote_subpath=bad),
+        )
+        assert resp.status_code == 400, bad
+
+
+def test_import_photos_remote_requires_mount_path(
+        app_and_db, tmp_path, monkeypatch):
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path, mount_path="")
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    resp = client.post(
+        "/api/jobs/import-photos", json=_remote_import_body(card))
+    assert resp.status_code == 400
+    assert "mount path" in resp.get_json()["error"]
+
+
+def test_import_photos_remote_requires_gnu_rsync(
+        app_and_db, tmp_path, monkeypatch):
+    import move as move_mod
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        move_mod, "resolve_rsync_bin", lambda configured="": None)
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    resp = client.post(
+        "/api/jobs/import-photos", json=_remote_import_body(card))
+    assert resp.status_code == 400
+    assert "rsync" in resp.get_json()["error"].lower()
