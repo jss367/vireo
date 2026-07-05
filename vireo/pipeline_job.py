@@ -557,6 +557,17 @@ def _progress_event(stages, stage_id, phase, **extra):
         "current": current,
         "total": total,
         "stages": {k: dict(v) for k, v in stages.items()},
+        # JobRunner.push_event merges progress payloads into job["progress"]
+        # rather than replacing them, so a sub-phase (e.g. "Extracting metadata"
+        # with phase_current/phase_total set) would otherwise linger through
+        # every later stage that omits these keys and keep the /api/jobs
+        # poll — and thus the jobs page + navbar sub-progress bar — rendering
+        # a stale phase. Default the triple to None here so callers with no
+        # active sub-phase actively clear it; the update() below lets callers
+        # with a real sub-phase override.
+        "phase_current": None,
+        "phase_total": None,
+        "phase_label": None,
     }
     data.update(extra)
     return data

@@ -7300,6 +7300,92 @@ def test_update_stages_emits_weighted_current_total():
     assert data["current"] == 6
 
 
+def test_progress_event_defaults_phase_triple_to_none():
+    """Every progress payload must carry an explicit phase_current /
+    phase_total / phase_label triple. JobRunner.push_event merges progress
+    payloads into job['progress'] rather than replacing them, so a scan
+    sub-phase (e.g. 'Extracting metadata' with numeric phase_current /
+    phase_total) would linger across every later status emission that
+    omits these keys — the jobs page and navbar would keep rendering the
+    stale 'Extracting metadata' bar through 'Hashing ...' and downstream
+    pipeline stages. Callers with no active sub-phase must therefore emit
+    None so the merge actively clears the previous values."""
+    from pipeline_job import _progress_event
+
+    stages = _empty_stages()
+    stages["scan"]["status"] = "running"
+
+    # No phase_* passed → the triple defaults to None and reaches the payload
+    # so the frontend's `typeof phase_current === 'number' && phase_total > 0`
+    # guard falls back to overall progress instead of re-rendering a stale bar.
+    data = _progress_event(stages, "scan", "Hashing 3 files (2 workers)...")
+    assert data["phase_current"] is None
+    assert data["phase_total"] is None
+    assert data["phase_label"] is None
+
+    # Callers with an active sub-phase override the defaults.
+    data = _progress_event(
+        stages, "scan", "Extracting metadata (2 / 3 files)...",
+        phase_current=2,
+        phase_total=3,
+        phase_label="Extracting metadata",
+    )
+    assert data["phase_current"] == 2
+    assert data["phase_total"] == 3
+    assert data["phase_label"] == "Extracting metadata"
+
+
+def test_emit_progress_clears_stale_phase_in_merged_job_progress():
+    """End-to-end: JobRunner.push_event merges into job['progress']; after a
+    scan sub-phase emission followed by a plain status emission, the merged
+    progress dict must show the phase triple cleared to None so /api/jobs
+    polling stops rendering the stale metadata bar."""
+    import queue as _queue
+    import sys as _sys
+
+    _sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+    from jobs import JobRunner
+    from pipeline_job import _emit_progress
+    from wait import wait_for_job_via_runner
+
+    runner = JobRunner()
+    seen_progress = _queue.Queue()
+
+    def work(job):
+        stages = _empty_stages()
+        stages["scan"]["status"] = "running"
+
+        _emit_progress(
+            runner, job["id"], stages, "scan",
+            "Extracting metadata (2 / 3 files)...",
+            phase_current=2,
+            phase_total=3,
+            phase_label="Extracting metadata",
+        )
+        seen_progress.put(dict(job["progress"]))
+
+        _emit_progress(
+            runner, job["id"], stages, "scan",
+            "Hashing 3 files (2 workers)...",
+        )
+        seen_progress.put(dict(job["progress"]))
+
+        return {"ok": True}
+
+    job_id = runner.start("scan", work)
+    wait_for_job_via_runner(runner, job_id)
+
+    metadata_prog = seen_progress.get_nowait()
+    assert metadata_prog["phase_current"] == 2
+    assert metadata_prog["phase_total"] == 3
+    assert metadata_prog["phase_label"] == "Extracting metadata"
+
+    hashing_prog = seen_progress.get_nowait()
+    assert hashing_prog["phase_current"] is None
+    assert hashing_prog["phase_total"] is None
+    assert hashing_prog["phase_label"] is None
+
+
 # ---------------------------------------------------------------------------
 # Cancel responsiveness in extract_masks / eye_keypoints
 #
