@@ -1569,6 +1569,27 @@ async function loadFolderScopeList() {
     if (!Array.isArray(folders)) return;
     var byId = {};
     folders.forEach(function(f) { byId[f.id] = f; });
+    // Deep links from the audit panel carry the ACTUAL folder path a file
+    // sits in (e.g. /root/2026/07), but only top-level roots are rendered
+    // here because the server-side subtree expansion covers descendants.
+    // An exact-match on cb.checked therefore preselects nothing and Start
+    // stays disabled. Map each prefill path to the top-level root whose
+    // path it lives under, so /pipeline?folder=/root/2026/07 checks the
+    // /root row instead of orphaning the deep link.
+    var prefillRootIds = new Set();
+    if (_prefillFolderPaths.length) {
+      var topLevel = folders.filter(function(f) {
+        return !(f.parent_id && byId[f.parent_id]);
+      });
+      _prefillFolderPaths.forEach(function(prefillPath) {
+        topLevel.forEach(function(f) {
+          if (prefillPath === f.path
+              || prefillPath.indexOf(f.path + '/') === 0) {
+            prefillRootIds.add(f.id);
+          }
+        });
+      });
+    }
     list.innerHTML = '';
     folders.forEach(function(f) {
       // Only offer top-level entries: children are covered by the
@@ -1582,7 +1603,7 @@ async function loadFolderScopeList() {
       cb.value = f.id;
       cb.dataset.path = f.path;
       cb.style.accentColor = 'var(--accent)';
-      cb.checked = _prefillFolderPaths.indexOf(f.path) !== -1;
+      cb.checked = prefillRootIds.has(f.id);
       cb.onchange = function() { updateSourceSummary(); updateStartButton(); schedulePlanRefresh(); };
       var span = document.createElement('span');
       var count = f.workspace_photo_count != null
@@ -1592,7 +1613,15 @@ async function loadFolderScopeList() {
       label.appendChild(span);
       list.appendChild(label);
     });
-    if (_prefillFolderPaths.length) { updateSourceSummary(); updateStartButton(); }
+    if (_prefillFolderPaths.length) {
+      updateSourceSummary();
+      updateStartButton();
+      // A deep link maps to at least one workspace root only when the
+      // prefill actually sat under a tracked root; when it did, refresh
+      // the plan so readiness pills describe the preselected subtree
+      // instead of the blank whole-workspace fallback.
+      if (prefillRootIds.size) schedulePlanRefresh();
+    }
   } catch (e) {
     list.textContent = 'Could not load workspace folders.';
   }
@@ -1627,6 +1656,18 @@ function applyStrategyPreset() {
   ['classify', 'extract', 'eyekeypoints', 'group'].forEach(function(st) {
     try { onStageToggle(st); } catch (e) { /* stage rows update below */ }
   });
+  // cull_ready enables group without extract (regroup is cheap and cull
+  // review needs encounters — see process_strategies.py), but the
+  // onStageToggle chain treats group as downstream of extract and would
+  // have unchecked+disabled Group when we cascaded extract=false above.
+  // Re-force the preset value for any stage the preset said should be on
+  // so startPipeline sends skip_regroup=false for cull_ready instead of
+  // overriding the server-side expansion.
+  if (p.group) {
+    var gCb = document.getElementById('enableGroup');
+    gCb.checked = true;
+    gCb.disabled = false;
+  }
   refreshPipelineUI();
 }
 
@@ -2612,7 +2653,13 @@ async function selectSourceMode(mode) {
 
   var copySection = document.getElementById('destCopySection');
   var copyNote = document.getElementById('destCopyDisabledNote');
-  if (mode === 'collection' || mode === 'new_images') {
+  // Folder scope re-processes existing workspace photos in place, so the
+  // copy-to-another-location controls have nothing to act on — startPipeline
+  // only serializes body.folder_ids in this mode, and any copy settings the
+  // user checked would be silently discarded. Dim the copy section (same
+  // treatment as collection / new_images) so the UI can't lie about what
+  // will happen.
+  if (mode === 'collection' || mode === 'new_images' || mode === 'folders') {
     copySection.classList.add('dimmed');
     copyNote.style.display = '';
   } else {
@@ -2623,19 +2670,24 @@ async function selectSourceMode(mode) {
   // Snapshot IDs are scoped to the workspace they were captured in, so the
   // "New workspace" destination would produce a 404 at lookup time. Lock the
   // destination to the current workspace while new-images mode is active.
+  // Folder IDs are likewise workspace-local (workspace_folders is the guard
+  // both on the plan route and /api/jobs/pipeline), so activating an empty
+  // "New workspace" would make the selected folder_ids foreign to the run's
+  // workspace. Lock destination to Current for folder scope for the same
+  // reason.
   // Apply the destination lock and button state BEFORE any async snapshot
   // POST — callers don't await this function, so a click on Start during
   // the POST's network round-trip would otherwise see stale state.
   var wsNewRadio = document.getElementById('radioWsNew');
   var wsCurrentRadio = document.getElementById('radioWsCurrent');
   var wsNewNote = document.getElementById('destWsNewImagesNote');
-  if (mode === 'new_images') {
+  if (mode === 'new_images' || mode === 'folders') {
     if (wsNewRadio) wsNewRadio.disabled = true;
     if (wsCurrentRadio && !wsCurrentRadio.checked) {
       wsCurrentRadio.checked = true;
       onDestWorkspaceChange();
     }
-    if (wsNewNote) wsNewNote.style.display = '';
+    if (wsNewNote) wsNewNote.style.display = mode === 'new_images' ? '' : 'none';
   } else {
     if (wsNewRadio) wsNewRadio.disabled = false;
     if (wsNewNote) wsNewNote.style.display = 'none';

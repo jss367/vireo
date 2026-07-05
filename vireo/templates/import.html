@@ -173,6 +173,17 @@ function selectedAfterImport() {
   return v === '__none__' ? null : v;
 }
 
+// True once initImportPage() has resolved the workspace's after-import
+// default into the select. Until then, the select still shows its HTML
+// initial value (__none__), which selectedAfterImport() would surface as
+// an explicit null. Posting `after_import: null` tells the import
+// endpoint to run import-only and skip the workspace's
+// pipeline.default_strategy — the exact race the reviewer flagged.
+// Guarding the body key with this flag makes an unresolved default
+// fall back to the endpoint's "key omitted → apply workspace default"
+// branch, which is what the user actually expects.
+let _afterImportConfigLoaded = false;
+
 function showError(msg) {
   const el = document.getElementById('importError');
   el.textContent = msg;
@@ -263,8 +274,10 @@ async function startImport() {
     folder_template: (document.getElementById('folderTemplate').value || '').trim(),
     file_types: document.getElementById('fileTypes').value,
     recursive: document.getElementById('chkRecursive').checked,
-    after_import: selectedAfterImport(),
   };
+  if (_afterImportConfigLoaded) {
+    body.after_import = selectedAfterImport();
+  }
   document.getElementById('btnStart').disabled = true;
   try {
     const resp = await fetch('/api/jobs/import-photos', {
@@ -396,9 +409,11 @@ async function initImportPage() {
   // db.get_effective_config's pipeline/ingest sub-dict behavior).
   let cfg = {};
   let overrides = {};
+  let cfgOk = false;
+  let overridesOk = false;
   try {
     const resp = await fetch('/api/config');
-    if (resp.ok) cfg = await resp.json();
+    if (resp.ok) { cfg = await resp.json(); cfgOk = true; }
   } catch (e) { /* defaults below */ }
   try {
     const resp = await fetch('/api/workspaces/active');
@@ -406,6 +421,7 @@ async function initImportPage() {
       const ws = await resp.json();
       const raw = ws.config_overrides;
       overrides = typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
+      overridesOk = true;
     }
   } catch (e) { /* defaults below */ }
   const ingestCfg = Object.assign(
@@ -431,6 +447,11 @@ async function initImportPage() {
   const def = pipelineCfg.default_strategy;
   sel.value = def ? def : '__none__';
   if (sel.selectedIndex === -1) sel.value = '__none__';
+  // Only mark the resolved default as trustworthy when BOTH config
+  // fetches actually succeeded. Otherwise the select value reflects the
+  // HTML placeholder rather than the workspace default, and startImport
+  // should omit the key so the server applies pipeline.default_strategy.
+  _afterImportConfigLoaded = cfgOk && overridesOk;
 }
 initImportPage();
 </script>
