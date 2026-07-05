@@ -1107,12 +1107,22 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                     dest_path = entry[0]
                     if dest_path in reclassified_landed_paths:
                         continue
-                    pre_hash = pre_scan_hashes.get(dest_path)
-                    if pre_hash is None:
-                        # Row didn't exist pre-scan (fresh insert), or
-                        # pre-existing row's hash was NULL. Either way,
-                        # there are no derived caches to invalidate.
+                    if dest_path not in pre_scan_hashes:
+                        # No pre-scan row (fresh insert) — no derived
+                        # caches exist for this photo yet.
                         continue
+                    # A pre-scan row existed. Its ``file_hash`` may be
+                    # ``NULL`` (legacy row, or a prior scan that couldn't
+                    # read the file), and such a row can still carry
+                    # ``working_copy_path``/thumb/preview caches from
+                    # earlier processing. Scanner's own content-change
+                    # path treats ``NULL -> concrete hash`` as an
+                    # invalidating transition (see scanner.scan()'s
+                    # ``content_identity_changed`` block); mirror that
+                    # here so restoring a deleted archive file whose
+                    # legacy row lost its hash still clears the stale
+                    # derived caches. See PR #1107 review.
+                    pre_hash = pre_scan_hashes[dest_path]
                     verified_hash = entry[1]
                     if pre_hash == verified_hash:
                         continue

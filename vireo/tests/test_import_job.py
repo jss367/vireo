@@ -2649,3 +2649,70 @@ def test_import_invalidates_derived_caches_on_content_change(tmp_path):
     assert not fake_wc.exists(), (
         "content change on a landed row must delete the stale WC file"
     )
+
+
+def test_import_invalidates_derived_caches_when_pre_row_had_null_hash(tmp_path):
+    """Legacy row invariant: a pre-scan row with ``file_hash IS NULL`` can
+    still carry ``working_copy_path``/thumb/preview caches from earlier
+    processing (e.g. a prior scan that couldn't read the file cleared the
+    hash but left derived rows). Scanner's own content-change path treats
+    ``NULL -> concrete hash`` as an invalidating transition; the import
+    per-batch invalidation loop must mirror that, or restoring a deleted
+    archive file at that path leaves stale WC/thumb bytes cached against
+    the fresh hash. See PR #1107 review.
+    """
+    from import_job import ImportParams, run_import_job
+
+    archive = tmp_path / "archive"
+    dest_dir = archive / "2026" / "2026-07-03"
+    dest_dir.mkdir(parents=True)
+
+    vireo_dir = tmp_path / "vireo_data"
+    (vireo_dir / "working").mkdir(parents=True)
+    fake_wc = vireo_dir / "working" / "1.jpg"
+    Image.new("RGB", (8, 8), "yellow").save(str(fake_wc))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES (?, ?, 'ok')",
+        (str(dest_dir), dest_dir.name),
+    ).lastrowid
+    # Legacy-shaped row: no file on disk, ``file_hash IS NULL``, but a
+    # stale ``working_copy_path`` from an earlier processing pass.
+    photo_id = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, extension, file_size,"
+        " file_hash, working_copy_path) VALUES (?, ?, '.jpg', ?, NULL, ?)",
+        (fid, "DSC_0701.jpg", 12345, str(fake_wc)),
+    ).lastrowid
+    db.conn.commit()
+
+    # Card holds the NEW bytes at the same filename/date — the import
+    # will land them at the archive path whose row currently has
+    # ``file_hash IS NULL`` + a stale WC.
+    card = _make_card(tmp_path, [
+        ("DSC_0701.jpg", datetime(2026, 7, 3, 10, 0, 0), "green"),
+    ])
+    result = run_import_job(_make_job(), FakeRunner(), db_path, ws_id,
+                            ImportParams(sources=[str(card)],
+                                         destination=str(archive),
+                                         skip_duplicates=False,
+                                         vireo_dir=str(vireo_dir)))
+    assert result["copied"] == 1
+    assert result["failed"] == 0
+
+    # The row's WC path was cleared: NULL -> concrete hash is a real
+    # content change, and the deferred extractor / later backfill must be
+    # allowed to rebuild the WC against the just-imported archive bytes.
+    row = db.conn.execute(
+        "SELECT working_copy_path FROM photos WHERE id = ?", (photo_id,),
+    ).fetchone()
+    assert row["working_copy_path"] is None, (
+        "NULL-hash pre-scan row must invalidate its stale derived caches "
+        "when the import stamps a concrete hash (mirrors scanner.scan()'s "
+        "content-change path)"
+    )
+    assert not fake_wc.exists(), (
+        "NULL-hash pre-scan row must have its stale WC file unlinked"
+    )
