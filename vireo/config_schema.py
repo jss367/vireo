@@ -363,6 +363,22 @@ SCHEMA = {
     },
 
     # --- Pipeline (scoring weights & rejection thresholds) ---------------
+    "pipeline.default_strategy": {
+        # Workspace-scoped: consumed by the import→process chaining hook
+        # via db.get_effective_config(cfg.load()). None (import only) is the
+        # DEFAULTS value; validation of the workspace override is done in
+        # /api/workspaces/<id> via resolve_strategy so null passes through.
+        "type": "enum",
+        "enum": ["full", "cull_ready", "quick_look"],
+        "enum_labels": {
+            "full": "Full",
+            "cull_ready": "Cull-ready",
+            "quick_look": "Quick look",
+        },
+        "category": "Pipeline", "scope": "workspace",
+        "label": "Default process strategy",
+        "desc": "Strategy run automatically after an import completes on this workspace.",
+    },
     "pipeline.w_focus": {
         "type": "float", "min": 0.0, "max": 1.0, "step": 0.01,
         "category": "Pipeline", "scope": "both",
