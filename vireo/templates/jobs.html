@@ -315,6 +315,32 @@
     }
   }
 
+  function activeProgress(progress) {
+    if (!progress) return null;
+    if (typeof progress.phase_current === 'number' && progress.phase_total > 0) {
+      return {
+        current: progress.phase_current,
+        total: progress.phase_total,
+        label: progress.phase_label || progress.phase || 'Current phase',
+        phase: true,
+      };
+    }
+    if (progress.total > 0) {
+      return {
+        current: progress.current || 0,
+        total: progress.total,
+        label: 'Overall',
+        phase: false,
+      };
+    }
+    return null;
+  }
+
+  function progressPct(info) {
+    if (!info || !info.total) return 0;
+    return Math.max(0, Math.min(100, Math.round((info.current / info.total) * 100)));
+  }
+
   function renderJobCard(job, options) {
     options = options || {};
     // Queued pipelines are "live" for UI purposes: they have a real
@@ -354,8 +380,9 @@
     html += '<div class="job-detail-meta">';
     html += '<span>Started: ' + new Date(job.started_at).toLocaleTimeString() + '</span>';
     html += '<span>Elapsed: ' + elapsed + '</span>';
-    if (job.progress && job.progress.total > 0) {
-      html += '<span>Overall: ' + Math.round((job.progress.current / job.progress.total) * 100) + '%</span>';
+    var visibleProgress = activeProgress(job.progress);
+    if (visibleProgress) {
+      html += '<span>' + esc(visibleProgress.label) + ': ' + progressPct(visibleProgress) + '%</span>';
     }
     html += '</div>';
 
@@ -371,10 +398,11 @@
       // Fallback for running jobs without steps
       html += '<div class="job-tree"><div style="padding:8px;font-size:13px;color:var(--text-muted);">';
       if (job.progress.phase) html += '<div style="color:var(--accent);font-weight:500;margin-bottom:8px;">' + esc(job.progress.phase) + '</div>';
-      if (job.progress.total > 0) {
-        var pct = Math.round((job.progress.current / job.progress.total) * 100);
+      var fallbackProgress = activeProgress(job.progress);
+      if (fallbackProgress) {
+        var pct = progressPct(fallbackProgress);
         html += '<div class="tree-step-bar" style="width:200px;margin-bottom:4px;"><div class="tree-step-bar-fill" style="width:' + pct + '%"></div></div>';
-        html += '<div>' + job.progress.current.toLocaleString() + ' / ' + job.progress.total.toLocaleString() + '</div>';
+        html += '<div>' + esc(fallbackProgress.label) + ': ' + fallbackProgress.current.toLocaleString() + ' / ' + fallbackProgress.total.toLocaleString() + '</div>';
       }
       if (job.progress.current_file) html += '<div style="margin-top:4px;">' + esc(job.progress.current_file) + '</div>';
       html += '</div></div>';
@@ -644,8 +672,12 @@
       time = timeAgo(j.started_at);
     }
     var detail = '';
+    var visibleProgress = activeProgress(j.progress);
     if (j.status === 'running' && j.progress && j.progress.phase) {
       detail = esc(j.progress.phase);
+      if (visibleProgress && visibleProgress.phase) {
+        detail += ' ' + visibleProgress.current.toLocaleString() + '/' + visibleProgress.total.toLocaleString();
+      }
     } else if (j.summary) {
       detail = esc(j.summary);
     } else if (j.status === 'failed' && j.errors && j.errors.length > 0) {
@@ -654,8 +686,8 @@
       detail = formatElapsed(j.duration);
     }
     var pct = 0;
-    if (j.progress && j.progress.total > 0) {
-      pct = Math.round((j.progress.current / j.progress.total) * 100);
+    if (visibleProgress) {
+      pct = progressPct(visibleProgress);
     }
     var html = '<div class="job-list-item' + selected + '" data-job-id="' + esc(j.id) + '" data-job-source="' + source + '">';
     html += '<div class="job-list-item-header">';

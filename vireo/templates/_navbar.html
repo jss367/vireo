@@ -9230,6 +9230,32 @@ function formatDuration(seconds) {
   // Tauri. With multiple concurrent jobs we pick the one that started first
   // (earliest started_at); phases without a known total pulse instead.
   var _lastDockProgress = { state: null, value: -1 };
+  function bpActiveProgress(progress) {
+    if (!progress) return null;
+    if (typeof progress.phase_current === 'number' && progress.phase_total > 0) {
+      return {
+        current: progress.phase_current,
+        total: progress.phase_total,
+        label: progress.phase_label || progress.phase || 'Current phase',
+        phase: true,
+      };
+    }
+    if (progress.total > 0) {
+      return {
+        current: progress.current || 0,
+        total: progress.total,
+        label: 'Overall',
+        phase: false,
+      };
+    }
+    return null;
+  }
+
+  function bpProgressPct(info) {
+    if (!info || !info.total) return 0;
+    return Math.max(0, Math.min(100, Math.round((info.current / info.total) * 100)));
+  }
+
   function updateDockProgress() {
     if (!window.__TAURI_INTERNALS__) return;
     var running = activeJobs.filter(function(j) {
@@ -9245,10 +9271,9 @@ function formatDuration(seconds) {
         var b = longest.started_at || '';
         if (a && (!b || a < b)) longest = running[i];
       }
-      var total = longest.progress && longest.progress.total;
-      var current = longest.progress && longest.progress.current;
-      if (total && total > 0) {
-        var pct = Math.max(0, Math.min(100, Math.round((current / total) * 100)));
+      var progressInfo = bpActiveProgress(longest.progress);
+      if (progressInfo) {
+        var pct = bpProgressPct(progressInfo);
         state = 'normal'; value = pct;
       } else {
         state = 'indeterminate'; value = null;
@@ -9322,11 +9347,12 @@ function formatDuration(seconds) {
   function renderJobList(jobs) {
     var html = '';
     jobs.forEach(function(j) {
-      var pct = j.progress && j.progress.total > 0 ? Math.round((j.progress.current / j.progress.total) * 100) : 0;
+      var progressInfo = bpActiveProgress(j.progress);
+      var pct = progressInfo ? bpProgressPct(progressInfo) : 0;
       var phase = j.progress && j.progress.phase ? j.progress.phase : '';
       var detail = '';
-      if (j.progress && j.progress.total > 0) {
-        detail = j.progress.current.toLocaleString() + '/' + j.progress.total.toLocaleString();
+      if (progressInfo) {
+        detail = progressInfo.current.toLocaleString() + '/' + progressInfo.total.toLocaleString();
         if (pct > 0) detail += ' (' + pct + '%)';
       }
       // Queued/pending work gets a muted dot so the user can tell it apart
@@ -9385,13 +9411,14 @@ function formatDuration(seconds) {
     if (j.progress && j.progress.phase) {
       text += ' — ' + j.progress.phase;
     }
-    if (j.progress && j.progress.total > 0) {
-      var pct = Math.round((j.progress.current / j.progress.total) * 100);
-      var isBytes = j.type && j.type.indexOf('download') !== -1 && j.progress.total > 1000000;
+    var progressInfo = bpActiveProgress(j.progress);
+    if (progressInfo) {
+      var pct = bpProgressPct(progressInfo);
+      var isBytes = j.type && j.type.indexOf('download') !== -1 && progressInfo.total > 1000000;
       if (isBytes) {
-        text += ' ' + (j.progress.current / (1024*1024)).toFixed(0) + '/' + (j.progress.total / (1024*1024)).toFixed(0) + ' MB (' + pct + '%)';
+        text += ' ' + (progressInfo.current / (1024*1024)).toFixed(0) + '/' + (progressInfo.total / (1024*1024)).toFixed(0) + ' MB (' + pct + '%)';
       } else {
-        text += ' ' + j.progress.current.toLocaleString() + '/' + j.progress.total.toLocaleString() + ' (' + pct + '%)';
+        text += ' ' + progressInfo.current.toLocaleString() + '/' + progressInfo.total.toLocaleString() + ' (' + pct + '%)';
       }
       if (j.progress.rate > 0) {
         text += ' ' + (j.progress.rate / (1024*1024)).toFixed(1) + ' MB/s';

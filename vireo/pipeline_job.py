@@ -960,10 +960,18 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     runner.update_step(job["id"], "scan",
                                        current_file=os.path.basename(path))
 
-                def status_cb(message):
+                def status_cb(message, phase_current=None, phase_total=None, phase_label=None):
                     runner.update_step(job["id"], "scan", current_file=message)
+                    extra = {"current_file": message}
+                    if phase_current is not None or phase_total is not None:
+                        extra.update({
+                            "phase_current": phase_current,
+                            "phase_total": phase_total,
+                            "phase_label": phase_label,
+                        })
                     _emit_progress(
-                        runner, job["id"], stages, "scan", message,
+                        runner, job["id"], stages, "scan",
+                        phase_label or message, **extra,
                     )
 
                 def cancel_check():

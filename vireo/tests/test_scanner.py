@@ -406,6 +406,39 @@ def test_scan_cancel_check_aborts_before_metadata_extraction(tmp_path, monkeypat
     assert db.get_photos(per_page=100) == []
 
 
+def test_scan_reports_metadata_phase_progress(tmp_path, monkeypatch):
+    """ExifTool batch progress is surfaced as status callback metadata."""
+    import scanner
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['img1.jpg', 'img2.jpg', 'img3.jpg']})
+    db = Database(str(tmp_path / "test.db"))
+    status_events = []
+
+    def fake_extract_metadata(paths, progress_callback=None):
+        if progress_callback:
+            progress_callback(2, len(paths))
+            progress_callback(len(paths), len(paths))
+        return {}
+
+    def status_cb(message, **kwargs):
+        status_events.append((message, kwargs))
+
+    monkeypatch.setattr(scanner, "extract_metadata", fake_extract_metadata)
+
+    scanner.scan(root, db, status_callback=status_cb)
+
+    metadata_events = [
+        event for event in status_events
+        if event[1].get("phase_label") == "Extracting metadata"
+    ]
+    assert metadata_events[0][1]["phase_current"] == 0
+    assert metadata_events[0][1]["phase_total"] == 3
+    assert metadata_events[-1][1]["phase_current"] == 3
+    assert metadata_events[-1][1]["phase_total"] == 3
+
+
 def test_scan_non_recursive_only_finds_root_photos(tmp_path):
     """scan(recursive=False) only finds photos in the root folder, not subfolders."""
     from db import Database

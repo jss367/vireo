@@ -225,7 +225,7 @@ def _group_tags(flat_dict):
     return grouped
 
 
-def extract_metadata(file_paths, restricted_tags=None):
+def extract_metadata(file_paths, restricted_tags=None, progress_callback=None):
     """Extract metadata from files using ExifTool.
 
     Args:
@@ -233,6 +233,8 @@ def extract_metadata(file_paths, restricted_tags=None):
         restricted_tags: optional list of tag names to extract (e.g.
             ['-DateTimeOriginal', '-GPSLatitude', '-ImageWidth']).
             If None, extracts all tags.
+        progress_callback: optional callable(current, total) invoked after
+            each ExifTool batch completes.
 
     Returns:
         dict mapping file_path -> grouped metadata dict.
@@ -250,6 +252,8 @@ def extract_metadata(file_paths, restricted_tags=None):
             source = entry.get("SourceFile")
             if source:
                 results[source] = _group_tags(entry)
+        if progress_callback:
+            progress_callback(min(i + len(batch), len(file_paths)), len(file_paths))
 
     return results
 

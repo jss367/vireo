@@ -1092,7 +1092,9 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         extract_full_metadata: if True, store full ExifTool JSON in exif_data column
         photo_callback: optional callable(photo_id, path_str) called after each photo is committed
         skip_paths: optional set of absolute path strings to exclude from scanning
-        status_callback: optional callable(message) for phase status updates
+        status_callback: optional callable(message) for phase status updates.
+            Callers may also accept keyword-only ``phase_current``,
+            ``phase_total``, and ``phase_label`` for sub-phase progress.
         recursive: if True (default), scan subfolders; if False, only scan root directory
         restrict_dirs: optional list of directory paths to scan instead of the
             full tree. When provided, only files in these directories are
@@ -1149,11 +1151,29 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         if cancel_check is not None and cancel_check():
             raise RuntimeError("scan cancelled")
 
+    def _emit_status(message, phase_current=None, phase_total=None, phase_label=None):
+        if not status_callback:
+            return
+        if phase_current is None and phase_total is None and phase_label is None:
+            status_callback(message)
+            return
+        try:
+            status_callback(
+                message,
+                phase_current=phase_current,
+                phase_total=phase_total,
+                phase_label=phase_label,
+            )
+        except TypeError:
+            # Keep compatibility with older one-argument callbacks in tests and
+            # utility callers.
+            status_callback(message)
+
     # Discover all image files (incremental enumeration for progress reporting)
     log.info("Discovering files in %s ...", root)
     _check_cancelled()
     if status_callback:
-        status_callback("Discovering files...")
+        _emit_status("Discovering files...")
     image_files = []
 
     # os.walk + onerror, not Path.rglob: rglob silently skips any
@@ -1265,7 +1285,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                     if checked % 100 == 0:
                         _check_cancelled()
                     if checked % 500 == 0 and status_callback:
-                        status_callback(
+                        _emit_status(
                             f"Discovering files... ({len(image_files)} found)"
                         )
                     ext = os.path.splitext(name)[1].lower()
@@ -1301,7 +1321,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 if checked % 100 == 0:
                     _check_cancelled()
                 if checked % 500 == 0 and status_callback:
-                    status_callback(
+                    _emit_status(
                         f"Discovering files... ({len(image_files)} found)"
                     )
                 if (f.is_file()
@@ -1564,9 +1584,27 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     # Batch extract metadata via ExifTool only for files that need processing
     paths_to_extract = [str(ip) for ip in files_to_process]
     if paths_to_extract and status_callback:
-        status_callback(f"Extracting metadata ({len(paths_to_extract)} files)...")
+        metadata_total = len(paths_to_extract)
+        _emit_status(
+            f"Extracting metadata (0 / {metadata_total} files)...",
+            phase_current=0,
+            phase_total=metadata_total,
+            phase_label="Extracting metadata",
+        )
     _check_cancelled()
-    metadata_map = extract_metadata(paths_to_extract) if paths_to_extract else {}
+
+    def _metadata_progress(current, total):
+        _emit_status(
+            f"Extracting metadata ({current} / {total} files)...",
+            phase_current=current,
+            phase_total=total,
+            phase_label="Extracting metadata",
+        )
+
+    metadata_map = (
+        extract_metadata(paths_to_extract, progress_callback=_metadata_progress)
+        if paths_to_extract else {}
+    )
     _check_cancelled()
 
     # Compute phash + file_hash in parallel across all files that need
@@ -1576,7 +1614,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     # while the main thread commits the head — no O(n) buffer of features.
     workers = _resolve_worker_count(files_to_process)
     if paths_to_extract and status_callback:
-        status_callback(
+        _emit_status(
             f"Hashing {len(paths_to_extract)} files ({workers} worker{'s' if workers != 1 else ''})..."
         )
 
