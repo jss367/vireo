@@ -4286,3 +4286,130 @@ def test_remote_import_verify_fails_uncataloged_landings(
         "not cataloged" in u["reason"]
         for u in result["unsafe_files"]
     ), result["unsafe_files"]
+
+
+def test_remote_import_rsync_uses_ignore_existing_to_survive_basename_races(
+        tmp_path, monkeypatch):
+    """Two remote import jobs (or a job racing another writer) that plan to
+    land different bytes under the same basename would both pass the earlier
+    mount-side ``os.path.exists`` collision check. Plain ``rsync -a`` would
+    then let the second writer clobber the first's already-verified NAS
+    bytes; ``--ignore-existing`` on the transfer flag list stops rsync
+    from overwriting the receiver-side file, and the verify step still
+    catches the mismatch. Regression: the transport flags must include
+    ``--ignore-existing`` on every rsync call the remote import issues."""
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+    _install_fake_remote_rsync(monkeypatch, calls, verify=None)
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+        ("DSC_0002.jpg", datetime(2026, 7, 3, 10, 5, 0), "green"),
+    ])
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra,
+        ),
+    )
+
+    assert calls["rsync"], "no rsync invocation captured"
+    for c in calls["rsync"]:
+        assert "--ignore-existing" in c["extra_args"], (
+            "rsync invocation missing --ignore-existing "
+            f"race-guard: {c['extra_args']}"
+        )
+
+
+def test_remote_import_fails_when_mount_row_hash_disagrees_with_verified_card(
+        tmp_path, monkeypatch):
+    """``remote_verify_files`` runs card -> NAS (``ssh_base``); ``scan()``
+    reads under the local mount. If the mount base is stale/misconfigured
+    but happens to already contain the same ``<folder>/<filename>`` we
+    transferred, scan populates the row from unrelated bytes. Stamping
+    ``hash_status='ok'`` on that row would flip ``safe_to_format`` green
+    over storage we never touched. This exercises the cross-check: the
+    landed file is failed rather than stamped ok, and safe_to_format
+    stays False."""
+    import move as _move
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+
+    # Fake rsync that "lands" the file under the destination BUT with
+    # wrong bytes — the scenario Codex flagged: the NAS is fine (verify
+    # step below reports OK), but the mount base points at different
+    # storage whose bytes at ``<folder>/<filename>`` don't match the
+    # card. scan() will pick up the wrong-storage hash; the cross-check
+    # must fail this file rather than stamp ``hash_status='ok'``.
+    def fake_rsync_writes_wrong_bytes(
+            src_path, dest_spec, rsync_flags, total_files,
+            progress_cb, rsync_bin="rsync", extra_args=None,
+            src_specs=None, src_specs_dest_is_dir=True, **kw):
+        calls["rsync"].append({
+            "src_specs": list(src_specs or []),
+            "dest_spec": dest_spec,
+            "extra_args": list(extra_args or []),
+        })
+        # Map the SSH dest_spec back to the mount side and write a file
+        # with DIFFERENT bytes than the card — the wrong-storage stand-in.
+        ssh_path = dest_spec.split(":", 1)[1]
+        if src_specs_dest_is_dir:
+            rel = os.path.relpath(ssh_path, ra["ssh_base"])
+            mount_dir = os.path.join(ra["mount_base"], rel)
+            os.makedirs(mount_dir, exist_ok=True)
+            from PIL import Image as _Image
+            for s in src_specs:
+                _Image.new("RGB", (16, 16), "green").save(
+                    os.path.join(mount_dir, os.path.basename(s)))
+        else:
+            rel = os.path.relpath(ssh_path, ra["ssh_base"])
+            mount_file = os.path.join(ra["mount_base"], rel)
+            os.makedirs(os.path.dirname(mount_file), exist_ok=True)
+            from PIL import Image as _Image
+            _Image.new("RGB", (16, 16), "green").save(mount_file)
+        return (0, "", False)
+
+    monkeypatch.setattr(_move, "_run_rsync_streamed",
+                        fake_rsync_writes_wrong_bytes)
+    monkeypatch.setattr(_move, "_remote_mkdir_p", lambda r, p: (True, ""))
+    # NAS-side card verification succeeds (the card bytes DID make it to
+    # the NAS in this scenario). The mount just doesn't show them.
+    monkeypatch.setattr(_move, "remote_verify_files",
+                        lambda *a, **kw: None)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra, verify_by_hash=True,
+        ),
+    )
+
+    assert result["copied"] == 0, result
+    assert result["failed"] == 1, result
+    assert result["safe_to_format"] is False, result
+    assert any(
+        "scanned mount row hash" in u["reason"]
+        for u in result["unsafe_files"]
+    ), result["unsafe_files"]
+    rows = {r["filename"]: r for r in _photo_rows(db)}
+    # The row must NOT carry an 'ok' verdict.
+    if "DSC_0001.jpg" in rows:
+        assert rows["DSC_0001.jpg"]["hash_status"] != "ok", dict(
+            rows["DSC_0001.jpg"])

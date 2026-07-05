@@ -632,7 +632,7 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
         # cataloged twin's bytes are confirmed at the destination; the local
         # path re-hashes the twin's archive file. On the mount that file is
         # locally readable, so reuse the same on-disk re-hash contract.
-        to_transfer = []           # (source_file, dest_basename)
+        to_transfer = []           # (source_file, dest_basename, src_hash)
         dup_skipped = 0
         # dest basename -> src_hash, for intra-batch same-basename collision
         # resolution (FIX 2). Populated as files are queued/skipped.
@@ -752,14 +752,42 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
             if adopted:
                 continue
             claimed_basenames[dest_basename] = src_hash
-            to_transfer.append((source_file, dest_basename))
+            to_transfer.append((source_file, dest_basename, src_hash))
 
         # --- Per-batch rsync -------------------------------------------
-        landed = []   # (dest_path, card_source, src_size, src_mtime_ns)
+        # landed carries the card-side src_hash so the catalog-stamping loop
+        # below can cross-check the scanned MOUNT row's file_hash against the
+        # hash confirmed on the NAS. Without that carry-through, a stale/
+        # misconfigured mount base that happens to already contain
+        # ``<folder>/<filename>`` for a name we transferred would let scan()
+        # populate the row from unrelated bytes while remote_verify_files
+        # confirmed the NAS bytes — and blind hash_status='ok' stamping would
+        # flip safe_to_format green over storage we never touched. See PR
+        # #1113 review.
+        landed = []   # (dest_path, card_source, src_hash, src_size, src_mtime_ns)
         if to_transfer:
+            # ``--ignore-existing`` protects against basename-race overwrites:
+            # two remote import jobs (or a job racing another writer) that
+            # both passed the earlier mount-side os.path.exists check for
+            # DSC_0001.jpg would otherwise both rsync to the same NAS name
+            # with plain ``rsync -a``, and the second writer would clobber
+            # the first's already-verified bytes. ``--ignore-existing`` tells
+            # rsync's receiver to skip files that already exist there, so
+            # the first landing's bytes stay put. On the verify path, the
+            # subsequent ``rsync -an --checksum`` step then detects the
+            # mismatch between the second writer's card bytes and the
+            # first-writer bytes on the NAS and fails that specific file
+            # honestly; without verification the honesty gate already
+            # reports safe_to_format=False for the whole run, so a masked
+            # race can't quietly flip the pill green. Crash-recovery already
+            # avoids re-transferring files it saw on the mount (hash match
+            # -> skip; hash mismatch -> advance to a suffix that doesn't
+            # exist), so no legitimate flow relies on rsync overwriting an
+            # existing destination file. See PR #1113 review.
             extra_args = [
                 "-e", move_mod._ssh_rsh_string(remote),
                 "--partial-dir=.rsync-partial",
+                "--ignore-existing",
             ]
             if remote.get("bwlimit_kbps"):
                 extra_args.append(f"--bwlimit={int(remote['bwlimit_kbps'])}")
@@ -767,7 +795,7 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
             # rsync creates the leaf itself but not intermediate parents.
             ok_mkdir, mkdir_detail = move_mod._remote_mkdir_p(remote, ssh_dest)
             if not ok_mkdir:
-                for sf, _bn in to_transfer:
+                for sf, _bn, _sh in to_transfer:
                     _fail(rel, sf,
                           f"remote mkdir failed for {ssh_dest}: {mkdir_detail}")
             else:
@@ -776,11 +804,11 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                 # verified individually to an explicit NAS filename, since a
                 # flat --files-from list to one dir can't rename).
                 flat = [
-                    (sf, bn) for sf, bn in to_transfer
+                    (sf, bn, sh) for sf, bn, sh in to_transfer
                     if bn == sf.name
                 ]
                 renamed = [
-                    (sf, bn) for sf, bn in to_transfer
+                    (sf, bn, sh) for sf, bn, sh in to_transfer
                     if bn != sf.name
                 ]
 
@@ -796,25 +824,25 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                     except OSError as exc:
                         return 1, str(exc), False
 
-                transferred = []   # (sf, dest_basename, nas_full_path)
+                transferred = []   # (sf, dest_basename, src_hash, nas_full_path)
                 # Flat batch: one rsync into the dir.
                 if flat:
                     rc, stderr, timed_out = _do_rsync(
-                        [str(sf) for sf, _bn in flat], rsync_target, True,
+                        [str(sf) for sf, _bn, _sh in flat], rsync_target, True,
                         extra_args)
                     if timed_out:
-                        for sf, _bn in flat:
+                        for sf, _bn, _sh in flat:
                             _fail(rel, sf, "rsync stalled (no progress)")
                     elif rc != 0:
-                        for sf, _bn in flat:
+                        for sf, _bn, _sh in flat:
                             _fail(rel, sf, f"rsync failed: {stderr.strip()}")
                     else:
-                        for sf, bn in flat:
+                        for sf, bn, sh in flat:
                             transferred.append((
-                                sf, bn, posixpath.join(ssh_dest, bn)))
+                                sf, bn, sh, posixpath.join(ssh_dest, bn)))
                 # Renamed files: one rsync each to the explicit NAS file
                 # path (rsync <card> user@host:/dir/DSC_0001_1.jpg).
-                for sf, bn in renamed:
+                for sf, bn, sh in renamed:
                     nas_full = posixpath.join(ssh_dest, bn)
                     rc, stderr, timed_out = _do_rsync(
                         [str(sf)],
@@ -825,9 +853,9 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                     elif rc != 0:
                         _fail(rel, sf, f"rsync failed: {stderr.strip()}")
                     else:
-                        transferred.append((sf, bn, nas_full))
+                        transferred.append((sf, bn, sh, nas_full))
 
-                for sf, bn, nas_full in transferred:
+                for sf, bn, src_hash, nas_full in transferred:
                     dest_path = os.path.join(dest_folder, bn)
                     # Independent verification (Task 2.7 FIX 1): card -> NAS,
                     # opt-in behind ``verify_by_hash`` (it reads every NAS
@@ -871,7 +899,7 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                     _counts(rel)["copied"] += 1
                     if params.verify_by_hash:
                         verified += 1
-                    landed.append((dest_path, str(sf), sz, mt))
+                    landed.append((dest_path, str(sf), src_hash, sz, mt))
 
         # --- Catalog this batch ----------------------------------------
         # Fresh copies AND duplicate skips both need the mount folder
@@ -890,7 +918,7 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                     skip_working_copies=True,
                 )
             except Exception as e:
-                for dest_path, _sf, _sz, _mt in landed:
+                for dest_path, _sf, _sh, _sz, _mt in landed:
                     # Roll back the copied count and fail.
                     copied -= 1
                     _counts(rel)["copied"] -= 1
@@ -915,9 +943,9 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
             # verify_by_hash the rows keep NULL hash_status/hash_checked_at
             # (scan may set file_hash, but we don't claim an integrity
             # verdict we didn't independently make).
-            for dest_path, _sf, _sz, _mt in list(landed):
+            for dest_path, _sf, src_hash, _sz, _mt in list(landed):
                 row = db.conn.execute(
-                    """SELECT p.id FROM photos p
+                    """SELECT p.id, p.file_hash FROM photos p
                        JOIN folders f ON f.id = p.folder_id
                        WHERE f.path = ? AND p.filename = ?""",
                     (os.path.dirname(dest_path),
@@ -925,6 +953,50 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                 ).fetchone()
                 if row is not None:
                     if params.verify_by_hash:
+                        # Cross-check the scanned MOUNT row's hash against
+                        # the source hash that remote_verify_files just
+                        # confirmed at the NAS. remote_verify_files ran
+                        # card -> ssh_base (the NAS); scan() reads whatever
+                        # is under the mount base. If the mount is stale
+                        # or misconfigured but happens to already contain
+                        # the same <folder>/<filename> we transferred, scan
+                        # populates ``file_hash`` from the mount's (wrong)
+                        # bytes. Stamping ``hash_status='ok'`` on that row
+                        # would let ``safe_to_format`` go green over
+                        # storage we never actually touched. Require the
+                        # scanned row's file_hash to match the verified
+                        # source hash; otherwise fail this file. Mirrors
+                        # the local path's cross-check against
+                        # ``verified_hash``. See PR #1113 review.
+                        #
+                        # Normalize zero-byte convention on both sides:
+                        # scan() writes NULL for zero-byte files;
+                        # ``checker.content_hash`` returns None; a
+                        # checker-less ``compute_file_hash`` returns
+                        # ``EMPTY_FILE_SHA256``. Treat all three as
+                        # equivalent so an empty card file matches its
+                        # empty catalog row.
+                        scan_h = row["file_hash"]
+                        if scan_h == EMPTY_FILE_SHA256:
+                            scan_h = None
+                        src_h_norm = (
+                            None if src_hash == EMPTY_FILE_SHA256
+                            else src_hash
+                        )
+                        if scan_h != src_h_norm:
+                            copied -= 1
+                            verified -= 1
+                            _counts(rel)["copied"] -= 1
+                            _fail(
+                                rel, dest_path,
+                                "scanned mount row hash does not match "
+                                "the hash verified on the NAS (mount "
+                                "base is likely stale or misconfigured)",
+                            )
+                            landed = [
+                                e for e in landed if e[0] != dest_path
+                            ]
+                            continue
                         db.update_photo_hash_check(
                             row["id"], "ok", commit=False,
                         )
@@ -941,7 +1013,7 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
             db.conn.commit()
 
             if params.vireo_dir:
-                for dest_path, sf, sz, mt in landed:
+                for dest_path, sf, _sh, sz, mt in landed:
                     wc_source_paths[dest_path] = (sf, sz, mt)
                 wc_dest_folders.add(dest_folder)
 
