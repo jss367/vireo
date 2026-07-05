@@ -147,6 +147,20 @@ def _join_subtree_path(root_path: str, relative_path: str) -> str:
     return stripped + sep + sep.join(parts)
 
 
+def _stored_parent_path(path: str) -> str | None:
+    stripped = path.rstrip("/\\")
+    if not stripped or stripped in ("/", "\\"):
+        return None
+    sep_idx = max(stripped.rfind("/"), stripped.rfind("\\"))
+    if sep_idx < 0:
+        return None
+    if sep_idx == 0:
+        return stripped[0]
+    if sep_idx == 2 and len(stripped) >= 2 and stripped[1] == ":":
+        return stripped[:3]
+    return stripped[:sep_idx]
+
+
 def _chunks(values, size=_SQLITE_PARAM_CHUNK_SIZE):
     values = list(values)
     for idx in range(0, len(values), size):
@@ -354,6 +368,7 @@ class Database:
             ):
                 raise IncompatibleDatabaseError(self._db_path, str(e)) from e
             raise
+        self.repair_missing_folder_parents()
         self.ensure_default_workspace()
         # Idempotent legacy-type migration. MUST run before genre seeding
         # so an upgraded DB with e.g. 'descriptive'/'event'/'people' rows
@@ -873,6 +888,17 @@ class Database:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_keywords_place_id "
             "ON keywords(place_id) WHERE place_id IS NOT NULL"
         )
+        # Migration: folders.parent_id. Truly legacy databases predate the
+        # column, and CREATE TABLE IF NOT EXISTS above is a no-op for them —
+        # so add the column here so repair_missing_folder_parents() (and
+        # every other query that reads parent_id) can run.
+        try:
+            self.conn.execute("SELECT parent_id FROM folders LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute(
+                "ALTER TABLE folders "
+                "ADD COLUMN parent_id INTEGER REFERENCES folders(id)"
+            )
         # Phase 1 storage-philosophy migration: classifier embeddings move
         # from single-slot photos.(embedding, embedding_model) columns into
         # the per-(photo, model, variant) photo_embeddings table. Rows whose
@@ -1124,6 +1150,29 @@ class Database:
                 "WHERE id=? AND active_mask_variant IS NULL",
                 (r["id"],),
             )
+        self.conn.commit()
+
+    def repair_missing_folder_parents(self):
+        """Fill parent_id for legacy folder rows whose parent path is known."""
+        rows = self.conn.execute(
+            "SELECT id, path, parent_id FROM folders"
+        ).fetchall()
+        path_to_id = {r["path"]: r["id"] for r in rows}
+        updates = []
+        for row in rows:
+            if row["parent_id"] is not None:
+                continue
+            parent_path = _stored_parent_path(row["path"])
+            parent_id = path_to_id.get(parent_path)
+            if parent_id is None or parent_id == row["id"]:
+                continue
+            updates.append((parent_id, row["id"]))
+        if not updates:
+            return
+        self.conn.executemany(
+            "UPDATE folders SET parent_id = ? WHERE id = ?",
+            updates,
+        )
         self.conn.commit()
 
     # -- Workspaces --
@@ -2087,9 +2136,19 @@ class Database:
             folder_id = cur.lastrowid
         else:
             row = self.conn.execute(
-                "SELECT id FROM folders WHERE path = ?", (path,)
+                "SELECT id, parent_id FROM folders WHERE path = ?", (path,)
             ).fetchone()
             folder_id = row["id"]
+            if (
+                parent_id is not None
+                and row["parent_id"] is None
+                and folder_id != parent_id
+            ):
+                self.conn.execute(
+                    "UPDATE folders SET parent_id = ? WHERE id = ?",
+                    (parent_id, folder_id),
+                )
+                commit_with_retry(self.conn)
         # Auto-link to active workspace
         if link_to_workspace and self._active_workspace_id is not None:
             self.add_workspace_folder(
