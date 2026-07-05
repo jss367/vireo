@@ -7155,6 +7155,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # accessors that expect a JSON object (or NULL) in this column.
             if overrides is not None and not isinstance(overrides, dict):
                 return json_error("config_overrides must be an object or null")
+            # pipeline.default_strategy: None means "no automatic processing
+            # after import" (the chaining hook short-circuits on it) and is
+            # accepted as-is; a string must name a real strategy. The string
+            # "none" is NOT the null sentinel — one vocabulary with
+            # /api/jobs/pipeline, which also rejects it.
+            pipeline_overrides = (overrides or {}).get("pipeline")
+            if (
+                isinstance(pipeline_overrides, dict)
+                and "default_strategy" in pipeline_overrides
+                and pipeline_overrides["default_strategy"] is not None
+            ):
+                from process_strategies import resolve_strategy
+
+                try:
+                    resolve_strategy(pipeline_overrides["default_strategy"])
+                except ValueError as e:
+                    return json_error(str(e))
             kwargs["config_overrides"] = overrides
         if "ui_state" in body:
             kwargs["ui_state"] = body["ui_state"]

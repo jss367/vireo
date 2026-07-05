@@ -2004,3 +2004,99 @@ def test_tabs_are_per_workspace(db):
     db.set_active_workspace(ws2)
     assert db.get_tabs() == DEFAULT_TABS
     assert "logs" not in db.get_tabs()
+
+
+# ---------------------------------------------------------------------------
+# per-workspace default process strategy (import/process split PR 1)
+# ---------------------------------------------------------------------------
+
+
+def _put_default_strategy(client, ws_id, value):
+    return client.put(
+        f"/api/workspaces/{ws_id}",
+        data=json.dumps(
+            {"config_overrides": {"pipeline": {"default_strategy": value}}}
+        ),
+        content_type="application/json",
+    )
+
+
+def test_workspace_default_strategy_saved_and_effective(client):
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({"name": "Strat"}),
+        content_type="application/json",
+    )
+    ws_id = resp.get_json()["id"]
+    resp = _put_default_strategy(client, ws_id, "cull_ready")
+    assert resp.status_code == 200
+
+    import config as cfg
+    from db import Database
+
+    # Read through get_effective_config exactly like the pipeline does.
+    db_path = None
+    with client.application.app_context():
+        db_path = client.application.config["DB_PATH"]
+    db = Database(db_path)
+    db.set_active_workspace(ws_id)
+    effective = db.get_effective_config(cfg.load())
+    assert effective["pipeline"]["default_strategy"] == "cull_ready"
+
+
+def test_workspace_default_strategy_null_means_import_only(client):
+    """None is the "no automatic processing after import" sentinel that
+    PR 3's chaining hook short-circuits on. Saving it must succeed — if
+    this 400s, the "import only" user flow is unreachable."""
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({"name": "StratNull"}),
+        content_type="application/json",
+    )
+    ws_id = resp.get_json()["id"]
+    resp = _put_default_strategy(client, ws_id, None)
+    assert resp.status_code == 200
+
+    import config as cfg
+    from db import Database
+
+    db = Database(client.application.config["DB_PATH"])
+    db.set_active_workspace(ws_id)
+    effective = db.get_effective_config(cfg.load())
+    assert effective["pipeline"]["default_strategy"] is None
+
+
+def test_workspace_default_strategy_unknown_400(client):
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({"name": "StratBad"}),
+        content_type="application/json",
+    )
+    ws_id = resp.get_json()["id"]
+    resp = _put_default_strategy(client, ws_id, "yolo")
+    assert resp.status_code == 400
+    assert "unknown strategy" in resp.get_json()["error"]
+
+
+def test_workspace_default_strategy_none_string_400(client):
+    """The string "none" is not the null sentinel — the "no process" case
+    uses JSON null, matching /api/jobs/pipeline (which also rejects
+    strategy: "none"). One vocabulary across the workspace default, the
+    API body, and the chaining hook."""
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({"name": "StratNoneStr"}),
+        content_type="application/json",
+    )
+    ws_id = resp.get_json()["id"]
+    resp = _put_default_strategy(client, ws_id, "none")
+    assert resp.status_code == 400
+
+
+def test_config_default_strategy_default_is_none():
+    import os
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "vireo"))
+    from config import DEFAULTS
+
+    assert DEFAULTS["pipeline"]["default_strategy"] is None
