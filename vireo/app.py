@@ -7,6 +7,8 @@ Usage:
 import argparse
 import contextlib
 import copy
+import csv
+import io
 import json
 import logging
 import logging.handlers
@@ -6832,6 +6834,185 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             photos_per_species=request.args.get("photos_per_species", 12, type=int),
         )
         return jsonify(payload)
+
+    _LIFE_LIST_EXPORT_FORMATS = {
+        "json": "json",
+        "csv": "csv",
+        "txt": "txt",
+        "text": "txt",
+        "file": "files",
+        "files": "files",
+        "filenames": "files",
+        "file-list": "files",
+    }
+
+    def _life_list_export_bool_arg(name, default=False):
+        raw = request.args.get(name)
+        if raw is None:
+            return default
+        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _strip_life_list_locations(payload):
+        for entry in payload.get("species", []):
+            entry["locations"] = []
+
+    def _life_list_export_photos(entry, mode):
+        if mode == "all":
+            return entry.get("photos") or []
+        best = entry.get("best")
+        return [best] if best else []
+
+    def _life_list_export_response(body, mimetype, extension):
+        today = datetime.now(UTC).date().isoformat()
+        resp = make_response(body)
+        resp.headers["Content-Type"] = mimetype
+        resp.headers["Content-Disposition"] = (
+            f'attachment; filename="vireo-life-list-{today}.{extension}"'
+        )
+        return resp
+
+    def _life_list_species_csv(payload):
+        out = io.StringIO()
+        fieldnames = [
+            "number",
+            "species",
+            "scientific_name",
+            "common_name",
+            "photo_count",
+            "first_seen",
+            "last_seen",
+            "locations",
+            "best_photo_id",
+            "best_filename",
+        ]
+        writer = csv.DictWriter(out, fieldnames=fieldnames)
+        writer.writeheader()
+        for entry in payload.get("species", []):
+            best = entry.get("best") or {}
+            writer.writerow({
+                "number": entry.get("number") or "",
+                "species": entry.get("species") or "",
+                "scientific_name": entry.get("scientific_name") or "",
+                "common_name": entry.get("common_name") or "",
+                "photo_count": entry.get("photo_count") or 0,
+                "first_seen": entry.get("first_seen") or "",
+                "last_seen": entry.get("last_seen") or "",
+                "locations": "; ".join(entry.get("locations") or []),
+                "best_photo_id": best.get("id") or "",
+                "best_filename": best.get("filename") or "",
+            })
+        return out.getvalue()
+
+    def _life_list_photos_csv(payload, photo_mode):
+        out = io.StringIO()
+        fieldnames = [
+            "number",
+            "species",
+            "scientific_name",
+            "common_name",
+            "photo_id",
+            "filename",
+            "timestamp",
+            "is_life_list_photo",
+            "quality_score",
+            "locations",
+        ]
+        writer = csv.DictWriter(out, fieldnames=fieldnames)
+        writer.writeheader()
+        for entry in payload.get("species", []):
+            for photo in _life_list_export_photos(entry, photo_mode):
+                writer.writerow({
+                    "number": entry.get("number") or "",
+                    "species": entry.get("species") or "",
+                    "scientific_name": entry.get("scientific_name") or "",
+                    "common_name": entry.get("common_name") or "",
+                    "photo_id": photo.get("id") or "",
+                    "filename": photo.get("filename") or "",
+                    "timestamp": photo.get("timestamp") or "",
+                    "is_life_list_photo": "yes" if photo.get("is_life_list_photo") else "no",
+                    "quality_score": photo.get("quality_score")
+                    if photo.get("quality_score") is not None else "",
+                    "locations": "; ".join(entry.get("locations") or []),
+                })
+        return out.getvalue()
+
+    def _life_list_text(payload):
+        lines = []
+        for entry in payload.get("species", []):
+            name = entry.get("species") or ""
+            sci = entry.get("scientific_name")
+            if sci and sci != name:
+                name = f"{name} ({sci})"
+            parts = [
+                f"#{entry.get('number') or ''} {name}".strip(),
+                f"{entry.get('photo_count') or 0} photo"
+                + ("" if entry.get("photo_count") == 1 else "s"),
+            ]
+            if entry.get("first_seen"):
+                parts.append(f"first seen {entry['first_seen']}")
+            if entry.get("last_seen") and entry.get("last_seen") != entry.get("first_seen"):
+                parts.append(f"latest {entry['last_seen']}")
+            if entry.get("locations"):
+                parts.append("locations: " + "; ".join(entry["locations"]))
+            lines.append(" - ".join(parts))
+        return "\n".join(lines) + ("\n" if lines else "")
+
+    def _life_list_file_list(payload, photo_mode):
+        seen = set()
+        lines = []
+        for entry in payload.get("species", []):
+            for photo in _life_list_export_photos(entry, photo_mode):
+                filename = photo.get("filename")
+                if not filename or filename in seen:
+                    continue
+                seen.add(filename)
+                lines.append(filename)
+        return "\n".join(lines) + ("\n" if lines else "")
+
+    @app.route("/api/life-list/export")
+    def api_life_list_export():
+        fmt = (request.args.get("format") or "json").strip().lower()
+        fmt = _LIFE_LIST_EXPORT_FORMATS.get(fmt)
+        if not fmt:
+            return json_error("format must be json, csv, txt, or files")
+
+        detail = (request.args.get("detail") or "species").strip().lower()
+        if detail not in {"species", "photos"}:
+            return json_error("detail must be species or photos")
+
+        photo_mode = (request.args.get("photos") or "best").strip().lower()
+        if photo_mode not in {"best", "all"}:
+            return json_error("photos must be best or all")
+
+        db = _get_db()
+        payload = _build_life_list_payload(
+            db,
+            photos_per_species=request.args.get("photos_per_species", 12, type=int),
+        )
+        if not _life_list_export_bool_arg("include_locations"):
+            _strip_life_list_locations(payload)
+
+        if fmt == "json":
+            body = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+            return _life_list_export_response(body, "application/json", "json")
+        if fmt == "csv":
+            body = (
+                _life_list_photos_csv(payload, photo_mode)
+                if detail == "photos"
+                else _life_list_species_csv(payload)
+            )
+            return _life_list_export_response(body, "text/csv; charset=utf-8", "csv")
+        if fmt == "files":
+            return _life_list_export_response(
+                _life_list_file_list(payload, photo_mode),
+                "text/plain; charset=utf-8",
+                "txt",
+            )
+        return _life_list_export_response(
+            _life_list_text(payload),
+            "text/plain; charset=utf-8",
+            "txt",
+        )
 
     @app.route("/api/highlights/confirm", methods=["POST"])
     def api_highlights_confirm():

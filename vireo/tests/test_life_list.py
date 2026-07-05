@@ -1,4 +1,7 @@
 """Tests for the Life List page and /api/life-list."""
+import csv
+import io
+import json
 import os
 
 import pytest
@@ -102,6 +105,7 @@ def test_page_renders(life_app):
     resp = app.test_client().get("/life-list")
     assert resp.status_code == 200
     assert b"Life List" in resp.data
+    assert b"Export Life List" in resp.data
 
 
 def test_groups_by_species_and_counts(life_app):
@@ -268,3 +272,69 @@ def test_same_named_species_keywords_dedupe_photos(life_app):
     assert len(photo_ids) == len(set(photo_ids))
     # Workspace-wide distinct-photo count is unaffected.
     assert data["meta"]["photo_count"] == 3
+
+
+def test_life_list_export_json_attachment(life_app):
+    app, _, _ = life_app
+    resp = app.test_client().get("/api/life-list/export?format=json")
+    assert resp.status_code == 200
+    assert resp.headers["Content-Type"] == "application/json"
+    assert "attachment" in resp.headers.get("Content-Disposition", "")
+    assert "vireo-life-list-" in resp.headers.get("Content-Disposition", "")
+
+    data = json.loads(resp.get_data(as_text=True))
+    assert data["meta"]["species_count"] == 2
+    cardinal = _entry(data, "Northern Cardinal")
+    assert cardinal["locations"] == []
+
+
+def test_life_list_export_species_csv_with_locations(life_app):
+    app, _, _ = life_app
+    resp = app.test_client().get(
+        "/api/life-list/export?format=csv&include_locations=1"
+    )
+    assert resp.status_code == 200
+    assert resp.headers["Content-Type"].startswith("text/csv")
+
+    rows = list(csv.DictReader(io.StringIO(resp.get_data(as_text=True))))
+    assert [r["species"] for r in rows] == ["House Sparrow", "Northern Cardinal"]
+    cardinal = next(r for r in rows if r["species"] == "Northern Cardinal")
+    assert cardinal["locations"] == "Backyard"
+    assert cardinal["best_filename"] == "card2.jpg"
+
+
+def test_life_list_export_photo_csv_all_photos(life_app):
+    app, _, ids = life_app
+    resp = app.test_client().get(
+        "/api/life-list/export?format=csv&detail=photos&photos=all"
+    )
+    assert resp.status_code == 200
+
+    rows = list(csv.DictReader(io.StringIO(resp.get_data(as_text=True))))
+    assert [int(r["photo_id"]) for r in rows] == [ids["p3"], ids["p2"], ids["p1"]]
+    assert all(r["locations"] == "" for r in rows)
+
+
+def test_life_list_export_text_and_file_lists(life_app):
+    app, _, _ = life_app
+    client = app.test_client()
+
+    text_resp = client.get("/api/life-list/export?format=txt&include_locations=1")
+    assert text_resp.status_code == 200
+    text = text_resp.get_data(as_text=True)
+    assert "#1 House Sparrow (Passer domesticus)" in text
+    assert "locations: Backyard" in text
+
+    files_resp = client.get("/api/life-list/export?format=file&photos=all")
+    assert files_resp.status_code == 200
+    assert files_resp.get_data(as_text=True).splitlines() == [
+        "sparrow1.jpg",
+        "card2.jpg",
+        "card1.jpg",
+    ]
+
+
+def test_life_list_export_rejects_unknown_format(life_app):
+    app, _, _ = life_app
+    resp = app.test_client().get("/api/life-list/export?format=pdf")
+    assert resp.status_code == 400

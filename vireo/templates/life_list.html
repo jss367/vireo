@@ -13,12 +13,18 @@
   .control-group label { font-size:13px; color:var(--text-secondary); white-space:nowrap; }
   .control-group input[type=search], .control-group select { font-size:13px; padding:4px 8px; background:var(--bg-input); color:var(--text-primary); border:1px solid var(--border-secondary); border-radius:4px; }
   .control-group input[type=search] { width:180px; }
-  .publish-btn { margin-left:auto; border:1px solid var(--accent); background:transparent; color:var(--accent); border-radius:4px; padding:5px 10px; font-size:12px; cursor:pointer; }
+  .lifelist-actions { margin-left:auto; display:flex; gap:8px; align-items:center; }
+  .publish-btn { border:1px solid var(--accent); background:transparent; color:var(--accent); border-radius:4px; padding:5px 10px; font-size:12px; cursor:pointer; }
   .publish-btn:hover { background:rgba(99, 179, 237, 0.08); }
   .publish-path-row { display:flex; gap:8px; align-items:center; }
   .publish-path-row .modal-input { flex:1; }
   .publish-option { display:flex; gap:8px; align-items:flex-start; margin-top:12px; font-size:13px; color:var(--text-secondary); }
   .publish-status { min-height:16px; margin-top:10px; font-size:12px; color:var(--text-secondary); }
+  .export-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  @media (max-width: 640px) {
+    .lifelist-actions { margin-left:0; width:100%; justify-content:flex-end; }
+    .export-grid { grid-template-columns:1fr; }
+  }
 
   .lifelist-meta { padding:8px 24px; font-size:12px; color:var(--text-secondary); }
 
@@ -58,10 +64,53 @@
       <option value="most-photos">Most photos</option>
     </select>
   </div>
-  <button class="publish-btn" onclick="openPublishModal()">Publish Site</button>
+  <div class="lifelist-actions">
+    <button class="publish-btn" onclick="openExportModal()">Export...</button>
+    <button class="publish-btn" onclick="openPublishModal()">Publish Site</button>
+  </div>
 </div>
 
 <div class="lifelist-meta" id="meta"></div>
+
+<div class="modal-overlay" id="exportModal" onclick="if(event.target===this)closeExportModal()">
+  <div class="modal">
+    <h3>Export Life List</h3>
+    <div class="export-grid">
+      <div>
+        <label class="modal-label" for="exportFormat">Format</label>
+        <select id="exportFormat" class="modal-input" onchange="updateExportControls()">
+          <option value="json">JSON data</option>
+          <option value="csv">CSV spreadsheet</option>
+          <option value="txt">Text list</option>
+          <option value="files">Filename list</option>
+        </select>
+      </div>
+      <div id="exportDetailWrap">
+        <label class="modal-label" for="exportDetail">Rows</label>
+        <select id="exportDetail" class="modal-input" onchange="updateExportControls()">
+          <option value="species">Species summary</option>
+          <option value="photos">Photo rows</option>
+        </select>
+      </div>
+      <div id="exportPhotosWrap">
+        <label class="modal-label" for="exportPhotos">Photos</label>
+        <select id="exportPhotos" class="modal-input">
+          <option value="best">Representative photo per species</option>
+          <option value="all">All listed photos</option>
+        </select>
+      </div>
+      <label class="publish-option" style="margin-top:22px;">
+        <input id="exportLocations" type="checkbox">
+        <span>Include location keywords.</span>
+      </label>
+    </div>
+    <div class="publish-status" id="exportStatus"></div>
+    <div class="modal-actions">
+      <button id="exportSubmitBtn" class="modal-btn modal-btn-primary" onclick="downloadLifeListExport()">Export</button>
+      <button class="modal-btn modal-btn-cancel" onclick="closeExportModal()">Cancel</button>
+    </div>
+  </div>
+</div>
 
 <div class="modal-overlay" id="publishModal">
   <div class="modal">
@@ -248,6 +297,48 @@ document.getElementById('speciesSearch').addEventListener('input', debounceRende
 document.getElementById('sortSelect').addEventListener('change', function() {
   if (currentData) render();
 });
+
+function openExportModal() {
+  var modal = document.getElementById('exportModal');
+  var status = document.getElementById('exportStatus');
+  if (status) status.textContent = '';
+  updateExportControls();
+  modal.classList.add('open');
+  setTimeout(function() {
+    var input = document.getElementById('exportFormat');
+    if (input) input.focus();
+  }, 0);
+}
+
+function closeExportModal() {
+  document.getElementById('exportModal').classList.remove('open');
+}
+
+function updateExportControls() {
+  var format = document.getElementById('exportFormat').value;
+  var detailWrap = document.getElementById('exportDetailWrap');
+  var photosWrap = document.getElementById('exportPhotosWrap');
+  var detail = document.getElementById('exportDetail').value;
+  detailWrap.style.display = format === 'csv' ? '' : 'none';
+  photosWrap.style.display = (
+    format === 'files' || (format === 'csv' && detail === 'photos')
+  ) ? '' : 'none';
+}
+
+function downloadLifeListExport() {
+  var format = document.getElementById('exportFormat').value;
+  var detail = document.getElementById('exportDetail').value;
+  var photos = document.getElementById('exportPhotos').value;
+  var includeLocations = document.getElementById('exportLocations').checked ? '1' : '0';
+  var params = new URLSearchParams({
+    format: format,
+    detail: detail,
+    photos: photos,
+    include_locations: includeLocations,
+  });
+  window.location.href = '/api/life-list/export?' + params.toString();
+  closeExportModal();
+}
 
 function openPublishModal() {
   var modal = document.getElementById('publishModal');
