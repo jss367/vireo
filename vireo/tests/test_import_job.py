@@ -3315,3 +3315,103 @@ def test_key_duplicate_links_only_byte_verified_twin_folder(tmp_path):
         "key-collision folder must NOT be scanned by a duplicate-"
         "only import: its bytes were never proven to match the card"
     )
+
+
+def test_hash_duplicate_links_only_byte_verified_twin_folder(tmp_path):
+    """Hash-token duplicate: ``_hash_twin_rows`` returns every catalog
+    row whose stored ``photos.file_hash`` matches the card. The stored
+    hash column reflects the LAST scan, so a stale row can name a
+    folder whose archive file has since been overwritten with unrelated
+    bytes. Only the twin(s) whose CURRENT on-disk bytes we re-hashed
+    and matched are proven duplicates; linking the other rows'
+    folders would pull unrelated/missing archive folders into the
+    active workspace on a duplicate-only import. See PR #1107 review.
+    """
+    from import_dedup import compute_file_hash
+    from import_job import ImportParams, run_import_job
+
+    # Card file whose bytes hash to a known value.
+    card = tmp_path / "card"
+    card.mkdir()
+    card_file = card / "IMG_1300.jpg"
+    Image.new("RGB", (16, 16), "cyan").save(str(card_file))
+    ts = datetime(2026, 6, 20, 11, 30, 0).timestamp()
+    os.utime(str(card_file), (ts, ts))
+    card_hash = compute_file_hash(str(card_file))
+    card_size = os.path.getsize(str(card_file))
+
+    # Two archive folders both cataloged as holding a photo with
+    # file_hash == card_hash. Twin A really does; Twin B was modified
+    # after its scan and now holds different bytes (stale hash row).
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    verified_dir = archive / "verified-hash-twin"
+    verified_dir.mkdir()
+    verified_file = verified_dir / "IMG_1300.jpg"
+    # Real duplicate: same bytes as the card.
+    with open(str(card_file), "rb") as src, open(str(verified_file), "wb") as dst:
+        dst.write(src.read())
+
+    stale_dir = archive / "stale-hash-twin"
+    stale_dir.mkdir()
+    stale_file = stale_dir / "IMG_1300.jpg"
+    # Stale twin: on-disk bytes NO LONGER match card_hash. Same size
+    # (so the size sanity check doesn't reject it) but a byte flipped.
+    stale_bytes = bytearray(card_file.read_bytes())
+    stale_bytes[-1] ^= 0xFF
+    stale_file.write_bytes(bytes(stale_bytes))
+    assert compute_file_hash(str(stale_file)) != card_hash
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    # Catalog both twins with file_hash == card_hash. Both rows appear
+    # in ``_hash_twin_rows`` — but only ``verified_dir`` currently
+    # holds those bytes.
+    for folder_dir in (verified_dir, stale_dir):
+        fid = db.conn.execute(
+            "INSERT INTO folders (path, name, status) VALUES (?, ?, 'ok')",
+            (str(folder_dir), folder_dir.name),
+        ).lastrowid
+        db.conn.execute(
+            "INSERT INTO photos (folder_id, filename, extension, file_size,"
+            " file_hash) VALUES (?, ?, '.jpg', ?, ?)",
+            (fid, "IMG_1300.jpg", card_size, card_hash),
+        )
+    db.conn.commit()
+
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id, ImportParams(
+            sources=[str(card)], destination=str(archive),
+            verify_by_hash=True,
+        ),
+    )
+
+    # The verified twin proves the archive still holds the card's
+    # bytes — a legitimate skip.
+    assert result["copied"] == 0
+    assert result["skipped_duplicate"] == 1
+    assert result["failed"] == 0
+    assert result["safe_to_format"] is True
+
+    ws_folder_is_root = {
+        row["path"]: row["is_root"]
+        for row in db.conn.execute(
+            "SELECT f.path, wf.is_root FROM workspace_folders wf "
+            "JOIN folders f ON f.id = wf.folder_id "
+            "WHERE wf.workspace_id = ?",
+            (ws_id,),
+        )
+    }
+    # The byte-verified twin's folder is a user-facing workspace root
+    # (``is_root=1``) — the import proved the archive holds the card's
+    # bytes and links its folder into the workspace UI.
+    assert ws_folder_is_root.get(str(verified_dir)) == 1
+    # The stale-hash-twin folder was NEVER byte-verified against the
+    # card this run. Before the fix, the hash path passed the whole
+    # ``twin_rows`` set to ``_linkable_twin_dirs`` on the assumption
+    # that ``photos.file_hash`` is authoritative, so this folder was
+    # workspace-linked as its own top-level root, pulling an unrelated
+    # archive folder into the workspace UI. It must NOT surface as a
+    # workspace root here.
+    assert ws_folder_is_root.get(str(stale_dir), 0) == 0
