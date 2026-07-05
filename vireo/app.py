@@ -14763,6 +14763,122 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         return jsonify({"job_id": job_id})
 
+    @app.route("/api/jobs/import-photos", methods=["POST"])
+    def api_job_import_photos():
+        """Photo import job: copy card -> archive, hash-verify, catalog
+        incrementally (import/process split PR 2).
+
+        Distinct from ``POST /api/jobs/import`` (Lightroom catalog import),
+        which keeps its route and shape. No pipeline slot involvement —
+        imports are I/O-bound and must not queue behind a GPU run; that
+        coupling is exactly what the split removes.
+        """
+        from image_loader import is_excluded_scan_path
+        from ingest import _is_unsafe_path
+
+        body = request.get_json(silent=True) or {}
+
+        sources = body.get("sources")
+        if isinstance(sources, str):
+            sources = [sources]
+        if not sources or not isinstance(sources, list) or not all(
+            isinstance(s, str) and s for s in sources
+        ):
+            return json_error("sources must be a non-empty list of paths")
+        for s in sources:
+            # Pre-stat rejection of other-app bundles: os.path.isdir on a
+            # .photoslibrary path itself trips the macOS TCC prompt.
+            if is_excluded_scan_path(s):
+                return json_error(
+                    f"source is inside a macOS app-managed library and "
+                    f"cannot be imported: {s}"
+                )
+            if not os.path.isdir(s):
+                return json_error(f"source directory not found: {s}")
+
+        destination = body.get("destination")
+        if not destination:
+            return json_error("destination required")
+        if not os.path.isabs(destination):
+            return json_error("destination must be an absolute path")
+
+        folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
+        if folder_template and _is_unsafe_path(folder_template):
+            return json_error(
+                "folder_template must be a relative path without '..' or "
+                "backslashes"
+            )
+
+        db = _get_db()
+        # After-import strategy: validated at enqueue (failing the chain
+        # hours later is the old pipeline's mistake). Key present -> null
+        # means import-only, a string must name a real strategy. Key
+        # omitted -> default from the workspace's pipeline.default_strategy
+        # (nullable, same vocabulary). Stored in the job config for the
+        # PR 3 chaining hook; the import job itself never reads it.
+        if "after_import" in body:
+            after_import = body.get("after_import")
+        else:
+            import config as cfg
+
+            effective_cfg = db.get_effective_config(cfg.load())
+            after_import = (
+                effective_cfg.get("pipeline", {}).get("default_strategy")
+            )
+        if after_import is not None:
+            if not isinstance(after_import, str):
+                return json_error(
+                    "after_import must be a strategy name or null, got "
+                    f"{type(after_import).__name__}"
+                )
+            from process_strategies import resolve_strategy
+
+            try:
+                resolve_strategy(after_import)
+            except ValueError as e:
+                return json_error(str(e))
+
+        file_types = body.get("file_types", "both")
+        skip_duplicates = bool(body.get("skip_duplicates", True))
+        verify_by_hash = bool(body.get("verify_by_hash", False))
+        recursive = bool(body.get("recursive", True))
+
+        runner = app._job_runner
+        active_ws = db._active_workspace_id
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+
+        job_config = {
+            "sources": sources,
+            "destination": destination,
+            "folder_template": folder_template,
+            "file_types": file_types,
+            "skip_duplicates": skip_duplicates,
+            "verify_by_hash": verify_by_hash,
+            "recursive": recursive,
+            "after_import": after_import,
+        }
+
+        def work(job):
+            from import_job import ImportParams, run_import_job
+
+            params = ImportParams(
+                sources=sources,
+                destination=destination,
+                folder_template=folder_template,
+                file_types=file_types,
+                skip_duplicates=skip_duplicates,
+                verify_by_hash=verify_by_hash,
+                recursive=recursive,
+                after_import=after_import,
+                vireo_dir=vireo_dir,
+            )
+            return run_import_job(job, runner, db_path, active_ws, params)
+
+        job_id = runner.start(
+            "import", work, config=job_config, workspace_id=active_ws,
+        )
+        return jsonify({"job_id": job_id})
+
     @app.route("/api/jobs/sync", methods=["POST"])
     def api_job_sync():
         runner = app._job_runner

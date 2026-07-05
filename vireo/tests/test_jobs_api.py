@@ -3112,3 +3112,137 @@ def test_pipeline_folder_ids_treats_empty_sources_as_omitted(
             "folder_ids": [root_id], "strategy": "quick_look", **extra,
         })
         assert resp.status_code == 200, resp.get_json()
+
+
+# --- POST /api/jobs/import-photos (import job) ---------------------------
+
+def _import_card(tmp_path, names=("DSC_0001.jpg",)):
+    card = tmp_path / "import-card"
+    card.mkdir(exist_ok=True)
+    for name in names:
+        Image.new("RGB", (16, 16), "red").save(str(card / name))
+    return str(card)
+
+
+def test_lightroom_import_route_not_shadowed(app_and_db):
+    """POST /api/jobs/import (Lightroom catalogs) keeps its contract —
+    the photo import route is a NEW endpoint, not a rename."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/jobs/import", json={})
+    assert resp.status_code == 400
+    assert "catalogs" in resp.get_json()["error"]
+
+
+def test_import_photos_happy_path(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    dest = str(tmp_path / "archive")
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": dest,
+        "after_import": "cull_ready",
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job_id = resp.get_json()["job_id"]
+    assert job_id.startswith("import-")
+
+    config = _job_config(client, job_id)
+    assert config["sources"] == [card]
+    assert config["destination"] == dest
+    assert config["folder_template"] == "%Y/%Y-%m-%d"
+    assert config["after_import"] == "cull_ready"
+
+    job = wait_for_job_via_client(client, job_id)
+    assert job["status"] == "completed", job
+    result = job["result"]
+    assert result["discovered"] == 1
+    assert result["copied"] == 1
+    assert result["safe_to_format"] is True
+
+
+def test_import_photos_null_after_import_is_import_only(app_and_db, tmp_path):
+    """after_import: null means import-only (PR 3's hook short-circuits) —
+    same nullable vocabulary as pipeline.default_strategy."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    config = _job_config(client, resp.get_json()["job_id"])
+    assert config["after_import"] is None
+
+
+@pytest.mark.parametrize("bad", ["yolo", "none"])
+def test_import_photos_invalid_after_import_400(app_and_db, tmp_path, bad):
+    """Invalid strategy names fail at enqueue, not at completion — failing
+    the chain hours later is the old pipeline's mistake."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": bad,
+    })
+    assert resp.status_code == 400
+    assert "unknown strategy" in resp.get_json()["error"]
+
+
+def test_import_photos_after_import_defaults_from_workspace(
+        app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    ws_id = db._active_workspace_id
+    db.update_workspace(ws_id, config_overrides={
+        "pipeline": {"default_strategy": "cull_ready"},
+    })
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+    })
+    assert resp.status_code == 200, resp.get_json()
+    config = _job_config(client, resp.get_json()["job_id"])
+    assert config["after_import"] == "cull_ready"
+
+
+def test_import_photos_validation_400s(app_and_db, tmp_path):
+    app, _ = app_and_db
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    dest = str(tmp_path / "archive")
+
+    # Missing sources.
+    resp = client.post("/api/jobs/import-photos", json={"destination": dest})
+    assert resp.status_code == 400
+    # Missing destination.
+    resp = client.post("/api/jobs/import-photos", json={"sources": [card]})
+    assert resp.status_code == 400
+    # Relative destination.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": "relative/archive",
+    })
+    assert resp.status_code == 400
+    # Nonexistent source directory.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [str(tmp_path / "nope")], "destination": dest,
+    })
+    assert resp.status_code == 400
+    # macOS app-managed library as source (pre-stat rejection).
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    bundle.mkdir()
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [str(bundle)], "destination": dest,
+    })
+    assert resp.status_code == 400
+    assert "macos" in resp.get_json()["error"].lower()
+    # Unsafe folder template.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": dest,
+        "folder_template": "../escape",
+    })
+    assert resp.status_code == 400

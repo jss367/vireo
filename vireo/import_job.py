@@ -553,5 +553,9 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         "unsafe_files": unsafe_files,
         "folders": folder_counts,
         "cancelled": cancelled,
+        # JobRunner's mixed-outcome convention: a run with any failed file
+        # is recorded "failed" (with per-file reasons), never "completed".
+        "ok": failed == 0,
+        "errors": [f"{u['path']}: {u['reason']}" for u in unsafe_files],
     }
     return result
