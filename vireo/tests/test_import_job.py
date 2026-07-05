@@ -1343,6 +1343,162 @@ def test_wc_extraction_falls_back_to_archive_when_card_vanishes(
     )
 
 
+def test_wc_extraction_ignores_card_override_when_size_no_longer_matches(
+        tmp_path, monkeypatch):
+    """The override existence check is not enough: if the card was reused
+    (mount point holds a different card, or the same file rewritten with
+    different content), reading it caches a working copy for the WRONG
+    bytes — and because ``working_copy_path`` gets set, normal backfill
+    won't regenerate from the archive. The extractor must compare the
+    override's on-disk size against the row's file_size and fall back to
+    the verified archive copy on mismatch.
+    """
+    import import_job
+    import scanner
+
+    # Card holds a RAW file with a distinctive size.
+    card = tmp_path / "card"
+    card.mkdir()
+    Image.new("RGB", (16, 16), "red").save(str(card / "DSC_2001.jpg"))
+    raw_bytes = (card / "DSC_2001.jpg").read_bytes() + b"RAW-SENSOR-DATA"
+    (card / "DSC_2001.NEF").write_bytes(raw_bytes)
+    (card / "DSC_2001.jpg").unlink()
+    ts = datetime(2026, 7, 5, 10, 0, 0).timestamp()
+    os.utime(str(card / "DSC_2001.NEF"), (ts, ts))
+    original_size = os.path.getsize(str(card / "DSC_2001.NEF"))
+
+    calls = []
+
+    def fake_extract(source_path, output_path, max_size=4096, quality=92):
+        calls.append(str(source_path))
+        if not os.path.isfile(source_path):
+            return False
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "wb") as f:
+            f.write(b"jpeg-bytes")
+        return True
+
+    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+
+    vireo_dir = tmp_path / "vireo"
+    (vireo_dir / "working").mkdir(parents=True)
+    dest = str(tmp_path / "archive")
+
+    # Between copy+catalog and the end-of-run extraction, rewrite the
+    # card file with DIFFERENT bytes (and a different size). This mimics
+    # the card being reused for a different shoot, or the same file being
+    # rewritten by the camera. os.path.isfile still returns True — only
+    # a size compare catches it.
+    real_extract_wc = scanner._extract_working_copies
+
+    def rewrite_then_extract(*a, **kw):
+        card_raw = card / "DSC_2001.NEF"
+        card_raw.write_bytes(b"COMPLETELY DIFFERENT CONTENT")
+        assert os.path.getsize(str(card_raw)) != original_size
+        return real_extract_wc(*a, **kw)
+
+    monkeypatch.setattr(
+        "scanner._extract_working_copies", rewrite_then_extract,
+    )
+
+    _db, _ws_id, result = _run_import(tmp_path, import_job.ImportParams(
+        sources=[str(card)], destination=dest,
+        vireo_dir=str(vireo_dir),
+    ))
+
+    assert result["copied"] == 1
+
+    # The extractor must have read the ARCHIVE path (verified bytes),
+    # never the rewritten card path. Without the size check the extractor
+    # would happily read the card's new bytes and cache a wrong working
+    # copy — indistinguishable in the WC file from a real success.
+    assert calls, "extractor should have run"
+    archive_reads = [c for c in calls if str(card) not in c]
+    card_reads = [c for c in calls if str(card) in c]
+    assert archive_reads, (
+        f"extractor should have read from the archive (size mismatch → "
+        f"fall back to catalog primary); got calls={calls}"
+    )
+    assert not card_reads, (
+        f"extractor should not have read the rewritten card path (size "
+        f"no longer matches file_size); got card reads={card_reads}"
+    )
+
+
+def test_wc_extraction_retries_from_archive_when_card_read_fails(
+        tmp_path, monkeypatch):
+    """The size check can pass (card intact when we peek), then reading
+    the file can still fail (transient I/O error, card unmounted right
+    after the stat, permission blip). In that case the row would be
+    marked ``working_copy_failed_at`` even though the archive copy is
+    hash-verified and available; the extractor must retry from the
+    catalog primary before giving up.
+    """
+    import import_job
+    import scanner
+
+    card = tmp_path / "card"
+    card.mkdir()
+    Image.new("RGB", (16, 16), "red").save(str(card / "DSC_3001.jpg"))
+    raw_bytes = (card / "DSC_3001.jpg").read_bytes() + b"RAW-SENSOR-DATA"
+    (card / "DSC_3001.NEF").write_bytes(raw_bytes)
+    (card / "DSC_3001.jpg").unlink()
+    ts = datetime(2026, 7, 5, 11, 0, 0).timestamp()
+    os.utime(str(card / "DSC_3001.NEF"), (ts, ts))
+
+    card_raw_path = str(card / "DSC_3001.NEF")
+    calls = []
+
+    def fake_extract(source_path, output_path, max_size=4096, quality=92):
+        calls.append(str(source_path))
+        # Card-side read always fails (simulate an unreadable RAW /
+        # transient card I/O error); archive-side read succeeds.
+        if str(source_path) == card_raw_path:
+            return False
+        if not os.path.isfile(source_path):
+            return False
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "wb") as f:
+            f.write(b"jpeg-bytes")
+        return True
+
+    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+
+    vireo_dir = tmp_path / "vireo"
+    (vireo_dir / "working").mkdir(parents=True)
+    dest = str(tmp_path / "archive")
+
+    db, _ws_id, result = _run_import(tmp_path, import_job.ImportParams(
+        sources=[str(card)], destination=dest,
+        vireo_dir=str(vireo_dir),
+    ))
+
+    assert result["copied"] == 1
+
+    # The extractor tried the card (size matched), failed, then retried
+    # from the archive and succeeded. Both reads visible in the call log.
+    assert card_raw_path in calls, (
+        f"expected the card override to be tried first; got calls={calls}"
+    )
+    archive_reads = [c for c in calls if c != card_raw_path]
+    assert archive_reads, (
+        f"expected retry from archive after card read failed; "
+        f"got calls={calls}"
+    )
+
+    # The photo row must show a successful working_copy_path — the retry
+    # from archive worked, so no failure marker.
+    row = db.conn.execute(
+        "SELECT working_copy_path, working_copy_failed_at FROM photos"
+    ).fetchone()
+    assert row["working_copy_path"] is not None, (
+        "expected working_copy_path set after archive-retry success"
+    )
+    assert row["working_copy_failed_at"] is None, (
+        "expected no failure marker after archive-retry success"
+    )
+
+
 def test_copy_and_hash_verify_falls_back_when_hardlinks_unsupported(
         tmp_path, monkeypatch):
     """Destinations on FAT/exFAT and some SMB/NFS mounts reject os.link

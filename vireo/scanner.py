@@ -728,6 +728,25 @@ def _subtree_like_pattern(path, sep=None):
 _FAILURE_RETRY_AFTER = "-24 hours"
 
 
+def _override_size_matches(override_path, expected_size):
+    """True when ``source_paths`` override is safe to substitute for the archive.
+
+    The card-side override is trusted iff both a size is known for the
+    catalog row (``expected_size`` non-null) AND the file at
+    ``override_path`` currently has exactly that size. Byte-identical files
+    are the same size — a mismatch (or an OSError from an unmounted card)
+    proves the override no longer holds the copied bytes, so extraction
+    falls back to the verified archive path instead of caching a working
+    copy for the wrong content.
+    """
+    if expected_size is None:
+        return False
+    try:
+        return os.stat(override_path).st_size == int(expected_size)
+    except OSError:
+        return False
+
+
 def _working_copy_candidate_predicate(wc_max_size, alias=""):
     """Build the WHERE-clause fragment selecting photos eligible for working-copy
     extraction, plus its bind parameters.
@@ -872,6 +891,7 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
         f"""
         SELECT p.id, p.filename, p.companion_path, p.working_copy_path,
                p.extension, p.width, p.height, p.exif_data, p.file_mtime,
+               p.file_size,
                f.path AS folder_path
           FROM photos p
           JOIN folders f ON f.id = p.folder_id
@@ -911,31 +931,52 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
         # companion so an extractable JPEG copy isn't refused outright.
         catalog_primary = os.path.join(row["folder_path"], row["filename"])
         primary_path = catalog_primary
+        primary_override_used = False
         if source_paths:
             # ``source_paths`` overrides the catalog path with the card-side
             # source so extraction reads local card bytes instead of the
-            # just-written archive copy over a slow NAS. But if the card was
-            # unmounted between copy and the end-of-run extraction pass, the
-            # override points at a dead path — reading it would record a
-            # failure marker even though the verified archive copy is
-            # available. Only substitute the alternate source when it still
-            # exists on disk; otherwise keep the catalog path.
+            # just-written archive copy over a slow NAS. Existence alone is
+            # not enough: if the card was unmounted, its mount point was
+            # reused for a different card, or the source file itself was
+            # rewritten between copy and this extraction pass, the override
+            # points at bytes that no longer match what the archive holds.
+            # Reading them here would cache a working copy for the wrong
+            # image and — because ``working_copy_path`` gets set — normal
+            # backfill would never regenerate it from the archive. Verify
+            # the override's size against the file_size scan() recorded for
+            # this row (identical bytes must have identical size); anything
+            # else falls back to the verified archive copy. row["file_size"]
+            # is null on legacy rows that never made it through the sizing
+            # scan — those also fall back rather than trust an unverifiable
+            # override.
             override = source_paths.get(catalog_primary)
-            if override and os.path.isfile(override):
+            if override and _override_size_matches(override, row["file_size"]):
                 primary_path = override
+                primary_override_used = True
         primary_is_raw = (
             os.path.splitext(row["filename"])[1].lower() in RAW_EXTENSIONS
         )
         companion_path = None
+        catalog_companion = None
+        companion_override_used = False
         if row["companion_path"]:
             catalog_companion = os.path.join(
                 row["folder_path"], row["companion_path"],
             )
             candidate = catalog_companion
             if source_paths:
+                # Companion size is not carried on the RAW's row (pairing
+                # merged the JPEG's photos row into the RAW's), so we can't
+                # size-verify the companion override the way we do the
+                # primary. Track override use here and retry from the
+                # verified archive companion on extraction failure below;
+                # that keeps a rewritten card from silently poisoning a
+                # working copy while still preferring fast local reads
+                # when the override matches.
                 override = source_paths.get(catalog_companion)
                 if override and os.path.isfile(override):
                     candidate = override
+                    companion_override_used = True
             if os.path.isfile(candidate):
                 companion_path = candidate
 
@@ -949,6 +990,34 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
         # extract_working_copy is slow (RAW decode + JPEG encode); run it
         # before any DB write so no transaction is open while it runs.
         ok = extract_working_copy(source, wc_abs, max_size=wc_max_size, quality=wc_quality)
+        # Card-side override failed but the verified archive copy exists
+        # — retry from the archive before falling through to the RAW→
+        # companion fallback or recording a failure marker. Without this,
+        # a transient card I/O error (or a card that was unmounted just
+        # after the size check above) would leave the row marked failed
+        # even though the archive copy has the correct bytes.
+        if not ok:
+            retry_source = None
+            if source == primary_path and primary_override_used:
+                retry_source = catalog_primary
+            elif source == companion_path and companion_override_used:
+                retry_source = catalog_companion
+            if retry_source and os.path.isfile(retry_source):
+                log.info(
+                    "Card-side working-copy extraction failed for photo "
+                    "%s (%s); retrying from archive %s",
+                    row["id"], source, retry_source,
+                )
+                source = retry_source
+                if retry_source == catalog_primary:
+                    primary_path = catalog_primary
+                    primary_override_used = False
+                else:
+                    companion_path = catalog_companion
+                    companion_override_used = False
+                ok = extract_working_copy(
+                    source, wc_abs, max_size=wc_max_size, quality=wc_quality,
+                )
         raw_failed_then_companion = False
         # libraw returns an embedded JPEG when it can't demosaic a RAW; that
         # preview is often a fraction of sensor resolution, so ok=True here
@@ -1019,6 +1088,29 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
             ok = extract_working_copy(
                 source, wc_abs, max_size=wc_max_size, quality=wc_quality,
             )
+            # Companion attempt used a card override and failed — retry
+            # from the verified archive companion before recording failure.
+            # Same rationale as the primary retry above: a transient card
+            # I/O error or an unmounted card must not force this row into
+            # a persistent failure marker when the archive copy is available.
+            if (
+                not ok
+                and companion_override_used
+                and catalog_companion
+                and os.path.isfile(catalog_companion)
+            ):
+                log.info(
+                    "Card-side companion extraction failed for photo %s "
+                    "(%s); retrying from archive companion %s",
+                    row["id"], source, catalog_companion,
+                )
+                source = catalog_companion
+                companion_path = catalog_companion
+                companion_override_used = False
+                ok = extract_working_copy(
+                    source, wc_abs,
+                    max_size=wc_max_size, quality=wc_quality,
+                )
             raw_failed_then_companion = ok
         if ok:
             if raw_failed_then_companion:
