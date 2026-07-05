@@ -1742,6 +1742,114 @@ def test_wc_extraction_retries_from_archive_when_card_read_fails(
     )
 
 
+def test_reclassified_landed_entry_skips_card_source_override(
+        tmp_path, monkeypatch):
+    """A landed entry reclassified as failed by the hash-stamping loop
+    (because the archive file was mutated between ``copy_and_hash_verify``
+    and the restricted scan) must not contribute a card-side override to
+    the deferred ``_extract_working_copies`` pass. Without the filter the
+    extractor would cache a working copy from the still-clean card bytes
+    onto a photo whose catalog ``file_hash`` describes the mutated archive
+    bytes instead — leaving preview/edit renders that don't match the
+    archive contents even though the import was reported unsafe.
+    """
+    import scanner
+    from import_job import ImportParams
+
+    # RAW files (.NEF) are WC-extraction candidates regardless of size;
+    # tiny JPEGs would be skipped by the working-copy candidate filter,
+    # so RAWs are the smallest fixture that actually exercises the
+    # extractor. Seed the RAW body with real JPEG bytes plus a trailing
+    # tag so the two "RAW"s have distinct content.
+    card = tmp_path / "card"
+    card.mkdir()
+    seed = card / "_seed.jpg"
+    Image.new("RGB", (16, 16), "red").save(str(seed))
+    seed_bytes = seed.read_bytes()
+    seed.unlink()
+    for name, mtime in (
+        ("DSC_9100.NEF", datetime(2026, 7, 3, 10, 0, 0)),
+        ("DSC_9101.NEF", datetime(2026, 7, 3, 11, 0, 0)),
+    ):
+        (card / name).write_bytes(seed_bytes + name.encode())
+        ts = mtime.timestamp()
+        os.utime(str(card / name), (ts, ts))
+
+    archive = tmp_path / "archive"
+    calls = []
+
+    def fake_extract(source_path, output_path, max_size=4096, quality=92):
+        calls.append(str(source_path))
+        if not os.path.isfile(source_path):
+            return False
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "wb") as f:
+            f.write(b"jpeg-bytes")
+        return True
+
+    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+
+    # Wrap ``scanner.scan`` so DSC_9101's archive bytes are mutated
+    # after ``copy_and_hash_verify`` succeeded but BEFORE scan reads
+    # them. scan() then hashes and records the mutated bytes; the
+    # hash-stamping loop's mismatch branch reclassifies DSC_9101 from
+    # ``copied`` to ``failed``. DSC_9100 stays untouched and lands
+    # cleanly. ``run_import_job`` does ``from scanner import scan``
+    # inside the function, so patching on the scanner module is picked
+    # up on each invocation (mirrors ``test_dup_link_scan_failure_...``
+    # above).
+    real_scan = scanner.scan
+
+    def scan_after_mutating(*args, **kwargs):
+        for root, _dirs, files in os.walk(str(archive)):
+            for name in files:
+                if name == "DSC_9101.NEF":
+                    with open(os.path.join(root, name), "r+b") as fh:
+                        fh.write(b"MUTATED-ARCHIVE-BYTES")
+        return real_scan(*args, **kwargs)
+
+    monkeypatch.setattr(scanner, "scan", scan_after_mutating)
+
+    vireo_dir = tmp_path / "vireo"
+    (vireo_dir / "working").mkdir(parents=True)
+
+    _db, _ws_id, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)], destination=str(archive),
+        vireo_dir=str(vireo_dir),
+    ))
+
+    assert result["copied"] == 1, result
+    assert result["failed"] == 1, result
+    assert result["safe_to_format"] is False
+    assert any("DSC_9101" in u["path"] for u in result["unsafe_files"]), (
+        f"expected DSC_9101 in unsafe_files: {result['unsafe_files']!r}"
+    )
+
+    # DSC_9100 is a successful landing — it should still use its
+    # card-side override (the whole point of source_paths). This anchors
+    # the negative assertion below: the filter narrows to reclassified
+    # entries and does not blanket-drop the override for the batch.
+    card_reads_9100 = [
+        c for c in calls if "DSC_9100" in c and str(card) in c
+    ]
+    assert card_reads_9100, (
+        f"successful entry should have used card-side override; "
+        f"got calls={calls}"
+    )
+
+    # DSC_9101 was reclassified: the extractor must NEVER be told to
+    # read the still-clean card bytes. It may still read the mutated
+    # archive path (that's fine — it matches whatever the catalog now
+    # holds), but the card path is off-limits for this row.
+    card_reads_9101 = [
+        c for c in calls if "DSC_9101" in c and str(card) in c
+    ]
+    assert not card_reads_9101, (
+        f"reclassified entry must not contribute a card override; "
+        f"got calls={calls}"
+    )
+
+
 def test_copy_and_hash_verify_falls_back_when_hardlinks_unsupported(
         tmp_path, monkeypatch):
     """Destinations on FAT/exFAT and some SMB/NFS mounts reject os.link

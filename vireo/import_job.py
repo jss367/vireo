@@ -743,6 +743,18 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                     )
                 landed = []
 
+            # dest_paths that hash-stamping reclassified from
+            # copied/skipped_duplicate to failed. The entries stay in
+            # ``landed`` (mutating a list during its own iteration is
+            # error-prone), so we filter them out of the working-copy
+            # override map below — otherwise the deferred
+            # ``_extract_working_copies`` would read card-side bytes for
+            # a photo whose catalog row is missing (JPEG-pair miss aside)
+            # or whose archive bytes no longer match what we copied, and
+            # cache a working copy that doesn't correspond to what the
+            # rest of the app sees at the archive path. See PR #1107 review.
+            reclassified_landed_paths = set()
+
             # Stamp the verified hashes in the integrity-audit vocabulary,
             # cross-checked against what scan() stored.
             for entry in landed:
@@ -773,6 +785,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                     _reclassify_landed_failed(
                         rel, entry, "not cataloged after scan",
                     )
+                    reclassified_landed_paths.add(dest_path)
                     continue
                 if row["file_hash"] == verified_hash:
                     db.update_photo_hash_check(
@@ -797,6 +810,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                         "destination changed between copy verification and "
                         "catalog scan (hash mismatch)",
                     )
+                    reclassified_landed_paths.add(dest_path)
             db.conn.commit()
 
             # Accumulate the card-source mapping for the deferred
@@ -810,6 +824,15 @@ def run_import_job(job, runner, db_path, workspace_id, params):
             if params.vireo_dir:
                 for entry in landed:
                     dest_path = entry[0]
+                    if dest_path in reclassified_landed_paths:
+                        # Reclassified to failed by hash stamping above
+                        # (missing row or archive-vs-copy hash mismatch).
+                        # Skipping the card override lets the WC extractor
+                        # fall back to whatever the archive currently
+                        # holds — matching the catalog's view — instead
+                        # of caching a WC of bytes the archive no longer
+                        # has.
+                        continue
                     src_path = entry[2]
                     exp_size = entry[4]
                     exp_mtime_ns = entry[5]
