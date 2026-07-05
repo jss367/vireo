@@ -2699,6 +2699,15 @@ _ABS_DEST = os.path.abspath("/abs/dest")
             {"local_processing": True},
             "local_processing requires a destination or a remote target",
         ),
+        # Non-boolean miss_enabled — the type-check must fire BEFORE
+        # ``db.add_collection`` runs. Previously the check sat after
+        # materialization, so a rejected request like
+        # ``{"folder_ids": [...], "miss_enabled": "false"}`` left a stray
+        # "Process …" row behind.
+        (
+            {"miss_enabled": "false"},
+            "miss_enabled",
+        ),
     ],
 )
 def test_pipeline_folder_ids_leaves_no_stray_collection_on_400(

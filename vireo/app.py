@@ -16857,6 +16857,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if _is_unsafe_path(folder_template):
                 return json_error("folder_template must be a relative path without '..' or backslashes")
 
+        # ``miss_enabled`` is tri-state (None / True / False) so ``body.get``
+        # can't apply a default the way boolean skip_* flags do. Validate it
+        # explicitly instead: pipeline_job.py branches on
+        # ``params.miss_enabled is not None`` and then on truthiness, so a
+        # non-bool value like the string "false" would flow through as
+        # truthy — a caller expecting misses off would get them on.
+        #
+        # Validate BEFORE the folder-scope collection is materialized so a
+        # bad value 400s cleanly; otherwise ``db.add_collection`` commits
+        # first and the rejected request leaves a stray "Process …" row.
+        miss_enabled_body = body.get("miss_enabled")
+        if miss_enabled_body is not None and not isinstance(miss_enabled_body, bool):
+            return json_error(
+                f"miss_enabled must be boolean, got "
+                f"{type(miss_enabled_body).__name__}"
+            )
+
         # All request validation has passed — safe to materialize the
         # folder-scope collection row now. Deferring this insert avoids the
         # stray "Process …" collection that would linger in the workspace
@@ -16885,19 +16902,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             dict(remote_archive_config["target"])
             if remote_archive_config is not None else None
         )
-
-        # ``miss_enabled`` is tri-state (None / True / False) so ``body.get``
-        # can't apply a default the way boolean skip_* flags do. Validate it
-        # explicitly instead: pipeline_job.py branches on
-        # ``params.miss_enabled is not None`` and then on truthiness, so a
-        # non-bool value like the string "false" would flow through as
-        # truthy — a caller expecting misses off would get them on.
-        miss_enabled_body = body.get("miss_enabled")
-        if miss_enabled_body is not None and not isinstance(miss_enabled_body, bool):
-            return json_error(
-                f"miss_enabled must be boolean, got "
-                f"{type(miss_enabled_body).__name__}"
-            )
         params = PipelineParams(
             collection_id=collection_id,
             source=source,
