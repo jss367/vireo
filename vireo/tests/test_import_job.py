@@ -241,6 +241,128 @@ def test_catalog_never_references_missing_files(tmp_path):
     assert len(rows) == 1
     for r in rows:
         assert os.path.isfile(os.path.join(r["folder_path"], r["filename"]))
+    # A failed copy means the card is NOT safe to format, with the
+    # failure named.
+    assert result["safe_to_format"] is False
+    assert len(result["unsafe_files"]) == 1
+    assert "DSC_0011" in result["unsafe_files"][0]["path"]
+    assert result["unsafe_files"][0]["reason"]
+
+
+# --- safe-to-format ledger ----------------------------------------------
+
+def test_fresh_import_is_safe_to_format(tmp_path):
+    from import_job import ImportParams
+
+    card = _make_card(tmp_path, [
+        ("DSC_0020.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+        ("DSC_0021.jpg", datetime(2026, 7, 3, 11, 0, 0), "green"),
+    ])
+    _, _, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)], destination=str(tmp_path / "archive"),
+    ))
+    assert result["safe_to_format"] is True
+    assert result["unsafe_files"] == []
+
+
+def test_hash_backed_duplicate_is_safe_to_format(tmp_path):
+    """A byte-identical twin already cataloged means the card file's bytes
+    verifiably exist — safe."""
+    from import_dedup import compute_file_hash
+    from import_job import ImportParams
+
+    archive = tmp_path / "archive"
+    dest_dir = archive / "2026" / "2026-07-03"
+    dest_dir.mkdir(parents=True)
+    dest_file = dest_dir / "IMG_0300.jpg"
+    Image.new("RGB", (16, 16), "red").save(str(dest_file))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES (?, ?, 'ok')",
+        (str(dest_dir), dest_dir.name),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, extension, file_size,"
+        " file_hash) VALUES (?, ?, '.jpg', ?, ?)",
+        (fid, "IMG_0300.jpg", os.path.getsize(str(dest_file)),
+         compute_file_hash(str(dest_file))),
+    )
+    db.conn.commit()
+
+    card = tmp_path / "card"
+    card.mkdir()
+    import shutil
+    shutil.copy2(str(dest_file), str(card / "IMG_0300.jpg"))
+
+    from import_job import run_import_job
+    result = run_import_job(_make_job(), FakeRunner(), db_path, ws_id,
+                            ImportParams(sources=[str(card)],
+                                         destination=str(archive)))
+    assert result["skipped_duplicate"] == 1
+    assert result["safe_to_format"] is True
+
+
+def test_key_match_with_different_bytes_imports_as_distinct(tmp_path):
+    """A metadata-only ("key") match against a cataloged twin whose bytes
+    differ must NOT be skipped: the card's bytes were never verified
+    anywhere, so skipping would let the safe-to-format pill go green while
+    the card holds the only copy. The file imports as a distinct photo."""
+    from import_job import ImportParams
+    from PIL.ExifTags import Base as ExifBase
+
+    dt = datetime(2026, 5, 1, 10, 15, 30)
+
+    # Card file with a trustworthy EXIF capture time.
+    card = tmp_path / "card"
+    card.mkdir()
+    card_file = card / "IMG_0400.jpg"
+    img = Image.new("RGB", (16, 16), "red")
+    exif = img.getexif()
+    exif[ExifBase.DateTimeOriginal] = dt.strftime("%Y:%m:%d %H:%M:%S")
+    img.save(str(card_file), exif=exif)
+    card_bytes = card_file.read_bytes()
+
+    # Cataloged twin: same name, same size, same trusted capture time —
+    # different bytes (last byte flipped; only ever hashed, never decoded).
+    library = tmp_path / "library"
+    library.mkdir()
+    twin_file = library / "IMG_0400.jpg"
+    twin_bytes = card_bytes[:-1] + bytes([card_bytes[-1] ^ 0xFF])
+    twin_file.write_bytes(twin_bytes)
+    assert len(twin_bytes) == len(card_bytes)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES (?, ?, 'ok')",
+        (str(library), "library"),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, extension, file_size,"
+        " timestamp) VALUES (?, ?, '.jpg', ?, ?)",
+        (fid, "IMG_0400.jpg", len(twin_bytes), "2026-05-01T10:15:30"),
+    )
+    db.conn.commit()
+
+    archive = tmp_path / "archive"
+    from import_job import run_import_job
+    result = run_import_job(_make_job(), FakeRunner(), db_path, ws_id,
+                            ImportParams(sources=[str(card)],
+                                         destination=str(archive)))
+
+    # Imported as a fresh distinct photo, not skipped.
+    assert result["copied"] == 1
+    assert result["skipped_duplicate"] == 0
+    dest = archive / "2026" / "2026-05-01" / "IMG_0400.jpg"
+    assert dest.read_bytes() == card_bytes
+    # Two catalog rows now: the seeded twin and the new import.
+    assert len(_photo_rows(db)) == 2
+    # The copy verified, so the card is safe.
+    assert result["safe_to_format"] is True
 
 
 def test_copy_and_hash_verify_roundtrip(tmp_path):

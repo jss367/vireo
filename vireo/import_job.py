@@ -276,7 +276,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     verified = 0
     skipped_duplicate = 0
     failed = 0
-    failed_files = []          # [{path, reason}]
+    unsafe_files = []          # [{path, reason}] — failed copies etc.
     folder_counts = {}         # rel folder -> counts for the PR 3 UI
     emitted = 0
     cancelled = False
@@ -295,7 +295,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         nonlocal failed
         failed += 1
         _counts(rel)["failed"] += 1
-        failed_files.append({"path": str(source_file), "reason": reason})
+        unsafe_files.append({"path": str(source_file), "reason": reason})
         log.warning("Import failed for %s: %s", source_file, reason)
 
     for rel, batch in batches:
@@ -533,13 +533,24 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         ),
     )
 
+    # Safe to format iff every discovered file reached a verified
+    # terminal bucket: hash-verified fresh copy, or duplicate whose bytes
+    # verifiably exist (hash-backed match, or key match re-hashed against
+    # its cataloged twin). A cancelled run leaves unprocessed files, so it
+    # is never safe. This pill means exactly what it says.
+    safe_to_format = (
+        not cancelled
+        and failed == 0
+        and (copied + skipped_duplicate) == discovered
+    )
     result = {
         "discovered": discovered,
         "copied": copied,
         "verified": verified,
         "skipped_duplicate": skipped_duplicate,
         "failed": failed,
-        "failed_files": failed_files,
+        "safe_to_format": safe_to_format,
+        "unsafe_files": unsafe_files,
         "folders": folder_counts,
         "cancelled": cancelled,
     }
