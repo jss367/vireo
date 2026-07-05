@@ -642,6 +642,8 @@ var editorState = {
   navIds: [],
   loadSeq: 0,
   loading: false,
+  histogramTimer: null,
+  suppressUnloadPrompt: false,
 };
 
 function setEditorLoading(loading) {
@@ -1002,15 +1004,30 @@ function updateHistogramFeedback() {
   var ctx = canvas.getContext('2d');
   if (!ctx) return;
 
+  // Sample only the active crop so the histogram and clip readouts describe
+  // the frame the user is keeping — the preview render is uncropped, and a
+  // blown sky the user already cropped away must not keep warning about
+  // highlight clipping. Mirrors Auto Tone's _lumaStats sampling.
+  var crop = editorState.showBefore
+    ? clampCrop(Object.assign({x: 0, y: 0, w: 1, h: 1}, editorState.savedRecipe.crop || {}))
+    : ensureCrop(editorState.recipe);
+  var sx = 0, sy = 0;
+  var sW = img.naturalWidth, sH = img.naturalHeight;
+  if (!isFullCrop(crop)) {
+    sx = Math.max(0, Math.round((Number(crop.x) || 0) * img.naturalWidth));
+    sy = Math.max(0, Math.round((Number(crop.y) || 0) * img.naturalHeight));
+    sW = Math.max(1, Math.round((Number(crop.w) || 1) * img.naturalWidth));
+    sH = Math.max(1, Math.round((Number(crop.h) || 1) * img.naturalHeight));
+  }
   var sample = document.createElement('canvas');
   var maxSample = 180;
-  var scale = Math.min(1, maxSample / Math.max(img.naturalWidth, img.naturalHeight));
-  sample.width = Math.max(1, Math.round(img.naturalWidth * scale));
-  sample.height = Math.max(1, Math.round(img.naturalHeight * scale));
+  var scale = Math.min(1, maxSample / Math.max(sW, sH));
+  sample.width = Math.max(1, Math.round(sW * scale));
+  sample.height = Math.max(1, Math.round(sH * scale));
   var sampleCtx = sample.getContext('2d', { willReadFrequently: true });
   if (!sampleCtx) return;
   try {
-    sampleCtx.drawImage(img, 0, 0, sample.width, sample.height);
+    sampleCtx.drawImage(img, sx, sy, sW, sH, 0, 0, sample.width, sample.height);
     var data = sampleCtx.getImageData(0, 0, sample.width, sample.height).data;
   } catch (_) {
     clearHistogramFeedback();
@@ -1109,6 +1126,18 @@ function schedulePreview() {
   }, 140);
 }
 
+function scheduleHistogramRefresh() {
+  // Debounced histogram/clip-readout resample for crop-only edits, which
+  // don't re-render the preview: the readouts sample inside the crop, so a
+  // crop drag changes what they should report even though the pixels on
+  // screen are unchanged.
+  if (editorState.histogramTimer) clearTimeout(editorState.histogramTimer);
+  editorState.histogramTimer = setTimeout(function() {
+    editorState.histogramTimer = null;
+    updateHistogramFeedback();
+  }, 140);
+}
+
 function scheduleMaskOverlayRefresh() {
   // Debounced counterpart to schedulePreview() for crop-only edits that
   // don't schedule a preview: /edit-mask-preview reads the current crop
@@ -1148,11 +1177,14 @@ function markChanged(render) {
   updateDirtyState();
   renderCropBox();
   if (render || wasShowingBefore) schedulePreview();
-  // Crop-only edits (resetCrop, setAspect, drag pointermove) pass
-  // render=false, so the preview isn't rescheduled — but the mask
-  // overlay depends on the current crop for its feather scale, so it
-  // must reload too whenever it's currently on.
-  else if (editorState.maskOverlay) scheduleMaskOverlayRefresh();
+  else {
+    // Crop-only edits (resetCrop, setAspect, drag pointermove) pass
+    // render=false, so the preview isn't rescheduled — but the histogram
+    // samples inside the crop, and the mask overlay depends on the current
+    // crop for its feather scale, so both must refresh anyway.
+    scheduleHistogramRefresh();
+    if (editorState.maskOverlay) scheduleMaskOverlayRefresh();
+  }
 }
 
 function rotateRecipe(delta) {
@@ -2003,8 +2035,25 @@ async function loadHistory(photoId) {
 }
 
 function goBackToBrowse() {
+  if (isEditorDirty() && !window.confirm('Discard unsaved edits to this photo?')) return;
+  // The explicit confirm above already covered this navigation; don't let the
+  // beforeunload guard prompt a second time. Re-arm shortly after in case the
+  // navigation is cancelled or the page comes back from the bfcache.
+  editorState.suppressUnloadPrompt = true;
+  setTimeout(function() { editorState.suppressUnloadPrompt = false; }, 1000);
   if (window.history.length > 1) window.history.back();
   else window.location.href = '/browse';
+}
+
+function initUnloadGuard() {
+  // Prev/Next confirm discards via editorNav, and Back via goBackToBrowse —
+  // this catches every other way off the page with unsaved edits: navbar
+  // links, refresh, tab close.
+  window.addEventListener('beforeunload', function(e) {
+    if (editorState.suppressUnloadPrompt || !isEditorDirty()) return;
+    e.preventDefault();
+    e.returnValue = '';
+  });
 }
 
 function initCropDrag() {
@@ -2056,9 +2105,16 @@ function initCropDrag() {
   document.addEventListener('pointerup', function() {
     editorState.drag = null;
   });
+  // pointercancel (touch interrupted, pointer grabbed by the browser) ends
+  // the gesture without a pointerup; without this the drag stays armed and
+  // the next stray pointermove keeps resizing the crop.
+  document.addEventListener('pointercancel', function() {
+    editorState.drag = null;
+  });
   window.addEventListener('resize', function() {
     renderCropBox();
     updateHistogramFeedback();
+    positionMaskOverlay();
   });
 }
 
@@ -2178,7 +2234,12 @@ async function loadPhoto(photoId, opts) {
     loadHistory(photoId);
   } catch (e) {
     if (seq !== editorState.loadSeq) return;
-    setEditorLoading(false);
+    // Keep the editing surface frozen (editor-loading) on failure: the stage
+    // still shows the previous photo's pixels, the history panel still lists
+    // its checkpoints, and the recipe state was reset above — re-enabling the
+    // panels would let a slider tweak build a recipe from scratch and save it
+    // over this photo's real saved recipe. Prev/Next/Back in the topbar stay
+    // usable to retry or leave.
     document.getElementById('editorFilename').textContent = 'Photo unavailable';
     setStatus(e.message || 'Could not load photo', true);
   }
@@ -2198,6 +2259,7 @@ function initEditorKeyboard() {
 async function initEditor() {
   initCropDrag();
   initEditorKeyboard();
+  initUnloadGuard();
   buildLocalControls();
   clearHistogramFeedback();
   setZoomMode('fit');
