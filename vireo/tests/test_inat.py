@@ -152,7 +152,6 @@ def test_submit_observation_wraps_request_exception_as_partial_upload():
     create_observation succeeded must surface as InatPartialUploadError so the
     recovery observation_url is not lost."""
     import requests as _requests
-
     from inat import InatPartialUploadError, submit_observation
     with patch(
         "inat.create_observation",
@@ -179,7 +178,6 @@ def test_submit_observation_wraps_timeout_as_partial_upload():
     """A requests.Timeout during upload_photo should also become a partial-upload
     error so the caller can surface observation_url in the response."""
     import requests as _requests
-
     from inat import InatPartialUploadError, submit_observation
     with patch(
         "inat.create_observation",
