@@ -113,4 +113,13 @@ def submit_observation(token, photo_path, taxon_name=None, observed_on=None,
             observation_id=obs_id,
             observation_url=obs_url,
         ) from e
+    except requests.RequestException as e:
+        # Timeout / ConnectionError / SSLError etc. after the observation was
+        # created leaves a photo-less observation on iNaturalist. Surface the
+        # recovery URL instead of returning an unhandled 500.
+        raise InatPartialUploadError(
+            f"Photo upload request failed ({e}). Observation was created without a photo.",
+            observation_id=obs_id,
+            observation_url=obs_url,
+        ) from e
     return obs_id, obs_url

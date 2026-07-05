@@ -147,6 +147,57 @@ def test_submit_observation_reports_partial_upload_failure():
     assert "without a photo" in str(exc.value)
 
 
+def test_submit_observation_wraps_request_exception_as_partial_upload():
+    """A requests.Timeout / ConnectionError during upload_photo after
+    create_observation succeeded must surface as InatPartialUploadError so the
+    recovery observation_url is not lost."""
+    import requests as _requests
+
+    from inat import InatPartialUploadError, submit_observation
+    with patch(
+        "inat.create_observation",
+        return_value={"id": 77777, "uri": "https://www.inaturalist.org/observations/77777"},
+    ):
+        with patch(
+            "inat.upload_photo",
+            side_effect=_requests.ConnectionError("connection reset by peer"),
+        ):
+            with pytest.raises(InatPartialUploadError) as exc:
+                submit_observation(
+                    token="fake-token",
+                    photo_path="/path/to/photo.jpg",
+                    taxon_name="Cardinalis cardinalis",
+                )
+
+    assert exc.value.observation_id == 77777
+    assert exc.value.observation_url == "https://www.inaturalist.org/observations/77777"
+    assert "without a photo" in str(exc.value)
+    assert "connection reset by peer" in str(exc.value)
+
+
+def test_submit_observation_wraps_timeout_as_partial_upload():
+    """A requests.Timeout during upload_photo should also become a partial-upload
+    error so the caller can surface observation_url in the response."""
+    import requests as _requests
+
+    from inat import InatPartialUploadError, submit_observation
+    with patch(
+        "inat.create_observation",
+        return_value={"id": 66666, "uri": "https://www.inaturalist.org/observations/66666"},
+    ):
+        with patch("inat.upload_photo", side_effect=_requests.Timeout("read timed out")):
+            with pytest.raises(InatPartialUploadError) as exc:
+                submit_observation(
+                    token="fake-token",
+                    photo_path="/path/to/photo.jpg",
+                    taxon_name="Cardinalis cardinalis",
+                )
+
+    assert exc.value.observation_id == 66666
+    assert exc.value.observation_url == "https://www.inaturalist.org/observations/66666"
+    assert "without a photo" in str(exc.value)
+
+
 from PIL import Image
 
 
