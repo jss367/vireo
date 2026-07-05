@@ -198,6 +198,34 @@ def test_submit_observation_wraps_timeout_as_partial_upload():
     assert "without a photo" in str(exc.value)
 
 
+def test_submit_observation_wraps_auth_error_as_partial_upload():
+    """If the token expires between create_observation and upload_photo,
+    upload_photo raises InatAuthError. Because that's not a subclass of
+    InatApiError, it used to skip the partial-upload wrap and cause /api/inat/submit
+    to return a plain 401 without observation_url — losing the recovery link for
+    the observation that already exists on iNaturalist."""
+    from inat import InatAuthError, InatPartialUploadError, submit_observation
+    with patch(
+        "inat.create_observation",
+        return_value={"id": 55555, "uri": "https://www.inaturalist.org/observations/55555"},
+    ):
+        with patch(
+            "inat.upload_photo",
+            side_effect=InatAuthError("iNaturalist token is invalid or expired."),
+        ):
+            with pytest.raises(InatPartialUploadError) as exc:
+                submit_observation(
+                    token="fake-token",
+                    photo_path="/path/to/photo.jpg",
+                    taxon_name="Cardinalis cardinalis",
+                )
+
+    assert exc.value.observation_id == 55555
+    assert exc.value.observation_url == "https://www.inaturalist.org/observations/55555"
+    assert "without a photo" in str(exc.value)
+    assert "invalid or expired" in str(exc.value)
+
+
 from PIL import Image
 
 

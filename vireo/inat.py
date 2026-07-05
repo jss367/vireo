@@ -107,7 +107,10 @@ def submit_observation(token, photo_path, taxon_name=None, observed_on=None,
     obs_url = obs.get("uri", f"{INAT_RAILS}/observations/{obs_id}")
     try:
         upload_photo(token, obs_id, photo_path)
-    except InatApiError as e:
+    except (InatApiError, InatAuthError) as e:
+        # A 401 during upload (token revoked/expired between create and upload)
+        # is not a subclass of InatApiError, so wrap it here too — otherwise the
+        # observation exists without a photo and the route loses obs_url.
         raise InatPartialUploadError(
             f"{e} Observation was created without a photo.",
             observation_id=obs_id,

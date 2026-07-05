@@ -7116,7 +7116,8 @@ async function openInatQuickModal(items, failures) {
   if (cancelBtn) cancelBtn.textContent = 'Close';
 
   var opened = false;
-  if (items.length === 1 && items[0].upload_url) {
+  var skipAutoOpenForDuplicate = items.length === 1 && !!items[0].already_submitted;
+  if (items.length === 1 && items[0].upload_url && !skipAutoOpenForDuplicate) {
     opened = await _inatOpenUrl(items[0].upload_url);
   }
 
@@ -7136,7 +7137,11 @@ async function openInatQuickModal(items, failures) {
         '<div style="flex:1;min-width:0;">' +
           '<div style="font-size:13px;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(items[0].filename) + '</div>' +
           '<div class="inat-card-status ' + (opened ? 'success' : 'warning') + '">' +
-            (opened ? 'Opened iNaturalist in your browser.' : 'iNaturalist did not visibly open. Use the link below.') +
+            (opened
+              ? 'Opened iNaturalist in your browser.'
+              : (skipAutoOpenForDuplicate
+                  ? 'Did not auto-open — this photo appears already submitted. Review the warning below before opening a new upload.'
+                  : 'iNaturalist did not visibly open. Use the link below.')) +
           '</div>' +
           _inatAlreadySubmittedWarning(items[0]) +
         '</div>' +
