@@ -364,11 +364,17 @@ SCHEMA = {
 
     # --- Pipeline (scoring weights & rejection thresholds) ---------------
     "pipeline.default_strategy": {
-        # Workspace-scoped: consumed by the import→process chaining hook
-        # via db.get_effective_config(cfg.load()). None (import only) is the
-        # DEFAULTS value; `nullable` here lets the workspace override the
-        # global default back to null via /api/settings/workspace, and the
-        # settings UI renders the null option so users can pick it.
+        # Workspace-scoped: the stored value the future import→process
+        # chaining hook will read via db.get_effective_config(cfg.load()).
+        # None (import only) is the DEFAULTS value; `nullable` here lets a
+        # workspace override the global default back to null via
+        # /api/settings/workspace, and the settings UI renders the null
+        # option so users can pick it. This PR (the import/process split
+        # phase 1) ships the storage, validation, and UI surfaces only —
+        # the chaining hook that actually enqueues the run at import
+        # completion is added in a follow-up PR, so today the setting is
+        # a stored preference and imports do not auto-chain regardless of
+        # the value.
         "type": "enum",
         "enum": ["full", "cull_ready", "quick_look"],
         "enum_labels": {
@@ -380,7 +386,11 @@ SCHEMA = {
         "null_label": "Import only (no processing)",
         "category": "Pipeline", "scope": "workspace",
         "label": "Default process strategy",
-        "desc": "Strategy run automatically after an import completes on this workspace.",
+        "desc": (
+            "Default strategy for post-import processing on this workspace. "
+            "Stored preference only in this release — automatic "
+            "import→process chaining is wired in a follow-up update."
+        ),
     },
     "pipeline.w_focus": {
         "type": "float", "min": 0.0, "max": 1.0, "step": 0.01,
