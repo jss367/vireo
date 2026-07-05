@@ -491,9 +491,9 @@ def test_intra_run_key_collision_across_cards_imports_second_as_fresh(tmp_path):
     check: the two files' bytes were never compared, so skipping would
     let safe_to_format go green while the second card is the only copy
     of its bytes."""
-    from PIL.ExifTags import Base as ExifBase
-    from import_job import ImportParams, run_import_job
     from import_dedup import compute_file_hash
+    from import_job import ImportParams, run_import_job
+    from PIL.ExifTags import Base as ExifBase
 
     dt = datetime(2026, 5, 2, 11, 20, 45)
 
@@ -551,9 +551,9 @@ def test_key_candidate_source_read_error_fails_only_that_file(
     error), that source alone is bucketed as failed. The failure must
     not escape and kill the whole background job — siblings still import
     normally, and the safe-to-format ledger records the failure."""
-    from PIL.ExifTags import Base as ExifBase
     import import_dedup
     from import_job import ImportParams, run_import_job
+    from PIL.ExifTags import Base as ExifBase
 
     dt_bad = datetime(2026, 5, 3, 12, 0, 0)
     dt_good = datetime(2026, 5, 3, 12, 5, 0)
