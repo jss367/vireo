@@ -203,6 +203,7 @@ NO_LOCATION_INFORMATION_RULES = {
 }
 
 ALL_NAV_IDS = frozenset({
+    "import",
     "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
     "misses", "highlights", "life_list", "browse", "edit", "map", "variants",
     "dashboard", "audit", "move", "compare",
@@ -211,7 +212,7 @@ ALL_NAV_IDS = frozenset({
 })
 
 DEFAULT_TABS = [
-    "browse", "pipeline", "pipeline_review",
+    "browse", "import", "pipeline", "pipeline_review",
     "review", "cull", "jobs",
     "highlights", "misses", "settings",
 ]
@@ -910,6 +911,33 @@ class Database:
                 "UPDATE workspaces SET tabs = ? WHERE tabs IS NULL",
                 (json.dumps(DEFAULT_TABS),),
             )
+        # Migration (import/process split PR 3): insert the Import tab
+        # before Process ("pipeline") in every saved tabs row that predates
+        # the split. One-shot, guarded by PRAGMA user_version so a later
+        # unpin isn't silently undone on the next Database.__init__ call
+        # (and `_get_db()` opens a fresh Database per request).
+        current_user_version = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        if current_user_version < 1:
+            rows = self.conn.execute(
+                "SELECT id, tabs FROM workspaces WHERE tabs IS NOT NULL"
+            ).fetchall()
+            for row in rows:
+                try:
+                    tabs = json.loads(row["tabs"])
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(tabs, list) or "import" in tabs:
+                    continue
+                if "pipeline" in tabs:
+                    tabs.insert(tabs.index("pipeline"), "import")
+                else:
+                    tabs.insert(0, "import")
+                self.conn.execute(
+                    "UPDATE workspaces SET tabs = ? WHERE id = ?",
+                    (json.dumps(tabs), row["id"]),
+                )
+            self.conn.execute("PRAGMA user_version = 1")
+
         # Migration: drop legacy open_tabs column (replaced by `tabs`).
         try:
             self.conn.execute("SELECT open_tabs FROM workspaces LIMIT 0")

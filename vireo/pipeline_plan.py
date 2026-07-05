@@ -21,6 +21,12 @@ log = logging.getLogger(__name__)
 @dataclass
 class PipelinePlanParams:
     collection_id: int | None = None
+    # Explicit photo-id scope. The Process page's folder scope resolves
+    # folder_ids to their workspace subtrees' photos at the API layer
+    # (mirroring /api/jobs/pipeline) and passes the ids here so every
+    # per-stage real-status query runs over exactly the photos a
+    # folder-scoped run would process — never whole-workspace proxies.
+    photo_ids: list | None = None
     exclude_photo_ids: list = field(default_factory=list)
     skip_classify: bool = False
     skip_extract_masks: bool = False
@@ -1156,7 +1162,11 @@ def compute_plan(db, params, db_path):
     known_count = 0
     unlinked_folder_count = 0
     hash_dup_count = 0
-    if params.collection_id is not None:
+    if params.photo_ids is not None:
+        # Folder scope (Process page): ids were resolved from the folder
+        # subtrees at the API layer.
+        photo_ids = list(params.photo_ids)
+    elif params.collection_id is not None:
         from pipeline import _resolve_collection_photo_ids
         photo_ids = _resolve_collection_photo_ids(db, params.collection_id)
     elif params.source_paths is not None:

@@ -13139,6 +13139,7 @@ def test_count_classifier_runs_excludes_full_image_and_below_threshold(tmp_path)
 def test_all_nav_ids_covers_every_page():
     from db import ALL_NAV_IDS
     expected = {
+        "import",
         "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
         "misses", "highlights", "life_list", "browse", "edit", "map", "variants",
         "dashboard", "audit", "move", "compare",
@@ -13148,10 +13149,10 @@ def test_all_nav_ids_covers_every_page():
     assert expected == ALL_NAV_IDS
 
 
-def test_default_tabs_is_the_curated_nine():
+def test_default_tabs_is_the_curated_ten():
     from db import DEFAULT_TABS
     assert DEFAULT_TABS == [
-        "browse", "pipeline", "pipeline_review",
+        "browse", "import", "pipeline", "pipeline_review",
         "review", "cull", "jobs",
         "highlights", "misses", "settings",
     ]
@@ -14700,3 +14701,72 @@ def test_delete_edit_preset(tmp_path):
     assert db.delete_edit_preset(preset["id"]) is True
     assert db.delete_edit_preset(preset["id"]) is False
     assert db.list_edit_presets() == []
+
+
+def test_import_tab_in_nav_registries(tmp_path):
+    """import/process split PR 3: the Import tab must be in every server
+    registry or get_tabs silently drops it / set_tabs rejects it."""
+    from db import ALL_NAV_IDS, DEFAULT_TABS, Database
+
+    assert "import" in ALL_NAV_IDS
+    idx = DEFAULT_TABS.index("import")
+    assert DEFAULT_TABS[idx + 1] == "pipeline", DEFAULT_TABS
+
+    db = Database(str(tmp_path / "t.db"))
+    db.set_tabs(["import", "browse"])
+    assert db.get_tabs()[:2] == ["import", "browse"]
+
+
+def test_existing_workspaces_gain_import_tab(tmp_path):
+    """A pre-split workspace tabs row (no 'import') gets it inserted
+    before 'pipeline' on init — reset-in-place, solo-user app."""
+    import json as json_mod
+
+    from db import Database
+
+    db_path = str(tmp_path / "m.db")
+    db = Database(db_path)
+    ws = db._active_workspace_id
+    old = ["browse", "pipeline", "review"]
+    db.conn.execute(
+        "UPDATE workspaces SET tabs = ? WHERE id = ?",
+        (json_mod.dumps(old), ws),
+    )
+    # A real pre-split DB was written by a version that never set
+    # PRAGMA user_version, so it reads back as 0. The fresh Database
+    # above already bumped it to 1; reset it so the second init runs
+    # the guarded import-tab migration.
+    db.conn.execute("PRAGMA user_version = 0")
+    db.conn.commit()
+    db.close()
+
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws)
+    tabs = db2.get_tabs()
+    assert "import" in tabs
+    assert tabs.index("import") == tabs.index("pipeline") - 1
+
+
+def test_import_tab_migration_not_reapplied_after_unpin(tmp_path):
+    """Once the import-tab migration has run, a subsequent unpin must
+    stay unpinned — the migration is guarded by PRAGMA user_version so
+    every ``Database`` re-open doesn't silently re-add ``import``.
+    """
+    import json as json_mod
+
+    from db import Database
+
+    db_path = str(tmp_path / "m.db")
+    db = Database(db_path)
+    ws = db._active_workspace_id
+    # User unpins ``import`` after the migration has already run.
+    db.conn.execute(
+        "UPDATE workspaces SET tabs = ? WHERE id = ?",
+        (json_mod.dumps(["browse", "pipeline", "review"]), ws),
+    )
+    db.conn.commit()
+    db.close()
+
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws)
+    assert "import" not in db2.get_tabs()

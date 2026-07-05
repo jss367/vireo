@@ -3342,3 +3342,127 @@ def test_import_photos_inconclusive_case_probe_rejects_case_collision(
     })
     assert resp.status_code == 400
     assert "inside a source" in resp.get_json()["error"]
+
+
+# ---------------------------------------------------------------------------
+# after-import chaining (import/process split PR 3)
+# ---------------------------------------------------------------------------
+
+
+def _chain_card(tmp_path, n=2, name="chain-card"):
+    import datetime as _dt
+
+    card = tmp_path / name
+    card.mkdir(exist_ok=True)
+    for i in range(n):
+        p = card / f"DSC_{i:04d}.jpg"
+        Image.new("RGB", (16, 16), "red").save(str(p))
+        ts = _dt.datetime(2026, 7, 3, 10, i).timestamp()
+        os.utime(str(p), (ts, ts))
+    return card
+
+
+def _post_import(client, card, archive, after_import="omit"):
+    body = {"sources": [str(card)], "destination": str(archive)}
+    if after_import != "omit":
+        body["after_import"] = after_import
+    resp = client.post("/api/jobs/import-photos", json=body)
+    assert resp.status_code == 200, resp.get_json()
+    return resp.get_json()["job_id"]
+
+
+def test_import_chains_process_job(app_and_db, tmp_path):
+    """A successful import with after_import set enqueues a process job
+    scoped to exactly the imported photos, and links the two in history."""
+    from wait import wait_for_job_via_client
+
+    app, db = app_and_db
+    card = _chain_card(tmp_path)
+    with app.test_client() as client:
+        job_id = _post_import(client, card, tmp_path / "arch", "quick_look")
+        job = wait_for_job_via_client(client, job_id)
+        res = job["result"]
+        assert res.get("process_job_id"), res
+        assert "after_import_skipped" not in res
+
+        pj = client.get(f"/api/jobs/{res['process_job_id']}").get_json()
+        assert pj["config"]["strategy"] == "quick_look"
+        assert pj["config"].get("chained_from") == job_id
+        col_id = pj["config"]["collection_id"]
+        photos = db.get_collection_photos(col_id, per_page=999999)
+        assert sorted(p["id"] for p in photos) == sorted(res["photo_ids"])
+
+
+def test_import_only_choice_skips_chaining(app_and_db, tmp_path):
+    """after_import null (and the omitted->workspace-default-null case)
+    never reaches /api/jobs/pipeline; the result says why."""
+    from wait import wait_for_job_via_client
+
+    app, _ = app_and_db
+    card = _chain_card(tmp_path)
+    with app.test_client() as client:
+        job_id = _post_import(client, card, tmp_path / "arch", None)
+        job = wait_for_job_via_client(client, job_id)
+        res = job["result"]
+        assert res.get("after_import_skipped") == "import-only"
+        assert "process_job_id" not in res
+
+
+def test_failed_import_does_not_chain(app_and_db, tmp_path):
+    """A green processing run must not hide a failed import (rollup
+    convention): any failed file suppresses chaining."""
+    from wait import wait_for_job_via_client
+
+    app, _ = app_and_db
+    card = _chain_card(tmp_path)
+    unreadable = card / "DSC_9999.jpg"
+    Image.new("RGB", (16, 16), "blue").save(str(unreadable))
+    os.chmod(str(unreadable), 0)
+    try:
+        with app.test_client() as client:
+            job_id = _post_import(
+                client, card, tmp_path / "arch", "quick_look",
+            )
+            job = wait_for_job_via_client(client, job_id)
+            res = job["result"]
+            assert res["failed"] >= 1
+            assert res.get("after_import_skipped") == "import failed"
+            assert "process_job_id" not in res
+    finally:
+        os.chmod(str(unreadable), 0o644)
+
+
+def test_duplicates_only_import_skips_chaining(app_and_db, tmp_path):
+    """Re-importing an already-archived card chains to 'no new photos',
+    not an empty process run."""
+    from wait import wait_for_job_via_client
+
+    app, _ = app_and_db
+    card = _chain_card(tmp_path)
+    with app.test_client() as client:
+        first = _post_import(client, card, tmp_path / "arch", None)
+        wait_for_job_via_client(client, first)
+        second = _post_import(client, card, tmp_path / "arch", "quick_look")
+        job = wait_for_job_via_client(client, second)
+        res = job["result"]
+        assert res["skipped_duplicate"] == 2
+        assert res.get("after_import_skipped") == "no new photos"
+        assert "process_job_id" not in res
+
+
+def test_chained_run_surfaces_model_warning(app_and_db, tmp_path):
+    """cull_ready needs a classifier; with none downloaded the chained run
+    still enqueues (auto-skipped) and the import result carries the same
+    model_warning the manual pipeline route surfaces."""
+    from wait import wait_for_job_via_client
+
+    app, _ = app_and_db
+    card = _chain_card(tmp_path)
+    with app.test_client() as client:
+        job_id = _post_import(client, card, tmp_path / "arch", "cull_ready")
+        job = wait_for_job_via_client(client, job_id)
+        res = job["result"]
+        assert res.get("process_job_id"), res
+        assert "model_warning" in res
+        pj = client.get(f"/api/jobs/{res['process_job_id']}").get_json()
+        assert pj["config"]["skip_classify"] is True  # auto-skip applied
