@@ -2790,8 +2790,46 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 )
         else:
             hash_duplicate_paths = None
+        # Folder scope (Process page): resolve folder_ids to their
+        # active-workspace subtree photo ids with the same guards as
+        # /api/jobs/pipeline, so the plan describes exactly the photos a
+        # folder-scoped run would process.
+        scope_photo_ids = None
+        folder_ids = body.get("folder_ids")
+        if folder_ids is not None:
+            if (
+                not isinstance(folder_ids, list)
+                or not folder_ids
+                or any(
+                    isinstance(fid, bool) or not isinstance(fid, int)
+                    for fid in folder_ids
+                )
+            ):
+                return json_error(
+                    "folder_ids must be a non-empty list of integers"
+                )
+            db = _get_db()
+            ws_for_folders = db._active_workspace_id
+            subtree_ids = set()
+            for fid in folder_ids:
+                linked = db.conn.execute(
+                    "SELECT 1 FROM workspace_folders "
+                    "WHERE workspace_id = ? AND folder_id = ?",
+                    (ws_for_folders, fid),
+                ).fetchone()
+                if not linked:
+                    return json_error("folder not found", 404)
+                subtree_ids.update(db.get_folder_subtree_ids(fid))
+            marks = ",".join("?" for _ in subtree_ids)
+            scope_photo_ids = [
+                r["id"] for r in db.conn.execute(
+                    f"SELECT id FROM photos WHERE folder_id IN ({marks})",
+                    tuple(subtree_ids),
+                )
+            ]
         params = PipelinePlanParams(
             collection_id=body.get("collection_id"),
+            photo_ids=scope_photo_ids,
             exclude_photo_ids=body.get("exclude_photo_ids") or [],
             skip_classify=bool(body.get("skip_classify")),
             skip_extract_masks=bool(body.get("skip_extract_masks")),

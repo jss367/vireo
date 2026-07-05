@@ -723,60 +723,16 @@ body { padding-bottom: 36px; }
     </div>
     <div class="stage-body">
       <div class="source-choice">
-        <div class="source-option" id="sourceOptionImport">
-          <div class="source-option-header" onclick="selectSourceMode('import')">
-            <input type="radio" name="sourceMode" value="import" id="radioImport" checked data-testid="source-import">
-            <label for="radioImport" style="cursor:pointer;font-weight:600;font-size:13px;">Import Photos</label>
+        <div class="source-option" id="sourceOptionFolders">
+          <div class="source-option-header" onclick="selectSourceMode('folders')">
+            <input type="radio" name="sourceMode" value="folders" id="radioFolders" checked data-testid="source-folders">
+            <label for="radioFolders" style="cursor:pointer;font-weight:600;font-size:13px;">Workspace Folders</label>
           </div>
-          <div class="source-option-body" id="sourceImportBody">
+          <div class="source-option-body" id="sourceFoldersBody">
             <div class="setting-row">
-              <div class="setting-item" id="folderLabelItem">
-                <div class="setting-label" id="lblFolder">Folders</div>
-                <div style="display:flex;flex-direction:column;gap:6px;">
-                  <button onclick="browseForFolder()" class="btn btn-primary" style="white-space:nowrap;align-self:flex-start;">Browse&hellip;</button>
-                  <input type="text" class="setting-select" id="cfgSourceInput" list="volumeDatalist"
-                         placeholder="or type a path and press Enter" style="font-family:inherit;"
-                         onkeydown="if(event.key==='Enter'){event.preventDefault();addSourceFolder();}">
-                  <datalist id="volumeDatalist"></datalist>
-                </div>
-                <div id="sourceFolderList" style="margin-top:6px;"></div>
-                <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;margin-top:6px;display:inline-flex;align-items:center;gap:4px;">
-                  <input type="checkbox" id="chkIncludeSubfolders" checked style="accent-color:var(--accent);" onchange="fetchFolderPreview();markFolderPreviewStale()"> Include subfolders
-                </label>
-              </div>
-            </div>
-            <div class="setting-row" style="align-items:flex-start;">
-              <div class="setting-item" style="flex-direction:column;align-items:flex-start;gap:4px;">
-                <div class="setting-label">File Types</div>
-                <div style="display:flex;gap:16px;">
-                  <div>
-                    <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;font-weight:600;">
-                      <input type="checkbox" id="chkStandard" checked style="accent-color:var(--accent);" onchange="onGroupToggle('standard')"> Standard
-                    </label>
-                    <div id="standardExts" style="margin-left:18px;margin-top:2px;display:flex;flex-direction:column;gap:1px;">
-                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="standard" data-ext=".jpg" checked style="accent-color:var(--accent);" onchange="onExtToggle('standard')"> JPG</label>
-                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="standard" data-ext=".png" checked style="accent-color:var(--accent);" onchange="onExtToggle('standard')"> PNG</label>
-                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="standard" data-ext=".tiff" checked style="accent-color:var(--accent);" onchange="onExtToggle('standard')"> TIFF</label>
-                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="standard" data-ext=".bmp" checked style="accent-color:var(--accent);" onchange="onExtToggle('standard')"> BMP</label>
-                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="standard" data-ext=".webp" checked style="accent-color:var(--accent);" onchange="onExtToggle('standard')"> WebP</label>
-                    </div>
-                  </div>
-                  <div>
-                    <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;font-weight:600;">
-                      <input type="checkbox" id="chkRaw" checked style="accent-color:var(--accent);" onchange="onGroupToggle('raw')"> RAW
-                    </label>
-                    <div id="rawExts" style="margin-left:18px;margin-top:2px;display:flex;flex-direction:column;gap:1px;">
-                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="raw" data-ext=".nef" checked style="accent-color:var(--accent);" onchange="onExtToggle('raw')"> NEF</label>
-                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="raw" data-ext=".cr2" checked style="accent-color:var(--accent);" onchange="onExtToggle('raw')"> CR2</label>
-                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="raw" data-ext=".cr3" checked style="accent-color:var(--accent);" onchange="onExtToggle('raw')"> CR3</label>
-                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="raw" data-ext=".arw" checked style="accent-color:var(--accent);" onchange="onExtToggle('raw')"> ARW</label>
-                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="raw" data-ext=".raf" checked style="accent-color:var(--accent);" onchange="onExtToggle('raw')"> RAF</label>
-                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="raw" data-ext=".dng" checked style="accent-color:var(--accent);" onchange="onExtToggle('raw')"> DNG</label>
-                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="raw" data-ext=".rw2" checked style="accent-color:var(--accent);" onchange="onExtToggle('raw')"> RW2</label>
-                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="raw" data-ext=".orf" checked style="accent-color:var(--accent);" onchange="onExtToggle('raw')"> ORF</label>
-                    </div>
-                  </div>
-                </div>
+              <div class="setting-item">
+                <div class="setting-label">Folders <span style="font-weight:400;color:var(--text-dim);">(each includes its subfolders; importing lives on the Import page)</span></div>
+                <div id="folderScopeList" style="display:flex;flex-direction:column;gap:2px;max-height:220px;overflow-y:auto;font-size:12px;"></div>
               </div>
             </div>
           </div>
@@ -1038,7 +994,17 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <div class="stage-section-header">AI processing<span class="stage-section-sub">optional &mdash; toggle to include</span></div>
+  <div class="stage-section-header">AI processing<span class="stage-section-sub">optional &mdash; toggle to include</span>
+    <span style="margin-left:auto;display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);">
+      Strategy
+      <select id="strategySelect" onchange="applyStrategyPreset()" style="font-size:12px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:3px 6px;">
+        <option value="__custom__" selected>Custom (use toggles)</option>
+        <option value="full">Full pipeline</option>
+        <option value="cull_ready">Cull-ready</option>
+        <option value="quick_look">Quick look</option>
+      </select>
+    </span>
+  </div>
 
   <!-- Card 5: Classify -->
   <div class="stage-card" id="card-classify" data-testid="stage-card">
@@ -1388,6 +1354,7 @@ function initPipelinePage() {
   });
 
   // Load collections, models, labels, volumes in parallel
+  loadFolderScopeList();
   loadCollections();
   // Models and labels populate the pickers the plan endpoint reads from,
   // so chain the first plan refresh once both are in the DOM. Without
@@ -1405,11 +1372,11 @@ function initPipelinePage() {
   var urlParams = new URLSearchParams(window.location.search);
   var prefillFolders = urlParams.getAll('folder');
   if (prefillFolders.length > 0) {
-    _sourceFolders = prefillFolders;
-    renderSourceFolders();
-    selectSourceMode('import');
+    // Paths from the deep link; loadFolderScopeList checks the matching
+    // scope boxes once the workspace folder list arrives.
+    _prefillFolderPaths = prefillFolders;
+    selectSourceMode('folders');
     updateStartButton();
-    fetchFolderPreview();
   }
 }
 
@@ -1583,7 +1550,87 @@ function onDestWorkspaceChange() {
 }
 
 // -- Card 1: Source --
-var _sourceMode = 'import'; // 'import' or 'collection'
+var _prefillFolderPaths = [];
+
+function selectedFolderIds() {
+  var ids = [];
+  document.querySelectorAll('#folderScopeList input[type=checkbox]:checked')
+    .forEach(function(cb) { ids.push(parseInt(cb.value, 10)); });
+  return ids;
+}
+
+async function loadFolderScopeList() {
+  var list = document.getElementById('folderScopeList');
+  if (!list) return;
+  try {
+    var ws = await safeFetch('/api/workspaces/active', {}, { toast: false });
+    var folders = await safeFetch(
+      '/api/workspaces/' + ws.id + '/folders', {}, { toast: false });
+    if (!Array.isArray(folders)) return;
+    var byId = {};
+    folders.forEach(function(f) { byId[f.id] = f; });
+    list.innerHTML = '';
+    folders.forEach(function(f) {
+      // Only offer top-level entries: children are covered by the
+      // server-side subtree expansion, and listing every dated folder
+      // would bury the roots.
+      if (f.parent_id && byId[f.parent_id]) return;
+      var label = document.createElement('label');
+      label.style.cssText = 'display:flex;align-items:center;gap:6px;cursor:pointer;color:var(--text-primary);';
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.value = f.id;
+      cb.dataset.path = f.path;
+      cb.style.accentColor = 'var(--accent)';
+      cb.checked = _prefillFolderPaths.indexOf(f.path) !== -1;
+      cb.onchange = function() { updateSourceSummary(); updateStartButton(); };
+      var span = document.createElement('span');
+      var count = f.workspace_photo_count != null
+        ? f.workspace_photo_count : f.photo_count;
+      span.textContent = f.path + (count != null ? ' (' + count + ')' : '');
+      label.appendChild(cb);
+      label.appendChild(span);
+      list.appendChild(label);
+    });
+    if (_prefillFolderPaths.length) { updateSourceSummary(); updateStartButton(); }
+  } catch (e) {
+    list.textContent = 'Could not load workspace folders.';
+  }
+}
+
+function updateSourceSummary() {
+  var el = document.getElementById('txtSource');
+  if (!el) return;
+  if (_sourceMode === 'folders') {
+    var n = selectedFolderIds().length;
+    el.textContent = n ? (n + ' folder(s) selected') : '';
+  }
+}
+
+function applyStrategyPreset() {
+  // Mirror process_strategies.py so the visible toggles always tell the
+  // truth about what the preset will run (transparency rule) — the
+  // explicit flags sent alongside body.strategy agree with the expansion.
+  var sel = document.getElementById('strategySelect');
+  if (!sel || sel.value === '__custom__') { refreshPipelineUI(); return; }
+  var presets = {
+    full:       { classify: true,  extract: true,  eyes: true,  group: true  },
+    cull_ready: { classify: true,  extract: false, eyes: false, group: true  },
+    quick_look: { classify: false, extract: false, eyes: false, group: false },
+  };
+  var p = presets[sel.value];
+  if (!p) return;
+  document.getElementById('enableClassify').checked = p.classify;
+  document.getElementById('enableExtract').checked = p.extract;
+  document.getElementById('enableEyeKeypoints').checked = p.eyes;
+  document.getElementById('enableGroup').checked = p.group;
+  ['classify', 'extract', 'eyekeypoints', 'group'].forEach(function(st) {
+    try { onStageToggle(st); } catch (e) { /* stage rows update below */ }
+  });
+  refreshPipelineUI();
+}
+
+var _sourceMode = 'folders'; // 'folders', 'collection', or 'new_images'
 var _copyMode = false;
 var _folderPreviewShown = false;
 var _sourceWasReady = false;
@@ -1605,6 +1652,13 @@ var _thumbSchedulerCancel = null; // cancels the current thumbnail pump on re-re
 
 function fetchFolderPreview() {
   if (_previewAbort) _previewAbort.abort();
+
+  // Folder scope has no per-file preview: the run covers the selected
+  // subtrees and the readiness panels report per-stage work honestly.
+  if (_sourceMode === 'folders') {
+    showPreviewPlaceholder();
+    return;
+  }
 
   // New images mode: fetch from new-images-preview endpoint
   if (_sourceMode === 'new_images') {
@@ -2533,16 +2587,16 @@ async function selectSourceMode(mode) {
   // Cancel any in-flight duplicate scan before switching context
   if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
   _sourceMode = mode;
-  document.getElementById('radioImport').checked = (mode === 'import');
+  document.getElementById('radioFolders').checked = (mode === 'folders');
   document.getElementById('radioCollection').checked = (mode === 'collection');
   var newImgRadio = document.getElementById('radioNewImages');
   if (newImgRadio) newImgRadio.checked = (mode === 'new_images');
 
-  var importBody = document.getElementById('sourceImportBody');
+  var importBody = document.getElementById('sourceFoldersBody');
   var collBody = document.getElementById('sourceCollectionBody');
   var newImgBody = document.getElementById('sourceNewImagesBody');
 
-  if (mode === 'import') {
+  if (mode === 'folders') {
     importBody.classList.remove('dimmed');
     collBody.classList.add('dimmed');
     if (newImgBody) newImgBody.classList.add('dimmed');
@@ -2727,10 +2781,8 @@ function updateStartButton() {
     actionStatus.className = 'status-msg';
   }
 
-  if (_sourceMode === 'import') {
-    var hasFolders = _sourceFolders.length > 0;
-    var anyType = getIngestFileTypes().length > 0;
-    btn.disabled = !hasFolders || !anyType;
+  if (_sourceMode === 'folders') {
+    btn.disabled = selectedFolderIds().length === 0;
   } else if (_sourceMode === 'new_images') {
     btn.disabled = !newImagesSnapshotId;
   } else {
@@ -3048,41 +3100,12 @@ async function startPipeline() {
   // Gather config from the UI
   var body = {};
 
-  if (_sourceMode === 'import') {
-    if (_sourceFolders.length > 0) {
-      body.sources = _sourceFolders;
-    }
-    body.recursive = document.getElementById('chkIncludeSubfolders').checked;
-    body.file_types = getIngestFileTypes();
-    // Add excluded paths from preview selection
-    if (_previewData && _previewSelected) {
-      var excluded = [];
-      _previewData.files.forEach(function(f) {
-        if (!_previewSelected[f.path]) excluded.push(f.path);
-      });
-      if (excluded.length > 0) body.exclude_paths = excluded;
-    }
-    if (_copyMode) {
-      var remoteTargetId = pipelineRemoteTargetId();
-      if (remoteTargetId) {
-        // Remote (SSH) archive: same request shape as the Move page —
-        // saved target id + relative subpath — and always local processing
-        // (the backend rejects anything else).
-        var subResult = normalizeRemoteSubpath(
-          document.getElementById('cfgRemoteSubpath').value);
-        body.remote_target_id = remoteTargetId;
-        body.remote_subpath = subResult.value;
-        body.local_processing = true;
-      } else {
-        body.destination = document.getElementById('cfgDestination').value.trim();
-        var localProcessing = document.getElementById('chkLocalProcessing');
-        body.local_processing = !!(localProcessing && localProcessing.checked);
-      }
-      body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
-      body.verify_by_hash = document.getElementById('chkVerifyByHash').checked;
-      body.folder_template = getSelectedFolderTemplate();
-    }
-  } else if (_sourceMode === 'new_images') {
+  if (_sourceMode === 'folders') {
+    // Scope = selected workspace folders; the server expands each to
+    // its active-workspace subtree and pins the run to an ad-hoc
+    // collection (import/process split PR 1).
+    body.folder_ids = selectedFolderIds();
+  } else if (_sourceMode === 'new_images') {  } else if (_sourceMode === 'new_images') {
     body.source_snapshot_id = newImagesSnapshotId;
     delete body.source;
     delete body.sources;
@@ -3106,6 +3129,15 @@ async function startPipeline() {
       });
       if (excludedIds.length > 0) body.exclude_photo_ids = excludedIds;
     }
+  }
+
+  // Named strategy preset: when one is active the run is described by
+  // the preset name; the stage checkboxes were synced to it by
+  // applyStrategyPreset so the explicit flags below agree with the
+  // expansion (and miss_enabled comes from the preset server-side).
+  var strategySel = document.getElementById('strategySelect');
+  if (strategySel && strategySel.value !== '__custom__') {
+    body.strategy = strategySel.value;
   }
 
   // Optional stages
@@ -5060,7 +5092,13 @@ function _buildPlanBody() {
   //     truthful counts. Without this the plan falls back to whole-workspace
   //     counts, which renders "Already done" for an import into a
   //     non-empty workspace — exactly the bug we're fixing.
-  if (_sourceMode === 'collection') {
+  if (_sourceMode === 'folders') {
+    // Empty selection deliberately still sends folder_ids: the endpoint
+    // 400s and the pills clear, which is honest — falling back to
+    // whole-workspace counts would render "Already done" for a scope
+    // the user hasn't picked yet.
+    body.folder_ids = selectedFolderIds();
+  } else if (_sourceMode === 'collection') {
     var picker = document.getElementById('collectionPicker');
     var cid = picker && picker.value ? parseInt(picker.value, 10) : NaN;
     if (!isNaN(cid)) body.collection_id = cid;

@@ -6838,3 +6838,47 @@ def test_import_page_resolves_default_strategy_client_side(app_and_db):
     assert "/api/workspaces/active" in html
     assert "default_strategy" in html
     assert "config_overrides" in html
+
+
+def test_process_page_has_no_import_source(app_and_db):
+    """The wizard is the Process page now: the Import Photos source is
+    gone (it lives at /import); Folders / Collection / New images scopes
+    and the strategy menu are present."""
+    app, _ = app_and_db
+    client = app.test_client()
+    html = client.get("/pipeline").data.decode()
+    assert 'id="radioImport"' not in html
+    assert 'id="radioFolders"' in html
+    assert 'id="radioCollection"' in html
+    assert 'id="radioNewImages"' in html
+    assert 'id="strategySelect"' in html
+    assert "folder_ids" in html
+    assert "<title>Vireo - Process</title>" in html
+
+
+def test_pipeline_plan_accepts_folder_scope(app_and_db):
+    """The Process page's folder scope must produce truthful readiness
+    pills: the plan is computed over the folders' subtree photos, not the
+    whole workspace (CORE_PHILOSOPHY: no cheaper-proxy counts)."""
+    app, db = app_and_db
+    root = db.conn.execute(
+        "SELECT id FROM folders WHERE path = '/photos/2024'"
+    ).fetchone()["id"]
+    client = app.test_client()
+    resp = client.post("/api/pipeline/plan", json={"folder_ids": [root]})
+    assert resp.status_code == 200
+    scope = resp.get_json()["scope"]
+    # Fixture: 2 photos on the root + 1 in its child folder.
+    assert scope["photo_count"] == 3
+
+
+def test_pipeline_plan_folder_scope_unlinked_404(app_and_db):
+    app, db = app_and_db
+    original_ws = db._active_workspace_id
+    other = db.create_workspace("PlanOther")
+    db.set_active_workspace(other)
+    foreign = db.add_folder("/photos/plan-foreign", name="plan-foreign")
+    db.set_active_workspace(original_ws)
+    client = app.test_client()
+    resp = client.post("/api/pipeline/plan", json={"folder_ids": [foreign]})
+    assert resp.status_code == 404
