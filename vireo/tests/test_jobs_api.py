@@ -2916,3 +2916,63 @@ def test_pipeline_miss_enabled_accepts_bools(app_and_db, monkeypatch):
             assert resp.status_code == 200, resp.get_json()
             cfg = _job_config(client, resp.get_json()["job_id"])
             assert cfg["miss_enabled"] is value
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"exclude_paths": None},
+        {"exclude_paths": "not-a-list"},
+        {"exclude_photo_ids": None},
+        {"exclude_photo_ids": {"id": 3}},
+    ],
+)
+def test_pipeline_folder_ids_bad_list_field_leaves_no_stray_collection(
+    app_and_db, extra,
+):
+    """Regression for the Codex review on commit 5dc5a9f: a folder-scoped
+    request with ``"exclude_paths": null`` (or any non-list value) passed
+    every up-front validation, materialized the ad-hoc collection, then
+    exploded at ``set(body.get("exclude_paths", []))`` inside the
+    PipelineParams constructor. The 500 left a stray "Process …" row
+    behind and never queued a job. Reject at request time and confirm
+    the workspace's collection count is unchanged."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    before = len(db.get_collections())
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/jobs/pipeline",
+            json={"folder_ids": [root_id], **extra},
+        )
+        assert resp.status_code == 400, resp.get_json()
+        # Error message names the offending field so the caller can fix it.
+        offending = next(iter(extra))
+        assert offending in resp.get_json()["error"]
+    assert len(db.get_collections()) == before
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"source": ""},
+        {"sources": []},
+        {"source": "", "sources": []},
+    ],
+)
+def test_pipeline_folder_ids_treats_empty_sources_as_omitted(
+    app_and_db, extra,
+):
+    """A generic pipeline form can emit ``source: ""`` / ``sources: []``
+    as its unfilled defaults. The rest of this endpoint treats those as
+    omitted (see the ``if sources:`` / ``elif source:`` dispatch and the
+    required-scope truthiness check), so the folder-scope conflict guard
+    must too — otherwise every folder-scoped request from such a form
+    would falsely 400 without the client having to delete unused keys."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [root_id], "strategy": "quick_look", **extra,
+        })
+        assert resp.status_code == 200, resp.get_json()

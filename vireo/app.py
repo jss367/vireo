@@ -16595,14 +16595,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # folder-derived ``collection_id`` and run the snapshot scope
             # instead — the job would process a different scope than the
             # request implies.
-            other_scopes = [
-                name for name, value in (
-                    ("collection_id", collection_id),
-                    ("source", source),
-                    ("sources", sources),
-                    ("source_snapshot_id", source_snapshot_id),
-                ) if value is not None
-            ]
+            #
+            # ``source``/``sources`` are checked for truthiness (not just
+            # ``is not None``) because the rest of this endpoint treats
+            # empty string / empty list as omitted (see the required-scope
+            # check below and the ``if sources:`` / ``elif source:``
+            # dispatch above). Otherwise a generic pipeline form that
+            # always emits ``source: ""`` / ``sources: []`` would falsely
+            # 400 every folder-scoped run.
+            other_scopes = []
+            if collection_id is not None:
+                other_scopes.append("collection_id")
+            if source:
+                other_scopes.append("source")
+            if sources:
+                other_scopes.append("sources")
+            if source_snapshot_id is not None:
+                other_scopes.append("source_snapshot_id")
             if other_scopes:
                 return json_error(
                     "folder_ids cannot be combined with "
@@ -16911,6 +16920,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 f"miss_enabled must be boolean, got "
                 f"{type(miss_enabled_body).__name__}"
             )
+
+        # ``exclude_paths`` / ``exclude_photo_ids`` are coerced inside the
+        # PipelineParams constructor via ``set(body.get(field, []))``. A
+        # JSON ``null`` overrides the default, turning that into
+        # ``set(None)`` which raises TypeError. Since the folder-scope
+        # collection row is committed just below, an unvalidated crash in
+        # PipelineParams would leave a stray "Process …" collection with
+        # no queued job. Reject present-but-non-list values (including
+        # explicit ``null``) up front — same reason miss_enabled is
+        # checked here rather than at the constructor site. Key-presence
+        # (not truthiness) is what matters: missing keys fall through to
+        # the ``[]`` default, but ``{"exclude_paths": null}`` must 400.
+        for _list_field in ("exclude_paths", "exclude_photo_ids"):
+            if _list_field in body and not isinstance(body[_list_field], list):
+                return json_error(
+                    f"{_list_field} must be a list, got "
+                    f"{type(body[_list_field]).__name__}"
+                )
 
         # All request validation has passed — safe to materialize the
         # folder-scope collection row now. Deferring this insert avoids the
