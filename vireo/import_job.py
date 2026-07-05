@@ -284,6 +284,14 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     # Intra-run duplicate destinations: token -> dest folder where the
     # identity landed this run (mirrors ingest's batch_dest_folders).
     run_dest_folders = {}
+    # Byte-proven verified hash for each intra-run token. A ('hash', h)
+    # token's own value IS the proof; a ('key', …) token carries no bytes,
+    # so accepting a later key match against a run twin requires hashing
+    # the current source and comparing against this recorded value (two
+    # different files with the same filename+size+capture-second across
+    # cards would otherwise be counted as skipped_duplicate without ever
+    # verifying bytes — safe_to_format green, second card is only copy).
+    run_verified_hashes = {}
     linked_dup_dirs = set()    # dup-twin dirs already scanned+linked
 
     def _counts(rel):
@@ -346,21 +354,52 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                         src_hash = token[1]
                     else:
                         twin_rows = _key_twin_rows(db, token[1])
-                        src_hash = checker.content_hash(source_file)
+                        # Hash the current source so a key match can be
+                        # confirmed against a cataloged (or intra-run)
+                        # twin's actual bytes. Reading a removable-media
+                        # source can fail (card yanked mid-check, I/O
+                        # error) — same as checker.match() and the copy
+                        # path, that must fail JUST this source rather
+                        # than escape and kill the whole background job.
+                        try:
+                            src_hash = checker.content_hash(source_file)
+                        except OSError as e:
+                            _fail(
+                                rel, source_file,
+                                f"duplicate check failed: {e}",
+                            )
+                            continue
                     # An intra-run token is byte-proven by this session's
                     # own copy_and_hash_verify — safe to skip without
-                    # hitting the archive. Any other match (catalog-side
-                    # hash OR metadata-only key) is stale-suspect: the
-                    # photos.file_hash row could describe an archive file
-                    # that was deleted or modified since the last scan, so
-                    # a duplicate skip must be backed by a cataloged twin
-                    # that STILL holds those bytes on disk. Without this,
-                    # a stale hash row would let the card be counted as
-                    # skipped_duplicate and safe_to_format go green while
-                    # the card is the only remaining copy of the bytes.
+                    # hitting the archive, but ONLY when the token itself
+                    # carries bytes (``('hash', …)`` — the hash IS the
+                    # proof) or the current source's bytes match the run
+                    # twin's verified hash (``('key', …)`` — the metadata
+                    # key proves nothing about bytes; two different files
+                    # with the same filename+size+capture-second across
+                    # cards would otherwise be counted as skipped without
+                    # ever being byte-compared). Any other match
+                    # (catalog-side hash OR metadata-only key) is
+                    # stale-suspect: the photos.file_hash row could
+                    # describe an archive file that was deleted or
+                    # modified since the last scan, so a duplicate skip
+                    # must be backed by a cataloged twin that STILL holds
+                    # those bytes on disk. Without this, a stale hash row
+                    # would let the card be counted as skipped_duplicate
+                    # and safe_to_format go green while the card is the
+                    # only remaining copy of the bytes.
                     if token in run_dest_folders:
-                        accept = True
-                    else:
+                        if token[0] == "hash":
+                            accept = True
+                        else:
+                            run_hash = run_verified_hashes.get(token)
+                            if (
+                                src_hash is not None
+                                and run_hash is not None
+                                and src_hash == run_hash
+                            ):
+                                accept = True
+                    if not accept:
                         for twin in twin_rows:
                             twin_path = os.path.join(
                                 twin["folder_path"], twin["filename"],
@@ -419,6 +458,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                             if checker is not None:
                                 for tok in checker.record(source_file):
                                     run_dest_folders[tok] = dest_folder
+                                    run_verified_hashes[tok] = src_hash
                             continue
                     # Different content, same name — numeric suffix.
                     stem, suffix = os.path.splitext(source_file.name)
@@ -453,6 +493,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
             if checker is not None:
                 for tok in checker.record(source_file):
                     run_dest_folders[tok] = dest_folder
+                    run_verified_hashes[tok] = file_hash
 
         # --- Catalog this batch (even when cancelled mid-batch: what
         # landed on disk must be cataloged before we stop, so every

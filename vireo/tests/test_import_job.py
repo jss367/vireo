@@ -483,6 +483,153 @@ def test_key_match_with_different_bytes_imports_as_distinct(tmp_path):
     assert result["safe_to_format"] is True
 
 
+def test_intra_run_key_collision_across_cards_imports_second_as_fresh(tmp_path):
+    """Two cards can hold different bytes at the same filename+size+
+    capture-second (say, an IMG_XXXX rollover after a firmware reset).
+    A metadata-key match against the first card's just-copied file must
+    NOT let the second card's file be counted as skipped without a byte
+    check: the two files' bytes were never compared, so skipping would
+    let safe_to_format go green while the second card is the only copy
+    of its bytes."""
+    from PIL.ExifTags import Base as ExifBase
+    from import_job import ImportParams, run_import_job
+    from import_dedup import compute_file_hash
+
+    dt = datetime(2026, 5, 2, 11, 20, 45)
+
+    card1 = tmp_path / "card1"
+    card1.mkdir()
+    card1_file = card1 / "IMG_0700.jpg"
+    img = Image.new("RGB", (16, 16), "red")
+    exif = img.getexif()
+    exif[ExifBase.DateTimeOriginal] = dt.strftime("%Y:%m:%d %H:%M:%S")
+    img.save(str(card1_file), exif=exif)
+    card1_bytes = card1_file.read_bytes()
+
+    # Card 2: SAME filename, SAME size, SAME trusted capture time,
+    # different bytes (last byte flipped; EXIF header untouched).
+    card2 = tmp_path / "card2"
+    card2.mkdir()
+    card2_file = card2 / "IMG_0700.jpg"
+    card2_bytes = card1_bytes[:-1] + bytes([card1_bytes[-1] ^ 0xFF])
+    assert len(card2_bytes) == len(card1_bytes)
+    assert card2_bytes != card1_bytes
+    card2_file.write_bytes(card2_bytes)
+
+    archive = tmp_path / "archive"
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id, ImportParams(
+            sources=[str(card1), str(card2)], destination=str(archive),
+        ),
+    )
+
+    # Second card must NOT be counted as skipped_duplicate.
+    assert result["copied"] == 2
+    assert result["skipped_duplicate"] == 0
+    assert result["failed"] == 0
+    # safe_to_format is true because both cards' bytes verifiably landed.
+    assert result["safe_to_format"] is True
+
+    dest_dir = archive / "2026" / "2026-05-02"
+    landed = sorted(p for p in dest_dir.iterdir() if p.is_file())
+    assert len(landed) == 2
+    on_disk = {p.read_bytes() for p in landed}
+    assert card1_bytes in on_disk
+    assert card2_bytes in on_disk
+    hashes_on_disk = {compute_file_hash(str(p)) for p in landed}
+    assert compute_file_hash(str(card1_file)) in hashes_on_disk
+    assert compute_file_hash(str(card2_file)) in hashes_on_disk
+
+
+def test_key_candidate_source_read_error_fails_only_that_file(
+        tmp_path, monkeypatch):
+    """When the current-source hash read for a metadata-key duplicate
+    candidate raises OSError (removable media pulled mid-check, I/O
+    error), that source alone is bucketed as failed. The failure must
+    not escape and kill the whole background job — siblings still import
+    normally, and the safe-to-format ledger records the failure."""
+    from PIL.ExifTags import Base as ExifBase
+    import import_dedup
+    from import_job import ImportParams, run_import_job
+
+    dt_bad = datetime(2026, 5, 3, 12, 0, 0)
+    dt_good = datetime(2026, 5, 3, 12, 5, 0)
+
+    card = tmp_path / "card"
+    card.mkdir()
+    bad_file = card / "IMG_0800.jpg"
+    img = Image.new("RGB", (16, 16), "red")
+    exif_bad = img.getexif()
+    exif_bad[ExifBase.DateTimeOriginal] = (
+        dt_bad.strftime("%Y:%m:%d %H:%M:%S")
+    )
+    img.save(str(bad_file), exif=exif_bad)
+
+    good_file = card / "IMG_0801.jpg"
+    img2 = Image.new("RGB", (16, 16), "green")
+    exif_good = img2.getexif()
+    exif_good[ExifBase.DateTimeOriginal] = (
+        dt_good.strftime("%Y:%m:%d %H:%M:%S")
+    )
+    img2.save(str(good_file), exif=exif_good)
+
+    # Seed a cataloged twin whose (filename, size, capture-second) matches
+    # the bad file — checker.match() will return ('key', …) without needing
+    # to hash, so the next read (the current-source hash for byte
+    # verification) is the one we make fail.
+    library = tmp_path / "library"
+    library.mkdir()
+    twin_file = library / "IMG_0800.jpg"
+    twin_bytes = bad_file.read_bytes()[:-1] + b"\x00"
+    twin_file.write_bytes(twin_bytes)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES (?, ?, 'ok')",
+        (str(library), "library"),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, extension, file_size,"
+        " timestamp) VALUES (?, ?, '.jpg', ?, ?)",
+        (fid, "IMG_0800.jpg", os.path.getsize(str(bad_file)),
+         dt_bad.strftime("%Y-%m-%dT%H:%M:%S")),
+    )
+    db.conn.commit()
+
+    real_hash = import_dedup.compute_file_hash
+    bad_path_str = str(bad_file)
+
+    def flaky_hash(path):
+        if str(path) == bad_path_str:
+            raise OSError("card yanked mid-check")
+        return real_hash(path)
+
+    monkeypatch.setattr(import_dedup, "compute_file_hash", flaky_hash)
+
+    archive = tmp_path / "archive"
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(sources=[str(card)], destination=str(archive)),
+    )
+
+    assert result["failed"] == 1
+    assert result["copied"] == 1
+    assert result["skipped_duplicate"] == 0
+    assert result["safe_to_format"] is False
+    assert len(result["unsafe_files"]) == 1
+    assert result["unsafe_files"][0]["path"] == bad_path_str
+    assert "duplicate check failed" in result["unsafe_files"][0]["reason"]
+
+    dest_good = archive / "2026" / "2026-05-03" / "IMG_0801.jpg"
+    assert dest_good.exists()
+    assert dest_good.read_bytes() == good_file.read_bytes()
+
+
 def test_copy_and_hash_verify_roundtrip(tmp_path):
     from import_dedup import compute_file_hash
     from import_job import copy_and_hash_verify
