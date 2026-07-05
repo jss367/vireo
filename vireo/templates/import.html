@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/png" href="/favicon.ico">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/vireo-base.css">
+<title>Vireo - Import</title>
+<style>
+body { display: flex; flex-direction: column; height: 100vh; }
+.content { flex: 1; overflow-y: auto; padding: 20px; }
+.import-wrap { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+.card { background: var(--bg-secondary); border: 1px solid var(--border-primary); border-radius: 8px; padding: 16px; }
+.card h3 { margin: 0 0 10px 0; font-size: 14px; color: var(--text-primary); }
+.row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+.row label { font-size: 12px; color: var(--text-secondary); }
+.row input[type=text], .row select {
+  background: var(--bg-tertiary); color: var(--text-primary);
+  border: 1px solid var(--border-secondary); border-radius: 4px;
+  padding: 6px 10px; font-size: 12px; outline: none; flex: 1; min-width: 220px;
+}
+.row input[type=text]:focus, .row select:focus { border-color: var(--accent); }
+.btn { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border-secondary); border-radius: 4px; padding: 6px 12px; font-size: 12px; cursor: pointer; }
+.btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.btn:disabled { opacity: 0.5; cursor: default; }
+.source-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.source-item { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-primary); background: var(--bg-tertiary); border-radius: 4px; padding: 4px 8px; }
+.source-item button { background: none; border: none; color: var(--danger); cursor: pointer; font-size: 14px; }
+.hint { font-size: 11px; color: var(--text-secondary); }
+.preview-summary { font-size: 12px; color: var(--text-secondary); margin-top: 6px; }
+.progress-bar { height: 8px; background: var(--bg-tertiary); border-radius: 4px; overflow: hidden; }
+.progress-bar > div { height: 100%; background: var(--accent); width: 0; transition: width 0.2s; }
+.folder-progress { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+.folder-progress td { padding: 3px 8px; border-bottom: 1px solid var(--border-primary); color: var(--text-primary); }
+.folder-progress td.num { text-align: right; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.pill { display: inline-flex; align-items: center; gap: 6px; border-radius: 12px; padding: 3px 10px; font-size: 12px; font-weight: 600; }
+.pill-ok { background: color-mix(in srgb, var(--success, #2da44e) 18%, transparent); color: var(--success, #2da44e); }
+.pill-bad { background: color-mix(in srgb, var(--danger, #cf222e) 18%, transparent); color: var(--danger, #cf222e); }
+.unsafe-list { margin: 6px 0 0 0; padding-left: 18px; font-size: 12px; color: var(--text-secondary); }
+.result-links a { color: var(--accent); font-size: 12px; }
+#importError { color: var(--danger); font-size: 12px; margin-top: 6px; display: none; }
+.warn { font-size: 12px; color: var(--warning, #bf8700); margin-top: 6px; }
+</style>
+</head>
+<body>
+{% include '_navbar.html' %}
+<div class="content">
+  <div class="import-wrap">
+
+    <div class="card" id="sourceCard">
+      <h3>Source</h3>
+      <div class="row">
+        <input type="text" id="sourceInput" list="volumeDatalist"
+               placeholder="Card or folder path — press Enter to add"
+               onkeydown="if(event.key==='Enter'){event.preventDefault();addSource();}">
+        <datalist id="volumeDatalist"></datalist>
+        <button class="btn" onclick="addSource()">Add</button>
+      </div>
+      <div class="source-list" id="sourceList"></div>
+      <div class="row" style="margin-top:8px;">
+        <label><input type="checkbox" id="chkRecursive" checked> Include subfolders</label>
+        <label>File types
+          <select id="fileTypes" style="min-width:100px;">
+            <option value="both" selected>RAW + JPEG</option>
+            <option value="raw">RAW only</option>
+            <option value="jpeg">JPEG only</option>
+          </select>
+        </label>
+      </div>
+    </div>
+
+    <div class="card" id="destCard">
+      <h3>Destination</h3>
+      <div class="row">
+        <input type="text" id="destInput" list="recentDestinations"
+               placeholder="Archive folder (e.g. /Volumes/Photography/Raw Files/USA)"
+               value="">
+        <datalist id="recentDestinations">
+          {% for dest in recent_destinations %}<option value="{{ dest }}">{% endfor %}
+        </datalist>
+      </div>
+      <div class="row">
+        <label>Folder template</label>
+        <input type="text" id="folderTemplate" value="{{ folder_template_default }}" style="max-width:200px;flex:0 1 auto;">
+        <span class="hint">strftime of each photo's capture time, e.g. %Y/%Y-%m-%d</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>After import</h3>
+      <div class="row">
+        <select id="afterImportSelect" data-default-strategy="{{ default_strategy or '' }}" style="max-width:280px;">
+          <option value="__none__">None — import only</option>
+          <option value="quick_look">Quick look (thumbnails + previews)</option>
+          <option value="cull_ready">Cull-ready (+ detect, classify, group)</option>
+          <option value="full">Full pipeline (everything)</option>
+        </select>
+      </div>
+      <div class="hint">Processing runs as its own job when the import finishes — a processing failure never touches imported photos.</div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <button class="btn" id="btnPreview" onclick="previewImport()">Check for duplicates</button>
+        <button class="btn btn-primary" id="btnStart" onclick="startImport()">Start import</button>
+      </div>
+      <div class="preview-summary" id="previewSummary"></div>
+      <div id="importError"></div>
+    </div>
+
+    <div class="card" id="progressCard" style="display:none;">
+      <h3>Import progress</h3>
+      <div class="row"><span id="progressPhase" class="hint"></span></div>
+      <div class="progress-bar"><div id="progressFill"></div></div>
+      <table class="folder-progress" id="folderProgress"></table>
+    </div>
+
+    <div class="card" id="resultCard" style="display:none;">
+      <h3>Result</h3>
+      <div class="row">
+        <span class="pill" id="safeToFormatPill"></span>
+      </div>
+      <ul class="unsafe-list" id="unsafeList" style="display:none;"></ul>
+      <div id="resultSummary" class="hint" style="margin-top:6px;"></div>
+      <table class="folder-progress" id="resultFolders"></table>
+      <div id="chainInfo" class="hint" style="margin-top:8px;"></div>
+      <div id="modelWarning" class="warn" style="display:none;"></div>
+      <div class="result-links" style="margin-top:8px;">
+        <a href="/browse">Open Browse</a> &nbsp;·&nbsp; <a href="/jobs">Open Jobs</a>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+/* Import page: posts to /api/jobs/import-photos, renders live per-folder
+   progress from the job's SSE stream, and shows the safe-to-format pill
+   with per-file reasons. */
+let sources = [];
+let activeJobId = null;
+let es = null;
+
+function renderSources() {
+  const list = document.getElementById('sourceList');
+  list.innerHTML = '';
+  sources.forEach((s, i) => {
+    const div = document.createElement('div');
+    div.className = 'source-item';
+    const span = document.createElement('span');
+    span.textContent = s;
+    span.style.flex = '1';
+    const btn = document.createElement('button');
+    btn.textContent = '×';
+    btn.title = 'Remove';
+    btn.onclick = () => { sources.splice(i, 1); renderSources(); };
+    div.appendChild(span);
+    div.appendChild(btn);
+    list.appendChild(div);
+  });
+}
+
+function addSource() {
+  const input = document.getElementById('sourceInput');
+  const v = (input.value || '').trim();
+  if (!v) return;
+  if (!sources.includes(v)) sources.push(v);
+  input.value = '';
+  renderSources();
+}
+
+function selectedAfterImport() {
+  const v = document.getElementById('afterImportSelect').value;
+  return v === '__none__' ? null : v;
+}
+
+function showError(msg) {
+  const el = document.getElementById('importError');
+  el.textContent = msg;
+  el.style.display = msg ? 'block' : 'none';
+}
+
+async function previewImport() {
+  showError('');
+  if (!sources.length) { showError('Add at least one source folder.'); return; }
+  const summary = document.getElementById('previewSummary');
+  summary.textContent = 'Discovering files…';
+  try {
+    const resp = await fetch('/api/import/folder-preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folders: sources }),
+    });
+    if (!resp.ok) throw new Error((await resp.json()).error || 'preview failed');
+    const data = await resp.json();
+    const files = data.files || [];
+    if (!files.length) { summary.textContent = 'No importable files found.'; return; }
+    summary.textContent = files.length + ' files found — checking for duplicates…';
+    // check-duplicates streams results; count flagged paths as they arrive.
+    const dupResp = await fetch('/api/import/check-duplicates', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths: files.map(f => f.path) }),
+    });
+    if (!dupResp.ok) throw new Error('duplicate check failed');
+    const reader = dupResp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let dupCount = 0;
+    for (;;) {
+      const r = await reader.read();
+      if (r.done) break;
+      buffer += decoder.decode(r.value, { stream: true });
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop();
+      for (const part of parts) {
+        const m = part.match(/^data: (.+)$/m);
+        if (!m) continue;
+        try {
+          const d = JSON.parse(m[1]);
+          if (d.duplicates) dupCount += d.duplicates.length;
+        } catch (e) { /* partial frame */ }
+      }
+    }
+    summary.textContent = files.length + ' files found · ' + dupCount +
+      ' already in your library (will be skipped) · ' +
+      (files.length - dupCount) + ' to copy';
+  } catch (e) {
+    summary.textContent = '';
+    showError(String(e.message || e));
+  }
+}
+
+function renderFolderTable(el, folders) {
+  el.innerHTML = '';
+  Object.keys(folders).sort().forEach((rel) => {
+    const c = folders[rel];
+    const tr = document.createElement('tr');
+    const name = document.createElement('td');
+    name.textContent = rel;
+    const copied = document.createElement('td');
+    copied.className = 'num';
+    copied.textContent = c.copied + ' copied';
+    const skipped = document.createElement('td');
+    skipped.className = 'num';
+    skipped.textContent = c.skipped_duplicate + ' duplicate';
+    const failed = document.createElement('td');
+    failed.className = 'num';
+    failed.textContent = c.failed ? (c.failed + ' failed') : '';
+    if (c.failed) failed.style.color = 'var(--danger)';
+    tr.append(name, copied, skipped, failed);
+    el.appendChild(tr);
+  });
+}
+
+async function startImport() {
+  showError('');
+  if (!sources.length) { showError('Add at least one source folder.'); return; }
+  const destination = (document.getElementById('destInput').value || '').trim();
+  if (!destination) { showError('Choose a destination folder.'); return; }
+  const body = {
+    sources: sources,
+    destination: destination,
+    folder_template: (document.getElementById('folderTemplate').value || '').trim(),
+    file_types: document.getElementById('fileTypes').value,
+    recursive: document.getElementById('chkRecursive').checked,
+    after_import: selectedAfterImport(),
+  };
+  document.getElementById('btnStart').disabled = true;
+  try {
+    const resp = await fetch('/api/jobs/import-photos', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || 'import failed to start');
+    activeJobId = data.job_id;
+    document.getElementById('progressCard').style.display = '';
+    document.getElementById('resultCard').style.display = 'none';
+    watchJob(activeJobId);
+  } catch (e) {
+    showError(String(e.message || e));
+    document.getElementById('btnStart').disabled = false;
+  }
+}
+
+function watchJob(jobId) {
+  if (es) { es.close(); es = null; }
+  es = new EventSource('/api/jobs/' + jobId + '/stream');
+  es.addEventListener('progress', (evt) => {
+    try { renderProgress(JSON.parse(evt.data)); } catch (e) { /* ignore */ }
+  });
+  es.addEventListener('complete', () => { es.close(); es = null; finishJob(jobId); });
+  es.addEventListener('error', () => {
+    // Stream dropped (server restart, network) — fall back to polling the
+    // job once rather than pretending progress continues.
+    if (es) { es.close(); es = null; }
+    finishJob(jobId);
+  });
+}
+
+function renderProgress(data) {
+  document.getElementById('progressPhase').textContent =
+    (data.phase || '') + (data.current_file ? ' · ' + data.current_file : '');
+  const pct = data.total ? Math.round(100 * data.current / data.total) : 0;
+  document.getElementById('progressFill').style.width = pct + '%';
+  if (data.folders && Object.keys(data.folders).length) {
+    renderFolderTable(document.getElementById('folderProgress'), data.folders);
+  }
+}
+
+async function finishJob(jobId) {
+  let job = null;
+  for (let i = 0; i < 30; i++) {
+    const resp = await fetch('/api/jobs/' + jobId);
+    if (resp.ok) {
+      job = await resp.json();
+      if (job.status && job.status !== 'running' && job.status !== 'queued') break;
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  document.getElementById('btnStart').disabled = false;
+  if (!job || !job.result) {
+    showError('Import ended but its result could not be loaded — check the Jobs page.');
+    return;
+  }
+  renderResult(job.result, job.status);
+}
+
+function renderResult(res, status) {
+  document.getElementById('resultCard').style.display = '';
+  const pill = document.getElementById('safeToFormatPill');
+  const unsafe = document.getElementById('unsafeList');
+  unsafe.innerHTML = '';
+  if (res.safe_to_format) {
+    pill.className = 'pill pill-ok';
+    pill.textContent = 'Safe to format the card — every file is verified in the archive';
+    unsafe.style.display = 'none';
+  } else {
+    pill.className = 'pill pill-bad';
+    pill.textContent = 'Do NOT format the card yet';
+    const files = res.unsafe_files || [];
+    unsafe.style.display = files.length ? '' : 'none';
+    files.forEach((u) => {
+      const li = document.createElement('li');
+      li.textContent = u.path + ' — ' + u.reason;
+      unsafe.appendChild(li);
+    });
+    if (!files.length && res.cancelled) {
+      const li = document.createElement('li');
+      li.textContent = 'Import was cancelled before every file was verified.';
+      unsafe.style.display = '';
+      unsafe.appendChild(li);
+    }
+  }
+  document.getElementById('resultSummary').textContent =
+    res.discovered + ' discovered · ' + res.copied + ' copied · ' +
+    res.skipped_duplicate + ' duplicates skipped · ' + res.failed + ' failed' +
+    (status && status !== 'completed' ? ' · job ' + status : '');
+  renderFolderTable(document.getElementById('resultFolders'), res.folders || {});
+
+  const chain = document.getElementById('chainInfo');
+  if (res.process_job_id) {
+    chain.textContent = 'Processing started as its own job: ' + res.process_job_id;
+  } else if (res.after_import_skipped) {
+    chain.textContent = 'Processing not started: ' + res.after_import_skipped;
+  } else {
+    chain.textContent = '';
+  }
+  const warn = document.getElementById('modelWarning');
+  if (res.model_warning) {
+    warn.textContent = res.model_warning;
+    warn.style.display = '';
+  } else {
+    warn.style.display = 'none';
+  }
+}
+
+async function initImportPage() {
+  // Volume suggestions for the source input.
+  try {
+    const resp = await fetch('/api/volumes');
+    if (resp.ok) {
+      const volumes = await resp.json();
+      const dl = document.getElementById('volumeDatalist');
+      (volumes || []).forEach((v) => {
+        const opt = document.createElement('option');
+        opt.value = v.path || v;
+        dl.appendChild(opt);
+      });
+    }
+  } catch (e) { /* suggestions only */ }
+  // Preselect the workspace's default strategy (null -> import only).
+  const sel = document.getElementById('afterImportSelect');
+  const def = sel.getAttribute('data-default-strategy');
+  sel.value = def ? def : '__none__';
+  if (sel.selectedIndex === -1) sel.value = '__none__';
+}
+initImportPage();
+</script>
+</body>
+</html>

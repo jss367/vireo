@@ -547,6 +547,13 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     ])
     runner.update_step(job["id"], "import", status="running")
 
+    # Live per-folder counters, mutated by the copy loop via _counts() and
+    # snapshotted onto every progress event so the Import page can render
+    # truthful per-folder progress mid-run (not just from the terminal
+    # result). Initialized before _emit so the discovery-phase emits see
+    # an empty-but-present dict.
+    folder_counts = {}
+
     def _emit(phase, current, total, current_file=""):
         job["progress"]["current"] = current
         job["progress"]["total"] = total
@@ -561,6 +568,11 @@ def run_import_job(job, runner, db_path, workspace_id, params):
             "current": current,
             "total": total,
             "current_file": current_file,
+            # Snapshot (counts dicts mutate as the loop advances; SSE
+            # consumers must see the state at emit time).
+            "folders": {
+                rel: dict(counts) for rel, counts in folder_counts.items()
+            },
         })
 
     # --- Discover ---------------------------------------------------
@@ -624,7 +636,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     skipped_duplicate = 0
     failed = 0
     unsafe_files = []          # [{path, reason}] — failed copies etc.
-    folder_counts = {}         # rel folder -> counts for the PR 3 UI
+    # (folder_counts is initialized above _emit — see there.)
     # Photo rows this run created or landed bytes into: hash-stamped fresh
     # copies plus RAW primaries that adopted a landed companion JPEG.
     # The after-import chaining hook scopes its process job to exactly

@@ -6802,3 +6802,43 @@ def test_api_audit_import_untracked_silent_when_exiftool_present(
     assert data["ok"] is True
     assert data["imported"] == 1
     assert "warning" not in data
+
+
+# ---------------------------------------------------------------------------
+# Import page (import/process split PR 3)
+# ---------------------------------------------------------------------------
+
+
+def test_import_page_returns_200(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/import")
+    assert resp.status_code == 200
+    html = resp.data.decode()
+    assert "navbar" in html
+    # Core controls, by id: the after-import strategy menu (including the
+    # import-only null choice), the duplicate preview trigger, the
+    # safe-to-format pill container, and the start button posting to
+    # /api/jobs/import-photos.
+    assert 'id="afterImportSelect"' in html
+    assert 'value="__none__"' in html  # "None — import only" option
+    assert "/api/import/check-duplicates" in html
+    assert 'id="safeToFormatPill"' in html
+    assert "/api/jobs/import-photos" in html
+
+
+def test_import_page_defaults_after_import_from_workspace(app_and_db):
+    """The menu's preselected value must reflect the active workspace's
+    pipeline.default_strategy — not a hardcoded default."""
+    import json as json_mod
+
+    app, db = app_and_db
+    db.update_workspace(
+        db._active_workspace_id,
+        config_overrides=json_mod.dumps(
+            {"pipeline": {"default_strategy": "cull_ready"}}
+        ),
+    )
+    client = app.test_client()
+    html = client.get("/import").data.decode()
+    assert 'data-default-strategy="cull_ready"' in html
