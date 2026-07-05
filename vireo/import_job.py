@@ -850,8 +850,29 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                                 continue
                             if twin_hash is not None and twin_hash == src_hash:
                                 accept = True
-                                verified_twin_rows = [twin]
-                                break
+                                if token[0] == "hash":
+                                    # link_rows below is twin_rows for
+                                    # 'hash' tokens (all rows share the
+                                    # verified hash by construction), so
+                                    # a single verified twin is enough to
+                                    # flip accept and stop hashing more.
+                                    verified_twin_rows = [twin]
+                                    break
+                                # For 'key' tokens link_rows is
+                                # verified_twin_rows, so only twins whose
+                                # bytes we actually re-hashed can be
+                                # linked. Breaking at the first byte
+                                # match risks capturing only an
+                                # off-destination twin: _linkable_twin_
+                                # dirs then drops it, dup_dirs stays
+                                # empty for the destination twin's
+                                # folder, and a duplicate-only import
+                                # returns safe_to_format=true while the
+                                # imported photo remains invisible in
+                                # the active workspace. Keep scanning
+                                # to collect every byte-verified twin.
+                                # See PR #1107 review.
+                                verified_twin_rows.append(twin)
                     if accept:
                         skipped_duplicate += 1
                         _counts(rel)["skipped_duplicate"] += 1
