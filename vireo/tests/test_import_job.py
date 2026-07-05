@@ -2265,3 +2265,93 @@ def test_non_empty_null_scan_hash_reclassifies_when_rehash_disagrees(
     ) == result["discovered"]
     unsafe_paths = [u["path"] for u in result["unsafe_files"]]
     assert any("DSC_3000.jpg" in p for p in unsafe_paths), unsafe_paths
+
+
+def test_source_equals_dest_file_is_rejected(tmp_path):
+    """When a source lives under the destination and the folder template
+    maps it back to the same directory, dest_file resolves to the source
+    file itself. The adopt branch would hash the file against itself and
+    count it as ``skipped_duplicate`` with safe_to_format=True — then
+    formatting/erasing the source erases the only copy. The import job
+    must reject that overlap at the worker level (the API rejects
+    ``destination inside source`` but not the reverse). See PR #1107 review.
+    """
+    from import_job import ImportParams
+
+    # Source is /archive/2026/2026-07-05; destination is /archive with the
+    # default %Y/%Y-%m-%d template → dest_folder becomes 2026/2026-07-05,
+    # so dest_file IS the source file.
+    archive = tmp_path / "archive"
+    day = archive / "2026" / "2026-07-05"
+    day.mkdir(parents=True)
+    from PIL import Image
+    src_file = day / "DSC_4000.jpg"
+    Image.new("RGB", (16, 16), "coral").save(str(src_file))
+    ts = datetime(2026, 7, 5, 10, 0, 0).timestamp()
+    os.utime(str(src_file), (ts, ts))
+    original_bytes = src_file.read_bytes()
+
+    db, ws_id, result = _run_import(tmp_path, ImportParams(
+        sources=[str(day)], destination=str(archive),
+    ))
+
+    # The source bytes MUST still be on disk (nothing was moved/deleted).
+    assert src_file.exists()
+    assert src_file.read_bytes() == original_bytes
+    # It must NOT be counted as skipped_duplicate; it must be failed.
+    assert result["skipped_duplicate"] == 0
+    assert result["failed"] == 1
+    assert result["copied"] == 0
+    # Safe-to-format must NOT go green when the source == dest.
+    assert result["safe_to_format"] is False
+    assert (
+        result["copied"]
+        + result["skipped_duplicate"]
+        + result["failed"]
+    ) == result["discovered"]
+    # The failure specifically names the file.
+    unsafe_paths = [u["path"] for u in result["unsafe_files"]]
+    assert any("DSC_4000.jpg" in p for p in unsafe_paths), unsafe_paths
+
+
+def test_import_invalidates_new_images_cache(tmp_path):
+    """After per-batch and dup-link scans, run_import_job must invalidate
+    the /new-images cache for the touched destination folders. Otherwise
+    a workspace whose cache was warm before the import keeps reporting
+    the just-imported files as new until TTL expires or another full
+    scan runs. Mirrors the try/finally in api_job_scan / api_job_import_full
+    / pipeline_job. See PR #1107 review.
+    """
+    from import_job import ImportParams
+
+    card = _make_card(tmp_path, [
+        ("DSC_5000.jpg", datetime(2026, 7, 3, 10, 0, 0), "teal"),
+    ])
+    archive = tmp_path / "archive"
+
+    # Prime the cache with a sentinel value for the active workspace so
+    # we can observe invalidation without racing an actual /new-images
+    # walk. If run_import_job invalidates correctly, the sentinel is
+    # gone by the time the job returns.
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    db._new_images_cache.set(
+        db_path, ws_id, {"new_count": 999, "sample": []},
+    )
+    assert db._new_images_cache.get(db_path, ws_id) is not None
+
+    from import_job import run_import_job
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(sources=[str(card)], destination=str(archive)),
+    )
+    assert result["copied"] == 1  # sanity: the import actually ran
+
+    # The restricted scan invalidation must have cleared the sentinel for
+    # the workspace linked to the dest_folder.
+    assert db._new_images_cache.get(db_path, ws_id) is None, (
+        "run_import_job must invalidate the new-images cache for the "
+        "workspace linked to the destination folder after its restricted "
+        "scans (mirrors pipeline_job / api_job_scan / api_job_import_full)"
+    )

@@ -71,6 +71,24 @@ from scanner import EMPTY_FILE_SHA256
 
 log = logging.getLogger(__name__)
 
+
+def _invalidate_new_images(db, root):
+    """Invalidate the /new-images cache for ``root`` after a restricted scan.
+
+    Lazy import so import_job.py stays independent of new_images at
+    module-load time (mirrors how pipeline_job.py handles it). A failure
+    here must never fail the import — the bytes are on disk and cataloged;
+    the cache will re-warm on its next miss.
+    """
+    try:
+        from new_images import invalidate_new_images_after_scan
+        invalidate_new_images_after_scan(db, root)
+    except Exception:
+        log.exception(
+            "Failed to invalidate new-images cache for %s", root,
+        )
+
+
 # Batch unit (Task 2.0 Q4): files sharing a destination folder, chunked so
 # one scan call never covers more than this many fresh files. Copy, verify,
 # scan, and hash stamping all commit at batch boundaries, so every stopping
@@ -687,6 +705,40 @@ def run_import_job(job, runner, db_path, workspace_id, params):
 
             # Destination path + collision handling (mirrors ingest()).
             dest_file = os.path.join(dest_folder, source_file.name)
+            # Reject the source-under-destination overlap where the folder
+            # template maps the source right back to its own directory
+            # (e.g. source ``/archive/2026/2026-07-05``, destination
+            # ``/archive``, template ``%Y/%Y-%m-%d`` → dest_file IS the
+            # source file). The API rejects destinations INSIDE any source;
+            # this catches the opposite direction, where the destination is
+            # a legal ancestor but the template resolves back to the source
+            # directory. Without this the adopt branch below hashes the
+            # source against itself, records it as ``skipped_duplicate``,
+            # and safe_to_format goes green — deleting/formatting the
+            # source then erases the only copy. See PR #1107 review.
+            try:
+                same_file = (
+                    os.path.exists(dest_file)
+                    and os.path.samefile(str(source_file), dest_file)
+                )
+            except OSError:
+                # Fall back to normalized-path equality when samefile can't
+                # stat (e.g. the destination is a stale entry). Prefer a
+                # false positive here (fail this file) over a false
+                # negative that lets the adopt branch loop back onto the
+                # source itself.
+                same_file = (
+                    os.path.normpath(str(source_file))
+                    == os.path.normpath(dest_file)
+                )
+            if same_file:
+                _fail(
+                    rel, source_file,
+                    "destination folder template resolves back to the "
+                    "source directory (dest_file is the source file itself); "
+                    "no archive copy would be made",
+                )
+                continue
             # Capture card-side (size, mtime_ns) BEFORE the copy so the
             # deferred working-copy pass can identity-check the card
             # override at extraction time. Byte-identical files have the
@@ -845,6 +897,15 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                         rel, entry, f"catalog scan failed: {e}",
                     )
                 landed = []
+            else:
+                # Restricted scan committed new photo rows and
+                # created/linked ``workspace_folders`` entries under
+                # ``dest_folder``; the /api/workspaces/active/new-images
+                # endpoint serves a cached filesystem diff that will
+                # otherwise report the just-imported files as new until
+                # the cache expires or another full scan runs. Mirrors
+                # api_job_scan / api_job_import_full / pipeline_job.
+                _invalidate_new_images(db, dest_folder)
 
             # dest_paths that hash-stamping reclassified from
             # copied/skipped_duplicate to failed. The entries stay in
@@ -1012,6 +1073,12 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                     cancel_check=lambda: runner.is_cancelled(job["id"]),
                 )
                 linked_dup_dirs.update(new_dup_dirs)
+                # Duplicate-link scan created/linked workspace_folders
+                # rows for each duplicate twin's folder; the same
+                # cached-diff staleness applies (see the fresh-batch
+                # scan branch above). Invalidate every touched dup dir.
+                for d in sorted(new_dup_dirs):
+                    _invalidate_new_images(db, d)
             except RuntimeError:
                 cancelled = True
             except Exception as e:
