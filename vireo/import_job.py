@@ -54,6 +54,16 @@ import sys
 import uuid
 from dataclasses import dataclass
 
+# POSIX advisory lock used by the hardlinkless-FS promote fallback (see
+# copy_and_hash_verify below). Unavailable on Windows; Vireo targets
+# macOS/Linux so this import normally succeeds. If it fails, the
+# fallback promote path degrades gracefully to the previous
+# check-then-rename behavior (documented in that block).
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None
+
 from db import Database
 from import_dedup import (
     CatalogIndex,
@@ -139,11 +149,13 @@ def copy_and_hash_verify(src, dst, *, src_hash=None):
 
     When the destination filesystem does not support hard links (exFAT/FAT,
     some SMB/NFS mounts — os.link raises OSError with EPERM/ENOTSUP/
-    EOPNOTSUPP), fall back to ``O_CREAT|O_EXCL`` to atomically claim the
-    destination path as an empty placeholder, then ``os.replace`` the
-    verified temp file over it. That preserves no-overwrite race
-    protection without requiring hardlink support, so imports do not fail
-    across every file on FAT-family archives or hardlinkless NAS shares.
+    EOPNOTSUPP), fall back to a check-then-rename promotion serialized on
+    a directory-level ``fcntl.flock`` of the destination folder. That
+    preserves both crash-safety (no zero-byte placeholder file) and
+    no-overwrite race protection against concurrent imports targeting the
+    same destination/date folder — the fallback block below documents the
+    tradeoffs. Imports do not fail across every file on FAT-family
+    archives or hardlinkless NAS shares.
 
     On mismatch (or race) the temp copy is removed and any pre-existing
     ``dst`` is left untouched.
@@ -195,47 +207,70 @@ def copy_and_hash_verify(src, dst, *, src_hash=None):
             # hardlinkless archives buckets as a copy failure and
             # imports are unusable on those destinations.
             #
-            # Fall back to existence-check + os.rename: the verified
-            # temp stays hidden until it moves atomically over to
-            # ``dst``. Do NOT reserve the final path as an O_EXCL
-            # placeholder before renaming — a crash between placeholder
-            # creation and os.replace would leave a zero-byte stray at
-            # the intended archive name, and a retry treats that
-            # placeholder as "existing archive file", suffixes the real
-            # photo to ``name_1.ext``, and orphans the empty file.
-            # That violates the import/crash-recovery invariant that a
+            # Fall back to existence-check + os.rename, wrapped in a
+            # directory-level POSIX advisory lock. The verified temp
+            # stays hidden until it moves atomically over to ``dst``.
+            # Do NOT reserve the final path as an O_EXCL placeholder
+            # before renaming — a crash between placeholder creation
+            # and os.replace would leave a zero-byte stray at the
+            # intended archive name, and a retry treats that
+            # placeholder as "existing archive file", suffixes the
+            # real photo to ``name_1.ext``, and orphans the empty
+            # file. That violates the crash-recovery invariant that a
             # dead run leaves only valid archive copies or hidden
-            # temps. The check-then-rename flow trades strict atomic
-            # no-overwrite protection for that crash-safety: a
-            # concurrent import creating ``dst`` between the exists()
-            # check and os.rename() could be overwritten, but
-            # destinations are per-workspace/per-date-folder in this
-            # workflow so overlapping runs are unusual, and losing that
-            # narrow race is preferable to leaving zero-byte strays on
-            # every abnormal exit. See PR #1107 review.
+            # temps.
+            #
+            # A bare check-then-rename loses a concurrent-import race:
+            # two hardlinkless-FS jobs targeting the same
+            # destination/date folder could both pass exists() before
+            # either rename(), and the later rename would silently
+            # overwrite the first job's already-verified archive copy
+            # (its ``safe_to_format`` would still report green after
+            # its bytes are gone). Serialize the critical section on
+            # an exclusive ``fcntl.flock`` of the destination
+            # directory: FD-scoped, so a crash releases it
+            # automatically — no placeholder cleanup burden, and the
+            # zero-byte crash-safety invariant is preserved. On mounts
+            # where flock silently no-ops (some remote FSes mounted
+            # ``nolock``) we degrade to the previous check-then-rename
+            # behavior; per-workspace/per-date destinations make
+            # overlapping runs unusual there. See PR #1107 review.
             if not _fs_lacks_hardlinks(link_err):
                 raise
             log.info(
                 "os.link unsupported on %s (%s); using rename fallback",
                 dst_dir, link_err,
             )
-            if os.path.exists(dst):
-                log.warning(
-                    "Destination raced during copy "
-                    "(concurrent import?): %s",
-                    dst,
-                )
-                return (False, None)
+            lock_fd = None
             try:
-                os.rename(tmp, dst)
-            except OSError as rep_err:
-                log.warning(
-                    "Fallback promote failed for %s -> %s: %s",
-                    src, dst, rep_err,
-                )
-                return (False, None)
-            tmp = None
-            return (True, copied_hash)
+                try:
+                    lock_fd = os.open(dst_dir, os.O_RDONLY)
+                except OSError:
+                    lock_fd = None
+                if lock_fd is not None and fcntl is not None:
+                    with contextlib.suppress(OSError):
+                        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                if os.path.exists(dst):
+                    log.warning(
+                        "Destination raced during copy "
+                        "(concurrent import?): %s",
+                        dst,
+                    )
+                    return (False, None)
+                try:
+                    os.rename(tmp, dst)
+                except OSError as rep_err:
+                    log.warning(
+                        "Fallback promote failed for %s -> %s: %s",
+                        src, dst, rep_err,
+                    )
+                    return (False, None)
+                tmp = None
+                return (True, copied_hash)
+            finally:
+                if lock_fd is not None:
+                    with contextlib.suppress(OSError):
+                        os.close(lock_fd)
         os.unlink(tmp)
         tmp = None
         return (True, copied_hash)

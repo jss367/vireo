@@ -2365,6 +2365,57 @@ def test_copy_and_hash_verify_fallback_leaves_no_placeholder_at_dst_on_promote_f
     assert not list(dst.parent.glob(".DSC_9502.jpg.*.tmp"))
 
 
+def test_copy_and_hash_verify_fallback_serializes_via_directory_flock(
+        tmp_path, monkeypatch):
+    """The hardlinkless-FS fallback wraps its exists-check + rename in a
+    ``fcntl.flock`` on the destination directory. Without this, two
+    concurrent imports targeting the same date folder could both pass
+    exists() before either rename(), and the later rename would silently
+    overwrite the first job's already-verified archive copy — its
+    ``safe_to_format`` would still report green after its bytes are
+    gone. See PR #1107 review.
+    """
+    import errno as errno_mod
+
+    from import_job import copy_and_hash_verify
+
+    src = tmp_path / "card" / "DSC_9503.jpg"
+    src.parent.mkdir()
+    src.write_bytes(b"card bytes for lock test" * 50)
+    dst = tmp_path / "archive" / "DSC_9503.jpg"
+
+    def unsupported_link(a, b):
+        raise OSError(errno_mod.EPERM, "operation not permitted")
+
+    monkeypatch.setattr("import_job.os.link", unsupported_link)
+
+    flock_calls = []
+
+    real_flock = None
+    try:
+        import fcntl as fcntl_mod
+        real_flock = fcntl_mod.flock
+
+        def spy_flock(fd, op):
+            flock_calls.append((fd, op))
+            return real_flock(fd, op)
+
+        monkeypatch.setattr("import_job.fcntl.flock", spy_flock)
+    except ImportError:  # pragma: no cover - Windows
+        pass
+
+    ok, _ = copy_and_hash_verify(str(src), str(dst))
+    assert ok is True
+    # LOCK_EX must have been requested exactly once during the fallback
+    # promote critical section — the exists+rename window is serialized.
+    if real_flock is not None:
+        assert len(flock_calls) == 1, (
+            f"expected one flock(LOCK_EX) on fallback path; got {flock_calls}"
+        )
+        _, op = flock_calls[0]
+        assert op == fcntl_mod.LOCK_EX
+
+
 def test_landed_file_failed_after_scan_is_not_double_counted(
         tmp_path, monkeypatch):
     """A file that lands (copy verifies), then hits a scan/lookup failure
