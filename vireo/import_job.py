@@ -628,6 +628,26 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
         )
         os.makedirs(dest_folder, exist_ok=True)
 
+        # Promote any pre-existing folder row for this destination out of
+        # ``'missing'``. Mirrors the local path (see
+        # ``UPDATE folders SET status = 'ok' ... status = 'missing'``
+        # after ``os.makedirs`` there): ``scanner.scan()`` only clears
+        # ``'partial'`` on success, and workspace/photo queries hide rows
+        # under ``missing`` folders, so a folder row still labelled
+        # ``'missing'`` (from a prior health check when the NAS mount was
+        # absent) would keep the just-imported photos invisible in the
+        # workspace even after this run lands and hash-stamps them —
+        # ``safe_to_format`` could go green over folders the UI won't
+        # show. We just makedirs'd the folder so the path exists;
+        # preserve ``'partial'`` (a real prior-scan needs-rescan signal).
+        # See PR #1113 review.
+        db.conn.execute(
+            "UPDATE folders SET status = 'ok' "
+            "WHERE path = ? AND status = 'missing'",
+            (dest_folder,),
+        )
+        db.conn.commit()
+
         # Duplicate gate. A remote duplicate skip is only honest when the
         # cataloged twin's bytes are confirmed at the destination; the local
         # path re-hashes the twin's archive file. On the mount that file is
@@ -931,18 +951,21 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
 
             # Catalog-row presence is required on BOTH paths: the route's
             # copy-and-catalog contract says every landed byte becomes a
-            # photo row, and a landed file with no row after scan is failed
-            # rather than silently left counted as ``copied`` — otherwise a
-            # remote import into an unmounted/misconfigured mount base would
-            # report copied/ok (or copied/NULL, no-verify) with no catalog
-            # trail. (A RAW+JPEG pair whose JPEG row was merged into the RAW
-            # is the main legitimate "no row" case; the RAW carries the
-            # bytes, so failing the JPEG here is conservative but keeps the
-            # pill honest.) Hash stamping (``hash_status='ok'``) still runs
-            # ONLY on the checksum-verification path — without
-            # verify_by_hash the rows keep NULL hash_status/hash_checked_at
-            # (scan may set file_hash, but we don't claim an integrity
-            # verdict we didn't independently make).
+            # photo row (directly or via a companion_path on a sibling
+            # row), and a landed file with no row and no companion row
+            # after scan is failed rather than silently left counted as
+            # ``copied`` — otherwise a remote import into an unmounted/
+            # misconfigured mount base would report copied/ok (or
+            # copied/NULL, no-verify) with no catalog trail. The
+            # RAW+JPEG-pair case (scan merges the JPEG row into the RAW
+            # primary via ``companion_path`` and deletes the JPEG row) is
+            # handled explicitly below so a legitimate paired JPEG is
+            # accepted instead of failed. Hash stamping
+            # (``hash_status='ok'``) still runs ONLY on the checksum-
+            # verification path — without verify_by_hash the rows keep
+            # NULL hash_status/hash_checked_at (scan may set file_hash,
+            # but we don't claim an integrity verdict we didn't
+            # independently make).
             for dest_path, _sf, src_hash, _sz, _mt in list(landed):
                 row = db.conn.execute(
                     """SELECT p.id, p.file_hash FROM photos p
@@ -1001,6 +1024,57 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                             row["id"], "ok", commit=False,
                         )
                 else:
+                    # RAW+JPEG pairing merges the JPEG's photo row into
+                    # the RAW primary (companion_path) and deletes the
+                    # JPEG's own row, so a landed JPEG whose sibling RAW
+                    # was scanned in the same batch legitimately has no
+                    # row of its own. Look it up as another row's
+                    # companion_path before deciding "not cataloged".
+                    # When verifying, cross-check the mount JPEG bytes
+                    # against the hash confirmed card->NAS (same
+                    # stale-mount guard the non-companion branch runs
+                    # above). Mirrors the local path's companion lookup.
+                    # See PR #1113 review.
+                    companion = db.conn.execute(
+                        """SELECT p.id FROM photos p
+                           JOIN folders f ON f.id = p.folder_id
+                           WHERE f.path = ? AND p.companion_path = ?""",
+                        (os.path.dirname(dest_path),
+                         os.path.basename(dest_path)),
+                    ).fetchone()
+                    if companion is not None:
+                        if params.verify_by_hash:
+                            try:
+                                mount_hash = compute_file_hash(dest_path)
+                            except OSError:
+                                mount_hash = None
+                            src_h_norm = (
+                                None if src_hash == EMPTY_FILE_SHA256
+                                else src_hash
+                            )
+                            mount_norm = (
+                                None if mount_hash == EMPTY_FILE_SHA256
+                                else mount_hash
+                            )
+                            if mount_norm != src_h_norm:
+                                copied -= 1
+                                verified -= 1
+                                _counts(rel)["copied"] -= 1
+                                _fail(
+                                    rel, dest_path,
+                                    "paired companion mount bytes do "
+                                    "not match the hash verified on "
+                                    "the NAS (mount base is likely "
+                                    "stale or misconfigured)",
+                                )
+                                landed = [
+                                    e for e in landed if e[0] != dest_path
+                                ]
+                                continue
+                        # JPEG bytes are represented by the RAW row's
+                        # companion_path — accept as landed; leave the
+                        # copied/verified counters alone.
+                        continue
                     copied -= 1
                     if params.verify_by_hash:
                         verified -= 1

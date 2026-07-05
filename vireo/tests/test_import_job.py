@@ -4413,3 +4413,281 @@ def test_remote_import_fails_when_mount_row_hash_disagrees_with_verified_card(
     if "DSC_0001.jpg" in rows:
         assert rows["DSC_0001.jpg"]["hash_status"] != "ok", dict(
             rows["DSC_0001.jpg"])
+
+
+def test_remote_import_promotes_missing_destination_folder_to_ok(
+        tmp_path, monkeypatch):
+    """A remote import that lands into a folder whose ``folders`` row is
+    currently ``status='missing'`` (e.g. a previous health check ran while
+    the NAS mount was absent) must promote the row to ``'ok'`` after
+    makedirs — mirroring the local path. ``scanner.scan()`` only clears
+    ``'partial'`` on success, so a row still labelled ``'missing'`` would
+    keep the imported photos hidden from workspace queries while
+    ``safe_to_format`` could still flip green. See PR #1113 review."""
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+    _install_fake_remote_rsync(monkeypatch, calls, verify=None)
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # Pre-seed the destination folder row as missing (as if a prior health
+    # check ran while the NAS mount was offline).
+    mount_dir = os.path.join(ra["mount_base"], "2026", "2026-07-03")
+    os.makedirs(mount_dir, exist_ok=True)
+    db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES (?, ?, 'missing')",
+        (mount_dir, os.path.basename(mount_dir)),
+    )
+    db.conn.commit()
+
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra, verify_by_hash=True,
+        ),
+    )
+
+    assert result["copied"] == 1, result
+    assert result["failed"] == 0, result
+
+    # The folder row must have flipped out of 'missing'. Otherwise
+    # workspace queries would filter the just-imported photo out.
+    row = db.conn.execute(
+        "SELECT status FROM folders WHERE path = ?", (mount_dir,),
+    ).fetchone()
+    assert row is not None, "destination folder row disappeared"
+    assert row["status"] == "ok", (
+        f"expected status='ok' after remote import into a previously "
+        f"missing folder; got {row['status']!r}"
+    )
+
+    # And the imported photo is visible in the active workspace.
+    linked = _ws_linked_folder_paths(db, ws_id)
+    assert mount_dir in linked, linked
+
+
+def test_remote_import_promotes_missing_folder_preserves_partial(
+        tmp_path, monkeypatch):
+    """Guard-rail: the missing→ok promote must NOT stomp a row currently
+    labelled ``'partial'`` (a real prior-scan needs-rescan signal). The
+    local path preserves ``'partial'``; the remote path must too."""
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+    _install_fake_remote_rsync(monkeypatch, calls, verify=None)
+
+    card = _make_card(tmp_path, [
+        ("DSC_0002.jpg", datetime(2026, 7, 3, 10, 0, 0), "blue"),
+    ])
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    mount_dir = os.path.join(ra["mount_base"], "2026", "2026-07-03")
+    os.makedirs(mount_dir, exist_ok=True)
+    db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES (?, ?, 'partial')",
+        (mount_dir, os.path.basename(mount_dir)),
+    )
+    db.conn.commit()
+
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra, verify_by_hash=True,
+        ),
+    )
+    assert result["failed"] == 0, result
+
+    row = db.conn.execute(
+        "SELECT status FROM folders WHERE path = ?", (mount_dir,),
+    ).fetchone()
+    # scan() may clear partial→ok on its own success stamp; the point of
+    # this test is that our missing→ok UPDATE did NOT stomp partial before
+    # scan ran. Either 'ok' (scan cleared it) or 'partial' (scan
+    # preserved it) is acceptable; anything else means our UPDATE
+    # over-reached.
+    assert row["status"] in ("ok", "partial"), (
+        f"missing→ok UPDATE must preserve 'partial'; got {row['status']!r}"
+    )
+
+
+def test_remote_import_accepts_paired_jpeg_companion_row(
+        tmp_path, monkeypatch):
+    """When a remote batch lands a JPEG whose sibling RAW is already
+    cataloged in the same destination folder, ``scanner.scan()`` runs
+    ``_pair_raw_jpeg_companions`` which merges the JPEG into the RAW row
+    (``companion_path``) and DELETES the JPEG's own row. The catalog-row
+    presence check must recognize this legitimate ``row is None`` case
+    via the companion lookup instead of failing the JPEG as
+    ``not cataloged after scan``. Mirrors the local path. See PR #1113
+    review."""
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+    _install_fake_remote_rsync(monkeypatch, calls, verify=None)
+
+    # Seed an existing RAW file at the destination + its catalog row.
+    mount_dir = os.path.join(ra["mount_base"], "2026", "2026-07-03")
+    os.makedirs(mount_dir, exist_ok=True)
+    raw_seed = os.path.join(mount_dir, "_seed.jpg")
+    Image.new("RGB", (16, 16), "red").save(raw_seed)
+    raw_bytes = open(raw_seed, "rb").read() + b"RAW-SENSOR-DATA"
+    os.unlink(raw_seed)
+    raw_path = os.path.join(mount_dir, "DSC_0800.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(raw_bytes)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES (?, ?, 'ok')",
+        (mount_dir, os.path.basename(mount_dir)),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, extension, file_size,"
+        " file_hash) VALUES (?, ?, '.nef', ?, ?)",
+        (fid, "DSC_0800.NEF", len(raw_bytes), "deadbeef" * 8),
+    )
+    db.conn.commit()
+
+    # Card holds a new JPEG that will land as DSC_0800.jpg and pair with
+    # the pre-existing RAW during the batch's restricted scan.
+    card = _make_card(tmp_path, [
+        ("DSC_0800.jpg", datetime(2026, 7, 3, 10, 0, 0), "green"),
+    ])
+
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra, verify_by_hash=True,
+        ),
+    )
+
+    # The paired JPEG must NOT be reported as "not cataloged after scan"
+    # — its bytes are represented by the RAW row's companion_path.
+    assert result["copied"] == 1, result
+    assert result["failed"] == 0, result
+    assert not any(
+        "not cataloged" in u["reason"]
+        for u in result["unsafe_files"]
+    ), result["unsafe_files"]
+
+    # The RAW row now records the JPEG as its companion.
+    raw_row = db.conn.execute(
+        "SELECT companion_path FROM photos WHERE filename = 'DSC_0800.NEF'",
+    ).fetchone()
+    assert raw_row["companion_path"] == "DSC_0800.jpg", (
+        f"pair-merge must record JPEG on the RAW; got {dict(raw_row)}"
+    )
+    # And the JPEG has no standalone row of its own.
+    jpeg_row = db.conn.execute(
+        "SELECT id FROM photos WHERE filename = 'DSC_0800.jpg'",
+    ).fetchone()
+    assert jpeg_row is None, (
+        "paired JPEG must not keep a standalone row after pair-merge"
+    )
+
+
+def test_remote_import_paired_jpeg_verify_fails_on_mount_hash_mismatch(
+        tmp_path, monkeypatch):
+    """Cross-check parity: when the paired JPEG's mount bytes disagree
+    with the source hash confirmed on the NAS (stale/misconfigured
+    mount), the ``verify_by_hash`` branch must fail the JPEG instead of
+    silently accepting it via the companion row. Same guard the non-
+    companion branch runs; the pair-merged JPEG can't be exempt from
+    it."""
+    import move as _move
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+
+    # Seed the existing RAW at the mount.
+    mount_dir = os.path.join(ra["mount_base"], "2026", "2026-07-03")
+    os.makedirs(mount_dir, exist_ok=True)
+    raw_seed = os.path.join(mount_dir, "_seed.jpg")
+    Image.new("RGB", (16, 16), "red").save(raw_seed)
+    raw_bytes = open(raw_seed, "rb").read() + b"RAW-SENSOR-DATA"
+    os.unlink(raw_seed)
+    raw_path = os.path.join(mount_dir, "DSC_0800.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(raw_bytes)
+
+    # Fake rsync that "lands" the JPEG at the mount but with WRONG bytes
+    # (the wrong-storage stand-in). NAS-side card verify still succeeds.
+    def fake_rsync_wrong_bytes(
+            src_path, dest_spec, rsync_flags, total_files,
+            progress_cb, rsync_bin="rsync", extra_args=None,
+            src_specs=None, src_specs_dest_is_dir=True, **kw):
+        calls["rsync"].append({
+            "src_specs": list(src_specs or []),
+            "extra_args": list(extra_args or []),
+        })
+        ssh_path = dest_spec.split(":", 1)[1]
+        rel = os.path.relpath(ssh_path, ra["ssh_base"])
+        if src_specs_dest_is_dir:
+            mount_dst = os.path.join(ra["mount_base"], rel)
+            os.makedirs(mount_dst, exist_ok=True)
+            for s in src_specs:
+                Image.new("RGB", (16, 16), "yellow").save(
+                    os.path.join(mount_dst, os.path.basename(s)))
+        else:
+            mount_file = os.path.join(ra["mount_base"], rel)
+            os.makedirs(os.path.dirname(mount_file), exist_ok=True)
+            Image.new("RGB", (16, 16), "yellow").save(mount_file)
+        return (0, "", False)
+
+    monkeypatch.setattr(_move, "_run_rsync_streamed", fake_rsync_wrong_bytes)
+    monkeypatch.setattr(_move, "_remote_mkdir_p", lambda r, p: (True, ""))
+    monkeypatch.setattr(_move, "remote_verify_files",
+                        lambda *a, **kw: None)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES (?, ?, 'ok')",
+        (mount_dir, os.path.basename(mount_dir)),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, extension, file_size,"
+        " file_hash) VALUES (?, ?, '.nef', ?, ?)",
+        (fid, "DSC_0800.NEF", len(raw_bytes), "deadbeef" * 8),
+    )
+    db.conn.commit()
+
+    card = _make_card(tmp_path, [
+        ("DSC_0800.jpg", datetime(2026, 7, 3, 10, 0, 0), "green"),
+    ])
+
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra, verify_by_hash=True,
+        ),
+    )
+
+    assert result["copied"] == 0, result
+    assert result["failed"] == 1, result
+    assert result["safe_to_format"] is False, result
+    assert any(
+        "paired companion mount bytes" in u["reason"]
+        for u in result["unsafe_files"]
+    ), result["unsafe_files"]
