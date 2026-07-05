@@ -6,12 +6,122 @@ Returns grouped tag dictionaries keyed by ExifTool group (EXIF, GPS, XMP, etc.).
 
 import json
 import logging
+import shutil
 import subprocess
+import sys
+
+try:
+    from .proc import no_window_kwargs
+except ImportError:
+    from proc import no_window_kwargs
 
 log = logging.getLogger(__name__)
 
 # Batch size for ExifTool invocations
 _BATCH_SIZE = 100
+_EXIFTOOL_TIMEOUT = 120
+_MAX_TIMEOUT_SPLIT_ATTEMPTS = 16
+_TIMEOUT = object()
+
+
+def _exiftool_install_hint() -> str:
+    """Platform-appropriate guidance for installing exiftool.
+
+    The macOS-only ``brew install exiftool`` hint is wrong on Windows
+    (no Homebrew) and Linux, so tailor the message per platform.
+    """
+    if sys.platform == "win32":
+        return "download it from https://exiftool.org"
+    if sys.platform == "darwin":
+        return "install it with: brew install exiftool"
+    return "install it with your package manager (e.g. apt install libimage-exiftool-perl)"
+
+
+def exiftool_available():
+    """Return True if the exiftool binary resolves on PATH AND runs.
+
+    A PATH-only check misses broken installs (dangling wrapper, bad Perl)
+    where ``shutil.which`` succeeds but ``exiftool -ver`` fails — in that
+    case every scan loses metadata silently. Probes via ``-ver``; called
+    once per scan, not per photo.
+    """
+    return exiftool_status()["available"]
+
+
+def exiftool_status():
+    """Report exiftool presence, runnability, path, version, and a hint.
+
+    Mirrors the shape of ``/api/darktable/status`` so the UI can render
+    external-dependency checks uniformly. ``available`` is True only when
+    the binary both resolves on PATH and a ``-ver`` probe succeeds — a
+    PATH-only check would render broken installs as a healthy green state
+    while every scan loses capture date, GPS, and camera info.
+    """
+    path = shutil.which("exiftool")
+    if not path:
+        return {
+            "available": False,
+            "path": "",
+            "version": None,
+            "error": None,
+            "hint": _exiftool_install_hint(),
+        }
+
+    ran_ok = False
+    version = None
+    error = None
+    try:
+        result = subprocess.run(
+            ["exiftool", "-ver"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            **no_window_kwargs(),
+        )
+        if result.returncode == 0:
+            ran_ok = True
+            version = result.stdout.strip() or None
+        else:
+            error = (
+                result.stderr.strip()
+                or f"exiftool -ver exited with status {result.returncode}"
+            )
+    except Exception as e:
+        error = str(e) or e.__class__.__name__
+
+    if ran_ok:
+        return {
+            "available": True,
+            "path": path,
+            "version": version,
+            "error": None,
+            "hint": _exiftool_install_hint(),
+        }
+
+    return {
+        "available": False,
+        "path": path,
+        "version": None,
+        "error": error,
+        "hint": (
+            f"found at {path} but couldn't run — reinstall it "
+            f"({_exiftool_install_hint()})"
+        ),
+    }
+
+
+def scan_metadata_warning():
+    """Return a user-facing warning when exiftool is unavailable, else ``None``.
+
+    Appended to a scan step's summary so a scan run without a runnable
+    exiftool reads as "completed, but degraded" instead of a clean success
+    — photos indexed in that run get no capture date, GPS, or camera info.
+    Reused by every scan completion path (standalone scan, import, and
+    pipeline) so silent degradation is closed off uniformly.
+    """
+    if exiftool_available():
+        return None
+    return "⚠ ExifTool not found — no capture dates, GPS, or camera info"
 
 
 def _run_exiftool(file_paths, extra_args=None):
@@ -38,7 +148,8 @@ def _run_exiftool(file_paths, extra_args=None):
             cmd,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=_EXIFTOOL_TIMEOUT,
+            **no_window_kwargs(),
         )
         if result.returncode not in (0, 1):
             # returncode 1 = warnings (e.g. minor errors), still has output
@@ -46,14 +157,54 @@ def _run_exiftool(file_paths, extra_args=None):
             return []
         if result.stdout.strip():
             return json.loads(result.stdout)
+        return []
     except FileNotFoundError:
-        log.error("exiftool not found — install it with: brew install exiftool")
+        log.error("exiftool not found — %s", _exiftool_install_hint())
     except subprocess.TimeoutExpired:
         log.error("exiftool timed out processing %d files", len(file_paths))
+        return _TIMEOUT
     except json.JSONDecodeError as e:
         log.error("Failed to parse exiftool JSON output: %s", e)
 
     return []
+
+
+def _run_exiftool_with_retries(file_paths, extra_args=None, split_budget=None):
+    """Run ExifTool, splitting timed-out batches to salvage metadata."""
+    if split_budget is None:
+        split_budget = [_MAX_TIMEOUT_SPLIT_ATTEMPTS]
+
+    raw = _run_exiftool(file_paths, extra_args=extra_args)
+    if raw is not _TIMEOUT:
+        return raw
+
+    if len(file_paths) <= 1:
+        return []
+
+    if split_budget[0] <= 0:
+        log.warning(
+            "Stopping exiftool timeout retries for %d files after exhausting split budget",
+            len(file_paths),
+        )
+        return []
+
+    split_budget[0] -= 1
+    mid = len(file_paths) // 2
+    log.warning(
+        "Retrying timed-out exiftool batch of %d files as %d + %d (%d splits left)",
+        len(file_paths),
+        mid,
+        len(file_paths) - mid,
+        split_budget[0],
+    )
+    return (
+        _run_exiftool_with_retries(
+            file_paths[:mid], extra_args=extra_args, split_budget=split_budget
+        )
+        + _run_exiftool_with_retries(
+            file_paths[mid:], extra_args=extra_args, split_budget=split_budget
+        )
+    )
 
 
 def _group_tags(flat_dict):
@@ -74,7 +225,7 @@ def _group_tags(flat_dict):
     return grouped
 
 
-def extract_metadata(file_paths, restricted_tags=None):
+def extract_metadata(file_paths, restricted_tags=None, progress_callback=None):
     """Extract metadata from files using ExifTool.
 
     Args:
@@ -82,6 +233,8 @@ def extract_metadata(file_paths, restricted_tags=None):
         restricted_tags: optional list of tag names to extract (e.g.
             ['-DateTimeOriginal', '-GPSLatitude', '-ImageWidth']).
             If None, extracts all tags.
+        progress_callback: optional callable(current, total) invoked after
+            each ExifTool batch completes.
 
     Returns:
         dict mapping file_path -> grouped metadata dict.
@@ -94,11 +247,13 @@ def extract_metadata(file_paths, restricted_tags=None):
     # Process in batches
     for i in range(0, len(file_paths), _BATCH_SIZE):
         batch = file_paths[i:i + _BATCH_SIZE]
-        raw = _run_exiftool(batch, extra_args=restricted_tags)
+        raw = _run_exiftool_with_retries(batch, extra_args=restricted_tags)
         for entry in raw:
             source = entry.get("SourceFile")
             if source:
                 results[source] = _group_tags(entry)
+        if progress_callback:
+            progress_callback(min(i + len(batch), len(file_paths)), len(file_paths))
 
     return results
 

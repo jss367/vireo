@@ -73,10 +73,10 @@
 
   .progress-container { display: none; margin-top: 20px; }
   .progress-bar-track {
-    height: 6px; background: var(--bg-tertiary); border-radius: 3px; overflow: hidden;
+    height: 10px; background: var(--bg-tertiary); border-radius: 5px; overflow: hidden;
   }
   .progress-bar-fill {
-    height: 100%; background: var(--accent); border-radius: 3px;
+    height: 100%; background: var(--accent); border-radius: 5px;
     width: 0%; transition: width 0.3s;
   }
   .progress-label { font-size: 12px; color: var(--text-secondary); margin-top: 8px; }
@@ -104,39 +104,147 @@
     color: var(--text-dim); text-decoration: none;
   }
   .skip-link:hover { color: var(--text-secondary); }
+
+  .system-check {
+    max-width: 360px;
+    margin: 0 auto 24px;
+    text-align: left;
+    font-size: 13px;
+    min-height: 18px;
+  }
+  .system-check .checking { color: var(--text-dim); }
+  .system-check .ok { color: var(--accent); }
+  .system-check .warn-box {
+    padding: 12px 14px;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--warning) 12%, transparent);
+    border: 1px solid var(--warning);
+    color: var(--text-primary);
+    line-height: 1.5;
+  }
+  .system-check .warn-box strong { color: var(--warning); }
+  .system-check .warn-box code {
+    background: var(--bg-tertiary);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+
+  /* ---- Step 2: region / species list ---- */
+  #stepLabels { display: none; text-align: left; }
+  #stepLabels .step-intro {
+    font-size: 14px; color: var(--text-secondary); line-height: 1.5;
+    margin-bottom: 20px; text-align: center;
+  }
+  .field-label {
+    display: block; font-size: 12px; font-weight: 600;
+    color: var(--text-secondary); margin: 16px 0 6px;
+  }
+  #placeSearch {
+    width: 100%; box-sizing: border-box; padding: 10px 12px;
+    background: var(--bg-tertiary); border: 1px solid var(--border-secondary);
+    border-radius: 8px; color: var(--text-primary); font-size: 14px;
+  }
+  #placeSearch:focus { outline: none; border-color: var(--accent); }
+  #placeDropdown {
+    border: 1px solid var(--border-secondary); border-radius: 8px;
+    margin-top: 4px; overflow: hidden;
+  }
+  #placeDropdown:empty { display: none; }
+  .place-option {
+    padding: 8px 10px; font-size: 13px; color: var(--text-secondary);
+    cursor: pointer; border-bottom: 1px solid var(--border-secondary);
+  }
+  .place-option:hover { background: var(--bg-tertiary); }
+  .place-empty { padding: 8px 10px; font-size: 12px; color: var(--text-dim); }
+  .place-error { padding: 8px 10px; font-size: 12px; color: var(--danger); }
+  .taxon-row { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+  .taxon-row label {
+    font-size: 13px; color: var(--text-secondary);
+    display: flex; align-items: center; gap: 5px; cursor: pointer;
+  }
+  .taxon-row input { accent-color: var(--accent); }
+  #stepLabels .actions {
+    margin-top: 28px; text-align: center;
+  }
+  #labelsStatus { font-size: 12px; color: var(--text-dim); margin-top: 12px; }
+  #labelsSkip {
+    display: block; margin-top: 16px; font-size: 12px;
+    color: var(--text-dim); text-decoration: none;
+  }
+  #labelsSkip:hover { color: var(--text-secondary); }
 </style>
 </head>
 <body>
 
 <div class="setup-card">
-  <div class="setup-title">Welcome to Vireo</div>
-  <div class="setup-tagline">AI-powered wildlife photo organizer</div>
 
-  <ul class="features">
-    <li>Identify species in your photos with AI</li>
-    <li>Rate and cull your best shots</li>
-    <li>Organize photos into collections</li>
-  </ul>
+  <!-- Step 1: download the classification model -->
+  <div id="stepModel">
+    <div class="setup-title">Welcome to Vireo</div>
+    <div class="setup-tagline">AI-powered wildlife photo organizer</div>
 
-  <div>
-    <button class="btn-primary" id="downloadBtn" onclick="getStarted()" disabled>
-      Get Started
-    </button>
-  </div>
-  <div class="settings-hint">You can change models and settings anytime in Settings.</div>
+    <ul class="features">
+      <li>Identify species in your photos with AI</li>
+      <li>Rate and cull your best shots</li>
+      <li>Organize photos into collections</li>
+    </ul>
 
-  <div class="progress-container" id="progressContainer">
-    <div class="progress-bar-track"><div class="progress-bar-fill" id="progressBar"></div></div>
-    <div class="progress-label" id="progressLabel"></div>
-  </div>
+    <div class="system-check" id="systemCheck">
+      <span class="checking">Checking your system&hellip;</span>
+    </div>
 
-  <div class="error-container" id="errorContainer">
-    <div id="errorMessage"></div>
-    <div class="error-actions">
-      <button class="retry-btn" onclick="getStarted()">Retry</button>
-      <a href="#" class="skip-link" id="skipLink" onclick="skipSetup(); return false;">Skip for now</a>
+    <div>
+      <button class="btn-primary" id="downloadBtn" onclick="getStarted()" disabled>
+        Get Started
+      </button>
+    </div>
+    <div class="settings-hint">You can change models and settings anytime in Settings.</div>
+
+    <div class="progress-container" id="progressContainer">
+      <div class="progress-bar-track"><div class="progress-bar-fill" id="progressBar"></div></div>
+      <div class="progress-label" id="progressLabel"></div>
+    </div>
+
+    <div class="error-container" id="errorContainer">
+      <div id="errorMessage"></div>
+      <div class="error-actions">
+        <button class="retry-btn" onclick="getStarted()">Retry</button>
+        <a href="#" class="skip-link" id="skipLink" onclick="skipSetup(); return false;">Skip for now</a>
+      </div>
     </div>
   </div>
+
+  <!-- Step 2: download a species list for the user's region -->
+  <div id="stepLabels">
+    <div class="setup-title">Choose your region</div>
+    <div class="step-intro">
+      Vireo identifies species by matching them against a list for your area.
+      Pick a region and the wildlife groups you photograph, and we'll download
+      the species list. You can add more regions later in Settings.
+    </div>
+
+    <label class="field-label" for="placeSearch">Region</label>
+    <input type="text" id="placeSearch" autocomplete="off"
+           placeholder="e.g. California, Virginia, Costa Rica"
+           oninput="searchPlacesDebounced()">
+    <div id="placeDropdown"></div>
+
+    <label class="field-label">Wildlife groups</label>
+    <div class="taxon-row" id="taxonCheckboxes"></div>
+
+    <div class="actions">
+      <button class="btn-primary" id="fetchLabelsBtn" onclick="fetchLabels()" disabled>
+        Download species list
+      </button>
+      <div id="labelsStatus"></div>
+      <div class="progress-container" id="labelsProgress">
+        <div class="progress-bar-track"><div class="progress-bar-fill" id="labelsBar"></div></div>
+      </div>
+      <a href="#" id="labelsSkip" onclick="skipLabels(); return false;">Skip for now — set this up later in Settings</a>
+    </div>
+  </div>
+
 </div>
 
 <script src="/static/vireo-utils.js"></script>
@@ -177,8 +285,9 @@ if (typeof safeEventSource === 'undefined') {
   };
 }
 
-var MODEL_ID = 'bioclip-vit-b-16';
+var MODEL_ID = 'bioclip-2.5-vith14';
 var modelAlreadyDownloaded = false;
+var classificationReady = false;
 
 async function checkModelStatus() {
   try {
@@ -187,6 +296,7 @@ async function checkModelStatus() {
     if (match && match.downloaded) {
       modelAlreadyDownloaded = true;
     }
+    classificationReady = !!(data && data.classification && data.classification.labels_ready);
   } catch(e) {
     /* Ignore — we'll attempt the download when the user clicks */
   }
@@ -199,9 +309,8 @@ async function getStarted() {
 
   if (modelAlreadyDownloaded) {
     btn.disabled = true;
-    btn.textContent = 'Redirecting...';
-    await safeFetch('/api/setup/complete', { method: 'POST' }, { toast: false });
-    window.location.href = '/browse';
+    btn.textContent = 'Loading…';
+    await proceedAfterModel();
     return;
   }
 
@@ -239,10 +348,7 @@ async function getStarted() {
         if (result.status === 'completed') {
           progressBar.style.width = '100%';
           progressLabel.textContent = 'Download complete!';
-          safeFetch('/api/setup/complete', { method: 'POST' }, { toast: false }).then(function() {
-            btn.textContent = 'Setup Complete!';
-            setTimeout(function() { window.location.href = '/browse'; }, 800);
-          });
+          proceedAfterModel();
         } else {
           var msg = (result.errors && result.errors[0]) || 'Download failed';
           showError(msg);
@@ -255,6 +361,35 @@ async function getStarted() {
   } catch(e) {
     showError(e.message || 'Download failed. Please try again.');
   }
+}
+
+/* The model is ready. The default model (BioCLIP-2.5) ships Tree of Life
+   embeddings, so it classifies label-free and setup can finish straight away.
+   The status endpoint reports classification usable when the active model is
+   label-free (Tree of Life or timm) OR a non-empty label list is present;
+   otherwise route the user to the labels step so the pipeline won't fail at
+   the classify stage. */
+async function proceedAfterModel() {
+  var ready = false;
+  try {
+    var status = await safeFetch('/api/models/status', {}, { toast: false });
+    ready = !!(status && status.classification && status.classification.labels_ready);
+  } catch(e) {
+    /* On error, fall through to the labels step — better to offer it than
+       to silently land the user in a configuration that can't classify. */
+  }
+  if (ready) {
+    await finishSetup();
+    return;
+  }
+  showLabelsStep();
+}
+
+async function finishSetup() {
+  try {
+    await safeFetch('/api/setup/complete', { method: 'POST' }, { toast: false });
+  } catch(e) {}
+  window.location.href = '/browse';
 }
 
 function showError(message) {
@@ -274,11 +409,252 @@ function showError(message) {
 }
 
 async function skipSetup() {
-  await safeFetch('/api/setup/complete', { method: 'POST' }, { toast: false });
-  window.location.href = '/browse';
+  await finishSetup();
 }
 
+/* ---------------- Step 2: region / species list ----------------
+   DOM is built with createElement/textContent (not innerHTML) so
+   place names returned by the iNaturalist search can't inject markup. */
+
+var selectedPlaceId = null;
+var selectedPlaceName = '';
+var placeSearchTimer = null;
+
+function showLabelsStep() {
+  document.getElementById('stepModel').style.display = 'none';
+  document.getElementById('stepLabels').style.display = 'block';
+  loadTaxonGroups();
+}
+
+async function loadTaxonGroups() {
+  var container = document.getElementById('taxonCheckboxes');
+  container.textContent = '';
+  try {
+    var groups = await safeFetch('/api/labels/taxon-groups', {}, { toast: false });
+    (groups || []).forEach(function(g) {
+      var label = document.createElement('label');
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.className = 'taxon-cb';
+      cb.value = g.key;
+      if (g.key === 'birds') cb.checked = true;
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(' ' + g.name));
+      container.appendChild(label);
+    });
+  } catch(e) {
+    var span = document.createElement('span');
+    span.style.cssText = 'font-size:12px;color:var(--text-dim);';
+    span.textContent = 'Could not load groups.';
+    container.appendChild(span);
+  }
+}
+
+function searchPlacesDebounced() {
+  if (selectedPlaceId) {
+    selectedPlaceId = null;
+    selectedPlaceName = '';
+    document.getElementById('fetchLabelsBtn').disabled = true;
+    document.getElementById('placeSearch').style.borderColor = 'var(--border-secondary)';
+  }
+  if (placeSearchTimer) clearTimeout(placeSearchTimer);
+  placeSearchTimer = setTimeout(searchPlaces, 300);
+}
+
+function _setDropdownMessage(cls, text) {
+  var dropdown = document.getElementById('placeDropdown');
+  dropdown.textContent = '';
+  var div = document.createElement('div');
+  div.className = cls;
+  div.textContent = text;
+  dropdown.appendChild(div);
+}
+
+async function searchPlaces() {
+  var q = document.getElementById('placeSearch').value.trim();
+  var dropdown = document.getElementById('placeDropdown');
+  if (q.length < 2) { dropdown.textContent = ''; return; }
+  try {
+    var places = await safeFetch('/api/labels/search-places?q=' + encodeURIComponent(q), {}, { toast: false });
+    if (!places || places.length === 0) {
+      _setDropdownMessage('place-empty', 'No places found');
+      return;
+    }
+    dropdown.textContent = '';
+    places.slice(0, 8).forEach(function(p) {
+      var dn = p.display_name || p.name || '';
+      var opt = document.createElement('div');
+      opt.className = 'place-option';
+      opt.textContent = dn;
+      opt.addEventListener('click', function() { selectPlace(p.id, dn); });
+      dropdown.appendChild(opt);
+    });
+  } catch(e) {
+    _setDropdownMessage('place-error', 'Error: ' + (e.message || e));
+  }
+}
+
+function selectPlace(id, name) {
+  selectedPlaceId = parseInt(id);
+  selectedPlaceName = name;
+  document.getElementById('placeDropdown').textContent = '';
+  document.getElementById('placeSearch').value = name;
+  document.getElementById('placeSearch').style.borderColor = 'var(--accent)';
+  document.getElementById('fetchLabelsBtn').disabled = false;
+}
+
+async function startWelcomeEmbeddingPrecompute(precompute) {
+  if (!precompute || !precompute.model_id || !precompute.labels_file) return;
+  try {
+    await safeFetch('/api/jobs/precompute-embeddings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model_id: precompute.model_id,
+        labels_file: precompute.labels_file,
+      }),
+    }, { toast: false });
+  } catch(e) {
+    /* Non-fatal: the first classification run can still compute embeddings. */
+  }
+}
+
+async function fetchLabels() {
+  if (!selectedPlaceId) return;
+  var groups = [];
+  document.querySelectorAll('.taxon-cb:checked').forEach(function(cb) { groups.push(cb.value); });
+  var status = document.getElementById('labelsStatus');
+  if (groups.length === 0) {
+    status.style.color = 'var(--text-dim)';
+    status.textContent = 'Select at least one wildlife group.';
+    return;
+  }
+
+  var btn = document.getElementById('fetchLabelsBtn');
+  var progress = document.getElementById('labelsProgress');
+  var bar = document.getElementById('labelsBar');
+  btn.disabled = true;
+  status.style.color = 'var(--text-dim)';
+  status.textContent = 'Starting download…';
+
+  try {
+    var data = await safeFetch('/api/jobs/fetch-labels', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        place_id: selectedPlaceId,
+        place_name: selectedPlaceName,
+        taxon_groups: groups,
+        observation_filter: 'research',
+      }),
+    }, { toast: false });
+
+    if (!data || !data.job_id) {
+      status.textContent = 'Could not start the download. Please try again.';
+      btn.disabled = false;
+      return;
+    }
+
+    progress.style.display = 'block';
+    bar.style.width = '0%';
+    status.textContent = 'Fetching species…';
+
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(p) {
+        if (p.current_file) status.textContent = p.current_file;
+        if (p.total > 0 && p.current > 0) {
+          bar.style.width = Math.round((p.current / p.total) * 100) + '%';
+        }
+      },
+      onComplete: function(result) {
+        if (result.status === 'completed' && result.result) {
+          bar.style.width = '100%';
+          status.style.color = 'var(--accent)';
+          var precompute = result.result.embedding_precompute;
+          status.textContent = 'Done! ' + result.result.species_count +
+            ' species downloaded.' + (precompute ? ' Pre-computing embeddings in background…' : ' Finishing setup…');
+          Promise.resolve(startWelcomeEmbeddingPrecompute(precompute)).then(function() {
+            setTimeout(finishSetup, 500);
+          });
+        } else {
+          status.style.color = 'var(--danger)';
+          status.textContent = 'Failed: ' + ((result.errors || []).join(', ') || 'unknown error');
+          btn.disabled = false;
+        }
+      },
+      onError: function() {
+        status.style.color = 'var(--danger)';
+        status.textContent = 'Connection lost during download. Please try again.';
+        btn.disabled = false;
+      }
+    });
+  } catch(e) {
+    status.style.color = 'var(--danger)';
+    status.textContent = 'Error: ' + (e.message || e);
+    btn.disabled = false;
+  }
+}
+
+async function skipLabels() {
+  await finishSetup();
+}
+
+/* exiftool is the metadata backbone for every scan. Without it scans still
+   run but photos get no capture date, GPS, or camera info — so surface the
+   check here rather than letting it fail silently later. This is advisory:
+   it never blocks "Get Started" (the model download is independent).
+   Built with DOM nodes + textContent so the install hint can't inject. */
+async function checkExiftool() {
+  var el = document.getElementById('systemCheck');
+  try {
+    var data = await safeFetch('/api/exiftool/status', {}, { toast: false });
+    el.textContent = '';
+    if (data && data.available) {
+      var ok = document.createElement('span');
+      ok.className = 'ok';
+      ok.textContent = '✓ ExifTool found' +
+        (data.version ? ' (v' + data.version + ')' : '');
+      el.appendChild(ok);
+    } else {
+      var box = document.createElement('div');
+      box.className = 'warn-box';
+      var strong = document.createElement('strong');
+      /* A populated path with available=false means shutil.which resolved
+         but the -ver probe failed — a broken install, not a missing one.
+         Distinguish so the user knows whether to install or to repair. */
+      var broken = !!(data && data.path);
+      strong.textContent = broken
+        ? '⚠ ExifTool is installed but won’t run.'
+        : '⚠ ExifTool not found.';
+      box.appendChild(strong);
+      box.appendChild(document.createTextNode(
+        ' Vireo uses it to read capture dates, GPS, and camera info from your ' +
+        'photos. Without it, scans still run but those details will be missing. ' +
+        'To fix, '));
+      var code = document.createElement('code');
+      code.textContent = (data && data.hint) ||
+        (broken ? 'reinstall ExifTool' : 'install ExifTool');
+      box.appendChild(code);
+      box.appendChild(document.createTextNode(', then restart Vireo.'));
+      el.appendChild(box);
+    }
+  } catch (e) {
+    /* Status endpoint unreachable — leave the check blank rather than
+       showing a misleading warning. */
+    el.textContent = '';
+  }
+}
+
+checkExiftool();
+
 checkModelStatus().then(function() {
+  // Resume mid-onboarding: if the model is already on disk but classification
+  // isn't usable yet (no labels), jump straight to the labels step rather than
+  // making the user re-click "Get Started".
+  if (modelAlreadyDownloaded && !classificationReady) {
+    showLabelsStep();
+    return;
+  }
   document.getElementById('downloadBtn').disabled = false;
 });
 </script>

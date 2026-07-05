@@ -439,6 +439,12 @@ function formatDate(ts) {
 /* ── State for bi-directional sync ── */
 var photoMarkers = {};  /* photo id -> marker */
 var activePhotoId = null;
+var requestedPhotoId = (function() {
+  var raw = new URLSearchParams(window.location.search).get('photo_id');
+  if (!raw) return null;
+  var parsed = parseInt(raw, 10);
+  return isNaN(parsed) ? null : parsed;
+})();
 
 function setActiveCard(photoId) {
   if (activePhotoId !== null) {
@@ -455,6 +461,24 @@ function setActiveCard(photoId) {
   }
 }
 
+function openPhotoMarker(photoId) {
+  var marker = photoMarkers[photoId];
+  if (!marker) return false;
+  setActiveCard(photoId);
+  markers.zoomToShowLayer(marker, function() {
+    map.setView(marker.getLatLng(), Math.max(map.getZoom(), 14));
+    marker.openPopup();
+  });
+  return true;
+}
+
+function photoThumbnailUrl(p) {
+  if (!p || p.id == null) return '';
+  return window.vireoThumbnailUrl
+    ? window.vireoThumbnailUrl(p)
+    : '/thumbnails/' + p.id + '.jpg';
+}
+
 /* ── Sidebar rendering ── */
 function renderSidebar(photos) {
   var list = document.getElementById('sidebarList');
@@ -466,7 +490,7 @@ function renderSidebar(photos) {
     card.className = 'sidebar-card';
     card.setAttribute('data-id', p.id);
 
-    var thumbSrc = p.id != null ? '/thumbnails/' + p.id + '.jpg' : '';
+    var thumbSrc = photoThumbnailUrl(p);
     var color = getSpeciesColor(p.species);
     var speciesHtml = p.species
       ? '<div class="card-species"><span class="species-dot" style="background:' + color + '"></span>'
@@ -482,14 +506,7 @@ function renderSidebar(photos) {
       + '</div>';
 
     card.addEventListener('click', function() {
-      var marker = photoMarkers[p.id];
-      if (marker) {
-        map.setView(marker.getLatLng(), Math.max(map.getZoom(), 14));
-        markers.zoomToShowLayer(marker, function() {
-          marker.openPopup();
-        });
-      }
-      setActiveCard(p.id);
+      openPhotoMarker(p.id);
     });
 
     list.appendChild(card);
@@ -508,7 +525,7 @@ function showClusterPreview(e) {
   for (var i = 0; i < previewCount; i++) {
     var p = childMarkers[i]._photoData;
     if (p && p.id != null) {
-      gridHtml += '<img src="/thumbnails/' + p.id + '.jpg"'
+      gridHtml += '<img src="' + escapeAttr(photoThumbnailUrl(p)) + '"'
         + ' alt="" onerror="this.style.visibility=\'hidden\'">';
     } else {
       gridHtml += '<div style="width:56px;height:56px;background:var(--bg-tertiary,#14374E);border-radius:3px"></div>';
@@ -538,6 +555,8 @@ markers.on('clusterclick', hideClusterPreview);
 
 /* ── Load photos ── */
 async function loadPhotos() {
+  var focusPhotoId = requestedPhotoId;
+  requestedPhotoId = null;
   var params = new URLSearchParams();
   var folder = document.getElementById('filterFolder').value;
   var rating = document.getElementById('filterRating').value;
@@ -564,8 +583,9 @@ async function loadPhotos() {
 
     if (data.photos.length === 0) {
       renderSidebar([]);
-      document.getElementById('mapStatus').textContent =
-        'No geolocated photos found. Photos with GPS data in their EXIF metadata will appear here.';
+      document.getElementById('mapStatus').textContent = focusPhotoId !== null
+        ? 'No map location found for this photo.'
+        : 'No geolocated photos found. Photos with GPS data in their EXIF metadata will appear here.';
       legendControl.update({});
       return;
     }
@@ -574,7 +594,7 @@ async function loadPhotos() {
     legendControl.update(speciesColorMap);
 
     data.photos.forEach(function(p) {
-      var thumbSrc = p.id != null ? '/thumbnails/' + p.id + '.jpg' : '';
+      var thumbSrc = photoThumbnailUrl(p);
       var imgTag = thumbSrc
         ? '<img src="' + escapeAttr(thumbSrc) + '" alt="" onerror="this.style.display=\'none\'">'
         : '';
@@ -614,6 +634,12 @@ async function loadPhotos() {
 
     map.fitBounds(markers.getBounds(), { padding: [30, 30] });
     renderSidebar(data.photos);
+    if (focusPhotoId !== null) {
+      if (!openPhotoMarker(focusPhotoId)) {
+        document.getElementById('mapStatus').textContent =
+          'No map location found for this photo.';
+      }
+    }
 
     /* GPS coverage stats — global (unfiltered) for consistency */
     var totalFiltered = data.total_filtered;
@@ -628,7 +654,9 @@ async function loadPhotos() {
     if (missingGps > 0) {
       parts.push('<a href="/browse?missing_gps=1">' + missingGps + ' missing GPS</a>');
     }
-    statusEl.innerHTML = parts.join(' &mdash; ');
+    if (focusPhotoId === null || photoMarkers[focusPhotoId]) {
+      statusEl.innerHTML = parts.join(' &mdash; ');
+    }
   } catch (e) {
     document.getElementById('mapStatus').textContent = 'Failed to load photos.';
   }

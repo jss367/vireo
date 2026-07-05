@@ -479,7 +479,74 @@
     background: var(--bg-secondary, #0E2A3D);
     flex-shrink: 0;
   }
-  .grm-footer .grm-hint { font-size: 11px; color: var(--text-ghost, #555); flex: 1; }
+  .grm-keys-bar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    padding: 7px 20px;
+    background: var(--bg-secondary, #0E2A3D);
+    border-top: 1px solid var(--border-primary, #14374E);
+    font-size: 11px;
+    color: var(--text-ghost, #555);
+    flex-shrink: 0;
+  }
+  .grm-keys-bar .grm-key { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+  .grm-keys-bar kbd {
+    display: inline-block;
+    min-width: 14px;
+    padding: 1px 6px;
+    text-align: center;
+    border-radius: 4px;
+    background: var(--bg-tertiary, #14374E);
+    border: 1px solid var(--border-secondary, #1A4560);
+    color: var(--text-muted, #888);
+    font-family: inherit;
+    font-size: 10px;
+    line-height: 1.7;
+  }
+  .grm-mouse-help {
+    position: relative;
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    cursor: help;
+    color: var(--text-dim, #6a8a9a);
+  }
+  .grm-mouse-help .grm-mouse-help-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    border: 1px solid var(--border-secondary, #1A4560);
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-muted, #888);
+  }
+  .grm-mouse-pop {
+    display: none;
+    position: absolute;
+    bottom: calc(100% + 8px);
+    right: 0;
+    width: max-content;
+    max-width: 280px;
+    padding: 8px 12px;
+    background: var(--bg-tertiary, #14374E);
+    border: 1px solid var(--border-primary, #14374E);
+    border-radius: 6px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+    color: var(--text-secondary, #B0D0D0);
+    line-height: 1.8;
+    text-align: left;
+    z-index: 10;
+  }
+  .grm-mouse-pop strong { display: block; color: var(--text-primary, #E0F0F0); margin-bottom: 4px; font-size: 11px; }
+  .grm-mouse-help:hover .grm-mouse-pop,
+  .grm-mouse-help:focus .grm-mouse-pop,
+  .grm-mouse-help:focus-within .grm-mouse-pop { display: block; }
   .grm-res-control,
   .grm-loupe-zoom-control {
     display: flex;
@@ -543,6 +610,7 @@
     overflow: hidden;
     cursor: crosshair;
   }
+  .grm-loupe-img.align-dragging { cursor: grabbing; }
   .grm-loupe-img img {
     width: 100%;
     height: 100%;
@@ -916,7 +984,9 @@ function renderStats() {
       '<span class="stat accepted-count">' + accepted + ' Accepted</span>' +
       '<span class="stat">' + predictions.length + ' Total</span>';
   } else {
-    el.innerHTML = '<span class="stat">' + allData.photos.length + ' photos</span>';
+    // Browse mode means zero predictions loaded — the grid's empty state
+    // explains the situation, so there's no count worth showing here.
+    el.textContent = '';
   }
 }
 
@@ -1030,6 +1100,19 @@ function renderGrid() {
   grid.innerHTML = items.map(function(p) { return renderPredictionCard(p); }).join('');
 }
 
+document.addEventListener('lightbox:renderchanged', function(e) {
+  var ids = e && e.detail && Array.isArray(e.detail.photoIds) ? e.detail.photoIds : [];
+  ids.forEach(function(id) {
+    var hideDetectionOverlay = (
+      typeof window.vireoPhotoHasOrientationEdit === 'function' &&
+      window.vireoPhotoHasOrientationEdit(id)
+    );
+    document.querySelectorAll('.detection-box[data-photo-id="' + id + '"]').forEach(function(box) {
+      box.style.display = hideDetectionOverlay ? 'none' : '';
+    });
+  });
+});
+
 /* Delegate grid clicks for lightbox and group review (XSS-safe) */
 document.getElementById('grid').addEventListener('click', function(e) {
   var img = e.target.closest('img[data-photo-id]');
@@ -1069,7 +1152,17 @@ function getConsensusSpecies(pred) {
 }
 
 function renderPredictionCard(pred) {
-  var thumbUrl = '/thumbnails/' + pred.photo_id + '.jpg';
+  if (
+    typeof window.vireoRememberPhotoEditRecipe === 'function' &&
+    Object.prototype.hasOwnProperty.call(pred, 'edit_recipe')
+  ) {
+    window.vireoRememberPhotoEditRecipe(pred.photo_id, pred.edit_recipe, {
+      skipIfLocallyWritten: true,
+    });
+  }
+  var thumbUrl = window.vireoThumbnailUrl
+    ? window.vireoThumbnailUrl(pred)
+    : '/thumbnails/' + pred.photo_id + '.jpg';
   var displaySpecies = pred.group_id ? getConsensusSpecies(pred) : pred.species;
   var confPct = Math.round(pred.confidence * 100);
   var confColor = confPct >= 70 ? 'var(--accent)' : confPct >= 50 ? 'var(--warning)' : 'var(--danger)';
@@ -1177,6 +1270,10 @@ function renderPredictionCard(pred) {
 
   // Build image with optional bounding box overlay
   var hasBox = pred.box_x != null && pred.box_y != null && pred.box_w != null && pred.box_h != null;
+  var hideDetectionOverlay = (
+    typeof window.vireoPhotoHasOrientationEdit === 'function' &&
+    window.vireoPhotoHasOrientationEdit(pred.photo_id)
+  );
   var imgStyle = hasBox ? 'cursor:pointer;object-fit:contain;' : 'cursor:pointer;';
   var imgTag = '<img src="' + thumbUrl + '" loading="lazy" alt="' + escapeAttr(pred.filename || '') +
     '" style="' + imgStyle + '" data-photo-id="' + pred.photo_id + '" data-filename="' + escapeAttr(pred.filename || '') + '">';
@@ -1189,7 +1286,7 @@ function renderPredictionCard(pred) {
     var bWidth = (pred.box_w * 100).toFixed(2) + '%';
     var bHeight = (pred.box_h * 100).toFixed(2) + '%';
     imgHtml = '<div class="card-img-wrap">' + imgTag +
-      '<div class="detection-box" style="left:' + bLeft + ';top:' + bTop +
+      '<div class="detection-box" data-photo-id="' + pred.photo_id + '" style="' + (hideDetectionOverlay ? 'display:none;' : '') + 'left:' + bLeft + ';top:' + bTop +
       ';width:' + bWidth + ';height:' + bHeight + ';border-color:' + color + ';">' +
       '<span class="detection-label" style="background:' + color +
       ';color:#0A1F2E;">' + escapeHtml(displaySpecies) + ' ' + confPct + '%</span>' +
@@ -1275,7 +1372,12 @@ document.addEventListener('keydown', function(e) {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
   if (mode !== 'review') return;
   if (!_shortcuts) return;
-  var pending = predictions.filter(function(p) { return p.status === 'pending'; });
+  // No-op while an overlay owns the keyboard (lightbox, burst modal, etc.) —
+  // otherwise A/S would invisibly accept/reject grid cards behind it.
+  if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active')) return;
+  // The toolbar hint promises "first visible card": use the grid's filtered
+  // + sorted view, not the API-ordered raw predictions array.
+  var pending = getVisibleItems().filter(function(p) { return p.status === 'pending'; });
   if (pending.length === 0) return;
   if (matchesShortcut(e, _shortcuts.accept)) { e.preventDefault(); acceptPrediction(pending[0].id); }
   else if (matchesShortcut(e, _shortcuts.skip)) { e.preventDefault(); rejectPrediction(pending[0].id); }
@@ -1381,7 +1483,7 @@ function buildReviewCardContextMenu(pred) {
     onClick: function() { openReviewLightbox(photoId, pred.filename); },
   });
   items.push({
-    label: 'Reveal in Finder/Folder',
+    label: window.VIREO_REVEAL_LABEL,
     onClick: function() { revealReviewPhoto(photoId); },
   });
   items.push({
@@ -1444,7 +1546,7 @@ function buildBurstGroupContextMenu(photoId, filename) {
     ] },
     { separator: true },
     { label: 'Open in Lightbox',        onClick: function() { openReviewLightbox(photoId, filename); } },
-    { label: 'Reveal in Finder/Folder', onClick: function() { revealReviewPhoto(photoId); } },
+    { label: window.VIREO_REVEAL_LABEL, onClick: function() { revealReviewPhoto(photoId); } },
     { label: 'Copy Path',               onClick: function() { copyReviewPhotoPath(photoId); } },
     { separator: true },
     // Send-elsewhere actions: get the photo into another tool without losing
@@ -1453,6 +1555,29 @@ function buildBurstGroupContextMenu(photoId, filename) {
     { label: 'Send to iNaturalist',
       onClick: function() {
         if (typeof window.submitToInat === 'function') window.submitToInat(photoId);
+      } },
+    { label: 'Edit Photo',
+      onClick: function() {
+        // Hand the group's ordered photo list to the editor for Prev/Next,
+        // mirroring the lightbox "Edit Photo" handoff. Use the visible
+        // (non-removed) items so the editor can't navigate into frames the
+        // user has already removed from the group.
+        if (window.vireoEditNav) {
+          window.vireoEditNav.setList(
+            _grmVisibleItems().map(function(it) { return it.photo_id; }), photoId);
+          window.vireoEditNav.setLastPhoto(photoId);
+        }
+        // Open in a new tab in a real browser so the modal stays alive with
+        // any pending pick/reject/remove decisions — navigating in place
+        // would tear it down and drop that unsaved work. Tauri has no tabs
+        // and ignores window.open(_, '_blank'); navigate in place there,
+        // same tradeoff as Open in Browse Mode.
+        var url = '/edit/' + photoId;
+        if (typeof isTauri === 'function' && isTauri()) {
+          window.location.href = url;
+        } else {
+          window.open(url, '_blank', 'noopener');
+        }
       } },
   ].concat(
     typeof window.buildOpenInEditorMenuItems === 'function'
@@ -1464,7 +1589,7 @@ function buildBurstGroupContextMenu(photoId, filename) {
         if (typeof window.developPhotos === 'function') window.developPhotos([photoId]);
       } },
     { label: 'Open in Browse Mode',
-      onClick: function() { window.open('/browse?photo_id=' + photoId, '_blank'); } },
+      onClick: function() { window.openInBrowse(photoId); } },
     { separator: true },
     { label: 'Remove from Group',       onClick: function() { grmRemoveFromGroup(); } },
   ]);
@@ -1515,11 +1640,17 @@ function openGroupReview(groupId, model) {
   _grmLoupeZoomLevel = 1;
   _grmOffsets = {};
   _grmDragging = null;
+  _grmLoupeAlignDragging = null;
+  document.removeEventListener('mousemove', grmLoupeMouseMove);
+  document.removeEventListener('mouseup', grmLoupeMouseUp);
   _grmSuppressNextClick = false;
+  _grmSuppressLoupeClick = false;
   _grmLoupeLastX = 50;
   _grmLoupeLastY = 50;
   _grmLoupeHovering = false;
   _grmPendingSnap = false;
+  _grmLoupeOneToOne = false;
+  _grmLoupePendingOneToOne = false;
   grmRefreshResetAllVisibility();
   document.getElementById('grmOverlay').classList.add('open');
   grmSetThumbSize(GRM_CARD_W, false);
@@ -1534,6 +1665,9 @@ function closeGroupReview() {
   document.getElementById('grmOverlay').classList.remove('open');
   _grmOffsets = {};
   _grmDragging = null;
+  _grmLoupeAlignDragging = null;
+  document.removeEventListener('mousemove', grmLoupeMouseMove);
+  document.removeEventListener('mouseup', grmLoupeMouseUp);
   grmRefreshResetAllVisibility();
 }
 
@@ -1589,7 +1723,7 @@ function renderGroupModal() {
     var boxSharp = it.box_sharpness != null ? Math.round(it.box_sharpness) : null;
     var confPct = Math.round((it.confidence || 0) * 100);
 
-    var src = grmPhotoUrl(it.photo_id);
+    var src = grmPhotoUrl(it);
     var nat = grmNaturalDims(it);
     var imgStyle = 'width:' + nat.w + 'px;height:' + nat.h + 'px;';
     var scoresHtml = 'Q: <span class="score-val">' + qScore + '</span> S: <span class="score-val">' + sharp + '</span>';
@@ -1721,7 +1855,7 @@ function grmSelect(photoId, mode) {
   var loupePreds = document.getElementById('grmLoupePreds');
   if (grmState.selected) {
     loupeImg.src = grmLoupePhotoUrl(grmState.selected);
-    grmApplyLoupeZoom();
+    _grmAfterLoupeSourceChange();
     var item = grmState.items.find(function(it) { return it.photo_id === grmState.selected; });
     if (item) {
       var sharp = item.subject_sharpness != null ? Math.round(item.subject_sharpness) : (item.sharpness != null ? Math.round(item.sharpness) : '?');
@@ -1745,7 +1879,7 @@ function grmRefreshSelectedLoupe() {
   if (!loupeImg || !loupeInfo || !loupePreds) return;
   if (grmState.selected) {
     loupeImg.src = grmLoupePhotoUrl(grmState.selected);
-    grmApplyLoupeZoom();
+    _grmAfterLoupeSourceChange();
     var item = grmState.items.find(function(it) { return it.photo_id === grmState.selected; });
     if (item) {
       var sharp = item.subject_sharpness != null ? Math.round(item.subject_sharpness) : (item.sharpness != null ? Math.round(item.sharpness) : '?');
@@ -1798,7 +1932,9 @@ var _grmLoupeLocked = false;
 // the underlying image as the shared zoom changes.
 var _grmOffsets = {};
 var _grmDragging = null;
+var _grmLoupeAlignDragging = null;
 var _grmSuppressNextClick = false;
+var _grmSuppressLoupeClick = false;
 // Latest cursor position over the loupe image (in %), used as the transform
 // origin when zoom is applied outside a mouse event (e.g. wheel after drag,
 // 1:1 snap, drag-induced re-apply). Initialized to centre so pre-hover zoom
@@ -1823,6 +1959,8 @@ var GRM_RES_STOPS = [
 ];
 var grmResolutionIdx = 1;
 var _grmLoupeZoomLevel = 1;
+var _grmLoupeOneToOne = false;
+var _grmLoupePendingOneToOne = false;
 
 function _grmInitialThumbSize() {
   try {
@@ -1856,21 +1994,52 @@ function grmSetThumbSize(value, persist) {
 GRM_CARD_W = _grmInitialThumbSize();
 GRM_CARD_H = Math.round(GRM_CARD_W * 2 / 3);
 
-function grmPhotoUrl(photoId) {
+function grmPhotoUrl(photoOrId) {
+  var photo = photoOrId && typeof photoOrId === 'object' ? photoOrId : null;
+  var photoId = photo ? (photo.photo_id != null ? photo.photo_id : photo.id) : photoOrId;
   var stop = GRM_RES_STOPS[grmResolutionIdx] || GRM_RES_STOPS[1];
-  if (stop.kind === 'thumb') return '/thumbnails/' + photoId + '.jpg';
+  if (stop.kind === 'thumb') {
+    if (!photo && grmState && grmState.items) {
+      photo = grmState.items.find(function(it) {
+        return String(it.photo_id) === String(photoId);
+      }) || null;
+    }
+    return window.vireoThumbnailUrl
+      ? window.vireoThumbnailUrl(photo || photoId)
+      : '/thumbnails/' + photoId + '.jpg';
+  }
   if (stop.kind === 'original') return '/photos/' + photoId + '/original';
-  return '/photos/' + photoId + '/preview?size=' + stop.size;
+  return vireoPreviewUrl(photoId, stop.size);
 }
 
 function grmLoupePhotoUrl(photoId) {
   return grmPhotoUrl(photoId);
 }
 
+function grmEditedSourceDims(item) {
+  var W = (item && item.width) ? Number(item.width) : 1800;
+  var H = (item && item.height) ? Number(item.height) : 1200;
+  var recipe = (item && item.edit_recipe) || {};
+  var rotation = Number(recipe.rotation || 0);
+  if (rotation === 90 || rotation === 270) {
+    var tmp = W;
+    W = H;
+    H = tmp;
+  }
+  if (recipe.crop && typeof recipe.crop === 'object') {
+    var cropW = Number(recipe.crop.w);
+    var cropH = Number(recipe.crop.h);
+    if (Number.isFinite(cropW) && cropW > 0) W = Math.max(1, Math.round(W * cropW));
+    if (Number.isFinite(cropH) && cropH > 0) H = Math.max(1, Math.round(H * cropH));
+  }
+  return { w: W, h: H };
+}
+
 function grmNaturalDims(item) {
   var stop = GRM_RES_STOPS[grmResolutionIdx] || GRM_RES_STOPS[1];
-  var W = (item && item.width) ? item.width : 1800;
-  var H = (item && item.height) ? item.height : 1200;
+  var dims = grmEditedSourceDims(item);
+  var W = dims.w;
+  var H = dims.h;
   if (stop.kind === 'original') {
     return { w: W, h: H };
   }
@@ -1902,6 +2071,14 @@ function grmUpdateResLabel() {
 function grmSetResolution(idx) {
   grmResolutionIdx = parseInt(idx, 10) || 0;
   grmState.upgraded = (GRM_RES_STOPS[grmResolutionIdx] || {}).kind === 'original';
+  var wasOneToOne = _grmLoupeOneToOne || _grmLoupePendingOneToOne;
+  _grmLoupePendingOneToOne = false;
+  _grmLoupeOneToOne = false;
+  if (wasOneToOne) {
+    // Resolution change invalidates the prior 1:1 calculation; mirror the
+    // toggle-off path so the zoom label stops showing "1:1".
+    _grmSetLoupeZoomLevel(1);
+  }
   var slider = document.getElementById('grmResSlider');
   if (slider) slider.value = grmResolutionIdx;
   document.querySelectorAll('.grm-card').forEach(function(card) {
@@ -1914,7 +2091,7 @@ function grmSetResolution(idx) {
     card.dataset.natH = nat.h;
     img.style.width = nat.w + 'px';
     img.style.height = nat.h + 'px';
-    img.src = grmPhotoUrl(pid);
+    img.src = grmPhotoUrl(item || pid);
   });
   if (grmState && grmState.selected) {
     var loupe = document.getElementById('grmLoupePhoto');
@@ -1927,7 +2104,9 @@ function grmSetResolution(idx) {
 function grmSetLoupeZoom(value, persist) {
   var pct = parseInt(value, 10);
   if (!pct) pct = 100;
-  pct = Math.max(100, Math.min(500, pct));
+  pct = Math.max(100, Math.min(_grmLoupeSliderMax(), pct));
+  _grmLoupePendingOneToOne = false;
+  _grmLoupeOneToOne = false;
   _grmLoupeZoomLevel = pct / 100;
   var slider = document.getElementById('grmLoupeZoomSlider');
   if (slider) slider.value = pct;
@@ -1941,6 +2120,79 @@ function grmApplyLoupeZoom() {
   if (!img) return;
   img.style.transformOrigin = _grmLoupeLastX + '% ' + _grmLoupeLastY + '%';
   img.style.transform = 'scale(' + _grmLoupeZoomLevel + ')';
+}
+
+function _grmAfterLoupeSourceChange() {
+  if (_grmLoupeOneToOne || _grmLoupePendingOneToOne) {
+    _grmLoupeOneToOne = false;
+    _grmLoupePendingOneToOne = true;
+    _grmFinishLoupeOneToOne();
+  } else {
+    grmApplyLoupeZoom();
+  }
+}
+
+function _grmLoupeSliderMax() {
+  var slider = document.getElementById('grmLoupeZoomSlider');
+  var fromDom = slider ? parseInt(slider.max, 10) : 500;
+  return Math.max(500, fromDom || 500);
+}
+
+function _grmLoupeFitScale(img) {
+  var box = document.getElementById('grmLoupeImg');
+  if (!box || !img || !img.naturalWidth || !img.naturalHeight) return null;
+  var rect = box.getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+  return Math.min(rect.width / img.naturalWidth, rect.height / img.naturalHeight);
+}
+
+function _grmLoupeNativeZoom(img) {
+  var fitScale = _grmLoupeFitScale(img);
+  if (!fitScale) return null;
+  return Math.max(1, 1 / (fitScale * (window.devicePixelRatio || 1)));
+}
+
+function _grmSetLoupeZoomLevel(zoom, labelText) {
+  _grmLoupeZoomLevel = Math.max(1, zoom || 1);
+  var pct = Math.round(_grmLoupeZoomLevel * 100);
+  var slider = document.getElementById('grmLoupeZoomSlider');
+  if (slider) {
+    slider.max = String(Math.max(500, pct));
+    slider.value = String(pct);
+  }
+  var label = document.getElementById('grmLoupeZoomVal');
+  if (label) {
+    label.textContent = labelText || _grmLoupeZoomLevel.toFixed(_grmLoupeZoomLevel >= 2 ? 1 : 2).replace(/\.0$/, '') + '×';
+  }
+  grmApplyLoupeZoom();
+}
+
+function grmLoupeImgLoaded(img) {
+  if (_grmLoupePendingOneToOne) {
+    _grmFinishLoupeOneToOne();
+  }
+}
+
+function grmToggleLoupeOneToOne() {
+  if (_grmLoupeOneToOne || _grmLoupePendingOneToOne) {
+    _grmLoupePendingOneToOne = false;
+    _grmLoupeOneToOne = false;
+    _grmSetLoupeZoomLevel(1);
+    return;
+  }
+  _grmLoupePendingOneToOne = true;
+  _grmUpgradeStripToOriginal();
+  _grmFinishLoupeOneToOne();
+}
+
+function _grmFinishLoupeOneToOne() {
+  var img = document.getElementById('grmLoupePhoto');
+  if (!img || !img.complete || !img.naturalWidth || !img.naturalHeight) return;
+  var zoom = _grmLoupeNativeZoom(img);
+  if (zoom == null) return;
+  _grmLoupePendingOneToOne = false;
+  _grmLoupeOneToOne = true;
+  _grmSetLoupeZoomLevel(zoom, '1:1');
 }
 
 function _grmUpgradeStripToOriginal() {
@@ -1964,7 +2216,7 @@ function _grmUpgradeStripToOriginal() {
     card.dataset.natH = nat.h;
     img.style.width = nat.w + 'px';
     img.style.height = nat.h + 'px';
-    img.src = grmPhotoUrl(pid);
+    img.src = grmPhotoUrl(item || pid);
   });
   if (grmState && grmState.selected) {
     var loupe = document.getElementById('grmLoupePhoto');
@@ -2025,6 +2277,10 @@ function _grmMaxZoom() {
 }
 
 function grmLoupeToggleLock(e) {
+  if (_grmSuppressLoupeClick) {
+    _grmSuppressLoupeClick = false;
+    return;
+  }
   _grmLoupeLocked = !_grmLoupeLocked;
   var ch = document.getElementById('grmCrosshairH');
   var cv = document.getElementById('grmCrosshairV');
@@ -2039,6 +2295,7 @@ function grmLoupeToggleLock(e) {
 }
 
 function grmLoupeMove(e) {
+  if (_grmLoupeAlignDragging) return;
   if (_grmLoupeLocked) return;
 
   var rect = e.currentTarget.getBoundingClientRect();
@@ -2057,6 +2314,90 @@ function grmLoupeMove(e) {
   // for every strip card. Upgrade only when the user expresses zoom intent via
   // the wheel or the 1:1 snap key.
   _grmApplyAllCardTransforms(x, y);
+}
+
+function _grmCardDisplayedScale(card) {
+  var coverFit = _grmCardCoverFit(card);
+  var hovering = _grmLoupeHovering || _grmLoupeLocked;
+  return hovering ? Math.max(coverFit, coverFit * _grmZoomLevel) : coverFit;
+}
+
+function _grmSelectedOffsetTargets() {
+  var ids = [];
+  if (grmState && grmState.selectedIds && grmState.selectedIds.size) {
+    ids = Array.from(grmState.selectedIds);
+  } else if (grmState && grmState.selected) {
+    ids = [grmState.selected];
+  }
+  var seen = {};
+  return ids.map(function(pid) {
+    var key = String(pid);
+    if (seen[key]) return null;
+    seen[key] = true;
+    var targetCard = document.querySelector('.grm-card[data-photo-id="' + key + '"]');
+    if (!targetCard) return null;
+    var cur = _grmOffsets[key] || _grmOffsets[pid] || { tx: 0, ty: 0 };
+    return { card: targetCard, photoId: key, origTx: cur.tx, origTy: cur.ty };
+  }).filter(Boolean);
+}
+
+function grmLoupeMouseDown(e) {
+  if (e.button !== 0) return;
+  var targets = _grmSelectedOffsetTargets();
+  if (!targets.length) return;
+  _grmLoupeAlignDragging = {
+    targets: targets,
+    startX: e.clientX,
+    startY: e.clientY,
+    moved: false,
+  };
+  document.addEventListener('mousemove', grmLoupeMouseMove);
+  document.addEventListener('mouseup', grmLoupeMouseUp);
+  e.preventDefault();
+}
+
+function grmLoupeMouseMove(e) {
+  if (!_grmLoupeAlignDragging) return;
+  if ((e.buttons & 1) === 0) {
+    grmLoupeMouseUp(e);
+    return;
+  }
+  var dx = e.clientX - _grmLoupeAlignDragging.startX;
+  var dy = e.clientY - _grmLoupeAlignDragging.startY;
+  if (!_grmLoupeAlignDragging.moved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
+    _grmLoupeAlignDragging.moved = true;
+    var loupe = document.getElementById('grmLoupeImg');
+    if (loupe) loupe.classList.add('align-dragging');
+    _grmLoupeAlignDragging.targets.forEach(function(target) {
+      target.card.classList.add('dragging');
+    });
+  }
+  if (!_grmLoupeAlignDragging.moved) return;
+  _grmLoupeAlignDragging.targets.forEach(function(target) {
+    var scale = _grmCardDisplayedScale(target.card);
+    var z = scale > 0.001 ? scale : 1;
+    var newTx = target.origTx + dx / z;
+    var newTy = target.origTy + dy / z;
+    _grmOffsets[target.photoId] = { tx: newTx, ty: newTy };
+    _grmApplyCardTransform(target.card);
+    _grmUpdateIndicator(target.card);
+  });
+  e.preventDefault();
+}
+
+function grmLoupeMouseUp(e) {
+  if (!_grmLoupeAlignDragging) return;
+  var moved = _grmLoupeAlignDragging.moved;
+  _grmLoupeAlignDragging.targets.forEach(function(target) {
+    target.card.classList.remove('dragging');
+  });
+  var loupe = document.getElementById('grmLoupeImg');
+  if (loupe) loupe.classList.remove('align-dragging');
+  document.removeEventListener('mousemove', grmLoupeMouseMove);
+  document.removeEventListener('mouseup', grmLoupeMouseUp);
+  _grmLoupeAlignDragging = null;
+  if (moved) _grmSuppressLoupeClick = true;
+  grmRefreshResetAllVisibility();
 }
 
 function _grmCardCoverFit(card) {
@@ -2173,6 +2514,7 @@ function _grmFinishSnap() {
 function grmLoupeReset() {
   if (_grmLoupeLocked) return;
   if (_grmDragging) return;
+  if (_grmLoupeAlignDragging) return;
   // Re-apply transforms in their default (cover-fit, centred) state. We
   // can't just clear `style.transform` because the natural-size <img> needs
   // a scale-down transform at all times to fit the thumbnail viewport.
@@ -2231,9 +2573,7 @@ function grmCardMouseMove(e) {
   // space. That keeps the visible pan delta identical across selected cards
   // even when their displayed scales differ.
   _grmDragging.targets.forEach(function(target) {
-    var coverFit = _grmCardCoverFit(target.card);
-    var hovering = _grmLoupeHovering || _grmLoupeLocked;
-    var s = hovering ? Math.max(coverFit, coverFit * _grmZoomLevel) : coverFit;
+    var s = _grmCardDisplayedScale(target.card);
     var z = s > 0.001 ? s : 1;
     var newTx = target.origTx + dx / z;
     var newTy = target.origTy + dy / z;
@@ -2463,19 +2803,25 @@ async function grmApply() {
       }),
     });
 
-    // Update local prediction status immediately so cards reflect the change
+    // Update local prediction status immediately so cards reflect the
+    // change — mirroring what the backend just did: picks become accepted,
+    // rejects become rejected, untouched candidates stay pending. Marking
+    // the whole group accepted made rejected photos show as Accepted in
+    // the tabs/badges until a reload.
     var groupId = grmState.groupId;
     var model = grmState.model;
-    allPredictions.forEach(function(p) {
-      if (p.group_id === groupId && p.model === model) {
+    var picks = grmState.picks;
+    var rejects = grmState.rejects;
+    function applyLocalStatus(p) {
+      if (p.group_id !== groupId || p.model !== model) return;
+      if (picks.has(p.photo_id)) {
         p.status = 'accepted';
+      } else if (rejects.has(p.photo_id)) {
+        p.status = 'rejected';
       }
-    });
-    predictions.forEach(function(p) {
-      if (p.group_id === groupId && p.model === model) {
-        p.status = 'accepted';
-      }
-    });
+    }
+    allPredictions.forEach(applyLocalStatus);
+    predictions.forEach(applyLocalStatus);
 
     closeGroupReview();
     renderAll();
@@ -2487,7 +2833,17 @@ async function grmApply() {
 // Keyboard handling for the modal
 document.addEventListener('keydown', function(e) {
   if (!document.getElementById('grmOverlay').classList.contains('open')) return;
+  // The lightbox can be opened on top of this modal ("Open in Lightbox").
+  // While it's open it owns the keyboard (arrows navigate photos, Esc closes
+  // it via the Keymap stack) — these shortcuts must not also fire underneath,
+  // invisibly moving photos to Picks/Rejects or removing them.
+  var lb = document.getElementById('lightboxOverlay');
+  if (lb && lb.classList.contains('active')) return;
   if (e.target.tagName === 'INPUT') return;
+  // The mouse-help control is focusable so keyboard users can read its
+  // popover; don't let keystrokes there (e.g. Space) fall through to the
+  // review shortcuts and mutate the selected photo's state.
+  if (e.target.closest && e.target.closest('.grm-mouse-help')) return;
 
   if (e.key === 'Escape') { closeGroupReview(); e.preventDefault(); return; }
   if (e.key === 'ArrowUp') { grmMoveUp(); e.preventDefault(); return; }
@@ -2508,6 +2864,7 @@ document.addEventListener('keydown', function(e) {
   if (e.key === 'Delete' || e.key === 'Backspace') { grmRemoveFromGroup(); e.preventDefault(); return; }
   if (e.key === ' ') { grmMoveCandidate(); e.preventDefault(); return; }
   if (e.key === '1') { grmSnapOneToOne(); e.preventDefault(); return; }
+  if (e.key && e.key.toLowerCase() === 'z') { grmToggleLoupeOneToOne(); e.preventDefault(); return; }
 });
 
 </script>
@@ -2535,8 +2892,8 @@ document.addEventListener('keydown', function(e) {
       </div>
     </div>
     <div class="grm-loupe" id="grmLoupe">
-      <div class="grm-loupe-img" id="grmLoupeImg" onmousemove="grmLoupeMove(event)" onmouseleave="grmLoupeReset()" onclick="grmLoupeToggleLock(event)" onwheel="grmLoupeZoom(event)">
-        <img id="grmLoupePhoto" src="" alt="">
+      <div class="grm-loupe-img" id="grmLoupeImg" onmousedown="grmLoupeMouseDown(event)" onmousemove="grmLoupeMove(event)" onmouseleave="grmLoupeReset()" onclick="grmLoupeToggleLock(event)" onwheel="grmLoupeZoom(event)">
+        <img id="grmLoupePhoto" src="" alt="" onload="grmLoupeImgLoaded(this)" draggable="false">
         <div class="grm-loupe-crosshair-h" id="grmCrosshairH"></div>
         <div class="grm-loupe-crosshair-v" id="grmCrosshairV"></div>
       </div>
@@ -2565,8 +2922,25 @@ document.addEventListener('keydown', function(e) {
       <input type="range" id="grmLoupeZoomSlider" min="100" max="500" step="25" value="100" oninput="grmSetLoupeZoom(this.value)">
       <span id="grmLoupeZoomVal">1×</span>
     </div>
-    <span class="grm-hint">↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; 1 = 1:1 zoom &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
     <button id="grmApplyBtn" onclick="grmApply()" class="btn-batch-accept" style="margin-left:auto;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;">Apply & Close</button>
+  </div>
+  <div class="grm-keys-bar">
+    <span class="grm-key"><kbd>↑↓</kbd> move zone</span>
+    <span class="grm-key"><kbd>←→</kbd> navigate</span>
+    <span class="grm-key"><kbd>Space</kbd> unsort</span>
+    <span class="grm-key"><kbd>Del</kbd> remove</span>
+    <span class="grm-key"><kbd>Z</kbd> right 1:1</span>
+    <span class="grm-key"><kbd>1</kbd> strip 1:1</span>
+    <span class="grm-mouse-help" tabindex="0" aria-label="Mouse controls">
+      <span class="grm-mouse-help-icon">?</span> mouse
+      <span class="grm-mouse-pop">
+        <strong>Mouse</strong>
+        Click the preview to lock/unlock zoom<br>
+        Drag the preview to nudge selected thumbnails<br>
+        Drag a thumbnail to pan it<br>
+        Double-click a thumbnail to reset pan
+      </span>
+    </span>
   </div>
 </div>
 

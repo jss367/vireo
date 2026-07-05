@@ -455,9 +455,15 @@ def load_taxa_from_file(db, gz_path):
         for row in reader:
             if len(row) < 6:
                 continue
-            inat_id = int(row[0])
+            try:
+                inat_id = int(row[0])
+                rank_level = float(row[2])
+            except ValueError:
+                # The real iNaturalist open-data dump ships with a header
+                # row (taxon_id\tancestry\t...) — skip it (and any other
+                # malformed line) instead of aborting the whole import.
+                continue
             ancestry_str = row[1]
-            rank_level = float(row[2])
             rank = row[3]
             name = row[4]
             active = row[5].lower() == 'true'

@@ -89,9 +89,9 @@ def test_pipeline_params_has_preview_max_size():
     assert params.preview_max_size == 2560
 
 
-def test_pipeline_params_preview_max_size_defaults_1920():
+def test_pipeline_params_preview_max_size_defaults_to_config():
     params = PipelineParams(collection_id=1)
-    assert params.preview_max_size == 1920
+    assert params.preview_max_size is None
 
 
 def test_pipeline_params_sources_list():
@@ -122,7 +122,7 @@ def test_pipeline_params_defaults():
     assert params.skip_regroup is False
     assert params.sources is None
     assert params.skip_classify is False
-    assert params.preview_max_size == 1920
+    assert params.preview_max_size is None
 
 
 def test_pipeline_params_all_fields():
@@ -620,6 +620,148 @@ def test_pipeline_previews_stage_runs(tmp_path, monkeypatch):
         "Expected 'previews' stage in progress events"
 
 
+def test_pipeline_previews_stage_writes_atomically(tmp_path, monkeypatch):
+    """previews_stage must write to a sibling temp file then os.replace into
+    the deterministic ``previews/{id}_{max_size}.jpg`` path.
+
+    With SLOT_CAP > 1, two pipelines processing the same photo can both miss
+    the os.path.exists() cache check and race on the same deterministic path.
+    A direct img.save(cache_path) would interleave/truncate bytes, leaving a
+    corrupt JPEG that preview_cache claims is valid. Regression for Codex
+    P2 review on PR #907.
+    """
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    Image.new("RGB", (100, 100), "red").save(str(photo_dir / "a.jpg"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # Capture every path Image.save() is invoked with so we can prove the
+    # final cache_path was never the direct target — only the os.replace
+    # destination is.
+    saved_paths = []
+    real_save = Image.Image.save
+
+    def tracking_save(self, fp, *args, **kwargs):
+        saved_paths.append(fp)
+        return real_save(self, fp, *args, **kwargs)
+
+    monkeypatch.setattr(Image.Image, "save", tracking_save)
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+        preview_max_size=1920,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    preview_dir = os.path.join(os.path.dirname(db_path), "previews")
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws_id)
+    photo_id = db2.get_photos(per_page=1)[0]["id"]
+    final_path = os.path.join(preview_dir, f"{photo_id}_1920.jpg")
+
+    # The final preview must exist and be a complete, openable JPEG (proves
+    # os.replace ran).
+    assert os.path.isfile(final_path)
+    with Image.open(final_path) as img:
+        img.verify()
+
+    # No Image.save call targeted the final deterministic path directly —
+    # every write went through a sibling temp file. Thumbnails go through
+    # generate_thumbnail (also atomic) so those saves also won't target the
+    # preview path; restrict the check to saves inside preview_dir.
+    preview_dir_saves = [
+        p for p in saved_paths
+        if isinstance(p, str | bytes) and str(p).startswith(preview_dir)
+    ]
+    assert preview_dir_saves, "previews_stage should have written at least one file"
+    for p in preview_dir_saves:
+        assert str(p) != final_path, (
+            f"previews_stage wrote directly to {final_path}; expected a "
+            "temp sibling + os.replace to make the swap atomic under "
+            "concurrent same-photo pipelines"
+        )
+        assert str(p).endswith(".jpg.tmp"), (
+            f"expected .jpg.tmp temp file, got {p}"
+        )
+
+
+def test_pipeline_previews_stage_bounds_non_crop_recipe_loads(tmp_path, monkeypatch):
+    import config as cfg
+    import image_loader
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    source_path = photo_dir / "edited.jpg"
+    Image.new("RGB", (800, 600), "red").save(source_path, "JPEG")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    folder_id = db.add_folder(str(photo_dir), name="photos")
+    photo_id = db.add_photo(
+        folder_id=folder_id,
+        filename="edited.jpg",
+        extension=".jpg",
+        file_size=os.path.getsize(source_path),
+        file_mtime=os.path.getmtime(source_path),
+        width=800,
+        height=600,
+    )
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    collection_id = db.add_collection(
+        "Edited",
+        json.dumps([{"field": "photo_ids", "op": "in", "value": [photo_id]}]),
+    )
+
+    original_load_image = image_loader.load_image
+    seen_max_sizes = []
+
+    def tracking_load_image(file_path, max_size=1024):
+        seen_max_sizes.append(max_size)
+        return original_load_image(file_path, max_size=max_size)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(
+        job,
+        runner,
+        db_path,
+        ws_id,
+        PipelineParams(
+            collection_id=collection_id,
+            skip_classify=True,
+            skip_extract_masks=True,
+            skip_regroup=True,
+            preview_max_size=1920,
+        ),
+    )
+
+    assert seen_max_sizes[-1] == 1920
+
+
 def test_pipeline_params_sources_used_over_source():
     """When sources is provided, it should take precedence over source."""
     params = PipelineParams(source="/single", sources=["/a", "/b"])
@@ -926,8 +1068,8 @@ def test_pipeline_scan_progress_includes_rate_and_eta(tmp_path, monkeypatch):
     last = progress_events[-1]
     assert "rate" in last, "Progress event should include rate"
     assert "eta_seconds" in last, "Progress event should include eta_seconds"
-    assert isinstance(last["rate"], (int, float))
-    assert isinstance(last["eta_seconds"], (int, float))
+    assert isinstance(last["rate"], int | float)
+    assert isinstance(last["eta_seconds"], int | float)
 
 
 def test_pipeline_multi_folder_scan_progress_is_monotonic(tmp_path, monkeypatch):
@@ -1267,6 +1409,115 @@ def test_pipeline_scan_step_gets_status_updates(tmp_path, monkeypatch):
     ]
     assert len(status_sse_events) > 0, \
         "Status updates should also push SSE progress events"
+
+
+def test_pipeline_ingest_records_safe_to_eject_counts_on_success(tmp_path, monkeypatch):
+    """Once ingest copies everything off the source with no failures, the
+    stage (and final result) should carry 'copied'/'skipped_duplicate' counts
+    so the UI can tell the user the source (e.g. an SD card) is safe to eject.
+    """
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    src = tmp_path / "source"
+    src.mkdir()
+    for name, color in [("a.jpg", "red"), ("b.jpg", "blue")]:
+        img = Image.new("RGB", (100, 100), color)
+        img.save(str(src / name))
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    params = PipelineParams(
+        source=str(src),
+        destination=str(dest),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    result = run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert result["stages"]["ingest"]["copied"] == 2
+    assert result["stages"]["ingest"]["skipped_duplicate"] == 0
+
+    # The live SSE stream should carry the same counts on the completed event.
+    ingest_completed_events = [
+        e[2]["stages"]["ingest"] for e in runner.events
+        if e[1] == "progress" and e[2]["stages"].get("ingest", {}).get("status") == "completed"
+    ]
+    assert ingest_completed_events, "expected a progress event with ingest completed"
+    assert ingest_completed_events[-1]["copied"] == 2
+
+
+def test_pipeline_ingest_omits_safe_to_eject_counts_on_partial_failure(tmp_path, monkeypatch):
+    """Plain copy mode (no local_processing) doesn't abort the run when a file
+    fails to copy — it still marks the ingest stage 'completed'. The
+    safe-to-eject counts must NOT be published in that case, since the source
+    still holds a file that never made it to the destination.
+    """
+    import config as cfg
+    import ingest as ingest_module
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    src = tmp_path / "source"
+    src.mkdir()
+    for name, color in [("a.jpg", "red"), ("b.jpg", "blue")]:
+        img = Image.new("RGB", (100, 100), color)
+        img.save(str(src / name))
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    real_copy2 = ingest_module.shutil.copy2
+
+    def flaky_copy2(source, destination, *args, **kwargs):
+        if str(source).endswith("b.jpg"):
+            raise OSError("simulated card read error")
+        return real_copy2(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(ingest_module.shutil, "copy2", flaky_copy2)
+
+    params = PipelineParams(
+        source=str(src),
+        destination=str(dest),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    result = run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert "ingest" not in result["stages"] or "copied" not in result["stages"]["ingest"]
+
+    ingest_completed_events = [
+        e[2]["stages"]["ingest"] for e in runner.events
+        if e[1] == "progress" and e[2]["stages"].get("ingest", {}).get("status") == "completed"
+    ]
+    assert ingest_completed_events, "expected a progress event with ingest completed"
+    assert "copied" not in ingest_completed_events[-1]
 
 
 def test_pipeline_ingest_step_present_only_with_destination(tmp_path, monkeypatch):
@@ -1741,6 +1992,84 @@ def test_pipeline_collection_mode_generates_missing_thumbnails(tmp_path, monkeyp
     assert len(thumb_files) == 3
 
 
+def test_pipeline_collection_mode_edited_thumbnail_uses_working_copy(
+    tmp_path, monkeypatch,
+):
+    """Collection thumbnail replay should fall back to usable working copies."""
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    original = photo_dir / "a.jpg"
+    Image.new("RGB", (100, 100), "red").save(str(original))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    runner = FakeRunner()
+    job = _make_job()
+    result = run_pipeline_job(
+        job,
+        runner,
+        db_path,
+        ws_id,
+        PipelineParams(
+            source=str(photo_dir),
+            skip_classify=True,
+            skip_extract_masks=True,
+            skip_regroup=True,
+        ),
+    )
+    coll_id = result["collection_id"]
+
+    photo = db.get_collection_photos(coll_id, per_page=999999)[0]
+    working_dir = tmp_path / "working"
+    working_dir.mkdir()
+    Image.new("RGB", (100, 100), "blue").save(str(working_dir / f"{photo['id']}.jpg"))
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=? WHERE id=?",
+        (f"working/{photo['id']}.jpg", photo["id"]),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        photo["id"],
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
+    )
+    os.remove(original)
+
+    thumb_dir = os.path.join(os.path.dirname(db_path), "thumbnails")
+    for f in os.listdir(thumb_dir):
+        os.remove(os.path.join(thumb_dir, f))
+
+    runner2 = FakeRunner()
+    job2 = _make_job()
+    result2 = run_pipeline_job(
+        job2,
+        runner2,
+        db_path,
+        ws_id,
+        PipelineParams(
+            collection_id=coll_id,
+            skip_classify=True,
+            skip_extract_masks=True,
+            skip_regroup=True,
+        ),
+    )
+
+    thumb_result = result2["stages"].get("thumbnails", {})
+    assert thumb_result.get("failed") == 0
+    assert thumb_result.get("generated") == 1
+    with Image.open(os.path.join(thumb_dir, f"{photo['id']}.jpg")) as thumb:
+        r, g, b = thumb.resize((1, 1)).getpixel((0, 0))
+    assert b > r and b > g
+
+
 # ---------------------------------------------------------------------------
 # Stage failure propagation (fixes the silent model-loader failure incident)
 # ---------------------------------------------------------------------------
@@ -1787,6 +2116,7 @@ def _setup_fake_downloaded_model(tmp_path, monkeypatch):
     import classify_job
     import model_verify
     import models
+    import taxonomy
     monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
     monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
     _write_fake_model_files(tmp_path / "models" / "bioclip-vit-b-16")
@@ -1797,13 +2127,21 @@ def _setup_fake_downloaded_model(tmp_path, monkeypatch):
     monkeypatch.setattr(
         classify_job, "_load_labels", lambda *a, **k: (["test-label"], False)
     )
+    # model_loader_stage triggers a real iNat DWCA download whenever
+    # params.download_taxonomy is True (the default) and no taxonomy file is
+    # available — which is always the case in the test's isolated HOME. That
+    # download is hundreds of MB and can exceed the per-test timeout on
+    # slower CI runners, surfacing as an opaque "worker crashed" failure.
+    # Stub it to a no-op; tests that exercise the real download path
+    # re-monkeypatch this after calling the helper.
+    monkeypatch.setattr(taxonomy, "download_taxonomy", lambda *a, **k: None)
     # Short-circuit hash verification — these tests use stub files that
     # would never match any real HF hash, and the verification path has
     # its own dedicated unit tests.
     monkeypatch.setattr(
         model_verify,
         "verify_if_needed",
-        lambda model_id, model_dir, hf_subdir: None,
+        lambda model_id, model_dir, hf_subdir, optional_files=None: None,
     )
     return "bioclip-vit-b-16"
 
@@ -1812,6 +2150,7 @@ def _setup_two_fake_downloaded_models(tmp_path, monkeypatch):
     """Install two bioclip models side-by-side; both reported as downloaded."""
     import classify_job
     import models
+    import taxonomy
     monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
     monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
     _write_fake_model_files(tmp_path / "models" / "bioclip-vit-b-16")
@@ -1824,6 +2163,8 @@ def _setup_two_fake_downloaded_models(tmp_path, monkeypatch):
     monkeypatch.setattr(
         classify_job, "_load_labels", lambda *a, **k: (["test-label"], False)
     )
+    # See _setup_fake_downloaded_model for why this stub is required.
+    monkeypatch.setattr(taxonomy, "download_taxonomy", lambda *a, **k: None)
     return ["bioclip-vit-b-16", "bioclip-2"]
 
 
@@ -1905,7 +2246,7 @@ def test_pipeline_translates_verify_failure_to_repair_message(tmp_path, monkeypa
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
-    def raise_corrupt(model_id, model_dir, hf_subdir):
+    def raise_corrupt(model_id, model_dir, hf_subdir, optional_files=None):
         raise model_verify.ModelCorruptError(
             model_id,
             model_verify.VerifyResult(
@@ -2230,19 +2571,22 @@ def test_pipeline_redownloads_taxonomy_when_existing_file_is_corrupt(
     )
     monkeypatch.setattr(taxonomy_mod, "load_local_taxonomy", lambda: None)
 
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Test", "[]")
+
+    # Helper installs a no-op download_taxonomy stub; override it AFTER the
+    # helper so this test's recording stub wins. Order matters: the helper's
+    # monkeypatch.setattr would clobber an earlier override.
+    _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
     download_calls = []
 
     def fake_download(output_path, progress_callback=None):
         download_calls.append(output_path)
 
     monkeypatch.setattr(taxonomy_mod, "download_taxonomy", fake_download)
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
-    col_id = db.add_collection("Test", "[]")
-
-    _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
     class FakeClassifier:
         def __init__(self, *args, **kwargs):
@@ -2295,6 +2639,15 @@ def test_pipeline_skips_taxonomy_download_when_file_is_usable(
     )
     monkeypatch.setattr(taxonomy_mod, "load_local_taxonomy", lambda: None)
 
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Test", "[]")
+
+    # Override the helper's no-op download stub AFTER calling the helper, so
+    # this test's recording stub wins. See sibling test above.
+    _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
     download_calls = []
     monkeypatch.setattr(
         taxonomy_mod,
@@ -2303,13 +2656,6 @@ def test_pipeline_skips_taxonomy_download_when_file_is_usable(
             output_path
         ),
     )
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
-    col_id = db.add_collection("Test", "[]")
-
-    _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
     class FakeClassifier:
         def __init__(self, *args, **kwargs):
@@ -2749,6 +3095,109 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
         "stale boxes via get_existing_detection_photo_ids + get_detections, "
         "causing false-positive detections to persist indefinitely. "
         "Regression for Codex P1 review on #511 line 848."
+    )
+
+
+def test_pipeline_reclassify_same_boxes_preserves_predictions(
+    tmp_path, monkeypatch,
+):
+    """Reclassify that re-detects the SAME boxes must NOT purge the rows it
+    just rewrote.
+
+    Detection ids are content-addressed, so re-detecting an unchanged box
+    yields the same id as the pre-run snapshot. write_detection_batch UPSERTs
+    that row and classify writes fresh predictions onto it. The reclassify
+    purge used to delete every pre-run id unconditionally — which, with stable
+    ids, meant deleting the live detection and cascading the just-written
+    predictions for every photo whose boxes didn't change (the common case).
+    The purge must subtract the current live set so only genuinely-dropped
+    rows are deleted. (Codex P1 family on PR #907 / latent since the
+    content-addressed-id merge.)
+    """
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    photo_id = db.add_photo(folder_id, "test.jpg", ".jpg", 12345, 1_000_000.0)
+    _drop_jpeg(folder_path, "test.jpg")
+
+    box = {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}
+    prior = db.save_detections(
+        photo_id,
+        [{"box": box, "confidence": 0.9, "category": "animal"}],
+        detector_model="megadetector-v6",
+    )
+    prior_id = prior[0]
+
+    col_id = db.add_collection(
+        "Test", json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
+    )
+    model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
+
+    # Reclassify re-detects the SAME box → content-addressed id == prior_id.
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
+        dmap = {}
+        for p in batch:
+            ids = db_.write_detection_batch(
+                p["id"], "megadetector-v6",
+                [{"box": box, "confidence": 0.9, "category": "animal"}],
+            )
+            dmap[p["id"]] = [{
+                "id": ids[0], "box_x": box["x"], "box_y": box["y"],
+                "box_w": box["w"], "box_h": box["h"], "confidence": 0.9,
+                "category": "animal", "detector_model": "megadetector-v6",
+            }]
+        return dmap, len(batch), {p["id"] for p in batch}
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    class FakeClassifier:
+        def __init__(self, *a, **k):
+            pass
+
+        def classify_with_embedding(self, img, threshold=0):
+            import numpy as np
+            return ([{"species": "Robin", "score": 0.9}],
+                    np.zeros(512, dtype=np.float32))
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            import numpy as np
+            z = np.zeros(512, dtype=np.float32)
+            return [([{"species": "Robin", "score": 0.9}], z) for _ in images]
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id, model_ids=model_ids[:1], reclassify=True,
+        skip_extract_masks=True, skip_regroup=True,
+    )
+    run_pipeline_job(_make_job(), FakeRunner(), db_path, ws_id, params)
+
+    verify = Database(db_path)
+    verify.set_active_workspace(ws_id)
+    assert verify.get_detections(photo_id) != [], (
+        "re-detected detection (same box → same content id) must survive "
+        "reclassify, not be purged as 'stale'"
+    )
+    preds = verify.conn.execute(
+        "SELECT COUNT(*) AS c FROM predictions WHERE detection_id=?",
+        (prior_id,),
+    ).fetchone()["c"]
+    assert preds >= 1, (
+        f"freshly-written predictions must survive the reclassify purge; "
+        f"got {preds}"
     )
 
 
@@ -3856,6 +4305,131 @@ def test_pipeline_classify_cancel_does_not_raise_when_earlier_model_load_failed(
     )
 
 
+def test_pipeline_later_model_load_cancel_marks_model_skipped(
+    tmp_path, monkeypatch,
+):
+    """A cancellation observed while loading model 2 must not mark that
+    per-model row as a load failure.
+    """
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    pid = db.add_photo(folder_id, "photo.jpg", ".jpg", 2000, 2_000_000.0)
+    _drop_jpeg(folder_path, "photo.jpg")
+    db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MegaDetector",
+    )
+    col_id = db.add_collection(
+        "Test",
+        json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
+
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
+        det_map = {}
+        for p in batch:
+            existing = db_.get_detections(p["id"])
+            det_map[p["id"]] = [{
+                "id": d["id"],
+                "box_x": d["box_x"], "box_y": d["box_y"],
+                "box_w": d["box_w"], "box_h": d["box_h"],
+                "confidence": d["detector_confidence"],
+                "category": d["category"],
+            } for d in existing if d["detector_model"] != "full-image"]
+        return det_map, len(batch), {p["id"] for p in batch}
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    from PIL import Image as _PILImage
+
+    def fake_prepare_image(photo, folders, detection, vireo_dir=None):
+        folder_path = folders.get(photo["folder_id"], "")
+        image_path = os.path.join(folder_path, photo["filename"])
+        return _PILImage.new("RGB", (16, 16), "black"), folder_path, image_path
+
+    monkeypatch.setattr(classify_job, "_prepare_image", fake_prepare_image)
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def encode_image(self, *args, **kwargs):
+            import numpy as np
+            return np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    def cancelling_flush(batch, clf, model_type, model_name, db_, raw_results,
+                         top_k=1):
+        for entry in batch:
+            raw_results.append({
+                "photo": entry["photo"],
+                "detection_id": entry.get("detection_id"),
+                "folder_path": entry["folder_path"],
+                "image_path": entry["image_path"],
+                "prediction": "Robin",
+                "confidence": 0.9,
+                "timestamp": None,
+                "filename": entry["photo"]["filename"],
+                "embedding": None,
+                "taxonomy": None,
+            })
+        runner.cancelled_ids.add(job["id"])
+        return 0
+
+    monkeypatch.setattr(classify_job, "_flush_batch", cancelling_flush)
+    monkeypatch.setattr(
+        classify_job, "_store_grouped_predictions",
+        lambda *a, **k: {"predictions_stored": 0, "burst_groups": 0,
+                         "already_labeled": 0},
+    )
+
+    run_pipeline_job(
+        job,
+        runner,
+        db_path,
+        ws_id,
+        PipelineParams(
+            collection_id=col_id,
+            model_ids=model_ids,
+            skip_extract_masks=True,
+            skip_regroup=True,
+        ),
+    )
+
+    later_step_id = f"classify:{model_ids[1]}"
+    later_updates = [
+        kw for _, sid, kw in runner.step_updates if sid == later_step_id
+    ]
+    assert any(
+        kw.get("summary") == "Skipped (cancelled)"
+        and kw.get("status") == "completed"
+        for kw in later_updates
+    ), later_updates
+    assert not any(kw.get("status") == "failed" for kw in later_updates)
+
+
 # ---------------------------------------------------------------------------
 # Sentinel written on ONNX load failure
 # ---------------------------------------------------------------------------
@@ -4642,6 +5216,7 @@ def test_extract_masks_stage_warns_on_mixed_already_masked_and_subthreshold(
 
     monkeypatch.setenv("HOME", str(tmp_path))
     cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    _stub_extract_masks_heavy_ops(monkeypatch)
 
     db_path = str(tmp_path / "test.db")
     db = Database(db_path)
@@ -6192,6 +6767,127 @@ def test_pipeline_miss_stage_skipped_when_regroup_fails(tmp_path, monkeypatch):
         )
 
 
+def test_workspace_regroup_lock_spans_regroup_and_miss(tmp_path, monkeypatch):
+    """The workspace_regroup lock must wrap BOTH regroup_stage and
+    miss_stage. Without a single lock spanning both, pipeline B could
+    sneak in between A's regroup release and A's miss acquire and
+    rewrite burst_id / pipeline_results_ws*.json — leaving the
+    persisted miss flags inconsistent with the cached grouping the
+    review UI reads for "Review misses".
+
+    Trace acquire/release vs. regroup-work and miss-step events and
+    verify release happens AFTER the miss step, not between them."""
+    import config as cfg
+    import pipeline as pipeline_mod
+    import pipeline_job as pj
+    import pipeline_locks
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    Image.new("RGB", (16, 16), "black").save(str(photo_dir / "a.jpg"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    events = []
+
+    real_acquire = pipeline_locks.acquire_workspace_regroup
+
+    class TrackingLock:
+        def __init__(self, inner, ws):
+            self._inner = inner
+            self._ws = ws
+
+        def __enter__(self):
+            events.append(("acquire", self._ws))
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            events.append(("release", self._ws))
+            return self._inner.__exit__(*args)
+
+    monkeypatch.setattr(
+        pj, "acquire_workspace_regroup",
+        lambda ws: TrackingLock(real_acquire(ws), ws),
+    )
+
+    def _ok_run(photos, config=None, emit_trace=False):
+        events.append(("regroup_work", ws_id))
+        return {"summary": {"groups": 1}, "photos": photos}
+
+    monkeypatch.setattr(pipeline_mod, "run_full_pipeline", _ok_run)
+    monkeypatch.setattr(pipeline_mod, "save_results", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        pipeline_mod, "load_photo_features",
+        lambda thread_db, collection_id=None, config=None: [{"id": 1}],
+    )
+
+    class TrackingRunner(FakeRunner):
+        def update_step(self, job_id, step_id, **kwargs):
+            if step_id == "misses":
+                events.append(("miss_step", kwargs.get("status")))
+            super().update_step(job_id, step_id, **kwargs)
+
+    # skip_classify=True keeps the test from needing real model files;
+    # miss_stage takes its early-skip path but still calls update_step
+    # on the "misses" step — which must happen INSIDE the lock.
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+    )
+    runner = TrackingRunner()
+    job = _make_job()
+
+    with contextlib.suppress(Exception):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Strip events from earlier stages that don't touch the regroup lock.
+    interesting = [
+        e for e in events
+        if e[0] in ("acquire", "release", "regroup_work", "miss_step")
+    ]
+    assert ("acquire", ws_id) in interesting, (
+        f"workspace_regroup lock was never acquired; events: {interesting}"
+    )
+    assert ("release", ws_id) in interesting, (
+        f"workspace_regroup lock was never released; events: {interesting}"
+    )
+
+    acquire_idx = interesting.index(("acquire", ws_id))
+    release_idx = interesting.index(("release", ws_id))
+    regroup_idx = next(
+        (i for i, e in enumerate(interesting) if e[0] == "regroup_work"),
+        None,
+    )
+    miss_idx = next(
+        (i for i, e in enumerate(interesting) if e[0] == "miss_step"),
+        None,
+    )
+
+    assert regroup_idx is not None, (
+        f"regroup work never ran; events: {interesting}"
+    )
+    assert miss_idx is not None, (
+        f"miss step never ran; events: {interesting}"
+    )
+    assert acquire_idx < regroup_idx < release_idx, (
+        f"regroup work must run inside the lock; events: {interesting}"
+    )
+    assert acquire_idx < miss_idx < release_idx, (
+        "miss step must run inside the same lock as regroup — otherwise "
+        "a second same-workspace pipeline could sneak in and rewrite "
+        f"grouping state between them. events: {interesting}"
+    )
+
+
 def test_pipeline_regroup_stamps_workspace_group_fingerprint(tmp_path, monkeypatch):
     """When regroup_stage completes successfully, last_grouped_at and
     last_group_fingerprint must be written on the active workspace so the
@@ -6604,6 +7300,92 @@ def test_update_stages_emits_weighted_current_total():
     assert data["current"] == 6
 
 
+def test_progress_event_defaults_phase_triple_to_none():
+    """Every progress payload must carry an explicit phase_current /
+    phase_total / phase_label triple. JobRunner.push_event merges progress
+    payloads into job['progress'] rather than replacing them, so a scan
+    sub-phase (e.g. 'Extracting metadata' with numeric phase_current /
+    phase_total) would linger across every later status emission that
+    omits these keys — the jobs page and navbar would keep rendering the
+    stale 'Extracting metadata' bar through 'Hashing ...' and downstream
+    pipeline stages. Callers with no active sub-phase must therefore emit
+    None so the merge actively clears the previous values."""
+    from pipeline_job import _progress_event
+
+    stages = _empty_stages()
+    stages["scan"]["status"] = "running"
+
+    # No phase_* passed → the triple defaults to None and reaches the payload
+    # so the frontend's `typeof phase_current === 'number' && phase_total > 0`
+    # guard falls back to overall progress instead of re-rendering a stale bar.
+    data = _progress_event(stages, "scan", "Hashing 3 files (2 workers)...")
+    assert data["phase_current"] is None
+    assert data["phase_total"] is None
+    assert data["phase_label"] is None
+
+    # Callers with an active sub-phase override the defaults.
+    data = _progress_event(
+        stages, "scan", "Extracting metadata (2 / 3 files)...",
+        phase_current=2,
+        phase_total=3,
+        phase_label="Extracting metadata",
+    )
+    assert data["phase_current"] == 2
+    assert data["phase_total"] == 3
+    assert data["phase_label"] == "Extracting metadata"
+
+
+def test_emit_progress_clears_stale_phase_in_merged_job_progress():
+    """End-to-end: JobRunner.push_event merges into job['progress']; after a
+    scan sub-phase emission followed by a plain status emission, the merged
+    progress dict must show the phase triple cleared to None so /api/jobs
+    polling stops rendering the stale metadata bar."""
+    import queue as _queue
+    import sys as _sys
+
+    _sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+    from jobs import JobRunner
+    from pipeline_job import _emit_progress
+    from wait import wait_for_job_via_runner
+
+    runner = JobRunner()
+    seen_progress = _queue.Queue()
+
+    def work(job):
+        stages = _empty_stages()
+        stages["scan"]["status"] = "running"
+
+        _emit_progress(
+            runner, job["id"], stages, "scan",
+            "Extracting metadata (2 / 3 files)...",
+            phase_current=2,
+            phase_total=3,
+            phase_label="Extracting metadata",
+        )
+        seen_progress.put(dict(job["progress"]))
+
+        _emit_progress(
+            runner, job["id"], stages, "scan",
+            "Hashing 3 files (2 workers)...",
+        )
+        seen_progress.put(dict(job["progress"]))
+
+        return {"ok": True}
+
+    job_id = runner.start("scan", work)
+    wait_for_job_via_runner(runner, job_id)
+
+    metadata_prog = seen_progress.get_nowait()
+    assert metadata_prog["phase_current"] == 2
+    assert metadata_prog["phase_total"] == 3
+    assert metadata_prog["phase_label"] == "Extracting metadata"
+
+    hashing_prog = seen_progress.get_nowait()
+    assert hashing_prog["phase_current"] is None
+    assert hashing_prog["phase_total"] is None
+    assert hashing_prog["phase_label"] is None
+
+
 # ---------------------------------------------------------------------------
 # Cancel responsiveness in extract_masks / eye_keypoints
 #
@@ -6916,6 +7698,124 @@ def _run_extract_masks_for_test(
     run_pipeline_job(job, runner, db_path, ws_id, params)
 
     return db, runner, generate_mask_calls, photo_ids
+
+
+def _apply_extract_masks_stubs(monkeypatch, generate_mask_calls):
+    """(Re)install the SAM2/DINOv2 stubs for a follow-up extract_masks run on
+    an existing DB. generate_mask appends (variant, det_box) to the passed
+    list so the caller can assert whether SAM ran.
+    """
+    import dino_embed
+    import masking
+    import numpy as np
+    import quality
+
+    monkeypatch.setattr(
+        masking, "render_proxy",
+        lambda *a, **k: np.zeros((4, 4, 3), dtype=np.uint8),
+    )
+
+    def fake_generate_mask(proxy, det_box, variant=None):
+        generate_mask_calls.append((variant, tuple(sorted(det_box.items()))))
+        return np.ones((4, 4), dtype=bool)
+
+    monkeypatch.setattr(masking, "generate_mask", fake_generate_mask)
+    monkeypatch.setattr(masking, "crop_completeness", lambda m: 0.9)
+    monkeypatch.setattr(masking, "crop_subject", lambda p, m, margin=0.15: None)
+    monkeypatch.setattr(masking, "ensure_sam2_weights", lambda **k: None)
+    monkeypatch.setattr(
+        quality, "compute_all_quality_features",
+        lambda p, m: {
+            "subject_tenengrad": 1.5, "bg_tenengrad": 0.3,
+            "subject_clip_high": 0.01, "subject_clip_low": 0.01,
+            "subject_y_median": 100.0, "bg_separation": 50.0,
+            "phash_crop": "deadbeef", "noise_estimate": 5.0,
+        },
+    )
+    monkeypatch.setattr(
+        dino_embed, "embed",
+        lambda p, variant=None: np.zeros(384, dtype=np.float32),
+    )
+    monkeypatch.setattr(
+        dino_embed, "embed_batch",
+        lambda imgs, variant=None: np.zeros((len(imgs), 384), dtype=np.float32),
+    )
+    monkeypatch.setattr(dino_embed, "embedding_to_blob", lambda e: b"")
+    monkeypatch.setattr(dino_embed, "ensure_dinov2_weights", lambda **k: None)
+
+
+def test_extract_masks_recomputes_when_active_variant_differs(
+    tmp_path, monkeypatch,
+):
+    """Cross-variant cache-hit consistency (Codex P2 on PR #907).
+
+    A cached mask exists for the *requested* SAM variant, but the photos
+    row is currently active on a DIFFERENT variant (e.g. two workspaces
+    share a folder, one configured sam2-small and one sam2-large, both on
+    dinov2 vit-b14). The cheap "re-activate only" fast path would call
+    set_active_mask_variant — denormalising the requested variant's mask
+    features — WITHOUT update_photo_embeddings, leaving photos.dino_*
+    describing the previously-active variant's mask. regroup reads both off
+    the photos row, so it would mix one variant's mask features with
+    another's embedding. The fix forces a recompute when the active variant
+    (or dino embedding variant) doesn't already match, so generate_mask runs
+    and the photos row ends internally consistent.
+    """
+    import config as cfg
+
+    spec = {"filename": "a.jpg", "box": (10, 20, 100, 200),
+            "model": "MegaDetector"}
+
+    # Run 1: variant small → photo_masks[small], photos.active=small.
+    db, _, _, photo_ids = _run_extract_masks_for_test(
+        tmp_path, monkeypatch, "sam2-small", [spec],
+    )
+    pid = photo_ids[0]
+    db_path = str(tmp_path / "test.db")
+    ws_id = db._active_workspace_id
+    col_id = db.conn.execute(
+        "SELECT id FROM collections ORDER BY id LIMIT 1"
+    ).fetchone()[0]
+
+    def rerun(variant):
+        calls = []
+        _apply_extract_masks_stubs(monkeypatch, calls)
+        cfg.save({"pipeline": {"sam2_variant": variant,
+                               "dinov2_variant": "vit-b14"}})
+        run_pipeline_job(
+            _make_job(), FakeRunner(), db_path, ws_id,
+            PipelineParams(collection_id=col_id, skip_classify=True,
+                           skip_extract_masks=False, skip_regroup=True),
+        )
+        return calls
+
+    # Run 2: variant large → adds photo_masks[large], photos.active=large.
+    calls_large = rerun("sam2-large")
+    assert calls_large, "switching to a new variant must run SAM"
+    state = db.conn.execute(
+        "SELECT active_mask_variant FROM photos WHERE id=?", (pid,),
+    ).fetchone()
+    assert state["active_mask_variant"] == "sam2-large"
+    # Both variant rows now cached on disk.
+    variants = {r["variant"] for r in db.list_masks_for_photo(pid)}
+    assert variants == {"sam2-small", "sam2-large"}
+
+    # Run 3: back to small. The small row is cached (prompt+detector match,
+    # file on disk) so the OLD code would cheap-skip via set_active_mask_
+    # variant and never touch embeddings. With the fix, because the photos
+    # row is active on large, the stage recomputes: generate_mask runs for
+    # small and the row ends active+consistent on small.
+    calls_small = rerun("sam2-small")
+    assert calls_small, (
+        "cached mask but stale active variant must recompute, not cheap-skip; "
+        f"generate_mask was not called: {calls_small}"
+    )
+    final = db.conn.execute(
+        "SELECT active_mask_variant, dino_embedding_variant FROM photos "
+        "WHERE id=?", (pid,),
+    ).fetchone()
+    assert final["active_mask_variant"] == "sam2-small"
+    assert final["dino_embedding_variant"] == "vit-b14"
 
 
 def test_extract_masks_skips_sam_when_cached_with_same_prompt(
@@ -8408,3 +9308,1517 @@ def test_pipeline_scan_surfaces_permission_denied(tmp_path, monkeypatch):
         assert isinstance(result, dict)
     finally:
         os.chmod(str(locked_dir), 0o755)
+
+
+def test_release_classifier_cache_handle_clears_bundle_fields():
+    """After release, ``loaded_models`` must not keep the classifier alive.
+
+    Regression for the Codex P2 on PR #899: a late-stage release that
+    only popped ``_cache_handle`` left ``clf``/``labels``/``active_model``
+    in ``loaded_models``. The cache refcount could then drop to 0 and the
+    5-minute idle timer fire while the bundle was still strongly
+    referenced — evicting the cache entry without freeing VRAM, and
+    forcing a duplicate session on the next same-key acquire.
+    """
+    import gc
+    import time
+    import weakref
+
+    from model_cache import ModelCache
+    from pipeline_job import _release_classifier_cache_handle
+
+    # Short idle window so the test exercises the actual eviction path
+    # the bug occurs on (timer fires, entry drops, VRAM frees) rather
+    # than just inspecting dict keys.
+    cache = ModelCache(idle_secs=0.05)
+
+    class FakeClassifier:
+        pass
+
+    box = [FakeClassifier()]
+    clf_ref = weakref.ref(box[0])
+    key = ("bioclip", "m1", "model_str", "/path", "fp")
+
+    handle = cache.acquire(key, lambda: box[0])
+    handle.__enter__()
+    loaded_models = {
+        "_cache_handle": handle,
+        "clf": box[0],
+        "model_type": "bioclip",
+        "model_name": "M1",
+        "model_str": "model_str",
+        "labels": ["a", "b"],
+        "use_tol": False,
+        "active_model": {"id": "m1"},
+        "labels_fingerprint": "fp",
+        # Non-bundle keys must be preserved: pipeline-scoped, not per-model.
+        "tax": object(),
+        "resolved_specs": [{"id": "m1"}],
+    }
+    box[0] = None  # drop the test's own strong ref to the classifier
+
+    _release_classifier_cache_handle(loaded_models)
+
+    for k in ("_cache_handle", "clf", "model_type", "model_name",
+              "model_str", "labels", "use_tol", "active_model",
+              "labels_fingerprint"):
+        assert k not in loaded_models, (
+            f"{k!r} must be cleared so idle eviction can reclaim VRAM"
+        )
+    for k in ("tax", "resolved_specs"):
+        assert k in loaded_models, (
+            f"{k!r} is pipeline-scoped and must survive release"
+        )
+
+    # Drop the local handle ref so only the cache could plausibly pin the
+    # classifier. Wait for the idle timer to evict the entry, then GC. With
+    # bundle fields cleared (the fix) the weakref must collapse — meaning
+    # VRAM would actually be freed. Without the fix, ``loaded_models["clf"]``
+    # would survive and the weakref stays alive.
+    del handle
+    deadline = time.time() + 2.0
+    while time.time() < deadline and cache._has_entry(key):
+        time.sleep(0.01)
+    gc.collect()
+    assert clf_ref() is None, (
+        "classifier must be collectable after release+eviction; "
+        "if this fails, something in loaded_models is still pinning it"
+    )
+
+
+def test_release_classifier_cache_handle_idempotent_when_no_bundle():
+    """Calling release on an empty dict (classify skipped pre-load) is a no-op."""
+    from pipeline_job import _release_classifier_cache_handle
+
+    loaded_models = {"tax": object(), "resolved_specs": []}
+    _release_classifier_cache_handle(loaded_models)
+    assert "tax" in loaded_models
+    assert "resolved_specs" in loaded_models
+
+
+def test_weights_fingerprint_changes_on_in_place_replacement(tmp_path):
+    """A Repair / re-register that overwrites weights at the same path must
+    produce a different cache-key component.
+
+    Regression for the Codex P2 on PR #899: the classifier cache key
+    only contained ``weights_path`` (a stable directory string), so a
+    pipeline reusing the in-process cache after a Repair would silently
+    classify with stale or corrupt session bytes until the 5-minute idle
+    timer fired.
+    """
+    import os
+    import time
+
+    from pipeline_job import _weights_fingerprint
+
+    files = ["image_encoder.onnx", "config.json"]
+    for rel in files:
+        (tmp_path / rel).write_bytes(b"v1")
+
+    fp1 = _weights_fingerprint(str(tmp_path), files)
+    assert fp1 is not None
+
+    # Identical disk state — fingerprint must be byte-identical so cache
+    # hits across pipeline runs work.
+    assert _weights_fingerprint(str(tmp_path), files) == fp1
+
+    # Bump mtime in a way the OS can resolve (st_mtime_ns is OS-dependent;
+    # 10 ms covers every filesystem we care about). The size also changes
+    # here, but mtime alone would be enough — in-place overwrites bump it.
+    time.sleep(0.01)
+    (tmp_path / "image_encoder.onnx").write_bytes(b"v2-longer")
+    # Force mtime forward in case the filesystem coalesces same-second writes.
+    new_mtime = os.stat(tmp_path / "image_encoder.onnx").st_mtime + 1
+    os.utime(tmp_path / "image_encoder.onnx", (new_mtime, new_mtime))
+
+    fp2 = _weights_fingerprint(str(tmp_path), files)
+    assert fp2 != fp1, (
+        "weights fingerprint must change after in-place file replacement "
+        "so the classifier cache misses on the new bytes"
+    )
+
+
+def test_weights_fingerprint_handles_missing_path_and_files():
+    """``None``/missing inputs must collapse to ``None`` so the cache key
+    stays well-formed when nothing can be stat'd.
+    """
+    from pipeline_job import _weights_fingerprint
+
+    assert _weights_fingerprint(None, ["a.onnx"]) is None
+    assert _weights_fingerprint(None, None) is None
+    assert _weights_fingerprint("/nonexistent/path/that/does/not/exist", None) is None
+    assert _weights_fingerprint("/nonexistent/path/that/does/not/exist", []) is None
+
+
+def test_weights_fingerprint_custom_model_directory(tmp_path):
+    """Custom models have no declared ``files`` list, so the fingerprint
+    must fall back to listing the directory. Without this, a user who
+    re-registers a custom model at the same path within the idle window
+    keeps hitting the cached session built from the old weights.
+    """
+    from pipeline_job import _weights_fingerprint
+
+    (tmp_path / "model.onnx").write_bytes(b"v1")
+    (tmp_path / "config.json").write_bytes(b"{}")
+    fp1 = _weights_fingerprint(str(tmp_path), None)
+    assert fp1 is not None
+    assert any(part[0] == "model.onnx" for part in fp1)
+
+    # Re-register: overwrite the .onnx with new bytes.
+    import os
+    import time
+
+    time.sleep(0.01)
+    (tmp_path / "model.onnx").write_bytes(b"v2-much-larger-payload")
+    os.utime(tmp_path / "model.onnx", None)
+    fp2 = _weights_fingerprint(str(tmp_path), None)
+    assert fp2 != fp1
+
+
+def test_weights_fingerprint_custom_model_single_file(tmp_path):
+    """Custom models can be registered as a path to a single .onnx file
+    rather than a directory; that case must still produce a fingerprint
+    so in-place replacement is detected.
+    """
+    from pipeline_job import _weights_fingerprint
+
+    onnx = tmp_path / "model.onnx"
+    onnx.write_bytes(b"v1")
+    fp1 = _weights_fingerprint(str(onnx), None)
+    assert fp1 is not None
+
+    import os
+    import time
+
+    time.sleep(0.01)
+    onnx.write_bytes(b"v2-much-larger-payload")
+    os.utime(onnx, None)
+    fp2 = _weights_fingerprint(str(onnx), None)
+    assert fp2 != fp1
+
+
+def test_weights_fingerprint_missing_file_distinguishes_from_present(tmp_path):
+    """A partial-Repair state (file deleted but path still listed) must
+    fingerprint differently from the complete state, so the cache misses
+    and the load attempt either succeeds with fresh files or raises a
+    clear "incomplete" error instead of reusing a stale session.
+    """
+    from pipeline_job import _weights_fingerprint
+
+    files = ["a.onnx", "b.onnx"]
+    (tmp_path / "a.onnx").write_bytes(b"x")
+    (tmp_path / "b.onnx").write_bytes(b"y")
+    full_fp = _weights_fingerprint(str(tmp_path), files)
+
+    (tmp_path / "b.onnx").unlink()
+    partial_fp = _weights_fingerprint(str(tmp_path), files)
+
+    assert partial_fp != full_fp
+    # Missing entries collapse to a sentinel so the key still hashes.
+    assert any(part[1] is None for part in partial_fp)
+
+
+# ---------------------------------------------------------------------------
+# Thumbnail-stage failure must not deadlock the scanner
+# ---------------------------------------------------------------------------
+
+
+def test_thumbnail_setup_failure_does_not_deadlock_scanner(tmp_path, monkeypatch):
+    """If thumbnail_stage dies BEFORE its drain loop (import, Database(),
+    cfg.load(), os.makedirs can all raise), the scanner's blocking
+    scan_to_thumb.put() would wedge forever once the queue fills — the
+    orchestrator's threads["scanner"].join() then never returns and the
+    job leaks a pipeline slot until restart. The failure path must set
+    abort and drain the queue so the producer can never block forever.
+
+    The scan→thumbnail queue is shrunk to maxsize=2 so a handful of photos
+    reproduces the >maxsize condition; the pipeline runs on a worker thread
+    with a timeout so a regression fails fast instead of hanging pytest.
+    """
+    import queue as queue_mod
+
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    for i in range(8):
+        Image.new("RGB", (16, 16), "red").save(str(photo_dir / f"p{i}.jpg"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # Shrink only the pipeline's scan→thumb queue (created with maxsize=200)
+    # so the scanner outruns the dead consumer after 2 photos.
+    real_queue_cls = queue_mod.Queue
+
+    def small_queue(maxsize=0):
+        return real_queue_cls(maxsize=2 if maxsize == 200 else maxsize)
+
+    monkeypatch.setattr(queue_mod, "Queue", small_queue)
+
+    # Break thumbnail_stage before its drain loop: deleting the symbol makes
+    # `from thumbnails import generate_thumbnail` raise ImportError.
+    import thumbnails as thumbs_mod
+    monkeypatch.delattr(thumbs_mod, "generate_thumbnail")
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+
+    done = threading.Event()
+    outcome = {}
+
+    def _run():
+        try:
+            outcome["result"] = run_pipeline_job(job, runner, db_path, ws_id, params)
+        except Exception as e:  # stage failure propagates as RuntimeError
+            outcome["error"] = e
+        finally:
+            done.set()
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    assert done.wait(60), (
+        "run_pipeline_job did not terminate — the scanner is deadlocked on "
+        "scan_to_thumb.put() after the thumbnail consumer died"
+    )
+
+    # The thumbnails stage must end failed and the job must propagate it.
+    thumb_statuses = [
+        kw["status"] for (_, sid, kw) in runner.step_updates
+        if sid == "thumbnails" and "status" in kw
+    ]
+    assert thumb_statuses and thumb_statuses[-1] == "failed"
+    assert isinstance(outcome.get("error"), RuntimeError), (
+        f"expected the thumbnails stage failure to propagate, got {outcome!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Previews must land under the configured thumb dir's parent
+# ---------------------------------------------------------------------------
+
+
+def test_previews_stage_uses_thumb_cache_dir_parent(tmp_path, monkeypatch):
+    """With a custom --thumb-dir, previews_stage must write preview files,
+    preview_cache rows, and run quota eviction under
+    dirname(thumb_cache_dir)/previews — the root app.py serves, reconciles,
+    and evicts. Writing under dirname(db_path)/previews instead leaves
+    warmed previews that are never served, rows reaped as ghosts, and
+    orphan JPEGs outside the quota.
+    """
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    Image.new("RGB", (64, 64), "green").save(str(photo_dir / "a.jpg"))
+
+    db_dir = tmp_path / "dbhome"
+    db_dir.mkdir()
+    db_path = str(db_dir / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # Custom cache root, deliberately outside dirname(db_path).
+    custom_root = tmp_path / "custom_cache"
+    thumb_dir = custom_root / "thumbnails"
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+        preview_max_size=1920,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(
+        job, runner, db_path, ws_id, params, thumb_cache_dir=str(thumb_dir),
+    )
+
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws_id)
+    photo_id = db2.get_photos(per_page=1)[0]["id"]
+
+    served_path = custom_root / "previews" / f"{photo_id}_1920.jpg"
+    assert served_path.is_file(), (
+        "preview must be written under dirname(thumb_cache_dir)/previews "
+        "to match the Flask serve convention"
+    )
+    orphan_path = db_dir / "previews" / f"{photo_id}_1920.jpg"
+    assert not orphan_path.exists(), (
+        "preview must NOT be written under dirname(db_path)/previews when "
+        "a custom thumb_cache_dir is configured"
+    )
+    # The preview_cache row must account for the file the app will serve.
+    assert db2.preview_cache_get(photo_id, 1920) is not None
+
+
+def test_pipeline_previews_honor_raw_failure_marker_after_source_selection(
+    tmp_path, monkeypatch,
+):
+    import config as cfg
+    import image_loader
+    import scanner
+    import thumbnails
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    raw_path = photo_dir / "source.NEF"
+    raw_path.write_bytes(b"raw")
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    folder_id = db.add_folder(str(photo_dir), name="photos")
+    photo_id = db.add_photo(
+        folder_id=folder_id,
+        filename="source.NEF",
+        extension=".nef",
+        file_size=raw_path.stat().st_size,
+        file_mtime=1234.0,
+        width=600,
+        height=400,
+    )
+    working_dir = tmp_path / "working"
+    working_dir.mkdir()
+    Image.new("RGB", (400, 400), "blue").save(str(working_dir / f"{photo_id}.jpg"))
+    db.conn.execute(
+        """UPDATE photos
+           SET working_copy_path=?,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=1234.0,
+               working_copy_failed_source='source'
+           WHERE id=?""",
+        (f"working/{photo_id}.jpg", photo_id),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        photo_id,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+    )
+    collection_id = db.add_collection("Test", json.dumps([]))
+
+    def fake_generate_thumbnail(photo_id, photo_path, cache_dir, size=300, **kwargs):
+        os.makedirs(cache_dir, exist_ok=True)
+        thumb_path = os.path.join(cache_dir, f"{photo_id}.jpg")
+        Image.new("RGB", (size, size), "green").save(thumb_path)
+        return thumb_path
+
+    monkeypatch.setattr(thumbnails, "generate_thumbnail", fake_generate_thumbnail)
+    monkeypatch.setattr(scanner, "extract_working_copy", lambda *args, **kwargs: False)
+
+    original_load_image = image_loader.load_image
+    raw_loads = []
+
+    def tracking_load_image(file_path, max_size=1024):
+        if os.path.abspath(str(file_path)) == os.path.abspath(str(raw_path)):
+            raw_loads.append(file_path)
+            raise AssertionError("pipeline preview retried failed RAW")
+        return original_load_image(file_path, max_size=max_size)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    result = run_pipeline_job(
+        _make_job(),
+        FakeRunner(),
+        db_path,
+        ws_id,
+        PipelineParams(
+            collection_id=collection_id,
+            skip_classify=True,
+            skip_extract_masks=True,
+            skip_regroup=True,
+            preview_max_size=1920,
+        ),
+    )
+
+    previews = result["stages"]["previews"]
+    assert previews["failed"] == 0
+    assert previews["generated"] == 0
+    assert previews["skipped"] == 1
+    assert raw_loads == []
+    assert db.preview_cache_get(photo_id, 1920) is None
+
+
+def test_pipeline_scan_thumbnails_use_recipe_source_before_live_raw(
+    tmp_path, monkeypatch,
+):
+    import config as cfg
+    import scanner
+    import thumbnails
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    raw_path = photo_dir / "source.NEF"
+    raw_path.write_bytes(b"raw")
+    companion_path = photo_dir / "source.jpg"
+    Image.new("RGB", (800, 600), "blue").save(companion_path)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    scanned = {"done": False}
+
+    def fake_scan(
+        root,
+        scan_db,
+        progress_callback=None,
+        photo_callback=None,
+        **_kwargs,
+    ):
+        folder_id = scan_db.add_folder(str(root), name="photos")
+        photo_id = scan_db.add_photo(
+            folder_id=folder_id,
+            filename="source.NEF",
+            extension=".nef",
+            file_size=raw_path.stat().st_size,
+            file_mtime=1234.0,
+            width=800,
+            height=600,
+        )
+        scan_db.conn.execute(
+            """UPDATE photos
+               SET companion_path='source.jpg',
+                   working_copy_path=NULL,
+                   working_copy_failed_at=datetime('now'),
+                   working_copy_failed_mtime=1234.0,
+                   working_copy_failed_source='source'
+               WHERE id=?""",
+            (photo_id,),
+        )
+        scan_db.conn.commit()
+        scan_db.set_photo_edit_recipe(
+            photo_id,
+            {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+        )
+        scanned["done"] = True
+        if progress_callback:
+            progress_callback(1, 1)
+        if photo_callback:
+            photo_callback(photo_id, str(raw_path))
+
+    thumbnail_sources = []
+
+    def fake_generate_thumbnail(photo_id, photo_path, cache_dir, size=300, **kwargs):
+        thumbnail_sources.append(photo_path)
+        if os.path.abspath(str(photo_path)) == os.path.abspath(str(raw_path)):
+            raise AssertionError("scan thumbnail used live RAW path")
+        assert kwargs.get("recipe")
+        os.makedirs(cache_dir, exist_ok=True)
+        thumb_path = os.path.join(cache_dir, f"{photo_id}.jpg")
+        Image.new("RGB", (size, size), "green").save(thumb_path)
+        return thumb_path
+
+    monkeypatch.setattr(scanner, "scan", fake_scan)
+    monkeypatch.setattr(thumbnails, "generate_thumbnail", fake_generate_thumbnail)
+
+    result = run_pipeline_job(
+        _make_job(),
+        FakeRunner(),
+        db_path,
+        ws_id,
+        PipelineParams(
+            source=str(photo_dir),
+            skip_classify=True,
+            skip_extract_masks=True,
+            skip_regroup=True,
+        ),
+    )
+
+    assert scanned["done"] is True
+    assert result["stages"]["thumbnails"]["failed"] == 0
+    assert thumbnail_sources == [str(companion_path)]
+
+
+def test_pipeline_scan_thumbnails_honor_raw_marker_after_source_selection(
+    tmp_path, monkeypatch,
+):
+    import config as cfg
+    import scanner
+    import thumbnails
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    raw_path = photo_dir / "source.NEF"
+    raw_path.write_bytes(b"raw")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    def fake_scan(
+        root,
+        scan_db,
+        progress_callback=None,
+        photo_callback=None,
+        **_kwargs,
+    ):
+        folder_id = scan_db.add_folder(str(root), name="photos")
+        photo_id = scan_db.add_photo(
+            folder_id=folder_id,
+            filename="source.NEF",
+            extension=".nef",
+            file_size=raw_path.stat().st_size,
+            file_mtime=1234.0,
+            width=800,
+            height=600,
+        )
+        working_dir = tmp_path / "working"
+        working_dir.mkdir()
+        Image.new("RGB", (200, 150), "blue").save(
+            working_dir / f"{photo_id}.jpg",
+        )
+        scan_db.conn.execute(
+            """UPDATE photos
+               SET working_copy_path=?,
+                   working_copy_failed_at=datetime('now'),
+                   working_copy_failed_mtime=1234.0,
+                   working_copy_failed_source='source'
+               WHERE id=?""",
+            (f"working/{photo_id}.jpg", photo_id),
+        )
+        scan_db.conn.commit()
+        scan_db.set_photo_edit_recipe(
+            photo_id,
+            {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+        )
+        if progress_callback:
+            progress_callback(1, 1)
+        if photo_callback:
+            photo_callback(photo_id, str(raw_path))
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("scan thumbnail retried failed RAW")
+
+    monkeypatch.setattr(scanner, "scan", fake_scan)
+    monkeypatch.setattr(thumbnails, "generate_thumbnail", fail_if_called)
+
+    result = run_pipeline_job(
+        _make_job(),
+        FakeRunner(),
+        db_path,
+        ws_id,
+        PipelineParams(
+            source=str(photo_dir),
+            skip_classify=True,
+            skip_extract_masks=True,
+            skip_regroup=True,
+        ),
+    )
+
+    thumbnails_stage = result["stages"]["thumbnails"]
+    assert thumbnails_stage["failed"] == 0
+    assert thumbnails_stage["skipped"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Aborted pipelines must not leave step rows stuck at "pending"
+# ---------------------------------------------------------------------------
+
+
+def test_pipeline_abort_finalizes_all_step_rows(tmp_path, monkeypatch):
+    """When the pipeline aborts early (user cancel here), every step row
+    created by runner.set_steps — including previews, extract_masks,
+    eye_keypoints, regroup, and misses — must reach a terminal status.
+    Gating those stage calls on `if not abort.is_set()` left their rows
+    persisted as "pending" with no finished_at, forever (the same defect
+    previously fixed for detect/classify).
+    """
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    for name in ("a.jpg", "b.jpg"):
+        Image.new("RGB", (16, 16), "blue").save(str(photo_dir / name))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # All optional stages enabled so their step rows exist; classify is
+    # skipped to keep the test free of model files.
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+    # Pre-cancel: the cancel watcher sets the local abort event immediately,
+    # so the post-scan stages all hit their abort skip paths.
+    runner.cancelled_ids.add(job["id"])
+
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    terminal = {"completed", "failed", "cancelled"}
+    for step in runner.steps_defined:
+        statuses = [
+            kw["status"] for (_, sid, kw) in runner.step_updates
+            if sid == step["id"] and "status" in kw
+        ]
+        final = statuses[-1] if statuses else None
+        assert final in terminal, (
+            f"Step {step['id']!r} must reach a terminal status on an aborted "
+            f"pipeline, got {final!r} (history={statuses})"
+        )
+
+
+def test_pipeline_regroup_failure_finalizes_miss_step_row(tmp_path, monkeypatch):
+    """When regroup_stage fails (without abort), miss_stage must still be
+    invoked so the misses row reaches a terminal "Skipped" state instead of
+    persisting as pending — while still never touching miss_* DB state
+    (regroup's burst_id output is its prerequisite).
+    """
+    import config as cfg
+    import pipeline as pipeline_mod
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    Image.new("RGB", (16, 16), "black").save(str(photo_dir / "a.jpg"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("synthetic regroup failure")
+
+    monkeypatch.setattr(pipeline_mod, "run_full_pipeline", _boom)
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+
+    with contextlib.suppress(Exception):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    miss_statuses = [
+        kw["status"] for (_, sid, kw) in runner.step_updates
+        if sid == "misses" and "status" in kw
+    ]
+    assert miss_statuses, "misses row got no status update after regroup failure"
+    assert miss_statuses[-1] == "completed", (
+        f"misses must finalize as a skipped/completed row, got {miss_statuses}"
+    )
+    # The skip path must not have mutated miss state.
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws_id)
+    rows = db2.conn.execute("SELECT miss_computed_at FROM photos").fetchall()
+    assert rows and all(r["miss_computed_at"] is None for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# Remote (SSH) archive destination — resolve_remote_archive unit tests plus
+# end-to-end pipeline runs with the SSH/rsync seams monkeypatched, following
+# the fake pattern in test_move_remote.py.
+# ---------------------------------------------------------------------------
+
+import pytest
+from pipeline_job import resolve_remote_archive
+
+
+def _remote_target(tmp_path, **overrides):
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas", "user": "me",
+        "port": 22, "ssh_key": "", "bwlimit_kbps": 0,
+        "remote_path": "/volume1/Photography",
+        "mount_path": str(tmp_path / "mount"),
+    }
+    target.update(overrides)
+    return target
+
+
+def test_resolve_remote_archive_joins_both_bases(tmp_path):
+    ctx = resolve_remote_archive(_remote_target(tmp_path), "2026/trip")
+    assert ctx["subpath"] == "2026/trip"
+    assert ctx["parent_subpath"] == "2026"
+    assert ctx["ssh_final"] == "/volume1/Photography/2026/trip"
+    assert ctx["mount_final"] == os.path.join(
+        str(tmp_path / "mount"), "2026", "trip")
+    assert ctx["display"] == "me@nas:/volume1/Photography/2026/trip"
+
+
+def test_resolve_remote_archive_single_segment_subpath(tmp_path):
+    ctx = resolve_remote_archive(_remote_target(tmp_path), "trip")
+    # A single segment has no parent: the move spec's bases are the target's
+    # own base paths and the staged leaf ("trip") lands directly under them.
+    assert ctx["parent_subpath"] == ""
+    assert ctx["ssh_final"] == "/volume1/Photography/trip"
+
+
+def test_resolve_remote_archive_rejects_bad_input(tmp_path):
+    with pytest.raises(ValueError, match="remote_subpath is required"):
+        resolve_remote_archive(_remote_target(tmp_path), "")
+    with pytest.raises(ValueError):
+        resolve_remote_archive(_remote_target(tmp_path), "../escape")
+    with pytest.raises(ValueError, match="mount path"):
+        resolve_remote_archive(
+            _remote_target(tmp_path, mount_path=""), "trip")
+    with pytest.raises(ValueError, match="absolute"):
+        resolve_remote_archive(
+            _remote_target(tmp_path, mount_path="Photos"), "trip")
+
+
+def test_pipeline_params_remote_archive_defaults():
+    params = PipelineParams(collection_id=1)
+    assert params.remote_target_id is None
+    assert params.remote_subpath == ""
+    assert params.remote_target_snapshot is None
+
+
+class _RemoteArchiveRunner(FakeRunner):
+    """FakeRunner + the uncancellable handshake archive_stage requires."""
+
+    def begin_uncancellable(self, job_id):
+        return True
+
+
+def _remote_env(tmp_path, monkeypatch, mount_path=None):
+    """Config + SSH/rsync seam fakes for a remote-archive pipeline run.
+
+    Every subprocess-backed seam in move.py is replaced (same seams
+    test_move_remote.py fakes) so no test ever shells out to ssh/rsync.
+    Returns a dict of captured rsync calls plus the paths the assertions
+    need.
+    """
+    import config as cfg
+    import local_processing
+    import move as move_mod
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    mount = mount_path or str(tmp_path / "mount")
+    cfg.save({"remote_targets": [{
+        "id": "nas1", "name": "NAS", "host": "nas", "user": "me",
+        "remote_path": "/volume1/Photography",
+        "mount_path": mount,
+    }]})
+
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    captured = {"rsync_calls": []}
+
+    def fake_rsync(src_path, dest_spec, flags, total, cb, rsync_bin="rsync",
+                   extra_args=None, **kw):
+        captured["rsync_calls"].append({
+            "src": src_path,
+            "dest_spec": dest_spec,
+            "flags": list(flags or []),
+            "rsync_bin": rsync_bin,
+            "extra_args": list(extra_args or []),
+        })
+        return (0, "", False)
+
+    monkeypatch.setattr(
+        move_mod, "resolve_rsync_bin", lambda configured="": "/usr/bin/rsync")
+    monkeypatch.setattr(move_mod, "is_gnu_rsync", lambda p: True)
+    monkeypatch.setattr(
+        move_mod, "test_remote_connection",
+        lambda t, r: {"ok": True, "message": "Connection OK"})
+    monkeypatch.setattr(
+        move_mod, "_remote_free_bytes", lambda t, p: 100 * 1024 ** 3)
+    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: False)
+    monkeypatch.setattr(move_mod, "_remote_mkdir_p", lambda r, p: (True, ""))
+    monkeypatch.setattr(
+        move_mod, "_find_remote_content_conflict", lambda *a, **k: None)
+    monkeypatch.setattr(
+        move_mod, "_remote_verify_complete", lambda *a, **k: None)
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_rsync)
+
+    src = tmp_path / "card"
+    src.mkdir()
+    Image.new("RGB", (16, 16), "white").save(str(src / "test.jpg"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    return {
+        "captured": captured, "src": src, "db_path": db_path, "db": db,
+        "ws_id": ws_id, "mount": mount, "tmp_path": tmp_path,
+    }
+
+
+def _remote_params(env, **overrides):
+    kwargs = {
+        "sources": [str(env["src"])],
+        "local_processing": True,
+        "remote_target_id": "nas1",
+        "remote_subpath": "2026/trip",
+        "folder_template": "",
+        "skip_classify": True,
+        "skip_extract_masks": True,
+        "skip_regroup": True,
+    }
+    kwargs.update(overrides)
+    return PipelineParams(**kwargs)
+
+
+def test_pipeline_remote_archive_end_to_end(tmp_path, monkeypatch):
+    """A local-processing run with a remote target stages locally, then
+    archives over SSH: rsync is pointed at the NAS-side subpath with
+    --partial-dir resume semantics, the catalog is repointed at the mount
+    path, and staging is cleaned up."""
+    env = _remote_env(tmp_path, monkeypatch)
+    runner = _RemoteArchiveRunner()
+    job = _make_job()
+
+    result = run_pipeline_job(
+        job, runner, env["db_path"], env["ws_id"], _remote_params(env))
+
+    mount_final = os.path.join(env["mount"], "2026", "trip")
+
+    # The archive result names both views of the destination.
+    assert result["archive"]["final_destination"] == mount_final
+    assert result["archive"]["moved"] == 1
+    assert result["archive"]["remote"]["ssh_destination"] == \
+        "/volume1/Photography/2026/trip"
+    assert result["archive"]["remote"]["target_name"] == "NAS"
+
+    # rsync addressed the NAS-side subpath, over SSH, with the same
+    # merge-on-retry transport shape the Move page uses.
+    call = env["captured"]["rsync_calls"][-1]
+    assert call["dest_spec"] == "me@nas:/volume1/Photography/2026/trip"
+    assert call["rsync_bin"] == "/usr/bin/rsync"
+    assert "-e" in call["extra_args"]
+    assert "--partial-dir=.rsync-partial" in call["extra_args"]
+    # Fresh destination — not a merge, so no --ignore-existing.
+    assert "--ignore-existing" not in call["flags"]
+
+    # Catalog repointed at the mount path (photos stay in the library).
+    from db import Database
+    check_db = Database(env["db_path"])
+    row = check_db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", (mount_final,)).fetchone()
+    assert row is not None
+    photo = check_db.conn.execute(
+        "SELECT filename FROM photos WHERE folder_id = ?", (row["id"],),
+    ).fetchone()
+    assert photo["filename"] == "test.jpg"
+
+    # Staging cleaned up (move_folder rmtree'd it after the verify).
+    staging = tmp_path / "staging"
+    assert not staging.exists() or not any(staging.rglob("*.jpg"))
+
+    # Storage-step summary reports the remote free-space check honestly.
+    storage_summaries = [
+        kw.get("summary", "") for _, sid, kw in runner.step_updates
+        if sid == "storage" and kw.get("status") == "completed"
+    ]
+    assert storage_summaries and "free at NAS" in storage_summaries[-1]
+    assert result["local_processing"]["remote"]["free_space_checked"] is True
+
+
+def test_pipeline_remote_archive_preflight_refuses_without_rsync(
+    tmp_path, monkeypatch,
+):
+    """No GNU rsync -> the storage preflight fails BEFORE anything is staged
+    or processed, with an actionable message."""
+    import move as move_mod
+    env = _remote_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        move_mod, "resolve_rsync_bin", lambda configured="": None)
+    runner = _RemoteArchiveRunner()
+    job = _make_job()
+
+    with pytest.raises(RuntimeError):
+        run_pipeline_job(
+            job, runner, env["db_path"], env["ws_id"], _remote_params(env))
+
+    assert any(
+        "[storage] Fatal" in e and "rsync" in e.lower() for e in job["errors"]
+    ), job["errors"]
+    # Nothing was staged — the refusal beat the staging mkdir/copy.
+    assert not (tmp_path / "staging").exists()
+    # And no transfer was ever attempted.
+    assert env["captured"]["rsync_calls"] == []
+
+
+def test_pipeline_remote_archive_preflight_refuses_when_connection_fails(
+    tmp_path, monkeypatch,
+):
+    import move as move_mod
+    env = _remote_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        move_mod, "test_remote_connection",
+        lambda t, r: {"ok": False, "message": "SSH connection failed - check host"})
+    runner = _RemoteArchiveRunner()
+    job = _make_job()
+
+    with pytest.raises(RuntimeError):
+        run_pipeline_job(
+            job, runner, env["db_path"], env["ws_id"], _remote_params(env))
+
+    fatal = [e for e in job["errors"] if "[storage] Fatal" in e]
+    assert fatal, job["errors"]
+    # The error names the target and carries the connection test's message.
+    assert "NAS" in fatal[0]
+    assert "SSH connection failed" in fatal[0]
+    assert not (tmp_path / "staging").exists()
+
+
+def test_pipeline_remote_archive_space_probe_failure_degrades(
+    tmp_path, monkeypatch,
+):
+    """A df probe failure must not fail (or fake) the preflight: the run
+    proceeds, the summary says the check was skipped, and the result
+    payload marks it unchecked."""
+    import move as move_mod
+    env = _remote_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(move_mod, "_remote_free_bytes", lambda t, p: None)
+    runner = _RemoteArchiveRunner()
+    job = _make_job()
+
+    result = run_pipeline_job(
+        job, runner, env["db_path"], env["ws_id"], _remote_params(env))
+
+    assert result["archive"]["moved"] == 1
+    remote_info = result["local_processing"]["remote"]
+    assert remote_info["free_space_checked"] is False
+    storage_summaries = [
+        kw.get("summary", "") for _, sid, kw in runner.step_updates
+        if sid == "storage" and kw.get("status") == "completed"
+    ]
+    assert storage_summaries, runner.step_updates
+    assert "free-space check skipped" in storage_summaries[-1]
+
+
+def test_pipeline_remote_archive_refuses_when_remote_volume_full(
+    tmp_path, monkeypatch,
+):
+    import move as move_mod
+    env = _remote_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(move_mod, "_remote_free_bytes", lambda t, p: 0)
+    runner = _RemoteArchiveRunner()
+    job = _make_job()
+
+    with pytest.raises(RuntimeError):
+        run_pipeline_job(
+            job, runner, env["db_path"], env["ws_id"], _remote_params(env))
+
+    fatal = [e for e in job["errors"] if "[storage] Fatal" in e]
+    assert fatal, job["errors"]
+    assert "Remote archive needs about" in fatal[0]
+    assert "me@nas:/volume1/Photography/2026/trip" in fatal[0]
+    # No transfer was attempted.
+    assert env["captured"]["rsync_calls"] == []
+
+
+def test_pipeline_remote_archive_merges_on_retry(tmp_path, monkeypatch):
+    """An existing remote destination (an earlier interrupted archive) makes
+    the archive move a merge/resume: --ignore-existing so already-present
+    files are never overwritten, still with --partial-dir resume."""
+    import move as move_mod
+    env = _remote_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(move_mod, "_remote_dir_exists", lambda r, p: True)
+    runner = _RemoteArchiveRunner()
+    job = _make_job()
+
+    result = run_pipeline_job(
+        job, runner, env["db_path"], env["ws_id"], _remote_params(env))
+
+    assert result["archive"]["moved"] == 1
+    call = env["captured"]["rsync_calls"][-1]
+    assert "--ignore-existing" in call["flags"]
+    assert "--partial-dir=.rsync-partial" in call["extra_args"]
+
+
+def test_pipeline_remote_archive_failure_deindexes_staging(
+    tmp_path, monkeypatch,
+):
+    """A failed remote transfer must deindex the staged folder/photos —
+    otherwise a retry of the same source would hit ingest()'s duplicate
+    skip and publish an empty archive — while leaving the staged files on
+    disk for recovery. Mirrors the local archive-failure contract."""
+    import move as move_mod
+    env = _remote_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        move_mod, "_run_rsync_streamed",
+        lambda *a, **k: (1, "rsync error: connection reset", False))
+    runner = _RemoteArchiveRunner()
+    job = _make_job()
+
+    with pytest.raises(RuntimeError):
+        run_pipeline_job(
+            job, runner, env["db_path"], env["ws_id"], _remote_params(env))
+
+    fatal = [e for e in job["errors"] if "[archive] Fatal" in e]
+    assert fatal, job["errors"]
+    # The error names the remote destination, not just the rsync stderr.
+    assert "me@nas:/volume1/Photography/2026/trip" in fatal[0]
+    assert "connection reset" in fatal[0]
+    assert "local staging" in fatal[0]
+
+    # Staged files remain on disk for manual recovery...
+    staged = list((tmp_path / "staging").rglob("test.jpg"))
+    assert staged, "staged files must remain on disk after a failed archive"
+    # ...but the catalog rows are gone, so a retry re-ingests them.
+    from db import Database
+    check_db = Database(env["db_path"])
+    count = check_db.conn.execute(
+        "SELECT COUNT(*) AS n FROM photos").fetchone()["n"]
+    assert count == 0
+
+
+def test_pipeline_remote_archive_snapshot_wins_over_mutated_settings(
+    tmp_path, monkeypatch,
+):
+    """A queued pipeline must archive to the target the user saw at Start,
+    not whatever the saved target got edited to before the pipeline slot
+    opened. Editing ``remote_targets`` after PipelineParams is built must not
+    redirect the archive — the ``remote_target_snapshot`` wins over the
+    mutable ``cfg.get_remote_target`` lookup."""
+    import config as cfg
+    env = _remote_env(tmp_path, monkeypatch)
+    snapshot = cfg.get_remote_target("nas1")
+    assert snapshot["host"] == "nas"
+    assert snapshot["remote_path"] == "/volume1/Photography"
+
+    # Simulate a settings edit between click-Start and slot-open: same id,
+    # different host / user / remote_path / mount_path. If the job re-reads
+    # Settings the archive lands in the hijacked place.
+    hijacked_mount = str(tmp_path / "other-mount")
+    cfg.save({"remote_targets": [{
+        "id": "nas1", "name": "NAS-edited", "host": "attacker",
+        "user": "root", "remote_path": "/tmp/hijack",
+        "mount_path": hijacked_mount,
+    }]})
+
+    params = _remote_params(env, remote_target_snapshot=dict(snapshot))
+    runner = _RemoteArchiveRunner()
+    job = _make_job()
+
+    result = run_pipeline_job(
+        job, runner, env["db_path"], env["ws_id"], params)
+
+    call = env["captured"]["rsync_calls"][-1]
+    assert call["dest_spec"] == "me@nas:/volume1/Photography/2026/trip", (
+        "rsync must address the snapshot's host + remote_path, not the "
+        "post-edit target"
+    )
+    assert "attacker" not in call["dest_spec"]
+    assert "/tmp/hijack" not in call["dest_spec"]
+
+    # Catalog was repointed at the snapshot's mount path (photos stay in the
+    # user's original library), not the hijacked mount.
+    assert result["archive"]["final_destination"] == os.path.join(
+        env["mount"], "2026", "trip")
+    assert hijacked_mount not in result["archive"]["final_destination"]
+    # And the job's archive-result payload reflects the snapshot's target
+    # name, not the edited one.
+    assert result["archive"]["remote"]["target_name"] == "NAS"
+
+
+def test_pipeline_remote_archive_falls_back_to_settings_without_snapshot(
+    tmp_path, monkeypatch,
+):
+    """When no snapshot is present (older direct-call test paths) the run
+    still resolves the target from Settings so existing callers keep
+    working."""
+    env = _remote_env(tmp_path, monkeypatch)
+    runner = _RemoteArchiveRunner()
+    job = _make_job()
+
+    # Note: no ``remote_target_snapshot`` — falls back to cfg.get_remote_target.
+    result = run_pipeline_job(
+        job, runner, env["db_path"], env["ws_id"], _remote_params(env))
+
+    assert result["archive"]["moved"] == 1
+    call = env["captured"]["rsync_calls"][-1]
+    assert call["dest_spec"] == "me@nas:/volume1/Photography/2026/trip"
+
+
+# ---------------------------------------------------------------------------
+# miss_enabled per-run override (process strategies, import/process split PR 1)
+# ---------------------------------------------------------------------------
+
+
+def test_pipeline_params_miss_enabled_defaults_none():
+    """None means "defer to workspace config" — today's behavior."""
+    params = PipelineParams()
+    assert params.miss_enabled is None
+
+
+def _run_pipeline_for_miss_tests(tmp_path, monkeypatch, *, pipeline_cfg,
+                                 params_extra, expect_runtime_error=False):
+    """Run a collection pipeline far enough to reach miss_stage.
+
+    classify must complete (model_loader failure sets abort, and the misses
+    gate skips on abort), so install a fake downloaded model, a fake
+    Classifier, and a fake _detect_batch. regroup must succeed (the misses
+    gate skips when regroup failed), so stub run_full_pipeline /
+    save_results / load_photo_features. Returns (runner, result, spy_calls)
+    where spy_calls captures every compute_misses_for_workspace invocation.
+
+    ``expect_runtime_error`` is opt-in: the setup-failure test needs to swallow
+    the RuntimeError so it can inspect ``job["_fatal_error"]``, but the
+    override tests must let unexpected pipeline aborts propagate — otherwise
+    an earlier stage failing would make miss_stage skip for the wrong reason
+    and the test would pass on a false green.
+    """
+    import json as json_mod
+
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    import numpy as np
+    import pipeline as pipeline_mod
+    from db import Database
+
+    try:
+        import misses as misses_mod
+    except ImportError:
+        # The setup-failure test poisons sys.modules["misses"] so the miss
+        # stage's own import raises; the spy is unused on that path.
+        misses_mod = None
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    with open(cfg.CONFIG_PATH, "w") as f:
+        json_mod.dump({"pipeline": pipeline_cfg}, f)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    photo_id = db.add_photo(folder_id, "test.jpg", ".jpg", 12345, 1_000_000.0)
+    _drop_jpeg(folder_path, "test.jpg")
+    col_id = db.add_collection(
+        "Test",
+        json_mod.dumps([{"field": "photo_ids", "value": [photo_id]}]),
+    )
+
+    _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
+        return {}, 0, {p["id"] for p in batch}
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def encode_image(self, *args, **kwargs):
+            return np.zeros(512, dtype=np.float32)
+
+        def classify_with_embedding(self, img, threshold=0):
+            return (
+                [{"species": "Robin", "score": 0.9}],
+                np.zeros(512, dtype=np.float32),
+            )
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            zero = np.zeros(512, dtype=np.float32)
+            return [([{"species": "Robin", "score": 0.9}], zero)
+                    for _ in images]
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    monkeypatch.setattr(
+        pipeline_mod, "run_full_pipeline",
+        lambda photos, config=None, emit_trace=False: {
+            "summary": {"groups": 1}, "photos": photos,
+        },
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "save_results", lambda results, cache_dir, ws: None,
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "load_photo_features",
+        lambda thread_db, collection_id=None, config=None: [{"id": photo_id}],
+    )
+
+    spy_calls = []
+
+    def spy_compute(thread_db, p_cfg, collection_id=None,
+                    exclude_photo_ids=None, now=None):
+        spy_calls.append({"pipeline_cfg": dict(p_cfg)})
+        return 3
+
+    if misses_mod is not None:
+        monkeypatch.setattr(
+            misses_mod, "compute_misses_for_workspace", spy_compute,
+        )
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_extract_masks=True,
+        **params_extra,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+    # Suppression is opt-in — the setup-failure test needs to inspect
+    # job["_fatal_error"] after the recorded RuntimeError, but the
+    # miss_enabled override tests must let unexpected aborts propagate so
+    # the miss_stage.skipped assertion can't pass because an earlier stage
+    # failed for an unrelated reason.
+    result = None
+    if expect_runtime_error:
+        with contextlib.suppress(RuntimeError):
+            result = run_pipeline_job(job, runner, db_path, ws_id, params)
+    else:
+        result = run_pipeline_job(job, runner, db_path, ws_id, params)
+    return runner, result, spy_calls, job
+
+
+def _last_stages(runner):
+    progress_events = [
+        data for (_, evt, data) in runner.events
+        if evt == "progress" and "stages" in data
+    ]
+    assert progress_events, "pipeline emitted no progress events"
+    return progress_events[-1]["stages"]
+
+
+def test_miss_enabled_false_param_short_circuits_before_compute(
+    tmp_path, monkeypatch,
+):
+    """Skip direction: workspace says True, params say False -> the stage
+    records skipped and compute_misses_for_workspace is never invoked. A
+    local-variable-only implementation (gating just the cache marker)
+    would still call compute and fail this test."""
+    runner, result, spy_calls, job = _run_pipeline_for_miss_tests(
+        tmp_path, monkeypatch,
+        pipeline_cfg={"miss_enabled": True},
+        params_extra={"miss_enabled": False},
+    )
+    assert spy_calls == [], "compute_misses_for_workspace ran despite override"
+    assert _last_stages(runner)["misses"]["status"] == "skipped"
+    miss_steps = [
+        kw for (_, step, kw) in runner.step_updates if step == "misses"
+    ]
+    assert {"status": "completed", "summary": "Skipped"} in miss_steps
+
+
+def test_miss_enabled_true_param_overrides_disabled_workspace(
+    tmp_path, monkeypatch,
+):
+    """Enable direction: workspace says False, params say True -> compute IS
+    invoked and sees the injected effective value. Without injection the
+    compute call reads workspace-False and silently evaluates nothing."""
+    runner, result, spy_calls, job = _run_pipeline_for_miss_tests(
+        tmp_path, monkeypatch,
+        pipeline_cfg={"miss_enabled": False},
+        params_extra={"miss_enabled": True},
+    )
+    assert len(spy_calls) == 1, "compute_misses_for_workspace did not run"
+    assert spy_calls[0]["pipeline_cfg"].get("miss_enabled") is True
+    assert _last_stages(runner)["misses"]["status"] == "completed"
+    miss_steps = [
+        kw for (_, step, kw) in runner.step_updates if step == "misses"
+    ]
+    assert {"status": "completed", "summary": "3 photos evaluated"} in miss_steps
+
+
+def test_miss_stage_setup_failure_marks_stage_failed(tmp_path, monkeypatch):
+    """Setup-failure direction: if the miss stage's setup (imports, DB,
+    config load) raises, the stage must record failed — not linger as
+    pending while the job completes "successfully". Pins the contract the
+    hoisted-setup refactor could otherwise regress. Only miss_stage imports
+    the misses module, so poisoning it in sys.modules scopes the failure to
+    exactly this stage."""
+    import sys as sys_mod
+
+    def run(tmp, mk):
+        mk.setitem(sys_mod.modules, "misses", None)
+        return _run_pipeline_for_miss_tests(
+            tmp, mk,
+            pipeline_cfg={"miss_enabled": True},
+            params_extra={},
+            expect_runtime_error=True,
+        )
+
+    runner, result, spy_calls, job = run(tmp_path, monkeypatch)
+    assert spy_calls == []
+    assert _last_stages(runner)["misses"]["status"] == "failed"
+    miss_steps = [
+        kw for (_, step, kw) in runner.step_updates if step == "misses"
+    ]
+    assert any(kw.get("status") == "failed" and kw.get("error")
+               for kw in miss_steps), miss_steps
+    assert str(job.get("_fatal_error", "")).startswith("[misses] Fatal:"), (
+        job.get("_fatal_error"), job.get("errors")
+    )
+
+
+# ---------------------------------------------------------------------------
+# per-photo resume contract (import/process split PR 1)
+# ---------------------------------------------------------------------------
+
+
+def test_collection_rerun_redoes_only_missing_work(tmp_path, monkeypatch):
+    """The process job's core promise: re-running the same strategy over the
+    same photos re-does only what's missing. Second run must report zero
+    generated thumbnails/previews and a fully cache-hit classify. If this
+    fails, the failure is the finding — fix the specific stage's skip
+    check rather than loosening the assertion."""
+    import json as json_mod
+
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    import numpy as np
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    photo_ids = []
+    for i, name in enumerate(("a.jpg", "b.jpg")):
+        pid = db.add_photo(folder_id, name, ".jpg", 1000 + i, 1_000_000.0 + i)
+        _drop_jpeg(folder_path, name)
+        # Pre-seed one detection per photo so the classify loop has a
+        # primary detection to classify (and, on run 2, to find cached
+        # predictions for). Mirrors the reclassify tests' setup.
+        db.save_detections(
+            pid,
+            [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+              "confidence": 0.9, "category": "animal"}],
+            detector_model="MegaDetector",
+        )
+        photo_ids.append(pid)
+    col_id = db.add_collection(
+        "Resume test",
+        json_mod.dumps([{"field": "photo_ids", "value": photo_ids}]),
+    )
+
+    _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
+        det_map = {}
+        for p in batch:
+            # The classify loop expects plain dicts (the real _detect_batch
+            # returns them); sqlite3.Row has no .get.
+            dets = [dict(d) for d in db_.get_detections(p["id"])]
+            if dets:
+                det_map[p["id"]] = dets
+        return det_map, 0, {p["id"] for p in batch}
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    inference_calls = []
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def encode_image(self, *args, **kwargs):
+            inference_calls.append("encode_image")
+            return np.zeros(512, dtype=np.float32)
+
+        def classify_with_embedding(self, img, threshold=0):
+            inference_calls.append("classify_with_embedding")
+            return (
+                [{"species": "Robin", "score": 0.9}],
+                np.zeros(512, dtype=np.float32),
+            )
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            inference_calls.append("classify_batch_with_embedding")
+            zero = np.zeros(512, dtype=np.float32)
+            return [([{"species": "Robin", "score": 0.9}], zero)
+                    for _ in images]
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    def run_once():
+        params = PipelineParams(
+            collection_id=col_id,
+            skip_extract_masks=True,
+            skip_regroup=True,
+        )
+        runner = FakeRunner()
+        job = _make_job()
+        return run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    first = run_once()
+    n = len(photo_ids)
+    assert first["stages"]["thumbnails"]["generated"] == n, first["stages"]
+    assert first["stages"]["previews"]["generated"] == n, first["stages"]
+    assert first["stages"]["classify"]["predictions_stored"] == n, (
+        first["stages"]
+    )
+    assert inference_calls, "first run never invoked the classifier"
+
+    inference_calls.clear()
+    second = run_once()
+    assert second["stages"]["thumbnails"] == {
+        "generated": 0, "skipped": n, "failed": 0,
+    }, second["stages"]
+    assert second["stages"]["previews"]["generated"] == 0, second["stages"]
+    assert second["stages"]["previews"]["skipped"] == n, second["stages"]
+    assert second["stages"]["previews"]["failed"] == 0, second["stages"]
+    assert second["stages"]["classify"]["already_classified"] == n, (
+        second["stages"]
+    )
+    # NOTE: predictions_stored is NOT asserted to be 0 on the rerun — the
+    # cached branch deliberately re-surfaces cached predictions into
+    # raw_results so downstream grouping/storage sees them, and storage
+    # re-upserts the same rows (idempotent, cheap). The expensive contract
+    # is that no model inference happens at all on a fully-cached rerun:
+    assert inference_calls == [], (
+        f"rerun invoked the classifier: {inference_calls}"
+    )

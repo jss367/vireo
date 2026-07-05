@@ -45,6 +45,20 @@ def _mark_sam_done(db, photo_id, path, variant="sam2-small"):
     db.set_active_mask_variant(photo_id, variant)
 
 
+def _tol_weights(tmp_path, name="bioclip-2"):
+    """Create a fake ToL weights dir with the artifact stubs so
+    `tree_of_life_ready()` treats the model as ready. The label-free ToL
+    gate is disk-aware — it checks `tol_embeddings.npy` and
+    `tol_classes.json` on disk — so tests that mock a ToL-supported model
+    must ship a real dir with the stubs, otherwise the planner blocks the
+    Classify stage. Reused across tests via `exist_ok=True`."""
+    weights = tmp_path / name
+    weights.mkdir(exist_ok=True)
+    (weights / "tol_embeddings.npy").write_bytes(b"stub")
+    (weights / "tol_classes.json").write_bytes(b"[]")
+    return str(weights)
+
+
 # -------- db helpers --------
 
 def test_photos_by_paths_returns_known_and_omits_unknown(tmp_path):
@@ -716,7 +730,8 @@ def test_classify_plan_will_run_when_no_detections_yet(tmp_path, monkeypatch):
     monkeypatch.setattr(models_mod, "get_models", lambda: [
         {"id": "m1", "name": "BioCLIP-2",
          "model_str": "hf-hub:imageomics/bioclip-2",
-         "model_type": "bioclip", "downloaded": True},
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path)},
     ])
     plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
     assert plan["stages"]["Classify"]["state"] == "will-run"
@@ -733,7 +748,8 @@ def test_classify_plan_done_prior_when_all_pairs_recorded(tmp_path, monkeypatch)
     monkeypatch.setattr(models_mod, "get_models", lambda: [
         {"id": "m1", "name": "BioCLIP-2",
          "model_str": "hf-hub:imageomics/bioclip-2",
-         "model_type": "bioclip", "downloaded": True},
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path)},
     ])
     # Pin label resolution: no labels_files passed and no workspace
     # overrides → TOL fallback for bioclip-2. The dev's real
@@ -813,7 +829,8 @@ def test_classify_plan_counts_primary_detections_only(tmp_path, monkeypatch):
     monkeypatch.setattr(models_mod, "get_models", lambda: [
         {"id": "m1", "name": "BioCLIP-2",
          "model_str": "hf-hub:imageomics/bioclip-2",
-         "model_type": "bioclip", "downloaded": True},
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path)},
     ])
     monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
     monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
@@ -841,10 +858,12 @@ def test_classify_plan_will_run_when_new_model_added(tmp_path, monkeypatch):
     monkeypatch.setattr(models_mod, "get_models", lambda: [
         {"id": "m1", "name": "BioCLIP-2",
          "model_str": "hf-hub:imageomics/bioclip-2",
-         "model_type": "bioclip", "downloaded": True},
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path, "bioclip-2")},
         {"id": "m2", "name": "BioCLIP",
          "model_str": "hf-hub:imageomics/bioclip",
-         "model_type": "bioclip", "downloaded": True},
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path, "bioclip")},
     ])
     # Only m1 has been run — the new m2 has zero coverage.
     db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=3)
@@ -868,7 +887,8 @@ def test_classify_plan_reclassify_bypasses_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(models_mod, "get_models", lambda: [
         {"id": "m1", "name": "BioCLIP-2",
          "model_str": "hf-hub:imageomics/bioclip-2",
-         "model_type": "bioclip", "downloaded": True},
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path)},
     ])
     db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=3)
 
@@ -896,7 +916,8 @@ def test_classify_plan_exposes_pending_and_eligible_done_prior(tmp_path, monkeyp
     monkeypatch.setattr(models_mod, "get_models", lambda: [
         {"id": "m1", "name": "BioCLIP-2",
          "model_str": "hf-hub:imageomics/bioclip-2",
-         "model_type": "bioclip", "downloaded": True},
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path)},
     ])
     monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
     monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
@@ -921,10 +942,12 @@ def test_classify_plan_exposes_pending_and_eligible_will_run(tmp_path, monkeypat
     monkeypatch.setattr(models_mod, "get_models", lambda: [
         {"id": "m1", "name": "BioCLIP-2",
          "model_str": "hf-hub:imageomics/bioclip-2",
-         "model_type": "bioclip", "downloaded": True},
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path, "bioclip-2")},
         {"id": "m2", "name": "BioCLIP",
          "model_str": "hf-hub:imageomics/bioclip",
-         "model_type": "bioclip", "downloaded": True},
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path, "bioclip")},
     ])
     monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
     monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
@@ -949,7 +972,8 @@ def test_classify_plan_exposes_pending_and_eligible_reclassify(tmp_path, monkeyp
     monkeypatch.setattr(models_mod, "get_models", lambda: [
         {"id": "m1", "name": "BioCLIP-2",
          "model_str": "hf-hub:imageomics/bioclip-2",
-         "model_type": "bioclip", "downloaded": True},
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path)},
     ])
     db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=3)
 
@@ -1001,10 +1025,133 @@ def test_classify_plan_exposes_pending_and_eligible_blocked_only(tmp_path, monke
     monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
 
     plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
-    detail = plan["stages"]["Classify"]["detail"]
+    classify = plan["stages"]["Classify"]
+    assert classify["state"] == "blocked"
+    assert classify["detail"]["blocked_models"] == ["SomeTimmModel"]
+    detail = classify["detail"]
     assert detail["eligible"] == 0  # no unblocked models
     assert detail["pending"] == 0
 
+
+def test_classify_plan_blocked_when_no_detections_and_no_labels(tmp_path, monkeypatch):
+    """Fresh install: a label-needing model with no labels and no detections
+    cached yet must report "blocked", not "will-run". This is the exact
+    first-run state that previously slipped through the total_dets==0
+    early-return and let the user launch a pipeline that crashes at classify.
+    """
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+
+    import labels as labels_mod
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP ViT-B-16",
+         "model_str": "ViT-B-16",
+         "model_type": "bioclip", "downloaded": True},
+    ])
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+
+    plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
+    classify = plan["stages"]["Classify"]
+    assert classify["state"] == "blocked"
+    assert "Settings" in classify["summary"]
+    assert classify["detail"]["blocked_models"] == ["BioCLIP ViT-B-16"]
+
+
+def test_classify_plan_mixed_blocked_with_no_detections_emits_blocked(
+    tmp_path, monkeypatch,
+):
+    """Mixed scope, no detections cached yet: one label-free model can run,
+    another model is blocked on missing labels. The unblocked_count==0 guard
+    doesn't fire (one model is runnable), but classify_job iterates every
+    selected model and the blocked one will fail at _load_labels once
+    MegaDetector creates detections. The planner must emit "blocked" (gates
+    Start), not "will-run" — otherwise Start stays enabled, the user
+    launches, and the pipeline records the same missing-labels classify
+    failure this PR is meant to prevent.
+    """
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+
+    import labels as labels_mod
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        # Label-free TOL model — unblocked.
+        {"id": "m1", "name": "BioCLIP-2",
+         "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path)},
+        # Label-needing model with no active labels — blocked.
+        {"id": "m2", "name": "BioCLIP ViT-B-16",
+         "model_str": "ViT-B-16",
+         "model_type": "bioclip", "downloaded": True},
+    ])
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+
+    plan = compute_plan(
+        db, _params(model_ids=["m1", "m2"]), str(tmp_path / "test.db"),
+    )
+    classify = plan["stages"]["Classify"]
+    assert classify["state"] == "blocked", (
+        "mixed scope with no detections + one blocked model must emit "
+        "'blocked', not slip through the total_dets==0 'will-run' branch"
+    )
+    assert classify["detail"]["blocked_models"] == ["BioCLIP ViT-B-16"]
+    assert classify["detail"]["pending"] == 0
+    assert classify["detail"]["eligible"] == 0
+
+
+def test_classify_plan_mixed_blocked_with_pending_emits_blocked(
+    tmp_path, monkeypatch,
+):
+    """Mixed scope with cached detections: one unblocked model has pending
+    classify work AND another selected model is blocked on missing labels.
+    Previously the `blocked and not pending_total` guard skipped this case
+    (pending_total > 0 from the runnable model) and the planner fell through
+    to "will-run" with blocked_models only buried in detail. The Start gate
+    only disables `state === "blocked"`, so the user clicked Start, the
+    classify job iterated every selected resolved spec, and the blocked
+    model failed at _load_labels — the exact missing-labels failure this PR
+    is meant to prevent. Must emit "blocked" so Start stays disabled until
+    the user either adds labels or deselects the blocked model.
+    """
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    _add_photo_with_detection(db, folder_id, "a.jpg")
+
+    import labels as labels_mod
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        # Label-free TOL model — unblocked, has pending work (no
+        # record_classifier_run was called for it, so the detection is
+        # uncached and pending_total > 0 for this model).
+        {"id": "m1", "name": "BioCLIP-2",
+         "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path)},
+        # Label-needing model with no active labels — blocked.
+        {"id": "m2", "name": "BioCLIP ViT-B-16",
+         "model_str": "ViT-B-16",
+         "model_type": "bioclip", "downloaded": True},
+    ])
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+
+    plan = compute_plan(
+        db, _params(model_ids=["m1", "m2"]), str(tmp_path / "test.db"),
+    )
+    classify = plan["stages"]["Classify"]
+    assert classify["state"] == "blocked", (
+        "any blocked model in a mixed selection must emit 'blocked' (gates "
+        "Start) — falling through to 'will-run' when other models have "
+        "pending work let the missing-labels classify failure through on "
+        "launch"
+    )
+    assert classify["detail"]["blocked_models"] == ["BioCLIP ViT-B-16"]
+    assert classify["detail"]["pending"] == 0
+    assert classify["detail"]["eligible"] == 0
 
 
 def test_classify_plan_exposes_pending_and_eligible_mixed_blocked_and_done(
@@ -1041,7 +1188,11 @@ def test_classify_plan_exposes_pending_and_eligible_mixed_blocked_and_done(
         db, _params(model_ids=["m1", "m2"]), str(tmp_path / "test.db"),
     )
     classify = plan["stages"]["Classify"]
-    assert classify["state"] == "will-run"
+    assert classify["state"] == "blocked", (
+        "mixed blocked/done shape has no runnable work, so it must emit "
+        "'blocked' (gates Start) — not 'will-run', which left Start enabled "
+        "behind a 'Blocked' summary and reached the unlabeled model"
+    )
     assert "Blocked" in classify["summary"]
     detail = classify["detail"]
     assert detail["pending"] == 0
@@ -1056,7 +1207,10 @@ def test_classify_plan_exposes_pending_and_eligible_mixed_blocked_and_done(
 def test_classify_plan_emits_fingerprint_outdated_when_stale(
     tmp_path, monkeypatch,
 ):
-    """A detection classified under fp_old + no current-fp row → outdated."""
+    """A detection classified under fp_old + no current-fp row needs the
+    current label set, and the plan should explain that without implying
+    the old classifications or user's keywords are bad.
+    """
     from pipeline_plan import compute_plan
     db, folder_id = _make_db(tmp_path)
     _, did = _add_photo_with_detection(db, folder_id, "a.jpg")
@@ -1067,15 +1221,18 @@ def test_classify_plan_emits_fingerprint_outdated_when_stale(
     monkeypatch.setattr(models_mod, "get_models", lambda: [
         {"id": "m1", "name": "BioCLIP-2",
          "model_str": "hf-hub:imageomics/bioclip-2",
-         "model_type": "bioclip", "downloaded": True},
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path)},
     ])
     monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
     monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
 
     plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
     detail = plan["stages"]["Classify"]["detail"]
+    assert "Current label set differs" in plan["stages"]["Classify"]["summary"]
     assert detail["stale"] == 1
     assert detail["fingerprint_outdated"] is True
+    assert detail["fingerprint_reason"] == "label_set_changed"
 
 
 def test_classify_plan_no_outdated_flag_when_current(
@@ -2063,14 +2220,21 @@ def _import_params(paths, **kwargs):
     )
 
 
-def _stub_models(monkeypatch):
+def _stub_models(monkeypatch, tmp_path=None):
     import labels as labels_mod
     import models as models_mod
-    monkeypatch.setattr(models_mod, "get_models", lambda: [
-        {"id": "m1", "name": "BioCLIP-2",
-         "model_str": "hf-hub:imageomics/bioclip-2",
-         "model_type": "bioclip", "downloaded": True},
-    ])
+    model = {
+        "id": "m1", "name": "BioCLIP-2",
+        "model_str": "hf-hub:imageomics/bioclip-2",
+        "model_type": "bioclip", "downloaded": True,
+    }
+    if tmp_path is not None:
+        # Label-free ToL is now disk-aware — the planner checks that the
+        # ToL artifacts exist under weights_path. Tests that expect
+        # BioCLIP-2 to run label-free must ship a real weights dir with
+        # the artifact stubs, otherwise the Classify stage blocks.
+        model["weights_path"] = _tol_weights(tmp_path)
+    monkeypatch.setattr(models_mod, "get_models", lambda: [model])
     monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
     monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
 
@@ -2082,7 +2246,7 @@ def test_import_plan_all_new_files_flips_classify_to_will_run(tmp_path, monkeypa
     from labels_fingerprint import TOL_SENTINEL
     from pipeline_plan import compute_plan
     db, folder_id = _make_db(tmp_path)
-    _stub_models(monkeypatch)
+    _stub_models(monkeypatch, tmp_path)
     # Existing scope: one detection, already classified — would be
     # "done-prior" without imports.
     _, did = _add_photo_with_detection(db, folder_id, "existing.jpg")
@@ -2280,6 +2444,133 @@ def test_import_plan_deduplicates_source_paths(tmp_path, monkeypatch):
     assert plan_mixed["stages"]["Scan"]["detail"]["already_known"] == 1
 
 
+def test_import_plan_all_duplicates_reports_zero_new_photos(
+    tmp_path, monkeypatch
+):
+    """The re-inserted SD card (local-processing mode): every selected
+    file is already in the library via the hash/metadata duplicate gate,
+    so the run will import 0 new photos and every per-photo stage executes
+    over an empty set — the post-ingest scan walks the local staging root,
+    which stays empty when everything deduplicated.
+    The summaries must say that outright — "no photos in scope yet" and
+    "MegaDetector will run first" read as "work is coming" when none is.
+    Group must report "Will skip": with 0 collected photos the job never
+    creates a collection, and regroup_stage skips on `not collection_id` —
+    so any "Will run" claim (upstream work, no cached grouping, stale
+    cache) would promise a Group run the job cannot perform."""
+    import pipeline as pipeline_mod
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+    _stub_models(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    paths = ["/cards/SD/IMG_001.NEF", "/cards/SD/IMG_002.NEF"]
+    plan = compute_plan(
+        db,
+        _import_params(
+            paths,
+            model_ids=["m1"],
+            hash_duplicate_paths=list(paths),
+            local_processing=True,
+            skip_eye_keypoints=False,
+            skip_regroup=False,
+        ),
+        str(tmp_path / "test.db"),
+    )
+    assert plan["scope"]["new_count"] == 0
+    assert plan["scope"]["known_count"] == 2
+    for suffix in ("Previews", "Classify", "Extract", "EyeKeypoints"):
+        stage = plan["stages"][suffix]
+        assert stage["state"] == "will-run", (suffix, stage)
+        assert "0 new photos to import" in stage["summary"], (suffix, stage)
+        assert stage["detail"]["import_no_new"] is True, (suffix, stage)
+    group = plan["stages"]["Group"]
+    assert group["state"] == "will-skip", group
+    assert "nothing to group" in group["summary"], group
+    assert "0 new photos to import" in group["summary"], group
+    assert group["detail"]["import_no_new"] is True, group
+    assert group["detail"]["upstream_will_run"] is False, group
+    assert "cache_exists" in group["detail"], group
+
+
+def test_import_plan_all_duplicates_copy_mode_keeps_forward_summaries(
+    tmp_path, monkeypatch
+):
+    """Contrast case for the above: same all-duplicates selection but in
+    plain copy mode (local_processing off). Here "nothing to …" would
+    overclaim: with no copied paths the post-ingest scan runs with
+    restrict=None over the REAL destination, and scanner.scan fires the
+    photo callback for existing cataloged rows there — so downstream
+    workspace-scoped stages can still find real work among
+    previously-unprocessed destination photos. The plan must keep the
+    pre-existing forward-looking summaries and let Group see upstream
+    as will-run."""
+    import pipeline as pipeline_mod
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+    _stub_models(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    paths = ["/cards/SD/IMG_001.NEF", "/cards/SD/IMG_002.NEF"]
+    plan = compute_plan(
+        db,
+        _import_params(
+            paths,
+            model_ids=["m1"],
+            hash_duplicate_paths=list(paths),
+            skip_eye_keypoints=False,
+            skip_regroup=False,
+        ),
+        str(tmp_path / "test.db"),
+    )
+    assert plan["scope"]["new_count"] == 0
+    assert plan["scope"]["known_count"] == 2
+    for suffix in ("Previews", "Classify", "Extract", "EyeKeypoints"):
+        stage = plan["stages"][suffix]
+        assert stage["state"] == "will-run", (suffix, stage)
+        assert "0 new photos to import" not in stage["summary"], (suffix, stage)
+        assert not stage["detail"].get("import_no_new"), (suffix, stage)
+    assert "no photos in scope yet" in plan["stages"]["Previews"]["summary"]
+    group = plan["stages"]["Group"]
+    assert group["state"] == "will-run"
+    assert "upstream stages have new work" in group["summary"], group
+
+
+def test_import_plan_with_new_files_keeps_forward_looking_summaries(
+    tmp_path, monkeypatch
+):
+    """Contrast case: an import that DOES bring new files must keep the
+    counting summaries and never claim "0 new photos to import" — even in
+    local-processing mode, where the all-duplicates wording is allowed."""
+    import pipeline as pipeline_mod
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+    _stub_models(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    plan = compute_plan(
+        db,
+        _import_params(
+            ["/cards/SD/IMG_001.NEF", "/cards/SD/IMG_002.NEF"],
+            model_ids=["m1"],
+            local_processing=True,
+            skip_eye_keypoints=False,
+            skip_regroup=False,
+        ),
+        str(tmp_path / "test.db"),
+    )
+    assert plan["scope"]["new_count"] == 2
+    for suffix in ("Previews", "Classify", "Extract", "EyeKeypoints"):
+        stage = plan["stages"][suffix]
+        assert stage["state"] == "will-run", (suffix, stage)
+        assert "0 new photos to import" not in stage["summary"], (suffix, stage)
+        assert not stage["detail"].get("import_no_new"), (suffix, stage)
+    assert plan["stages"]["Group"]["state"] == "will-run"
+
+
 def test_import_plan_all_known_scan_is_done_prior(tmp_path):
     """If every preview file is already in the DB, Scan reports done-prior
     (the run will be a no-op for the scan step). Other stages reflect
@@ -2442,6 +2733,36 @@ def test_api_pipeline_plan_rejects_non_string_source_paths_elements(app_and_db):
         },
     )
     assert resp.status_code == 400
+
+
+def test_api_pipeline_plan_parses_local_processing(app_and_db):
+    """The route must thread local_processing through to the planner: an
+    all-duplicates import only gets the "0 new photos to import" wording
+    when the flag is true (staging-root scan), never in plain copy mode
+    (destination re-scan can surface real downstream work)."""
+    app, _ = app_and_db
+    client = app.test_client()
+    body = {
+        "source_paths": ["/cards/SD/IMG_001.NEF", "/cards/SD/IMG_002.NEF"],
+        "hash_duplicate_paths": [
+            "/cards/SD/IMG_001.NEF", "/cards/SD/IMG_002.NEF",
+        ],
+        "skip_classify": True, "skip_extract_masks": True,
+        "skip_eye_keypoints": True, "skip_regroup": True,
+    }
+    resp = client.post(
+        "/api/pipeline/plan", json={**body, "local_processing": True},
+    )
+    assert resp.status_code == 200
+    previews = resp.get_json()["stages"]["Previews"]
+    assert previews["detail"]["import_no_new"] is True
+    assert "0 new photos to import" in previews["summary"]
+
+    resp = client.post("/api/pipeline/plan", json=body)  # copy mode
+    assert resp.status_code == 200
+    previews = resp.get_json()["stages"]["Previews"]
+    assert not previews["detail"].get("import_no_new")
+    assert "0 new photos to import" not in previews["summary"]
 
 
 def test_import_plan_empty_source_paths_is_no_op(tmp_path, monkeypatch):
@@ -2812,3 +3133,25 @@ def test_api_pipeline_plan_rejects_non_string_hash_duplicate_paths_elements(app_
         },
     )
     assert resp.status_code == 400
+
+
+def test_exclusions_apply_in_whole_workspace_mode(tmp_path):
+    """The running job filters exclude_photo_ids in every mode; the plan
+    previously honored them only for collections, overstating pending
+    counts for whole-workspace runs."""
+    from pipeline_plan import PipelinePlanParams, compute_plan
+
+    db, folder_id = _make_db(tmp_path)
+    p1, _ = _add_photo_with_detection(db, folder_id, "a.jpg")
+    p2, _ = _add_photo_with_detection(db, folder_id, "b.jpg")
+
+    base = compute_plan(db, PipelinePlanParams(), str(tmp_path / "test.db"))
+    assert base["stages"]["Extract"]["detail"]["pending"] == 2
+
+    plan = compute_plan(
+        db,
+        PipelinePlanParams(exclude_photo_ids=[p2]),
+        str(tmp_path / "test.db"),
+    )
+    assert plan["stages"]["Extract"]["detail"]["pending"] == 1
+    assert plan["scope"]["photo_count"] == 1

@@ -260,10 +260,33 @@ def test_conftest_autouse_fixture_restores_cfg_path(tmp_path):
             )
     """))
 
+    # Isolate the sub-pytest from the parent's env: drop any inherited
+    # PYTEST_ADDOPTS/PYTEST_CURRENT_TEST and route TMP/TEMP into a fresh
+    # subdir so the nested pytest's own tmp_path_factory doesn't see the
+    # parent's shared Temp tree.
+    child_tmp = tmp_path / "subpytest-tmp"
+    child_tmp.mkdir()
+    child_env = os.environ.copy()
+    child_env.pop("PYTEST_ADDOPTS", None)
+    child_env.pop("PYTEST_CURRENT_TEST", None)
+    child_env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    child_env["TMP"] = str(child_tmp)
+    child_env["TEMP"] = str(child_tmp)
+    # ``--rootdir`` + ``--confcutdir`` pin the sub-pytest's collection scope
+    # to ``sub_dir``. Without them, pytest walks ``argpath.parents`` up to the
+    # drive root, and on Windows runners the parent walk through the shared
+    # ``Temp\`` directory triggers ``Session._collect_path`` to iterate sibling
+    # entries — when a sibling like ``Temp\firefox`` (left by an unrelated
+    # process) is removed between scandir and pytest's Windows
+    # ``samefile_nofollow`` lstat, collection dies with a spurious
+    # ``FileNotFoundError`` and this test fails for reasons unrelated to the
+    # autouse fixture under test. The TMP/TEMP override above doesn't help
+    # here because ``sub_dir`` still lives under the parent's Temp.
     result = subprocess.run(
         [sys.executable, "-m", "pytest", str(sub_dir), "-q",
-         "-p", "no:cacheprovider", "-p", "no:xdist", "--no-header"],
-        capture_output=True, text=True, timeout=60,
+         "-p", "no:cacheprovider", "-p", "no:xdist", "--no-header",
+         "--rootdir", str(sub_dir), "--confcutdir", str(sub_dir)],
+        capture_output=True, text=True, timeout=60, env=child_env,
     )
     assert result.returncode == 0, (
         f"sub-pytest failed (exit {result.returncode}):\n"
@@ -405,11 +428,162 @@ def test_miss_defaults_present():
     import config as cfg
     d = cfg.DEFAULTS["pipeline"]
     assert d["miss_enabled"] is True
-    assert d["miss_det_confidence"] == 0.25
-    assert d["miss_det_confidence_burst"] == 0.15
+    assert d["miss_det_confidence"] == 0.20
+    assert d["miss_det_confidence_burst"] == 0.12
     assert d["miss_bbox_area_min"] == 0.005
     assert d["miss_bbox_area_min_singleton"] == 0.002
     assert d["miss_oof_ratio"] == 0.5
+
+
+def _write_raw(path, data):
+    import json as _json
+    with open(path, "w") as f:
+        _json.dump(data, f)
+
+
+def _read_raw(path):
+    import json as _json
+    with open(path) as f:
+        return _json.load(f)
+
+
+def test_migrate_legacy_miss_thresholds_rewrites_exact_pair(tmp_path, monkeypatch):
+    """An install with the previous default pair persisted gets rewritten."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {
+        "pipeline": {
+            "miss_det_confidence": 0.25,
+            "miss_det_confidence_burst": 0.15,
+        },
+    })
+
+    assert cfg.migrate_legacy_miss_thresholds() is True
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["pipeline"]["miss_det_confidence"] == 0.20
+    assert raw["pipeline"]["miss_det_confidence_burst"] == 0.12
+    assert cfg.MIGRATION_MISS_THRESHOLDS in raw["_migrations_applied"]
+
+
+def test_migrate_legacy_miss_thresholds_preserves_customized(tmp_path, monkeypatch):
+    """A user who set a non-default pair (e.g. 0.30/0.18) is left alone."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {
+        "pipeline": {
+            "miss_det_confidence": 0.30,
+            "miss_det_confidence_burst": 0.18,
+        },
+    })
+
+    cfg.migrate_legacy_miss_thresholds()
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["pipeline"]["miss_det_confidence"] == 0.30
+    assert raw["pipeline"]["miss_det_confidence_burst"] == 0.18
+    assert cfg.MIGRATION_MISS_THRESHOLDS in raw["_migrations_applied"]
+
+
+def test_migrate_legacy_miss_thresholds_skips_partial_pair(tmp_path, monkeypatch):
+    """If only the singleton matches the legacy default but the burst is
+    custom (or missing), neither is rewritten — the exact pair gate is what
+    distinguishes 'never touched defaults' from 'partial customization'."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {
+        "pipeline": {
+            "miss_det_confidence": 0.25,
+            "miss_det_confidence_burst": 0.10,
+        },
+    })
+
+    cfg.migrate_legacy_miss_thresholds()
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["pipeline"]["miss_det_confidence"] == 0.25
+    assert raw["pipeline"]["miss_det_confidence_burst"] == 0.10
+
+
+def test_migrate_legacy_miss_thresholds_is_one_time(tmp_path, monkeypatch):
+    """Once the marker is set, a user who explicitly re-saves the legacy
+    pair (e.g. 25% via the slider) is NOT silently rewritten on next load.
+    """
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {
+        "pipeline": {
+            "miss_det_confidence": 0.25,
+            "miss_det_confidence_burst": 0.15,
+        },
+    })
+    cfg.migrate_legacy_miss_thresholds()
+
+    # User explicitly re-saves 25%/15% later — paired by the settings UI.
+    raw = _read_raw(cfg.CONFIG_PATH)
+    raw["pipeline"]["miss_det_confidence"] = 0.25
+    raw["pipeline"]["miss_det_confidence_burst"] = 0.15
+    _write_raw(cfg.CONFIG_PATH, raw)
+
+    assert cfg.migrate_legacy_miss_thresholds() is False
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["pipeline"]["miss_det_confidence"] == 0.25
+    assert raw["pipeline"]["miss_det_confidence_burst"] == 0.15
+
+
+def test_migrate_legacy_miss_thresholds_no_config_file(tmp_path, monkeypatch):
+    """No config.json yet — migration creates the file with just the marker
+    and returns False (nothing was rewritten)."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    assert cfg.migrate_legacy_miss_thresholds() is False
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert cfg.MIGRATION_MISS_THRESHOLDS in raw["_migrations_applied"]
+
+
+def test_migrate_legacy_miss_thresholds_rewrites_workspace_overrides(
+    tmp_path, monkeypatch
+):
+    """Workspace overrides carrying the exact legacy pair are rewritten."""
+    import json as _json
+
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+
+    db = Database(str(tmp_path / "vireo.db"))
+    ws_id = db.create_workspace(
+        "Legacy",
+        config_overrides={
+            "pipeline": {
+                "miss_det_confidence": 0.25,
+                "miss_det_confidence_burst": 0.15,
+            },
+        },
+    )
+    db.create_workspace(
+        "Customized",
+        config_overrides={
+            "pipeline": {
+                "miss_det_confidence": 0.30,
+                "miss_det_confidence_burst": 0.18,
+            },
+        },
+    )
+
+    cfg.migrate_legacy_miss_thresholds(db)
+
+    legacy_ws = db.get_workspace(ws_id)
+    legacy_overrides = _json.loads(legacy_ws["config_overrides"])
+    assert legacy_overrides["pipeline"]["miss_det_confidence"] == 0.20
+    assert legacy_overrides["pipeline"]["miss_det_confidence_burst"] == 0.12
+
+    custom_ws_id = next(
+        w["id"] for w in db.get_workspaces() if w["name"] == "Customized"
+    )
+    custom_overrides = _json.loads(
+        db.get_workspace(custom_ws_id)["config_overrides"]
+    )
+    assert custom_overrides["pipeline"]["miss_det_confidence"] == 0.30
+    assert custom_overrides["pipeline"]["miss_det_confidence_burst"] == 0.18
 
 
 def test_default_subject_types_includes_taxonomy_individual_genre(tmp_path, monkeypatch):
@@ -456,3 +630,63 @@ def test_open_in_browser_round_trip(tmp_path, monkeypatch):
 
     cfg.set("open_in_browser", False)
     assert cfg.get("open_in_browser") is False
+
+
+def test_save_retries_on_windows_permission_error(tmp_path, monkeypatch):
+    """On Windows, Defender / Search indexer transiently locks the destination
+    after a write; ``cfg.save`` must retry ``os.replace`` instead of bubbling
+    the ``PermissionError`` up as a 500. Regression for CI failure on PR #977
+    where two consecutive saves in ``test_import_replaces_global_file`` hit
+    ``[WinError 5] Access is denied`` from the second ``os.replace``."""
+    import config as cfg
+
+    monkeypatch.setattr(cfg, "sys", _FakeWin32Sys())
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    real_replace = cfg.os.replace
+    calls = {"n": 0}
+
+    def flaky_replace(src, dst):
+        calls["n"] += 1
+        if calls["n"] < 8:
+            raise PermissionError(5, "Access is denied", dst)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(cfg.os, "replace", flaky_replace)
+    monkeypatch.setattr(cfg.time, "sleep", lambda _s: None)
+
+    cfg.save({"classification_threshold": 0.42})
+
+    assert calls["n"] == 8
+    assert cfg.load()["classification_threshold"] == 0.42
+
+
+def test_save_raises_when_windows_retry_budget_exhausted(tmp_path, monkeypatch):
+    """If every ``os.replace`` attempt raises ``PermissionError``, the last
+    exception is re-raised so callers see the underlying failure rather than
+    silently dropping the write."""
+    import config as cfg
+
+    monkeypatch.setattr(cfg, "sys", _FakeWin32Sys())
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    def always_fail(src, dst):
+        raise PermissionError(5, "Access is denied", dst)
+
+    monkeypatch.setattr(cfg.os, "replace", always_fail)
+    monkeypatch.setattr(cfg.time, "sleep", lambda _s: None)
+
+    import pytest
+
+    with pytest.raises(PermissionError):
+        cfg.save({"classification_threshold": 0.42})
+
+    # Temp file should be cleaned up after the failure.
+    assert not any(p.name.endswith(".tmp") for p in tmp_path.iterdir())
+
+
+class _FakeWin32Sys:
+    """Stand-in for ``sys`` that reports ``platform == 'win32'`` so the retry
+    branch in ``config._replace_with_windows_retry`` exercises on POSIX CI."""
+
+    platform = "win32"

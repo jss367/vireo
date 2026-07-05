@@ -23,6 +23,9 @@ EXCLUDED = (
     # List of {name, path} dicts — has custom settings UI rather than a
     # generic widget, so it lives outside SCHEMA.
     "external_editors",
+    # List of remote-target dicts — custom settings UI (Remote targets
+    # section), so it lives outside SCHEMA like external_editors.
+    "remote_targets",
 )
 
 
@@ -122,6 +125,12 @@ SCHEMA = {
         "category": "Metadata", "scope": "both",
         "label": "Sync pick/reject flags to XMP",
         "desc": "Write Vireo pick/reject flags to XMP sidecars using Lightroom-compatible pick metadata.",
+    },
+    "write_assigned_location_to_xmp": {
+        "type": "bool",
+        "category": "Metadata", "scope": "both",
+        "label": "Write assigned locations to XMP",
+        "desc": "Write Vireo-assigned location coordinates to XMP sidecars so Lightroom exports can include GPS metadata.",
     },
     "scan_workers": {
         "type": "int", "min": 0, "max": 64,
@@ -226,10 +235,10 @@ SCHEMA = {
 
     # --- Preview ----------------------------------------------------------
     "preview_max_size": {
-        "type": "int", "min": 512, "max": 8192,
+        "type": "int", "min": 0, "max": 8192,
         "category": "Preview", "scope": "global",
         "label": "Preview max size (px)",
-        "desc": "Largest dimension for inline preview images.",
+        "desc": "Largest dimension for inline preview images. Set to 0 to serve originals instead of cached previews.",
     },
     "preview_quality": {
         "type": "int", "min": 1, "max": 100,
@@ -289,6 +298,14 @@ SCHEMA = {
         "label": "Adobe DNG Converter path",
         "desc": "Optional path to Adobe DNG Converter. Leave empty to auto-detect the app.",
     },
+    "rsync_bin": {
+        "type": "path",
+        "category": "Paths", "scope": "global",
+        "label": "GNU rsync path (remote moves)",
+        "desc": "Path to a GNU rsync binary for remote (SSH) folder moves. "
+                "macOS ships openrsync, which can't do rsync-over-SSH. "
+                "Leave empty to auto-detect.",
+    },
 
     # --- Integrations -----------------------------------------------------
     "inat_token": {
@@ -346,6 +363,35 @@ SCHEMA = {
     },
 
     # --- Pipeline (scoring weights & rejection thresholds) ---------------
+    "pipeline.default_strategy": {
+        # Workspace-scoped: the stored value the future import→process
+        # chaining hook will read via db.get_effective_config(cfg.load()).
+        # None (import only) is the DEFAULTS value; `nullable` here lets a
+        # workspace override the global default back to null via
+        # /api/settings/workspace, and the settings UI renders the null
+        # option so users can pick it. This PR (the import/process split
+        # phase 1) ships the storage, validation, and UI surfaces only —
+        # the chaining hook that actually enqueues the run at import
+        # completion is added in a follow-up PR, so today the setting is
+        # a stored preference and imports do not auto-chain regardless of
+        # the value.
+        "type": "enum",
+        "enum": ["full", "cull_ready", "quick_look"],
+        "enum_labels": {
+            "full": "Full",
+            "cull_ready": "Cull-ready",
+            "quick_look": "Quick look",
+        },
+        "nullable": True,
+        "null_label": "Import only (no processing)",
+        "category": "Pipeline", "scope": "workspace",
+        "label": "Default process strategy",
+        "desc": (
+            "Default strategy for post-import processing on this workspace. "
+            "Stored preference only in this release — automatic "
+            "import→process chaining is wired in a follow-up update."
+        ),
+    },
     "pipeline.w_focus": {
         "type": "float", "min": 0.0, "max": 1.0, "step": 0.01,
         "category": "Pipeline", "scope": "both",
@@ -717,7 +763,7 @@ def _coerce(raw, kind):
     if kind == "bool":
         if isinstance(raw, bool):
             return raw
-        if isinstance(raw, (int, float)):
+        if isinstance(raw, int | float):
             return bool(raw)
         if isinstance(raw, str):
             low = raw.strip().lower()
@@ -777,11 +823,19 @@ def validate_value(key, raw):
 
     Returns the coerced value. Raises :class:`ValidationError` on any failure
     (unknown key, type mismatch, out-of-range, unknown enum value, etc.).
+
+    Fields with ``nullable: True`` accept ``None`` (and the empty string, as
+    the settings UI serializes a null <option> as ``value=""``) and return
+    ``None`` — used for enums where "unset" is a meaningful third state
+    distinct from any listed choice (e.g. ``pipeline.default_strategy`` where
+    null means "import only, no processing").
     """
     if key not in SCHEMA:
         raise ValidationError(f"unknown setting {key!r}")
     spec = SCHEMA[key]
     kind = spec["type"]
+    if spec.get("nullable") and (raw is None or raw == ""):
+        return None
     value = _coerce(raw, kind)
 
     if kind in ("int", "float"):

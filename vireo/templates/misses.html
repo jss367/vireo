@@ -187,15 +187,6 @@
     background: rgba(0,0,0,0.15);
   }
 
-  /* Detection bbox overlay (matches browse.html .det-box styling) */
-  .miss-bbox {
-    position: absolute;
-    border: 2px solid var(--accent);
-    border-radius: 2px;
-    pointer-events: none;
-    box-shadow: 0 0 4px color-mix(in srgb, var(--accent) 40%, transparent);
-  }
-
   .miss-card-badge {
     position: absolute;
     top: 6px;
@@ -289,6 +280,89 @@
     font-size: 10px;
     color: var(--text-secondary);
   }
+
+  .misses-tuning {
+    margin: 0 0 12px;
+    padding: 12px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-primary);
+    border-radius: 6px;
+  }
+  .misses-tuning-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .misses-tuning-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+  .misses-tuning-status {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+  .misses-tuning-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 10px 14px;
+  }
+  .misses-tuning-control {
+    display: grid;
+    gap: 5px;
+    min-width: 0;
+  }
+  .misses-tuning-control label {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  .misses-tuning-control output {
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+  }
+  .misses-tuning-control input[type="range"] {
+    width: 100%;
+    accent-color: var(--accent);
+  }
+  .misses-tuning-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 12px;
+    flex-wrap: wrap;
+  }
+  .misses-tuning-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  .misses-tuning-check input { accent-color: var(--accent); }
+  .misses-tuning-btn {
+    border: 1px solid var(--border-secondary);
+    border-radius: 4px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    padding: 6px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .misses-tuning-btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  .misses-tuning-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
 </style>
 </head>
 <body>
@@ -305,7 +379,10 @@
 
   <div class="misses-selection-bar" id="missesSelectionBar">
     <span class="misses-selection-count" id="missesSelectionCount">0 selected</span>
-    <button class="misses-selection-btn" type="button" onclick="bulkUnflagSelection()">
+    <button class="misses-selection-btn" id="missesSelectionBrowseBtn" type="button" onclick="openSelectionInBrowse()">
+      Open in Browse
+    </button>
+    <button class="misses-selection-btn" id="missesSelectionUnflagBtn" type="button" onclick="bulkUnflagSelection()">
       Unmark missed
     </button>
     <button class="misses-selection-btn danger" type="button" onclick="deleteSelectedMisses()">
@@ -323,6 +400,62 @@
     <a href="/misses" style="color:var(--accent);margin-left:8px;">Show all</a>
   </div>
 
+  <div class="misses-tuning" id="missesTuning">
+    <div class="misses-tuning-head">
+      <span class="misses-tuning-title">Miss thresholds</span>
+      <span class="misses-tuning-status" id="missTuningStatus">Loading thresholds...</span>
+    </div>
+    <div class="misses-tuning-grid">
+      <div class="misses-tuning-control">
+        <label for="missCfgDetectorFloor">
+          <span>Detection floor</span>
+          <output id="missCfgDetectorFloorVal">--</output>
+        </label>
+        <input id="missCfgDetectorFloor" type="range" min="0" max="100" step="1" value="20" disabled>
+      </div>
+      <div class="misses-tuning-control">
+        <label for="missCfgNoSubject">
+          <span>No-subject threshold</span>
+          <output id="missCfgNoSubjectVal">--</output>
+        </label>
+        <input id="missCfgNoSubject" type="range" min="0" max="100" step="1" value="20" disabled>
+      </div>
+      <div class="misses-tuning-control">
+        <label for="missCfgClassifierRescue">
+          <span>Classifier rescue</span>
+          <output id="missCfgClassifierRescueVal">--</output>
+        </label>
+        <input id="missCfgClassifierRescue" type="range" min="0" max="101" step="1" value="80" disabled>
+      </div>
+      <div class="misses-tuning-control">
+        <label for="missCfgBboxMin">
+          <span>Minimum bbox size</span>
+          <output id="missCfgBboxMinVal">--</output>
+        </label>
+        <input id="missCfgBboxMin" type="range" min="0" max="200" step="1" value="5" disabled>
+      </div>
+      <div class="misses-tuning-control">
+        <label for="missCfgOofRatio">
+          <span>OOF ratio</span>
+          <output id="missCfgOofRatioVal">--</output>
+        </label>
+        <input id="missCfgOofRatio" type="range" min="0" max="200" step="1" value="50" disabled>
+      </div>
+    </div>
+    <div class="misses-tuning-actions">
+      <button class="misses-tuning-btn primary" id="missRecomputeBtn" type="button" onclick="recomputeMisses()" disabled>
+        Recompute misses
+      </button>
+      <button class="misses-tuning-btn" id="missResetPreviewBtn" type="button" onclick="resetMissThresholds()" disabled>
+        Reset preview
+      </button>
+      <label class="misses-tuning-check">
+        <input id="missSaveDefaults" type="checkbox" checked disabled>
+        <span>Save as workspace defaults</span>
+      </label>
+    </div>
+  </div>
+
   <div id="missesRoot">
     <!-- Sections rendered here -->
     <div class="misses-empty-page" id="loadingState">Loading...</div>
@@ -338,12 +471,31 @@ var CATEGORY_LABELS = {
   oof:        'Out of focus',
 };
 var missesData = { no_subject: [], clipped: [], oof: [] };
+var missConfig = null;
+var originalMissConfig = null;
+var previewTimer = null;
+var previewActive = false;
+var previewPayload = null;
+var previewRequestId = 0;
+var missConfigLoaded = false;
 var focusedCategory = null;
 var focusedIndex = -1;
+var missLightboxCategoryById = {};
+var missLightboxCurrent = null;
 // Multi-select state. Spans categories — ctrl-click on cards in different
 // sections accumulates them all. The focused card doubles as the anchor for
 // shift-click range selection (range stays within the clicked category).
 var selection = new Set();
+var MISS_TUNING_CONTROL_IDS = [
+  'missCfgDetectorFloor',
+  'missCfgNoSubject',
+  'missCfgClassifierRescue',
+  'missCfgBboxMin',
+  'missCfgOofRatio',
+  'missSaveDefaults',
+  'missRecomputeBtn',
+  'missResetPreviewBtn',
+];
 
 function escapeHtml(s) {
   if (s == null) return '';
@@ -352,6 +504,13 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 function escapeAttr(s) { return escapeHtml(s); }
+
+function photoThumbnailUrl(p) {
+  if (!p || p.id == null) return '';
+  return window.vireoThumbnailUrl
+    ? window.vireoThumbnailUrl(p)
+    : '/thumbnails/' + p.id + '.jpg';
+}
 
 /* ---------- detection_box parsing ----------
  * Stored as a JSON string: '{"x": 0.12, "y": 0.22, "w": 0.3, "h": 0.4}'
@@ -392,29 +551,199 @@ function getSinceParam() {
   } catch (e) { return null; }
 }
 
-/* ---------- Fetch + render ---------- */
-async function loadMisses() {
+function setMissTuningStatus(text) {
+  var el = document.getElementById('missTuningStatus');
+  if (el) el.textContent = text || '';
+}
+
+function setMissTuningDisabled(disabled) {
+  MISS_TUNING_CONTROL_IDS.forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.disabled = !!disabled;
+  });
+}
+
+function invalidateMissPreview() {
+  previewRequestId++;
+  if (previewTimer) {
+    clearTimeout(previewTimer);
+    previewTimer = null;
+  }
+}
+
+function percentValue(id) {
+  return parseInt(document.getElementById(id).value, 10) / 100;
+}
+
+function addChangedSliderValue(body, key, id, scale) {
+  var raw = parseInt(document.getElementById(id).value, 10);
+  var baseline = null;
+  if (missConfig && missConfig[key] != null) {
+    baseline = Math.round(Number(missConfig[key]) * scale);
+  }
+  if (baseline == null || raw !== baseline) {
+    body[key] = raw / scale;
+  }
+}
+
+function collectMissThresholds() {
+  // No miss_enabled toggle on this page: omit it so preview/recompute (and
+  // save_defaults) preserve a workspace's effective value instead of silently
+  // re-enabling miss detection for workspaces that disabled it.
+  var body = {};
+  addChangedSliderValue(body, 'detector_confidence', 'missCfgDetectorFloor', 100);
+  addChangedSliderValue(body, 'miss_det_confidence', 'missCfgNoSubject', 100);
+  addChangedSliderValue(body, 'miss_classifier_override_conf', 'missCfgClassifierRescue', 100);
+  addChangedSliderValue(body, 'miss_bbox_area_min', 'missCfgBboxMin', 1000);
+  addChangedSliderValue(body, 'miss_oof_ratio', 'missCfgOofRatio', 100);
+  return body;
+}
+
+function updateMissSliderLabels() {
+  var det = parseInt(document.getElementById('missCfgDetectorFloor').value, 10);
+  var ns = parseInt(document.getElementById('missCfgNoSubject').value, 10);
+  var rescue = parseInt(document.getElementById('missCfgClassifierRescue').value, 10);
+  var bbox = parseInt(document.getElementById('missCfgBboxMin').value, 10);
+  var oof = parseInt(document.getElementById('missCfgOofRatio').value, 10);
+  document.getElementById('missCfgDetectorFloorVal').textContent = det + '%';
+  document.getElementById('missCfgNoSubjectVal').textContent = ns + '%';
+  document.getElementById('missCfgClassifierRescueVal').textContent = rescue > 100 ? 'off' : rescue + '%';
+  document.getElementById('missCfgBboxMinVal').textContent = (bbox / 1000).toFixed(3);
+  document.getElementById('missCfgOofRatioVal').textContent = (oof / 100).toFixed(2);
+}
+
+function setMissSliders(config) {
+  document.getElementById('missCfgDetectorFloor').value = Math.round((config.detector_confidence || 0) * 100);
+  document.getElementById('missCfgNoSubject').value = Math.round((config.miss_det_confidence || 0) * 100);
+  document.getElementById('missCfgClassifierRescue').value = Math.round((config.miss_classifier_override_conf || 0) * 100);
+  document.getElementById('missCfgBboxMin').value = Math.round((config.miss_bbox_area_min || 0) * 1000);
+  document.getElementById('missCfgOofRatio').value = Math.round((config.miss_oof_ratio || 0) * 100);
+  updateMissSliderLabels();
+}
+
+function installMissSliderHandlers() {
+  [
+    'missCfgDetectorFloor',
+    'missCfgNoSubject',
+    'missCfgClassifierRescue',
+    'missCfgBboxMin',
+    'missCfgOofRatio',
+  ].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input', function() {
+      updateMissSliderLabels();
+      scheduleMissPreview();
+    });
+  });
+}
+
+async function loadMissConfig() {
+  missConfigLoaded = false;
+  setMissTuningDisabled(true);
+  try {
+    var r = await fetch('/api/misses/config');
+    if (!r.ok) throw new Error('http ' + r.status);
+    missConfig = await r.json();
+    originalMissConfig = Object.assign({}, missConfig);
+    setMissSliders(missConfig);
+    missConfigLoaded = true;
+    setMissTuningDisabled(false);
+    setMissTuningStatus('Preview uses current sliders');
+  } catch (e) {
+    setMissTuningStatus('Thresholds unavailable');
+  }
+}
+
+function scheduleMissPreview() {
+  if (!missConfigLoaded) return;
+  if (previewTimer) clearTimeout(previewTimer);
+  previewTimer = setTimeout(previewMisses, 250);
+}
+
+async function previewMisses() {
+  if (!missConfigLoaded) return;
+  if (previewTimer) {
+    clearTimeout(previewTimer);
+    previewTimer = null;
+  }
+  var requestId = ++previewRequestId;
+  var body = collectMissThresholds();
   var since = getSinceParam();
-  if (since) {
-    var b = document.getElementById('scopeBanner');
-    if (b) b.style.display = '';
+  if (since) body.since = since;
+  setMissTuningStatus('Previewing...');
+  try {
+    var r = await fetch('/api/misses/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error('http ' + r.status);
+    var data = await r.json();
+    if (requestId !== previewRequestId) return;
+    previewActive = true;
+    previewPayload = data;
+    applyMissesPayload(data);
+    setMissTuningStatus('Preview only');
+  } catch (e) {
+    if (requestId !== previewRequestId) return;
+    setMissTuningStatus('Preview failed');
   }
-  var url = '/api/misses' + (since ? '?since=' + encodeURIComponent(since) : '');
-  var r = await fetch(url);
-  if (!r.ok) {
-    document.getElementById('missesRoot').innerHTML =
-      '<div class="misses-empty-page">Failed to load misses.</div>';
-    return;
+}
+
+async function recomputeMisses() {
+  if (!missConfigLoaded) return;
+  invalidateMissPreview();
+  var btn = document.getElementById('missRecomputeBtn');
+  var body = collectMissThresholds();
+  var since = getSinceParam();
+  if (since) body.since = since;
+  body.save_defaults = !!document.getElementById('missSaveDefaults').checked;
+  if (btn) btn.disabled = true;
+  previewActive = false;
+  previewPayload = null;
+  setMissTuningStatus('Recomputing...');
+  try {
+    var r = await fetch('/api/misses/recompute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error('http ' + r.status);
+    var data = await r.json();
+    previewActive = false;
+    previewPayload = null;
+    applyMissesPayload(data);
+    if (data.config && data.saved_defaults) {
+      missConfig = data.config;
+      originalMissConfig = Object.assign({}, data.config);
+    }
+    setMissTuningStatus('Updated ' + (data.updated || 0) + ' photos');
+    if (typeof showToast === 'function') showToast('Recomputed misses', 'success');
+  } catch (e) {
+    setMissTuningStatus('Recompute failed');
+    if (typeof showToast === 'function') showToast('Recompute failed', 'error');
+  } finally {
+    if (btn && missConfigLoaded) btn.disabled = false;
   }
-  var data = await r.json();
+}
+
+function resetMissThresholds() {
+  if (!missConfigLoaded || !originalMissConfig) return;
+  invalidateMissPreview();
+  setMissSliders(originalMissConfig);
+  previewActive = false;
+  previewPayload = null;
+  setMissTuningStatus('Preview reset');
+  loadMisses();
+}
+
+function applyMissesPayload(data) {
   missesData = {
     no_subject: sortPhotos(data.no_subject || []),
     clipped:    sortPhotos(data.clipped || []),
     oof:        sortPhotos(data.oof || []),
   };
-  // Drop any selected ids that no longer appear (rejected photos disappear
-  // from /api/misses on the next refetch). Without this, a stale id could
-  // sit in the set and be acted on by Esc-only-clear logic.
   var present = new Set();
   CATEGORY_ORDER.forEach(function(cat) {
     (missesData[cat] || []).forEach(function(p) { present.add(p.id); });
@@ -425,6 +754,31 @@ async function loadMisses() {
   render();
 }
 
+/* ---------- Fetch + render ---------- */
+async function loadMisses() {
+  var since = getSinceParam();
+  if (since) {
+    var b = document.getElementById('scopeBanner');
+    if (b) b.style.display = '';
+  }
+  if (previewActive) {
+    // Re-derive from the preview endpoint with the live slider values
+    // instead of replaying a cached payload that a mutating action may
+    // have made stale.
+    await previewMisses();
+    return;
+  }
+  var url = '/api/misses' + (since ? '?since=' + encodeURIComponent(since) : '');
+  var r = await fetch(url);
+  if (!r.ok) {
+    document.getElementById('missesRoot').innerHTML =
+      '<div class="misses-empty-page">Failed to load misses.</div>';
+    return;
+  }
+  var data = await r.json();
+  applyMissesPayload(data);
+}
+
 function render() {
   var root = document.getElementById('missesRoot');
   var total = missesData.no_subject.length + missesData.clipped.length + missesData.oof.length;
@@ -432,7 +786,7 @@ function render() {
     root.innerHTML =
       '<div class="misses-empty-page">' +
       '<p>No misses detected — either you nailed every shot, or detection hasn\'t run yet.</p>' +
-      '<p><a href="/pipeline">Go to Pipeline</a> to run miss detection on your folders.</p>' +
+      '<p><a href="/pipeline">Go to Process</a> to run miss detection on your folders.</p>' +
       '</div>';
     focusedCategory = null;
     focusedIndex = -1;
@@ -451,6 +805,7 @@ function render() {
       '<kbd>J</kbd>/<kbd>K</kbd> next/prev &middot; ' +
       '<kbd>Shift+J/K</kbd> extend selection &middot; ' +
       '<kbd>U</kbd>/<kbd>P</kbd>/<kbd>X</kbd> unflag/flag/reject (focused or selection) &middot; ' +
+      '<kbd>B</kbd> open focused in Browse &middot; ' +
       '<kbd>Esc</kbd> clear selection &middot; ' +
       'Click to select; Shift-click range; double-click to open lightbox' +
     '</div>';
@@ -483,7 +838,7 @@ function renderSection(cat, photos) {
           '<button class="misses-reject-btn" ' +
             'data-testid="miss-reject-' + cat + '" ' +
             'onclick="bulkReject(\'' + cat + '\', event)" ' +
-            (count === 0 ? 'disabled' : '') + '>' +
+            ((count === 0 || previewActive) ? 'disabled' : '') + '>' +
             'Reject all in ' + escapeHtml(label) +
           '</button>' +
         '</div>' +
@@ -498,13 +853,8 @@ function renderSection(cat, photos) {
 function renderCard(cat, p, idx) {
   var bbox = parseDetectionBox(p.detection_box);
   var bboxHtml = '';
-  if (cat === 'no_subject') {
-    // No bbox available — show dashed placeholder frame.
+  if (!bbox && cat === 'no_subject') {
     bboxHtml = '<div class="no-subject-frame">No subject detected</div>';
-  } else if (bbox) {
-    bboxHtml =
-      '<div class="miss-bbox" style="left:' + (bbox.x * 100) + '%;top:' + (bbox.y * 100) + '%;' +
-      'width:' + (bbox.w * 100) + '%;height:' + (bbox.h * 100) + '%;"></div>';
   }
 
   var meta = '';
@@ -532,7 +882,7 @@ function renderCard(cat, p, idx) {
       'onclick="onCardClick(\'' + cat + '\', ' + idx + ', ' + p.id + ', event)" ' +
       'ondblclick="onCardDoubleClick(\'' + cat + '\', ' + idx + ', event)">' +
       '<div class="miss-card-img-wrap">' +
-        '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="' + escapeAttr(p.filename || '') + '">' +
+        '<img src="' + escapeAttr(photoThumbnailUrl(p)) + '" loading="lazy" alt="' + escapeAttr(p.filename || '') + '">' +
         bboxHtml +
         '<span class="miss-card-badge">' +
           '<span class="dot cat-' + cat + '"></span>' +
@@ -541,6 +891,7 @@ function renderCard(cat, p, idx) {
         '<button class="miss-card-unflag" ' +
           'title="Unflag as miss (U)" ' +
           'data-testid="miss-unflag-' + cat + '-' + p.id + '" ' +
+          (previewActive ? 'disabled ' : '') +
           'onclick="unflagMiss(\'' + cat + '\', ' + p.id + ', event)">&times;</button>' +
       '</div>' +
       '<div class="miss-card-info">' +
@@ -565,7 +916,12 @@ function openMiss(cat, idx, e) {
   if (!photos || !photos[idx]) return;
   var p = photos[idx];
   setFocused(cat, idx);
-  var photoList = photos.map(function(q) { return { id: q.id, filename: q.filename }; });
+  missLightboxCategoryById = {};
+  var photoList = photos.map(function(q) {
+    missLightboxCategoryById[q.id] = cat;
+    return { id: q.id, filename: q.filename, missCategory: cat };
+  });
+  missLightboxCurrent = { photoId: p.id, category: cat };
 
   if (typeof openLightbox !== 'function') return;
   // The wrap onclick handler in _navbar.html guards on !window._lightboxZoomHandled,
@@ -573,6 +929,55 @@ function openMiss(cat, idx, e) {
   // true from a prior session would swallow the first click-to-zoom.
   window._lightboxZoomHandled = false;
   openLightbox(p.id, p.filename || '', photoList);
+}
+
+document.addEventListener('lightbox:photochanged', function(e) {
+  var photoId = e && e.detail ? e.detail.photoId : null;
+  var cat = photoId != null ? missLightboxCategoryById[photoId] : null;
+  missLightboxCurrent = cat ? { photoId: photoId, category: cat } : null;
+});
+
+document.addEventListener('lightbox:closed', function() {
+  missLightboxCurrent = null;
+});
+
+function getFocusedMiss() {
+  if (focusedCategory == null || focusedIndex < 0) return null;
+  return (missesData[focusedCategory] || [])[focusedIndex] || null;
+}
+
+function getActiveSelection() {
+  if (selection.size > 0) return Array.from(selection);
+  var focused = getFocusedMiss();
+  return focused ? [focused.id] : [];
+}
+
+function openPhotoInBrowse(photoId) {
+  photoId = parseInt(photoId, 10);
+  if (isNaN(photoId)) return;
+  window.location.href = '/browse?photo_id=' + encodeURIComponent(photoId);
+}
+
+function openSelectionInBrowse() {
+  var ids = getActiveSelection();
+  if (ids.length !== 1) return;
+  openPhotoInBrowse(ids[0]);
+}
+
+function openFocusedMissInBrowse() {
+  var focused = getFocusedMiss();
+  if (!focused) return;
+  openPhotoInBrowse(focused.id);
+}
+
+function openBrowseShortcutPhoto(fullscreen) {
+  var focused = getFocusedMiss();
+  if (!focused) return false;
+  openMiss(focusedCategory, focusedIndex);
+  if (fullscreen && typeof requestLightboxFullscreen === 'function') {
+    requestLightboxFullscreen();
+  }
+  return true;
 }
 
 /* Drop any selected ids that are no longer rendered in any category. Call
@@ -593,6 +998,12 @@ function pruneSelectionToVisible() {
 /* ---------- Bulk reject ---------- */
 async function bulkReject(cat, e) {
   if (e) e.stopPropagation();
+  if (previewActive) {
+    if (typeof showToast === 'function') {
+      showToast('Save or reset the preview before bulk rejecting', 'error');
+    }
+    return;
+  }
   var label = CATEGORY_LABELS[cat];
   var n = (missesData[cat] || []).length;
   if (n === 0) return;
@@ -681,6 +1092,12 @@ async function bulkFlagSelection(flag) {
  * linger if loadMisses takes a moment. */
 async function bulkUnflagSelection() {
   if (selection.size === 0) return;
+  if (previewActive) {
+    if (typeof showToast === 'function') {
+      showToast('Save or reset the preview before unmarking misses', 'error');
+    }
+    return;
+  }
   var ids = Array.from(selection);
   // Build the (id, category) work list from the current in-memory data so
   // we don't need an extra round-trip to discover which categories each
@@ -710,6 +1127,12 @@ async function bulkUnflagSelection() {
 /* ---------- Per-card unflag ---------- */
 async function unflagMiss(cat, photoId, e) {
   if (e) e.stopPropagation();
+  if (previewActive) {
+    if (typeof showToast === 'function') {
+      showToast('Save or reset the preview before unmarking misses', 'error');
+    }
+    return;
+  }
   var r = await fetch('/api/misses/' + photoId + '/unflag', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -727,6 +1150,41 @@ async function unflagMiss(cat, photoId, e) {
   pruneSelectionToVisible();
   render();
 }
+
+async function unflagLightboxMiss(photoId) {
+  if (previewActive) {
+    if (typeof showToast === 'function') {
+      showToast('Save or reset the preview before unmarking misses', 'error');
+    }
+    return;
+  }
+  if (!missLightboxCurrent || missLightboxCurrent.photoId !== photoId) return;
+  var cat = missLightboxCurrent.category;
+  if (!cat) return;
+
+  var failures = 0;
+  await fetch('/api/misses/' + photoId + '/unflag', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ category: cat }),
+  }).then(function(r) { if (!r.ok) failures++; }).catch(function() { failures++; });
+  if (failures > 0) {
+    if (typeof showToast === 'function') showToast('Unflag failed', 'error');
+    return;
+  }
+  missesData[cat] = (missesData[cat] || []).filter(function(p) {
+    return p.id !== photoId;
+  });
+  pruneSelectionToVisible();
+  render();
+}
+
+window.handleMissesLightboxFlagShortcut = function(photoId, flag) {
+  if (flag !== 'none') return false;
+  if (!missLightboxCurrent || missLightboxCurrent.photoId !== photoId) return false;
+  unflagLightboxMiss(photoId);
+  return true;
+};
 
 /* ---------- Selection ----------
  * Plain click selects exactly one photo. Ctrl/Cmd-click toggles additional
@@ -766,6 +1224,10 @@ function updateSelectionBar() {
   var n = selection.size;
   bar.classList.toggle('active', n > 0);
   countEl.textContent = n + ' selected';
+  var unflagBtn = document.getElementById('missesSelectionUnflagBtn');
+  if (unflagBtn) unflagBtn.disabled = previewActive;
+  var browseBtn = document.getElementById('missesSelectionBrowseBtn');
+  if (browseBtn) browseBtn.disabled = n !== 1;
 }
 
 function selectRangeWithinCategory(cat, fromIdx, toIdx) {
@@ -815,6 +1277,42 @@ function onCardDoubleClick(cat, idx, e) {
   }
   openMiss(cat, idx, e);
 }
+
+function buildMissContextMenu(photoId, cat, idx) {
+  return [
+    { label: 'Open in Browse',
+      onClick: function() { openPhotoInBrowse(photoId); } },
+    { label: 'Open in Lightbox',
+      onClick: function() { openMiss(cat, idx); } },
+    { separator: true },
+    { label: 'Flag as Pick',
+      onClick: function() { flagFocusedMiss(photoId, 'flagged'); } },
+    { label: 'Reject Photo',
+      onClick: function() { flagFocusedMiss(photoId, 'rejected'); } },
+    { label: 'Unmark Missed', disabled: previewActive,
+      onClick: function() { unflagMiss(cat, photoId); } },
+  ];
+}
+
+document.addEventListener('contextmenu', function(e) {
+  var card = e.target.closest('.miss-card');
+  if (!card || !card.dataset.photoId) return;
+  if (e.target.closest('.vireo-ctx-menu')) return;
+  e.preventDefault();
+  e.stopPropagation();
+  var photoId = parseInt(card.dataset.photoId, 10);
+  var cat = card.dataset.cat;
+  var idx = parseInt(card.dataset.idx, 10);
+  if (isNaN(photoId) || !cat || isNaN(idx)) return;
+  setFocused(cat, idx);
+  if (!selection.has(photoId)) {
+    clearSelection();
+    setSelected(photoId, true);
+  }
+  if (typeof openContextMenu === 'function') {
+    openContextMenu(e, buildMissContextMenu(photoId, cat, idx));
+  }
+});
 
 function removePhotosFromMissesData(ids) {
   var deleted = new Set(ids);
@@ -954,6 +1452,11 @@ document.addEventListener('keydown', function(e) {
       e.preventDefault();
       clearSelection();
     }
+  } else if (k === 'b' || k === 'B') {
+    if (!e.shiftKey && focusedCategory != null && focusedIndex >= 0) {
+      e.preventDefault();
+      openFocusedMissInBrowse();
+    }
   } else if (k === 'Enter') {
     if (focusedCategory != null && focusedIndex >= 0) {
       e.preventDefault();
@@ -980,7 +1483,8 @@ function extendSelectionByFocus(delta) {
 }
 
 /* ---------- Boot ---------- */
-loadMisses();
+installMissSliderHandlers();
+loadMissConfig().then(loadMisses);
 </script>
 
 </body>

@@ -419,6 +419,50 @@ def test_run_duplicate_scan_emits_resolved_proposal(tmp_path):
     assert result["loser_count"] == 0
 
 
+def test_run_duplicate_scan_marks_empty_file_groups(tmp_path):
+    """Historical empty-file duplicate groups are called out for the UI."""
+    from duplicate_scan import run_duplicate_scan
+
+    empty_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    db = Database(str(tmp_path / "t.db"))
+    fid = db.add_folder(str(tmp_path))
+    _add(db, fid, "DSC_0001.NEF", file_hash=empty_hash)
+    _add(db, fid, "DSC_0002.NEF", file_hash=empty_hash)
+    db.conn.execute(
+        "UPDATE photos SET file_size = 0 WHERE file_hash = ?", (empty_hash,)
+    )
+    db.conn.commit()
+
+    result = run_duplicate_scan({"progress": {}}, db, include_resolved=True)
+
+    prop = result["proposals"][0]
+    assert prop["status"] == "resolved"
+    assert prop["empty_file_group"] is True
+    assert prop["losers"][0]["reason"] == "empty file"
+
+
+def test_run_duplicate_scan_attaches_edit_recipes(tmp_path):
+    """Fresh scan results seed thumbnail edit cache keys immediately."""
+    from duplicate_scan import run_duplicate_scan
+
+    db = Database(str(tmp_path / "t.db"))
+    fid = db.add_folder(str(tmp_path))
+    p1 = _add(db, fid, "owl.jpg", file_hash="HEDIT")
+    p2 = _add(db, fid, "owl-copy.jpg", file_hash="HEDIT")
+    _reset_flags(db, "HEDIT")
+    db.set_photo_edit_recipe(p1, {"rotation": 90})
+
+    result = run_duplicate_scan({"progress": {}}, db, include_resolved=False)
+    assert len(result["proposals"]) == 1
+    prop = result["proposals"][0]
+    by_id = {
+        candidate["id"]: candidate
+        for candidate in [prop["winner"]] + prop["losers"]
+    }
+    assert by_id[p1]["edit_recipe"] == {"version": 1, "rotation": 90}
+    assert by_id[p2]["edit_recipe"] is None
+
+
 def test_run_duplicate_scan_excludes_resolved_when_opt_out(tmp_path):
     """``include_resolved=False`` preserves the legacy unresolved-only output."""
     from duplicate_scan import run_duplicate_scan
@@ -849,3 +893,32 @@ def test_run_duplicate_scan_all_missing_flag(tmp_path):
     assert prop["all_missing"] is True
     assert prop["winner"]["exists"] is False
     assert all(l["exists"] is False for l in prop["losers"])
+
+
+# -----------------------------------------------------------------------------
+# NULL-flag visibility
+# -----------------------------------------------------------------------------
+
+def test_null_flag_photos_participate_in_duplicate_resolution(tmp_path):
+    """Photos with a NULL flag (undo paths restore them) were invisible to
+    duplicate resolution: `flag != 'rejected'` is NULL-false, so a NULL-flag
+    twin was treated as if rejected and never resolved."""
+    db = Database(str(tmp_path / "t.db"))
+    fid = db.add_folder(str(tmp_path))
+    p1 = _add(db, fid, "owl.jpg", file_hash="HASHN")
+    p2 = _add(db, fid, "owl (2).jpg", file_hash="HASHN")
+    # Simulate the undo path: restore both flags to NULL.
+    db.conn.execute("UPDATE photos SET flag = NULL WHERE file_hash = 'HASHN'")
+    db.conn.commit()
+
+    groups = db.find_duplicate_groups()
+    unresolved_hashes = {g["file_hash"] for g in groups}
+    assert "HASHN" in unresolved_hashes
+
+    result = db.apply_duplicate_resolution([p1, p2])
+    assert result["winner_id"] == p1
+    assert result["loser_ids"] == [p2]
+    flag = db.conn.execute(
+        "SELECT flag FROM photos WHERE id = ?", (p2,)
+    ).fetchone()["flag"]
+    assert flag == "rejected"

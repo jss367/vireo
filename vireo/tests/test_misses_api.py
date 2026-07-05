@@ -144,6 +144,175 @@ def test_api_misses_rejects_invalid_category_on_unflag(client, db_with_misses, c
     assert r.status_code == 400
 
 
+def test_api_misses_config_returns_thresholds(client, db_with_misses):
+    r = client.get("/api/misses/config")
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["detector_confidence"] == pytest.approx(0.2)
+    assert data["miss_det_confidence"] == pytest.approx(0.20)
+    assert data["miss_classifier_override_conf"] == pytest.approx(0.8)
+
+
+@pytest.mark.parametrize("path", ["/api/misses/preview", "/api/misses/recompute"])
+def test_api_misses_threshold_endpoints_reject_non_object_json(client, path):
+    r = client.post(path, data=json.dumps(["not", "an", "object"]),
+                    content_type="application/json")
+    assert r.status_code == 400
+    assert "JSON object" in r.get_json()["error"]
+
+
+def test_api_misses_preview_uses_classifier_rescue_override(tmp_path, monkeypatch):
+    """Preview should recalculate categories without persisting DB flags."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    from app import create_app
+    from db import Database
+
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    db_path = str(tmp_path / "test.db")
+    thumb_dir = str(tmp_path / "thumbs")
+    os.makedirs(thumb_dir)
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder("/photos/birds", name="birds")
+    pid = db.add_photo(
+        fid, "weak-bird.jpg", extension=".jpg", file_size=100,
+        file_mtime=1.0, timestamp="2026-04-22T10:00:00",
+    )
+    det_id = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
+          "confidence": 0.04, "category": "animal"}],
+        detector_model="megadetector-v6",
+    )[0]
+    db.add_prediction(
+        det_id, species="Likely Bird", confidence=0.70,
+        model="BioCLIP-2.5",
+    )
+
+    app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir)
+    client = app.test_client()
+
+    default_r = client.post(
+        "/api/misses/preview",
+        data=json.dumps({}),
+        content_type="application/json",
+    )
+    assert default_r.status_code == 200
+    default_payload = default_r.get_json()
+    assert [p["id"] for p in default_payload["no_subject"]] == [pid]
+    assert default_payload["no_subject"][0]["detection_conf"] == pytest.approx(0.04)
+    assert json.loads(default_payload["no_subject"][0]["detection_box"]) == {
+        "x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4,
+    }
+
+    rescued_r = client.post(
+        "/api/misses/preview",
+        data=json.dumps({"miss_classifier_override_conf": 0.65}),
+        content_type="application/json",
+    )
+    assert rescued_r.status_code == 200
+    assert rescued_r.get_json()["no_subject"] == []
+    row = db.conn.execute(
+        "SELECT miss_no_subject, miss_computed_at FROM photos WHERE id=?",
+        (pid,),
+    ).fetchone()
+    assert row["miss_no_subject"] is None
+    assert row["miss_computed_at"] is None
+
+
+def test_api_misses_recompute_can_save_workspace_defaults(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    from app import create_app
+    from db import Database
+
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    db_path = str(tmp_path / "test.db")
+    thumb_dir = str(tmp_path / "thumbs")
+    os.makedirs(thumb_dir)
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder("/photos/birds", name="birds")
+    pid = db.add_photo(
+        fid, "weak-bird.jpg", extension=".jpg", file_size=100,
+        file_mtime=1.0, timestamp="2026-04-22T10:00:00",
+    )
+    det_id = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
+          "confidence": 0.04, "category": "animal"}],
+        detector_model="megadetector-v6",
+    )[0]
+    db.add_prediction(
+        det_id, species="Likely Bird", confidence=0.70,
+        model="BioCLIP-2.5",
+    )
+
+    app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir)
+    client = app.test_client()
+    r = client.post(
+        "/api/misses/recompute",
+        data=json.dumps({
+            "miss_classifier_override_conf": 0.65,
+            "detector_confidence": 0.05,
+            "save_defaults": True,
+        }),
+        content_type="application/json",
+    )
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["updated"] == 1
+    assert data["saved_defaults"] is True
+
+    row = db.conn.execute(
+        "SELECT miss_no_subject FROM photos WHERE id=?", (pid,),
+    ).fetchone()
+    assert row["miss_no_subject"] == 0
+
+    effective = db.get_effective_config(cfg.load())
+    assert effective["detector_confidence"] == pytest.approx(0.05)
+    assert effective["pipeline"]["miss_classifier_override_conf"] == pytest.approx(0.65)
+
+
+def test_api_misses_recompute_preserves_custom_derived_thresholds(
+    client, db_with_misses,
+):
+    """Derived burst/singleton thresholds should change only with their slider."""
+    import config as cfg
+
+    _, db, _ = db_with_misses
+    db.update_workspace(db._active_workspace_id, config_overrides={
+        "pipeline": {
+            "miss_det_confidence": 0.4,
+            "miss_det_confidence_burst": 0.05,
+            "miss_bbox_area_min": 0.01,
+            "miss_bbox_area_min_singleton": 0.001,
+        }
+    })
+
+    r = client.post(
+        "/api/misses/recompute",
+        data=json.dumps({"miss_oof_ratio": 0.42, "save_defaults": True}),
+        content_type="application/json",
+    )
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["config"]["miss_det_confidence_burst"] == pytest.approx(0.05)
+    assert data["config"]["miss_bbox_area_min_singleton"] == pytest.approx(0.001)
+
+    effective = db.get_effective_config(cfg.load())
+    assert effective["pipeline"]["miss_det_confidence_burst"] == pytest.approx(0.05)
+    assert effective["pipeline"]["miss_bbox_area_min_singleton"] == pytest.approx(
+        0.001
+    )
+    assert effective["pipeline"]["miss_oof_ratio"] == pytest.approx(0.42)
+
+
 def test_api_bulk_reject_records_edit_history(client, db_with_misses):
     """Bulk reject must write a batch `flag` edit_history entry so the change
     is undoable and shows up in the audit log, matching /api/batch/flag."""

@@ -50,6 +50,117 @@ def test_working_copy_path_column_exists(tmp_path):
     assert row[0][0] == "working_copy_path"
 
 
+def test_old_predictions_schema_raises_incompatible(tmp_path):
+    """A pre-`classifier_model` database fails with a typed, actionable error.
+
+    Reproduces the real-world crash: a database from an older Vireo has a
+    `predictions` table built around a `model` column. The current schema's
+    `CREATE TABLE IF NOT EXISTS predictions` silently skips that existing
+    table, then `idx_predictions_identity` references the absent
+    `classifier_model` column and raises `no such column: classifier_model`.
+    `Database.__init__` must convert that opaque OperationalError into an
+    IncompatibleDatabaseError carrying the db path and original cause.
+    """
+    import sqlite3
+
+    import pytest
+    from db import Database, IncompatibleDatabaseError
+
+    db_path = str(tmp_path / "old.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE predictions (
+            id           INTEGER PRIMARY KEY,
+            detection_id INTEGER,
+            species      TEXT,
+            model        TEXT,
+            UNIQUE(detection_id, model, species)
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(IncompatibleDatabaseError) as excinfo:
+        Database(db_path)
+    assert excinfo.value.db_path == db_path
+    assert "classifier_model" in (excinfo.value.cause or "")
+    # The message is user-facing remediation context, not a bare stack trace.
+    assert "incompatible older version" in str(excinfo.value)
+
+
+def test_fresh_database_does_not_raise_incompatible(tmp_path):
+    """A fresh database initializes cleanly — the guard never false-fires."""
+    from db import Database
+
+    # No exception == pass. Sanity-check a current-schema table came through.
+    db = Database(str(tmp_path / "fresh.db"))
+    cols = [r[1] for r in db.conn.execute("PRAGMA table_info(predictions)").fetchall()]
+    assert "classifier_model" in cols
+
+
+def test_insert_into_stale_table_raises_incompatible(tmp_path, monkeypatch):
+    """A stale-schema failure surfacing as ``has no column named …`` is caught.
+
+    SQLite reports a different OperationalError shape when an INSERT/UPDATE
+    targets an existing-but-stale table that's missing a newly added column:
+    ``table <name> has no column named <col>`` rather than
+    ``no such column: …``. ``_create_tables`` has INSERT paths into long-lived
+    tables (e.g. backfill writes to ``db_meta``) that can hit this when the
+    on-disk shape is older than the current build expects, so the guard must
+    classify this third spelling as an incompatible-database failure too —
+    otherwise the raw OperationalError escapes, ``main()`` never emits the
+    structured ``incompatible_database`` stderr, and the desktop launcher
+    shows the generic "Sidecar did not become healthy" timeout instead of
+    the actionable remediation.
+    """
+    import sqlite3
+
+    import db as db_module
+    import pytest
+    from db import Database, IncompatibleDatabaseError
+
+    def fake_create(self):
+        raise sqlite3.OperationalError(
+            "table db_meta has no column named value"
+        )
+
+    monkeypatch.setattr(db_module.Database, "_create_tables", fake_create)
+
+    with pytest.raises(IncompatibleDatabaseError) as excinfo:
+        Database(str(tmp_path / "stale.db"))
+    assert excinfo.value.db_path == str(tmp_path / "stale.db")
+    assert "has no column named" in (excinfo.value.cause or "")
+    assert "incompatible older version" in str(excinfo.value)
+
+
+def test_non_schema_operational_error_propagates(tmp_path, monkeypatch):
+    """Environmental OperationalErrors propagate as-is, not as IncompatibleDatabaseError.
+
+    The guard is for stale-schema failures ("no such column/table: …"). Other
+    OperationalErrors — file locked, read-only, disk full, I/O error — are
+    recoverable environmental problems and must surface accurately, otherwise
+    the user gets misleading "back up and remove your DB" remediation for a
+    perfectly good database that just needs a different fix.
+    """
+    import sqlite3
+
+    import db as db_module
+    import pytest
+    from db import Database, IncompatibleDatabaseError
+
+    def fake_create(self):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(db_module.Database, "_create_tables", fake_create)
+
+    with pytest.raises(sqlite3.OperationalError) as excinfo:
+        Database(str(tmp_path / "locked.db"))
+    assert "locked" in str(excinfo.value)
+    assert not isinstance(excinfo.value, IncompatibleDatabaseError)
+
+
 def test_add_and_get_folder(tmp_path):
     """add_folder creates a folder, get_folder_tree returns it."""
     from db import Database
@@ -386,6 +497,28 @@ def test_get_photos_sort(tmp_path):
     assert by_date_desc[0]['filename'] == 'b.jpg'
 
 
+def test_get_photos_date_sort_puts_missing_timestamps_last(tmp_path):
+    """Undated photos should not appear before the oldest captured photo."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    db.add_photo(folder_id=fid, filename='undated.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp=None)
+    db.add_photo(folder_id=fid, filename='newer.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp='2024-06-01T00:00:00')
+    db.add_photo(folder_id=fid, filename='older.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp='2024-01-01T00:00:00')
+
+    by_date = db.get_photos(sort='date')
+    assert [p['filename'] for p in by_date] == ['older.jpg', 'newer.jpg', 'undated.jpg']
+
+    by_date_desc = db.get_photos(sort='date_desc')
+    assert [p['filename'] for p in by_date_desc] == ['newer.jpg', 'older.jpg', 'undated.jpg']
+
+    ids_by_date = db.get_photo_ids(sort='date')
+    assert ids_by_date == [p['id'] for p in by_date]
+
+
 def test_sort_date_tiebreaker(tmp_path):
     """Photos with identical timestamps sort by filename as tiebreaker."""
     from db import Database
@@ -550,6 +683,38 @@ def test_get_photos_keyword_search(tmp_path):
     assert results[0]['filename'] == 'cardinal.jpg'
 
 
+def test_get_photos_keyword_multi_token(tmp_path):
+    """Multi-token keyword search requires every whitespace-separated token to
+    match (in the filename or some keyword), so "red bill" finds the
+    hyphenated keyword "Red-billed leiothrix" without an exact substring."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p3 = db.add_photo(folder_id=fid, filename='c.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    db.tag_photo(p1, db.add_keyword('Red-billed leiothrix'))
+    db.tag_photo(p2, db.add_keyword('Northern Cardinal'))
+    # p3 holds each token in a *separate* keyword.
+    db.tag_photo(p3, db.add_keyword('Reddish'))
+    db.tag_photo(p3, db.add_keyword('Billboard'))
+
+    # "red bill" matches the hyphenated single keyword (p1) and the
+    # split-across-two-keywords photo (p3); token order is irrelevant.
+    assert {r['filename'] for r in db.get_photos(keyword='red bill')} == {'a.jpg', 'c.jpg'}
+    assert {r['filename'] for r in db.get_photos(keyword='bill red')} == {'a.jpg', 'c.jpg'}
+
+    # Every token must match: no photo has both a "red*" and a "cardinal*" tag.
+    assert db.get_photos(keyword='red cardinal') == []
+
+    # A token can be satisfied by a different keyword on the same photo.
+    assert {r['filename'] for r in db.get_photos(keyword='northern card')} == {'b.jpg'}
+
+    # count_filtered_photos and get_photo_ids agree with get_photos.
+    assert db.count_filtered_photos(keyword='red bill') == 2
+    assert len(db.get_photo_ids(keyword='red bill')) == 2
+
+
 def test_add_keyword_idempotent(tmp_path):
     """add_keyword returns existing id if keyword already exists."""
     from db import Database
@@ -596,6 +761,30 @@ def test_collection_photos_rating_rule(tmp_path):
     photos = db.get_collection_photos(cid)
     assert len(photos) == 1
     assert photos[0]['filename'] == 'good.jpg'
+
+
+def test_collection_photos_date_sort_puts_missing_timestamps_last(tmp_path):
+    """Collection Browse order follows the main Browse date order."""
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    db.add_photo(folder_id=fid, filename='undated.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp=None)
+    db.add_photo(folder_id=fid, filename='newer.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp='2024-06-01T00:00:00')
+    db.add_photo(folder_id=fid, filename='older.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp='2024-01-01T00:00:00')
+
+    rules = [{"field": "rating", "op": ">=", "value": 0}]
+    cid = db.add_collection('All', json.dumps(rules))
+
+    photos = db.get_collection_photos(cid)
+    assert [p['filename'] for p in photos] == ['older.jpg', 'newer.jpg', 'undated.jpg']
+    assert db.get_collection_photo_ids(cid) == [p['id'] for p in photos]
 
 
 def test_collection_photos_keyword_rule(tmp_path):
@@ -1320,6 +1509,7 @@ def test_default_collections_created(tmp_path):
     assert 'Untagged' in names
     assert 'Flagged' in names
     assert 'Recent Import' in names
+    assert 'GPS Without Location Keyword' in names
 
 
 def test_default_collections_idempotent(tmp_path):
@@ -1332,7 +1522,7 @@ def test_default_collections_idempotent(tmp_path):
     db.create_default_collections()
 
     colls = db.get_collections()
-    assert len(colls) == 5
+    assert len(colls) == 6
 
 
 def test_default_collections_adds_missing(tmp_path):
@@ -1353,7 +1543,42 @@ def test_default_collections_adds_missing(tmp_path):
     assert 'Needs Identification' in names
     assert 'Untagged' in names
     assert 'Recent Import' in names
-    assert len(colls) == 5  # no duplicate Flagged
+    assert 'GPS Without Location Keyword' in names
+    assert len(colls) == 6  # no duplicate Flagged
+
+
+def test_default_collections_for_all_workspaces_adds_missing_defaults(tmp_path):
+    """Startup seeding covers non-active workspaces in upgraded databases."""
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws1 = db.ensure_default_workspace()
+    ws2 = db.create_workspace("ws-b")
+
+    # Simulate an upgraded multi-workspace database where only one workspace
+    # already had the older default set. The all-workspaces startup pass should
+    # add the new GPS/location-keyword default everywhere without duplicating Flagged.
+    db.conn.execute(
+        "INSERT INTO collections (workspace_id, name, rules) VALUES (?, ?, ?)",
+        (
+            ws2,
+            "Flagged",
+            json.dumps([{"field": "flag", "op": "equals", "value": "flagged"}]),
+        ),
+    )
+    db.conn.commit()
+
+    db.set_active_workspace(ws1)
+    db.create_default_collections_for_all_workspaces()
+
+    for ws in (ws1, ws2):
+        rows = db.conn.execute(
+            "SELECT name FROM collections WHERE workspace_id = ?", (ws,),
+        ).fetchall()
+        names = [r["name"] for r in rows]
+        assert "GPS Without Location Keyword" in names
+        assert names.count("Flagged") == 1
 
 
 def test_default_collection_uses_has_subject_for_new_workspaces(tmp_path):
@@ -1491,10 +1716,134 @@ def test_upgrade_path_no_duplicate_collection(tmp_path):
         {"field": "has_subject", "op": "equals", "value": 0},
         {"field": "wildlife_excluded", "op": "equals", "value": 0},
     ]
-    # Sanity: total default-collection count is 5, not 6 (no duplicate).
+    # Sanity: default collections include one Needs Identification, not a
+    # duplicate alongside the legacy Needs Classification.
     default_names = {"All Photos", "Needs Identification", "Untagged",
-                     "Flagged", "Recent Import"}
+                     "Flagged", "Recent Import", "GPS Without Location Keyword"}
     assert default_names.issubset(cols.keys())
+
+
+def test_default_gps_without_location_keyword_collection_matches_expected_photos(tmp_path):
+    """The default GPS/location-keyword collection surfaces geotagged photos
+    that still need Vireo's structured location keyword."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    needs_location = db.add_photo(
+        folder_id=fid, filename='gps-no-location.jpg',
+        extension='.jpg', file_size=100, file_mtime=1.0,
+    )
+    no_gps = db.add_photo(
+        folder_id=fid, filename='no-gps.jpg',
+        extension='.jpg', file_size=100, file_mtime=1.0,
+    )
+    has_location = db.add_photo(
+        folder_id=fid, filename='gps-with-location.jpg',
+        extension='.jpg', file_size=100, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET latitude = 1.0, longitude = 2.0 WHERE id IN (?, ?)",
+        (needs_location, has_location),
+    )
+    loc_kw = db.add_keyword("Yosemite", kw_type="location")
+    db.tag_photo(has_location, loc_kw)
+
+    db.create_default_collections()
+    cid = next(c["id"] for c in db.get_collections()
+               if c["name"] == "GPS Without Location Keyword")
+
+    pids = {p["id"] for p in db.get_collection_photos(cid, per_page=999)}
+    assert pids == {needs_location}
+
+
+def test_has_location_keyword_rule_and_no_location_information_definition(tmp_path):
+    """No Location Information means no EXIF GPS and no location keyword."""
+    import json
+
+    from db import NO_LOCATION_INFORMATION_RULES, Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    no_location = db.add_photo(
+        folder_id=fid, filename='no-location.jpg',
+        extension='.jpg', file_size=100, file_mtime=1.0,
+    )
+    gps_no_keyword = db.add_photo(
+        folder_id=fid, filename='gps-no-keyword.jpg',
+        extension='.jpg', file_size=100, file_mtime=1.0,
+    )
+    no_gps_with_keyword = db.add_photo(
+        folder_id=fid, filename='keyword-only.jpg',
+        extension='.jpg', file_size=100, file_mtime=1.0,
+    )
+    gps_with_keyword = db.add_photo(
+        folder_id=fid, filename='gps-keyword.jpg',
+        extension='.jpg', file_size=100, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET latitude = 1.0, longitude = 2.0 WHERE id IN (?, ?)",
+        (gps_no_keyword, gps_with_keyword),
+    )
+    loc_kw = db.add_keyword("Yosemite", kw_type="location")
+    db.tag_photo(no_gps_with_keyword, loc_kw)
+    db.tag_photo(gps_with_keyword, loc_kw)
+
+    cid = db.add_collection("No Location Information", json.dumps(NO_LOCATION_INFORMATION_RULES))
+
+    pids = {p["id"] for p in db.get_collection_photos(cid, per_page=999)}
+    assert pids == {no_location}
+
+
+def test_migrate_default_location_collections_renames_and_fixes_exact_legacy_rules(tmp_path):
+    """Clarify old location collection names without touching customized rules."""
+    import json
+
+    from db import (
+        GPS_WITHOUT_LOCATION_KEYWORD_RULES,
+        NO_LOCATION_INFORMATION_RULES,
+        Database,
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    db.add_collection("Needs Location", json.dumps(GPS_WITHOUT_LOCATION_KEYWORD_RULES))
+    db.add_collection(
+        "Needs Location",
+        json.dumps({"mode": "all", "rules": GPS_WITHOUT_LOCATION_KEYWORD_RULES}),
+    )
+    db.add_collection(
+        "No Location",
+        json.dumps({
+            "mode": "all",
+            "rules": [
+                {"field": "location_keyword_missing", "op": "equals", "value": 0},
+            ],
+        }),
+    )
+    db.add_collection("No Location", json.dumps([{"field": "rating", "op": ">=", "value": 3}]))
+
+    updated = db.migrate_default_location_collections()
+
+    rows = {
+        c["name"]: json.loads(c["rules"])
+        for c in db.get_collections()
+        if c["name"] != "No Location"
+    }
+    custom = [
+        json.loads(c["rules"])
+        for c in db.get_collections()
+        if c["name"] == "No Location"
+    ]
+    assert updated == 3
+    assert rows["GPS Without Location Keyword"] == GPS_WITHOUT_LOCATION_KEYWORD_RULES
+    assert rows["No Location Information"] == NO_LOCATION_INFORMATION_RULES
+    assert custom == [[{"field": "rating", "op": ">=", "value": 3}]]
 
 
 def test_default_genre_keywords_inserted(tmp_path):
@@ -2949,14 +3298,12 @@ def test_get_geolocated_photos_species_filter_multi_species(tmp_path):
                       file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id=?", (p1,))
     db.conn.commit()
-    det1 = db.save_detections(p1, [
-        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.95, "category": "animal"}
+    det_ids = db.save_detections(p1, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.95, "category": "animal"},
+        {"box": {"x": 0.5, "y": 0.5, "w": 0.3, "h": 0.4}, "confidence": 0.60, "category": "animal"},
     ], detector_model="MDV6")
-    det2 = db.save_detections(p1, [
-        {"box": {"x": 0.5, "y": 0.5, "w": 0.3, "h": 0.4}, "confidence": 0.60, "category": "animal"}
-    ], detector_model="MDV6")
-    db.add_prediction(det1[0], 'Red-tailed Hawk', 0.95, 'bioclip')
-    db.add_prediction(det2[0], "Sparrow", 0.60, 'bioclip')
+    db.add_prediction(det_ids[0], 'Red-tailed Hawk', 0.95, 'bioclip')
+    db.add_prediction(det_ids[1], "Sparrow", 0.60, 'bioclip')
     for pr in db.get_predictions(photo_ids=[p1]):
         db.accept_prediction(pr['id'])
 
@@ -3104,6 +3451,83 @@ def test_get_geolocated_photos_with_partial_exif_uses_keyword_pair(tmp_path):
     assert r['keyword_location_name'] == 'Central Park'
 
 
+def test_get_effective_photo_location_prefers_exif(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='both.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.conn.execute(
+        "UPDATE photos SET latitude=?, longitude=? WHERE id=?",
+        (37.7749, -122.4194, pid),
+    )
+    kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, latitude, longitude) "
+        "VALUES (?, 'location', ?, ?)",
+        ('Paris Airbnb', 48.8566, 2.3522),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, kid),
+    )
+    db.conn.commit()
+
+    loc = db.get_effective_photo_location(pid)
+    assert loc["source"] == "exif"
+    assert loc["latitude"] == 37.7749
+    assert loc["longitude"] == -122.4194
+    assert loc["keyword_location_name"] is None
+
+
+def test_get_effective_photo_location_falls_back_to_keyword_pair(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='assigned.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.conn.execute(
+        "UPDATE photos SET latitude=?, longitude=NULL WHERE id=?",
+        (37.7749, pid),
+    )
+    kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, place_id, latitude, longitude) "
+        "VALUES (?, 'location', ?, ?, ?)",
+        ('Paris Airbnb', 'place_123', 48.8566, 2.3522),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, kid),
+    )
+    db.conn.commit()
+
+    loc = db.get_effective_photo_location(pid)
+    assert loc["source"] == "keyword"
+    assert loc["latitude"] == 48.8566
+    assert loc["longitude"] == 2.3522
+    assert loc["keyword_location_name"] == "Paris Airbnb"
+    assert loc["place_id"] == "place_123"
+
+
+def test_get_effective_photo_location_enforces_active_workspace(tmp_path):
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='geo.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.conn.execute(
+        "UPDATE photos SET latitude=?, longitude=? WHERE id=?",
+        (37.7749, -122.4194, pid),
+    )
+    db.conn.commit()
+
+    other_ws = db.create_workspace("Other")
+    db.set_active_workspace(other_ws)
+
+    with pytest.raises(ValueError, match="active workspace"):
+        db.get_effective_photo_location(pid)
+
+
 def test_get_accepted_species(tmp_path):
     """get_accepted_species returns distinct marker species from geolocated photos."""
     from db import Database
@@ -3187,14 +3611,12 @@ def test_get_accepted_species_multiple_species_per_photo(tmp_path):
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id=?", (p1,))
     db.conn.commit()
     # Two detections for the same photo, each with different species
-    det_ids1 = db.save_detections(p1, [
-        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.95, "category": "animal"}
+    det_ids = db.save_detections(p1, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.95, "category": "animal"},
+        {"box": {"x": 0.5, "y": 0.5, "w": 0.3, "h": 0.4}, "confidence": 0.60, "category": "animal"},
     ], detector_model="MDV6")
-    det_ids2 = db.save_detections(p1, [
-        {"box": {"x": 0.5, "y": 0.5, "w": 0.3, "h": 0.4}, "confidence": 0.60, "category": "animal"}
-    ], detector_model="MDV6")
-    db.add_prediction(det_ids1[0], 'Red-tailed Hawk', 0.95, 'bioclip')
-    db.add_prediction(det_ids2[0], 'Cooper\'s Hawk', 0.60, 'bioclip')
+    db.add_prediction(det_ids[0], 'Red-tailed Hawk', 0.95, 'bioclip')
+    db.add_prediction(det_ids[1], 'Cooper\'s Hawk', 0.60, 'bioclip')
     preds = db.get_predictions(photo_ids=[p1])
     for pr in preds:
         db.accept_prediction(pr['id'])
@@ -4174,12 +4596,12 @@ def test_save_detections(tmp_path):
     ids = db.save_detections(pid, detections, detector_model="MDV6-yolov9-c")
     assert len(ids) == 2
     rows = db.conn.execute(
-        "SELECT * FROM detections WHERE photo_id = ? ORDER BY id",
+        "SELECT * FROM detections WHERE photo_id = ?",
         (pid,),
     ).fetchall()
     assert len(rows) == 2
-    assert rows[0]["box_x"] == 0.1
-    assert rows[1]["box_x"] == 0.5
+    # Content-addressed IDs aren't insertion-ordered, so compare as a set.
+    assert {round(r["box_x"], 4) for r in rows} == {0.1, 0.5}
 
 
 def test_save_detections_replaces_existing(tmp_path):
@@ -4535,6 +4957,44 @@ def test_accept_prediction_tags_photo(tmp_path):
     assert any(k["name"] == "Elk" for k in kws)
 
 
+def test_accept_prediction_commit_false_preserves_caller_transaction_on_error(
+    tmp_path, monkeypatch,
+):
+    """accept_prediction(_commit=False) leaves rollback to the caller."""
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid,
+        filename="elk.jpg",
+        extension=".jpg",
+        file_size=100,
+        file_mtime=1.0,
+    )
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9},
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species="Elk", confidence=0.9, model="bioclip")
+    pred = db.get_predictions()[0]
+
+    db.conn.execute(
+        "INSERT INTO keywords (name, is_species) VALUES ('Outer Marker', 0)"
+    )
+
+    def fail_add_keyword(*args, **kwargs):
+        raise RuntimeError("simulated accept failure")
+
+    monkeypatch.setattr(db, "add_keyword", fail_add_keyword)
+    with pytest.raises(RuntimeError, match="simulated accept failure"):
+        db.accept_prediction(pred["id"], _commit=False)
+
+    assert db.conn.execute(
+        "SELECT 1 FROM keywords WHERE name = 'Outer Marker'"
+    ).fetchone() is not None
+    db.conn.rollback()
+
+
 def test_get_existing_detection_photo_ids(tmp_path):
     """get_existing_detection_photo_ids shim returns photo IDs where the default
     detector model has run (delegates to get_detector_run_photo_ids)."""
@@ -4733,6 +5193,412 @@ def test_write_detection_batch_records_empty_scene(tmp_path):
     assert run is not None
     assert run["box_count"] == 0
     assert photo_id in db.get_detector_run_photo_ids("megadetector-v6")
+
+
+def test_write_detection_batch_ids_are_stable_for_same_content(tmp_path):
+    """IDs are derived from content, not table state. Even after other rows
+    are inserted (so auto-rowid recycling no longer hides the bug), the same
+    (photo, model, detections) must produce the same IDs.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_a = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    photo_b = db.add_photo(
+        folder_id=folder_id, filename="b.jpg", extension=".jpg",
+        file_size=200, file_mtime=2.0,
+    )
+
+    detections = [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 0.4, "y": 0.4, "w": 0.2, "h": 0.2},
+         "confidence": 0.7, "category": "animal"},
+    ]
+    ids1 = db.write_detection_batch(photo_a, "megadetector-v6", detections)
+    # Insert into a different photo so the table is non-empty when photo_a's
+    # rows are deleted-and-reinserted — defeats auto-rowid's "reset to 1
+    # when table empty" recycling that hides the bug.
+    db.write_detection_batch(photo_b, "megadetector-v6", detections)
+    ids2 = db.write_detection_batch(photo_a, "megadetector-v6", detections)
+    assert ids1 == ids2, (
+        f"same content must produce same IDs across rewrites; got {ids1} vs {ids2}"
+    )
+
+    count = db.conn.execute(
+        "SELECT COUNT(*) AS c FROM detections WHERE photo_id = ? AND detector_model = ?",
+        (photo_a, "megadetector-v6"),
+    ).fetchone()["c"]
+    assert count == len(detections), "second write must not duplicate rows"
+
+
+def test_write_detection_batch_retires_stale_rows(tmp_path):
+    """Detections the new run no longer produces must be deleted, even when
+    other detections from the same (photo, model) are unchanged. Predictions
+    against retired detections CASCADE-delete; predictions against retained
+    detections survive.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+
+    a = {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"}
+    b = {"box": {"x": 0.3, "y": 0.3, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"}
+    c = {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"}
+    ids_abc = db.write_detection_batch(photo_id, "megadetector-v6", [a, b, c])
+    id_a, id_b, id_c = ids_abc
+
+    # Plant a prediction against every detection. The retained ones
+    # (id_a, id_c) must survive the second write; only the retired one
+    # (id_b) should cascade-disappear. This pins the cascade contract:
+    # a bad implementation that DELETEs all rows and reinserts the kept
+    # ones would still produce the same `remaining` set below, but it
+    # would wipe id_a and id_c's predictions too.
+    for det_id, species in [(id_a, "A"), (id_b, "B"), (id_c, "C")]:
+        db.conn.execute(
+            """INSERT INTO predictions
+                 (detection_id, classifier_model, labels_fingerprint, species, confidence)
+               VALUES (?, 'classifier-v1', 'legacy', ?, 0.95)""",
+            (det_id, species),
+        )
+    db.conn.commit()
+
+    ids_ac = db.write_detection_batch(photo_id, "megadetector-v6", [a, c])
+    assert ids_ac == [id_a, id_c], "stable IDs for retained boxes"
+
+    remaining = {r["id"] for r in db.conn.execute(
+        "SELECT id FROM detections WHERE photo_id = ? AND detector_model = ?",
+        (photo_id, "megadetector-v6"),
+    ).fetchall()}
+    assert remaining == {id_a, id_c}, f"stale id {id_b} must be deleted"
+
+    remaining_predictions = {
+        (r["detection_id"], r["species"]) for r in db.conn.execute(
+            "SELECT detection_id, species FROM predictions"
+        ).fetchall()
+    }
+    assert remaining_predictions == {(id_a, "A"), (id_c, "C")}, (
+        "predictions on retained detections must survive; only id_b's "
+        f"prediction should have cascaded away, got {remaining_predictions}"
+    )
+
+
+def test_write_detection_batch_second_writer_does_not_cascade_predictions(tmp_path):
+    """The race: pipeline A writes detections, classify writes predictions
+    against them, pipeline B writes the same detections again. With
+    auto-rowid IDs, B's DELETE CASCADEs A's predictions (data loss). With
+    content-addressed IDs, B's UPSERT matches A's rows so the FK targets
+    survive.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    detections = [
+        {"box": {"x": 0.10, "y": 0.10, "w": 0.20, "h": 0.20},
+         "confidence": 0.9, "category": "animal"},
+    ]
+
+    # Pipeline A: writes detections, then writes a prediction against the
+    # detection it just produced.
+    ids_a = db.write_detection_batch(photo_id, "megadetector-v6", detections)
+    det_id = ids_a[0]
+    db.conn.execute(
+        """INSERT INTO predictions
+             (detection_id, classifier_model, labels_fingerprint, species, confidence, category)
+           VALUES (?, 'classifier-v1', 'legacy', 'cardinal', 0.95, 'animal')""",
+        (det_id,),
+    )
+    db.conn.commit()
+
+    pred_count_before = db.conn.execute(
+        "SELECT COUNT(*) AS c FROM predictions WHERE detection_id = ?",
+        (det_id,),
+    ).fetchone()["c"]
+    assert pred_count_before == 1
+
+    # Pipeline B: writes the same detections. With auto-rowid this would
+    # DELETE A's row and CASCADE-delete A's prediction.
+    ids_b = db.write_detection_batch(photo_id, "megadetector-v6", detections)
+    assert ids_b == ids_a, "concurrent writer must produce same IDs"
+
+    pred_count_after = db.conn.execute(
+        "SELECT COUNT(*) AS c FROM predictions WHERE detection_id = ?",
+        (det_id,),
+    ).fetchone()["c"]
+    assert pred_count_after == 1, (
+        "B's write must not CASCADE-delete A's prediction; "
+        f"got {pred_count_after} predictions remaining"
+    )
+
+
+def test_write_detection_batch_conflict_refreshes_box_fields(tmp_path):
+    """If a replacement box falls in the same quantized ID bucket, the row's
+    exact stored coordinates must still update to the latest detector output.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+
+    first = {
+        "box": {"x": 0.10001, "y": 0.20001, "w": 0.30001, "h": 0.40001},
+        "confidence": 0.70,
+        "category": "animal",
+    }
+    second = {
+        "box": {"x": 0.10002, "y": 0.20002, "w": 0.30002, "h": 0.40002},
+        "confidence": 0.91,
+        "category": "animal",
+    }
+
+    ids1 = db.write_detection_batch(photo_id, "megadetector-v6", [first])
+    ids2 = db.write_detection_batch(photo_id, "megadetector-v6", [second])
+    assert ids2 == ids1, "sub-quantization box drift should keep the same id"
+
+    row = db.conn.execute(
+        "SELECT box_x, box_y, box_w, box_h, detector_confidence, category"
+        " FROM detections WHERE id = ?",
+        (ids1[0],),
+    ).fetchone()
+    assert dict(row) == {
+        "box_x": second["box"]["x"],
+        "box_y": second["box"]["y"],
+        "box_w": second["box"]["w"],
+        "box_h": second["box"]["h"],
+        "detector_confidence": second["confidence"],
+        "category": "animal",
+    }
+
+
+def test_write_detection_batch_deduplicates_same_batch_ids(tmp_path):
+    """One detector batch can contain two boxes in the same quantized ID bucket.
+    Persist and count the unique detection once, using the strongest row.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+
+    low = {
+        "box": {"x": 0.10001, "y": 0.20001, "w": 0.30001, "h": 0.40001},
+        "confidence": 0.50,
+        "category": "animal",
+    }
+    high = {
+        "box": {"x": 0.10002, "y": 0.20002, "w": 0.30002, "h": 0.40002},
+        "confidence": 0.95,
+        "category": "animal",
+    }
+
+    ids = db.write_detection_batch(photo_id, "megadetector-v6", [low, high])
+    assert len(ids) == 1
+
+    row = db.conn.execute(
+        "SELECT box_x, detector_confidence FROM detections WHERE id = ?",
+        (ids[0],),
+    ).fetchone()
+    assert row["box_x"] == high["box"]["x"]
+    assert row["detector_confidence"] == high["confidence"]
+    run = db.conn.execute(
+        "SELECT box_count FROM detector_runs WHERE photo_id = ? AND detector_model = ?",
+        (photo_id, "megadetector-v6"),
+    ).fetchone()
+    assert run["box_count"] == 1
+
+
+def test_pairing_recomputes_detection_ids_so_photo_id_reuse_is_safe(tmp_path):
+    """Regression: when raw+jpeg pairing moves a detection to the primary photo,
+    its content-addressed id MUST be recomputed against the primary's photo_id.
+
+    Otherwise a later photo that reuses the companion's freed rowid (SQLite
+    INTEGER PRIMARY KEY without AUTOINCREMENT recycles ids) could produce a
+    detection whose computed id collides with the stale-moved row, and the
+    UPSERT would silently update the wrong photo's detection.
+    """
+    from db import Database
+    from detection_id import detection_id as compute_id
+    from scanner import _pair_raw_jpeg_companions
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, fid)
+    jpeg_id = db.add_photo(folder_id=fid, filename="IMG_1.jpg", extension=".jpg",
+                           file_size=1, file_mtime=1.0)
+    raw_id = db.add_photo(folder_id=fid, filename="IMG_1.cr3", extension=".cr3",
+                          file_size=1, file_mtime=1.0)
+
+    box = {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}
+    det_ids = db.write_detection_batch(jpeg_id, "MDV6", [
+        {"box": box, "confidence": 0.9, "category": "animal"},
+    ])
+    db.add_prediction(det_ids[0], "Robin", 0.95, "bioclip")
+
+    _pair_raw_jpeg_companions(db)
+
+    # After pairing: the surviving detection's id is computed against the
+    # primary (raw) photo's id, not the companion's.
+    expected_new_id = compute_id(
+        raw_id, "MDV6", (box["x"], box["y"], box["w"], box["h"]), "animal",
+    )
+    rows = db.conn.execute(
+        "SELECT id, photo_id FROM detections WHERE photo_id = ?", (raw_id,),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["id"] == expected_new_id, (
+        "moved detection's id must be recomputed against the new photo_id"
+    )
+
+    # Prediction followed the rehash.
+    pred = db.conn.execute(
+        "SELECT species FROM predictions WHERE detection_id = ?",
+        (expected_new_id,),
+    ).fetchone()
+    assert pred is not None and pred["species"] == "Robin"
+
+
+def test_pairing_redirects_classifier_runs_so_cache_gate_still_hits(tmp_path):
+    """Regression for Codex P2 on PR #912: after pair-up rehashes a
+    detection's id, the classifier_runs row must follow.
+
+    `get_classifier_run_keys(detection_id)` is the gate that decides
+    whether classify_photos can serve cached predictions. If the run-key
+    row stays pointed at the old (companion) id, paired-then-rehashed
+    photos look unclassified to the gate and get re-classified
+    unnecessarily on every subsequent classify pass.
+    """
+    from db import Database
+    from detection_id import detection_id as compute_id
+    from scanner import _pair_raw_jpeg_companions
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, fid)
+    jpeg_id = db.add_photo(folder_id=fid, filename="IMG_1.jpg", extension=".jpg",
+                           file_size=1, file_mtime=1.0)
+    raw_id = db.add_photo(folder_id=fid, filename="IMG_1.cr3", extension=".cr3",
+                          file_size=1, file_mtime=1.0)
+
+    box = {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}
+    det_ids = db.write_detection_batch(jpeg_id, "MDV6", [
+        {"box": box, "confidence": 0.9, "category": "animal"},
+    ])
+    old_det_id = det_ids[0]
+    db.add_prediction(old_det_id, "Robin", 0.95, "bioclip")
+    # Record the classifier_run row that gates non-reclassify reruns.
+    db.conn.execute(
+        """INSERT INTO classifier_runs
+             (detection_id, classifier_model, labels_fingerprint, prediction_count)
+           VALUES (?, 'bioclip', 'fp-x', 1)""",
+        (old_det_id,),
+    )
+    db.conn.commit()
+
+    _pair_raw_jpeg_companions(db)
+
+    expected_new_id = compute_id(
+        raw_id, "MDV6", (box["x"], box["y"], box["w"], box["h"]), "animal",
+    )
+    # The classifier_runs row must now point at the rehashed detection id —
+    # otherwise the non-reclassify gate would treat the paired photo as
+    # unclassified and rerun the classifier needlessly.
+    keys = db.get_classifier_run_keys(expected_new_id)
+    assert ("bioclip", "fp-x") in keys, (
+        f"classifier_runs must follow rehash; new id keys: {keys}"
+    )
+    # And nothing left pointing at the stale old id (CASCADE cleanup).
+    stale = db.conn.execute(
+        "SELECT 1 FROM classifier_runs WHERE detection_id = ?", (old_det_id,),
+    ).fetchone()
+    assert stale is None, "stale classifier_runs row must not survive"
+
+
+def test_pairing_preserves_review_when_duplicate_prediction_collapses(tmp_path):
+    """When a companion prediction loses the duplicate collapse, its manual
+    review state must move to the surviving primary prediction.
+    """
+    from db import Database
+    from scanner import _pair_raw_jpeg_companions
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, fid)
+    jpeg_id = db.add_photo(folder_id=fid, filename="IMG_1.jpg", extension=".jpg",
+                           file_size=1, file_mtime=1.0)
+    raw_id = db.add_photo(folder_id=fid, filename="IMG_1.cr3", extension=".cr3",
+                          file_size=1, file_mtime=1.0)
+
+    box = {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}
+    jpeg_det = db.write_detection_batch(jpeg_id, "MDV6", [
+        {"box": box, "confidence": 0.9, "category": "animal"},
+    ])[0]
+    raw_det = db.write_detection_batch(raw_id, "MDV6", [
+        {"box": box, "confidence": 0.9, "category": "animal"},
+    ])[0]
+    db.add_prediction(jpeg_det, "Robin", 0.95, "bioclip", status="accepted")
+    db.add_prediction(raw_det, "Robin", 0.90, "bioclip")
+
+    _pair_raw_jpeg_companions(db)
+
+    row = db.conn.execute(
+        """SELECT pr_rev.status
+             FROM predictions pr
+             JOIN prediction_review pr_rev ON pr_rev.prediction_id = pr.id
+            WHERE pr.detection_id IN (
+                  SELECT id FROM detections WHERE photo_id = ?
+            )
+              AND pr.species = 'Robin'
+              AND pr.classifier_model = 'bioclip'
+              AND pr_rev.workspace_id = ?""",
+        (raw_id, ws),
+    ).fetchone()
+    assert row is not None
+    assert row["status"] == "accepted"
 
 
 def test_multiple_predictions_per_detection(tmp_path):
@@ -5298,6 +6164,53 @@ def test_relocate_folder_cascade(tmp_path):
     assert row["status"] == "ok"
 
 
+def test_nearest_ancestor_folder_id(tmp_path):
+    """nearest_ancestor_folder_id returns the longest proper-ancestor row."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    usa = db.add_folder("/vol/USA", name="USA")
+    usa_2026 = db.add_folder("/vol/USA/2026", name="2026", parent_id=usa)
+
+    # Longest ancestor wins over the shallower one.
+    assert db.nearest_ancestor_folder_id("/vol/USA/2026/2026-05-30") == usa_2026
+    # Falls back to the nearest existing ancestor when the immediate one has
+    # no row.
+    assert db.nearest_ancestor_folder_id("/vol/USA/gap/leaf") == usa
+    # No ancestor row -> None (folder is a root).
+    assert db.nearest_ancestor_folder_id("/elsewhere/x") is None
+    # A row is never its own ancestor.
+    assert db.nearest_ancestor_folder_id("/vol/USA", exclude_id=usa) is None
+
+
+def test_relocate_folder_relinks_parent_by_path(tmp_path):
+    """Relocating a folder re-derives parent_id from its new path so it does
+    not stay nested under its pre-move parent (browse-tree mis-nesting bug)."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    pics_2026 = db.add_folder("/pics/2026", name="2026")
+    usa = db.add_folder("/vol/USA", name="USA")
+    # A date folder that originally lived under /pics/2026.
+    date = db.add_folder("/pics/2026/2026-05-30", name="2026-05-30",
+                         parent_id=pics_2026)
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (date,))
+    db.conn.commit()
+
+    # User moved it onto the USA volume and re-points Vireo at the new path.
+    db.relocate_folder(date, "/vol/USA/2026-05-30")
+
+    row = db.conn.execute(
+        "SELECT parent_id FROM folders WHERE id = ?", (date,)
+    ).fetchone()
+    # Re-linked to its real new ancestor, not left pointing at /pics/2026.
+    assert row["parent_id"] == usa
+
+
 def test_relocate_folder_merge_into_existing(tmp_path):
     """relocate_folder merges photos into existing folder when paths conflict."""
     from db import Database
@@ -5616,6 +6529,37 @@ def test_relocate_folder_cascade_skips_descendants_of_conflict(tmp_path):
         assert row["status"] == "missing"
 
 
+def test_relocate_folder_cascade_skips_mixed_separator_descendants_of_conflict(tmp_path):
+    """Conflicted ancestors must be processed before mixed-separator descendants."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    parent = db.add_folder("C:/old/root", name="root")
+    child = db.add_folder("C:\\old\\root\\sub", name="sub", parent_id=parent)
+    grand = db.add_folder("C:/old/root/sub/grand", name="grand", parent_id=child)
+    db.conn.execute("UPDATE folders SET status = 'missing'")
+    db.conn.commit()
+
+    new_root = str(tmp_path / "new_root")
+    child_target = os.path.join(new_root, "sub")
+    grand_target = os.path.join(new_root, "sub", "grand")
+    os.makedirs(grand_target)
+    db.add_folder(child_target, name="conflict")
+
+    cascaded = db.relocate_folder(parent, new_root)
+    assert cascaded == []
+
+    for fid, expected_path in [
+        (child, "C:\\old\\root\\sub"),
+        (grand, "C:/old/root/sub/grand"),
+    ]:
+        row = db.conn.execute("SELECT path, status FROM folders WHERE id = ?", (fid,)).fetchone()
+        assert row["path"] == expected_path
+        assert row["status"] == "missing"
+
+
 def test_delete_folder(tmp_path):
     """delete_folder removes folder and its photos from the database."""
     from db import Database
@@ -5632,6 +6576,301 @@ def test_delete_folder(tmp_path):
 
     assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid,)).fetchone() is None
     assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid,)).fetchone() is None
+
+
+def test_delete_folder_with_descendants(tmp_path):
+    """delete_folder removes the whole subtree — folders.parent_id has no ON
+    DELETE action, so deleting a non-leaf folder row alone would trip the FK
+    after its photos were already deleted."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    parent = db.add_folder("/tree", name="tree")
+    child = db.add_folder("/tree/sub", name="sub", parent_id=parent)
+    grand = db.add_folder("/tree/sub/deep", name="deep", parent_id=child)
+    pids = [
+        db.add_photo(folder_id=fid, filename=f"bird{fid}.jpg", extension=".jpg",
+                     file_size=1000, file_mtime=1.0)
+        for fid in (parent, child, grand)
+    ]
+
+    result = db.delete_folder(parent)
+    assert result["deleted_photos"] == 3
+
+    for fid in (parent, child, grand):
+        assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid,)).fetchone() is None
+        assert db.conn.execute(
+            "SELECT folder_id FROM workspace_folders WHERE folder_id = ?", (fid,)
+        ).fetchone() is None
+    for pid in pids:
+        assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid,)).fetchone() is None
+
+
+def test_delete_folder_keeps_descendant_rooted_in_other_workspace(tmp_path):
+    """Deleting a folder in one workspace must not destroy a descendant that
+    another workspace imported as its own root (is_root = 1) — that subtree
+    is still reachable there. The kept head is reparented to NULL and only
+    unlinked from the deleting workspace."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_a = db.ensure_default_workspace()
+    db.set_active_workspace(ws_a)
+
+    parent = db.add_folder("/tree", name="tree")
+    child = db.add_folder("/tree/sub", name="sub", parent_id=parent,
+                          workspace_root=False)
+    grand = db.add_folder("/tree/sub/deep", name="deep", parent_id=child,
+                          workspace_root=False)
+    other = db.add_folder("/tree/other", name="other", parent_id=parent,
+                          workspace_root=False)
+
+    # Workspace B imports /tree/sub as its own root.
+    ws_b = db.create_workspace("B")
+    db.add_workspace_folder(ws_b, child, is_root=True)
+
+    pid_parent = db.add_photo(folder_id=parent, filename="p.jpg", extension=".jpg",
+                              file_size=1000, file_mtime=1.0)
+    pid_child = db.add_photo(folder_id=child, filename="c.jpg", extension=".jpg",
+                             file_size=1000, file_mtime=1.0)
+    pid_grand = db.add_photo(folder_id=grand, filename="g.jpg", extension=".jpg",
+                             file_size=1000, file_mtime=1.0)
+    pid_other = db.add_photo(folder_id=other, filename="o.jpg", extension=".jpg",
+                             file_size=1000, file_mtime=1.0)
+
+    # Prime A's new-images cache: the delete changes what A can see (kept
+    # subtree unlinked), so the cached count must be dropped.
+    db._new_images_cache.set(db._db_path, ws_a, {"new_count": 7})
+
+    result = db.delete_folder(parent)
+    # Only the photos outside B's root are deleted.
+    assert result["deleted_photos"] == 2
+
+    # A's cached new-images payload is invalidated by the delete.
+    assert db._new_images_cache.get(db._db_path, ws_a) is None
+
+    # Parent and the unshared sibling are gone, with their photos.
+    for fid in (parent, other):
+        assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid,)).fetchone() is None
+    for pid in (pid_parent, pid_other):
+        assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid,)).fetchone() is None
+
+    # B's subtree survives: folder rows, photos, and B's links.
+    row = db.conn.execute("SELECT parent_id FROM folders WHERE id = ?", (child,)).fetchone()
+    assert row is not None
+    assert row["parent_id"] is None  # reparented — old parent row is gone
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (grand,)).fetchone() is not None
+    for pid in (pid_child, pid_grand):
+        assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid,)).fetchone() is not None
+    assert db.conn.execute(
+        "SELECT is_root FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_b, child),
+    ).fetchone()["is_root"] == 1
+    assert db.conn.execute(
+        "SELECT folder_id FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_b, grand),
+    ).fetchone() is not None
+
+    # Workspace A no longer sees any of it.
+    assert db.conn.execute(
+        "SELECT folder_id FROM workspace_folders WHERE workspace_id = ?", (ws_a,)
+    ).fetchall() == []
+
+
+def test_delete_folder_keeps_target_rooted_in_other_workspace(tmp_path):
+    """Deleting a folder that another workspace imported as its own root
+    must not delete anything — the folder row, subtree, and photos survive;
+    only the deleting workspace's links are removed."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_a = db.ensure_default_workspace()
+    db.set_active_workspace(ws_a)
+
+    parent = db.add_folder("/tree", name="tree")
+    child = db.add_folder("/tree/sub", name="sub", parent_id=parent,
+                          workspace_root=False)
+
+    # Workspace B imports /tree itself as its own root.
+    ws_b = db.create_workspace("B")
+    db.add_workspace_folder(ws_b, parent, is_root=True)
+    db.add_workspace_folder(ws_b, child, is_root=False)
+
+    pid_parent = db.add_photo(folder_id=parent, filename="p.jpg", extension=".jpg",
+                              file_size=1000, file_mtime=1.0)
+    pid_child = db.add_photo(folder_id=child, filename="c.jpg", extension=".jpg",
+                             file_size=1000, file_mtime=1.0)
+
+    # Prime A's new-images cache: the unlink-only path must still drop it,
+    # since the folder no longer contributes to A's backlog.
+    db._new_images_cache.set(db._db_path, ws_a, {"new_count": 7})
+
+    result = db.delete_folder(parent)
+    assert result["deleted_photos"] == 0
+    assert result["files"] == []
+
+    # A's cached new-images payload is invalidated by the unlink.
+    assert db._new_images_cache.get(db._db_path, ws_a) is None
+
+    # Folder rows and photos all survive, parent chain intact.
+    row = db.conn.execute(
+        "SELECT parent_id FROM folders WHERE id = ?", (child,)
+    ).fetchone()
+    assert row is not None
+    assert row["parent_id"] == parent
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (parent,)).fetchone() is not None
+    for pid in (pid_parent, pid_child):
+        assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid,)).fetchone() is not None
+
+    # B's links survive, including the root flag.
+    assert db.conn.execute(
+        "SELECT is_root FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_b, parent),
+    ).fetchone()["is_root"] == 1
+    assert db.conn.execute(
+        "SELECT folder_id FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_b, child),
+    ).fetchone() is not None
+
+    # Workspace A no longer sees any of it.
+    assert db.conn.execute(
+        "SELECT folder_id FROM workspace_folders WHERE workspace_id = ?", (ws_a,)
+    ).fetchall() == []
+
+
+def test_delete_folder_keeps_target_covered_by_other_workspace_ancestor_root(tmp_path):
+    """Deleting a folder whose only foreign link is scanner-materialized
+    (is_root = 0) must not delete anything: that link means another
+    workspace reaches the folder through a root ancestor outside the
+    deleted subtree. Any foreign link protects — not just is_root = 1."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_a = db.ensure_default_workspace()
+    db.set_active_workspace(ws_a)
+
+    parent = db.add_folder("/photos", name="photos")
+    child = db.add_folder("/photos/2024", name="2024", parent_id=parent,
+                          workspace_root=False)
+
+    # Workspace B imports /photos as its root; the scanner materializes the
+    # descendant /photos/2024 as a non-root link.
+    ws_b = db.create_workspace("B")
+    db.add_workspace_folder(ws_b, parent, is_root=True)
+    db.add_workspace_folder(ws_b, child, is_root=False)
+
+    pid_child = db.add_photo(folder_id=child, filename="c.jpg", extension=".jpg",
+                             file_size=1000, file_mtime=1.0)
+
+    # Workspace A deletes /photos/2024 — B still sees it via its /photos root.
+    result = db.delete_folder(child)
+    assert result["deleted_photos"] == 0
+    assert result["files"] == []
+
+    # Folder row and photo survive, parent chain intact.
+    row = db.conn.execute(
+        "SELECT parent_id FROM folders WHERE id = ?", (child,)
+    ).fetchone()
+    assert row is not None
+    assert row["parent_id"] == parent
+    assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid_child,)).fetchone() is not None
+
+    # B's links survive.
+    assert db.conn.execute(
+        "SELECT is_root FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_b, parent),
+    ).fetchone()["is_root"] == 1
+    assert db.conn.execute(
+        "SELECT folder_id FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_b, child),
+    ).fetchone() is not None
+
+    # Workspace A no longer links the deleted subtree, but keeps /photos.
+    assert db.conn.execute(
+        "SELECT folder_id FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_a, child),
+    ).fetchone() is None
+    assert db.conn.execute(
+        "SELECT folder_id FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_a, parent),
+    ).fetchone() is not None
+
+
+def test_delete_folder_includes_path_only_descendants(tmp_path):
+    """Legacy databases can hold descendants whose parent_id is NULL even
+    though their path lives under the deleted folder. The deletion walk
+    must collect the subtree by path (like the workspace link/unlink
+    paths), not by parent_id, or those rows and their photos survive."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    parent = db.add_folder("/photos", name="photos")
+    # Legacy shape: path is under /photos but parent_id was never set.
+    child = db.add_folder("/photos/2024", name="2024")
+    assert db.conn.execute(
+        "SELECT parent_id FROM folders WHERE id = ?", (child,)
+    ).fetchone()["parent_id"] is None
+
+    pids = [
+        db.add_photo(folder_id=fid, filename=f"bird{fid}.jpg", extension=".jpg",
+                     file_size=1000, file_mtime=1.0)
+        for fid in (parent, child)
+    ]
+
+    result = db.delete_folder(parent)
+    assert result["deleted_photos"] == 2
+
+    for fid in (parent, child):
+        assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid,)).fetchone() is None
+        assert db.conn.execute(
+            "SELECT folder_id FROM workspace_folders WHERE folder_id = ?", (fid,)
+        ).fetchone() is None
+    for pid in pids:
+        assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid,)).fetchone() is None
+
+
+def test_delete_folder_keeps_path_only_descendant_linked_in_other_workspace(tmp_path):
+    """A path-only legacy descendant that another workspace links must be
+    preserved by the same foreign-link protection as parent_id-linked
+    descendants: its row and photos survive, only the deleting workspace's
+    links go."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_a = db.ensure_default_workspace()
+    db.set_active_workspace(ws_a)
+
+    parent = db.add_folder("/photos", name="photos")
+    # Legacy shape: under /photos by path, parent_id NULL.
+    child = db.add_folder("/photos/2024", name="2024", workspace_root=False)
+
+    ws_b = db.create_workspace("B")
+    db.add_workspace_folder(ws_b, child, is_root=True)
+
+    pid_parent = db.add_photo(folder_id=parent, filename="p.jpg", extension=".jpg",
+                              file_size=1000, file_mtime=1.0)
+    pid_child = db.add_photo(folder_id=child, filename="c.jpg", extension=".jpg",
+                             file_size=1000, file_mtime=1.0)
+
+    result = db.delete_folder(parent)
+    assert result["deleted_photos"] == 1
+
+    # /photos and its photo are gone.
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (parent,)).fetchone() is None
+    assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid_parent,)).fetchone() is None
+
+    # B's legacy-shaped subtree survives with its photo and link.
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (child,)).fetchone() is not None
+    assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid_child,)).fetchone() is not None
+    assert db.conn.execute(
+        "SELECT is_root FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+        (ws_b, child),
+    ).fetchone()["is_root"] == 1
+
+    # Workspace A no longer sees any of it.
+    assert db.conn.execute(
+        "SELECT folder_id FROM workspace_folders WHERE workspace_id = ?", (ws_a,)
+    ).fetchall() == []
 
 
 def test_missing_folder_photos_hidden_from_browse(tmp_path):
@@ -6029,8 +7268,1428 @@ def test_move_folder_path_cascade(db):
     child = db.conn.execute("SELECT path FROM folders WHERE id = ?", (cid,)).fetchone()
     grandchild = db.conn.execute("SELECT path FROM folders WHERE id = ?", (gcid,)).fetchone()
     assert parent["path"] == "/nas/photos/2024"
-    assert child["path"] == "/nas/photos/2024/march"
-    assert grandchild["path"] == "/nas/photos/2024/march/birds"
+    assert os.path.normpath(child["path"]) == os.path.normpath("/nas/photos/2024/march")
+    assert os.path.normpath(grandchild["path"]) == os.path.normpath("/nas/photos/2024/march/birds")
+
+
+def test_bulk_photo_id_apis_chunk_param_lists(tmp_path):
+    """Select-all on a large library produces id lists beyond
+    SQLITE_MAX_VARIABLE_NUMBER (32766 on modern builds) — every bulk-id
+    API must chunk or stage rather than inline one placeholder per id."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                       file_size=100, file_mtime=1.0)
+
+    huge = [pid] + list(range(10_000_000, 10_033_000))  # > 32766 ids
+
+    db.batch_update_photo_rating(huge, 4, verify_workspace=False)
+    db.batch_update_photo_flag(huge, "flagged", verify_workspace=False)
+    # The set path inserts per-id (no IN clause); only the lookup and
+    # removal paths take id lists into one statement.
+    db.batch_set_color_label([pid], "red")
+    labels = db.get_color_labels_for_photos(huge)
+    db.batch_set_color_label(huge, None)
+
+    photo = db.get_photo(pid)
+    assert photo["rating"] == 4
+    assert photo["flag"] == "flagged"
+    assert labels == {pid: "red"}
+    assert db.get_color_labels_for_photos([pid]) == {}  # removal applied
+
+    # Scope-clause consumers and the reclassify purge must not raise either.
+    counts = db.count_real_detections_in_scope(photo_ids=huge, min_conf=0.2)
+    assert counts is not None
+    db.clear_predictions(model="some-model", collection_photo_ids=huge)
+
+    # Downstream lookups invoked by export/pipeline jobs after the outer
+    # query/scope chunks must also chunk — the export job feeds the entire
+    # filtered id list into get_photos_by_ids + get_species_keywords_for_photos,
+    # and pipeline.load_photo_features feeds the entire scoped id list into
+    # get_detections_for_photos twice.
+    photos_map = db.get_photos_by_ids(huge)
+    assert pid in photos_map  # the one real row survives the chunked select
+    species_map = db.get_species_keywords_for_photos(huge)
+    assert species_map == {}  # no keywords attached, but no OperationalError
+    det_map = db.get_detections_for_photos(huge, min_conf=0)
+    assert det_map == {}
+
+
+def test_move_folder_path_does_not_touch_wildcard_siblings(db):
+    """LIKE treats _ and % as wildcards — moving /pics/my_dir must not
+    rewrite the unrelated sibling /pics/myXdir's children."""
+    fid = db.add_folder("/pics/my_dir", name="my_dir")
+    sib = db.add_folder("/pics/myXdir", name="myXdir")
+    sib_child = db.add_folder("/pics/myXdir/sub", name="sub", parent_id=sib)
+
+    db.move_folder_path(fid, "/dest/dir")
+
+    moved = db.conn.execute("SELECT path FROM folders WHERE id = ?", (fid,)).fetchone()
+    sibling = db.conn.execute("SELECT path FROM folders WHERE id = ?", (sib,)).fetchone()
+    sibling_child = db.conn.execute("SELECT path FROM folders WHERE id = ?", (sib_child,)).fetchone()
+    assert moved["path"] == "/dest/dir"
+    assert sibling["path"] == "/pics/myXdir"
+    assert sibling_child["path"] == "/pics/myXdir/sub"
+
+
+def test_move_folder_path_is_case_sensitive(db):
+    """Path cascades must not use SQLite LIKE's ASCII case folding."""
+    fid = db.add_folder("/Photos/2024", name="2024")
+    child = db.add_folder("/Photos/2024/trip", name="trip", parent_id=fid)
+    sib = db.add_folder("/photos/2024", name="lower-2024")
+    sib_child = db.add_folder("/photos/2024/sibling", name="sibling", parent_id=sib)
+
+    db.move_folder_path(fid, "/Archive/2024")
+
+    moved = db.conn.execute("SELECT path FROM folders WHERE id = ?", (fid,)).fetchone()
+    moved_child = db.conn.execute("SELECT path FROM folders WHERE id = ?", (child,)).fetchone()
+    sibling = db.conn.execute("SELECT path FROM folders WHERE id = ?", (sib,)).fetchone()
+    sibling_child = db.conn.execute("SELECT path FROM folders WHERE id = ?", (sib_child,)).fetchone()
+    assert moved["path"] == "/Archive/2024"
+    assert os.path.normpath(moved_child["path"]) == os.path.normpath("/Archive/2024/trip")
+    assert sibling["path"] == "/photos/2024"
+    assert sibling_child["path"] == "/photos/2024/sibling"
+
+
+def test_merge_staged_tree_new_subfolders(db):
+    """Staged tree merged under an existing tracked base: new date folders
+    are repointed under the base, parent_id fixed, workspace linked, and the
+    base's existing photos are untouched."""
+    ws = db._active_workspace_id
+
+    # Existing tracked archive base with one prior shoot, linked as a root.
+    base_id = db.add_folder("/arch/USA", name="USA")
+    old_id = db.add_folder("/arch/USA/2025/2025-01-01", name="2025-01-01",
+                           parent_id=base_id)
+    db.add_photo(folder_id=old_id, filename="old.raf", extension=".raf",
+                 file_size=100, file_mtime=1.0)
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    # Staged tree (post-rsync the files already live at /arch/USA/...). Created
+    # with workspace_root=False so the staged rows are NOT pre-linked as roots.
+    # The intermediate year folder is a real catalog row (a scan would create
+    # it) so the reparenting chain is exercised end to end.
+    stage_root = db.add_folder("/stage/USA", name="USA", workspace_root=False)
+    stage_year = db.add_folder("/stage/USA/2026", name="2026",
+                               parent_id=stage_root, workspace_root=False)
+    stage_leaf = db.add_folder("/stage/USA/2026/2026-06-30", name="2026-06-30",
+                               parent_id=stage_year, workspace_root=False)
+    db.add_photo(folder_id=stage_leaf, filename="new.raf", extension=".raf",
+                 file_size=200, file_mtime=2.0)
+
+    db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
+
+    # New leaf now lives under the base, parented to its (new) target parent.
+    leaf = db.conn.execute(
+        "SELECT id, parent_id FROM folders WHERE path = ?",
+        ("/arch/USA/2026/2026-06-30",),
+    ).fetchone()
+    assert leaf is not None
+    year = db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", ("/arch/USA/2026",),
+    ).fetchone()
+    assert year is not None
+    assert leaf["parent_id"] == year["id"]
+
+    # The staged root and leaf rows are gone (folded into the existing base).
+    assert db.conn.execute(
+        "SELECT 1 FROM folders WHERE path = ?", ("/stage/USA",)
+    ).fetchone() is None
+    assert db.conn.execute(
+        "SELECT 1 FROM folders WHERE path LIKE '/stage/%'"
+    ).fetchone() is None
+
+    # The new photo moved with the folder; the old photo is untouched.
+    assert db.conn.execute(
+        "SELECT folder_id FROM photos WHERE filename = ?", ("new.raf",)
+    ).fetchone()["folder_id"] == leaf["id"]
+    assert db.conn.execute(
+        "SELECT folder_id FROM photos WHERE filename = ?", ("old.raf",)
+    ).fetchone()["folder_id"] == old_id
+
+    # New leaf is linked to the workspace as a non-root (base is the root).
+    row = db.conn.execute(
+        "SELECT is_root FROM workspace_folders WHERE workspace_id=? AND folder_id=?",
+        (ws, leaf["id"]),
+    ).fetchone()
+    assert row is not None and row["is_root"] == 0
+
+
+def test_merge_staged_tree_downgrades_staged_root_leaf(db):
+    """Regression: a staged photo-bearing leaf that the scanner registered as
+    its OWN workspace root (workspace_folders.is_root=1) must be demoted to a
+    plain descendant when it is folded under the existing archive base.
+
+    This reproduces the real trigger: the staging scan restricts to the leaf
+    dir, so add_folder links it as a root. add_workspace_folder's INSERT OR
+    IGNORE cannot downgrade that pre-existing is_root=1 row, so the merge must
+    UPDATE it to 0 explicitly — otherwise a stray second workspace root is left
+    inside the archive. The prior new-subfolders test seeds the staged rows with
+    workspace_root=False, so it would pass even with the fix removed; this one
+    genuinely exercises the downgrade."""
+    ws = db._active_workspace_id
+
+    # Existing tracked archive base, linked as the workspace root.
+    base_id = db.add_folder("/arch/USA", name="USA")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    # Staged tree post-rsync. The leaf is registered as its OWN root, exactly as
+    # the staging scanner does (restrict_dirs => is_root=1 on the scanned leaf).
+    stage_root = db.add_folder("/stage/USA", name="USA", workspace_root=False)
+    stage_year = db.add_folder("/stage/USA/2026", name="2026",
+                               parent_id=stage_root, workspace_root=False)
+    stage_leaf = db.add_folder("/stage/USA/2026/2026-06-30", name="2026-06-30",
+                               parent_id=stage_year, workspace_root=True)
+    db.add_photo(folder_id=stage_leaf, filename="new.raf", extension=".raf",
+                 file_size=200, file_mtime=2.0)
+
+    # Precondition: the staged leaf really IS a workspace root before the merge,
+    # so this test genuinely exercises the downgrade path.
+    pre = db.conn.execute(
+        "SELECT is_root FROM workspace_folders WHERE workspace_id=? AND folder_id=?",
+        (ws, stage_leaf),
+    ).fetchone()
+    assert pre is not None and pre["is_root"] == 1
+
+    db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
+
+    # The folded leaf now lives under the archive as a NON-root descendant.
+    leaf = db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?",
+        ("/arch/USA/2026/2026-06-30",),
+    ).fetchone()
+    assert leaf is not None
+    leaf_link = db.conn.execute(
+        "SELECT is_root FROM workspace_folders WHERE workspace_id=? AND folder_id=?",
+        (ws, leaf["id"]),
+    ).fetchone()
+    assert leaf_link is not None and leaf_link["is_root"] == 0
+
+    # The archive base is the single remaining workspace root.
+    roots = db.conn.execute(
+        "SELECT folder_id FROM workspace_folders "
+        "WHERE workspace_id=? AND is_root=1",
+        (ws,),
+    ).fetchall()
+    assert [r["folder_id"] for r in roots] == [base_id]
+
+
+def test_merge_staged_tree_existing_folder_and_collision(db, tmp_path):
+    """Staged folder folds into a pre-existing target date-folder: a
+    same-filename staged photo (even one carrying keyword links) whose archived
+    file REALLY exists on disk is dropped as already-archived, a genuinely-new
+    one is reparented, and the counts use the settled photo-count names.
+    Regression guard for the photo_keywords FK that has no ON DELETE CASCADE —
+    deleting the collided photo without first clearing its keyword rows would
+    raise FOREIGN KEY constraint failed."""
+    ws = db._active_workspace_id
+
+    # Real on-disk archive so the collision drop's "archived file exists" check
+    # sees the byte-identical file rsync --ignore-existing preserved. Both the
+    # staged and archived rows carry the SAME file_hash — a real collision (as
+    # opposed to a phantom-row replacement) only reaches the merge when the
+    # bytes on both sides are identical, because the upstream content-conflict
+    # check would abort the whole move otherwise.
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026" / "2026-06-30"
+    date_dir.mkdir(parents=True)
+    (date_dir / "dup.raf").write_bytes(b"archived-dup")
+    (date_dir / "keep.raf").write_bytes(b"archived-keep")
+
+    base_id = db.add_folder(str(arch), name="USA")
+    year_id = db.add_folder(str(arch / "2026"), name="2026", parent_id=base_id)
+    date_id = db.add_folder(str(date_dir), name="2026-06-30", parent_id=year_id)
+    db.add_photo(folder_id=date_id, filename="dup.raf", extension=".raf",
+                 file_size=12, file_mtime=1.0, file_hash="DUPHASH")
+    db.add_photo(folder_id=date_id, filename="keep.raf", extension=".raf",
+                 file_size=13, file_mtime=1.0, file_hash="KEEPHASH")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    # Staged tree post-rsync. The intermediate year folder is a real row so the
+    # reparent chain is exercised; the leaf already exists at the target.
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_year = db.add_folder(str(stage / "2026"), name="2026",
+                               parent_id=stage_root, workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026" / "2026-06-30"),
+                               name="2026-06-30",
+                               parent_id=stage_year, workspace_root=False)
+    dup_pid = db.add_photo(folder_id=stage_leaf, filename="dup.raf",
+                           extension=".raf", file_size=12, file_mtime=2.0,
+                           file_hash="DUPHASH")
+    db.add_photo(folder_id=stage_leaf, filename="fresh.raf", extension=".raf",
+                 file_size=200, file_mtime=2.0, file_hash="FRESHHASH")
+
+    # Attach a keyword to the COLLIDED staged photo so the delete must clear
+    # photo_keywords first; without the fix this raises a FK error.
+    kw = db.add_keyword("Osprey")
+    db.tag_photo(dup_pid, kw)
+
+    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    # No duplicate dup.raf row; fresh.raf reparented into the existing folder.
+    names = {r["filename"] for r in db.conn.execute(
+        "SELECT filename FROM photos WHERE folder_id = ?", (date_id,))}
+    assert names == {"dup.raf", "keep.raf", "fresh.raf"}
+    assert db.conn.execute(
+        "SELECT COUNT(*) c FROM photos WHERE filename='dup.raf'"
+    ).fetchone()["c"] == 1
+    # The dropped staged photo's keyword links are gone too.
+    assert db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ?", (dup_pid,)
+    ).fetchone() is None
+
+    # Settled count names with correct values: 1 new photo (fresh.raf), no new
+    # folders (every staged folder mapped to an existing target — root, year,
+    # and leaf all pre-exist under the archive), 3 merged folders, 1 dropped.
+    assert counts["new_photos"] == 1
+    assert counts["new_folders"] == 0
+    assert counts["merged_folders"] == 3
+    assert counts["already_present"] == 1
+
+    # All staged rows folded away.
+    assert db.conn.execute(
+        "SELECT 1 FROM folders WHERE path LIKE ?", (str(stage) + "%",)
+    ).fetchone() is None
+
+
+def test_merge_staged_tree_links_archive_to_active_workspace(db):
+    """Regression: when the pre-existing archive base is linked only to a
+    DIFFERENT workspace, merging staged photos into it must link the base
+    (and its subtree) to the active workspace too. Workspace-scoped photo
+    queries join ``workspace_folders`` on ``p.folder_id``; without the link,
+    the else-branch UPDATE moves photos onto a ``target["id"]`` that has no
+    ``workspace_folders`` row for the active ws, and every merged-in photo
+    silently vanishes from ws-scoped views even though the import reports
+    success. Reproduces via two workspaces: the archive lives under ``other``
+    only, and ``active`` runs the merge."""
+    # Archive lives under the default workspace; ``active`` never scans it.
+    other_ws = db._active_workspace_id
+    base_id = db.add_folder("/arch/USA", name="USA")
+    date_id = db.add_folder("/arch/USA/2025-06-30", name="2025-06-30",
+                            parent_id=base_id, workspace_root=False)
+    db.add_photo(folder_id=date_id, filename="prior.raf", extension=".raf",
+                 file_size=100, file_mtime=1.0)
+
+    # Switch to a fresh workspace — the one running the pipeline.
+    active_ws = db.create_workspace("Active")
+    db.set_active_workspace(active_ws)
+
+    # Precondition: the active ws cannot see the archive yet.
+    assert db.conn.execute(
+        "SELECT 1 FROM workspace_folders "
+        "WHERE workspace_id=? AND folder_id=?",
+        (active_ws, base_id),
+    ).fetchone() is None
+
+    # Staged tree post-rsync; a real scan restrict_dirs registers the leaf
+    # as its own root, but the base_id-invisible visibility bug reproduces
+    # regardless of that flag, so keep the setup minimal.
+    stage_root = db.add_folder("/stage/USA", name="USA", workspace_root=False)
+    stage_leaf = db.add_folder("/stage/USA/2025-06-30", name="2025-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    new_pid = db.add_photo(folder_id=stage_leaf, filename="new.raf",
+                           extension=".raf", file_size=200, file_mtime=2.0)
+
+    db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
+
+    # Archive base is now the active workspace's root; the subtree pull in
+    # add_workspace_folder linked the existing date folder along with it.
+    base_link = db.conn.execute(
+        "SELECT is_root FROM workspace_folders "
+        "WHERE workspace_id=? AND folder_id=?",
+        (active_ws, base_id),
+    ).fetchone()
+    assert base_link is not None and base_link["is_root"] == 1
+    assert db.conn.execute(
+        "SELECT 1 FROM workspace_folders "
+        "WHERE workspace_id=? AND folder_id=?",
+        (active_ws, date_id),
+    ).fetchone() is not None
+
+    # The other workspace's link on the archive base is preserved — the
+    # is_root UPDATE in add_workspace_folder is scoped by workspace_id.
+    other_link = db.conn.execute(
+        "SELECT is_root FROM workspace_folders "
+        "WHERE workspace_id=? AND folder_id=?",
+        (other_ws, base_id),
+    ).fetchone()
+    assert other_link is not None and other_link["is_root"] == 1
+
+    # The merged-in photo landed on the existing date folder and is now
+    # visible via the exact workspace_folders join every scoped query uses.
+    row = db.conn.execute(
+        """SELECT p.filename FROM photos p
+           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+           WHERE p.id = ? AND wf.workspace_id = ?""",
+        (new_pid, active_ws),
+    ).fetchone()
+    assert row is not None and row["filename"] == "new.raf"
+
+
+def test_merge_staged_tree_new_descendant_roots_tracked_ancestor_for_active_ws(
+        db):
+    """Regression: when the archive destination is a BRAND-NEW subfolder
+    inside a tracked archive that belongs only to a DIFFERENT workspace,
+    the merge used to skip the ``if archive_row:`` linking block (the new
+    subfolder has no folder row yet), then the reconciliation loop
+    reparented the staged root onto the new archive path and explicitly
+    demoted it to ``is_root=0``. The active workspace was left with NO
+    ``is_root=1`` row covering the merged tree, and
+    ``get_workspace_folder_roots()`` (which filters on ``is_root=1``)
+    returned nothing — the newly-archived photos silently disappeared from
+    the active workspace even though the import reported success.
+
+    The fix roots the deepest tracked ancestor in the active workspace
+    when no root ancestor is present, so the merged tree has a visible
+    anchor."""
+    # Archive tracked only under the default ws.
+    other_ws = db._active_workspace_id
+    tracked_id = db.add_folder("/arch", name="arch")
+    db.add_workspace_folder(other_ws, tracked_id, is_root=True)
+
+    # Switch to a fresh workspace with NO link to /arch and NO root
+    # ancestor above it.
+    active_ws = db.create_workspace("Active")
+    db.set_active_workspace(active_ws)
+    assert db.conn.execute(
+        "SELECT 1 FROM workspace_folders "
+        "WHERE workspace_id=? AND folder_id=?",
+        (active_ws, tracked_id),
+    ).fetchone() is None
+
+    # Staged tree destined for a NEW subfolder inside /arch — no folder row
+    # for /arch/NewShoot exists yet.
+    stage_root = db.add_folder("/stage/NewShoot", name="NewShoot",
+                               workspace_root=False)
+    stage_leaf = db.add_folder("/stage/NewShoot/2026-06-30", name="2026-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    new_pid = db.add_photo(folder_id=stage_leaf, filename="new.raf",
+                           extension=".raf", file_size=200, file_mtime=2.0)
+
+    db.merge_staged_tree_into_archive(stage_root, "/arch/NewShoot")
+
+    # The tracked ancestor /arch is now a root of the active workspace, so
+    # get_workspace_folder_roots() has an anchor for the merged tree.
+    ancestor_link = db.conn.execute(
+        "SELECT is_root FROM workspace_folders "
+        "WHERE workspace_id=? AND folder_id=?",
+        (active_ws, tracked_id),
+    ).fetchone()
+    assert ancestor_link is not None and ancestor_link["is_root"] == 1
+
+    # The merged photo is visible via the workspace_folders join every
+    # ws-scoped query uses.
+    row = db.conn.execute(
+        """SELECT p.filename FROM photos p
+           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+           WHERE p.id = ? AND wf.workspace_id = ?""",
+        (new_pid, active_ws),
+    ).fetchone()
+    assert row is not None and row["filename"] == "new.raf"
+
+    # The other workspace's root on /arch is preserved (is_root scoping in
+    # add_workspace_folder is per-workspace).
+    other_link = db.conn.execute(
+        "SELECT is_root FROM workspace_folders "
+        "WHERE workspace_id=? AND folder_id=?",
+        (other_ws, tracked_id),
+    ).fetchone()
+    assert other_link is not None and other_link["is_root"] == 1
+
+
+def test_merge_staged_tree_ancestor_base_stays_non_root(db):
+    """Regression: when the active workspace already has a managed root ANCESTOR
+    of the archive base (import into an existing subfolder — root ``/Photos``,
+    base ``/Photos/USA``), the merge must LINK the base to the workspace but NOT
+    root it. Rooting it would leave ``/Photos`` and ``/Photos/USA`` as two
+    overlapping workspace roots. When there is no root ancestor the base IS the
+    root (covered by the other merge tests)."""
+    ws = db._active_workspace_id
+
+    # Existing workspace root ancestor.
+    root_id = db.add_folder("/Photos", name="Photos")
+    base_id = db.add_folder("/Photos/USA", name="USA", parent_id=root_id)
+    db.add_workspace_folder(ws, root_id, is_root=True)
+
+    # Staged tree lands at a genuinely-new date subfolder inside the base.
+    stage_root = db.add_folder("/stage/USA", name="USA", workspace_root=False)
+    stage_leaf = db.add_folder("/stage/USA/2026-06-30", name="2026-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    db.add_photo(folder_id=stage_leaf, filename="new.raf", extension=".raf",
+                 file_size=200, file_mtime=2.0)
+
+    db.merge_staged_tree_into_archive(stage_root, "/Photos/USA")
+
+    # The base is linked to the workspace but as a NON-root.
+    base_link = db.conn.execute(
+        "SELECT is_root FROM workspace_folders "
+        "WHERE workspace_id=? AND folder_id=?", (ws, base_id),
+    ).fetchone()
+    assert base_link is not None and base_link["is_root"] == 0
+
+    # /Photos remains the SOLE workspace root — no duplicate overlapping root.
+    roots = [r["folder_id"] for r in db.conn.execute(
+        "SELECT folder_id FROM workspace_folders "
+        "WHERE workspace_id=? AND is_root=1", (ws,))]
+    assert roots == [root_id]
+
+
+def test_merge_staged_tree_materializes_missing_intermediate_parent(db):
+    """Regression: when the archive destination is nested inside a tracked
+    root but an intermediate archive folder has never been scanned (e.g.
+    ``/Photos`` tracked and the user imports to ``/Photos/2026/NewShoot``),
+    the storage preflight creates ``/Photos/2026`` on disk via rsync's
+    parent-dir setup but never opens a folder row for it. Without the fix
+    the reconciliation repoints the staged root to ``/Photos/2026/NewShoot``
+    with ``parent_id=NULL`` — floating it outside the managed archive tree
+    and breaking every parent-based subtree operation (cascade path
+    renames, ``_folder_subtree_ids_by_path``, tree UI). The merge must
+    materialize the missing intermediate rows top-down so the staged
+    root's ``parent_id`` resolves to the freshly-created ``/Photos/2026``
+    row, and each intermediate must be linked to the active workspace as
+    a non-root (they sit under the existing tracked root).
+    """
+    ws = db._active_workspace_id
+
+    # Existing tracked archive root — a single folder row, no descendants
+    # under it in the catalog. The intermediate ``/Photos/2026`` was
+    # never scanned.
+    root_id = db.add_folder("/Photos", name="Photos")
+    db.add_workspace_folder(ws, root_id, is_root=True)
+
+    # Staged tree that will land at /Photos/2026/NewShoot after rsync.
+    stage_root = db.add_folder("/stage/NewShoot", name="NewShoot",
+                               workspace_root=False)
+    stage_leaf = db.add_folder("/stage/NewShoot/2026-06-30",
+                               name="2026-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    db.add_photo(folder_id=stage_leaf, filename="new.raf", extension=".raf",
+                 file_size=100, file_mtime=1.0)
+
+    db.merge_staged_tree_into_archive(stage_root, "/Photos/2026/NewShoot")
+
+    # The intermediate archive folder now has a real folder row parented
+    # under the tracked root — not floating with parent_id=NULL.
+    mid = db.conn.execute(
+        "SELECT id, parent_id FROM folders WHERE path = ?",
+        ("/Photos/2026",),
+    ).fetchone()
+    assert mid is not None, (
+        "missing intermediate /Photos/2026 should be materialized so the "
+        "reparented staged root has a real parent row to point at"
+    )
+    assert mid["parent_id"] == root_id
+
+    # The staged root, now repointed to the archive destination, is
+    # correctly parented under the freshly-created intermediate.
+    dest = db.conn.execute(
+        "SELECT parent_id FROM folders WHERE path = ?",
+        ("/Photos/2026/NewShoot",),
+    ).fetchone()
+    assert dest is not None
+    assert dest["parent_id"] == mid["id"]
+
+    # /Photos remains the SOLE workspace root — no duplicate overlapping
+    # root created by the materialized intermediates or the reparented
+    # staged root.
+    roots = [r["folder_id"] for r in db.conn.execute(
+        "SELECT folder_id FROM workspace_folders "
+        "WHERE workspace_id=? AND is_root=1", (ws,))]
+    assert roots == [root_id]
+
+    # The intermediate is linked to the active workspace as a non-root so
+    # workspace-scoped queries over the tree include it.
+    mid_link = db.conn.execute(
+        "SELECT is_root FROM workspace_folders "
+        "WHERE workspace_id=? AND folder_id=?", (ws, mid["id"]),
+    ).fetchone()
+    assert mid_link is not None and mid_link["is_root"] == 0
+
+
+def test_merge_staged_tree_intermediate_insert_survives_race(db):
+    """Regression: two concurrent local-processing jobs targeting siblings
+    inside the same tracked archive (e.g. ``/Photos/2026/A`` and
+    ``/Photos/2026/B`` while only ``/Photos`` is tracked) can both snapshot
+    the shared intermediate ``/Photos/2026`` as missing during walk-up, then
+    race to insert it. The archive-destination reservation lets them run
+    because the leaf paths don't overlap. Without ``INSERT OR IGNORE`` +
+    requery, the loser would raise ``IntegrityError`` on the intermediate's
+    ``folders.path`` UNIQUE constraint AFTER all staging/processing work is
+    already done, stranding the merge. The reconciliation must instead fall
+    back to the winner's row and finish parenting the staged tree under it.
+    """
+    ws = db._active_workspace_id
+
+    # Tracked archive root; the shared intermediate /Photos/2026 has never
+    # been scanned (no folder row for it yet).
+    root_id = db.add_folder("/Photos", name="Photos")
+    db.add_workspace_folder(ws, root_id, is_root=True)
+
+    # Staged tree that will land at /Photos/2026/A after rsync.
+    stage_root = db.add_folder("/stage/A", name="A", workspace_root=False)
+    db.add_photo(folder_id=stage_root, filename="a.raf", extension=".raf",
+                 file_size=100, file_mtime=1.0)
+
+    # Simulate the race: the walk-up probe above has already snapshotted
+    # /Photos/2026 as missing; here we sneak in a competing insert JUST
+    # before the reconciliation's own INSERT fires, standing in for the
+    # winning concurrent job's commit. Without INSERT OR IGNORE the loser's
+    # plain INSERT would raise here. Wrap the connection (sqlite3.Connection
+    # is C-implemented and doesn't allow assigning to .execute directly).
+    real_conn = db.conn
+
+    class _RacingConn:
+        race_inserted = False
+
+        def execute(self_wrap, sql, params=()):
+            if (not _RacingConn.race_inserted
+                    and isinstance(sql, str)
+                    and sql.startswith("INSERT OR IGNORE INTO folders")):
+                real_conn.execute(
+                    "INSERT INTO folders (path, name, parent_id) "
+                    "VALUES (?, ?, ?)",
+                    ("/Photos/2026", "2026", root_id),
+                )
+                _RacingConn.race_inserted = True
+            return real_conn.execute(sql, params)
+
+        def __getattr__(self_wrap, name):
+            return getattr(real_conn, name)
+
+    db.conn = _RacingConn()
+    try:
+        db.merge_staged_tree_into_archive(stage_root, "/Photos/2026/A")
+    finally:
+        db.conn = real_conn
+
+    # The race was actually triggered (guards against a future refactor that
+    # renames the INSERT and silently no-ops this simulation).
+    assert _RacingConn.race_inserted, (
+        "expected the reconciliation to run INSERT OR IGNORE for the missing "
+        "intermediate row — the simulation didn't fire, so the race is no "
+        "longer exercised"
+    )
+
+    # Exactly one /Photos/2026 row survives (the winner's), and the staged
+    # tree ended up parented under it — no duplicates, no NULL parent, no
+    # UNIQUE-constraint crash.
+    mid_rows = db.conn.execute(
+        "SELECT id, parent_id FROM folders WHERE path = ?",
+        ("/Photos/2026",),
+    ).fetchall()
+    assert len(mid_rows) == 1
+    mid_id = mid_rows[0]["id"]
+    assert mid_rows[0]["parent_id"] == root_id
+    dest = db.conn.execute(
+        "SELECT parent_id FROM folders WHERE path = ?",
+        ("/Photos/2026/A",),
+    ).fetchone()
+    assert dest is not None and dest["parent_id"] == mid_id
+
+
+def test_merge_staged_tree_missing_target_file_keeps_new_photo(db, tmp_path):
+    """Defensive: a filename collision against a STALE target row whose file is
+    missing on disk must NOT drop the staged photo as ``already_present``. The
+    upstream content-conflict check couldn't fire (no dest file), so rsync
+    copied the new staged bytes; dropping the staged row would leave those bytes
+    represented by the phantom row's hash/metadata and lose the new photo.
+    Instead the phantom row is removed and the staged photo reparented in its
+    place, so the surviving row describes the real on-disk file."""
+    ws = db._active_workspace_id
+
+    # Real on-disk archive, but the archived file is ABSENT (stale catalog row).
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-06-30"
+    date_dir.mkdir(parents=True)
+    # NOTE: no missing.raf written to date_dir — the row is stale.
+
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-06-30", parent_id=base_id)
+    stale_pid = db.add_photo(folder_id=date_id, filename="missing.raf",
+                             extension=".raf", file_size=100, file_mtime=1.0,
+                             file_hash="STALEHASH")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    # Staged photo shares the basename but is the freshly-copied real file.
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-06-30"), name="2026-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    new_pid = db.add_photo(folder_id=stage_leaf, filename="missing.raf",
+                           extension=".raf", file_size=200, file_mtime=2.0,
+                           file_hash="NEWHASH")
+
+    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    # The staged photo survived and now lives on the archive date folder — it
+    # was NOT dropped as already_present.
+    assert counts["already_present"] == 0
+    assert counts["new_photos"] == 1
+    surviving = db.conn.execute(
+        "SELECT id, folder_id, file_hash FROM photos WHERE filename='missing.raf'"
+    ).fetchall()
+    assert len(surviving) == 1
+    assert surviving[0]["id"] == new_pid
+    assert surviving[0]["folder_id"] == date_id
+    assert surviving[0]["file_hash"] == "NEWHASH"
+    # The stale phantom row is gone (replaced by the real bytes' row).
+    assert db.conn.execute(
+        "SELECT 1 FROM photos WHERE id = ?", (stale_pid,)
+    ).fetchone() is None
+
+
+def test_merge_staged_tree_phantom_row_replaces_when_file_on_disk_after_rsync(
+    db, tmp_path,
+):
+    """Regression for the exact production ordering: ``move_folder`` runs
+    rsync ``--ignore-existing`` FIRST, then calls
+    ``merge_staged_tree_into_archive``. If the target row was a phantom
+    (its file missing before rsync), rsync creates the file at the target
+    path from the staged bytes — so by the time the merge's collision
+    check runs, ``os.path.exists`` returns True in the phantom case too
+    and can't tell it apart from a real byte-identical collision. Left
+    unfixed, the staged photo would be dropped as ``already_present`` and
+    the freshly-copied bytes would be represented by the phantom row's
+    stale hash/metadata — the newly-imported photo silently disappears
+    behind the stale row.
+
+    Distinguish real collision from phantom by the target row's
+    bytes-identity (``file_hash``) instead of raw file existence.
+    """
+    ws = db._active_workspace_id
+
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-06-30"
+    date_dir.mkdir(parents=True)
+    # The archived file IS on disk — but only because rsync just copied it
+    # in from staging over an empty slot. Its bytes are the STAGED bytes;
+    # the target catalog row was a phantom that had lost track of the
+    # deleted original.
+    (date_dir / "collide.raf").write_bytes(b"fresh-staged-bytes")
+
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-06-30",
+                            parent_id=base_id)
+    phantom_pid = db.add_photo(folder_id=date_id, filename="collide.raf",
+                               extension=".raf", file_size=100,
+                               file_mtime=1.0, file_hash="STALEHASH")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-06-30"), name="2026-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    new_pid = db.add_photo(folder_id=stage_leaf, filename="collide.raf",
+                           extension=".raf", file_size=200, file_mtime=2.0,
+                           file_hash="NEWHASH")
+
+    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    # The freshly-copied bytes are represented by the STAGED row (which
+    # accurately describes them), not the stale phantom row.
+    assert counts["already_present"] == 0
+    assert counts["new_photos"] == 1
+    surviving = db.conn.execute(
+        "SELECT id, folder_id, file_hash FROM photos "
+        "WHERE filename='collide.raf'"
+    ).fetchall()
+    assert len(surviving) == 1
+    assert surviving[0]["id"] == new_pid
+    assert surviving[0]["folder_id"] == date_id
+    assert surviving[0]["file_hash"] == "NEWHASH"
+    # The phantom row is gone; its cache files are reported for cleanup.
+    assert db.conn.execute(
+        "SELECT 1 FROM photos WHERE id = ?", (phantom_pid,)
+    ).fetchone() is None
+    assert phantom_pid in counts["dropped_photo_ids"]
+
+
+def test_merge_staged_tree_defaults_to_phantom_when_hashes_missing(
+    db, tmp_path,
+):
+    """When either row's ``file_hash`` is unset (older catalog rows, or a
+    scan that failed to hash), the collision guard has no safe post-copy
+    signal — ``file_size`` alone can coincidentally match a phantom row's
+    stored size (empty XMP sidecars, small metadata files), and rehashing
+    the on-disk file always matches the staged hash in the phantom case
+    (rsync wrote the staged bytes). Default to phantom-replacement so the
+    freshly-imported pipeline output survives; the alternative (silently
+    dropping the new photo behind a same-size stale row) is the worse
+    failure mode. Regression for the Codex finding at db.py:3221."""
+    ws = db._active_workspace_id
+
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-06-30"
+    date_dir.mkdir(parents=True)
+    # The archived file IS on disk (rsync landed the staged bytes there),
+    # and its size EQUALS the phantom row's recorded size — the exact
+    # coincidence the old size-fallback would have false-flagged as a
+    # real collision, silently dropping the newly-imported photo.
+    (date_dir / "collide.raf").write_bytes(b"x" * 100)
+
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-06-30",
+                            parent_id=base_id)
+    # Phantom row: no file_hash (older catalog row that pre-dates
+    # hashing) and a recorded size that HAPPENS to equal the freshly-
+    # copied staged file's size.
+    phantom_pid = db.add_photo(folder_id=date_id, filename="collide.raf",
+                               extension=".raf", file_size=100,
+                               file_mtime=1.0)
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-06-30"), name="2026-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    # Staged photo also lacks a recorded hash (the unhashed-scan case).
+    new_pid = db.add_photo(folder_id=stage_leaf, filename="collide.raf",
+                           extension=".raf", file_size=100,
+                           file_mtime=2.0)
+
+    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    # Without hash-based verification the guard defaults to phantom, so
+    # the staged (newly-imported) photo is preserved and the unverifiable
+    # target row is dropped.
+    assert counts["already_present"] == 0
+    assert counts["new_photos"] == 1
+    surviving = db.conn.execute(
+        "SELECT id FROM photos WHERE filename='collide.raf'"
+    ).fetchall()
+    assert len(surviving) == 1
+    assert surviving[0]["id"] == new_pid
+    assert db.conn.execute(
+        "SELECT 1 FROM photos WHERE id = ?", (phantom_pid,)
+    ).fetchone() is None
+    # The phantom's cache files must still be reported for cleanup so a
+    # rowid re-use can't inherit stale imagery.
+    assert phantom_pid in counts["dropped_photo_ids"]
+
+
+def test_merge_staged_tree_case_alias_collision_on_case_insensitive_volume(
+    db, tmp_path, monkeypatch,
+):
+    """On a case-insensitive archive volume (default macOS APFS, Windows
+    NTFS) an existing catalog row ``IMG.RAF`` and a staged ``img.raf`` are
+    the same on-disk file: rsync ``--ignore-existing`` treats them as a
+    match and skips the staged copy. Without a case-aware collision check
+    the staged row would be reparented onto the target folder, leaving TWO
+    catalog rows in one folder for the same file (SQLite text-equality is
+    case-sensitive so UNIQUE(folder_id, filename) doesn't fire to catch
+    the mistake). The staged row must be dropped as ``already_present``.
+    """
+    ws = db._active_workspace_id
+
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-06-30"
+    date_dir.mkdir(parents=True)
+    # Only the upper-case archived file exists on disk. The staged
+    # lower-case name would resolve to this same file on a case-folding
+    # volume.
+    (date_dir / "IMG.RAF").write_bytes(b"archived-bytes")
+
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-06-30",
+                            parent_id=base_id)
+    archived_pid = db.add_photo(folder_id=date_id, filename="IMG.RAF",
+                                extension=".raf", file_size=100,
+                                file_mtime=1.0, file_hash="SAMEBYTES")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-06-30"), name="2026-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    # A real case-alias collision only reaches the merge step when the bytes
+    # are identical (the upstream content-conflict check aborts the whole
+    # move otherwise), so the two rows describe the same bytes and share a
+    # hash. Modelling that here keeps the collision check's hash comparison
+    # honest: mismatched hashes would (correctly) be treated as a phantom
+    # row now, so a case-alias test with fake mismatching hashes would not
+    # represent the production invariant it's asserting.
+    staged_pid = db.add_photo(folder_id=stage_leaf, filename="img.raf",
+                              extension=".raf", file_size=100,
+                              file_mtime=2.0, file_hash="SAMEBYTES")
+
+    # Force the merge to treat the target volume as case-insensitive
+    # regardless of the CI host's actual filesystem behavior (Linux ext4
+    # is case-sensitive, so the underlying ``_case_insensitive_root``
+    # probe would otherwise return None and the fix wouldn't be exercised
+    # in this test environment).
+    import move
+    monkeypatch.setattr(move, "_case_insensitive_root", lambda p: "/")
+    # And make ``os.path.exists`` treat the case-alias lookup as present,
+    # since a real case-insensitive volume would resolve
+    # ``.../IMG.raf`` / ``.../img.raf`` back to the same on-disk file.
+    real_exists = os.path.exists
+    def case_insensitive_exists(p):
+        if real_exists(p):
+            return True
+        # Fall back to a case-insensitive directory listing.
+        parent = os.path.dirname(p)
+        base = os.path.basename(p).lower()
+        try:
+            entries = os.listdir(parent)
+        except OSError:
+            return False
+        return any(e.lower() == base for e in entries)
+    monkeypatch.setattr("db.os.path.exists", case_insensitive_exists)
+
+    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    # The staged row was dropped, not reparented — one row remains for the
+    # archived file.
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos WHERE folder_id = ?", (date_id,),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["id"] == archived_pid
+    assert rows[0]["filename"] == "IMG.RAF"
+    assert db.conn.execute(
+        "SELECT 1 FROM photos WHERE id = ?", (staged_pid,)
+    ).fetchone() is None
+    assert counts["already_present"] == 1
+    assert counts["new_photos"] == 0
+
+
+def test_merge_staged_tree_intra_staged_case_alias_collision(
+    db, tmp_path, monkeypatch,
+):
+    """Regression: two staged files whose filenames differ only in case
+    land in the same staged folder (e.g. staged on a case-sensitive disk,
+    archiving to a case-insensitive volume like APFS/SMB). rsync
+    ``--ignore-existing`` writes the FIRST file and silently skips the
+    second, so the second row's bytes never land on disk. Without an
+    intra-staged claim tracker, both rows get reparented into the target
+    folder — SQLite text-equality is case-sensitive so UNIQUE(folder_id,
+    filename) doesn't fire, and the catalog ends up with two rows for one
+    on-disk file (losing the second image). The second staged row must be
+    dropped as ``already_present`` instead of reparented.
+    """
+    ws = db._active_workspace_id
+
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-06-30"
+    date_dir.mkdir(parents=True)
+    # Empty target folder — no pre-existing catalog rows and (initially)
+    # no on-disk photos. The archive-side folder rows exist but the merge
+    # tracker must catch the intra-staged collision itself.
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-06-30",
+                            parent_id=base_id)
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-06-30"), name="2026-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    # Two staged photos with case-differing filenames. Different hashes
+    # model the realistic case where the two source files have DIFFERENT
+    # bytes — rsync writes only one of them to disk and the other row
+    # describes bytes that never landed. Even if the file hashes matched,
+    # only one on-disk file can exist on a case-insensitive volume so a
+    # second catalog row is still wrong.
+    first_pid = db.add_photo(folder_id=stage_leaf, filename="IMG.RAF",
+                             extension=".raf", file_size=100,
+                             file_mtime=1.0, file_hash="FIRSTBYTES")
+    second_pid = db.add_photo(folder_id=stage_leaf, filename="img.raf",
+                              extension=".raf", file_size=200,
+                              file_mtime=2.0, file_hash="OTHERBYTES")
+
+    # Force the merge to treat the target volume as case-insensitive
+    # regardless of the CI host's actual filesystem behavior.
+    import move
+    monkeypatch.setattr(move, "_case_insensitive_root", lambda p: "/")
+
+    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    # Exactly one photo row ends up in the target folder — the first
+    # staged row was reparented, the second was dropped as
+    # ``already_present`` (and its id reported for cache cleanup).
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos WHERE folder_id = ?", (date_id,),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["id"] == first_pid
+    assert rows[0]["filename"] == "IMG.RAF"
+    assert db.conn.execute(
+        "SELECT 1 FROM photos WHERE id = ?", (second_pid,)
+    ).fetchone() is None
+    assert counts["already_present"] == 1
+    assert counts["new_photos"] == 1
+    assert second_pid in counts["dropped_photo_ids"]
+
+
+def test_merge_staged_tree_intra_staged_case_alias_case_sensitive_volume(
+    db, tmp_path, monkeypatch,
+):
+    """On a case-sensitive archive volume (Linux ext4), two staged files
+    ``IMG.RAF`` and ``img.raf`` are distinct on-disk files and both should
+    be reparented into the target folder — the intra-staged claim tracker
+    must NOT trigger. Guards against a regression where the tracker
+    normalizes with ``str.casefold`` unconditionally and drops legitimate
+    distinct files on case-sensitive targets.
+    """
+    ws = db._active_workspace_id
+
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-06-30"
+    date_dir.mkdir(parents=True)
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-06-30",
+                            parent_id=base_id)
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA", workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-06-30"), name="2026-06-30",
+                               parent_id=stage_root, workspace_root=False)
+    upper_pid = db.add_photo(folder_id=stage_leaf, filename="IMG.RAF",
+                             extension=".raf", file_size=100,
+                             file_mtime=1.0, file_hash="UPPERBYTES")
+    lower_pid = db.add_photo(folder_id=stage_leaf, filename="img.raf",
+                             extension=".raf", file_size=200,
+                             file_mtime=2.0, file_hash="LOWERBYTES")
+
+    # Case-sensitive target: ``_case_insensitive_root`` returns None.
+    import move
+    monkeypatch.setattr(move, "_case_insensitive_root", lambda p: None)
+
+    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    rows = {r["filename"]: r["id"] for r in db.conn.execute(
+        "SELECT id, filename FROM photos WHERE folder_id = ? ORDER BY filename",
+        (date_id,),
+    ).fetchall()}
+    assert rows == {"IMG.RAF": upper_pid, "img.raf": lower_pid}
+    assert counts["already_present"] == 0
+    assert counts["new_photos"] == 2
+
+
+def test_merge_staged_tree_rolls_back_on_error(db, monkeypatch):
+    """Regression: ``merge_staged_tree_into_archive`` runs a long sequence of
+    UPDATE/DELETE statements before a single final commit. An exception
+    partway through the reconciliation loop must ``rollback()`` — otherwise
+    the pending mutations sit on the connection and a later unrelated commit
+    silently persists a half-merged catalog. Matches the pattern used by
+    ``delete_folder``, ``move_folders_to_workspace``, and
+    ``_merge_duplicate_keywords_pass``.
+
+    The concrete pending-mutation this test forces is a photo reparent from
+    a staged else-branch iteration (existing target folder). The else-branch
+    contains no ``add_workspace_folder`` call, so its ``UPDATE photos SET
+    folder_id`` is genuinely pending until the end-of-body commit — a raise
+    before that commit must roll it back."""
+    ws = db._active_workspace_id
+
+    # Existing tracked archive base + a pre-existing date folder so the
+    # first staged-folder iteration hits the else-branch (target exists),
+    # not the if-branch (which would commit mid-loop through
+    # ``add_workspace_folder`` and defeat the rollback demonstration).
+    base_id = db.add_folder("/arch/USA", name="USA")
+    existing_date_id = db.add_folder("/arch/USA/2025-12-25",
+                                     name="2025-12-25", parent_id=base_id)
+    db.add_photo(folder_id=existing_date_id, filename="old.raf",
+                 extension=".raf", file_size=100, file_mtime=1.0)
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    # Staged tree with two else-branch iterations. The stage_root maps to
+    # ``/arch/USA`` (base_id, exists), and the stage_leaf maps to
+    # ``/arch/USA/2025-12-25`` (existing_date_id, exists). We seed the
+    # stage_leaf photo so iteration 1 does its pending
+    # ``UPDATE photos SET folder_id`` first, then iteration 2 blows up on
+    # the ``_case_insensitive_root`` probe.
+    stage_root = db.add_folder("/stage/USA", name="USA",
+                               workspace_root=False)
+    staged_root_pid = db.add_photo(
+        folder_id=stage_root, filename="root_new.raf",
+        extension=".raf", file_size=150, file_mtime=1.5,
+    )
+    stage_leaf = db.add_folder("/stage/USA/2025-12-25",
+                               name="2025-12-25", parent_id=stage_root,
+                               workspace_root=False)
+    staged_leaf_pid = db.add_photo(
+        folder_id=stage_leaf, filename="leaf_new.raf",
+        extension=".raf", file_size=200, file_mtime=2.0,
+    )
+
+    # Poison ``_case_insensitive_root`` to succeed on the FIRST call (so
+    # iteration 1 completes its pending photo reparent) and raise on the
+    # SECOND (so iteration 2 crashes AFTER iteration 1's pending
+    # ``UPDATE photos SET folder_id`` is queued but before the end-of-body
+    # commit).
+    import move as move_mod
+    real_ci_root = move_mod._case_insensitive_root
+    call_count = {"n": 0}
+
+    def _flaky(path):
+        call_count["n"] += 1
+        if call_count["n"] >= 2:
+            raise RuntimeError("case-fold probe blew up mid-merge")
+        return real_ci_root(path)
+
+    monkeypatch.setattr(move_mod, "_case_insensitive_root", _flaky)
+
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="case-fold probe blew up"):
+        db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
+
+    # Iteration 1's pending ``UPDATE photos SET folder_id = base_id`` was
+    # rolled back: the staged photo is still on stage_root, NOT on base_id.
+    # Without the try/except + rollback, the pending UPDATE would sit on the
+    # connection and any later commit on the same connection would persist
+    # it — a silent half-merge.
+    assert db.conn.execute(
+        "SELECT folder_id FROM photos WHERE id = ?", (staged_root_pid,)
+    ).fetchone()["folder_id"] == stage_root
+    # Iteration 2's staged photo is untouched (the raise fired before its
+    # photo loop even ran).
+    assert db.conn.execute(
+        "SELECT folder_id FROM photos WHERE id = ?", (staged_leaf_pid,)
+    ).fetchone()["folder_id"] == stage_leaf
+    # Neither staged folder was folded into the archive — stage_root's row
+    # still lives under its staging path, not deleted or reparented.
+    assert db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", ("/stage/USA",)
+    ).fetchone()["id"] == stage_root
+    # The pre-existing archived photo is untouched.
+    old_photo = db.conn.execute(
+        "SELECT folder_id FROM photos WHERE filename = ?", ("old.raf",)
+    ).fetchone()
+    assert old_photo["folder_id"] == existing_date_id
+    # Confirm the poison actually fired twice (i.e. we did reach the raise
+    # via iteration 2, so iteration 1's pending mutation genuinely happened
+    # and the rollback is what returned staged_root_pid to stage_root).
+    assert call_count["n"] == 2
+
+
+def test_merge_staged_tree_new_folder_reparent_rolls_back_on_later_error(
+        db, monkeypatch):
+    """Regression: the new-folder branch (``target is None``) used to call
+    ``self.add_workspace_folder(...)`` — which commits the connection — so
+    a later exception's ``rollback()`` could not undo the preceding
+    ``UPDATE folders SET path = ?, parent_id = ?`` on the same staged row.
+    That left a half-merged catalog: the staged folder's path pointed at
+    the archive even though the merge as a whole was rolled back.
+
+    The fix is a non-committing helper (``_add_workspace_folder_no_commit``)
+    used inside the loop. This test exercises specifically the mid-loop
+    new-folder path followed by a later else-branch crash and verifies the
+    new-folder iteration's UPDATE is fully rolled back — a companion to
+    ``test_merge_staged_tree_rolls_back_on_error`` (which covers the
+    else-branch photo reparent)."""
+    ws = db._active_workspace_id
+
+    # Existing tracked archive base + one pre-existing descendant so the
+    # deepest staged iteration hits the else-branch (crash point).
+    base_id = db.add_folder("/arch/USA", name="USA")
+    existing_id = db.add_folder("/arch/USA/existing_leaf",
+                                name="existing_leaf", parent_id=base_id)
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    # Three staged folders ordered by length so iteration order is:
+    #   1. stage_root       → target=/arch/USA (EXISTS, else)
+    #   2. stage_new        → target=/arch/USA/new_leaf (NEW, if-branch — the
+    #                          iteration whose rollback we're verifying)
+    #   3. stage_existing   → target=/arch/USA/existing_leaf (EXISTS, else —
+    #                          the iteration we poison to force the raise)
+    stage_root = db.add_folder("/stage/USA", name="USA",
+                               workspace_root=False)
+    stage_new = db.add_folder("/stage/USA/new_leaf", name="new_leaf",
+                              parent_id=stage_root, workspace_root=False)
+    stage_new_pid = db.add_photo(folder_id=stage_new, filename="new.raf",
+                                 extension=".raf",
+                                 file_size=100, file_mtime=1.0)
+    stage_existing = db.add_folder("/stage/USA/existing_leaf",
+                                   name="existing_leaf",
+                                   parent_id=stage_root, workspace_root=False)
+    db.add_photo(folder_id=stage_existing, filename="dup.raf",
+                 extension=".raf", file_size=100, file_mtime=1.0)
+
+    # Poison ``_case_insensitive_root`` to succeed on the first call (else
+    # iteration 1, stage_root → base) and raise on the second call
+    # (else iteration 3, stage_existing → existing_leaf). Iteration 2
+    # (if-branch, stage_new → new target) queues an UPDATE folders SET
+    # path/parent_id + a workspace-folder link BETWEEN those two calls — the
+    # raise fires with iteration 2's mutations still uncommitted, so a
+    # correct rollback must revert stage_new's path.
+    import move as move_mod
+    real_ci_root = move_mod._case_insensitive_root
+    calls = {"n": 0}
+
+    def _flaky(path):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise RuntimeError("case-fold probe blew up mid-merge")
+        return real_ci_root(path)
+
+    monkeypatch.setattr(move_mod, "_case_insensitive_root", _flaky)
+
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="case-fold probe blew up"):
+        db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
+
+    # Poison actually fired on iteration 3 (2nd call) — confirms iteration 2
+    # completed BEFORE the raise, so its UPDATE is exactly what should have
+    # rolled back.
+    assert calls["n"] == 2
+
+    # stage_new's path UPDATE + parent_id UPDATE was rolled back: still
+    # ``/stage/USA/new_leaf``, parented to stage_root, not to base_id.
+    # Without the fix, the mid-loop commit inside ``add_workspace_folder``
+    # would have persisted the path change and this row would sit at
+    # ``/arch/USA/new_leaf`` with base_id as parent.
+    row = db.conn.execute(
+        "SELECT path, parent_id FROM folders WHERE id = ?", (stage_new,)
+    ).fetchone()
+    assert row["path"] == "/stage/USA/new_leaf"
+    assert row["parent_id"] == stage_root
+    # No archive row at the target path was left behind.
+    assert db.conn.execute(
+        "SELECT 1 FROM folders WHERE path = ?", ("/arch/USA/new_leaf",)
+    ).fetchone() is None
+    # The staged photo still lives under stage_new.
+    assert db.conn.execute(
+        "SELECT folder_id FROM photos WHERE id = ?", (stage_new_pid,)
+    ).fetchone()["folder_id"] == stage_new
+
+
+def test_merge_staged_tree_restores_missing_archive_base_status(db):
+    """Regression: an existing archive row marked ``status='missing'`` (e.g.
+    a health scan ran while the drive was unmounted) must be flipped back to
+    ``ok`` when the merge succeeds, otherwise the ws-scoped photo queries
+    (which filter ``status IN ('ok', 'partial')``) hide the newly-merged
+    photos even though the import reported success."""
+    ws = db._active_workspace_id
+    base_id = db.add_folder("/arch/USA", name="USA")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    # Simulate a prior health scan that saw the drive unmounted.
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (base_id,))
+    db.conn.commit()
+
+    stage_root = db.add_folder("/stage/USA", name="USA",
+                               workspace_root=False)
+    db.add_photo(folder_id=stage_root, filename="new.raf",
+                 extension=".raf", file_size=100, file_mtime=1.0)
+
+    db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
+
+    assert db.conn.execute(
+        "SELECT status FROM folders WHERE id = ?", (base_id,)
+    ).fetchone()["status"] == "ok"
+
+
+def test_merge_staged_tree_restores_missing_target_folder_status(
+        db, tmp_path):
+    """Regression: same as ``restores_missing_archive_base_status`` but for
+    an existing DESCENDANT target folder that the merge folds staged photos
+    into. Any lingering ``missing`` from an older health scan must flip to
+    ``ok`` after the merge so photos aren't hidden."""
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    # Mark the DESCENDANT folder as missing.
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (date_id,))
+    db.conn.commit()
+
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA",
+                               workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    db.add_photo(folder_id=stage_leaf, filename="fresh.raf",
+                 extension=".raf", file_size=100, file_mtime=1.0)
+
+    db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    assert db.conn.execute(
+        "SELECT status FROM folders WHERE id = ?", (date_id,)
+    ).fetchone()["status"] == "ok"
+
+
+def test_merge_staged_tree_partial_archive_base_status_preserved(db):
+    """The status restore only migrates ``missing`` → ``ok``. A folder
+    marked ``partial`` (some verified photos missing on disk) still has
+    unverified state and should remain ``partial`` after the merge — the
+    merge only proves the newly-added files exist, not the earlier ones."""
+    ws = db._active_workspace_id
+    base_id = db.add_folder("/arch/USA", name="USA")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+    db.conn.execute(
+        "UPDATE folders SET status = 'partial' WHERE id = ?", (base_id,))
+    db.conn.commit()
+
+    stage_root = db.add_folder("/stage/USA", name="USA",
+                               workspace_root=False)
+    db.add_photo(folder_id=stage_root, filename="new.raf",
+                 extension=".raf", file_size=100, file_mtime=1.0)
+
+    db.merge_staged_tree_into_archive(stage_root, "/arch/USA")
+
+    assert db.conn.execute(
+        "SELECT status FROM folders WHERE id = ?", (base_id,)
+    ).fetchone()["status"] == "partial"
+
+
+def test_merge_staged_tree_reports_dropped_photo_ids_for_collisions(
+        db, tmp_path):
+    """Regression: cached thumbnails/previews/working copies are keyed off
+    ``photos.id``. When the merge drops a staged photo as ``already_present``
+    (identical file already archived), the freed photo id would leave orphan
+    cache files on disk; SQLite reuses freed rowids so a later import that
+    lands on the same id would inherit stale imagery. The merge must report
+    the dropped ids up to the caller so it can clean the on-disk cache."""
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    # The archived file must exist on disk for the collision to be treated
+    # as ``already_present`` (a phantom target row is instead REPLACED).
+    (date_dir / "dup.raf").write_bytes(b"archived")
+
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    # Matching ``file_hash`` on both sides is required for the collision
+    # guard to treat this as a real collision — the row's byte-identity
+    # claim (hash) has to match the staged photo's for the drop to be
+    # safe in the post-copy path. See merge_staged_tree_into_archive's
+    # hash-only invariant.
+    db.add_photo(folder_id=date_id, filename="dup.raf", extension=".raf",
+                 file_size=8, file_mtime=1.0, file_hash="DUPHASH")
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA",
+                               workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    dup_pid = db.add_photo(folder_id=stage_leaf, filename="dup.raf",
+                           extension=".raf", file_size=8, file_mtime=2.0,
+                           file_hash="DUPHASH")
+
+    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    assert counts["already_present"] == 1
+    assert dup_pid in counts["dropped_photo_ids"]
+
+
+def test_merge_staged_tree_reports_dropped_photo_ids_for_phantom_target(
+        db, tmp_path):
+    """Regression: when the target folder has a filename-collision row whose
+    on-disk file is MISSING (a phantom row from a prior stale state), the
+    merge deletes the phantom and reparents the staged photo. The phantom's
+    freed photo id must also be reported as dropped so its cache files get
+    cleaned."""
+    ws = db._active_workspace_id
+    arch = tmp_path / "arch" / "USA"
+    date_dir = arch / "2026-01-01"
+    date_dir.mkdir(parents=True)
+    # NOTE: don't create dup.raf — the phantom target row points at a
+    # non-existent archived file.
+
+    base_id = db.add_folder(str(arch), name="USA")
+    date_id = db.add_folder(str(date_dir), name="2026-01-01",
+                            parent_id=base_id)
+    phantom_pid = db.add_photo(folder_id=date_id, filename="dup.raf",
+                               extension=".raf",
+                               file_size=8, file_mtime=1.0)
+    db.add_workspace_folder(ws, base_id, is_root=True)
+
+    stage = tmp_path / "stage" / "USA"
+    stage_root = db.add_folder(str(stage), name="USA",
+                               workspace_root=False)
+    stage_leaf = db.add_folder(str(stage / "2026-01-01"), name="2026-01-01",
+                               parent_id=stage_root, workspace_root=False)
+    db.add_photo(folder_id=stage_leaf, filename="dup.raf",
+                 extension=".raf", file_size=8, file_mtime=2.0)
+
+    counts = db.merge_staged_tree_into_archive(stage_root, str(arch))
+
+    # No ``already_present`` this time (the collision was a phantom, and the
+    # staged bytes represent the surviving row).
+    assert counts["already_present"] == 0
+    # The phantom id was freed and must be reported for cache cleanup.
+    assert phantom_pid in counts["dropped_photo_ids"]
+
+
+def test_folder_under_rule_excludes_siblings_and_escapes_wildcards(tmp_path, monkeypatch):
+    """'folder under /photos/2023' must match that folder and its
+    descendants only — not the sibling /photos/2023-trip — and a _ in the
+    value must not act as a LIKE wildcard."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    f_2023 = db.add_folder("/photos/2023", name="2023")
+    f_sub = db.add_folder("/photos/2023/trip", name="trip", parent_id=f_2023)
+    f_sib = db.add_folder("/photos/2023-trip", name="2023-trip")
+    f_us = db.add_folder("/photos/my_dir", name="my_dir")
+    f_usx = db.add_folder("/photos/myXdir", name="myXdir")
+    for fid, name in [(f_2023, "a"), (f_sub, "b"), (f_sib, "c"), (f_us, "d"), (f_usx, "e")]:
+        db.add_photo(folder_id=fid, filename=f"{name}.jpg", extension=".jpg",
+                     file_size=100, file_mtime=1.0)
+
+    under_2023 = [{"field": "folder", "op": "under", "value": "/photos/2023"}]
+    assert db.count_photos_for_rules(under_2023) == 2  # folder itself + descendant
+
+    not_under_2023 = [{"field": "folder", "op": "not_under", "value": "/photos/2023"}]
+    assert db.count_photos_for_rules(not_under_2023) == 3
+
+    under_us = [{"field": "folder", "op": "under", "value": "/photos/my_dir"}]
+    assert db.count_photos_for_rules(under_us) == 1  # not /photos/myXdir
+
+
+def test_folder_under_rule_matches_backslash_paths(tmp_path, monkeypatch):
+    """Windows libraries store folder paths with backslash separators
+    (``str(Path(...))`` in scanner.scan). The 'folder under' rule must
+    still match descendants of a backslash-delimited root and exclude
+    siblings; a LIKE pattern that hard-codes '/%' would silently miss
+    every Windows descendant."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    f_root = db.add_folder("C:\\Photos\\2023", name="2023")
+    f_sub = db.add_folder("C:\\Photos\\2023\\trip", name="trip", parent_id=f_root)
+    f_sib = db.add_folder("C:\\Photos\\2023-trip", name="2023-trip")
+    for fid, name in [(f_root, "a"), (f_sub, "b"), (f_sib, "c")]:
+        db.add_photo(folder_id=fid, filename=f"{name}.jpg", extension=".jpg",
+                     file_size=100, file_mtime=1.0)
+
+    # Forward-slash rule value still applies to a Windows library because
+    # both sides are normalized to '/'.
+    under = [{"field": "folder", "op": "under", "value": "C:/Photos/2023"}]
+    assert db.count_photos_for_rules(under) == 2  # root + descendant, not sibling
+
+    # Backslash rule values match symmetrically (normalized before escaping).
+    under_bs = [{"field": "folder", "op": "under", "value": "C:\\Photos\\2023"}]
+    assert db.count_photos_for_rules(under_bs) == 2
+
+    not_under = [{"field": "folder", "op": "not_under", "value": "C:/Photos/2023"}]
+    assert db.count_photos_for_rules(not_under) == 1  # only the sibling
+
+    under_sib = [{"field": "folder", "op": "under", "value": "C:/Photos/2023-trip"}]
+    assert db.count_photos_for_rules(under_sib) == 1
 
 
 def test_check_filename_collisions(db):
@@ -6224,6 +8883,134 @@ def test_get_highlights_candidates_workspace_wide_respects_min_quality_and_rejec
     results = db.get_highlights_candidates(folder_id=None, min_quality=0.5)
     filenames = [r["filename"] for r in results]
     assert filenames == ["keep.jpg"]
+
+
+def test_get_highlights_candidates_returns_predicted_species(tmp_path):
+    """Photos with no accepted species but a classifier prediction
+    expose ``predicted_species`` and ``predicted_confidence`` columns."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/p', name='p')
+    pid = db.add_photo(folder_id=fid, filename='bird.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET quality_score = 0.6 WHERE id = ?", (pid,))
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, species, confidence) "
+        "VALUES (?, 'test', 'ʻApapane', 0.82)",
+        (did,),
+    )
+    db.conn.commit()
+
+    rows = db.get_highlights_candidates(folder_id=fid, min_quality=0.0)
+    assert len(rows) == 1
+    assert rows[0]["predicted_species"] == "ʻApapane"
+    assert abs(rows[0]["predicted_confidence"] - 0.82) < 1e-6
+    # No accepted keyword → species is None
+    assert rows[0]["species"] is None
+
+
+def test_get_highlights_candidates_predicted_picks_highest_confidence(tmp_path):
+    """When a photo has multiple detections with different predictions,
+    the highest-confidence one is returned."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/p', name='p')
+    pid = db.add_photo(folder_id=fid, filename='two.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET quality_score = 0.5 WHERE id = ?", (pid,))
+    d1 = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (pid,),
+    ).lastrowid
+    d2 = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, species, confidence) "
+        "VALUES (?, 'm', 'Boring Bird', 0.40)",
+        (d1,),
+    )
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, species, confidence) "
+        "VALUES (?, 'm', 'Cool Bird', 0.90)",
+        (d2,),
+    )
+    db.conn.commit()
+
+    rows = db.get_highlights_candidates(folder_id=fid, min_quality=0.0)
+    assert rows[0]["predicted_species"] == "Cool Bird"
+    assert abs(rows[0]["predicted_confidence"] - 0.90) < 1e-6
+
+
+def test_get_highlights_candidates_predicted_excludes_rejected(tmp_path):
+    """Predictions the user rejected in the active workspace do not
+    appear as the fallback species."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/p', name='p')
+    pid = db.add_photo(folder_id=fid, filename='r.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET quality_score = 0.5 WHERE id = ?", (pid,))
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (pid,),
+    ).lastrowid
+    pred_id = db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, species, confidence) "
+        "VALUES (?, 'm', 'Wrong Bird', 0.95)",
+        (did,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO prediction_review (prediction_id, workspace_id, status) "
+        "VALUES (?, ?, 'rejected')",
+        (pred_id, db._ws_id()),
+    )
+    db.conn.commit()
+
+    rows = db.get_highlights_candidates(folder_id=fid, min_quality=0.0)
+    assert rows[0]["predicted_species"] is None
+    assert rows[0]["predicted_confidence"] is None
+
+
+def test_get_highlights_candidates_predicted_uses_latest_fingerprint(tmp_path):
+    """A reclassified detection (new labels_fingerprint) should bucket the
+    photo under the current classifier results, not an older high-confidence
+    prediction that the rest of the app no longer surfaces.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/p', name='p')
+    pid = db.add_photo(folder_id=fid, filename='reclass.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET quality_score = 0.5 WHERE id = ?", (pid,))
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (pid,),
+    ).lastrowid
+    # Older prediction: higher confidence but stale labels_fingerprint.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, labels_fingerprint, "
+        "species, confidence, created_at) "
+        "VALUES (?, 'm', 'OLD', 'Stale Bird', 0.95, '2025-01-01 00:00:00')",
+        (did,),
+    )
+    # Newer prediction: lower confidence but current labels_fingerprint.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, labels_fingerprint, "
+        "species, confidence, created_at) "
+        "VALUES (?, 'm', 'NEW', 'Fresh Bird', 0.60, '2026-01-01 00:00:00')",
+        (did,),
+    )
+    db.conn.commit()
+
+    rows = db.get_highlights_candidates(folder_id=fid, min_quality=0.0)
+    assert rows[0]["predicted_species"] == "Fresh Bird"
+    assert abs(rows[0]["predicted_confidence"] - 0.60) < 1e-6
 
 
 # --- Folders with quality data ---
@@ -8885,6 +11672,173 @@ def test_upsert_place_chain_walks_full_parent_chain(db):
     assert chain[-1]["parent_id"] is None
 
 
+def test_upsert_place_chain_filters_address_fragments(db):
+    """Street numbers, routes, and postal codes should not become keywords."""
+    details = {
+        "place_id": "ChIJ_Address_Fragment_Test",
+        "name": "123 Main St",
+        "lat": 37.1,
+        "lng": -122.2,
+        "address_components": [
+            {"name": "123", "short_name": "123", "types": ["street_number"]},
+            {"name": "Main St", "short_name": "Main St", "types": ["route"]},
+            {"name": "Mountain View", "short_name": "Mountain View", "types": ["locality"]},
+            {"name": "Santa Clara County", "short_name": "Santa Clara County",
+             "types": ["administrative_area_level_2"]},
+            {"name": "California", "short_name": "CA",
+             "types": ["administrative_area_level_1"]},
+            {"name": "United States", "short_name": "US", "types": ["country"]},
+            {"name": "94043", "short_name": "94043", "types": ["postal_code"]},
+        ],
+    }
+
+    leaf_id = db.upsert_place_chain(details)
+    names = []
+    cur_id = leaf_id
+    while cur_id is not None:
+        row = db.conn.execute(
+            "SELECT name, parent_id FROM keywords WHERE id = ?",
+            (cur_id,),
+        ).fetchone()
+        names.append(row["name"])
+        cur_id = row["parent_id"]
+
+    assert names == [
+        "123 Main St",
+        "Mountain View",
+        "Santa Clara County",
+        "California",
+        "United States",
+    ]
+    all_location_names = {
+        row["name"]
+        for row in db.conn.execute(
+            "SELECT name FROM keywords WHERE type = 'location'"
+        ).fetchall()
+    }
+    assert "123" not in all_location_names
+    assert "94043" not in all_location_names
+    assert "Main St" not in all_location_names
+
+
+def test_upsert_place_chain_preserves_lower_admin_levels(db):
+    """Administrative levels 6 and 7 are valid location parents."""
+    details = {
+        "place_id": "ChIJ_Admin_Level_7_Test",
+        "name": "Village Square",
+        "lat": 48.1,
+        "lng": 11.2,
+        "address_components": [
+            {"name": "Village Square", "short_name": "Village Square",
+             "types": ["point_of_interest"]},
+            {"name": "Quarter Seven", "short_name": "Q7",
+             "types": ["administrative_area_level_7"]},
+            {"name": "District Six", "short_name": "D6",
+             "types": ["administrative_area_level_6"]},
+            {"name": "Region Five", "short_name": "R5",
+             "types": ["administrative_area_level_5"]},
+            {"name": "Germany", "short_name": "DE", "types": ["country"]},
+            {"name": "12", "short_name": "12", "types": ["street_number"]},
+            {"name": "10115", "short_name": "10115", "types": ["postal_code"]},
+        ],
+    }
+
+    leaf_id = db.upsert_place_chain(details)
+    names = []
+    cur_id = leaf_id
+    while cur_id is not None:
+        row = db.conn.execute(
+            "SELECT name, parent_id FROM keywords WHERE id = ?",
+            (cur_id,),
+        ).fetchone()
+        names.append(row["name"])
+        cur_id = row["parent_id"]
+
+    assert names == [
+        "Village Square",
+        "Quarter Seven",
+        "District Six",
+        "Region Five",
+        "Germany",
+    ]
+
+
+def test_upsert_place_chain_preserves_same_named_admin_parent(db):
+    """Leaf-name filtering must not drop broader same-named parents."""
+    details = {
+        "place_id": "ChIJ_New_York_City_Test",
+        "name": "New York",
+        "types": ["locality", "political"],
+        "lat": 40.7128,
+        "lng": -74.0060,
+        "address_components": [
+            {"name": "New York", "short_name": "New York", "types": ["locality"]},
+            {"name": "New York County", "short_name": "New York County",
+             "types": ["administrative_area_level_2"]},
+            {"name": "New York", "short_name": "NY",
+             "types": ["administrative_area_level_1"]},
+            {"name": "United States", "short_name": "US", "types": ["country"]},
+        ],
+    }
+
+    leaf_id = db.upsert_place_chain(details)
+    names = []
+    cur_id = leaf_id
+    while cur_id is not None:
+        row = db.conn.execute(
+            "SELECT name, parent_id FROM keywords WHERE id = ?",
+            (cur_id,),
+        ).fetchone()
+        names.append(row["name"])
+        cur_id = row["parent_id"]
+
+    assert names == [
+        "New York",
+        "New York County",
+        "New York",
+        "United States",
+    ]
+
+
+def test_upsert_place_chain_preserves_same_named_poi_parent(db):
+    """POI leaves should not remove same-named geographic parents."""
+    details = {
+        "place_id": "ChIJ_Manhattan_Venue_Test",
+        "name": "Manhattan",
+        "types": ["point_of_interest", "establishment"],
+        "lat": 40.75,
+        "lng": -73.99,
+        "address_components": [
+            {"name": "Manhattan", "short_name": "Manhattan",
+             "types": ["sublocality_level_1", "sublocality", "political"]},
+            {"name": "New York", "short_name": "New York",
+             "types": ["locality", "political"]},
+            {"name": "New York", "short_name": "NY",
+             "types": ["administrative_area_level_1", "political"]},
+            {"name": "United States", "short_name": "US", "types": ["country"]},
+        ],
+    }
+
+    leaf_id = db.upsert_place_chain(details)
+    names = []
+    cur_id = leaf_id
+    while cur_id is not None:
+        row = db.conn.execute(
+            "SELECT name, parent_id FROM keywords WHERE id = ?",
+            (cur_id,),
+        ).fetchone()
+        names.append(row["name"])
+        cur_id = row["parent_id"]
+
+    assert names == [
+        "Manhattan",
+        "Manhattan",
+        "New York",
+        "New York",
+        "United States",
+    ]
+
+
 def test_upsert_place_chain_is_idempotent(db):
     details = _central_park_details()
     first_id = db.upsert_place_chain(details)
@@ -10186,8 +13140,8 @@ def test_all_nav_ids_covers_every_page():
     from db import ALL_NAV_IDS
     expected = {
         "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
-        "misses", "highlights", "browse", "map", "variants",
-        "dashboard", "audit", "compare",
+        "misses", "highlights", "life_list", "browse", "edit", "map", "variants",
+        "dashboard", "audit", "move", "compare",
         "zoom_test", "settings", "workspace", "lightroom", "shortcuts",
         "keywords", "duplicates", "logs",
     }
@@ -11447,3 +14401,302 @@ def test_get_workspace_extensions_excludes_missing_folders(tmp_path):
 
     # .cr2 lives only in the missing folder — must be filtered out.
     assert db.get_workspace_extensions() == ['.jpg']
+
+
+# -- Regression tests: unbounded IN clauses, inat ordering, override guards --
+
+
+def _cap_sqlite_vars(db, cap=999):
+    """Emulate the historical SQLITE_MAX_VARIABLE_NUMBER=999 cap so an
+    unchunked IN clause fails deterministically even on modern builds."""
+    import sqlite3
+    db.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, cap)
+
+
+def test_eye_keypoint_stage_chunks_large_photo_id_scope(tmp_path):
+    """Pipeline callers pass the full resolved collection scope as
+    photo_ids; a single IN clause would exceed the bind-var cap for big
+    collections. Must route through _scope_clause like its count siblings."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id
+    fid = db.add_folder(str(tmp_path), name="photos")
+    db.add_workspace_folder(ws_id, fid)
+
+    pids = []
+    for i in range(2):
+        pid = db.add_photo(fid, f"p{i}.jpg", ".jpg", 1000, float(i + 1),
+                           width=800, height=600)
+        db.update_photo_pipeline_features(pid, mask_path=str(tmp_path / "mask.png"))
+        det_ids = db.save_detections(
+            pid,
+            [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.9}],
+            detector_model="MegaDetector",
+        )
+        db.add_prediction(
+            det_ids[0], species="Vulpes vulpes", confidence=0.9,
+            model="bioclip-2.5", category="match",
+            taxonomy={"class": "Mammalia", "scientific_name": "Vulpes vulpes"},
+        )
+        pids.append(pid)
+
+    _cap_sqlite_vars(db)
+    scope = pids + list(range(1_000_000, 1_001_200))  # 1202 ids > 999 cap
+    rows = db.list_photos_for_eye_keypoint_stage(photo_ids=scope)
+    assert {r["id"] for r in rows} == set(pids)
+
+
+def test_get_predictions_chunks_large_photo_id_list(tmp_path):
+    """/api/predictions passes full-collection id lists. Chunked queries
+    must merge while preserving the confidence-DESC ordering across
+    chunk boundaries."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+
+    def make_photo(name, conf):
+        pid = db.add_photo(folder_id=fid, filename=name, extension='.jpg',
+                           file_size=100, file_mtime=1.0)
+        det = db.save_detections(
+            pid,
+            [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}],
+            detector_model="MegaDetector",
+        )[0]
+        db.add_prediction(det, species=name, confidence=conf, model="bioclip")
+        return pid
+
+    p_low = make_photo("low.jpg", 0.3)
+    p_high = make_photo("high.jpg", 0.9)
+
+    _cap_sqlite_vars(db)
+    # Put the high-confidence photo in the *last* chunk so an
+    # append-without-resort implementation would order it after p_low.
+    scope = [p_low] + list(range(1_000_000, 1_001_200)) + [p_high]
+    rows = db.get_predictions(photo_ids=scope)
+    assert [r["photo_id"] for r in rows] == [p_high, p_low]
+    confs = [r["confidence"] for r in rows]
+    assert confs == sorted(confs, reverse=True)
+
+
+def test_get_keywords_for_photos_chunks_and_dedups_large_input(tmp_path):
+    """Same /api/predictions source feeds get_keywords_for_photos with the
+    full collection scope; must chunk, and duplicated input ids must not
+    double-append keywords."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    kid = db.add_keyword("Robin", kw_type="general")
+    db.tag_photo(pid, kid)
+
+    _cap_sqlite_vars(db)
+    # pid appears twice, in what would be different chunks.
+    scope = [pid] + list(range(1_000_000, 1_001_200)) + [pid]
+    result = db.get_keywords_for_photos(scope)
+    assert list(result.keys()) == [pid]
+    assert [k["name"] for k in result[pid]] == ["Robin"]
+
+
+def test_delete_photos_chunks_large_resolve_list(tmp_path):
+    """api_audit_remove_missing passes a raw request-body id list straight
+    through; the initial resolve SELECT must chunk like the rest of the
+    method already does."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pids = [
+        db.add_photo(folder_id=fid, filename=f"p{i}.jpg", extension='.jpg',
+                     file_size=100, file_mtime=1.0)
+        for i in range(3)
+    ]
+
+    _cap_sqlite_vars(db)
+    result = db.delete_photos(pids + list(range(1_000_000, 1_001_200)))
+    assert result["deleted"] == 3
+    assert set(result["ids"]) == set(pids)
+
+
+def test_apply_duplicate_resolution_chunks_large_group(tmp_path):
+    """duplicate_scan.py documents that one duplicate group can exceed the
+    bind-var cap and chunks its own reads; the apply path must chunk both
+    the resolve SELECT and the loser-flag UPDATE."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path / "photos"), name='photos')
+    # 1100 photos in one group: 1099 losers > the legacy 999-var cap, so
+    # the rejected-flag UPDATE must chunk too.
+    pids = [
+        db.add_photo(folder_id=fid, filename=f"dup{i:04d}.jpg", extension='.jpg',
+                     file_size=100, file_mtime=float(i + 1))
+        for i in range(1100)
+    ]
+
+    _cap_sqlite_vars(db)
+    result = db.apply_duplicate_resolution(pids)
+    assert result["winner_id"] in pids
+    assert result["rejected"] == 1099
+    flagged = db.conn.execute(
+        "SELECT COUNT(*) AS n FROM photos WHERE flag = 'rejected'"
+    ).fetchone()["n"]
+    assert flagged == 1099
+
+
+def test_collection_photo_ids_rule_supports_large_selection(tmp_path):
+    """A static collection created from a large selection used to bind one
+    parameter per id, making every query against the collection fail
+    permanently. Integer ids are inlined as literals instead."""
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
+                      file_size=100, file_mtime=2.0)
+
+    ids = [p1, p2] + list(range(1_000_000, 1_001_200))
+    cid = db.add_collection(
+        'Big selection', json.dumps([{"field": "photo_ids", "value": ids}])
+    )
+
+    _cap_sqlite_vars(db)
+    assert db.count_collection_photos(cid) == 2
+    assert {p["id"] for p in db.get_collection_photos(cid)} == {p1, p2}
+    # Composability: the leaf still works inside a rule group with siblings.
+    assert db.count_photos_for_rules([
+        {"field": "photo_ids", "value": ids},
+        {"field": "rating", "op": ">=", "value": 0},
+    ]) == 2
+
+
+def test_get_inat_submissions_returns_newest_and_chunks(tmp_path):
+    """Each photo must map to its most recent submission (the old dict
+    comprehension over DESC-ordered rows kept the OLDEST), and the photo_id
+    IN clause must chunk."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.conn.execute(
+        "INSERT INTO inat_submissions (photo_id, observation_id, observation_url, submitted_at) "
+        "VALUES (?, 111, 'https://inat/111', '2025-01-01 00:00:00')",
+        (pid,),
+    )
+    db.conn.execute(
+        "INSERT INTO inat_submissions (photo_id, observation_id, observation_url, submitted_at) "
+        "VALUES (?, 222, 'https://inat/222', '2026-01-01 00:00:00')",
+        (pid,),
+    )
+    db.conn.commit()
+
+    subs = db.get_inat_submissions([pid])
+    assert subs[pid]["observation_id"] == 222
+
+    _cap_sqlite_vars(db)
+    subs = db.get_inat_submissions([pid] + list(range(1_000_000, 1_001_200)))
+    assert subs[pid]["observation_id"] == 222
+
+
+def test_workspace_active_labels_survive_non_dict_overrides(tmp_path):
+    """api_update_workspace can persist non-dict config_overrides JSON; the
+    active-labels accessors must fall back like get_effective_config and
+    get_subject_types do, not raise AttributeError/TypeError."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id
+
+    for bad in (["not", "a", "dict"], "just a string", 42):
+        db.update_workspace(ws_id, config_overrides=bad)
+        assert db.get_workspace_active_labels() is None
+        # Setter must replace the junk rather than crash on item assignment.
+        db.set_workspace_active_labels(["birds.txt"])
+        assert db.get_workspace_active_labels() == ["birds.txt"]
+
+
+def test_edit_presets_crud_strips_geometry(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    assert db.list_edit_presets() == []
+
+    preset = db.save_edit_preset(
+        "High-ISO forest",
+        {
+            "rotation": 90,
+            "crop": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+            "adjustments": {"exposure": 0.5, "noise_reduction": 40},
+        },
+    )
+    assert preset["name"] == "High-ISO forest"
+    assert preset["recipe"] == {
+        "version": 1,
+        "adjustments": {"exposure": 0.5, "noise_reduction": 40.0},
+    }
+
+    listed = db.list_edit_presets()
+    assert len(listed) == 1
+    assert listed[0]["id"] == preset["id"]
+    assert listed[0]["recipe"]["adjustments"]["noise_reduction"] == 40.0
+
+
+def test_edit_preset_upserts_by_trimmed_name(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+
+    first = db.save_edit_preset("Backlit  ", {"adjustments": {"exposure": 1}})
+    second = db.save_edit_preset(
+        " Backlit", {"adjustments": {"shadows": 30}}
+    )
+
+    assert first["name"] == "Backlit"
+    assert second["id"] == first["id"]
+    listed = db.list_edit_presets()
+    assert len(listed) == 1
+    assert listed[0]["recipe"]["adjustments"] == {"shadows": 30.0}
+
+
+def test_edit_presets_list_sorted_by_name(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    for name in ("zebra dusk", "Backlit", "high-ISO forest"):
+        db.save_edit_preset(name, {"adjustments": {"contrast": 10}})
+
+    names = [p["name"] for p in db.list_edit_presets()]
+    assert names == sorted(names, key=str.casefold)
+
+
+def test_edit_preset_rejects_empty_or_geometry_only(tmp_path):
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+
+    with pytest.raises(ValueError):
+        db.save_edit_preset("Nothing", {})
+    with pytest.raises(ValueError):
+        db.save_edit_preset("Geometry only", {"rotation": 90})
+    with pytest.raises(ValueError):
+        db.save_edit_preset("Zeroed", {"adjustments": {"exposure": 0}})
+    assert db.list_edit_presets() == []
+
+
+def test_edit_preset_rejects_blank_or_overlong_name(tmp_path):
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+
+    with pytest.raises(ValueError):
+        db.save_edit_preset("   ", {"adjustments": {"exposure": 1}})
+    with pytest.raises(ValueError):
+        db.save_edit_preset("x" * 200, {"adjustments": {"exposure": 1}})
+
+
+def test_delete_edit_preset(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    preset = db.save_edit_preset("Doomed", {"adjustments": {"exposure": 1}})
+
+    assert db.delete_edit_preset(preset["id"]) is True
+    assert db.delete_edit_preset(preset["id"]) is False
+    assert db.list_edit_presets() == []

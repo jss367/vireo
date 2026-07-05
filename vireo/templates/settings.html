@@ -612,10 +612,10 @@
           <small>Detector confidence below this flags the frame as "no subject". Burst siblings relax the bar; singletons use the full threshold.</small>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgMissDetConf" min="10" max="50" step="1" value="25"
+          <input type="range" id="cfgMissDetConf" min="10" max="50" step="1" value="20"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgMissDetConfVal').textContent = this.value + '%'; saveConfig()">
-          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgMissDetConfVal">25%</span>
+          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgMissDetConfVal">20%</span>
         </div>
       </div>
       <div class="setting-row">
@@ -857,7 +857,7 @@
     <div class="section-title">iNaturalist</div>
     <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
       Submit observations directly from Vireo.
-      Get your API token from <a href="https://www.inaturalist.org/users/api_token" target="_blank" style="color:var(--accent);text-decoration:none;">inaturalist.org/users/api_token</a>
+      Get your API token from <a href="https://www.inaturalist.org/users/api_token" target="_blank" onclick="return openExternalLink(event, this.href)" style="color:var(--accent);text-decoration:none;">inaturalist.org/users/api_token</a>
     </p>
     <div class="setting-row">
       <div class="setting-label">
@@ -899,10 +899,20 @@
   <div class="section">
     <div class="section-title">External Editors</div>
     <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
-      Applications used when clicking "Open in Editor" in the browse tab, lightbox, or burst review. Add as many as you like (e.g. Lightroom, Affinity, Photoshop) — when more than one is configured you'll get a picker. With none configured, photos open in the OS default app.
+      Applications used by "Open in Editor" context-menu and app-menu actions. Add as many as you like (e.g. Lightroom, Affinity, Photoshop); context menus show each configured editor, while the app menu uses the first. With none configured, photos open in the OS default app.
     </p>
     <div id="cfgExternalEditorsList" style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px;"></div>
     <button type="button" onclick="addExternalEditor()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">+ Add editor</button>
+  </div>
+
+  <!-- Remote targets (SSH folder moves) -->
+  <div class="section">
+    <div class="section-title">Remote targets (NAS / SSH)</div>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
+      Destinations for moving folders to a NAS over SSH — far more reliable than an SMB mount over a slow/remote link, with resume and integrity verification. The <b>Remote path</b> is the NAS-side filesystem path rsync writes to (e.g. <code>/volume1/Photography</code>); the <b>Local mount path</b> is where you can read those same files afterward (e.g. <code>/Volumes/Photography</code>) — moved photos are repointed there so they stay in your library. Remote moves need GNU rsync (set its path under “GNU rsync path” in the Paths settings if auto-detect fails).
+    </p>
+    <div id="cfgRemoteTargetsList" style="display:flex;flex-direction:column;gap:10px;margin-bottom:8px;"></div>
+    <button type="button" onclick="addRemoteTarget()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">+ Add remote target</button>
   </div>
 
   <!-- darktable Development -->
@@ -1005,6 +1015,13 @@
         <small id="megadetectorDetail">Checking...</small>
       </div>
       <span class="setting-value" id="megadetectorStatus">-</span>
+    </div>
+    <div class="setting-row">
+      <div class="setting-label">
+        ExifTool
+        <small id="exiftoolDetail">Reads capture date, GPS, and camera info during scans.</small>
+      </div>
+      <span class="setting-value" id="exiftoolStatus">-</span>
     </div>
   </div>
 
@@ -1464,15 +1481,27 @@ function saveWsConfig() {
   clearTimeout(_wsSaveTimer);
   _wsSaveTimer = setTimeout(async function() {
     var overrides = {};
+    var needsResync = false;
     ['classification_threshold', 'grouping_window_seconds', 'similarity_threshold', 'detector_confidence'].forEach(function(key) {
       var checkbox = document.getElementById('wsOverride_' + key);
       var input = document.getElementById('wsVal_' + key);
       if (!checkbox || !input) return;
       if (checkbox.checked) {
+        var parsed = parseInt(input.value, 10);
+        if (isNaN(parsed)) {
+          // Cleared/invalid number field: JSON.stringify turns NaN into
+          // null, which the backend reads as "delete this override" while
+          // the checkbox stays checked — the UI would claim an override
+          // that no longer exists. Omit the key instead (the backend
+          // preserves omitted keys) and resync the input from the server
+          // afterwards so it shows the value that is actually in effect.
+          needsResync = true;
+          return;
+        }
         if (key === 'classification_threshold' || key === 'similarity_threshold' || key === 'detector_confidence') {
-          overrides[key] = parseInt(input.value) / 100;
+          overrides[key] = parsed / 100;
         } else {
-          overrides[key] = parseInt(input.value);
+          overrides[key] = parsed;
         }
       } else {
         // Explicit null tells the backend to clear this override.
@@ -1487,6 +1516,9 @@ function saveWsConfig() {
         body: JSON.stringify(overrides)
       });
     } catch(e) {}
+    // Restore any field left empty/invalid to the server's persisted value
+    // (or uncheck it if no override actually exists server-side).
+    if (needsResync) loadWsOverrides();
   }, 500);
 }
 
@@ -1525,7 +1557,7 @@ function renderExternalEditors() {
 
     var pathInput = document.createElement('input');
     pathInput.type = 'text';
-    pathInput.placeholder = '/Applications/Adobe Lightroom Classic/Adobe Lightroom Classic.app';
+    pathInput.placeholder = window.VIREO_EDITOR_PATH_PLACEHOLDER || '/usr/bin/darktable';
     pathInput.value = ed.path || '';
     pathInput.style.cssText = inputCss + 'flex:1;min-width:240px;font-family:monospace;';
     pathInput.addEventListener('input', function() {
@@ -1580,6 +1612,158 @@ function collectExternalEditors() {
     });
 }
 
+// ---------- Remote targets (SSH) list ----------
+// Source-of-truth for the remote-target editor. Populated by loadConfig()
+// and read back on save via collectRemoteTargets().
+var _remoteTargetsState = [];
+
+function _genTargetId() {
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  return 'rt-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36);
+}
+
+var _rtInputCss = 'background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;';
+
+function _rtField(label, value, placeholder, onInput, opts) {
+  opts = opts || {};
+  var wrap = document.createElement('div');
+  wrap.style.cssText = 'display:flex;flex-direction:column;gap:3px;'
+    + (opts.flex ? ('flex:' + opts.flex + ';') : '') + (opts.width ? ('width:' + opts.width + ';') : '');
+  var lab = document.createElement('label');
+  lab.textContent = label;
+  lab.style.cssText = 'font-size:11px;color:var(--text-dim);';
+  var inp = document.createElement('input');
+  inp.type = opts.type || 'text';
+  inp.value = (value == null ? '' : value);
+  inp.placeholder = placeholder || '';
+  inp.style.cssText = _rtInputCss + (opts.mono ? 'font-family:monospace;' : '');
+  inp.addEventListener('input', function() { onInput(inp.value); });
+  wrap.appendChild(lab);
+  wrap.appendChild(inp);
+  return wrap;
+}
+
+function renderRemoteTargets() {
+  var container = document.getElementById('cfgRemoteTargetsList');
+  if (!container) return;
+  container.replaceChildren();
+  if (_remoteTargetsState.length === 0) {
+    var empty = document.createElement('div');
+    empty.style.cssText = 'color:var(--text-dim);font-size:12px;font-style:italic;';
+    empty.textContent = 'No remote targets configured.';
+    container.appendChild(empty);
+    return;
+  }
+  _remoteTargetsState.forEach(function(t, i) {
+    var card = document.createElement('div');
+    card.style.cssText = 'border:1px solid var(--border-secondary);border-radius:6px;padding:10px;display:flex;flex-direction:column;gap:8px;background:var(--bg-secondary);';
+
+    var save = function(field) {
+      return function(v) { _remoteTargetsState[i][field] = v; saveConfig(); };
+    };
+
+    var r1 = document.createElement('div');
+    r1.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;';
+    r1.appendChild(_rtField('Name', t.name, 'My NAS', save('name'), {flex: '2'}));
+    r1.appendChild(_rtField('User', t.user, 'admin', save('user'), {flex: '1'}));
+    r1.appendChild(_rtField('Host', t.host, 'synology-nas', save('host'), {flex: '2', mono: true}));
+    r1.appendChild(_rtField('Port', t.port, '22', save('port'), {width: '70px'}));
+    card.appendChild(r1);
+
+    var r2 = document.createElement('div');
+    r2.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;';
+    r2.appendChild(_rtField('Remote path (NAS side)', t.remote_path, '/volume1/Photography', save('remote_path'), {flex: '1', mono: true}));
+    r2.appendChild(_rtField('Local mount path', t.mount_path, '/Volumes/Photography', save('mount_path'), {flex: '1', mono: true}));
+    card.appendChild(r2);
+
+    var r3 = document.createElement('div');
+    r3.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;';
+    r3.appendChild(_rtField('SSH key (optional)', t.ssh_key, 'default key if blank', save('ssh_key'), {flex: '2', mono: true}));
+    r3.appendChild(_rtField('Bandwidth limit KB/s (0 = none)', t.bwlimit_kbps, '0', save('bwlimit_kbps'), {width: '160px'}));
+    card.appendChild(r3);
+
+    var r4 = document.createElement('div');
+    r4.style.cssText = 'display:flex;align-items:center;gap:10px;';
+    var testBtn = document.createElement('button');
+    testBtn.type = 'button';
+    testBtn.textContent = 'Test connection';
+    testBtn.style.cssText = 'background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;';
+    var statusEl = document.createElement('span');
+    statusEl.style.cssText = 'font-size:12px;color:var(--text-dim);flex:1;';
+    testBtn.addEventListener('click', function() { testRemoteTarget(i, testBtn, statusEl); });
+
+    var removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.textContent = 'Remove';
+    removeBtn.style.cssText = 'background:var(--bg-tertiary);color:var(--text-dim);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;';
+    removeBtn.addEventListener('click', function() {
+      _remoteTargetsState.splice(i, 1);
+      renderRemoteTargets();
+      saveConfig();
+    });
+
+    r4.appendChild(testBtn);
+    r4.appendChild(statusEl);
+    r4.appendChild(removeBtn);
+    card.appendChild(r4);
+    container.appendChild(card);
+  });
+}
+
+function addRemoteTarget() {
+  _remoteTargetsState.push({
+    id: _genTargetId(), name: '', host: '', user: '', port: 22,
+    ssh_key: '', remote_path: '', mount_path: '', bwlimit_kbps: 0,
+  });
+  renderRemoteTargets();
+  // Defer save until fields are filled — _coerce_remote_target drops empty
+  // entries server-side anyway, so an empty save would be a no-op write.
+}
+
+function collectRemoteTargets() {
+  // Mirror config._coerce_remote_target: drop entries missing host/user/
+  // remote_path; coerce numeric fields. Keep ids stable across edits.
+  var asStr = function(v) { return typeof v === 'string' ? v.trim() : (v == null ? '' : String(v).trim()); };
+  var asInt = function(v, d) { var n = parseInt(v, 10); return isNaN(n) ? d : n; };
+  return _remoteTargetsState
+    .map(function(t) {
+      return {
+        id: t.id || _genTargetId(),
+        name: asStr(t.name), host: asStr(t.host), user: asStr(t.user),
+        port: asInt(t.port, 22), ssh_key: asStr(t.ssh_key),
+        remote_path: asStr(t.remote_path), mount_path: asStr(t.mount_path),
+        bwlimit_kbps: Math.max(0, asInt(t.bwlimit_kbps, 0)),
+      };
+    })
+    .filter(function(t) { return t.host && t.user && t.remote_path; });
+}
+
+async function testRemoteTarget(i, btn, statusEl) {
+  var t = _remoteTargetsState[i];
+  btn.disabled = true;
+  var orig = btn.textContent;
+  btn.textContent = 'Testing…';
+  statusEl.textContent = 'Connecting…';
+  statusEl.style.color = 'var(--text-dim)';
+  try {
+    var res = await safeFetch('/api/remote-targets/test', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(t),
+    }, { toast: false });
+    statusEl.textContent = (res.ok ? '✓ ' : '⚠ ') + (res.message || '')
+      + (res.mount_path && !res.mount_present
+          ? ' (mount path not currently present — fine if the NAS just isn’t mounted right now.)' : '');
+    statusEl.style.color = res.ok ? 'var(--success, #4caf50)' : 'var(--warning)';
+  } catch (e) {
+    statusEl.textContent = '⚠ ' + (e && e.message ? e.message : 'Test failed.');
+    statusEl.style.color = 'var(--warning)';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
 async function loadConfig() {
   try {
     var cfg = await safeFetch('/api/config', {}, { toast: false });
@@ -1614,6 +1798,25 @@ async function loadConfig() {
       _editorsState = [{ name: 'Editor', path: cfg.external_editor.trim() }];
     }
     renderExternalEditors();
+    // Remote (SSH) move targets. Coerce defensively against a hand-edited
+    // config.json so a malformed entry can't crash the settings page.
+    var rawTargets = Array.isArray(cfg.remote_targets) ? cfg.remote_targets : [];
+    _remoteTargetsState = [];
+    rawTargets.forEach(function(t) {
+      if (!t || typeof t !== 'object') return;
+      _remoteTargetsState.push({
+        id: typeof t.id === 'string' && t.id ? t.id : _genTargetId(),
+        name: typeof t.name === 'string' ? t.name : '',
+        host: typeof t.host === 'string' ? t.host : '',
+        user: typeof t.user === 'string' ? t.user : '',
+        port: t.port == null ? 22 : t.port,
+        ssh_key: typeof t.ssh_key === 'string' ? t.ssh_key : '',
+        remote_path: typeof t.remote_path === 'string' ? t.remote_path : '',
+        mount_path: typeof t.mount_path === 'string' ? t.mount_path : '',
+        bwlimit_kbps: t.bwlimit_kbps == null ? 0 : t.bwlimit_kbps,
+      });
+    });
+    renderRemoteTargets();
     document.getElementById('cfgDarktableBin').value = cfg.darktable_bin || '';
     document.getElementById('cfgDarktableStyle').value = cfg.darktable_style || '';
     document.getElementById('cfgDarktableFormat').value = cfg.darktable_output_format || 'jpg';
@@ -1760,7 +1963,7 @@ var CARD_FIELD_OPTIONS = [
   { id: 'species', label: 'Species', desc: 'Species identification badges' },
   { id: 'dimensions', label: 'Dimensions', desc: 'Image width \u00d7 height' },
   { id: 'file_size', label: 'File size', desc: 'e.g. "4.2 MB"' },
-  { id: 'capture_date', label: 'Capture date', desc: 'Date photo was taken' },
+  { id: 'capture_date', label: 'Capture date & time', desc: 'Date and time photo was taken (to the minute)' },
   { id: 'extension', label: 'Extension', desc: 'File type (JPG, RAW, etc.)' },
   { id: 'quality_score', label: 'Quality score', desc: 'Pipeline quality score' },
 ];
@@ -1813,6 +2016,7 @@ function saveConfig() {
           inat_token: document.getElementById('cfgInatToken').value.trim(),
           google_maps_api_key: document.getElementById('cfgGoogleMapsApiKey').value.trim(),
           external_editors: collectExternalEditors(),
+          remote_targets: collectRemoteTargets(),
           // Always clear the legacy single-editor field when we save the new
           // list. Otherwise a user who once had `external_editor` set and now
           // removes every editor from the list can't get back to OS-default
@@ -1862,7 +2066,7 @@ function saveConfig() {
             // different kinds of evidence:
             //   - det_conf: siblings confirm a subject, so a burst is
             //     forgiving of low confidence (lower threshold). Default
-            //     det_conf=0.25 / det_conf_burst=0.15 → burst = 0.60 * singleton.
+            //     det_conf=0.20 / det_conf_burst=0.12 -> burst = 0.60 * singleton.
             //   - bbox_min: siblings showing a larger subject make a tiny
             //     bbox look like lost framing, so a burst flags more
             //     aggressively (higher threshold). Default bbox_min=0.005 /
@@ -1905,7 +2109,7 @@ function saveConfig() {
         }),
       });
       if (typeof loadPreviewCacheStatus === 'function') loadPreviewCacheStatus();
-      // Drop the cached editor list so the next "Open in Editor" click
+      // Drop the cached editor list so the next "Open in Editor" action
       // sees changes to the editors list without a page reload.
       if (typeof window.invalidateEditorsCache === 'function') {
         window.invalidateEditorsCache();
@@ -2064,7 +2268,37 @@ async function loadSystemInfo() {
       mdDetail.textContent = d.megadetector_detail;
     }
   } catch(e) {}
+  loadExiftoolStatus();
   loadPipelineModels();
+}
+
+// exiftool is the metadata backbone for every scan; a missing binary
+// degrades scans silently, so report its presence next to the other
+// external dependencies.
+async function loadExiftoolStatus() {
+  var statusEl = document.getElementById('exiftoolStatus');
+  var detailEl = document.getElementById('exiftoolDetail');
+  if (!statusEl) return;
+  try {
+    var d = await safeFetch('/api/exiftool/status', {}, { toast: false });
+    if (d && d.available) {
+      statusEl.textContent = d.version ? 'Installed (v' + d.version + ')' : 'Installed';
+      statusEl.style.color = 'var(--accent)';
+      detailEl.textContent = d.path || 'Reads capture date, GPS, and camera info during scans.';
+    } else {
+      /* A populated path with available=false means the binary resolved
+         on PATH but the -ver probe failed — a broken install, not a
+         missing one. Surface that distinction so the user knows whether
+         to install or to repair. */
+      var broken = !!(d && d.path);
+      statusEl.textContent = broken ? 'Installed but broken' : 'Not installed';
+      statusEl.style.color = 'var(--danger)';
+      detailEl.textContent = 'Scans won’t record dates, GPS, or camera info — ' +
+        ((d && d.hint) ||
+         (broken ? 'reinstall ExifTool' : 'install ExifTool')) +
+        ', then restart Vireo.';
+    }
+  } catch(e) {}
 }
 
 async function loadPipelineModels() {
@@ -2350,13 +2584,24 @@ async function fetchLabels() {
           status.textContent = 'Done! ' + result.result.species_count + ' species downloaded.';
           status.style.color = 'var(--accent)';
           progressFill.style.width = '100%';
+          var precompute = result.result.embedding_precompute;
+          if (precompute) {
+            startBackgroundEmbeddingPrecompute(precompute, {
+              status: status,
+              progressDiv: progressDiv,
+              progressFill: progressFill
+            });
+          }
         } else {
           status.textContent = 'Failed: ' + (result.errors || []).join(', ');
           status.style.color = 'var(--danger)';
         }
         btn.disabled = false;
         loadLabels();
-        setTimeout(function() { progressDiv.style.display = 'none'; }, 3000);
+        loadEmbeddingMatrix();
+        if (!(result.status === 'completed' && result.result && result.result.embedding_precompute)) {
+          setTimeout(function() { progressDiv.style.display = 'none'; }, 3000);
+        }
       },
       onError: function() {
         status.textContent = 'Connection lost';
@@ -2366,6 +2611,69 @@ async function fetchLabels() {
   } catch(e) {
     status.textContent = 'Error: ' + e.message;
     btn.disabled = false;
+  }
+}
+
+async function startBackgroundEmbeddingPrecompute(precompute, opts) {
+  if (!precompute || !precompute.model_id || !precompute.labels_file) return;
+  opts = opts || {};
+  var status = opts.status;
+  var progressDiv = opts.progressDiv;
+  var progressFill = opts.progressFill;
+  var modelName = precompute.model_name || 'active model';
+  if (status) {
+    status.textContent = 'Pre-computing embeddings for ' + modelName + ' in background...';
+    status.style.color = 'var(--text-dim)';
+  }
+  if (progressDiv) progressDiv.style.display = '';
+  if (progressFill) progressFill.style.width = '0%';
+
+  try {
+    var data = await safeFetch('/api/jobs/precompute-embeddings', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        model_id: precompute.model_id,
+        labels_file: precompute.labels_file
+      }),
+    }, { toast: false });
+
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(p) {
+        if (status && p.current_file) {
+          status.textContent = p.current_file.replace(/^Computing embeddings/, 'Pre-computing embeddings');
+        }
+        if (progressFill && p.total > 0) {
+          progressFill.style.width = Math.round((p.current / p.total) * 100) + '%';
+        }
+      },
+      onComplete: function(result) {
+        if (result.status === 'completed') {
+          if (status) {
+            status.textContent = 'Embeddings cached for ' + modelName + '.';
+            status.style.color = 'var(--accent)';
+          }
+          if (progressFill) progressFill.style.width = '100%';
+        } else if (status) {
+          status.textContent = 'Species list downloaded; embedding precompute failed.';
+          status.style.color = 'var(--warning)';
+        }
+        loadEmbeddingMatrix();
+        if (progressDiv) setTimeout(function() { progressDiv.style.display = 'none'; }, 3000);
+      },
+      onError: function() {
+        if (status) {
+          status.textContent = 'Species list downloaded; embedding precompute is still listed in Jobs.';
+          status.style.color = 'var(--warning)';
+        }
+      }
+    });
+  } catch(e) {
+    if (status) {
+      status.textContent = 'Species list downloaded; embedding precompute did not start: ' + e.message;
+      status.style.color = 'var(--warning)';
+    }
+    if (progressDiv) setTimeout(function() { progressDiv.style.display = 'none'; }, 3000);
   }
 }
 
@@ -2389,11 +2697,22 @@ async function loadModels() {
     models.forEach(function(m) {
       var isActive = m.id === activeId;
       var state = m.state || (m.downloaded ? 'ok' : 'missing');
+      var missingOptional = m.missing_optional_files || [];
+      // Unverified installs also expose missing_optional_files in
+      // get_models() because they count as "downloaded", so gate on both
+      // 'ok' and 'unverified' — otherwise the Retry-verification button
+      // is the only action offered and it can't fetch optional artifacts
+      // (see downloadModel vs verifyAllModels below).
+      var hasMissingOptional = (state === 'ok' || state === 'unverified') && missingOptional.length > 0;
       var statusColor, statusText;
-      if (state === 'ok') {
+      if (state === 'ok' && hasMissingOptional) {
+        statusColor = 'var(--warning)'; statusText = 'Downloaded — optional files available';
+      } else if (state === 'ok') {
         statusColor = 'var(--accent)'; statusText = 'Downloaded';
       } else if (state === 'incomplete') {
         statusColor = 'var(--warning)'; statusText = 'Incomplete — repair available';
+      } else if (state === 'unverified' && hasMissingOptional) {
+        statusColor = 'var(--warning)'; statusText = 'Unverified — optional files available';
       } else if (state === 'unverified') {
         statusColor = 'var(--warning)'; statusText = 'Unverified — could not reach HuggingFace';
       } else {
@@ -2412,9 +2731,16 @@ async function loadModels() {
       html += '<div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">' + escapeHtml(m.description || '') + '</div>';
       if (state === 'incomplete') {
         html += '<div style="font-size:11px;color:var(--warning);margin-bottom:6px;">Model files are missing or truncated. Click Repair to finish the download — already-downloaded files will not be re-fetched.</div>';
+      } else if (state === 'unverified' && hasMissingOptional) {
+        var reason = m.verify_skipped_reason ? ' (' + escapeHtml(m.verify_skipped_reason) + ')' : '';
+        var missingList = missingOptional.map(escapeHtml).join(', ');
+        html += '<div style="font-size:11px;color:var(--warning);margin-bottom:6px;">Files are present but SHA256 could not be checked against HuggingFace' + reason + ', and optional files are not installed: ' + missingList + '. Click Repair to fetch them and re-verify — Retry verification alone only re-checks hashes and cannot download the optional artifacts.</div>';
       } else if (state === 'unverified') {
         var reason = m.verify_skipped_reason ? ' (' + escapeHtml(m.verify_skipped_reason) + ')' : '';
         html += '<div style="font-size:11px;color:var(--warning);margin-bottom:6px;">Files are present but SHA256 could not be checked against HuggingFace' + reason + '. The model should work; click Retry verification once the network is reachable.</div>';
+      } else if (hasMissingOptional) {
+        var missingList = missingOptional.map(escapeHtml).join(', ');
+        html += '<div style="font-size:11px;color:var(--warning);margin-bottom:6px;">Optional files not installed: ' + missingList + '. The model works for label-list classification without them; click Repair to fetch them once available on HuggingFace (e.g. to enable Tree of Life mode).</div>';
       }
       html += '<div style="display:flex;align-items:center;gap:8px;">';
       html += '<span style="font-size:11px;color:' + statusColor + ';">' + statusText + '</span>';
@@ -2426,8 +2752,16 @@ async function loadModels() {
       html += '<span style="margin-left:auto;display:flex;gap:6px;">';
       if (state === 'incomplete' && m.source !== 'custom') {
         html += '<button onclick="downloadModel(\'' + m.id + '\')" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Repair</button>';
+      } else if (state === 'unverified' && hasMissingOptional && m.source !== 'custom') {
+        // Missing optionals need download_model (Repair); retry-verification
+        // alone would leave them absent. Offer both so the user can pick a
+        // lighter re-check once they've handled the optional artifacts.
+        html += '<button onclick="downloadModel(\'' + m.id + '\')" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Repair</button>';
+        html += '<button onclick="verifyAllModels()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Retry verification</button>';
       } else if (state === 'unverified' && m.source !== 'custom') {
         html += '<button onclick="verifyAllModels()" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Retry verification</button>';
+      } else if (hasMissingOptional && m.source !== 'custom') {
+        html += '<button onclick="downloadModel(\'' + m.id + '\')" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Repair</button>';
       } else if (state === 'missing' && m.source !== 'custom') {
         html += '<button onclick="downloadModel(\'' + m.id + '\')" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Download</button>';
       }
@@ -3244,6 +3578,15 @@ function renderSettingWidget(key, spec, effective) {
       var sel = (opt === effective) ? ' selected' : '';
       return '<option value="' + escapeAttr(opt) + '"' + sel + '>' + escapeHtml(label) + '</option>';
     }).join('');
+    if (spec.nullable) {
+      // Prepend the null option (value="" — the settings PATCH endpoint
+      // treats "" as null when spec.nullable is true) so users can pick
+      // "unset" as a first-class choice even after a non-null default has
+      // been assigned globally.
+      var nullLabel = spec.null_label || '(unset)';
+      var nullSel = (effective == null) ? ' selected' : '';
+      opts = '<option value=""' + nullSel + '>' + escapeHtml(nullLabel) + '</option>' + opts;
+    }
     return '<select ' + keyAttr + ' onchange="onSchemaInputChange(this, true)" '
          +    'style="' + inputStyle + 'min-width:120px;">'
          +   opts + '</select>';

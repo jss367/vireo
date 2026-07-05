@@ -6,6 +6,8 @@ selection. Double-click opens the shared lightbox.
 """
 import time
 
+from playwright.sync_api import expect
+
 
 def _seed_misses(db, photo_ids, category="no_subject"):
     """Mark each given photo as a miss in the named category."""
@@ -152,7 +154,7 @@ def test_x_with_selection_bulk_rejects(live_server, page):
     assert untouched["flag"] in (None, "none"), f"pids[1] was modified: {untouched['flag']!r}"
 
     # Selection cleared after bulk apply.
-    assert page.evaluate("selection.size") == 0
+    page.wait_for_function("selection.size === 0", timeout=3000)
 
 
 def test_p_with_selection_bulk_flags(live_server, page):
@@ -385,6 +387,72 @@ def test_double_click_opens_lightbox(live_server, page):
     )
 
 
+def test_u_unmarks_miss_from_lightbox(live_server, page):
+    """When inspecting a miss in the lightbox, `u` clears the miss flag."""
+    url = live_server["url"]
+    db = live_server["db"]
+    pid = live_server["data"]["photos"][0]
+    _seed_misses(db, [pid], "oof")
+
+    page.goto(f"{url}/misses")
+    card = page.locator(f"[data-testid='miss-card-oof-{pid}']")
+    card.wait_for(state="visible", timeout=3000)
+
+    card.dblclick()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+
+    page.keyboard.press("u")
+
+    page.wait_for_function(
+        f"!document.querySelector('[data-testid=\"miss-card-oof-{pid}\"]')",
+        timeout=3000,
+    )
+    row = db.conn.execute(
+        "SELECT miss_oof, flag FROM photos WHERE id=?",
+        (pid,),
+    ).fetchone()
+    assert row["miss_oof"] == 0
+    assert row["flag"] in (None, "none")
+
+
+def test_u_unmarks_only_active_miss_category_from_lightbox(live_server, page):
+    """A lightbox `u` clears the miss category that opened the lightbox."""
+    url = live_server["url"]
+    db = live_server["db"]
+    pid = live_server["data"]["photos"][0]
+    _seed_misses(db, [pid], "clipped")
+    _seed_misses(db, [pid], "oof")
+
+    page.goto(f"{url}/misses")
+    clipped_card = page.locator(f"[data-testid='miss-card-clipped-{pid}']")
+    oof_card = page.locator(f"[data-testid='miss-card-oof-{pid}']")
+    clipped_card.wait_for(state="visible", timeout=3000)
+    oof_card.wait_for(state="visible", timeout=3000)
+
+    clipped_card.dblclick()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+
+    page.keyboard.press("u")
+
+    page.wait_for_function(
+        f"!document.querySelector('[data-testid=\"miss-card-clipped-{pid}\"]')"
+        f" && document.querySelector('[data-testid=\"miss-card-oof-{pid}\"]')",
+        timeout=3000,
+    )
+    row = db.conn.execute(
+        "SELECT miss_clipped, miss_oof FROM photos WHERE id=?",
+        (pid,),
+    ).fetchone()
+    assert row["miss_clipped"] == 0
+    assert row["miss_oof"] == 1
+
+
 def test_selection_bar_unmarks_selected_misses(live_server, page):
     """The visible toolbar can clear the selected photos' miss flags."""
     url = live_server["url"]
@@ -416,6 +484,33 @@ def test_selection_bar_unmarks_selected_misses(live_server, page):
     assert {r["id"]: r["miss_no_subject"] for r in rows} == {a: 0, b: 0}
 
 
+def test_u_unmarks_clicked_miss(live_server, page):
+    """Plain-click selection followed by `u` clears the selected miss."""
+    url = live_server["url"]
+    db = live_server["db"]
+    pid = live_server["data"]["photos"][0]
+    _seed_misses(db, [pid], "no_subject")
+
+    page.goto(f"{url}/misses")
+    card = page.locator(f"[data-testid='miss-card-no_subject-{pid}']")
+    card.wait_for(state="visible", timeout=3000)
+
+    card.click()
+    assert page.evaluate("selection.size") == 1
+
+    page.keyboard.press("u")
+
+    page.wait_for_function(
+        f"!document.querySelector('[data-testid=\"miss-card-no_subject-{pid}\"]')",
+        timeout=3000,
+    )
+    row = db.conn.execute(
+        "SELECT miss_no_subject FROM photos WHERE id=?",
+        (pid,),
+    ).fetchone()
+    assert row["miss_no_subject"] == 0
+
+
 def test_selection_bar_deletes_selected_misses_from_vireo(live_server, page):
     """The visible toolbar can delete selected miss photos through the shared confirmation."""
     url = live_server["url"]
@@ -444,3 +539,65 @@ def test_selection_bar_deletes_selected_misses_from_vireo(live_server, page):
     )
     assert db.get_photo(a) is None
     assert db.get_photo(b) is None
+
+
+def test_selection_bar_opens_selected_miss_in_browse(live_server, page):
+    url = live_server["url"]
+    db = live_server["db"]
+    pid = live_server["data"]["photos"][0]
+    _seed_misses(db, [pid], "no_subject")
+
+    page.goto(f"{url}/misses")
+    card = page.locator(f"[data-testid='miss-card-no_subject-{pid}']")
+    card.wait_for(state="visible", timeout=3000)
+    card.click()
+
+    btn = page.locator("#missesSelectionBrowseBtn")
+    expect(btn).to_be_enabled()
+    btn.click()
+
+    page.wait_for_function(
+        f"location.pathname === '/browse' && new URLSearchParams(location.search).get('photo_id') === '{pid}'",
+        timeout=5000,
+    )
+
+
+def test_misses_b_opens_focused_card_in_browse(live_server, page):
+    url = live_server["url"]
+    db = live_server["db"]
+    pid = live_server["data"]["photos"][0]
+    _seed_misses(db, [pid], "clipped")
+
+    page.goto(f"{url}/misses")
+    page.locator(f"[data-testid='miss-card-clipped-{pid}']").wait_for(
+        state="visible", timeout=3000,
+    )
+
+    page.keyboard.press("j")
+    page.keyboard.press("b")
+
+    page.wait_for_function(
+        f"location.pathname === '/browse' && new URLSearchParams(location.search).get('photo_id') === '{pid}'",
+        timeout=5000,
+    )
+
+
+def test_misses_context_menu_opens_card_in_browse(live_server, page):
+    url = live_server["url"]
+    db = live_server["db"]
+    pid = live_server["data"]["photos"][0]
+    _seed_misses(db, [pid], "oof")
+
+    page.goto(f"{url}/misses")
+    card = page.locator(f"[data-testid='miss-card-oof-{pid}']")
+    card.wait_for(state="visible", timeout=3000)
+    card.click(button="right")
+
+    menu = page.locator(".vireo-ctx-menu")
+    expect(menu).to_be_visible()
+    menu.locator(".vireo-ctx-item", has_text="Open in Browse").click()
+
+    page.wait_for_function(
+        f"location.pathname === '/browse' && new URLSearchParams(location.search).get('photo_id') === '{pid}'",
+        timeout=5000,
+    )

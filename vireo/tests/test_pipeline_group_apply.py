@@ -11,7 +11,9 @@ def _photo_ids(db):
     return [p['id'] for p in db.get_photos()]
 
 
-def test_apply_flags_picks_rejects_and_adds_keyword(app_and_db):
+def test_apply_flags_picks_rejects_and_ignores_species(app_and_db):
+    """Flags-only contract: apply writes pick/reject flags but the endpoint
+    no longer tags species (species confirmation moves to a dedicated path)."""
     app, db = app_and_db
     pids = _photo_ids(db)
     pick_id, reject_id = pids[0], pids[1]
@@ -30,18 +32,45 @@ def test_apply_flags_picks_rejects_and_adds_keyword(app_and_db):
     assert db.get_photo(pick_id)['flag'] == 'flagged'
     assert db.get_photo(reject_id)['flag'] == 'rejected'
 
+    # No species keyword is tagged on the pick.
     pick_kws = {k['name'] for k in db.get_photo_keywords(pick_id)}
-    assert 'Coyote' in pick_kws
+    assert 'Coyote' not in pick_kws
 
-    # Reject should NOT get the species keyword.
+    # Reject also has no species keyword.
     reject_kws = {k['name'] for k in db.get_photo_keywords(reject_id)}
     assert 'Coyote' not in reject_kws
 
     # Returned per-photo state matches what we just wrote.
     photos = data['photos']
     assert photos[str(pick_id)]['flag'] == 'flagged'
-    assert photos[str(pick_id)]['has_species_keyword'] is True
+    assert photos[str(pick_id)]['has_species_keyword'] is False
     assert photos[str(reject_id)]['flag'] == 'rejected'
+    assert photos[str(reject_id)]['has_species_keyword'] is False
+
+
+def test_group_apply_ignores_species_and_tags_nothing(app_and_db):
+    """Posting `species` applies flags but tags NO species keyword."""
+    app, db = app_and_db
+    pids = _photo_ids(db)
+    p1, p2 = pids[0], pids[1]
+    client = app.test_client()
+
+    resp = client.post('/api/pipeline/group/apply', json={
+        'picks': [p1],
+        'rejects': [p2],
+        'candidates': [],
+        'species': 'Blue Jay',
+    })
+    assert resp.status_code == 200
+    body = resp.get_json()
+    # Flags still applied.
+    assert body['photos'][str(p1)]['flag'] == 'flagged'
+    assert body['photos'][str(p2)]['flag'] == 'rejected'
+    # But NO species keyword was added to the pick.
+    assert body['photos'][str(p1)]['has_species_keyword'] is False
+    # And the DB has no species keyword on p1.
+    kws = db.get_photo_keywords(p1)
+    assert not any(k['name'] == 'Blue Jay' for k in kws)
 
 
 def test_apply_clears_flag_when_photo_moved_to_candidates(app_and_db):
@@ -126,12 +155,10 @@ def test_apply_skips_keyword_when_already_applied(app_and_db):
     assert pending == 0
 
 
-def test_apply_cancels_pending_keyword_remove(app_and_db):
-    """If a `keyword_remove` for the same species is already pending sync,
-    a pick that adds that species must cancel the remove rather than queue a
-    contradictory `keyword_add` alongside it. sync_to_xmp applies removes
-    after adds, so a leftover remove would strip the tag from XMP even
-    though the DB has it."""
+def test_apply_does_not_touch_keyword_pending_changes(app_and_db):
+    """Flags-only contract: the endpoint no longer tags species, so it must not
+    queue, cancel, or otherwise modify keyword pending changes. A pre-existing
+    `keyword_remove` is left untouched, and no `keyword_add` is queued."""
     app, db = app_and_db
     pids = _photo_ids(db)
     pid = pids[0]
@@ -153,14 +180,15 @@ def test_apply_cancels_pending_keyword_remove(app_and_db):
         (pid, db._active_workspace_id),
     ).fetchall()
     types = {row['change_type'] for row in pending}
-    # The remove must be cancelled and no add queued in its place.
-    assert 'keyword_remove' not in types
+    # The remove is left untouched and no add is queued in its place.
+    assert 'keyword_remove' in types
     assert 'keyword_add' not in types
 
 
 def test_apply_records_edit_history_for_undo(app_and_db):
-    """Flag and keyword changes must be recorded in edit_history so undo
-    works the same way it does on the regular review page."""
+    """Flag changes must be recorded in edit_history so undo works the same way
+    it does on the regular review page. Flags-only: no `keyword_add` history is
+    recorded by this endpoint anymore (species moves to a dedicated path)."""
     app, db = app_and_db
     pids = _photo_ids(db)
     pid = pids[0]
@@ -180,7 +208,7 @@ def test_apply_records_edit_history_for_undo(app_and_db):
     ).fetchall()
     actions = [r['action_type'] for r in rows]
     assert 'flag' in actions
-    assert 'keyword_add' in actions
+    assert 'keyword_add' not in actions
 
 
 def test_apply_rejects_conflicting_zones(app_and_db):

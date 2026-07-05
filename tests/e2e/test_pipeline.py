@@ -1,3 +1,4 @@
+import json
 import re
 
 from playwright.sync_api import expect
@@ -112,6 +113,105 @@ def test_pipeline_preview_button_disabled_without_source_dest(live_server, page)
     expect(btn).to_be_disabled()
 
 
+def _destination_preview_body(managed_archive):
+    """Minimal destination-preview payload the render path needs, with an
+    optional managed_archive block."""
+    return json.dumps({
+        "total_photos": 3,
+        "total_folders": 1,
+        "new_folders": 0,
+        "existing_folders": 1,
+        "folders": [
+            {"path": "2026/2026-06-30", "count": 3, "exists": True,
+             "full_path": "/arch/USA/2026/2026-06-30"},
+        ],
+        "managed_archive": managed_archive,
+    })
+
+
+def test_pipeline_managed_archive_callout_shown_for_existing_archive(live_server, page):
+    """When destination-preview flags a managed archive, the merge callout
+    renders with the archive path and photo count."""
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    page.click("#card-destination .stage-header")
+    page.check("[data-testid='copy-photos-toggle']")
+
+    page.route(
+        "**/api/import/destination-preview",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=_destination_preview_body(
+                {"path": "/arch/USA", "photo_count": 1234}
+            ),
+        ),
+    )
+    # Drive the preview directly (no on-disk sources needed — the render path
+    # only consumes the stubbed destination-preview response).
+    page.evaluate("previewDestinationFolders()")
+
+    callout = page.locator("[data-testid='managed-archive-callout']")
+    expect(callout).to_be_visible()
+    expect(callout).to_contain_text("existing Vireo archive")
+    expect(callout).to_contain_text("/arch/USA")
+    expect(callout).to_contain_text("1,234 photos")
+    expect(callout).to_contain_text("merged in")
+
+
+def test_pipeline_no_managed_archive_callout_for_fresh_destination(live_server, page):
+    """A fresh (untracked) destination shows no merge callout."""
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    page.click("#card-destination .stage-header")
+    page.check("[data-testid='copy-photos-toggle']")
+
+    page.route(
+        "**/api/import/destination-preview",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=_destination_preview_body(None),
+        ),
+    )
+    page.evaluate("previewDestinationFolders()")
+
+    # Results render, but the callout stays hidden.
+    expect(page.locator("[data-testid='folder-preview-results']")).to_be_visible()
+    expect(page.locator("[data-testid='managed-archive-callout']")).to_be_hidden()
+
+
+def test_pipeline_duplicate_summary_reframed_when_merging(live_server, page):
+    """With a managed archive in play, the duplicate summary reads as an
+    archive merge (already-in-archive + new-will-be-merged), not the generic
+    'already imported' wording."""
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    # Managed-merge framing.
+    page.evaluate(
+        "window._managedArchive = {path: '/arch/USA', photo_count: 10};"
+        "updateDuplicateSummary({done: true, duplicate_count: 2, total: 5});"
+    )
+    dup = page.locator("#previewSummary .dup-status")
+    expect(dup).to_contain_text("already in your library")
+    expect(dup).to_contain_text("will be skipped")
+    expect(dup).to_contain_text("3 new")
+    expect(dup).to_contain_text("will be merged")
+
+
+def test_pipeline_duplicate_summary_generic_when_fresh(live_server, page):
+    """No managed archive -> today's exact 'already imported' wording."""
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    page.evaluate(
+        "window._managedArchive = null;"
+        "updateDuplicateSummary({done: true, duplicate_count: 2, total: 5});"
+    )
+    dup = page.locator("#previewSummary .dup-status")
+    expect(dup).to_contain_text("already imported")
+    expect(dup).not_to_contain_text("this archive")
+
+
 def test_pipeline_section_headers_visible(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
@@ -137,6 +237,63 @@ def test_pipeline_status_pills_visible_for_processing_stages(live_server, page):
     expect(page.locator("#pillExtract")).to_contain_text("Will run")
 
 
+def test_pipeline_import_plan_waits_for_folder_preview_scope(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    expect(page.locator("#pillClassify")).to_contain_text("Already done")
+
+    stale_plan_route = []
+
+    def hold_stale_plan(route):
+        stale_plan_route.append(route)
+
+    page.route("**/api/pipeline/plan", hold_stale_plan)
+    page.evaluate("setTimeout(refreshPipelinePlan, 0)")
+    for _ in range(50):
+        if stale_plan_route:
+            break
+        page.wait_for_timeout(100)
+    assert stale_plan_route
+
+    folder_preview_route = []
+    page.route("**/api/import/folder-preview", lambda route: folder_preview_route.append(route))
+    page.fill("#cfgSourceInput", "/Volumes/Photography/Raw Files/USA/2026/2026-05-30")
+    page.press("#cfgSourceInput", "Enter")
+    stale_plan_route[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps({
+            "stages": {
+                "Previews": {"state": "done-prior", "summary": "stale"},
+                "Classify": {"state": "done-prior", "summary": "stale"},
+                "Extract": {"state": "done-prior", "summary": "stale"},
+                "EyeKeypoints": {"state": "done-prior", "summary": "stale"},
+                "Group": {"state": "done-prior", "summary": "stale"},
+            },
+            "scope": {"collection_id": None, "photo_count": None, "new_count": 0, "known_count": 0},
+        }),
+    )
+
+    expect(page.locator("[data-testid='pipeline-plan-summary'] .plan-loading")).to_be_visible()
+    expect(page.locator("#pillClassify")).not_to_contain_text("Already done")
+    for _ in range(50):
+        if folder_preview_route:
+            break
+        page.wait_for_timeout(100)
+    assert folder_preview_route
+    folder_preview_route[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps({
+            "total_count": 0,
+            "total_size": 0,
+            "type_breakdown": {},
+            "duplicate_count": 0,
+            "files": [],
+        }),
+    )
+
+
 def test_pipeline_reclassify_flips_classify_pill_to_will_run(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
@@ -144,6 +301,17 @@ def test_pipeline_reclassify_flips_classify_pill_to_will_run(live_server, page):
     page.click("#card-classify .stage-header")
     page.check("#chkReclassify")
     expect(page.locator("#pillClassify")).to_contain_text("Will run")
+
+
+def test_pipeline_labels_get_more_opens_download_modal(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    page.click("#card-classify .stage-header")
+    page.get_by_role("button", name="Get more").click()
+    modal = page.locator("#pipelineLabelsModal")
+    expect(modal).to_have_class(re.compile("open"))
+    expect(modal.get_by_role("heading", name="Download Species Labels")).to_be_visible()
+    expect(page.locator("#pipelineTaxonCheckboxes")).to_contain_text("Birds")
 
 
 def test_pipeline_toggling_classify_off_marks_downstream_will_skip(live_server, page):
@@ -339,24 +507,16 @@ def test_pipeline_previews_pill_shows_pending_count(live_server, page):
     expect(page.locator("#summaryPreviews")).to_contain_text("preview")
 
 
-def test_pipeline_previews_pill_full_resolution_skips_previews(live_server, page):
-    """Selecting "Full resolution" disables the previews substage. The pill
-    summary must reflect that — promising N previews that will never run
-    would be a black box.
+def test_pipeline_preview_size_is_library_setting(live_server, page):
+    """Preview size is a library/workspace policy, not a per-run pipeline
+    choice. The pipeline should surface the active value without offering a
+    run-local override.
     """
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
     page.click("#card-previews .stage-header")
-    page.select_option("#cfgPreviewSize", "0")
-    # The summary updates after the debounced plan refresh fires. In will-run
-    # mode the summary surfaces "previews skipped" so the user sees why no
-    # preview count appears alongside the thumbnail count.
-    expect(page.locator("#summaryPreviews")).to_contain_text("previews skipped")
-    plan = page.evaluate(
-        "() => window._pipelinePlan ? window._pipelinePlan.stages.Previews : null"
-    )
-    assert plan["detail"]["previews_skipped"] is True
-    assert plan["detail"]["preview_pending"] == 0
+    expect(page.locator("#cfgPreviewSize")).to_have_count(0)
+    expect(page.locator("#cfgPreviewSizeSummary")).to_contain_text("px")
 
 
 def test_pipeline_shared_card_not_done_until_all_substages_complete(live_server, page):

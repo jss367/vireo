@@ -3,15 +3,31 @@
 import contextlib
 import logging
 import os
+import posixpath
 import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
 
-from grouping import read_exif_timestamp
-from image_loader import IMAGE_EXTENSIONS, RAW_EXTENSIONS, SUPPORTED_EXTENSIONS
+from image_loader import (
+    IMAGE_EXTENSIONS,
+    RAW_EXTENSIONS,
+    SUPPORTED_EXTENSIONS,
+    is_excluded_scan_path,
+    safe_iter_dir,
+    safe_scan_walk,
+)
+from import_dedup import (
+    CatalogIndex,
+    DuplicateChecker,
+    source_capture_timestamps,
+    stored_metadata_key,
+)
 from scanner import compute_file_hash
 
 log = logging.getLogger(__name__)
+
+_WINDOWS = sys.platform == "win32"
 
 
 def _escape_sql_like(s):
@@ -25,13 +41,73 @@ def _escape_sql_like(s):
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _slash_normpath(s):
+    # On Windows, both ``\`` and ``/`` are valid separators and stored paths
+    # may use either; replace backslashes first, then collapse ``..`` segments
+    # with posixpath.normpath so the prefix check in _path_under_root works
+    # regardless of which separator the caller used.
+    #
+    # On POSIX, ``\`` is a valid filename character rather than a separator.
+    # Converting it would conflate a literal sibling like ``/photos\archive``
+    # (one folder whose name happens to contain a backslash) with a child of
+    # ``/photos``, letting it slip through the subtree containment check.
+    # Run posixpath.normpath directly so backslashes stay literal.
+    raw = str(s)
+    if _WINDOWS and len(raw) == 2 and raw[1] == ":" and raw[0].isalpha():
+        # ``C:`` (drive letter and colon, no separator) is drive-relative:
+        # it means the current directory on drive C, NOT the root of C
+        # drive. Resolve via os.path.abspath so the prefix check
+        # distinguishes ``C:`` from ``C:\`` — without this, both collapse
+        # to ``c:`` and every ``C:\...`` row is wrongly accepted as inside
+        # a destination given as ``C:``.
+        raw = os.path.abspath(raw)
+    normalized = posixpath.normpath(raw.replace("\\", "/") if _WINDOWS else raw)
+    return "" if normalized == "." else normalized.rstrip("/")
+
+
+def _case_fold_path(s):
+    """Case-fold a path for comparison when the host filesystem is
+    case-insensitive (Windows NTFS/FAT). On POSIX hosts this is a no-op,
+    preserving case-sensitive matching.
+
+    The previous ``Path(...).is_relative_to(...)`` containment check was
+    case-insensitive on ``WindowsPath``; the slash-string comparison in
+    ``_path_under_root`` is not, so without this fold a destination passed
+    as ``c:\\photos`` would fail to match folder rows scanned as
+    ``C:\\Photos\\...`` and ``duplicate_folders`` would come back empty.
+    """
+    return s.lower() if _WINDOWS else s
+
+
+def _path_under_root(candidate, root):
+    candidate_norm = _case_fold_path(_slash_normpath(candidate))
+    root_norm = _case_fold_path(_slash_normpath(root))
+    if root_norm in {"", "/"}:
+        if _WINDOWS:
+            # On Windows, a destination given as ``/`` or ``\`` is
+            # drive-relative: it means the current drive root (e.g. ``C:\``),
+            # not every drive or UNC share. Resolve to the absolute drive
+            # root via ``os.path.abspath`` and recheck containment so a
+            # folder row on ``D:\...`` or ``\\server\share\...`` isn't
+            # accepted into a destination the user gave as ``/`` and then
+            # leaked into ``duplicate_folders`` for the restricted scan.
+            drive_root = _case_fold_path(_slash_normpath(os.path.abspath(root)))
+            if drive_root and drive_root not in {"", "/"}:
+                return (
+                    candidate_norm == drive_root
+                    or candidate_norm.startswith(drive_root + "/")
+                )
+        return os.path.isabs(os.path.normpath(candidate))
+    return candidate_norm == root_norm or candidate_norm.startswith(root_norm + "/")
+
+
 def _is_unsafe_path(s):
     """Check if a path string could escape the destination directory."""
     if not s:
         return False
     # Reject backslashes (Windows traversal), absolute paths, '..' segments,
     # and colons (Windows drive-relative paths like C:2026 or C:%Y)
-    if "\\" in s or ":" in s:
+    if s.startswith("/") or "\\" in s or ":" in s:
         return True
     p = Path(s)
     if p.is_absolute():
@@ -66,6 +142,30 @@ def build_destination_path(exif_timestamp, template="%Y/%Y-%m-%d"):
     return result
 
 
+def _source_file_timestamps(files, capture_times=None):
+    """Resolve timestamps for date-folder planning.
+
+    EXIF capture time first (lightweight reader, then batched ExifTool —
+    see import_dedup.source_capture_timestamps), falling back to file
+    modification time. The mtime fallback is fine here because these
+    timestamps only pick destination folders; duplicate identity uses the
+    EXIF-only map directly. Pass ``capture_times`` (a str(path) -> datetime
+    map) to reuse already-resolved EXIF reads instead of re-reading.
+    """
+    if capture_times is not None:
+        timestamps = {f: capture_times.get(str(f)) for f in files}
+    else:
+        timestamps = source_capture_timestamps(files)
+
+    for source_file, exif_dt in timestamps.items():
+        if exif_dt is None:
+            with contextlib.suppress(OSError, ValueError, OverflowError):
+                timestamps[source_file] = datetime.fromtimestamp(
+                    source_file.stat().st_mtime
+                )
+    return timestamps
+
+
 def preview_destination(sources, destination, folder_template="%Y/%Y-%m-%d",
                         file_types="both", recursive=True, exclude_paths=None):
     """Dry-run preview of destination folder structure.
@@ -84,16 +184,10 @@ def preview_destination(sources, destination, folder_template="%Y/%Y-%m-%d",
         skip = set(exclude_paths)
         all_files = [f for f in all_files if str(f) not in skip]
 
+    timestamps = _source_file_timestamps(all_files)
     folder_counts = {}
     for source_file in all_files:
-        exif_dt = None
-        with contextlib.suppress(OSError, ValueError):
-            exif_dt = read_exif_timestamp(str(source_file))
-        if exif_dt is None:
-            with contextlib.suppress(OSError, ValueError, OverflowError):
-                exif_dt = datetime.fromtimestamp(source_file.stat().st_mtime)
-
-        rel_folder = build_destination_path(exif_dt, folder_template)
+        rel_folder = build_destination_path(timestamps.get(source_file), folder_template)
         if not rel_folder:
             rel_folder = "."
         folder_counts[rel_folder] = folder_counts.get(rel_folder, 0) + 1
@@ -104,6 +198,7 @@ def preview_destination(sources, destination, folder_template="%Y/%Y-%m-%d",
         check_path = dest_path if path == "." else dest_path / path
         folders.append({
             "path": path,
+            "full_path": str(check_path),
             "count": folder_counts[path],
             "exists": check_path.is_dir(),
         })
@@ -133,6 +228,16 @@ def discover_source_files(source_dir, file_types="both", recursive=True):
         Sorted list of Path objects for matching files
     """
     source_path = Path(source_dir)
+    # prune_scan_dirs filters only children of the walked root; if the
+    # selected source is, or sits inside, an other-app data bundle (e.g.
+    # user picks ``~/Pictures/Photos Library.photoslibrary`` or a child
+    # like ``.../Photos Library.photoslibrary/originals`` as an import
+    # source), os.walk would still open it and trip the macOS TCC prompt.
+    # This must run BEFORE ``source_path.is_dir()`` — is_dir follows
+    # symlinks and stat's the target, so for a directly selected bundle
+    # (or a symlink to one) the existence test alone is enough to trip TCC.
+    if is_excluded_scan_path(source_path):
+        return []
     if not source_path.is_dir():
         return []
 
@@ -145,7 +250,37 @@ def discover_source_files(source_dir, file_types="both", recursive=True):
     else:
         allowed = SUPPORTED_EXTENSIONS
 
-    candidates = source_path.rglob("*") if recursive else source_path.iterdir()
+    if recursive:
+        # safe_scan_walk skips other-app data bundles (e.g.
+        # "Photos Library.photoslibrary") without stat-following any
+        # symlinked child that points at one — picking ~/Pictures as an
+        # import source would otherwise walk the whole Photos library and
+        # re-trip the macOS "access data from other apps" prompt.
+        #
+        # Stream the walk into the filter below rather than collecting
+        # every walked path first: a source like a home directory or
+        # external disk root can yield millions of non-image filenames,
+        # and materializing those would make memory grow with the whole
+        # tree (and stall the preview before any photo is copied). The
+        # previous Path.rglob path was likewise consumed lazily by
+        # ``sorted()``.
+        def _candidate_paths():
+            for dirpath, _dirnames, filenames in safe_scan_walk(str(source_path)):
+                for name in filenames:
+                    yield Path(dirpath) / name
+        candidates = _candidate_paths()
+    else:
+        # safe_iter_dir drops excluded bundle children before the
+        # is_file() filter below would stat them. With recursion off, a
+        # source like ~/Pictures still contains ``Photos
+        # Library.photoslibrary`` (or a symlink to one) as a direct
+        # child; a bare iterdir + is_file() would stat that bundle and
+        # re-trip the macOS "access data from other apps" TCC prompt
+        # this guard exists to avoid, even though the extension filter
+        # would have rejected it afterwards. ``safe_iter_dir`` is itself
+        # a generator — pass it straight through to the filter so we
+        # don't materialize the directory listing twice.
+        candidates = safe_iter_dir(str(source_path))
     return sorted(
         f
         for f in candidates
@@ -166,22 +301,36 @@ def ingest(
     extra_known_hashes=None,
     skip_paths=None,
     recursive=True,
+    verify_by_hash=False,
+    duplicate_checker=None,
 ):
     """Copy and organize photos from source to destination.
 
     Args:
         source_dir: path to source (e.g., /Volumes/SD_CARD)
         destination_dir: path to destination (e.g., /Volumes/NAS/Photos)
-        db: Database instance (used for duplicate hash lookup)
+        db: Database instance (used for duplicate identity lookup)
         file_types: "raw", "jpeg", or "both"
         folder_template: strftime format for destination subfolder
-        skip_duplicates: if True, skip files whose hash matches existing file
+        skip_duplicates: if True, skip files that duplicate a cataloged
+            photo. By default duplicates are identified by metadata —
+            (filename, size, EXIF capture time) — with a content-hash
+            fallback for files whose metadata is missing or placeholder;
+            see import_dedup for the exact rules and failure modes.
         progress_callback: optional callable(current, total, filename)
-        extra_known_hashes: optional set of hashes to treat as known in
-            addition to those already in the DB.  Pass a shared mutable set
-            when calling ingest() in a loop so that files copied by earlier
-            iterations are treated as duplicates by later ones even though
-            they have not been scanned into the DB yet.
+        extra_known_hashes: optional set of content hashes to treat as
+            known in addition to the catalog. Kept for callers that only
+            have hashes; note it disables the size shortcut on the hash
+            fallback. Prefer passing a shared ``duplicate_checker``.
+        verify_by_hash: if True, identify duplicates by content hash alone
+            (reads every byte of every source file — the historical exact
+            behavior).
+        duplicate_checker: optional import_dedup.DuplicateChecker to use
+            (and mutate) instead of building one from ``db``. Pass a shared
+            instance when calling ingest() in a loop so files copied by
+            earlier iterations are treated as duplicates by later ones even
+            though they have not been scanned into the DB yet. Its
+            ``verify_by_hash`` takes precedence over the argument above.
 
     Returns:
         dict with counts: copied, skipped_duplicate, failed, total
@@ -191,19 +340,22 @@ def ingest(
         files = [f for f in files if str(f) not in skip_paths]
     total = len(files)
 
-    # Load known hashes from database for duplicate detection and merge with
-    # any hashes accumulated by previous ingest() calls in the same session.
-    known_hashes = set()
-    known_hash_folders: dict[str, set[str]] = {}
+    # Duplicate oracle over the whole catalog. A source file matching any
+    # existing photo in the DB (even in another library root) is skipped
+    # so we don't silently duplicate bytes on disk. See import_dedup for
+    # the identity rules (metadata-first with hash fallback by default;
+    # hash-everything when verify_by_hash).
+    checker = None
+    dup_token_folders: dict[tuple, set[str]] = {}
     if skip_duplicates:
-        # Global hash set for dedup decisions. A source file matching any
-        # existing photo in the DB (even in another library root) is skipped
-        # so we don't silently duplicate bytes on disk.
-        rows = db.conn.execute(
-            "SELECT file_hash FROM photos WHERE file_hash IS NOT NULL"
-        ).fetchall()
-        known_hashes = {r["file_hash"] for r in rows}
-        # Destination-scoped hash -> set-of-folder-paths map for populating
+        checker = duplicate_checker
+        if checker is None:
+            checker = DuplicateChecker(
+                CatalogIndex.from_db(db), verify_by_hash=verify_by_hash,
+            )
+        if extra_known_hashes:
+            checker.add_known_hashes(extra_known_hashes)
+        # Destination-scoped identity -> set-of-folder-paths map for populating
         # the caller's post-ingest scan restrict_dirs. The same hash can
         # legitimately appear in more than one destination subfolder (e.g.,
         # the user copied the same photo into multiple date folders), and
@@ -219,12 +371,11 @@ def ingest(
         #      library into memory on large DBs. Escaping is required
         #      because destination paths may legally contain SQL LIKE
         #      wildcard characters (``_`` and ``%``).
-        #   3. Python ``Path.is_relative_to`` on lexically-normalized
-        #      paths — strict path-component comparison that catches any
-        #      residual LIKE wildcard leaks. ``os.path.normpath`` is
-        #      applied to both sides first so ``..`` segments in a
-        #      stored folder path can't lexically appear to be under
-        #      the destination while actually resolving outside it.
+        #   3. Python slash-normalized component-prefix comparison — strict
+        #      path-component matching that catches any residual LIKE wildcard
+        #      leaks. ``os.path.normpath`` is applied first so ``..`` segments
+        #      in a stored folder path can't lexically appear to be under the
+        #      destination while actually resolving outside it.
         #   4. Python ``Path.is_dir`` on the raw stored path — catches
         #      stale ``status IN ('ok', 'partial')`` rows when the folder
         #      was deleted since the last scan and the caller didn't
@@ -245,23 +396,68 @@ def ingest(
         # destination (``"/"``) produces LIKE prefix ``"/%"`` rather than
         # ``"//%"``.
         #
-        # ``dest_path_normalized`` is a separate ``Path`` used ONLY by the
-        # Python ``is_relative_to`` guard below. ``os.path.normpath`` is
-        # used instead of ``Path.resolve()`` to avoid filesystem access
-        # and symlink expansion, which could diverge from the raw paths
-        # stored in ``folders.path``.
         dest_path_str = str(Path(destination_dir))
-        dest_path_normalized = Path(os.path.normpath(dest_path_str))
-        dest_like_prefix = _escape_sql_like(dest_path_str.rstrip("/")) + "/%"
-        folder_rows = db.conn.execute(
-            """SELECT p.file_hash, f.path AS folder_path
-               FROM photos p
-               JOIN folders f ON p.folder_id = f.id
-               WHERE p.file_hash IS NOT NULL
-                 AND f.status IN ('ok', 'partial')
-                 AND (f.path = ? OR f.path LIKE ? ESCAPE '\\')""",
-            (dest_path_str, dest_like_prefix),
-        ).fetchall()
+        # Strip first so the LIKE prefix for root ("/") becomes "/%"
+        # rather than "//%". The equality side falls back to "/" for root.
+        # Backslashes are only normalized on Windows, where they are
+        # separators; on POSIX they are literal filename characters and
+        # converting them would match siblings like "/photos\archive"
+        # against destination "/photos".
+        if _WINDOWS:
+            dest_path_sql_stripped = dest_path_str.replace("\\", "/").rstrip("/")
+        else:
+            dest_path_sql_stripped = dest_path_str.rstrip("/")
+        dest_path_sql = dest_path_sql_stripped or "/"
+        dest_like_prefix = _escape_sql_like(dest_path_sql_stripped) + "/%"
+        # On Windows the filesystem is case-insensitive AND accepts both
+        # separators, so normalize the stored f.path to forward slashes and
+        # lower-case both sides to preserve the old Path.is_relative_to
+        # behaviour on WindowsPath. On POSIX, do neither: stored paths use
+        # the host's literal byte sequence and a literal sibling whose name
+        # contains "\" must not be folded into a child of the destination.
+        #
+        # SQLite's built-in LOWER() only folds ASCII, but Python's str.lower()
+        # is Unicode-aware: a stored folder row like 'C:\Älbum\2026' would
+        # lower in SQLite to 'c:/Älbum/2026' (Ä stays) while the Python-side
+        # destination 'c:\älbum' lowers to 'c:/älbum', so the prefilter would
+        # drop the row before the _path_under_root post-filter (which uses
+        # Unicode-aware folding via _case_fold_path) ever sees it. Register a
+        # Unicode-aware LOWER function on the connection so both sides agree.
+        if _WINDOWS:
+            db.conn.create_function(
+                "LOWER_UNICODE", 1,
+                lambda s: s.lower() if s is not None else None,
+            )
+            path_sql_expr = "LOWER_UNICODE(REPLACE(f.path, '\\', '/'))"
+            dest_path_sql_param = dest_path_sql.lower()
+            dest_like_prefix_param = dest_like_prefix.lower()
+        else:
+            path_sql_expr = "f.path"
+            dest_path_sql_param = dest_path_sql
+            dest_like_prefix_param = dest_like_prefix
+        if dest_path_sql_stripped:
+            folder_rows = db.conn.execute(
+                f"""SELECT p.file_hash, p.filename, p.file_size, p.timestamp,
+                          f.path AS folder_path
+                   FROM photos p
+                   JOIN folders f ON p.folder_id = f.id
+                   WHERE (p.file_hash IS NOT NULL OR p.timestamp IS NOT NULL)
+                     AND f.status IN ('ok', 'partial')
+                     AND (
+                       {path_sql_expr} = ?
+                       OR {path_sql_expr} LIKE ? ESCAPE '\\'
+                     )""",
+                (dest_path_sql_param, dest_like_prefix_param),
+            ).fetchall()
+        else:
+            folder_rows = db.conn.execute(
+                """SELECT p.file_hash, p.filename, p.file_size, p.timestamp,
+                          f.path AS folder_path
+                   FROM photos p
+                   JOIN folders f ON p.folder_id = f.id
+                   WHERE (p.file_hash IS NOT NULL OR p.timestamp IS NOT NULL)
+                     AND f.status IN ('ok', 'partial')"""
+            ).fetchall()
         for r in folder_rows:
             folder_path = r["folder_path"]
             # Normalise both sides before the subtree check: a stored path
@@ -269,27 +465,52 @@ def ingest(
             # "/dest/sub" but IS relative to "/dest". Without normpath,
             # is_relative_to gives the wrong answer for paths with ".."
             # segments that happen to share a prefix with dest.
-            candidate_normalized = Path(os.path.normpath(folder_path))
-            if not candidate_normalized.is_relative_to(dest_path_normalized):
+            if not _path_under_root(folder_path, dest_path_str):
                 continue
             if not Path(folder_path).is_dir():
                 continue
-            known_hash_folders.setdefault(r["file_hash"], set()).add(folder_path)
-        if extra_known_hashes:
-            known_hashes |= extra_known_hashes
+            # Index the row under both identity forms — the checker may
+            # match a source either way, and each match token must map to
+            # the folders holding the original.
+            if r["file_hash"] is not None:
+                dup_token_folders.setdefault(
+                    ("hash", r["file_hash"]), set(),
+                ).add(folder_path)
+            row_key = stored_metadata_key(
+                r["filename"], r["file_size"], r["timestamp"],
+            )
+            if row_key is not None:
+                dup_token_folders.setdefault(
+                    ("key", row_key), set(),
+                ).add(folder_path)
 
     copied = 0
     skipped_duplicate = 0
     failed = 0
     copied_paths = []
     duplicate_folders: set[str] = set()
+    emitted = 0
 
-    for i, source_file in enumerate(files):
-        try:
-            # Compute hash for duplicate detection
-            file_hash = compute_file_hash(str(source_file))
+    # Pass 1: partition into duplicates vs. survivors. The checker's EXIF
+    # prepass batches header reads across the whole card; only files with
+    # missing/placeholder metadata (and a plausible size twin) get their
+    # bytes read for the hash fallback — or every file when verify_by_hash.
+    if checker is not None:
+        checker.prepare(files)
+    to_copy: list[Path] = []
+    for source_file in files:
+        if checker is not None:
+            try:
+                token = checker.match(source_file)
+            except Exception as e:
+                log.warning("Failed to ingest %s: %s", source_file, e)
+                failed += 1
+                emitted += 1
+                if progress_callback:
+                    progress_callback(emitted, total, source_file.name)
+                continue
 
-            if skip_duplicates and file_hash in known_hashes:
+            if token is not None:
                 skipped_duplicate += 1
                 # Record every destination folder that holds a copy of
                 # this file, not just one. The pipeline uses this set
@@ -297,24 +518,61 @@ def ingest(
                 # folder the others never get linked to the active
                 # workspace.
                 duplicate_folders.update(
-                    known_hash_folders.get(file_hash, ())
+                    dup_token_folders.get(token, ())
                 )
+                emitted += 1
                 if progress_callback:
-                    progress_callback(i + 1, total, source_file.name)
+                    progress_callback(emitted, total, source_file.name)
                 continue
 
-            # Determine destination folder from EXIF date
-            exif_dt = None
-            try:
-                exif_dt = read_exif_timestamp(str(source_file))
-            except (OSError, ValueError):
-                log.debug("Could not read EXIF timestamp from %s", source_file)
-            if exif_dt is None:
-                # Fall back to file modification time
-                with contextlib.suppress(OSError, ValueError, OverflowError):
-                    exif_dt = datetime.fromtimestamp(source_file.stat().st_mtime)
+        to_copy.append(source_file)
 
-            rel_folder = build_destination_path(exif_dt, folder_template)
+    # Pass 2: resolve folder-planning timestamps for survivors and copy.
+    # In the default metadata mode the checker already resolved every
+    # file's EXIF time for the duplicate gate — reuse those reads and only
+    # add the mtime fallback. In verify/no-skip modes, batch the
+    # EXIF/ExifTool prepass over just the survivors.
+    timestamps = _source_file_timestamps(
+        to_copy,
+        capture_times=(
+            {str(f): checker.capture_time(f) for f in to_copy}
+            if checker is not None and not checker.verify_by_hash
+            else None
+        ),
+    )
+
+    # Records the destination folder where each identity token actually
+    # landed during this batch. Populated only when pass 2 marks an
+    # identity as known (successful copy or exact-match destination
+    # collision) so an intra-batch duplicate can report the correct
+    # post-import scan folder.
+    batch_dest_folders: dict[tuple, str] = {}
+
+    for source_file in to_copy:
+        try:
+            # Intra-batch dedup: a byte-identical sibling earlier in this
+            # batch already landed (or matched an existing destination
+            # file). Skip without re-copying. We intentionally defer the
+            # checker.record() mark to pass 2 success rather than
+            # recording it in pass 1 — if the primary's copy fails (e.g.
+            # the destination filename collides with a directory of the
+            # same name), the sibling still gets a chance to import the
+            # bytes.
+            if checker is not None:
+                token = checker.match(source_file)
+                if token is not None:
+                    skipped_duplicate += 1
+                    dest = batch_dest_folders.get(token)
+                    if dest is not None:
+                        duplicate_folders.add(dest)
+                    emitted += 1
+                    if progress_callback:
+                        progress_callback(emitted, total, source_file.name)
+                    continue
+
+            rel_folder = build_destination_path(
+                timestamps.get(source_file), folder_template
+            )
             dest_folder = Path(destination_dir) / rel_folder
             dest_folder.mkdir(parents=True, exist_ok=True)
 
@@ -322,15 +580,49 @@ def ingest(
 
             # Handle filename collision (different file, same name)
             if dest_file.exists():
-                dest_hash = compute_file_hash(str(dest_file))
-                if file_hash == dest_hash:
-                    # Exact same file already there
+                src_size = source_file.stat().st_size
+                dest_size = dest_file.stat().st_size
+                # Zero-byte ↔ zero-byte at the same destination path IS
+                # the same file (every empty file is bit-identical to
+                # every other), but zero-byte files carry no duplicate
+                # identity so the content-match branch below can't
+                # recognise this collision, and a ``skip_duplicates``
+                # retry of an interrupted card import would otherwise
+                # fall through to the numeric-suffix branch and start
+                # creating ``name_1.ext``, ``name_2.ext`` placeholder
+                # copies of the same empty file forever. The checker is
+                # deliberately NOT updated — zero-byte files are kept out
+                # of the duplicate-identity index everywhere else, and
+                # this skip mirrors that.
+                if src_size == 0 and dest_size == 0:
                     skipped_duplicate += 1
-                    known_hashes.add(file_hash)
                     duplicate_folders.add(str(dest_folder))
+                    emitted += 1
                     if progress_callback:
-                        progress_callback(i + 1, total, source_file.name)
+                        progress_callback(emitted, total, source_file.name)
                     continue
+                # Same size could be the same bytes — settle it by exact
+                # content, never by metadata (a wrong skip here would
+                # silently drop a photo). Different size proves a
+                # different file with no reads at all.
+                if src_size == dest_size:
+                    src_hash = (
+                        checker.content_hash(source_file)
+                        if checker is not None
+                        else compute_file_hash(str(source_file))
+                    )
+                    dest_hash = compute_file_hash(str(dest_file))
+                    if src_hash is not None and src_hash == dest_hash:
+                        # Exact same file already there
+                        skipped_duplicate += 1
+                        if checker is not None:
+                            for token in checker.record(source_file):
+                                batch_dest_folders[token] = str(dest_folder)
+                        duplicate_folders.add(str(dest_folder))
+                        emitted += 1
+                        if progress_callback:
+                            progress_callback(emitted, total, source_file.name)
+                        continue
                 # Different file, same name — add numeric suffix
                 stem = dest_file.stem
                 suffix = dest_file.suffix
@@ -340,7 +632,9 @@ def ingest(
                     counter += 1
 
             shutil.copy2(str(source_file), str(dest_file))
-            known_hashes.add(file_hash)
+            if checker is not None:
+                for token in checker.record(source_file):
+                    batch_dest_folders[token] = str(dest_folder)
             copied_paths.append(str(dest_file))
             copied += 1
 
@@ -348,8 +642,9 @@ def ingest(
             log.warning("Failed to ingest %s: %s", source_file, e)
             failed += 1
 
+        emitted += 1
         if progress_callback:
-            progress_callback(i + 1, total, source_file.name)
+            progress_callback(emitted, total, source_file.name)
 
     return {
         "copied": copied,

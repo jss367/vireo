@@ -46,6 +46,109 @@ def test_count_new_images_detects_unscanned_files(db_with_workspace):
     assert len(result["sample"]) == 2
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks required")
+def test_count_new_images_ignores_broken_symlinks(db_with_workspace):
+    """A dangling *.jpg symlink must not be counted as a "new image".
+
+    The os.walk path lists broken symlinks in `filenames`; the scanner
+    refuses to ingest them, so counting them inflates the banner with
+    files no scan can clear.
+    """
+    db, ws_id, tmp_path = db_with_workspace
+    root = tmp_path / "USA2026"
+    _touch_image(str(root / "real.jpg"))
+    db.add_folder(str(root), name="USA2026")
+    os.symlink(
+        str(root / "missing-target.jpg"),
+        str(root / "broken.jpg"),
+    )
+
+    from new_images import count_new_images_for_workspace
+    result = count_new_images_for_workspace(db, ws_id)
+
+    assert result["new_count"] == 1
+    assert all("broken.jpg" not in p for p in result["sample"])
+
+
+def test_count_new_images_skips_excluded_root_itself(db_with_workspace):
+    """A configured root that *is* an other-app data bundle is reported as 0.
+
+    prune_scan_dirs only filters children; without a root-level guard
+    os.walk would still open ``Photos Library.photoslibrary`` and inflate
+    the banner with managed images the scanner will never ingest, plus
+    trip the macOS TCC prompt this guard exists to avoid.
+    """
+    db, ws_id, tmp_path = db_with_workspace
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    _touch_image(str(bundle / "originals" / "managed.jpg"))
+    db.add_folder(str(bundle), name="Photos Library.photoslibrary")
+
+    from new_images import count_new_images_for_workspace
+    result = count_new_images_for_workspace(db, ws_id)
+
+    assert result["new_count"] == 0
+    assert result["sample"] == []
+    assert len(result["per_root"]) == 1
+    assert result["per_root"][0]["new_count"] == 0
+
+
+def test_count_new_images_skips_root_nested_in_excluded_bundle(db_with_workspace):
+    """A configured root that *sits inside* an excluded bundle is reported as 0.
+
+    A leaf-only check would let ``.../Photos Library.photoslibrary/originals``
+    through (the leaf ``originals`` looks innocuous) and the banner would
+    inflate with managed images the scanner will never ingest — and re-trip
+    the macOS TCC prompt this guard exists to avoid. The root guard must
+    look at every ancestor, not just the leaf.
+    """
+    db, ws_id, tmp_path = db_with_workspace
+    nested = tmp_path / "Photos Library.photoslibrary" / "originals"
+    _touch_image(str(nested / "0" / "managed.jpg"))
+    db.add_folder(str(nested), name="originals")
+
+    from new_images import count_new_images_for_workspace
+    result = count_new_images_for_workspace(db, ws_id)
+
+    assert result["new_count"] == 0
+    assert result["sample"] == []
+    assert len(result["per_root"]) == 1
+    assert result["per_root"][0]["new_count"] == 0
+
+
+def test_count_new_images_rejects_excluded_root_before_statting(
+    db_with_workspace, monkeypatch
+):
+    """The bundle guard must run BEFORE ``os.path.isdir`` on each root.
+
+    ``isdir`` follows symlinks and stat's the target, which alone trips
+    the macOS TCC prompt for a directly selected bundle or a symlink to
+    one. Fails the test if ``os.path.isdir`` is called on a path the
+    exclusion check covers — if the order is wrong, the stat sneaks in
+    before the guard returns.
+    """
+    from image_loader import is_excluded_scan_path
+    from new_images import count_new_images_for_workspace
+
+    real_isdir = os.path.isdir
+
+    def guarded_isdir(path):
+        if is_excluded_scan_path(path):
+            raise AssertionError(
+                f"os.path.isdir called on excluded path before guard: {path}"
+            )
+        return real_isdir(path)
+
+    monkeypatch.setattr(os.path, "isdir", guarded_isdir)
+
+    db, ws_id, tmp_path = db_with_workspace
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    _touch_image(str(bundle / "originals" / "managed.jpg"))
+    db.add_folder(str(bundle), name="Photos Library.photoslibrary")
+
+    result = count_new_images_for_workspace(db, ws_id)
+    assert result["new_count"] == 0
+
+
 def test_count_new_images_returns_all_paths_when_sample_limit_is_none(tmp_path):
     # Set up a workspace with 10 new files on disk.
     db = Database(str(tmp_path / "test.db"))
@@ -127,6 +230,51 @@ def test_mapped_roots_excludes_folder_with_any_linked_ancestor(db_with_workspace
     )
     assert result["per_root"][0]["path"] == str(a), (
         f"Root path should be /A, got {result['per_root'][0]['path']!r}"
+    )
+
+
+def test_import_into_archive_base_does_not_surface_siblings_as_new(db_with_workspace):
+    """End-to-end regression for the archive-base over-scope bug.
+
+    Importing into a destination base that already holds a large archive
+    (``USA/`` with many shoot folders) used to promote ``USA`` to a workspace
+    root, so the new-images detector walked every un-imported shoot under it
+    and reported the whole archive as "new". After scoping roots to the
+    imported leaf folders, only genuinely-new files inside those leaves count.
+    """
+    from new_images import count_new_images_for_workspace
+    from scanner import scan
+
+    db, ws_id, tmp_path = db_with_workspace
+    base = tmp_path / "USA"
+    imported = base / "2026-06-22"
+    sibling = base / "2026-01-01"          # pre-existing, never imported
+    _touch_image(str(imported / "IMG_0001.JPG"))
+    _touch_image(str(imported / "IMG_0002.JPG"))
+    _touch_image(str(sibling / "OLD_0001.JPG"))
+
+    # Mirror a templated copy-import: scan the base but restrict ingestion to
+    # the one subfolder the import wrote into.
+    scan(str(base), db, restrict_dirs=[str(imported)])
+
+    # Nothing on disk is unaccounted for within the imported root.
+    result = count_new_images_for_workspace(db, ws_id)
+    assert result["new_count"] == 0, (
+        f"The un-imported sibling shoot must NOT be surfaced as new; "
+        f"got {result['new_count']}. per_root={result['per_root']}"
+    )
+    assert [r["path"] for r in result["per_root"]] == [str(imported)], (
+        f"Only the imported leaf should be walked; per_root={result['per_root']}"
+    )
+
+    # A genuinely new file dropped into the imported root is still detected,
+    # while a new file in the un-imported sibling is correctly ignored.
+    _touch_image(str(imported / "IMG_0003.JPG"))
+    _touch_image(str(sibling / "OLD_0002.JPG"))
+    result2 = count_new_images_for_workspace(db, ws_id)
+    assert result2["new_count"] == 1, (
+        f"Only the new file inside the imported root should count; "
+        f"got {result2['new_count']}. per_root={result2['per_root']}"
     )
 
 

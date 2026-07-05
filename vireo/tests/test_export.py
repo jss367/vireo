@@ -1,6 +1,7 @@
 """Tests for photo export operations."""
 
 import contextlib
+import json
 import os
 import sys
 
@@ -144,6 +145,747 @@ def test_export_photos_resize(export_env):
         assert max(img.size) <= 400
 
 
+def test_export_photos_applies_edit_recipe(export_env):
+    """export_photos applies the stored non-destructive edit recipe."""
+    env = export_env
+    env["db"].set_photo_edit_recipe(
+        env["p1"],
+        {
+            "rotation": 90,
+            "crop": {"x": 0, "y": 0, "w": 0.5, "h": 1},
+        },
+    )
+
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}"},
+    )
+
+    assert result["exported"] == 1
+    assert result["errors"] == []
+    with Image.open(os.path.join(env["dest"], "bird1.jpg")) as img:
+        assert img.size == (300, 800)
+
+
+def test_export_photos_applies_adjustment_recipe(export_env):
+    """export_photos applies stored adjustment recipes."""
+    env = export_env
+    Image.new("RGB", (80, 60), color=(100, 100, 100)).save(
+        str(env["src"] / "bird1.jpg"), "JPEG", quality=95,
+    )
+    env["db"].set_photo_edit_recipe(
+        env["p1"],
+        {
+            "adjustments": {
+                "exposure": 0.5,
+                "contrast": 15,
+                "white_balance": {"temperature": 80, "tint": -20},
+                "saturation": 10,
+            },
+        },
+    )
+
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}"},
+    )
+
+    assert result["exported"] == 1
+    assert result["errors"] == []
+    with Image.open(os.path.join(env["dest"], "bird1.jpg")) as img:
+        r, g, b = img.getpixel((0, 0))
+    assert r > b
+    assert max(r, g, b) > 100
+
+
+def test_export_non_crop_recipe_loads_with_requested_size(export_env, monkeypatch):
+    import export as export_module
+
+    env = export_env
+    env["db"].set_photo_edit_recipe(env["p2"], {"rotation": 90})
+    original_load_image = export_module.load_image
+    seen_max_sizes = []
+
+    def tracking_load_image(file_path, max_size=1024):
+        seen_max_sizes.append(max_size)
+        return original_load_image(file_path, max_size=max_size)
+
+    monkeypatch.setattr(export_module, "load_image", tracking_load_image)
+
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p2"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}", "max_size": 400},
+    )
+
+    assert result["exported"] == 1
+    assert seen_max_sizes == [400]
+
+
+def test_export_cropped_recipe_avoids_undersized_working_copy(export_env):
+    """Cropped resized exports use the original when a capped WC is too small."""
+    env = export_env
+    db = env["db"]
+    working_dir = os.path.join(env["vireo_dir"], "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_path = os.path.join(working_dir, f"{env['p1']}.jpg")
+    Image.new("RGB", (400, 300), color="red").save(wc_path, "JPEG", quality=95)
+    db.conn.execute(
+        "UPDATE photos SET width=800, height=600, working_copy_path=? WHERE id=?",
+        (f"working/{env['p1']}.jpg", env["p1"]),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        env["p1"],
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
+    )
+
+    result = export_photos(
+        db=db,
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={
+            "naming_template": "{original}",
+            "max_size": 300,
+        },
+    )
+
+    assert result["exported"] == 1
+    assert result["errors"] == []
+    with Image.open(os.path.join(env["dest"], "bird1.jpg")) as img:
+        assert img.size == (300, 225)
+
+
+def test_export_edited_raw_skips_companion_jpeg_substitution(
+    export_env, monkeypatch,
+):
+    """Edited RAW+JPEG exports must decode the RAW, not the clipped companion JPEG.
+
+    Companion JPEGs are camera-baked: their highlights are already clipped.
+    Substituting the companion would silently bypass the RAW_DECODE_PRESERVE_HIGHLIGHTS
+    decode mode and apply edits to clipped data.
+    """
+    import export as export_module
+    from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS
+
+    env = export_env
+    db = env["db"]
+    raw_path = env["src"] / "source.NEF"
+    raw_path.write_bytes(b"\x00")
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path='bird1.jpg',
+               working_copy_path=NULL,
+               width=800, height=600
+           WHERE id=?""",
+        (env["p1"],),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        env["p1"],
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
+    )
+
+    load_calls = []
+
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        load_calls.append((str(file_path), kwargs))
+        return Image.new("RGB", (800, 600), color="red")
+
+    monkeypatch.setattr(export_module, "load_image", tracking_load_image)
+
+    result = export_photos(
+        db=db,
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={
+            "naming_template": "{original}",
+            "max_size": 300,
+        },
+    )
+
+    assert result["exported"] == 1
+    assert result["errors"] == []
+    assert len(load_calls) == 1
+    loaded_path, loaded_kwargs = load_calls[0]
+    assert loaded_path.lower().endswith(".nef"), (
+        f"export should load the RAW primary, got {loaded_path!r}"
+    )
+    assert loaded_kwargs.get("raw_decode") == RAW_DECODE_PRESERVE_HIGHLIGHTS
+
+
+def test_export_edited_raw_uses_working_copy_when_source_missing(export_env):
+    """Resized edited RAW exports may use a sufficient working copy offline."""
+    env = export_env
+    db = env["db"]
+    working_dir = os.path.join(env["vireo_dir"], "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_rel = f"working/{env['p1']}.jpg"
+    Image.new("RGB", (800, 600), color="red").save(
+        os.path.join(env["vireo_dir"], wc_rel), "JPEG", quality=95,
+    )
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='offline.NEF', extension='.nef',
+               working_copy_path=?,
+               companion_path=NULL,
+               width=800, height=600
+           WHERE id=?""",
+        (wc_rel, env["p1"]),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(env["p1"], {"rotation": 90})
+
+    result = export_photos(
+        db=db,
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={
+            "naming_template": "{original}",
+            "max_size": 400,
+        },
+    )
+
+    assert result["exported"] == 1
+    assert result["errors"] == []
+    with Image.open(os.path.join(env["dest"], "offline.jpg")) as img:
+        assert img.size == (300, 400)
+
+
+def test_export_edited_raw_uses_working_copy_when_folder_missing(export_env):
+    """Missing-folder RAW exports may still use a sufficient local working copy."""
+    env = export_env
+    db = env["db"]
+    working_dir = os.path.join(env["vireo_dir"], "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_rel = f"working/{env['p1']}.jpg"
+    Image.new("RGB", (800, 600), color="red").save(
+        os.path.join(env["vireo_dir"], wc_rel), "JPEG", quality=95,
+    )
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='offline.NEF', extension='.nef',
+               working_copy_path=?,
+               companion_path=NULL,
+               width=800, height=600
+           WHERE id=?""",
+        (wc_rel, env["p1"]),
+    )
+    db.conn.execute("UPDATE folders SET status='missing' WHERE id=?", (env["fid"],))
+    db.conn.commit()
+    db.set_photo_edit_recipe(env["p1"], {"rotation": 90})
+
+    result = export_photos(
+        db=db,
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={
+            "naming_template": "{original}",
+            "max_size": 400,
+        },
+    )
+
+    assert result["exported"] == 1
+    assert result["errors"] == []
+    with Image.open(os.path.join(env["dest"], "offline.jpg")) as img:
+        assert img.size == (300, 400)
+
+
+def test_export_edited_raw_uses_companion_when_source_missing(export_env):
+    """Offline edited RAW+JPEG exports may use a full-size companion."""
+    env = export_env
+    db = env["db"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='offline.NEF', extension='.nef',
+               working_copy_path=NULL,
+               companion_path='bird1.jpg',
+               width=800, height=600
+           WHERE id=?""",
+        (env["p1"],),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(env["p1"], {"rotation": 90})
+
+    result = export_photos(
+        db=db,
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={
+            "naming_template": "{original}",
+            "max_size": 400,
+        },
+    )
+
+    assert result["exported"] == 1
+    assert result["errors"] == []
+    with Image.open(os.path.join(env["dest"], "offline.jpg")) as img:
+        assert img.size == (300, 400)
+
+
+def test_export_falls_back_to_companion_when_raw_decode_fails(
+    export_env, monkeypatch,
+):
+    """When the RAW primary fails to decode, fall back to the companion JPEG.
+
+    A camera JPEG with clipped highlights still beats a failed export. The
+    unconditional RAW skip in `_companion_can_satisfy_export` would otherwise
+    leave RAW+JPEG photos with no usable source whenever libraw can't
+    demosaic the RAW.
+    """
+    import export as export_module
+    from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS
+
+    env = export_env
+    db = env["db"]
+    raw_path = env["src"] / "source.NEF"
+    raw_path.write_bytes(b"\x00")
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path='bird1.jpg',
+               working_copy_path=NULL,
+               width=800, height=600
+           WHERE id=?""",
+        (env["p1"],),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        env["p1"],
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
+    )
+
+    load_calls = []
+
+    def flaky_load_image(file_path, max_size=1024, **kwargs):
+        load_calls.append((str(file_path), kwargs))
+        if str(file_path).lower().endswith(".nef"):
+            return None
+        return Image.new("RGB", (800, 600), color="green")
+
+    monkeypatch.setattr(export_module, "load_image", flaky_load_image)
+
+    result = export_photos(
+        db=db,
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={
+            "naming_template": "{original}",
+            "max_size": 300,
+        },
+    )
+
+    assert result["exported"] == 1
+    assert result["errors"] == []
+    # RAW first (preserve-highlights), then companion as fallback.
+    assert len(load_calls) == 2
+    assert load_calls[0][0].lower().endswith(".nef")
+    # The failed RAW attempt must still request preserve-highlights so the
+    # fallback path can't quietly downgrade the RAW-first contract by
+    # passing the default JPEG-first decode mode.
+    assert (
+        load_calls[0][1].get("raw_decode") == RAW_DECODE_PRESERVE_HIGHLIGHTS
+    )
+    assert load_calls[1][0].lower().endswith(".jpg")
+    # The fallback companion load must NOT pass raw_decode (it's a JPEG).
+    assert "raw_decode" not in load_calls[1][1]
+
+
+def test_export_falls_back_to_companion_when_raw_returns_undersized_image(
+    export_env, monkeypatch,
+):
+    """Undersized RAW results (embedded preview) trigger the companion fallback.
+
+    ``image_loader._load_raw`` returns ``raw.extract_thumb()`` when libraw
+    cannot demosaic the RAW. That preview can be much smaller than the
+    full-size companion JPEG, so a non-None ``img`` here would silently
+    produce a downscaled export. Compare against the source's expected
+    long edge and prefer the companion when the RAW result falls short.
+    """
+    import export as export_module
+
+    env = export_env
+    db = env["db"]
+    raw_path = env["src"] / "source.NEF"
+    raw_path.write_bytes(b"\x00")
+    # Overwrite the fixture's 800x600 JPEG with a full-size companion so
+    # _companion_can_satisfy_export accepts it for a crop against the
+    # 6000x4000 source.
+    Image.new("RGB", (6000, 4000), color="green").save(
+        str(env["src"] / "bird1.jpg"), "JPEG", quality=85,
+    )
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path='bird1.jpg',
+               working_copy_path=NULL,
+               width=6000, height=4000
+           WHERE id=?""",
+        (env["p1"],),
+    )
+    db.conn.commit()
+    # Crop recipe so load_max_size is None and we ask for the full source.
+    db.set_photo_edit_recipe(
+        env["p1"],
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
+    )
+
+    load_calls = []
+
+    def fake_load_image(file_path, max_size=1024, **kwargs):
+        load_calls.append((str(file_path), kwargs))
+        if str(file_path).lower().endswith(".nef"):
+            # Stand in for _load_raw returning an undersized embedded JPEG
+            # when libraw fails to demosaic the RAW.
+            return Image.new("RGB", (1600, 1067), color="red")
+        # Companion JPEG is the actual full-size source.
+        return Image.new("RGB", (6000, 4000), color="green")
+
+    monkeypatch.setattr(export_module, "load_image", fake_load_image)
+
+    result = export_photos(
+        db=db,
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={
+            "naming_template": "{original}",
+            # No max_size so the recipe's crop runs against the full source.
+        },
+    )
+
+    assert result["exported"] == 1
+    assert result["errors"] == []
+    # RAW first (preserve-highlights), companion as fallback since the RAW
+    # load returned an undersized result.
+    assert len(load_calls) == 2
+    assert load_calls[0][0].lower().endswith(".nef")
+    assert load_calls[1][0].lower().endswith(".jpg")
+    # Final export must be the full-resolution cropped output (3000x2000),
+    # not the downscaled embedded preview's crop (800x533).
+    with Image.open(os.path.join(env["dest"], "source.jpg")) as img:
+        assert img.size == (3000, 2000)
+
+
+def test_export_falls_back_to_companion_when_raw_short_edge_is_smaller(
+    export_env, monkeypatch,
+):
+    """Companion replaces RAW even when long edges tie.
+
+    Codex's regression case: a 6000x3376 embedded preview for a 6000x4000
+    RAW has the same long edge as the companion JPEG. A long-edge-only
+    swap gate (``max(companion.size) > max(img.size)``) would keep the
+    embedded preview and crop from pixels missing short-edge content. The
+    swap must compare both axes.
+    """
+    import export as export_module
+
+    env = export_env
+    db = env["db"]
+    raw_path = env["src"] / "source.NEF"
+    raw_path.write_bytes(b"\x00")
+    Image.new("RGB", (6000, 4000), color="green").save(
+        str(env["src"] / "bird1.jpg"), "JPEG", quality=85,
+    )
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path='bird1.jpg',
+               working_copy_path=NULL,
+               width=6000, height=4000
+           WHERE id=?""",
+        (env["p1"],),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        env["p1"],
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
+    )
+
+    load_calls = []
+
+    def fake_load_image(file_path, max_size=1024, **kwargs):
+        load_calls.append((str(file_path), kwargs))
+        if str(file_path).lower().endswith(".nef"):
+            # Long edge ties the companion (6000), but the short edge
+            # falls short of the 4000 sensor height.
+            return Image.new("RGB", (6000, 3376), color="red")
+        return Image.new("RGB", (6000, 4000), color="green")
+
+    monkeypatch.setattr(export_module, "load_image", fake_load_image)
+
+    result = export_photos(
+        db=db,
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}"},
+    )
+
+    assert result["exported"] == 1
+    assert result["errors"] == []
+    # Both loads happen and the companion wins despite the long-edge tie.
+    assert len(load_calls) == 2
+    assert load_calls[0][0].lower().endswith(".nef")
+    assert load_calls[1][0].lower().endswith(".jpg")
+    with Image.open(os.path.join(env["dest"], "source.jpg")) as img:
+        # 50% crop of full-size companion (6000x4000 -> 3000x2000), not
+        # the undersized embedded preview's crop (6000x3376 -> 3000x1688)
+        # that a long-edge-only gate would have kept.
+        assert img.size == (3000, 2000)
+
+
+def test_export_rejects_reduced_companion_when_raw_decode_fails(
+    export_env, monkeypatch,
+):
+    """A reduced/aspect-cropped sidecar must not satisfy RAW fallback export."""
+    import export as export_module
+
+    env = export_env
+    db = env["db"]
+    raw_path = env["src"] / "source.NEF"
+    raw_path.write_bytes(b"\x00")
+    Image.new("RGB", (6000, 3376), color="green").save(
+        env["src"] / "source.jpg", "JPEG", quality=95,
+    )
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path='source.jpg',
+               working_copy_path=NULL,
+               width=6000, height=4000
+           WHERE id=?""",
+        (env["p1"],),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(env["p1"], {"rotation": 0})
+
+    load_calls = []
+
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        load_calls.append(str(file_path))
+        if str(file_path).lower().endswith(".nef"):
+            return None
+        return Image.new("RGB", (3000, 1688), color="green")
+
+    monkeypatch.setattr(export_module, "load_image", tracking_load_image)
+
+    result = export_photos(
+        db=db,
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={
+            "naming_template": "{original}",
+            "max_size": 3000,
+        },
+    )
+
+    assert result["exported"] == 0
+    assert result["errors"] == ["source.NEF: failed to load image"]
+    assert len(load_calls) == 1
+    assert load_calls[0].lower().endswith(".nef")
+
+
+def test_export_keeps_raw_when_decode_succeeds_at_full_size(
+    export_env, monkeypatch,
+):
+    """A successful preserve-highlights RAW decode is not replaced by companion."""
+    import export as export_module
+
+    env = export_env
+    db = env["db"]
+    raw_path = env["src"] / "source.NEF"
+    raw_path.write_bytes(b"\x00")
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path='bird1.jpg',
+               working_copy_path=NULL,
+               width=6000, height=4000
+           WHERE id=?""",
+        (env["p1"],),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        env["p1"],
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
+    )
+
+    load_calls = []
+
+    def fake_load_image(file_path, max_size=1024, **kwargs):
+        load_calls.append((str(file_path), kwargs))
+        # RAW decode succeeds at full sensor dimensions.
+        return Image.new("RGB", (6000, 4000), color="red")
+
+    monkeypatch.setattr(export_module, "load_image", fake_load_image)
+
+    result = export_photos(
+        db=db,
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={
+            "naming_template": "{original}",
+        },
+    )
+
+    assert result["exported"] == 1
+    assert result["errors"] == []
+    # Only the RAW load; no companion fallback when the RAW result is
+    # already full-size.
+    assert len(load_calls) == 1
+    assert load_calls[0][0].lower().endswith(".nef")
+
+
+def test_export_cropped_recipe_avoids_undersized_developed_output(export_env):
+    """Cropped resized exports skip developed files that lack source pixels."""
+    env = export_env
+    db = env["db"]
+    db.conn.execute(
+        "UPDATE photos SET width=800, height=600 WHERE id=?",
+        (env["p1"],),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        env["p1"],
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}},
+    )
+
+    developed = env["tmp_path"] / "developed"
+    developed_subdir = developed / developed_folder_key(str(env["src"]))
+    developed_subdir.mkdir(parents=True)
+    Image.new("RGB", (400, 300), color="red").save(
+        str(developed_subdir / "bird1.jpg"), "JPEG", quality=95,
+    )
+
+    result = export_photos(
+        db=db,
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={
+            "naming_template": "{original}",
+            "max_size": 300,
+            "developed_dir": str(developed),
+        },
+    )
+
+    assert result["exported"] == 1
+    assert result["errors"] == []
+    with Image.open(os.path.join(env["dest"], "bird1.jpg")) as img:
+        assert img.size == (300, 225)
+
+
+def test_export_cropped_recipe_uses_sufficient_developed_output(export_env):
+    """Cropped exports keep developed files that satisfy the cropped output."""
+    env = export_env
+    db = env["db"]
+    db.conn.execute(
+        "UPDATE photos SET width=8000, height=6000 WHERE id=?",
+        (env["p1"],),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        env["p1"],
+        {"crop": {"x": 0, "y": 0, "w": 0.1, "h": 0.1}},
+    )
+
+    developed = env["tmp_path"] / "developed"
+    developed_subdir = developed / developed_folder_key(str(env["src"]))
+    developed_subdir.mkdir(parents=True)
+    Image.new("RGB", (8000, 6000), color="green").save(
+        str(developed_subdir / "bird1.jpg"), "JPEG", quality=95,
+    )
+    os.remove(env["src"] / "bird1.jpg")
+
+    result = export_photos(
+        db=db,
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={
+            "naming_template": "{original}",
+            "max_size": 4000,
+            "developed_dir": str(developed),
+        },
+    )
+
+    assert result["exported"] == 1
+    assert result["errors"] == []
+    with Image.open(os.path.join(env["dest"], "bird1.jpg")) as img:
+        assert img.size == (800, 600)
+        r, g, b = img.resize((1, 1)).getpixel((0, 0))
+    assert g > r and g > b
+
+
+def test_export_cropped_recipe_uses_exif_oriented_original_dimensions(export_env):
+    """Crop-aware export sizing must match load_image's EXIF-transposed source."""
+    env = export_env
+    db = env["db"]
+    src_path = env["src"] / "bird1.jpg"
+    original = Image.new("RGB", (600, 400), color="red")
+    exif = original.getexif()
+    exif[0x0112] = 6
+    original.save(str(src_path), "JPEG", quality=95, exif=exif.tobytes())
+    db.conn.execute(
+        "UPDATE photos SET width=?, height=?, exif_data=? WHERE id=?",
+        (
+            600,
+            400,
+            json.dumps({"EXIF": {"Orientation": 6}}),
+            env["p1"],
+        ),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        env["p1"],
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+    )
+
+    developed = env["tmp_path"] / "developed"
+    developed_subdir = developed / developed_folder_key(str(env["src"]))
+    developed_subdir.mkdir(parents=True)
+    Image.new("RGB", (400, 400), color="green").save(
+        str(developed_subdir / "bird1.jpg"), "JPEG", quality=95,
+    )
+
+    result = export_photos(
+        db=db,
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={
+            "naming_template": "{original}",
+            "max_size": 500,
+            "developed_dir": str(developed),
+        },
+    )
+
+    assert result["exported"] == 1
+    assert result["errors"] == []
+    with Image.open(os.path.join(env["dest"], "bird1.jpg")) as img:
+        assert max(img.size) == 500
+        r, g, b = img.resize((1, 1)).getpixel((0, 0))
+    assert r > g and r > b
+
+
 def test_export_photos_subdirectories(export_env):
     """export_photos creates subdirectories from template."""
     env = export_env
@@ -174,6 +916,72 @@ def test_export_photos_collision_renames(export_env):
     assert result["exported"] == 2
     assert os.path.isfile(os.path.join(env["dest"], "photo.jpg"))
     assert os.path.isfile(os.path.join(env["dest"], "photo_2.jpg"))
+
+
+def test_export_photos_convert_png_batch_deduplicates_extension(export_env):
+    """Batch conversion uses the selected extension for every output/collision."""
+    env = export_env
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"], env["p2"]],
+        destination=env["dest"],
+        options={"naming_template": "converted", "format": "png"},
+    )
+
+    assert result["exported"] == 2
+    first = os.path.join(env["dest"], "converted.png")
+    second = os.path.join(env["dest"], "converted_2.png")
+    assert os.path.isfile(first)
+    assert os.path.isfile(second)
+    assert not os.path.exists(os.path.join(env["dest"], "converted.jpg"))
+    with Image.open(first) as img:
+        assert img.format == "PNG"
+    with Image.open(second) as img:
+        assert img.format == "PNG"
+
+
+def test_export_photos_convert_tiff_applies_recipe_and_resize(export_env):
+    """Converted exports still apply edit recipes before final resizing."""
+    env = export_env
+    env["db"].set_photo_edit_recipe(
+        env["p1"],
+        {
+            "rotation": 90,
+            "crop": {"x": 0, "y": 0, "w": 0.5, "h": 1},
+        },
+    )
+
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={
+            "naming_template": "{original}",
+            "format": "tiff",
+            "max_size": 400,
+        },
+    )
+
+    assert result["exported"] == 1
+    out_path = os.path.join(env["dest"], "bird1.tiff")
+    with Image.open(out_path) as img:
+        assert img.format == "TIFF"
+        assert img.size == (150, 400)
+
+
+def test_export_rejects_unknown_output_format(export_env):
+    """Unknown export formats fail before writing partial outputs."""
+    env = export_env
+    with pytest.raises(ValueError, match="format must be one of"):
+        export_photos(
+            db=env["db"],
+            vireo_dir=env["vireo_dir"],
+            photo_ids=[env["p1"]],
+            destination=env["dest"],
+            options={"naming_template": "{original}", "format": "bmp"},
+        )
 
 
 def test_export_photos_quality(export_env):
@@ -413,6 +1221,90 @@ def test_export_prefers_developed_tiff_when_jpg_absent(export_env):
     assert result["exported"] == 1
     r, g, b = _avg_rgb(os.path.join(env["dest"], "bird1.jpg"))
     assert b > r and b > g, f"expected blue-dominant from developed TIFF, got rgb=({r},{g},{b})"
+
+
+def test_export_tiff_prefers_developed_tiff_over_developed_jpg(export_env):
+    """TIFF exports use the TIFF developed source when both formats exist."""
+    env = export_env
+    developed_dir = env["src"] / "developed"
+    developed_dir.mkdir()
+    Image.new("RGB", (800, 600), color=(10, 200, 40)).save(
+        str(developed_dir / "bird1.jpg"), "JPEG", quality=95,
+    )
+    Image.new("RGB", (800, 600), color=(20, 30, 220)).save(
+        str(developed_dir / "bird1.tiff"), "TIFF",
+    )
+
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}", "format": "tiff"},
+    )
+
+    assert result["exported"] == 1
+    r, g, b = _avg_rgb(os.path.join(env["dest"], "bird1.tiff"))
+    assert b > r and b > g, (
+        f"expected blue-dominant from developed TIFF, got rgb=({r},{g},{b})"
+    )
+
+
+def test_export_png_prefers_developed_tiff_over_developed_jpg(export_env):
+    """PNG exports use the best developed source instead of stale JPEG."""
+    env = export_env
+    developed_dir = env["src"] / "developed"
+    developed_dir.mkdir()
+    Image.new("RGB", (800, 600), color=(10, 200, 40)).save(
+        str(developed_dir / "bird1.jpg"), "JPEG", quality=95,
+    )
+    Image.new("RGB", (800, 600), color=(20, 30, 220)).save(
+        str(developed_dir / "bird1.tiff"), "TIFF",
+    )
+
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}", "format": "png"},
+    )
+
+    assert result["exported"] == 1
+    r, g, b = _avg_rgb(os.path.join(env["dest"], "bird1.png"))
+    assert b > r and b > g, (
+        f"expected blue-dominant from developed TIFF, got rgb=({r},{g},{b})"
+    )
+
+
+def test_export_tries_next_developed_candidate_when_preferred_is_too_small(export_env):
+    """A too-small preferred developed file should not hide a usable fallback."""
+    env = export_env
+    developed_dir = env["src"] / "developed"
+    developed_dir.mkdir()
+    Image.new("RGB", (800, 600), color=(10, 200, 40)).save(
+        str(developed_dir / "bird1.jpg"), "JPEG", quality=95,
+    )
+    Image.new("RGB", (200, 150), color=(20, 30, 220)).save(
+        str(developed_dir / "bird1.tiff"), "TIFF",
+    )
+
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}", "format": "png", "max_size": 400},
+    )
+
+    assert result["exported"] == 1
+    out_path = os.path.join(env["dest"], "bird1.png")
+    with Image.open(out_path) as img:
+        assert max(img.size) == 400
+    r, g, b = _avg_rgb(out_path)
+    assert g > r and g > b, (
+        f"expected green-dominant from sufficient developed JPG, got rgb=({r},{g},{b})"
+    )
 
 
 def test_export_falls_back_to_original_when_no_developed(export_env):

@@ -6,9 +6,9 @@ const base = import.meta.env.BASE_URL;
 const releaseUrl = (v: string) => `https://github.com/jss367/vireo/releases/download/v${v}`;
 
 // Per-platform versions — updated independently by CI when each platform builds
-const macosArm64Version = '0.8.50';
-const windowsVersion = '0.8.50';
-const linuxVersion = '0.8.50';
+const macosArm64Version = '0.14.0';
+const windowsVersion = '0.14.0';
+const linuxVersion = '0.14.0';
 ---
 
 <Base title="Download — Vireo" description="Download Vireo for macOS, Windows, or Linux. Free, open source, no account required.">
@@ -66,7 +66,7 @@ const linuxVersion = '0.8.50';
             <li>macOS 12 Monterey or later</li>
             <li>Apple Silicon (M1 or later)</li>
             <li>4 GB RAM minimum</li>
-            <li>500 MB disk space</li>
+            <li>2 GB disk space (more for larger AI models)</li>
           </ul>
         </div>
         <div class="sysreq__card">
@@ -75,7 +75,7 @@ const linuxVersion = '0.8.50';
             <li>Windows 10 (64-bit) or later</li>
             <li>x86-64 processor</li>
             <li>4 GB RAM minimum</li>
-            <li>500 MB disk space</li>
+            <li>2 GB disk space (more for larger AI models)</li>
           </ul>
           <p class="sysreq__note">
             Windows is not actively supported at the moment. The installer is available but you may encounter issues.
@@ -88,7 +88,7 @@ const linuxVersion = '0.8.50';
             <li>Ubuntu 22.04+ / Debian 12+</li>
             <li>x86-64 processor</li>
             <li>4 GB RAM minimum</li>
-            <li>500 MB disk space</li>
+            <li>2 GB disk space (more for larger AI models)</li>
           </ul>
         </div>
       </div>
@@ -119,7 +119,7 @@ const linuxVersion = '0.8.50';
           <span class="quickstart__number">3</span>
           <div>
             <h3>Scan &amp; classify</h3>
-            <p>Vireo downloads the AI model on first launch, then scans and classifies your photos locally.</p>
+            <p>Vireo downloads the AI models on first use, then scans and classifies your photos locally.</p>
           </div>
         </div>
         <div class="quickstart__step">

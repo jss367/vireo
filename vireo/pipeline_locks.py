@@ -1,0 +1,275 @@
+"""Process-wide locks coordinating concurrent pipeline runs.
+
+Two primitives:
+
+* ``acquire_gpu()`` — a single-holder semaphore that every GPU-using stage
+  (classify, detect, extract_masks, eye_keypoints) wraps around its
+  per-batch inference call. Must be released between batches so a long
+  classify doesn't completely starve a second pipeline that just wants
+  one quick GPU op.
+
+* ``acquire_workspace_regroup(workspace_id)`` — a per-workspace lock
+  held across BOTH ``regroup_stage`` and ``miss_stage`` so two pipelines
+  targeting the same workspace can't interleave on the workspace-scoped
+  grouping state (``burst_id`` writes, ``pipeline_results_ws*.json``,
+  and the ``miss_computed_at`` timestamp paired with that grouping).
+  Pipelines on different workspaces never contend.
+
+Lock order (acquire outermost first): ``_progress_lock`` →
+``acquire_workspace_regroup`` → ``JobRunner._lock`` → ``acquire_gpu``.
+``JobRunner._lock`` is a brief leaf lock taken by ``runner.update_step``
+inside the workspace critical section; this is safe because no code
+path under ``JobRunner._lock`` acquires ``acquire_workspace_regroup``,
+so there is no cycle. ``acquire_gpu`` is the innermost: nothing else
+may be acquired while it is held.
+"""
+
+import threading
+
+# Single GPU operation at a time across the whole process. Size 1 by
+# design — see docs/plans/2026-05-26-pipeline-concurrency-design.md
+# "Concurrency model" for the rationale.
+_GPU_SEMAPHORE = threading.Semaphore(1)
+
+
+def acquire_gpu():
+    """Context manager for the process-wide GPU semaphore.
+
+    Use around a single batch of inference, not a whole stage::
+
+        for batch in batches:
+            with acquire_gpu():
+                results = model.run(batch)
+            process(results)
+    """
+    return _GpuLockContext()
+
+
+class _GpuLockContext:
+    def __enter__(self):
+        _GPU_SEMAPHORE.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        _GPU_SEMAPHORE.release()
+
+
+# Providers that actually run on a GPU device. ONNXRuntime's other
+# providers (CPUExecutionProvider, and anything not listed) execute on
+# the CPU, so taking the GPU semaphore for them would needlessly block
+# other pipelines' real GPU work.
+_GPU_PROVIDERS = ("CUDAExecutionProvider", "CoreMLExecutionProvider")
+
+
+def _session_uses_gpu(session):
+    """Return True if ``session`` is actually executing on a GPU provider.
+
+    ``InferenceSession.get_providers()`` returns the providers ONNX
+    Runtime decided to use after construction, so this reflects reality
+    even when CoreML was requested but excluded (e.g. for external-data
+    models). Falls back to ``True`` if the session doesn't expose
+    ``get_providers`` — conservative default that matches the unconditional-
+    lock behavior we had before this check existed.
+    """
+    try:
+        providers = session.get_providers()
+    except Exception:
+        return True
+    return any(p in _GPU_PROVIDERS for p in providers)
+
+
+def acquire_gpu_if_session_uses_it(session):
+    """Context manager: take the GPU semaphore only for GPU-running sessions.
+
+    CPU-only ONNX sessions (Apple Silicon with external-data models,
+    CPU-only installs) skip the lock so they don't block concurrent
+    pipelines' real GPU work. GPU-running sessions still serialise.
+
+    Usage::
+
+        with acquire_gpu_if_session_uses_it(session):
+            outputs = session.run(None, feeds)
+    """
+    if _session_uses_gpu(session):
+        return _GpuLockContext()
+    return _NoOpContext()
+
+
+class _NoOpContext:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+# Per-workspace regroup locks. Created lazily on first request. Entries
+# are never removed — workspace IDs are stable integers and the lock
+# objects are tiny, so accumulating one per workspace the user has ever
+# regrouped against is harmless.
+_REGROUP_LOCKS: dict = {}
+_REGROUP_LOCKS_GUARD = threading.Lock()
+
+
+def acquire_workspace_regroup(workspace_id):
+    """Context manager for the regroup lock keyed by ``workspace_id``.
+
+    Two pipelines targeting the same workspace serialise here; pipelines
+    targeting different workspaces don't interact.
+    """
+    if workspace_id is None:
+        # Treat unspecified workspace as a single shared lock. In practice
+        # callers always pass a real id; this branch only protects against
+        # latent bugs that would silently make the lock global.
+        workspace_id = "__unspecified__"
+    with _REGROUP_LOCKS_GUARD:
+        lock = _REGROUP_LOCKS.get(workspace_id)
+        if lock is None:
+            lock = threading.Lock()
+            _REGROUP_LOCKS[workspace_id] = lock
+    return lock
+
+
+# Test hook so unit tests can assert lock identity without snooping on
+# the module-private dict directly.
+def _workspace_regroup_lock_for_tests(workspace_id):
+    return acquire_workspace_regroup(workspace_id)
+
+
+# Per-photo locks for mask extraction. Two concurrent pipelines whose
+# collections overlap can both reach extract_masks_stage with the same
+# photo. The conflict has two distinct sources, and the lock has to
+# cover BOTH:
+#
+#   1. The deterministic ``masks/{photo_id}.{variant}.png`` file path
+#      (per-variant collision). Two pipelines with the SAME variant
+#      would corrupt each other's PNG bytes.
+#
+#   2. The denormalised writes to the ``photos`` row —
+#      ``set_active_mask_variant`` (mask_path, crop_complete,
+#      subject_tenengrad, bg_tenengrad) and ``update_photo_embeddings``
+#      (dino_subject_embedding, dino_global_embedding) — happen
+#      regardless of variant. Two pipelines processing the same photo
+#      with DIFFERENT variants can still interleave these writes,
+#      leaving photos.active_mask_variant pointing at one variant
+#      while photos.dino_subject_embedding was cropped from the
+#      other's mask.
+#
+# Because (2) crosses variants, the key is ``photo_id`` only.
+# Concurrency loss: two pipelines on the same photo with different
+# SAM variants now serialise on the whole extract-masks body. This is
+# rare in practice (it requires two workspaces sharing folders AND
+# configured with different SAM variants), and the alternative —
+# splitting into a per-variant lock for the mask file + a per-photo
+# lock for the row writes — would invert the lock order (a worker
+# holding the inner lock then trying to take the outer would deadlock).
+_PHOTO_MASK_LOCKS: dict = {}
+_PHOTO_MASK_LOCKS_GUARD = threading.Lock()
+
+
+def acquire_photo_mask(photo_id):
+    """Context manager for the per-photo mask-write lock.
+
+    Held across the get_photo_mask → generate_mask → save_mask →
+    upsert_photo_mask → set_active_mask_variant → update_photo_embeddings
+    sequence in ``extract_masks_stage`` so two pipelines hitting the
+    same photo serialise. Pipelines on different photos don't contend.
+    """
+    with _PHOTO_MASK_LOCKS_GUARD:
+        lock = _PHOTO_MASK_LOCKS.get(photo_id)
+        if lock is None:
+            lock = threading.Lock()
+            _PHOTO_MASK_LOCKS[photo_id] = lock
+    return lock
+
+
+def _photo_mask_lock_for_tests(photo_id):
+    return acquire_photo_mask(photo_id)
+
+
+# In-flight archive destinations claimed by local-processing pipeline runs.
+# Two pipelines aimed at the same new ``final_destination`` can both pass the
+# DB-only overlap check before either one has created the folder row (jobs.py
+# allows up to SLOT_CAP=2 pipeline jobs concurrently), and the second would
+# only fail inside ``move_folder`` after staging and processing everything.
+# Reserving the destination up front rejects the duplicate run before any
+# expensive work starts.
+_ARCHIVE_DESTINATIONS: set = set()
+_ARCHIVE_DESTINATIONS_GUARD = threading.Lock()
+
+
+def _normalize_archive_destination(path):
+    """Absolute, symlink-resolved, case-normalised form of ``path``.
+
+    ``realpath`` resolves symlinks (including partial resolution when the
+    leaf doesn't exist yet — the existing prefix is followed and the
+    missing tail is preserved). ``normcase`` folds case on Windows. Two
+    spellings that point at the same physical destination — a symlink and
+    its real path, a case-only alias on case-insensitive Windows —
+    collapse to the same key, so reservation/release can't drift apart and
+    a reservation lookup hits even when the caller used a different
+    spelling.
+
+    Case-insensitive POSIX (default macOS APFS) needs an FS probe to fold
+    case, which ``_paths_overlap`` does via ``move._path_equal_or_descends``
+    for the comparison itself. Keeping the stored key as
+    ``normcase(realpath(...))`` is enough because reserve/release are
+    paired with the same Python string in pipeline_job.
+    """
+    import os
+
+    return os.path.normcase(os.path.realpath(path))
+
+
+def _paths_overlap(a, b):
+    """Return True if ``a`` and ``b`` are equal or one descends from the other.
+
+    Defers to ``move._path_equal_or_descends`` so the reservation check
+    folds the same alias surface (symlinks, Windows case folding,
+    case-insensitive POSIX) that ``move_folder``'s own overlap check runs
+    later. Without this, two pipelines targeting the same physical
+    destination via different spellings could both pass the reservation
+    check and race into the same archive root before the move-time guard
+    runs.
+    """
+    from move import _path_equal_or_descends
+
+    if a == b:
+        return True
+    return (_path_equal_or_descends(a, b)
+            or _path_equal_or_descends(b, a))
+
+
+def try_reserve_archive_destination(path):
+    """Claim ``path`` for an in-flight local-processing archive.
+
+    Returns True on first claim, False if another running pipeline already
+    owns an overlapping destination — equal to ``path``, an ancestor of it,
+    or a descendant of it. Equal paths obviously collide; nested paths also
+    collide because ``move_folder`` would either create the parent's tracked
+    row inside its child's archive root, or move a parent into a destination
+    that the child has already claimed, leaving overlapping folder roots in
+    the catalog. Paths are normalised to absolute, so ``/Photos/Shoot`` and
+    ``./Photos/Shoot`` collide. Must be paired with
+    ``release_archive_destination`` once the run terminates (success or
+    failure) so retries and follow-on runs can re-acquire.
+    """
+    normalized = _normalize_archive_destination(path)
+    with _ARCHIVE_DESTINATIONS_GUARD:
+        for existing in _ARCHIVE_DESTINATIONS:
+            if _paths_overlap(existing, normalized):
+                return False
+        _ARCHIVE_DESTINATIONS.add(normalized)
+        return True
+
+
+def release_archive_destination(path):
+    """Release a previously reserved archive destination."""
+    normalized = _normalize_archive_destination(path)
+    with _ARCHIVE_DESTINATIONS_GUARD:
+        _ARCHIVE_DESTINATIONS.discard(normalized)
+
+
+def _archive_destinations_for_tests():
+    with _ARCHIVE_DESTINATIONS_GUARD:
+        return set(_ARCHIVE_DESTINATIONS)

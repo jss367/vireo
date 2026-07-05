@@ -29,6 +29,7 @@ pub mod ids {
     pub const REPORT_ISSUE: &str = "report_issue";
     pub const CHECK_FOR_UPDATES: &str = "check_for_updates";
     pub const OPEN_IN_BROWSER: &str = "open_in_browser_now";
+    pub const VIEW_RELOAD: &str = "view_reload";
 
     pub const FILE_NEW_WORKSPACE: &str = "file_new_workspace";
     pub const FILE_OPEN_WORKSPACE: &str = "file_open_workspace";
@@ -37,6 +38,7 @@ pub mod ids {
     pub const FILE_EXPORT_SELECTED: &str = "file_export_selected";
 
     pub const PHOTO_OPEN_LIGHTBOX: &str = "photo_open_lightbox";
+    pub const PHOTO_OPEN_BROWSE: &str = "photo_open_browse";
     pub const PHOTO_REVEAL: &str = "photo_reveal";
     pub const PHOTO_OPEN_EDITOR: &str = "photo_open_editor";
     pub const PHOTO_COPY_PATHS: &str = "photo_copy_paths";
@@ -65,6 +67,7 @@ pub mod ids {
 
     pub const TOOLS_RUN_PIPELINE: &str = "tools_run_pipeline";
     pub const TOOLS_SCAN_LIBRARY: &str = "tools_scan_library";
+    pub const TOOLS_RESCAN: &str = "tools_rescan";
     pub const TOOLS_FIND_DUPLICATES: &str = "tools_find_duplicates";
     pub const TOOLS_BUILD_PREVIEWS: &str = "tools_build_previews";
     pub const TOOLS_SYNC_METADATA: &str = "tools_sync_metadata";
@@ -117,6 +120,7 @@ pub fn command_for_id(id: &str) -> Option<&'static str> {
         ids::FILE_IMPORT_FOLDER => Some("import_folder"),
         ids::FILE_EXPORT_SELECTED => Some("export_selected"),
         ids::PHOTO_OPEN_LIGHTBOX => Some("photo_open_lightbox"),
+        ids::PHOTO_OPEN_BROWSE => Some("photo_open_browse"),
         ids::PHOTO_REVEAL => Some("photo_reveal"),
         ids::PHOTO_OPEN_EDITOR => Some("photo_open_editor"),
         ids::PHOTO_COPY_PATHS => Some("photo_copy_paths"),
@@ -143,6 +147,7 @@ pub fn command_for_id(id: &str) -> Option<&'static str> {
         ids::REVIEW_EXCLUDE_WILDLIFE => Some("review_exclude_wildlife"),
         ids::TOOLS_RUN_PIPELINE => Some("tools_run_pipeline"),
         ids::TOOLS_SCAN_LIBRARY => Some("tools_scan_library"),
+        ids::TOOLS_RESCAN => Some("tools_rescan"),
         ids::TOOLS_FIND_DUPLICATES => Some("tools_find_duplicates"),
         ids::TOOLS_BUILD_PREVIEWS => Some("tools_build_previews"),
         ids::TOOLS_SYNC_METADATA => Some("tools_sync_metadata"),
@@ -345,6 +350,12 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
     }
 
     view_builder = view_builder.separator().item(
+        &MenuItemBuilder::with_id(ids::VIEW_RELOAD, "Reload")
+            .accelerator("CmdOrCtrl+R")
+            .build(app)?,
+    );
+
+    view_builder = view_builder.item(
         &MenuItemBuilder::with_id(ids::OPEN_IN_BROWSER, "Open in Browser")
             .accelerator("CmdOrCtrl+Shift+B")
             .build(app)?,
@@ -366,8 +377,11 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
                 .build(app)?,
         )
         .item(
+            &MenuItemBuilder::with_id(ids::PHOTO_OPEN_BROWSE, "Open in Browse")
+                .build(app)?,
+        )
+        .item(
             &MenuItemBuilder::with_id(ids::PHOTO_REVEAL, reveal_label)
-                .accelerator("CmdOrCtrl+R")
                 .build(app)?,
         )
         .item(
@@ -455,6 +469,7 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
         .item(&MenuItemBuilder::with_id(ids::TOOLS_REVIEW_PIPELINE, "Review Pipeline Results").build(app)?)
         .separator()
         .item(&MenuItemBuilder::with_id(ids::TOOLS_SCAN_LIBRARY, "Scan Library...").build(app)?)
+        .item(&MenuItemBuilder::with_id(ids::TOOLS_RESCAN, "Rescan Folders...").build(app)?)
         .item(&MenuItemBuilder::with_id(ids::TOOLS_FIND_DUPLICATES, "Find Duplicates").build(app)?)
         .item(&MenuItemBuilder::with_id(ids::TOOLS_BUILD_PREVIEWS, "Build/Refresh Previews").build(app)?)
         .separator()

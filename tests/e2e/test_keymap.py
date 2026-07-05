@@ -250,6 +250,181 @@ def test_esc_closes_shortcuts_cheat_sheet(live_server, page):
     assert expect_closed is False
 
 
+def test_shortcuts_sheet_lists_misses_and_shared_hotkeys(live_server, page):
+    """The ? sheet should include /misses-only keys plus contextual shared keys."""
+    url = live_server["url"]
+    page.goto(f"{url}/misses", timeout=15000)
+    page.wait_for_load_state("networkidle")
+    page.wait_for_function("window._vireoShortcuts && window._vireoShortcuts.browse")
+
+    page.evaluate("""
+        window._vireoShortcuts.browse.flag = 'alt+p';
+        window._vireoShortcuts.browse.reject = 'alt+x';
+        window._vireoShortcuts.browse.unflag = 'alt+u';
+    """)
+    page.keyboard.press("?")
+    page.wait_for_function(
+        "document.getElementById('shortcutsCheatSheet').classList.contains('open')",
+        timeout=2000,
+    )
+
+    groups = page.evaluate("""
+        () => {
+          const out = {};
+          let title = null;
+          document.querySelectorAll('#shortcutsSheetContent > div').forEach((el) => {
+            if (el.classList.contains('sc-group-title')) {
+              title = el.textContent.trim();
+              out[title] = [];
+            } else if (title && el.classList.contains('sc-row')) {
+              out[title].push({
+                key: el.querySelector('.sc-key').textContent.trim(),
+                label: el.querySelector('.sc-label').textContent.trim(),
+              });
+            }
+          });
+          return out;
+        }
+    """)
+
+    assert {"Global", "Misses", "Lightbox"}.issubset(groups.keys())
+    assert {"key": "J", "label": "Next miss"} in groups["Misses"]
+    assert {"key": "K", "label": "Previous miss"} in groups["Misses"]
+    assert {"key": "Shift+J", "label": "Extend selection to next miss"} in groups["Misses"]
+    assert {"key": "Shift+K", "label": "Extend selection to previous miss"} in groups["Misses"]
+    assert {"key": "Alt+P", "label": "Flag focused or selected photo"} in groups["Misses"]
+    assert {"key": "Alt+X", "label": "Reject focused or selected photo"} in groups["Misses"]
+    assert {"key": "Alt+U", "label": "Unmark as missed"} in groups["Misses"]
+    assert {"key": "Enter", "label": "Open focused photo"} in groups["Misses"]
+    assert {"key": "Escape", "label": "Clear selection"} in groups["Misses"]
+    assert {"key": "?", "label": "Open keyboard shortcuts"} in groups["Global"]
+    assert {"key": "Alt+U", "label": "Clear pick/reject flag"} in groups["Lightbox"]
+
+
+def test_question_mark_opens_shortcuts_sheet_over_lightbox(live_server, page):
+    """The global ? shortcut should still work while the lightbox owns focus,
+    and the sheet must render visibly above the lightbox (not behind it)."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse", timeout=15000)
+    page.wait_for_load_state("networkidle")
+
+    page.evaluate("openLightbox(1, 'hawk1.jpg')")
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=2000,
+    )
+
+    page.keyboard.press("?")
+    page.wait_for_function(
+        "document.getElementById('shortcutsCheatSheet').classList.contains('open')",
+        timeout=2000,
+    )
+
+    assert page.evaluate("""
+        () => {
+          const el = document.elementFromPoint(window.innerWidth / 2, window.innerHeight / 2);
+          return !!(el && el.closest('#shortcutsCheatSheet'));
+        }
+    """) is True
+    assert page.evaluate(
+        "document.getElementById('lightboxOverlay').classList.contains('active')"
+    ) is True
+
+    # Verify the sheet is visually above the lightbox, not hidden behind it.
+    # A class of `open` alone is insufficient when z-index puts the sheet below
+    # the lightbox overlay — see Codex review on PR #926.
+    z_indexes = page.evaluate(
+        """() => {
+            const sheet = document.getElementById('shortcutsCheatSheet');
+            const lb = document.getElementById('lightboxOverlay');
+            return {
+                sheet: parseInt(getComputedStyle(sheet).zIndex, 10),
+                lightbox: parseInt(getComputedStyle(lb).zIndex, 10),
+            };
+        }"""
+    )
+    assert z_indexes["sheet"] > z_indexes["lightbox"], (
+        f"shortcuts sheet z-index ({z_indexes['sheet']}) must exceed "
+        f"lightbox z-index ({z_indexes['lightbox']}) so the sheet renders on top"
+    )
+
+    # The topmost element at the sheet's center must belong to the sheet's
+    # subtree, not the lightbox — proves the stacking actually works in render.
+    topmost_belongs_to_sheet = page.evaluate(
+        """() => {
+            const sheet = document.getElementById('shortcutsCheatSheet');
+            const r = sheet.getBoundingClientRect();
+            const el = document.elementFromPoint(
+                r.left + r.width / 2,
+                r.top + r.height / 2,
+            );
+            return el !== null && sheet.contains(el);
+        }"""
+    )
+    assert topmost_belongs_to_sheet, (
+        "topmost element at the sheet's center should be inside the sheet, "
+        "not the lightbox behind it"
+    )
+
+
+def test_question_mark_does_not_open_hidden_sheet_in_fullscreen_lightbox(live_server, page):
+    """When the lightbox is the browser fullscreen element, sibling overlays
+    cannot render above it; ? should not open a hidden shortcuts sheet."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse", timeout=15000)
+    page.wait_for_load_state("networkidle")
+
+    page.evaluate("openLightbox(1, 'hawk1.jpg')")
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=2000,
+    )
+    page.evaluate("""
+        () => {
+          const lightbox = document.getElementById('lightboxOverlay');
+          Object.defineProperty(document, 'fullscreenElement', {
+            configurable: true,
+            get: () => lightbox,
+          });
+          Object.defineProperty(document, 'webkitFullscreenElement', {
+            configurable: true,
+            get: () => null,
+          });
+        }
+    """)
+
+    page.keyboard.press("?")
+    page.wait_for_function(
+        """() => new Promise((resolve, reject) => {
+            const sheet = document.getElementById('shortcutsCheatSheet');
+            const isOpen = () => sheet.classList.contains('open');
+            if (isOpen()) {
+                reject(new Error('shortcuts sheet opened immediately'));
+                return;
+            }
+            const deadline = performance.now() + 300;
+            function check() {
+                if (isOpen()) {
+                    reject(new Error('shortcuts sheet opened during fullscreen guard window'));
+                } else if (performance.now() >= deadline) {
+                    resolve(true);
+                } else {
+                    requestAnimationFrame(check);
+                }
+            }
+            requestAnimationFrame(check);
+        })""",
+        timeout=1000,
+    )
+
+    assert page.evaluate(
+        "document.getElementById('shortcutsCheatSheet').classList.contains('open')"
+    ) is False
+    assert page.evaluate(
+        "document.getElementById('lightboxOverlay').classList.contains('active')"
+    ) is True
+
+
 def test_two_overlays_unwind_one_esc_each(live_server, page):
     """With lightbox open and cheat sheet stacked on top, each Esc closes one
     overlay (top-of-stack first). Locks in the new one-Esc-per-overlay model

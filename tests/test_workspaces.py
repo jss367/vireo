@@ -137,6 +137,56 @@ def test_workspace_root_hides_materialized_descendant_when_parent_has_photos(db)
     assert {p["filename"] for p in db.get_photos()} == {"root.jpg", "child.jpg"}
 
 
+def test_workspace_folder_roots_report_subtree_photo_counts(db):
+    ws_id = db._active_workspace_id
+    db.set_active_workspace(None)
+    # Root with no direct photos — all images live in subfolders. The
+    # direct-only folders.photo_count would read 0 here.
+    root_id = db.add_folder("/photos/usa", name="usa")
+    child_a = db.add_folder("/photos/usa/2026", name="2026", parent_id=root_id)
+    child_b = db.add_folder("/photos/usa/2025", name="2025", parent_id=root_id)
+    db.add_photo(child_a, "a1.jpg", ".jpg", 1000, 1.0)
+    db.add_photo(child_a, "a2.jpg", ".jpg", 1000, 1.0)
+    db.add_photo(child_b, "b1.jpg", ".jpg", 1000, 1.0)
+    # A separate sibling root — its photos must not bleed into usa's count.
+    other_root = db.add_folder("/photos/canada", name="canada")
+    db.add_photo(other_root, "c1.jpg", ".jpg", 1000, 1.0)
+    db.set_active_workspace(ws_id)
+
+    db.add_workspace_folder(ws_id, root_id)
+    db.add_workspace_folder(ws_id, other_root)
+
+    counts = {
+        f["path"]: f["workspace_photo_count"]
+        for f in db.get_workspace_folder_roots(ws_id)
+    }
+    assert counts["/photos/usa"] == 3
+    assert counts["/photos/canada"] == 1
+
+
+def test_workspace_root_count_is_scoped_to_its_workspace(db):
+    # The same folder tree lives in two workspaces; each root's count must
+    # reflect only photos and folders linked to that workspace.
+    db.set_active_workspace(None)
+    root_id = db.add_folder("/photos/usa", name="usa")
+    child_id = db.add_folder("/photos/usa/2026", name="2026", parent_id=root_id)
+    db.add_photo(child_id, "a.jpg", ".jpg", 1000, 1.0)
+    db.add_photo(child_id, "b.jpg", ".jpg", 1000, 1.0)
+
+    ws_a = db.create_workspace("A")
+    ws_b = db.create_workspace("B")
+    db.set_active_workspace(ws_a)
+    db.add_workspace_folder(ws_a, root_id)
+
+    counts_a = {
+        f["path"]: f["workspace_photo_count"]
+        for f in db.get_workspace_folder_roots(ws_a)
+    }
+    assert counts_a["/photos/usa"] == 2
+    # ws_b never linked the folder — it has no roots to report.
+    assert db.get_workspace_folder_roots(ws_b) == []
+
+
 def test_workspace_root_materializes_windows_style_descendants(db):
     ws_id = db._active_workspace_id
     db.set_active_workspace(None)
@@ -862,6 +912,281 @@ def test_merge_duplicate_keywords_scoped_by_workspace(db):
     assert sparrows == 2
 
 
+def test_merge_duplicate_keywords_respects_parent_and_type(db):
+    """Same-name keywords under different parents (Springfield, IL vs MO) or
+    with different types are distinct by design and must NOT merge; only
+    case-variants in the same (parent, type) slot are duplicates."""
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos", name="photos")
+    db.add_workspace_folder(ws, fid)
+    pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                       file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    db.conn.execute("INSERT INTO keywords (name, type) VALUES ('Illinois', 'location')")
+    db.conn.execute("INSERT INTO keywords (name, type) VALUES ('Missouri', 'location')")
+    il = db.conn.execute("SELECT id FROM keywords WHERE name='Illinois'").fetchone()[0]
+    mo = db.conn.execute("SELECT id FROM keywords WHERE name='Missouri'").fetchone()[0]
+    db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type) VALUES ('Springfield', ?, 'location')", (il,))
+    db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type) VALUES ('Springfield', ?, 'location')", (mo,))
+    # Same name, same NULL parent, different type — also distinct
+    db.conn.execute("INSERT INTO keywords (name, type) VALUES ('Macro', 'genre')")
+    db.conn.execute("INSERT INTO keywords (name, type) VALUES ('macro', 'general')")
+    db.conn.commit()
+
+    for row in db.conn.execute(
+        "SELECT id FROM keywords WHERE name IN ('Springfield', 'Macro', 'macro')"
+    ).fetchall():
+        db.tag_photo(pid, row[0])
+
+    merged = db.merge_duplicate_keywords()
+    assert merged == 0
+
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM keywords WHERE name = 'Springfield'"
+    ).fetchone()[0] == 2
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM keywords WHERE LOWER(name) = 'macro'"
+    ).fetchone()[0] == 2
+
+
+def test_merge_duplicate_keywords_reparents_children(db):
+    """A duplicate with child keywords merges without tripping the
+    keywords.parent_id FK; children move to the survivor, and a follow-up
+    pass collapses children that became same-parent case-duplicates.
+    Only the leaves are photo-tagged — XMP import never tags ancestors —
+    so the untagged Birds/birds parents must still be found via the
+    descendant walk."""
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos", name="photos")
+    db.add_workspace_folder(ws, fid)
+    pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                       file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    # Case-duplicate parents, each with a case-duplicate child chain
+    db.conn.execute("INSERT INTO keywords (name) VALUES ('Birds')")
+    db.conn.execute("INSERT INTO keywords (name) VALUES ('birds')")
+    upper = db.conn.execute("SELECT id FROM keywords WHERE name='Birds'").fetchone()[0]
+    lower = db.conn.execute("SELECT id FROM keywords WHERE name='birds'").fetchone()[0]
+    db.conn.execute("INSERT INTO keywords (name, parent_id) VALUES ('Heron', ?)", (upper,))
+    db.conn.execute("INSERT INTO keywords (name, parent_id) VALUES ('heron', ?)", (lower,))
+    db.conn.commit()
+
+    # Tag only the leaves, mirroring _import_keywords_for_photo
+    for row in db.conn.execute(
+        "SELECT id FROM keywords WHERE LOWER(name) = 'heron'"
+    ).fetchall():
+        db.tag_photo(pid, row[0])
+
+    merged = db.merge_duplicate_keywords()
+    assert merged == 2  # Birds/birds, then Heron/heron once same-parent
+
+    birds = db.conn.execute(
+        "SELECT id FROM keywords WHERE LOWER(name) = 'birds'"
+    ).fetchall()
+    herons = db.conn.execute(
+        "SELECT id, parent_id FROM keywords WHERE LOWER(name) = 'heron'"
+    ).fetchall()
+    assert len(birds) == 1 and len(herons) == 1
+    assert herons[0]["parent_id"] == birds[0]["id"]
+    # Photo keeps its leaf association, now on the surviving heron
+    tagged = {r[0] for r in db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (pid,)
+    ).fetchall()}
+    assert tagged == {herons[0]["id"]}
+
+
+def test_merge_duplicate_keywords_merges_exact_name_children(db):
+    """When duplicate parents both have a child with the exact same name,
+    the UNIQUE(name, parent_id) clash on reparenting means the child is a
+    duplicate of the survivor's sibling — it must merge into it (keeping
+    its photo associations), not get renamed to 'Heron (id-N)'."""
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos", name="photos")
+    db.add_workspace_folder(ws, fid)
+    pid1 = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                        file_size=100, file_mtime=1.0)
+    pid2 = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                        file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    # Case-duplicate parents, each with an exact-same-name child
+    db.conn.execute("INSERT INTO keywords (name) VALUES ('Birds')")
+    db.conn.execute("INSERT INTO keywords (name) VALUES ('birds')")
+    upper = db.conn.execute("SELECT id FROM keywords WHERE name='Birds'").fetchone()[0]
+    lower = db.conn.execute("SELECT id FROM keywords WHERE name='birds'").fetchone()[0]
+    db.conn.execute("INSERT INTO keywords (name, parent_id) VALUES ('Heron', ?)", (upper,))
+    db.conn.execute("INSERT INTO keywords (name, parent_id) VALUES ('Heron', ?)", (lower,))
+    h1 = db.conn.execute(
+        "SELECT id FROM keywords WHERE name='Heron' AND parent_id=?", (upper,)).fetchone()[0]
+    h2 = db.conn.execute(
+        "SELECT id FROM keywords WHERE name='Heron' AND parent_id=?", (lower,)).fetchone()[0]
+    db.conn.commit()
+
+    db.tag_photo(pid1, h1)
+    db.tag_photo(pid2, h2)
+
+    merged = db.merge_duplicate_keywords()
+    assert merged == 2  # birds into Birds, then its Heron into Birds' Heron
+
+    herons = db.conn.execute(
+        "SELECT id, name, parent_id FROM keywords WHERE name LIKE 'Heron%'"
+    ).fetchall()
+    assert len(herons) == 1
+    assert herons[0]["name"] == "Heron"  # no 'Heron (id-N)' mangling
+    assert herons[0]["parent_id"] == upper
+    # Both photos' associations converge on the surviving Heron
+    for pid in (pid1, pid2):
+        tagged = {r[0] for r in db.conn.execute(
+            "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (pid,)
+        ).fetchall()}
+        assert tagged == {herons[0]["id"]}
+
+
+def test_merge_duplicate_keywords_handles_stale_group_after_parent_merge(db):
+    """A pass that contains both duplicate parents AND duplicate children
+    under those parents must not crash when the parent merge recursively
+    deletes one of the child group's ids. Without checking that each
+    group's keep_id still exists, the loop would UPDATE photo_keywords
+    toward a non-existent FK target and trip an IntegrityError."""
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos", name="photos")
+    db.add_workspace_folder(ws, fid)
+    pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                       file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    # Parents: Birds (keep) and birds (dup). Birds already has a Heron
+    # child; birds has both 'Heron' and 'heron' children — these form
+    # their own duplicate group under birds, and the parent merge will
+    # collapse 'Heron@birds' into 'Heron@Birds' before that group is
+    # processed.
+    db.conn.execute("INSERT INTO keywords (name) VALUES ('Birds')")
+    db.conn.execute("INSERT INTO keywords (name) VALUES ('birds')")
+    upper = db.conn.execute("SELECT id FROM keywords WHERE name='Birds'").fetchone()[0]
+    lower = db.conn.execute("SELECT id FROM keywords WHERE name='birds'").fetchone()[0]
+    db.conn.execute("INSERT INTO keywords (name, parent_id) VALUES ('Heron', ?)", (upper,))
+    db.conn.execute("INSERT INTO keywords (name, parent_id) VALUES ('Heron', ?)", (lower,))
+    db.conn.execute("INSERT INTO keywords (name, parent_id) VALUES ('heron', ?)", (lower,))
+    db.conn.commit()
+
+    for row in db.conn.execute(
+        "SELECT id FROM keywords WHERE LOWER(name) = 'heron'"
+    ).fetchall():
+        db.tag_photo(pid, row[0])
+
+    # Species/location metadata carried only by the duplicate must fold
+    # into the survivor instead of being deleted with it. (Set after
+    # tagging so the auto-Wildlife rule doesn't muddy the tag assertions.)
+    db.conn.execute(
+        "UPDATE keywords SET is_species = 1, latitude = -33.9, longitude = 18.4 "
+        "WHERE name = 'heron' AND parent_id = ?", (lower,))
+    db.conn.commit()
+
+    # Must not raise; converges to one Birds with one Heron child.
+    db.merge_duplicate_keywords()
+
+    birds = db.conn.execute(
+        "SELECT id FROM keywords WHERE LOWER(name) = 'birds'"
+    ).fetchall()
+    herons = db.conn.execute(
+        "SELECT id, parent_id, is_species, latitude, longitude "
+        "FROM keywords WHERE LOWER(name) = 'heron'"
+    ).fetchall()
+    assert len(birds) == 1
+    assert len(herons) == 1
+    assert herons[0]["parent_id"] == birds[0]["id"]
+    assert herons[0]["is_species"] == 1
+    assert herons[0]["latitude"] == -33.9
+    assert herons[0]["longitude"] == 18.4
+    tagged = {r[0] for r in db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (pid,)
+    ).fetchall()}
+    assert tagged == {herons[0]["id"]}
+
+
+def test_merge_duplicate_keywords_preserves_differently_typed_children(db):
+    """A child name-collision on reparent is only a duplicate when both
+    children share a type. With 'Birds > Macro' (general) under one parent
+    and 'birds > Macro' (genre) under its case-duplicate, the parent merge
+    triggers a UNIQUE(name, parent_id) clash on the migrating Macro. The
+    dedup boundary is (LOWER(name), parent_id, type), so these aren't
+    duplicates; the migrating one must be preserved (disambiguated by
+    name), not silently merged into a different-type sibling — that would
+    retag photos across the type boundary and drop one typed keyword."""
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos", name="photos")
+    db.add_workspace_folder(ws, fid)
+    pid_general = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                               file_size=100, file_mtime=1.0)
+    pid_genre = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                             file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    db.conn.execute("INSERT INTO keywords (name) VALUES ('Birds')")
+    db.conn.execute("INSERT INTO keywords (name) VALUES ('birds')")
+    upper = db.conn.execute("SELECT id FROM keywords WHERE name='Birds'").fetchone()[0]
+    lower = db.conn.execute("SELECT id FROM keywords WHERE name='birds'").fetchone()[0]
+    db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type) VALUES ('Macro', ?, 'general')",
+        (upper,),
+    )
+    db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type) VALUES ('Macro', ?, 'genre')",
+        (lower,),
+    )
+    m_general = db.conn.execute(
+        "SELECT id FROM keywords WHERE name='Macro' AND parent_id=?", (upper,)
+    ).fetchone()[0]
+    m_genre = db.conn.execute(
+        "SELECT id FROM keywords WHERE name='Macro' AND parent_id=?", (lower,)
+    ).fetchone()[0]
+    db.conn.commit()
+
+    db.tag_photo(pid_general, m_general)
+    db.tag_photo(pid_genre, m_genre)
+
+    db.merge_duplicate_keywords()
+
+    # Birds/birds collapsed to one parent.
+    birds = db.conn.execute(
+        "SELECT id FROM keywords WHERE LOWER(name) = 'birds'"
+    ).fetchall()
+    assert len(birds) == 1
+    assert birds[0]["id"] == upper
+
+    # Both typed Macros survive under the survivor parent; the migrating
+    # one was disambiguated rather than merged across the type boundary.
+    macros = db.conn.execute(
+        "SELECT id, name, parent_id, type FROM keywords WHERE LOWER(name) LIKE 'macro%' "
+        "ORDER BY type"
+    ).fetchall()
+    assert len(macros) == 2
+    assert {m["parent_id"] for m in macros} == {upper}
+    assert {m["type"] for m in macros} == {"general", "genre"}
+    # The original general Macro keeps its name; the migrating genre Macro
+    # was disambiguated with an id suffix.
+    by_type = {m["type"]: m for m in macros}
+    assert by_type["general"]["id"] == m_general
+    assert by_type["general"]["name"] == "Macro"
+    assert by_type["genre"]["id"] == m_genre
+    assert by_type["genre"]["name"] == f"Macro (id-{m_genre})"
+
+    # Each photo's association sticks to its own type — neither got
+    # silently retagged onto the other-type Macro.
+    general_tags = {r[0] for r in db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (pid_general,)
+    ).fetchall()}
+    genre_tags = {r[0] for r in db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (pid_genre,)
+    ).fetchall()}
+    assert general_tags == {m_general}
+    assert genre_tags == {m_genre}
+
+
 def test_empty_workspace_labels_does_not_fallback_to_global(db):
     """An explicit empty active_labels [] should NOT fall back to global labels."""
     ws = db.create_workspace("Empty Labels")
@@ -942,6 +1267,25 @@ def test_move_folders_moves_pending_changes(db_with_workspace):
     assert len(db.get_pending_changes()) == 0
 
 
+def test_move_folders_moves_photo_preferences(db_with_workspace):
+    """Representative Life List / Highlights choices follow moved photos."""
+    db, ws1, folder_id, photo_id = db_with_workspace
+    db.set_photo_preference("life_list", "Robin", photo_id)
+    db.set_photo_preference("highlights", "Robin", photo_id)
+
+    ws2 = db.create_workspace("Target")
+    result = db.move_folders_to_workspace(ws1, ws2, [folder_id])
+
+    assert result["photo_preferences_moved"] == 2
+    db.set_active_workspace(ws2)
+    assert db.get_photo_preferences("life_list") == {"Robin": photo_id}
+    assert db.get_photo_preferences("highlights") == {"Robin": photo_id}
+
+    db.set_active_workspace(ws1)
+    assert db.get_photo_preferences("life_list") == {}
+    assert db.get_photo_preferences("highlights") == {}
+
+
 def test_move_folders_collections_stay_behind(db_with_workspace):
     """Collections in the source workspace are NOT moved."""
     db, ws1, folder_id, photo_id = db_with_workspace
@@ -972,6 +1316,517 @@ def test_move_folders_blocks_descendant_when_source_root_remains(db):
 
     assert {f["id"] for f in db.get_workspace_folders(ws1)} == {root_id, child_id}
     assert db.get_workspace_folders(ws2) == []
+
+
+def test_archive_merge_preserves_narrower_workspace_root(db):
+    """Merging into a broad archive must not widen an already-scoped workspace."""
+    ws_id = db.create_workspace("USA2026")
+
+    # Existing archive rows are globally known from another workspace/history,
+    # but this workspace is intentionally rooted only at the 2026 subtree.
+    db.set_active_workspace(None)
+    archive_id = db.add_folder("/archive/USA", name="USA")
+    year_id = db.add_folder("/archive/USA/2026", name="2026")
+    old_year_id = db.add_folder(
+        "/archive/USA/2020",
+        name="2020",
+        parent_id=archive_id,
+    )
+    db.add_photo(old_year_id, "old.jpg", ".jpg", 1000, 1.0)
+
+    db.set_active_workspace(ws_id)
+    db.add_workspace_folder(ws_id, year_id)
+    db.conn.executemany(
+        """INSERT INTO workspace_folders (workspace_id, folder_id, is_root)
+           VALUES (?, ?, 0)""",
+        [(ws_id, archive_id), (ws_id, old_year_id)],
+    )
+    db.conn.commit()
+
+    # Staging mirrors local-processing imports: the broad staging folder is
+    # just the archive shell; the touched dated leaf is the user-facing import
+    # root while it is still in staging.
+    staged_archive_id = db.add_folder(
+        "/staging/job/USA",
+        name="USA",
+        workspace_root=False,
+    )
+    staged_year_id = db.add_folder(
+        "/staging/job/USA/2026",
+        name="2026",
+        parent_id=staged_archive_id,
+        workspace_root=False,
+    )
+    staged_leaf_id = db.add_folder(
+        "/staging/job/USA/2026/2026-07-02",
+        name="2026-07-02",
+        parent_id=staged_year_id,
+        workspace_root=True,
+    )
+    db.add_photo(staged_leaf_id, "new.jpg", ".jpg", 1000, 2.0)
+    staged_other_year_id = db.add_folder(
+        "/staging/job/USA/2027",
+        name="2027",
+        parent_id=staged_archive_id,
+        workspace_root=False,
+    )
+    staged_other_leaf_id = db.add_folder(
+        "/staging/job/USA/2027/2027-01-01",
+        name="2027-01-01",
+        parent_id=staged_other_year_id,
+        workspace_root=True,
+    )
+    db.add_photo(staged_other_leaf_id, "future.jpg", ".jpg", 1000, 3.0)
+    db._new_images_cache.set(
+        db._db_path,
+        ws_id,
+        {"new_count": 99, "files": []},
+    )
+
+    result = db.merge_staged_tree_into_archive(staged_archive_id, "/archive/USA")
+
+    assert result["new_photos"] == 2
+    assert db._new_images_cache.get(db._db_path, ws_id) is None
+    root_paths = {
+        r["path"] for r in db.get_workspace_folder_roots(ws_id)
+    }
+    assert "/archive/USA/2026" in root_paths
+    assert "/archive/USA" not in root_paths
+    assert "/archive/USA/2027/2027-01-01" not in root_paths
+
+    archive_link = db.conn.execute(
+        """SELECT is_root FROM workspace_folders
+           WHERE workspace_id = ? AND folder_id = ?""",
+        (ws_id, archive_id),
+    ).fetchone()
+    assert archive_link is None
+
+    old_year_link = db.conn.execute(
+        """SELECT 1 FROM workspace_folders
+           WHERE workspace_id = ? AND folder_id = ?""",
+        (ws_id, old_year_id),
+    ).fetchone()
+    assert old_year_link is None
+
+    new_photo = db.conn.execute(
+        """SELECT p.filename
+           FROM photos p
+           JOIN folders f ON f.id = p.folder_id
+           JOIN workspace_folders wf ON wf.folder_id = f.id
+          WHERE wf.workspace_id = ? AND f.path = ?""",
+        (ws_id, "/archive/USA/2026/2026-07-02"),
+    ).fetchone()
+    assert new_photo["filename"] == "new.jpg"
+
+    old_photo = db.conn.execute(
+        """SELECT p.filename
+           FROM photos p
+           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+          WHERE wf.workspace_id = ? AND p.filename = ?""",
+        (ws_id, "old.jpg"),
+    ).fetchone()
+    assert old_photo is None
+
+    future_photo = db.conn.execute(
+        """SELECT p.filename
+           FROM photos p
+           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+          WHERE wf.workspace_id = ? AND p.filename = ?""",
+        (ws_id, "future.jpg"),
+    ).fetchone()
+    assert future_photo is None
+
+
+def test_archive_merge_scoped_root_invalidates_new_images_cache(db):
+    """Scoped-root merges must flush a stale new-images cache after commit.
+
+    The scoped-root branch skips ``add_workspace_folder`` for the broad
+    archive base; ``_prune_...`` and ``_materialize_...`` only invalidate
+    when they actually change rows. In the shape below both are no-ops, so
+    the only workspace-membership writes come from the reconciliation
+    loop's ``_add_workspace_folder_no_commit`` — which does not invalidate.
+    Without the post-commit invalidation a cache entry set between the
+    rsync copy and reconciliation would keep reporting the just-imported
+    files as "new" until the TTL expired.
+    """
+    ws_id = db.create_workspace("USA2026")
+
+    db.set_active_workspace(None)
+    archive_id = db.add_folder("/archive/USA", name="USA")
+    year_id = db.add_folder("/archive/USA/2026", name="2026")
+
+    db.set_active_workspace(ws_id)
+    db.add_workspace_folder(ws_id, year_id)
+
+    staged_archive_id = db.add_folder(
+        "/staging/job/USA",
+        name="USA",
+        workspace_root=False,
+    )
+    staged_year_id = db.add_folder(
+        "/staging/job/USA/2026",
+        name="2026",
+        parent_id=staged_archive_id,
+        workspace_root=False,
+    )
+    staged_leaf_id = db.add_folder(
+        "/staging/job/USA/2026/2026-07-02",
+        name="2026-07-02",
+        parent_id=staged_year_id,
+        workspace_root=True,
+    )
+    db.add_photo(staged_leaf_id, "new.jpg", ".jpg", 1000, 2.0)
+
+    db._new_images_cache.set(
+        db._db_path, ws_id, {"new_count": 0, "per_root": [], "sample": []}
+    )
+
+    db.merge_staged_tree_into_archive(staged_archive_id, "/archive/USA")
+
+    assert db._new_images_cache.get(db._db_path, ws_id) is None
+
+
+def test_archive_merge_new_path_preserves_narrower_workspace_root(db):
+    """Merging to a new archive path must not root a broader known ancestor."""
+    ws_id = db.create_workspace("USA2026")
+
+    db.set_active_workspace(None)
+    archive_id = db.add_folder("/archive/USA", name="USA")
+    year_id = db.add_folder(
+        "/archive/USA/2026",
+        name="2026",
+        parent_id=archive_id,
+    )
+    db.add_folder(
+        "/archive/USA/2020",
+        name="2020",
+        parent_id=archive_id,
+    )
+
+    db.set_active_workspace(ws_id)
+    db.add_workspace_folder(ws_id, year_id)
+
+    staged_year_id = db.add_folder(
+        "/staging/job/2027",
+        name="2027",
+        workspace_root=False,
+    )
+    staged_leaf_id = db.add_folder(
+        "/staging/job/2027/2027-01-01",
+        name="2027-01-01",
+        parent_id=staged_year_id,
+        workspace_root=True,
+    )
+    db.add_photo(staged_leaf_id, "future.jpg", ".jpg", 1000, 3.0)
+
+    result = db.merge_staged_tree_into_archive(
+        staged_year_id,
+        "/archive/USA/2027",
+    )
+
+    assert result["new_photos"] == 1
+    root_paths = {
+        r["path"] for r in db.get_workspace_folder_roots(ws_id)
+    }
+    assert root_paths == {"/archive/USA/2026"}
+
+    archive_link = db.conn.execute(
+        """SELECT 1 FROM workspace_folders
+           WHERE workspace_id = ? AND folder_id = ?""",
+        (ws_id, archive_id),
+    ).fetchone()
+    assert archive_link is None
+
+    future_photo = db.conn.execute(
+        """SELECT p.filename
+           FROM photos p
+           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+          WHERE wf.workspace_id = ? AND p.filename = ?""",
+        (ws_id, "future.jpg"),
+    ).fetchone()
+    assert future_photo is None
+
+
+def test_archive_merge_nested_new_path_does_not_link_out_of_scope_intermediate(db):
+    """A missing intermediate under a broad archive must not leak siblings.
+
+    Workspace root ``/archive/USA/2026`` is scoped narrower than the archive
+    base ``/archive/USA``. Merging into a nested new path ``/archive/USA/2027/
+    Trip`` requires materializing ``/archive/USA/2027`` as a folder row for
+    ``parent_id`` chaining. That intermediate must not be linked to the
+    workspace: no workspace root covers it, and any non-root link would let
+    ``_materialize_workspace_descendants`` (called by ``get_workspace_folders``)
+    pull the merged ``/archive/USA/2027/Trip`` subtree into the workspace.
+    """
+    ws_id = db.create_workspace("USA2026")
+
+    db.set_active_workspace(None)
+    archive_id = db.add_folder("/archive/USA", name="USA")
+    year_id = db.add_folder(
+        "/archive/USA/2026",
+        name="2026",
+        parent_id=archive_id,
+    )
+
+    db.set_active_workspace(ws_id)
+    db.add_workspace_folder(ws_id, year_id)
+
+    staged_trip_id = db.add_folder(
+        "/staging/job/Trip",
+        name="Trip",
+        workspace_root=True,
+    )
+    db.add_photo(staged_trip_id, "future.jpg", ".jpg", 1000, 3.0)
+
+    result = db.merge_staged_tree_into_archive(
+        staged_trip_id,
+        "/archive/USA/2027/Trip",
+    )
+
+    assert result["new_photos"] == 1
+
+    root_paths = {
+        r["path"] for r in db.get_workspace_folder_roots(ws_id)
+    }
+    assert root_paths == {"/archive/USA/2026"}
+
+    intermediate_row = db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?",
+        ("/archive/USA/2027",),
+    ).fetchone()
+    assert intermediate_row is not None
+    intermediate_link = db.conn.execute(
+        """SELECT 1 FROM workspace_folders
+           WHERE workspace_id = ? AND folder_id = ?""",
+        (ws_id, intermediate_row["id"]),
+    ).fetchone()
+    assert intermediate_link is None
+
+    # get_workspace_folders() runs _materialize_workspace_descendants; the
+    # merged Trip subtree must remain invisible to this scoped workspace.
+    linked_paths = {
+        r["path"] for r in db.get_workspace_folders(ws_id)
+    }
+    assert "/archive/USA/2027" not in linked_paths
+    assert "/archive/USA/2027/Trip" not in linked_paths
+
+    future_photo = db.conn.execute(
+        """SELECT p.filename
+           FROM photos p
+           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+          WHERE wf.workspace_id = ? AND p.filename = ?""",
+        (ws_id, "future.jpg"),
+    ).fetchone()
+    assert future_photo is None
+
+
+def test_archive_merge_new_path_prunes_stale_broad_nonroot_link(db):
+    """No-row merge must prune a stale broad ``is_root=0`` ancestor link.
+
+    Workspace root ``/archive/USA/2026`` is scoped narrower than the archive
+    base ``/archive/USA``. If the workspace already carries a stale
+    ``is_root=0`` link on ``/archive/USA`` (e.g. from a prior broader merge
+    or a legacy layout), merging into a brand-new sibling like
+    ``/archive/USA/2027/Trip`` (no folder row for the archive destination
+    yet) walks up to ``/archive/USA``, hits the descendant-root guard, and
+    skips rooting it. Without also pruning that stale non-root link the
+    next ``get_workspace_folders()`` runs
+    ``_materialize_workspace_descendants`` from ``/archive/USA`` and pulls
+    the freshly-inserted ``/archive/USA/2027`` (and its ``Trip`` subtree)
+    into the workspace, defeating the scoped merge. The elif branch must
+    prune uncovered non-root links matching the existing-row cleanup.
+    """
+    ws_id = db.create_workspace("USA2026")
+
+    db.set_active_workspace(None)
+    archive_id = db.add_folder("/archive/USA", name="USA")
+    year_id = db.add_folder(
+        "/archive/USA/2026",
+        name="2026",
+        parent_id=archive_id,
+    )
+
+    db.set_active_workspace(ws_id)
+    db.add_workspace_folder(ws_id, year_id)
+    # Seed the stale broad non-root link that this fix must clean up.
+    db.add_workspace_folder(ws_id, archive_id, is_root=False)
+
+    archive_link_before = db.conn.execute(
+        """SELECT is_root FROM workspace_folders
+           WHERE workspace_id = ? AND folder_id = ?""",
+        (ws_id, archive_id),
+    ).fetchone()
+    assert archive_link_before is not None
+    assert archive_link_before["is_root"] == 0
+
+    staged_trip_id = db.add_folder(
+        "/staging/job/Trip",
+        name="Trip",
+        workspace_root=True,
+    )
+    db.add_photo(staged_trip_id, "future.jpg", ".jpg", 1000, 3.0)
+
+    result = db.merge_staged_tree_into_archive(
+        staged_trip_id,
+        "/archive/USA/2027/Trip",
+    )
+
+    assert result["new_photos"] == 1
+
+    # The narrower root survives untouched.
+    root_paths = {
+        r["path"] for r in db.get_workspace_folder_roots(ws_id)
+    }
+    assert root_paths == {"/archive/USA/2026"}
+
+    # The stale ``/archive/USA`` non-root link is gone.
+    archive_link_after = db.conn.execute(
+        """SELECT 1 FROM workspace_folders
+           WHERE workspace_id = ? AND folder_id = ?""",
+        (ws_id, archive_id),
+    ).fetchone()
+    assert archive_link_after is None
+
+    # ``get_workspace_folders`` runs ``_materialize_workspace_descendants``;
+    # the merged Trip subtree and the new 2027 intermediate must remain
+    # invisible to this scoped workspace.
+    linked_paths = {
+        r["path"] for r in db.get_workspace_folders(ws_id)
+    }
+    assert "/archive/USA" not in linked_paths
+    assert "/archive/USA/2027" not in linked_paths
+    assert "/archive/USA/2027/Trip" not in linked_paths
+
+    future_photo = db.conn.execute(
+        """SELECT p.filename
+           FROM photos p
+           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+          WHERE wf.workspace_id = ? AND p.filename = ?""",
+        (ws_id, "future.jpg"),
+    ).fetchone()
+    assert future_photo is None
+
+
+def test_archive_merge_prunes_stale_nonroot_ancestor_above_scoped_root(db):
+    """Existing-row merge must prune non-root ancestors of the merge target.
+
+    A restricted scan (see ``scanner.py`` ``_restrict_root_paths``) links the
+    broad scan base as ``is_root=0`` above the user-facing scoped root — for
+    example, ``/archive`` non-root and ``/archive/USA/2026`` as the only
+    root. When a later merge into ``/archive/USA`` prunes non-root links at
+    or below ``/archive/USA`` and then calls
+    ``_materialize_workspace_descendants``, the surviving ``/archive``
+    non-root ancestor would immediately re-insert ``/archive/USA``,
+    ``/archive/USA/2020``, and any newly-merged sibling like
+    ``/archive/USA/2027``, defeating the scoped merge. The prune must also
+    remove uncovered non-root ancestors of the merge target.
+    """
+    ws_id = db.create_workspace("USA2026")
+
+    db.set_active_workspace(None)
+    archive_base_id = db.add_folder("/archive", name="archive")
+    usa_id = db.add_folder(
+        "/archive/USA",
+        name="USA",
+        parent_id=archive_base_id,
+    )
+    year_id = db.add_folder(
+        "/archive/USA/2026",
+        name="2026",
+        parent_id=usa_id,
+    )
+    old_year_id = db.add_folder(
+        "/archive/USA/2020",
+        name="2020",
+        parent_id=usa_id,
+    )
+    db.add_photo(old_year_id, "old.jpg", ".jpg", 1000, 1.0)
+
+    db.set_active_workspace(ws_id)
+    db.add_workspace_folder(ws_id, year_id)
+    # Seed the stale broad non-root ancestor link. This mirrors what a
+    # restricted scan leaves behind on the scan base above the scoped root.
+    db.add_workspace_folder(ws_id, archive_base_id, is_root=False)
+
+    staged_archive_id = db.add_folder(
+        "/staging/job/USA",
+        name="USA",
+        workspace_root=False,
+    )
+    staged_year_id = db.add_folder(
+        "/staging/job/USA/2026",
+        name="2026",
+        parent_id=staged_archive_id,
+        workspace_root=False,
+    )
+    staged_leaf_id = db.add_folder(
+        "/staging/job/USA/2026/2026-07-02",
+        name="2026-07-02",
+        parent_id=staged_year_id,
+        workspace_root=True,
+    )
+    db.add_photo(staged_leaf_id, "new.jpg", ".jpg", 1000, 2.0)
+    staged_other_year_id = db.add_folder(
+        "/staging/job/USA/2027",
+        name="2027",
+        parent_id=staged_archive_id,
+        workspace_root=False,
+    )
+    staged_other_leaf_id = db.add_folder(
+        "/staging/job/USA/2027/2027-01-01",
+        name="2027-01-01",
+        parent_id=staged_other_year_id,
+        workspace_root=True,
+    )
+    db.add_photo(staged_other_leaf_id, "future.jpg", ".jpg", 1000, 3.0)
+
+    db.merge_staged_tree_into_archive(staged_archive_id, "/archive/USA")
+
+    # Scoped root survives untouched.
+    root_paths = {
+        r["path"] for r in db.get_workspace_folder_roots(ws_id)
+    }
+    assert root_paths == {"/archive/USA/2026"}
+
+    # The stale ``/archive`` non-root ancestor link is gone, so a later
+    # ``_materialize_workspace_descendants`` cannot pull the whole archive
+    # subtree back into the workspace.
+    archive_base_link = db.conn.execute(
+        """SELECT 1 FROM workspace_folders
+           WHERE workspace_id = ? AND folder_id = ?""",
+        (ws_id, archive_base_id),
+    ).fetchone()
+    assert archive_base_link is None
+
+    # ``get_workspace_folders`` invokes ``_materialize_workspace_descendants``;
+    # verify neither the broad archive base nor sibling years surface.
+    linked_paths = {
+        r["path"] for r in db.get_workspace_folders(ws_id)
+    }
+    assert "/archive" not in linked_paths
+    assert "/archive/USA" not in linked_paths
+    assert "/archive/USA/2020" not in linked_paths
+    assert "/archive/USA/2027" not in linked_paths
+    assert "/archive/USA/2027/2027-01-01" not in linked_paths
+
+    # Out-of-scope sibling photos stay hidden.
+    old_photo = db.conn.execute(
+        """SELECT p.filename
+           FROM photos p
+           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+          WHERE wf.workspace_id = ? AND p.filename = ?""",
+        (ws_id, "old.jpg"),
+    ).fetchone()
+    assert old_photo is None
+
+    future_photo = db.conn.execute(
+        """SELECT p.filename
+           FROM photos p
+           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+          WHERE wf.workspace_id = ? AND p.filename = ?""",
+        (ws_id, "future.jpg"),
+    ).fetchone()
+    assert future_photo is None
 
 
 def test_move_folders_validates_source_workspace(db):
@@ -1149,3 +2004,221 @@ def test_tabs_are_per_workspace(db):
     db.set_active_workspace(ws2)
     assert db.get_tabs() == DEFAULT_TABS
     assert "logs" not in db.get_tabs()
+
+
+# ---------------------------------------------------------------------------
+# per-workspace default process strategy (import/process split PR 1)
+# ---------------------------------------------------------------------------
+
+
+def _put_default_strategy(client, ws_id, value):
+    return client.put(
+        f"/api/workspaces/{ws_id}",
+        data=json.dumps(
+            {"config_overrides": {"pipeline": {"default_strategy": value}}}
+        ),
+        content_type="application/json",
+    )
+
+
+def test_workspace_default_strategy_saved_and_effective(client):
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({"name": "Strat"}),
+        content_type="application/json",
+    )
+    ws_id = resp.get_json()["id"]
+    resp = _put_default_strategy(client, ws_id, "cull_ready")
+    assert resp.status_code == 200
+
+    import config as cfg
+    from db import Database
+
+    # Read through get_effective_config exactly like the pipeline does.
+    db_path = None
+    with client.application.app_context():
+        db_path = client.application.config["DB_PATH"]
+    db = Database(db_path)
+    db.set_active_workspace(ws_id)
+    effective = db.get_effective_config(cfg.load())
+    assert effective["pipeline"]["default_strategy"] == "cull_ready"
+
+
+def test_workspace_default_strategy_null_means_import_only(client):
+    """None is the "no automatic processing after import" sentinel that
+    PR 3's chaining hook short-circuits on. Saving it must succeed — if
+    this 400s, the "import only" user flow is unreachable."""
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({"name": "StratNull"}),
+        content_type="application/json",
+    )
+    ws_id = resp.get_json()["id"]
+    resp = _put_default_strategy(client, ws_id, None)
+    assert resp.status_code == 200
+
+    import config as cfg
+    from db import Database
+
+    db = Database(client.application.config["DB_PATH"])
+    db.set_active_workspace(ws_id)
+    effective = db.get_effective_config(cfg.load())
+    assert effective["pipeline"]["default_strategy"] is None
+
+
+def test_workspace_default_strategy_unknown_400(client):
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({"name": "StratBad"}),
+        content_type="application/json",
+    )
+    ws_id = resp.get_json()["id"]
+    resp = _put_default_strategy(client, ws_id, "yolo")
+    assert resp.status_code == 400
+    assert "unknown strategy" in resp.get_json()["error"]
+
+
+def test_workspace_default_strategy_none_string_400(client):
+    """The string "none" is not the null sentinel — the "no process" case
+    uses JSON null, matching /api/jobs/pipeline (which also rejects
+    strategy: "none"). One vocabulary across the workspace default, the
+    API body, and the chaining hook."""
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({"name": "StratNoneStr"}),
+        content_type="application/json",
+    )
+    ws_id = resp.get_json()["id"]
+    resp = _put_default_strategy(client, ws_id, "none")
+    assert resp.status_code == 400
+
+
+@pytest.mark.parametrize("bad", [5, True, ["cull_ready"], {"name": "full"}])
+def test_workspace_default_strategy_non_string_400(client, bad):
+    """A JSON client sending a number, bool, list, or dict for
+    ``pipeline.default_strategy`` must get a 400 validation error, not a
+    500. Before ``resolve_strategy`` guarded non-string inputs, an
+    array/dict here hit ``name not in STRATEGIES`` and raised
+    ``TypeError: unhashable type`` — which the endpoint didn't catch, so
+    it escaped as a 500. Regression tripwire."""
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({"name": f"StratBadType-{type(bad).__name__}"}),
+        content_type="application/json",
+    )
+    ws_id = resp.get_json()["id"]
+    resp = _put_default_strategy(client, ws_id, bad)
+    assert resp.status_code == 400
+    assert "strategy must be a string" in resp.get_json()["error"]
+
+
+def test_config_default_strategy_default_is_none():
+    import os
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "vireo"))
+    from config import DEFAULTS
+
+    assert DEFAULTS["pipeline"]["default_strategy"] is None
+
+
+# ---------------------------------------------------------------------------
+# Create-workspace config_overrides validation (mirror of PUT validation)
+#
+# Regression tripwires for a validation gap on POST /api/workspaces: the
+# create path used to pass ``body.get("config_overrides")`` straight into
+# db.create_workspace without checking pipeline.default_strategy, so a
+# client could seed a workspace with an unknown strategy that PUT and
+# /api/jobs/pipeline would both reject — later feeding the chaining hook
+# an invalid strategy that only surfaces as a job failure.
+# ---------------------------------------------------------------------------
+
+
+def test_create_workspace_rejects_unknown_default_strategy(client):
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({
+            "name": "StratBadCreate",
+            "config_overrides": {"pipeline": {"default_strategy": "yolo"}},
+        }),
+        content_type="application/json",
+    )
+    assert resp.status_code == 400
+    assert "unknown strategy" in resp.get_json()["error"]
+
+
+def test_create_workspace_rejects_none_string_default_strategy(client):
+    """POST must match PUT and /api/jobs/pipeline: the "no processing"
+    sentinel is JSON null, not the string ``"none"``."""
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({
+            "name": "StratNoneCreate",
+            "config_overrides": {"pipeline": {"default_strategy": "none"}},
+        }),
+        content_type="application/json",
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.parametrize("bad", [5, True, ["cull_ready"], {"name": "full"}])
+def test_create_workspace_rejects_non_string_default_strategy(client, bad):
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({
+            "name": f"StratBadTypeCreate-{type(bad).__name__}",
+            "config_overrides": {"pipeline": {"default_strategy": bad}},
+        }),
+        content_type="application/json",
+    )
+    assert resp.status_code == 400
+    assert "strategy must be a string" in resp.get_json()["error"]
+
+
+def test_create_workspace_accepts_valid_default_strategy(client):
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({
+            "name": "StratCreateOK",
+            "config_overrides": {"pipeline": {"default_strategy": "cull_ready"}},
+        }),
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    ws_id = resp.get_json()["id"]
+
+    import config as cfg
+    from db import Database
+
+    db = Database(client.application.config["DB_PATH"])
+    db.set_active_workspace(ws_id)
+    effective = db.get_effective_config(cfg.load())
+    assert effective["pipeline"]["default_strategy"] == "cull_ready"
+
+
+def test_create_workspace_accepts_null_default_strategy(client):
+    """Explicit null on create must round-trip — it is the "import only"
+    sentinel and mirrors the PUT path's null acceptance."""
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({
+            "name": "StratCreateNull",
+            "config_overrides": {"pipeline": {"default_strategy": None}},
+        }),
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+
+
+def test_create_workspace_rejects_non_object_config_overrides(client):
+    """``config_overrides`` must be a JSON object or null; anything else
+    would be persisted as-is and break the labels accessors."""
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({
+            "name": "StratBadOverrides",
+            "config_overrides": "not-a-dict",
+        }),
+        content_type="application/json",
+    )
+    assert resp.status_code == 400
+    assert "config_overrides" in resp.get_json()["error"]

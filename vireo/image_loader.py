@@ -6,15 +6,19 @@ Performance notes:
 - PIL resize and JPEG encode are negligible (<0.15s)
 - libraw (via rawpy) is already C — Rust/numba won't help here
 
-RAW strategy (JPEG-first):
+RAW strategy:
 - Modern cameras embed a full-resolution JPEG in the RAW file (the same image
   the camera would produce in RAW+JPEG mode). For a photo organizer, that's
   both faster to decode and sufficient in quality.
 - It also works for RAW variants libraw cannot decode. Example: Nikon Z 8
   "High Efficiency*" (HE*) files use TicoRAW compression that libraw 0.22
   cannot decode. The embedded JPEG is our only path for those files.
-- We prefer the embedded JPEG whenever it meets the requested size, and
-  fall back to it when demosaic-based decode raises.
+- Browsing paths use the JPEG-first strategy: prefer the embedded JPEG whenever
+  it meets the requested size, and fall back to it when demosaic-based decode
+  raises.
+- Edit-quality working copies use RAW_DECODE_PRESERVE_HIGHLIGHTS: demosaic the
+  RAW with auto-bright disabled and highlight blending enabled, falling back to
+  the embedded JPEG only when libraw cannot decode the file.
 """
 
 import io
@@ -29,14 +33,325 @@ log = logging.getLogger(__name__)
 RAW_EXTENSIONS = {".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp", ".webp"}
 SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | RAW_EXTENSIONS
+RAW_DECODE_JPEG_FIRST = "jpeg_first"
+RAW_DECODE_PRESERVE_HIGHLIGHTS = "preserve_highlights"
+_RAW_DECODE_MODES = {RAW_DECODE_JPEG_FIRST, RAW_DECODE_PRESERVE_HIGHLIGHTS}
+
+# macOS "package" directories that hold OTHER apps' managed data. Walking
+# into them triggers Sequoia's "<app> would like to access data from other
+# apps" (kTCCServiceSystemPolicyAppData) consent prompt — and because such a
+# bundle holds thousands of files, the prompt reappears on every file the
+# walk touches, so clicking Allow never makes it stop. The contents are also
+# app-managed derivatives or media-library internals we'd never want to ingest.
+# Any directory walker
+# that traverses user-chosen roots (~/Pictures by default contains
+# "Photos Library.photoslibrary"; ~/Music can contain
+# "Music Library.musiclibrary") must prune these. Matched case-insensitively.
+_EXCLUDED_DIR_SUFFIXES = (
+    ".photoslibrary",          # Apple Photos
+    ".musiclibrary",           # Apple Music
+    ".photolibrary",           # legacy iPhoto / older Photos
+    ".migratedphotolibrary",
+    ".aplibrary",              # Aperture
+    ".migratedaplibrary",
+)
+_EXCLUDED_DIR_NAMES = frozenset({"photo booth library"})
 
 
-def load_image(file_path, max_size=1024):
+def is_excluded_scan_dir(name):
+    """Return True if a directory basename is an other-app data bundle that
+    directory walkers must not descend into (see _EXCLUDED_DIR_* above)."""
+    lower = name.lower()
+    return lower in _EXCLUDED_DIR_NAMES or lower.endswith(_EXCLUDED_DIR_SUFFIXES)
+
+
+def is_excluded_scan_path(path):
+    """Return True if *path* is, or sits inside, an excluded bundle.
+
+    Used as the root-level guard for every walker that accepts a
+    user-chosen path. A leaf-only check is insufficient: a user can
+    select a child of the bundle directly (e.g.
+    ``~/Pictures/Photos Library.photoslibrary/originals``), and stale
+    folder rows from before this guard existed can carry the same
+    shape. Either way, opening it still trips the macOS TCC
+    "access data from other apps" prompt — so we reject the whole
+    subtree, not just the bundle root.
+
+    Also follows symlinks textually. A user-selected root may be a
+    symlink whose literal path components don't name the bundle (e.g.
+    ``~/PhotoLib -> Photos Library.photoslibrary``); ``Path.is_dir()``
+    and ``os.walk()`` would follow the link into the protected bundle
+    regardless, so the walkers must reject these before any stat that
+    follows the link.
+
+    We do NOT use ``os.path.realpath`` for that resolution. ``realpath``
+    walks the resolved chain by ``lstat``-ing every component along the
+    way — including the bundle target itself once a link points at it —
+    and the very reason this guard exists is to avoid any stat that
+    reaches into the protected bundle. Instead we walk the path one
+    component at a time, using ``os.path.islink`` (which ``lstat``s only
+    the link node — these live outside the bundle when the user picked
+    an alias like ``~/PhotoLibAlias``) and ``os.readlink`` (purely
+    textual — reads just the link's stored target string). Neither call
+    stats anything below a resolved link, so even a directly selected
+    alias like ``~/PhotoLibAlias -> Photos Library.photoslibrary``
+    never reaches into the protected bundle.
+
+    Non-path inputs (e.g. JSON primitives like ``123`` or ``True`` that
+    sneak through ``body.get("root")`` before the route's directory check)
+    are treated as "not excluded" rather than raising. ``Path(int)`` raises
+    ``TypeError``; without this guard the route would return 500 instead of
+    the 400 the subsequent ``os.path.isdir`` check produces.
+    """
+    try:
+        p = Path(path)
+    except TypeError:
+        return False
+    if any(is_excluded_scan_dir(part) for part in p.parts):
+        return True
+    parts = p.parts
+    if not parts:
+        return False
+    # Walk component by component. Each iteration appends one literal
+    # part of the original path, then follows any symlink chain from the
+    # accumulated location purely textually. If a chain target's
+    # components name an excluded bundle, we stop immediately — so for
+    # ``~/Aliases/MyLib/originals`` (MyLib → bundle), we detect the
+    # bundle while processing ``MyLib`` and never construct or stat
+    # ``MyLib/originals`` against the resolved target.
+    current = parts[0]
+    for i, part in enumerate(parts):
+        if i > 0:
+            current = os.path.join(current, part)
+        resolved = _follow_symlink_chain_textually(current)
+        if resolved is None:
+            return True
+        current = resolved
+    return False
+
+
+def _follow_symlink_chain_textually(path_str, max_depth=40):
+    """Follow the symlink chain starting at *path_str* using only
+    ``os.path.islink`` + ``os.readlink``. Returns the chain's terminal
+    path (or *path_str* unchanged when nothing is a link) — or ``None``
+    if any link in the chain points at or into an excluded bundle.
+
+    ``os.path.islink`` ``lstat``s the link node itself, never the
+    resolved target; ``os.readlink`` only reads the link's stored
+    target bytes. Together they never stat anything under a resolved
+    link, which is what lets this helper classify
+    ``~/PhotoLibAlias -> Photos Library.photoslibrary`` without
+    reaching into the protected bundle.
+    """
+    current = path_str
+    visited = set()
+    for _ in range(max_depth):
+        if current in visited:
+            return current
+        visited.add(current)
+        try:
+            if not os.path.islink(current):
+                return current
+            target = os.readlink(current)
+        except OSError:
+            return current
+        if not os.path.isabs(target):
+            target = os.path.join(os.path.dirname(current), target)
+        target = os.path.normpath(target)
+        if any(is_excluded_scan_dir(part) for part in Path(target).parts):
+            return None
+        current = target
+    # Depth cap reached without terminating in a non-link. Fail closed:
+    # the caller treats ``None`` as "excluded", so a chain longer than
+    # ``max_depth`` that might still resolve into a protected bundle never
+    # gets allowed past the guard.
+    return None
+
+
+def prune_scan_dirs(dirnames):
+    """Mutate an ``os.walk`` *dirnames* list in place, removing excluded
+    bundles so the walk never recurses into them. Returns the removed names
+    (useful for logging what was skipped).
+
+    Note: by the time this runs, ``os.walk`` has already called
+    ``DirEntry.is_dir()`` on every child to populate ``dirnames`` — and that
+    call follows symlinks, so a child like ``LibraryAlias ->
+    Photos Library.photoslibrary`` is stat'ed against the bundle target
+    *before* pruning. Use :func:`safe_scan_walk` for user-chosen roots so
+    the symlink target is never stat-followed.
+    """
+    removed = [d for d in dirnames if is_excluded_scan_dir(d)]
+    if removed:
+        dirnames[:] = [d for d in dirnames if d not in removed]
+    return removed
+
+
+def _symlink_target_is_excluded(entry):
+    """Return True if *entry* is a symlink whose target sits in (or whose
+    symlink chain reaches) an excluded bundle. Uses ``os.readlink`` /
+    ``os.path.islink`` only — never a stat that follows the link — so a
+    link pointing into a protected bundle is classified without statting
+    the bundle target.
+
+    Two shapes are caught, neither matched by a basename-only check:
+
+    1. A file-named link whose target path names an excluded bundle
+       directly, e.g.
+       ``IMG.jpg -> ../Photos Library.photoslibrary/originals/IMG.jpg`` —
+       the immediate target's parts include the bundle suffix.
+    2. A chained link whose immediate target is a *plain* path that
+       itself contains, or resolves through, another link into the
+       bundle, e.g. ``LibraryAlias -> MidAlias`` where
+       ``MidAlias -> Photos Library.photoslibrary`` (or a file-named
+       variant ``IMG.jpg -> MidAlias/originals/IMG.jpg``). Without
+       chasing the chain, the immediate target ``MidAlias`` looks
+       benign, but ``os.path.isfile`` / ``Path.is_file`` would follow
+       both hops and re-trip the macOS TCC prompt.
+
+    The chain is followed via :func:`is_excluded_scan_path`, which walks
+    components one at a time using textual ``islink``+``readlink``. That
+    component-by-component walk keeps each ``lstat`` confined to the
+    link node — it never resolves an intermediate link far enough to
+    touch the protected bundle.
+
+    Relative targets are joined against the link's parent and
+    normalized (still purely textual — ``os.path.normpath`` does not
+    stat) so ``..`` segments resolve before classification.
+    """
+    try:
+        if not entry.is_symlink():
+            return False
+    except OSError:
+        return False
+    try:
+        target = os.readlink(entry.path)
+    except OSError:
+        return False
+    if not target:
+        return False
+    if not os.path.isabs(target):
+        target = os.path.join(os.path.dirname(entry.path), target)
+    target = os.path.normpath(target)
+    return is_excluded_scan_path(target)
+
+
+def safe_iter_dir(top, onerror=None):
+    """Yield ``Path`` objects for direct children of *top*, skipping
+    excluded bundles by name and symlinks whose target sits inside one.
+
+    Use this instead of ``Path.iterdir()`` (or ``os.scandir``) in
+    non-recursive walks where the caller will then call ``Path.is_file()``
+    / ``Path.suffix`` / ``stat()`` on each entry. Those calls follow
+    symlinks, so a child like ``LibraryAlias -> Photos
+    Library.photoslibrary`` — or a direct bundle child ``Photos
+    Library.photoslibrary`` itself — would stat the bundle target and
+    re-trip the macOS "access data from other apps" TCC prompt this
+    guard exists to avoid, even though the caller's extension/name
+    filter would have rejected the entry afterwards.
+
+    Classification uses ``DirEntry.is_dir(follow_symlinks=False)`` and
+    ``os.readlink`` (purely textual) — never a stat that follows a link
+    into a protected bundle.
+    """
+    try:
+        scandir_it = os.scandir(top)
+    except OSError as exc:
+        if onerror is not None:
+            onerror(exc)
+        return
+    skipped = []
+    with scandir_it:
+        for entry in scandir_it:
+            if is_excluded_scan_dir(entry.name):
+                skipped.append(entry.name)
+                continue
+            if _symlink_target_is_excluded(entry):
+                skipped.append(entry.name)
+                continue
+            yield Path(entry.path)
+    if skipped:
+        log.info(
+            "Skipping other-app data bundle(s) under %s: %s",
+            top, ", ".join(skipped),
+        )
+
+
+def safe_scan_walk(top, onerror=None):
+    """Yield ``(dirpath, dirnames, filenames)`` like ``os.walk(top,
+    followlinks=False)``, but never stat-following a symlinked excluded
+    bundle.
+
+    The stock ``os.walk`` classifies each child by calling
+    ``DirEntry.is_dir()``, which follows symlinks. If a user-chosen root
+    contains ``LibraryAlias -> Photos Library.photoslibrary``, that
+    classification stat alone reaches into the protected bundle and
+    re-trips the macOS "access data from other apps" TCC prompt — even
+    though the subsequent :func:`prune_scan_dirs` would remove the entry
+    from recursion. We need to detect symlinks pointing at excluded
+    bundles *before* any stat that follows them; ``os.readlink`` is the
+    only call here that touches a symlink, and it returns the literal
+    target string without resolving it.
+
+    Direct-name exclusion (``is_excluded_scan_dir``) is also applied
+    here, so callers don't need a separate ``prune_scan_dirs`` step on
+    ``dirnames``. Classification uses ``follow_symlinks=False``, matching
+    ``os.walk(followlinks=False)``'s recursion behaviour — symlinks to
+    non-excluded directories are surfaced in ``filenames`` (not
+    ``dirnames``) and never recursed into. Callers that already filter
+    ``filenames`` with ``os.path.isfile`` (which returns False for
+    directories, including symlinked dirs) discard those entries
+    automatically.
+    """
+    try:
+        scandir_it = os.scandir(top)
+    except OSError as exc:
+        if onerror is not None:
+            onerror(exc)
+        return
+    dirs = []
+    nondirs = []
+    skipped = []
+    with scandir_it:
+        for entry in scandir_it:
+            name = entry.name
+            # Name-based exclusion catches direct bundle entries
+            # (``Photos Library.photoslibrary``) without any stat.
+            if is_excluded_scan_dir(name):
+                skipped.append(name)
+                continue
+            # Symlink whose target names an excluded bundle. os.readlink
+            # is textual and never follows the link, so this is safe even
+            # when the target is a protected macOS bundle.
+            if _symlink_target_is_excluded(entry):
+                skipped.append(name)
+                continue
+            try:
+                entry_is_dir = entry.is_dir(follow_symlinks=False)
+            except OSError as exc:
+                if onerror is not None:
+                    onerror(exc)
+                entry_is_dir = False
+            if entry_is_dir:
+                dirs.append(name)
+            else:
+                nondirs.append(name)
+    if skipped:
+        log.info(
+            "Skipping other-app data bundle(s) under %s: %s",
+            top, ", ".join(skipped),
+        )
+    yield top, dirs, nondirs
+    for subdir in dirs:
+        yield from safe_scan_walk(os.path.join(top, subdir), onerror=onerror)
+
+
+def load_image(file_path, max_size=1024, raw_decode=RAW_DECODE_JPEG_FIRST):
     """Load an image file and return a PIL Image, resized to max_size.
 
     Supports JPEG, PNG, TIFF, and RAW formats (NEF, CR2, ARW, etc.).
-    For RAW files, prefers the embedded full-res JPEG preview when it meets
-    the requested size; falls back to demosaic-based decode otherwise.
+    For RAW files, ``raw_decode`` controls whether browsing gets the fast
+    JPEG-first path or edit-quality renders demosaic the RAW with highlight
+    preservation settings before falling back to an embedded JPEG.
     Returns None if the file cannot be loaded.
 
     For RAW files we retry once on transient libraw I/O errors. NAS volumes
@@ -48,6 +363,8 @@ def load_image(file_path, max_size=1024):
     Args:
         file_path: Path to the image file
         max_size: Maximum dimension (longest side). None or 0 for full resolution.
+        raw_decode: RAW_DECODE_JPEG_FIRST (default) or
+            RAW_DECODE_PRESERVE_HIGHLIGHTS.
 
     Returns:
         PIL.Image.Image or None
@@ -57,14 +374,16 @@ def load_image(file_path, max_size=1024):
 
     if ext not in SUPPORTED_EXTENSIONS:
         return None
+    if raw_decode not in _RAW_DECODE_MODES:
+        raise ValueError(f"raw_decode must be one of: {', '.join(sorted(_RAW_DECODE_MODES))}")
 
     try:
         if ext in RAW_EXTENSIONS:
-            img = _load_raw_with_retry(path, max_size)
+            img = _load_raw_with_retry(path, max_size, raw_decode=raw_decode)
         else:
-            img = Image.open(str(path))
-            img = ImageOps.exif_transpose(img)
-            img = img.convert("RGB")
+            with Image.open(str(path)) as opened:
+                img = ImageOps.exif_transpose(opened)
+                img = img.convert("RGB")
 
         if img is None:
             return None
@@ -78,7 +397,7 @@ def load_image(file_path, max_size=1024):
         return None
 
 
-def _load_raw_with_retry(path, max_size):
+def _load_raw_with_retry(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
     """Wrap _load_raw with a single retry on transient libraw I/O errors.
 
     Only retries on LibRawIOError — other libraw errors (UnsupportedFormat,
@@ -87,7 +406,7 @@ def _load_raw_with_retry(path, max_size):
     contention-related and resolve immediately.
     """
     try:
-        return _load_raw(path, max_size)
+        return _load_raw(path, max_size, raw_decode=raw_decode)
     except Exception as e:
         # Identify libraw I/O errors by class name so we don't have to
         # import rawpy at module scope (it's only present when a RAW
@@ -95,7 +414,7 @@ def _load_raw_with_retry(path, max_size):
         if type(e).__name__ != "LibRawIOError":
             raise
         log.info("Transient libraw I/O error on %s; retrying once", path)
-        return _load_raw(path, max_size)
+        return _load_raw(path, max_size, raw_decode=raw_decode)
 
 
 def _load_standard(path, max_size):
@@ -112,9 +431,9 @@ def _load_standard(path, max_size):
         PIL.Image.Image or None
     """
     try:
-        img = Image.open(str(path))
-        img = ImageOps.exif_transpose(img)
-        img = img.convert("RGB")
+        with Image.open(str(path)) as opened:
+            img = ImageOps.exif_transpose(opened)
+            img = img.convert("RGB")
         if max_size and max_size > 0 and max(img.size) > max_size:
             img.thumbnail((max_size, max_size), Image.LANCZOS)
         return img
@@ -202,7 +521,11 @@ def extract_working_copy(source_path, output_path, max_size=4096, quality=92):
         True on success, False on failure
     """
     try:
-        img = load_image(source_path, max_size=max_size or None)
+        img = load_image(
+            source_path,
+            max_size=max_size or None,
+            raw_decode=RAW_DECODE_PRESERVE_HIGHLIGHTS,
+        )
         if img is None:
             return False
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -214,13 +537,18 @@ def extract_working_copy(source_path, output_path, max_size=4096, quality=92):
         return False
 
 
-def _load_raw(path, max_size):
-    """Load a RAW file using JPEG-first strategy.
+def _load_raw(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
+    """Load a RAW file using the requested decode strategy.
 
-    1. Try the embedded JPEG preview; use it if it's big enough for max_size.
-    2. Otherwise demosaic via rawpy.postprocess().
-    3. If postprocess raises (e.g. libraw 0.22 can't decode Nikon HE*/TicoRAW),
-       fall back to the embedded JPEG even if smaller than max_size.
+    JPEG-first:
+      1. Try the embedded JPEG preview; use it if it's big enough for max_size.
+      2. Otherwise demosaic via rawpy.postprocess().
+      3. If postprocess raises (e.g. libraw 0.22 can't decode Nikon HE*/TicoRAW),
+         fall back to the embedded JPEG even if smaller than max_size.
+
+    Preserve-highlights:
+      1. Demosaic the RAW with auto-bright disabled and highlight blending on.
+      2. Fall back to the embedded JPEG only if libraw cannot decode the RAW.
     """
     import rawpy
 
@@ -229,14 +557,23 @@ def _load_raw(path, max_size):
 
         # JPEG-first: if the embedded preview is large enough for the request,
         # use it and skip the slower RAW decode entirely.
-        if (embedded is not None and max_size and max_size > 0
-                and max(embedded.size) >= max_size):
+        if (
+            raw_decode == RAW_DECODE_JPEG_FIRST
+            and embedded is not None
+            and max_size
+            and max_size > 0
+            and max(embedded.size) >= max_size
+        ):
             return embedded
 
         # Otherwise demosaic the sensor data, falling back to the embedded
         # JPEG if libraw can't decode this RAW variant.
         try:
-            return _postprocess_raw(raw, max_size)
+            return _postprocess_raw(
+                raw,
+                max_size,
+                preserve_highlights=raw_decode == RAW_DECODE_PRESERVE_HIGHLIGHTS,
+            )
         except Exception as e:
             if embedded is not None:
                 # Only claim "full camera output" when the embedded JPEG
@@ -285,17 +622,27 @@ def _extract_embedded_jpeg(raw):
         return None
 
 
-def _postprocess_raw(raw, max_size):
+def _postprocess_raw(raw, max_size, preserve_highlights=False):
     """Demosaic raw sensor data into a PIL Image.
 
     Uses half-size decode when the target fits, which is ~3x faster and still
     produces ~4000x2700 for a 45MP sensor.
     """
+    import rawpy
+
     use_half = False
     if max_size and max_size > 0:
         sensor_long = max(raw.sizes.width, raw.sizes.height)
         half_long = sensor_long // 2
         if max_size <= half_long:
             use_half = True
-    rgb = raw.postprocess(half_size=use_half)
+    kwargs = {"half_size": use_half}
+    if preserve_highlights:
+        kwargs.update({
+            "use_camera_wb": True,
+            "no_auto_bright": True,
+            "bright": 1.0,
+            "highlight_mode": rawpy.HighlightMode.Blend,
+        })
+    rgb = raw.postprocess(**kwargs)
     return Image.fromarray(rgb)

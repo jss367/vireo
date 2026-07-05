@@ -263,7 +263,8 @@ def write_pinned_revision(model_dir: str, revision: str) -> None:
 
 
 def verify_model(
-    model_dir: str, hf_subdir: str, revision: str | None = None
+    model_dir: str, hf_subdir: str, revision: str | None = None,
+    optional_files=None,
 ) -> VerifyResult:
     """Verify that LFS files in model_dir match the hashes HF reports.
 
@@ -276,6 +277,15 @@ def verify_model(
     verify_if_needed when it resolves the current main SHA for unpinned
     legacy installs.
 
+    ``optional_files`` — filenames declared as `optional_files` in the
+    model's KNOWN_MODELS entry (best-effort downloads that don't gate
+    install completeness). An expected LFS entry that's in this set AND
+    absent locally is NOT reported as missing — otherwise a 2.5 install
+    that skipped its optional ToL files (e.g. list_repo_files was down
+    at download time) would be flagged as corrupt as soon as HF has the
+    files but disk doesn't. An optional file that IS present is still
+    hash-verified: a corrupt-but-present optional still needs to surface.
+
     Non-LFS files (config.json, tokenizer.json) are not checked here —
     that's _classify_model_state's job (file presence) and the model
     loader's job (parse-time validation).
@@ -283,11 +293,18 @@ def verify_model(
     if revision is None:
         revision = _read_pinned_revision(model_dir)
     expected = fetch_expected_hashes(hf_subdir, revision=revision)
+    optional = set(optional_files or ())
     mismatches: list[str] = []
     missing: list[str] = []
     for basename, expected_sha in expected.items():
         path = os.path.join(model_dir, basename)
         if not os.path.isfile(path):
+            if basename in optional:
+                # Optional file absent locally — treated as "not
+                # installed", never as corruption. Callers keep the
+                # install usable for label-list mode; the label-free
+                # gate in tree_of_life_ready() surfaces the real state.
+                continue
             missing.append(basename)
             continue
         if sha256_file(path) != expected_sha:
@@ -304,7 +321,10 @@ def _has_pinned_revision(model_dir: str) -> bool:
     return os.path.isfile(os.path.join(model_dir, REVISION_FILE))
 
 
-def verify_if_needed(model_id: str, model_dir: str, hf_subdir: str) -> None:
+def verify_if_needed(
+    model_id: str, model_dir: str, hf_subdir: str,
+    optional_files=None,
+) -> None:
     """Verify the model unless already verified in this process.
 
     **Pinned installs** (have .hf_revision): hard-fail on mismatch — the
@@ -321,6 +341,11 @@ def verify_if_needed(model_id: str, model_dir: str, hf_subdir: str) -> None:
     On hash-fetch failure (VerifyError — network outage, transient HF API
     error), records the failure time in _verify_error_cache and returns
     without writing .verify_failed so the pipeline continues fail-open.
+
+    ``optional_files`` — passed through to verify_model so declared
+    optional files that never made it to disk aren't flagged as
+    corruption on the next verification pass. See verify_model for the
+    full rationale.
     """
     if _is_verified(model_id):
         return
@@ -334,12 +359,16 @@ def verify_if_needed(model_id: str, model_dir: str, hf_subdir: str) -> None:
     pinned = _has_pinned_revision(model_dir)
 
     if not pinned:
-        _verify_unpinned(model_id, model_dir, hf_subdir)
+        _verify_unpinned(
+            model_id, model_dir, hf_subdir, optional_files=optional_files,
+        )
         return
 
     # --- Pinned install: hard-fail on mismatch ---
     try:
-        result = verify_model(model_dir, hf_subdir)
+        result = verify_model(
+            model_dir, hf_subdir, optional_files=optional_files,
+        )
     except VerifyError as e:
         _record_error(model_id)
         write_verify_skipped(model_dir, str(e))
@@ -360,7 +389,10 @@ def verify_if_needed(model_id: str, model_dir: str, hf_subdir: str) -> None:
     clear_verify_skipped(model_dir)
 
 
-def _verify_unpinned(model_id: str, model_dir: str, hf_subdir: str) -> None:
+def _verify_unpinned(
+    model_id: str, model_dir: str, hf_subdir: str,
+    optional_files=None,
+) -> None:
     """Verify a legacy install that has no .hf_revision pin.
 
     Fetches the current main SHA, verifies against it, and auto-pins on
@@ -376,7 +408,10 @@ def _verify_unpinned(model_id: str, model_dir: str, hf_subdir: str) -> None:
         return
 
     try:
-        result = verify_model(model_dir, hf_subdir, revision=latest_rev)
+        result = verify_model(
+            model_dir, hf_subdir, revision=latest_rev,
+            optional_files=optional_files,
+        )
     except VerifyError as e:
         _record_error(model_id)
         write_verify_skipped(model_dir, str(e))
@@ -453,6 +488,13 @@ def verify_all_models(progress_callback=None) -> dict[str, VerifyResult]:
         if progress_callback:
             progress_callback(f"Verifying {model_id}...")
 
+        # Files declared optional_files must be excluded from the
+        # missing-check when absent locally — otherwise a model whose
+        # optional artifacts weren't downloaded (bioclip-2.5 pre-upload)
+        # would fail verify_all_models even though every required file
+        # is intact.
+        opt_files = m.get("optional_files") or ()
+
         pinned = _has_pinned_revision(weights_path)
 
         if not pinned:
@@ -468,7 +510,8 @@ def verify_all_models(progress_callback=None) -> dict[str, VerifyResult]:
                 continue
             try:
                 result = verify_model(
-                    weights_path, m["hf_subdir"], revision=latest_rev
+                    weights_path, m["hf_subdir"], revision=latest_rev,
+                    optional_files=opt_files,
                 )
             except VerifyError as e:
                 write_verify_skipped(weights_path, str(e))
@@ -496,7 +539,9 @@ def verify_all_models(progress_callback=None) -> dict[str, VerifyResult]:
 
         # --- Pinned install: hard-fail on mismatch ---
         try:
-            result = verify_model(weights_path, m["hf_subdir"])
+            result = verify_model(
+                weights_path, m["hf_subdir"], optional_files=opt_files,
+            )
         except VerifyError as e:
             write_verify_skipped(weights_path, str(e))
             results[model_id] = VerifyResult(

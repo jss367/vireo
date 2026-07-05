@@ -478,6 +478,25 @@ def test_patch_workspace_value_beats_global_in_effective(app_and_db):
     assert values["global"]["classification_threshold"] == 0.5
 
 
+def test_patch_workspace_nullable_enum_accepts_null_for_import_only(app_and_db):
+    """A workspace can override the global pipeline.default_strategy back to
+    null (import-only, no automatic processing). The settings UI wires the
+    ``(unset)`` option as ``value=""`` — the endpoint must accept that as
+    null, not reject it as an unknown enum value, otherwise a workspace can
+    never escape a globally-set default from the UI."""
+    app, _ = app_and_db
+    client = app.test_client()
+    for wire_value in ("", None):
+        resp = client.patch(
+            "/api/settings/workspace",
+            json={"key": "pipeline.default_strategy", "value": wire_value},
+        )
+        assert resp.status_code == 200, resp.get_json()
+        assert resp.get_json()["value"] is None
+        values = client.get("/api/settings/values").get_json()
+        assert values["workspace"]["pipeline.default_strategy"] is None
+
+
 # ---------------------------------------------------------------------------
 # DELETE /api/settings/workspace/<dotted-key>
 # ---------------------------------------------------------------------------

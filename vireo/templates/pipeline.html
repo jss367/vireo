@@ -6,7 +6,7 @@
 <link rel="icon" type="image/png" href="/favicon.ico">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <link rel="stylesheet" href="/static/vireo-base.css">
-<title>Vireo - Pipeline</title>
+<title>Vireo - Process</title>
 <style>
 /* Page overrides */
 body { padding-bottom: 36px; }
@@ -97,12 +97,20 @@ body { padding-bottom: 36px; }
   background: var(--danger, #E74C3C);
   color: #fff;
 }
+.stage-status-pill.blocked {
+  background: color-mix(in srgb, var(--danger, #E74C3C) 18%, transparent);
+  color: var(--danger, #E74C3C);
+}
+.stage-status-pill.cancelled {
+  background: color-mix(in srgb, var(--warning, #F0A030) 20%, transparent);
+  color: var(--warning, #F0A030);
+}
 .stage-progress-bar {
   display: inline-flex;
-  width: 80px;
-  height: 6px;
+  width: 112px;
+  height: 8px;
   margin-left: 8px;
-  border-radius: 3px;
+  border-radius: 4px;
   overflow: hidden;
   background: var(--bg-tertiary, #14374E);
   vertical-align: middle;
@@ -190,6 +198,8 @@ body { padding-bottom: 36px; }
 }
 .pipeline-plan-summary .plan-stage-row.will-run .plan-stage-pill { color: var(--accent, #24E5CA); }
 .pipeline-plan-summary .plan-stage-row.will-skip .plan-stage-pill { color: var(--text-dim, #5A8890); font-style: italic; }
+.pipeline-plan-summary .plan-stage-row.cancelled .plan-stage-pill { color: var(--warning, #F0A030); }
+.pipeline-plan-summary .plan-stage-row.blocked .plan-stage-pill { color: var(--danger, #E74C3C); }
 .pipeline-plan-summary .plan-stage-row.done-prior .plan-stage-pill {
   color: color-mix(in srgb, var(--accent, #24E5CA) 65%, var(--text-secondary, #B0CCCC));
 }
@@ -242,6 +252,91 @@ body { padding-bottom: 36px; }
   font-size: 12px; color: var(--text-secondary, #8BB8C0);
   margin-top: 6px;
 }
+.labels-setting-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.labels-setting-head .setting-label {
+  margin-bottom: 0;
+}
+.labels-get-more-btn {
+  background: var(--bg-tertiary, #14374E);
+  color: var(--text-secondary, #B0CCCC);
+  border: 1px solid var(--border-secondary, #1A4560);
+  border-radius: 4px;
+  padding: 3px 9px;
+  font-size: 11px;
+  line-height: 1.3;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.labels-get-more-btn:hover {
+  border-color: var(--accent, #24E5CA);
+  color: var(--text-primary, #E0F0F0);
+}
+.pipeline-label-modal-section {
+  margin-bottom: 12px;
+}
+.pipeline-label-modal-section:last-child {
+  margin-bottom: 0;
+}
+.pipeline-label-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.pipeline-label-options.vertical {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  gap: 5px;
+}
+.pipeline-place-dropdown {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-secondary);
+  border-top: none;
+  border-radius: 0 0 4px 4px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.pipeline-place-option {
+  padding: 8px 10px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-bottom: 1px solid var(--border-secondary);
+}
+.pipeline-place-option:hover {
+  background: var(--bg-tertiary);
+}
+.pipeline-label-progress {
+  display: none;
+  height: 4px;
+  background: var(--bg-tertiary);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 8px;
+}
+.pipeline-label-progress div {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.3s;
+}
+.setting-static {
+  background: var(--bg-input, #14374E);
+  color: var(--text-primary, #E0F0F0);
+  border: 1px solid var(--border-secondary, #1A4560);
+  border-radius: 4px;
+  padding: 8px 12px;
+  font-size: 13px;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+}
 .setting-select {
   background: var(--bg-input, #14374E);
   color: var(--text-primary, #E0F0F0);
@@ -261,6 +356,7 @@ body { padding-bottom: 36px; }
 .btn-secondary:hover { background: var(--border-secondary, #1A4560); }
 .status-msg { font-size: 13px; color: var(--text-dim, #888); }
 .status-msg.ok { color: var(--accent, #24E5CA); }
+.status-msg.error { color: var(--danger, #E74C3C); }
 
 /* Readiness panel */
 .readiness-panel {
@@ -275,7 +371,7 @@ body { padding-bottom: 36px; }
 /* Progress bar */
 .progress-wrap { margin-top: 10px; }
 .progress-bar-track {
-  height: 4px; background: var(--bg-tertiary, #14374E); border-radius: 2px; overflow: hidden;
+  height: 8px; background: var(--bg-tertiary, #14374E); border-radius: 4px; overflow: hidden;
 }
 .progress-bar-fill {
   height: 100%; background: var(--accent, #24E5CA); width: 0%; transition: width 0.3s;
@@ -611,7 +707,7 @@ body { padding-bottom: 36px; }
 
 <div class="pipeline-layout">
 <div class="pipeline-left">
-  <h2 style="margin-bottom:20px;font-size:20px;">Pipeline</h2>
+  <h2 style="margin-bottom:20px;font-size:20px;">Process</h2>
 
   <div class="stage-section-header">Setup</div>
 
@@ -638,13 +734,10 @@ body { padding-bottom: 36px; }
                 <div class="setting-label" id="lblFolder">Folders</div>
                 <div style="display:flex;flex-direction:column;gap:6px;">
                   <button onclick="browseForFolder()" class="btn btn-primary" style="white-space:nowrap;align-self:flex-start;">Browse&hellip;</button>
-                  <div style="display:flex;gap:6px;">
-                    <input type="text" class="setting-select" id="cfgSourceInput" list="volumeDatalist"
-                           placeholder="or type a path" style="font-family:inherit;flex:1;"
-                           onkeydown="if(event.key==='Enter'){event.preventDefault();addSourceFolder();}">
-                    <datalist id="volumeDatalist"></datalist>
-                    <button onclick="addSourceFolder()" class="btn btn-secondary" style="white-space:nowrap;">Add</button>
-                  </div>
+                  <input type="text" class="setting-select" id="cfgSourceInput" list="volumeDatalist"
+                         placeholder="or type a path and press Enter" style="font-family:inherit;"
+                         onkeydown="if(event.key==='Enter'){event.preventDefault();addSourceFolder();}">
+                  <datalist id="volumeDatalist"></datalist>
                 </div>
                 <div id="sourceFolderList" style="margin-top:6px;"></div>
                 <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;margin-top:6px;display:inline-flex;align-items:center;gap:4px;">
@@ -787,15 +880,30 @@ body { padding-bottom: 36px; }
           <div class="setting-row">
             <div class="setting-item">
               <div class="setting-label">Destination</div>
-              <div style="display:flex;gap:6px;">
-                <input type="text" class="setting-select" id="cfgDestination"
-                       placeholder="/path/to/photo/library" style="font-family:inherit;flex:1;"
-                       oninput="updateStartButton();markFolderPreviewStale()">
-                <button onclick="openFolderBrowser('destination')" class="btn btn-secondary" style="white-space:nowrap;">Browse&hellip;</button>
+              <div style="margin-bottom:6px;">
+                <select id="cfgDestMode" class="setting-select" style="font-family:inherit;max-width:340px;"
+                        onchange="onDestModeChange()" data-testid="dest-mode-select">
+                  <option value="local">Local path</option>
+                </select>
               </div>
-              <div id="recentDestinations" style="display:none;margin-top:6px;" data-testid="recent-destinations">
-                <div style="font-size:11px;color:var(--text-dim);margin-bottom:4px;">Recent</div>
-                <div id="recentDestList" style="display:flex;flex-wrap:wrap;gap:4px;"></div>
+              <div id="destLocalRows">
+                <div style="display:flex;gap:6px;">
+                  <input type="text" class="setting-select" id="cfgDestination" list="volumeDatalist"
+                         placeholder="/path/to/photo/library" style="font-family:inherit;flex:1;"
+                         oninput="updateStartButton();markFolderPreviewStale()">
+                  <button onclick="openFolderBrowser('destination')" class="btn btn-secondary" style="white-space:nowrap;">Browse&hellip;</button>
+                </div>
+                <div id="recentDestinations" style="display:none;margin-top:6px;" data-testid="recent-destinations">
+                  <div style="font-size:11px;color:var(--text-dim);margin-bottom:4px;">Recent</div>
+                  <div id="recentDestList" style="display:flex;flex-wrap:wrap;gap:4px;"></div>
+                </div>
+              </div>
+              <div id="destRemoteRows" style="display:none;">
+                <input type="text" class="setting-select" id="cfgRemoteSubpath"
+                       placeholder="Archive folder under the target (e.g. 2026/kenya-trip)"
+                       style="font-family:inherit;width:100%;"
+                       oninput="updateRemoteDestPreview();updateStartButton()" data-testid="remote-subpath-input">
+                <div id="remoteDestPreview" style="font-size:11px;margin-top:4px;line-height:1.5;color:var(--text-dim);" data-testid="remote-dest-preview"></div>
               </div>
             </div>
           </div>
@@ -804,6 +912,25 @@ body { padding-bottom: 36px; }
               <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
                 <input type="checkbox" id="chkSkipDuplicates" checked style="accent-color:var(--accent);" onchange="onSkipDuplicatesToggle()"> Skip duplicates
               </label>
+              <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;display:block;margin:4px 0 0 20px;">
+                <input type="checkbox" id="chkVerifyByHash" style="accent-color:var(--accent);" onchange="onVerifyByHashToggle()"> Verify by full content hash
+              </label>
+              <div style="font-size:11px;color:var(--text-dim);margin:4px 0 0 20px;line-height:1.4;">
+                Off: duplicates are matched by filename, size, and capture time (fast — only files without reliable metadata are read in full). On: every byte of every source file is read and compared — exact, but slow on SD cards.
+              </div>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-item">
+              <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
+                <input type="checkbox" id="chkLocalProcessing" style="accent-color:var(--accent);" onchange="updateStartButton(); schedulePlanRefresh()" data-testid="local-processing-toggle"> Use local disk while processing
+              </label>
+              <div style="font-size:11px;color:var(--text-dim);margin-top:4px;line-height:1.4;">
+                Files are staged locally for faster processing, then archived to the destination after verification.
+              </div>
+              <div id="remoteLocalProcessingNote" style="display:none;font-size:11px;color:var(--text-dim);margin-top:4px;line-height:1.4;" data-testid="remote-local-processing-note">
+                Required for SSH targets &mdash; files are staged and processed locally, then transferred over SSH.
+              </div>
             </div>
           </div>
           <!-- Folder Organization -->
@@ -845,6 +972,7 @@ body { padding-bottom: 36px; }
             </div>
           </div>
           <div id="folderPreviewResults" style="display:none;margin-top:8px;" data-testid="folder-preview-results">
+            <div id="folderPreviewManagedArchive" style="display:none;font-size:12px;line-height:1.4;margin-bottom:8px;padding:6px 8px;border-radius:4px;background:var(--bg-tertiary,#0d2436);border:1px solid var(--accent,#24E5CA);" data-testid="managed-archive-callout"></div>
             <div id="folderPreviewSummary" style="font-size:12px;font-weight:600;margin-bottom:6px;"></div>
             <div id="folderPreviewList" style="font-size:12px;max-height:200px;overflow-y:auto;"></div>
             <div id="folderPreviewStale" style="display:none;font-size:11px;color:var(--warning,#f0ad4e);margin-top:4px;">
@@ -897,16 +1025,9 @@ body { padding-bottom: 36px; }
       </p>
       <div class="setting-row">
         <div class="setting-item">
-          <div class="setting-label">Preview size</div>
-          <select class="setting-select" id="cfgPreviewSize"
-                  onchange="schedulePlanRefresh()">
-            <option value="1280">1280px</option>
-            <option value="1920" selected>1920px</option>
-            <option value="2560">2560px</option>
-            <option value="3840">3840px</option>
-            <option value="0">Full resolution</option>
-          </select>
-          <div class="setting-hint">Largest edge for cached previews.</div>
+          <div class="setting-label">Standard preview</div>
+          <div class="setting-static" id="cfgPreviewSizeSummary">1920px</div>
+          <div class="setting-hint">Configured in Settings.</div>
         </div>
       </div>
       <div class="progress-wrap" id="progressPreviews" style="display:none;">
@@ -942,7 +1063,10 @@ body { padding-bottom: 36px; }
           <div id="modelPicker" style="font-size:12px;max-height:100px;overflow-y:auto;">Loading models...</div>
         </div>
         <div class="setting-item">
-          <div class="setting-label">Labels</div>
+          <div class="labels-setting-head">
+            <div class="setting-label">Labels</div>
+            <button type="button" class="labels-get-more-btn" onclick="openPipelineLabelsModal()">Get more</button>
+          </div>
           <div id="labelsPicker" style="font-size:12px;max-height:100px;overflow-y:auto;"></div>
           <div id="labelsPickerNote" style="font-size:11px;color:var(--text-faint);margin-top:4px;display:none;"></div>
         </div>
@@ -1101,9 +1225,19 @@ body { padding-bottom: 36px; }
     </button>
   </div>
   <div id="pipelineActionStatus" class="status-msg" style="margin-top:8px;"></div>
+  <div id="pipelineSlotStatus" class="status-msg" style="margin-top:6px;font-size:13px;color:var(--text-secondary);display:none;" data-testid="pipeline-slot-status">
+    <span id="pipelineSlotCounts"></span>
+    <span style="margin:0 6px;">&middot;</span>
+    <a href="/jobs">see Jobs</a>
+  </div>
   <div id="modelWarningBanner" style="display:none;background:var(--warning,#f0c040);color:#000;padding:8px 14px;border-radius:6px;margin:8px 0;font-size:13px;">
     <span id="modelWarningText"></span>
     <button onclick="this.parentElement.style.display='none'" style="float:right;background:none;border:none;cursor:pointer;font-size:16px;line-height:1;padding:0 4px;">&times;</button>
+  </div>
+  <div id="pipelineErrorBanner" data-testid="pipeline-error-banner" style="display:none;background:var(--danger,#e5484d);color:#fff;padding:10px 14px;border-radius:6px;margin:8px 0;font-size:13px;">
+    <button onclick="this.parentElement.style.display='none'" style="float:right;background:none;border:none;color:#fff;cursor:pointer;font-size:16px;line-height:1;padding:0 4px;">&times;</button>
+    <strong>Processing failed</strong>
+    <div id="pipelineErrorText" style="margin-top:4px;white-space:pre-line;"></div>
   </div>
 </div><!-- end pipeline-left -->
 
@@ -1137,6 +1271,46 @@ body { padding-bottom: 36px; }
 </div>
 </div><!-- end pipeline-layout -->
 
+<div class="modal-overlay" id="pipelineLabelsModal" onclick="if(event.target===this)closePipelineLabelsModal()">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="pipelineLabelsModalTitle" style="width:560px;max-width:calc(100vw - 32px);">
+    <h3 id="pipelineLabelsModalTitle">Download Species Labels</h3>
+    <p style="font-size:13px;color:var(--text-dim);line-height:1.5;margin:0 0 14px;">
+      Build a regional species list from iNaturalist for this classification run.
+    </p>
+
+    <div class="pipeline-label-modal-section">
+      <label class="modal-label" for="pipelinePlaceSearch">Region</label>
+      <input type="text" id="pipelinePlaceSearch" class="modal-input"
+             placeholder="e.g. Luxembourg, California, Costa Rica"
+             oninput="searchPipelinePlacesDebounced()" autocomplete="off">
+      <div id="pipelinePlaceDropdown" class="pipeline-place-dropdown"></div>
+    </div>
+
+    <div class="pipeline-label-modal-section">
+      <div class="modal-label">Include</div>
+      <div id="pipelineTaxonCheckboxes" class="pipeline-label-options"></div>
+    </div>
+
+    <div class="pipeline-label-modal-section">
+      <div class="modal-label">Observation Quality</div>
+      <div id="pipelineObservationFilterRadios" class="pipeline-label-options vertical"></div>
+    </div>
+
+    <div id="pipelineFetchLabelsStatus" style="font-size:12px;color:var(--text-dim);min-height:18px;"></div>
+    <div id="pipelineFetchLabelsProgress" class="pipeline-label-progress">
+      <div id="pipelineFetchLabelsFill"></div>
+    </div>
+
+    <div class="modal-actions">
+      <button type="button" class="modal-btn modal-btn-cancel" onclick="closePipelineLabelsModal()">Cancel</button>
+      <button type="button" class="modal-btn modal-btn-primary" id="pipelineFetchLabelsBtn"
+              onclick="fetchPipelineLabels()" disabled>
+        Download Species List
+      </button>
+    </div>
+  </div>
+</div>
+
 <script>
 // -- Page init: fetch pipeline data from API and populate the page --
 function initPipelinePage() {
@@ -1156,6 +1330,13 @@ function initPipelinePage() {
       document.getElementById('cfgDinov2').value = cfg.dinov2_variant;
       document.getElementById('cfgProxy').value = cfg.proxy_longest_edge;
       document.getElementById('valProxy').textContent = cfg.proxy_longest_edge;
+      var previewSummary = document.getElementById('cfgPreviewSizeSummary');
+      if (previewSummary) {
+        var previewMax = cfg.preview_max_size;
+        previewSummary.textContent = previewMax === 0
+          ? 'Original files'
+          : ((previewMax || 1920) + 'px');
+      }
 
       // Eye keypoints stage default tracks the global eye_detect_enabled
       // config so users who turned it off in Settings see it unchecked here
@@ -1218,6 +1399,7 @@ function initPipelinePage() {
     refreshPipelinePlan();
   });
   loadVolumes();
+  loadRemoteTargets();
 
   // Pre-fill folders from query params (e.g., from audit panel)
   var urlParams = new URLSearchParams(window.location.search);
@@ -1271,6 +1453,27 @@ document.addEventListener('DOMContentLoaded', refreshPipelineUI);
 
 // -- New images (Stage 1 third option) --
 var newImagesSnapshotId = null;
+
+function sleepNewImagesSnapshot(ms) {
+  return new Promise(function(resolve) { setTimeout(resolve, ms); });
+}
+
+async function createNewImagesSnapshotWithRetry(onPending) {
+  var maxAttempts = 20;  // About one minute at 3s intervals.
+  for (var attempt = 0; attempt < maxAttempts; attempt++) {
+    var resp = await fetch('/api/workspaces/active/new-images/snapshot', {method: 'POST'});
+    if (resp.status === 202) {
+      if (typeof onPending === 'function') onPending(attempt);
+      await sleepNewImagesSnapshot(3000);
+      continue;
+    }
+    if (!resp.ok) throw new Error('snapshot failed');
+    var data = await resp.json();
+    if (!data || data.snapshot_id == null) throw new Error('snapshot missing');
+    return data.snapshot_id;
+  }
+  throw new Error('snapshot timed out');
+}
 
 async function initNewImagesCard() {
   var params = new URLSearchParams(window.location.search);
@@ -1389,9 +1592,15 @@ var _sourceFolders = [];
 // -- Import preview state --
 var _previewData = null;       // response from /api/import/folder-preview
 var _previewSelected = {};     // { filePath: true/false }
+var _previewLoading = false;   // true while import/new-images preview scope is unresolved
 var _previewAbort = null;      // AbortController for in-flight request
 var _duplicateResults = {};    // path -> true for duplicates (cache)
 var _duplicateCheckAbort = null;  // AbortController for in-flight check
+// Set from the last destination-preview when the destination is (or sits
+// inside) an existing Vireo-managed archive: { path, photo_count }. null
+// otherwise. Used to reframe the destination preview + duplicate summary as
+// a merge into an existing archive rather than a fresh copy.
+var _managedArchive = null;
 var _thumbSchedulerCancel = null; // cancels the current thumbnail pump on re-render
 
 function fetchFolderPreview() {
@@ -1505,7 +1714,9 @@ function showPreviewPlaceholder() {
   document.getElementById('previewContent').style.display = 'none';
   document.getElementById('previewLoading').style.display = 'none';
   document.getElementById('previewError').style.display = 'none';
+  _previewLoading = false;
   _previewData = null;
+  _previewSelected = {};
   if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
 }
 
@@ -1514,6 +1725,13 @@ function showPreviewLoading() {
   document.getElementById('previewContent').style.display = 'none';
   document.getElementById('previewLoading').style.display = '';
   document.getElementById('previewError').style.display = 'none';
+  _previewLoading = true;
+  _previewData = null;
+  _previewSelected = {};
+  _planFetchSeq++;
+  _pipelinePlan = null;
+  updateSamVariantWarning(null);
+  refreshPipelineUI();
   // Cancel any in-flight duplicate check when preview context changes
   if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
   if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
@@ -1526,6 +1744,9 @@ function showPreviewError(msg) {
   var errEl = document.getElementById('previewError');
   errEl.style.display = '';
   errEl.textContent = msg;
+  _previewLoading = false;
+  _previewData = null;
+  _previewSelected = {};
   if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
 }
 
@@ -1534,6 +1755,7 @@ function renderPreview() {
   document.getElementById('previewLoading').style.display = 'none';
   document.getElementById('previewError').style.display = 'none';
   document.getElementById('previewContent').style.display = '';
+  _previewLoading = false;
 
   var data = _previewData;
   if (!data) return;
@@ -1656,7 +1878,10 @@ function checkForDuplicates() {
   fetch('/api/import/check-duplicates', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ paths: paths }),
+    body: JSON.stringify({
+      paths: paths,
+      verify_by_hash: document.getElementById('chkVerifyByHash').checked,
+    }),
     signal: _duplicateCheckAbort.signal,
   }).then(function(response) {
     if (!response.ok) return;
@@ -1731,15 +1956,56 @@ function updateDuplicateSummary(data) {
 
   var span = document.createElement('span');
   span.className = 'stat dup-status';
+  span.title = duplicateMethodNote();
   if (data.done) {
     if (data.duplicate_count > 0) {
-      span.innerHTML = '<span class="stat-value">' + data.duplicate_count + '</span> already imported';
+      if (_managedArchive) {
+        // Merging into an existing archive: frame duplicates as already
+        // living in the catalog (they'll be skipped), and \u2014 when we can
+        // reliably derive it \u2014 how many are genuinely new (will be merged).
+        // The duplicate check is catalog-global (matches ingest's global
+        // skip), so a match may live in a different archive \u2014 hence
+        // "in your library", not "in this archive". The count is still
+        // correct for the skip/merge framing.
+        span.innerHTML = '<span class="stat-value">' + data.duplicate_count
+          + '</span> already in your library (will be skipped)';
+        if (typeof data.total === 'number' && data.total >= data.duplicate_count) {
+          var newCount = data.total - data.duplicate_count;
+          span.innerHTML += ', <span class="stat-value">' + newCount
+            + '</span> new (will be merged)';
+        }
+      } else {
+        span.innerHTML = '<span class="stat-value">' + data.duplicate_count + '</span> already imported';
+      }
     }
     // If 0 duplicates, show nothing
   } else {
     span.textContent = 'Checking duplicates\u2026 ' + data.checked + '/' + data.total;
   }
   if (span.innerHTML || span.textContent) summary.appendChild(span);
+}
+
+function duplicateMethodNote() {
+  // Keep the summary honest about HOW duplicates were identified — the
+  // two modes can disagree on edge cases (e.g. renamed copies).
+  return document.getElementById('chkVerifyByHash').checked
+    ? 'matched by content hash'
+    : 'matched by filename, size & capture time';
+}
+
+function onVerifyByHashToggle() {
+  // The two modes can classify files differently, so cached results are
+  // stale the moment the mode changes: drop them and re-scan.
+  if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
+  _duplicateResults = {};
+  applyDuplicateVisuals();
+  var summary = document.getElementById('previewSummary');
+  var existing = summary ? summary.querySelector('.dup-status') : null;
+  if (existing) existing.remove();
+  if (document.getElementById('chkSkipDuplicates').checked) {
+    checkForDuplicates();
+  }
+  schedulePlanRefresh();
 }
 
 function onSkipDuplicatesToggle() {
@@ -1762,7 +2028,10 @@ function onSkipDuplicatesToggle() {
     if (dupCount > 0) {
       var span = document.createElement('span');
       span.className = 'stat dup-status';
-      span.innerHTML = '<span class="stat-value">' + dupCount + '</span> already imported';
+      span.title = duplicateMethodNote();
+      span.innerHTML = _managedArchive
+        ? '<span class="stat-value">' + dupCount + '</span> already in your library (will be skipped)'
+        : '<span class="stat-value">' + dupCount + '</span> already imported';
       summary.appendChild(span);
     }
   } else {
@@ -1906,9 +2175,172 @@ function renderSourceFolders() {
 function selectRecentDestination(path) {
   document.getElementById('chkCopyPhotos').checked = true;
   onCopyModeChange();
+  // Recents are local paths — switch back out of any remote mode.
+  document.getElementById('cfgDestMode').value = 'local';
+  onDestModeChange();
   document.getElementById('cfgDestination').value = path;
   updateStartButton();
   markFolderPreviewStale();
+}
+
+/* ---------- Remote (SSH) archive targets ----------
+   Mirrors the Move page's saved-remote-target picker: the archive
+   destination becomes a saved SSH target plus a required subpath naming
+   the archive folder under it. Requires local processing (files are
+   staged locally, then rsynced over SSH by the archive stage). */
+var _remoteTargets = [];
+var _rsyncAvailable = false;
+
+async function loadRemoteTargets() {
+  try {
+    var data = await safeFetch('/api/remote-targets', {}, { toast: false });
+    _remoteTargets = (data && data.targets) || [];
+    _rsyncAvailable = !!(data && data.rsync_available);
+  } catch (e) {
+    _remoteTargets = [];
+    _rsyncAvailable = false;
+  }
+  var sel = document.getElementById('cfgDestMode');
+  if (!sel) return;
+  // Rebuild remote options, keeping the "Local path" option at index 0.
+  while (sel.options.length > 1) sel.remove(1);
+  _remoteTargets.forEach(function(t) {
+    var opt = document.createElement('option');
+    opt.value = 'remote:' + t.id;
+    opt.textContent = t.name + ' — ' + t.user + '@' + t.host + ' (SSH)';
+    sel.appendChild(opt);
+  });
+}
+
+// The remote target id when the destination mode is a remote target, else ''.
+function pipelineRemoteTargetId() {
+  var el = document.getElementById('cfgDestMode');
+  var v = el ? el.value : 'local';
+  return v.indexOf('remote:') === 0 ? v.slice(7) : '';
+}
+
+function pipelineRemoteTarget() {
+  var id = pipelineRemoteTargetId();
+  if (!id) return null;
+  return _remoteTargets.find(function(t) { return t.id === id; }) || null;
+}
+
+function onDestModeChange() {
+  var remoteId = pipelineRemoteTargetId();
+  document.getElementById('destLocalRows').style.display = remoteId ? 'none' : '';
+  document.getElementById('destRemoteRows').style.display = remoteId ? '' : 'none';
+  // SSH targets require the local staging flow: photos can't be processed
+  // in place over SSH, so the archive stage rsyncs the staged tree to the
+  // NAS. Lock the toggle on so its state always matches what the job does.
+  var lp = document.getElementById('chkLocalProcessing');
+  var note = document.getElementById('remoteLocalProcessingNote');
+  if (remoteId) {
+    if (lp) { lp.checked = true; lp.disabled = true; }
+    if (note) note.style.display = '';
+  } else {
+    if (lp) lp.disabled = false;
+    if (note) note.style.display = 'none';
+  }
+  updateRemoteDestPreview();
+  markFolderPreviewStale();
+  updateStartButton();
+  schedulePlanRefresh();
+}
+
+// Normalize a remote-target subpath the same way move.py sanitize_subpath
+// does (see move.html's copy of this helper): trim, fold backslashes,
+// reject absolute paths and '..' traversal, drop empty/'.' segments.
+// Sharing the backend's rules means the path the UI previews is the path
+// the archive will actually write — a UI-transparency requirement.
+function normalizeRemoteSubpath(raw) {
+  var trimmed = (raw || '').trim();
+  if (!trimmed) return {value: '', error: ''};
+  var s = trimmed.replace(/\\/g, '/');
+  if (s.charAt(0) === '/' || /^[A-Za-z]:/.test(s)) {
+    return {value: '', error: 'Subpath must be relative.'};
+  }
+  var parts = [];
+  var segs = s.split('/');
+  for (var i = 0; i < segs.length; i++) {
+    var seg = segs[i];
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') return {value: '', error: "Subpath may not contain '..'."};
+    parts.push(seg);
+  }
+  return {value: parts.join('/'), error: ''};
+}
+
+// True if `p` looks absolute on either backend OS (POSIX, Windows drive,
+// or UNC). Used to warn before the backend refuses a relative mount path.
+function _isAbsolutePath(p) {
+  if (!p) return false;
+  return p.charAt(0) === '/' || /^[A-Za-z]:[\\\/]/.test(p) || /^\\\\/.test(p);
+}
+
+// Mirror move.py rsync_dest_spec(): bracket IPv6-literal hosts so the
+// preview shows the exact spec rsync will be handed.
+function rsyncDestSpec(user, host, path) {
+  var hostToken = host && host.indexOf(':') !== -1 ? '[' + host + ']' : host;
+  return user + '@' + hostToken + ':' + path;
+}
+
+function _remoteDestWarn(text) {
+  var d = document.createElement('div');
+  d.style.color = 'var(--warning,#f0ad4e)';
+  d.textContent = text;
+  return d;
+}
+
+function updateRemoteDestPreview() {
+  var el = document.getElementById('remoteDestPreview');
+  if (!el) return;
+  el.textContent = '';
+  var t = pipelineRemoteTarget();
+  if (!t) return;
+  var subResult = normalizeRemoteSubpath(
+    document.getElementById('cfgRemoteSubpath').value);
+  if (subResult.error) {
+    el.appendChild(_remoteDestWarn('⚠ ' + subResult.error));
+  } else if (!subResult.value) {
+    var hint = document.createElement('div');
+    hint.textContent = 'Name the archive folder under ' + t.remote_path
+      + ' — e.g. 2026/kenya-trip.';
+    el.appendChild(hint);
+  } else {
+    var line = document.createElement('div');
+    line.textContent = 'Staged locally, then archived over SSH to: ';
+    var span = document.createElement('span');
+    span.style.fontFamily = 'monospace';
+    span.textContent = rsyncDestSpec(
+      t.user, t.host, t.remote_path.replace(/\/+$/, '') + '/' + subResult.value);
+    line.appendChild(span);
+    el.appendChild(line);
+  }
+  if (!_rsyncAvailable) {
+    el.appendChild(_remoteDestWarn('⚠ No GNU rsync found — remote archiving '
+      + 'needs it. Install GNU rsync or set its path under Settings → Paths.'));
+  }
+  if (!t.mount_path) {
+    el.appendChild(_remoteDestWarn('⚠ This target has no local mount path, so '
+      + 'archived photos couldn’t stay in your library. Add one in Settings → '
+      + 'Remote targets.'));
+  } else if (!_isAbsolutePath(t.mount_path)) {
+    el.appendChild(_remoteDestWarn('⚠ This target’s local mount path must be '
+      + 'absolute (e.g. "/Volumes/Photos"). Fix it under Settings → Remote '
+      + 'targets.'));
+  }
+}
+
+// True when the remote archive selection is complete and usable. Mirrors
+// the backend's POST validation so Start is only enabled for a request
+// that would be accepted.
+function remoteArchiveSelectionReady() {
+  var t = pipelineRemoteTarget();
+  if (!t || !_rsyncAvailable) return false;
+  if (!t.mount_path || !_isAbsolutePath(t.mount_path)) return false;
+  var subResult = normalizeRemoteSubpath(
+    document.getElementById('cfgRemoteSubpath').value);
+  return !subResult.error && !!subResult.value;
 }
 
 function onCopyModeChange() {
@@ -2011,22 +2443,28 @@ async function previewDestinationFolders() {
     var parts = [data.total_photos + ' photo' + (data.total_photos !== 1 ? 's' : '')];
     parts.push(data.total_folders + ' folder' + (data.total_folders !== 1 ? 's' : ''));
     var detail = [];
-    if (newCount > 0) detail.push(newCount + ' new');
-    if (existCount > 0) detail.push(existCount + ' existing');
+    if (newCount > 0) detail.push(newCount + ' new folder' + (newCount !== 1 ? 's' : ''));
+    if (existCount > 0) detail.push(existCount + ' existing folder' + (existCount !== 1 ? 's' : ''));
     summaryDiv.textContent = parts.join(' \u2192 ') + (detail.length ? ' (' + detail.join(', ') + ')' : '');
 
     // Render folder list
     listDiv.innerHTML = data.folders.map(function(f) {
       var tag = f.exists
-        ? '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:var(--accent);color:#fff;margin-left:6px;">exists</span>'
-        : '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:var(--success,#28a745);color:#fff;margin-left:6px;">new</span>';
-      var label = f.path === '.' ? '(destination root)' : escapeHtml(f.path) + '/';
+        ? '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:var(--accent);color:#fff;margin-left:6px;white-space:nowrap;">Existing folder</span>'
+        : '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:var(--success,#28a745);color:#fff;margin-left:6px;white-space:nowrap;">New folder</span>';
+      var fullPath = f.full_path || (f.path === '.' ? destination : destination.replace(/\/$/, '') + '/' + f.path);
       return '<div style="padding:3px 0;display:flex;align-items:center;gap:4px;">'
-        + '<span style="font-family:monospace;color:var(--text-secondary);">' + label + '</span>'
+        + '<span title="' + escapeAttr(fullPath) + '" style="font-family:monospace;color:var(--text-secondary);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(fullPath) + '</span>'
         + tag
         + '<span style="color:var(--text-dim);margin-left:auto;">' + f.count + ' photo' + (f.count !== 1 ? 's' : '') + '</span>'
         + '</div>';
     }).join('');
+
+    // Managed-archive callout: when the destination is (or sits inside) an
+    // existing Vireo-managed archive, say so plainly so the dialog never
+    // presents an existing archive as an empty/new destination.
+    _managedArchive = data.managed_archive || null;
+    renderManagedArchiveCallout();
 
     resultsDiv.style.display = '';
     _folderPreviewShown = true;
@@ -2040,14 +2478,54 @@ async function previewDestinationFolders() {
   }
 }
 
+// Render (or hide) the "destination is an existing managed archive" callout
+// based on _managedArchive. Built with textContent so the archive path is
+// never interpreted as HTML.
+function renderManagedArchiveCallout() {
+  var el = document.getElementById('folderPreviewManagedArchive');
+  if (!el) return;
+  if (!_managedArchive || !_managedArchive.path) {
+    el.textContent = '';
+    el.style.display = 'none';
+    return;
+  }
+  var count = _managedArchive.photo_count || 0;
+  el.textContent = '';
+
+  var lead = document.createElement('span');
+  lead.textContent = 'Destination is an existing Vireo archive (';
+  el.appendChild(lead);
+
+  var pathEl = document.createElement('code');
+  pathEl.style.fontFamily = 'monospace';
+  pathEl.textContent = _managedArchive.path;
+  el.appendChild(pathEl);
+
+  var mid = document.createElement('span');
+  mid.textContent = ', ' + count.toLocaleString() + ' photo' + (count === 1 ? '' : 's')
+    + '). New files will be merged in.';
+  el.appendChild(mid);
+
+  el.style.display = '';
+}
+
 function markFolderPreviewStale() {
   if (!_folderPreviewShown) return;
+  // A source/destination change invalidates the managed-archive verdict — drop
+  // it so the duplicate summary doesn't keep merge-framing against a stale
+  // destination, and hide the callout so it never asserts an "existing archive"
+  // for a path that may no longer be the destination. The amber "click Refresh"
+  // banner below still prompts the user; the callout is recomputed on refresh.
+  _managedArchive = null;
+  renderManagedArchiveCallout();
   document.getElementById('folderPreviewStale').style.display = '';
   var btn = document.getElementById('btnPreviewFolders');
   btn.textContent = 'Refresh preview';
-  // Only enable if prerequisites are still met (sources + destination)
+  // Only enable if prerequisites are still met (sources + a LOCAL
+  // destination — the preview can't walk an SSH target).
   var hasSources = _sourceFolders.length > 0;
-  var hasDest = document.getElementById('cfgDestination').value.trim();
+  var hasDest = !pipelineRemoteTargetId()
+    && document.getElementById('cfgDestination').value.trim();
   btn.disabled = !(hasSources && hasDest);
 }
 
@@ -2116,17 +2594,28 @@ async function selectSourceMode(mode) {
 
   if (mode === 'new_images' && newImagesSnapshotId === null) {
     // User is selecting the card directly (no deep-link) — freeze the list now.
+    var actionStatus = document.getElementById('pipelineActionStatus');
+    var snapshotError = null;
     try {
-      var resp = await fetch('/api/workspaces/active/new-images/snapshot', {method: 'POST'});
-      if (resp.ok) {
-        var data = await resp.json();
-        newImagesSnapshotId = data.snapshot_id;
+      if (actionStatus) {
+        actionStatus.textContent = 'Preparing new-images snapshot...';
+        actionStatus.className = 'status-msg';
       }
+      newImagesSnapshotId = await createNewImagesSnapshotWithRetry(function() {
+        if (actionStatus) {
+          actionStatus.textContent = 'Still preparing new-images snapshot...';
+        }
+      });
     } catch (e) {
       // Leave snapshot id null; submit will fail validation via updateStartButton.
+      snapshotError = 'New-images snapshot is still being prepared. Try again in a moment.';
     }
     // Snapshot resolved (or failed) — refresh start-button state.
     updateStartButton();
+    if (snapshotError && actionStatus) {
+      actionStatus.textContent = snapshotError;
+      actionStatus.className = 'status-msg error';
+    }
   }
 
   fetchFolderPreview();
@@ -2212,11 +2701,22 @@ function getIngestFileTypes() {
 function updateStartButton() {
   var btn = document.getElementById('btnStartPipeline');
   var actionStatus = document.getElementById('pipelineActionStatus');
+  // While *this tab* owns a live pipeline run, the same button has
+  // been repurposed as "Stop Pipeline" (see startPipeline). Don't
+  // clobber its label/handler; just gate the disabled state on the
+  // cancel-in-flight flag.
+  //
+  // Step 5 of the pipeline-concurrency rollout removed the broader
+  // "_pipelineRunning disables Start" guard: a click while *any*
+  // pipeline (this tab's or another's) is running now enqueues a new
+  // run instead of being blocked. The label flips between
+  // "Start Pipeline" and "Queue Pipeline" based on slot occupancy
+  // polled from /api/pipeline/slots (see refreshSlotInfo).
   if (_pipelineRunning) {
     if (actionStatus) {
       actionStatus.textContent = _pipelineCancelling
-        ? 'Cancelling the running pipeline. Start will be available after the job stops.'
-        : 'A pipeline is running. Stop it or wait for it to finish before starting another.';
+        ? 'Cancelling the running pipeline.'
+        : '';
       actionStatus.className = 'status-msg';
     }
     btn.disabled = !!_pipelineCancelling;
@@ -2245,8 +2745,53 @@ function updateStartButton() {
       if (!wsName) btn.disabled = true;
     }
     if (_sourceMode === 'import' && _copyMode) {
-      var dest = document.getElementById('cfgDestination').value.trim();
-      if (!dest) btn.disabled = true;
+      if (pipelineRemoteTargetId()) {
+        if (!remoteArchiveSelectionReady()) btn.disabled = true;
+      } else {
+        var dest = document.getElementById('cfgDestination').value.trim();
+        if (!dest) btn.disabled = true;
+      }
+    }
+  }
+
+  // Snapshot whether source + destination are configured *before* the
+  // classify gates below. The stage-1 "complete" indicator and the
+  // auto-expand of the destination card key off this; if we let the
+  // classify gate (which can flip while a plan refresh is pending) drive
+  // the source indicator, the source stage flickers between complete and
+  // incomplete every time the plan refetches.
+  var sourceReady = !btn.disabled;
+
+  // Classify is blocked on missing species labels (the selected model can't
+  // run label-free). Gate Start so the user can't launch a run that would
+  // crash mid-pipeline at the classify stage — point them at Settings ›
+  // Labels, or let them turn Classify off to run the other stages. Mirrors
+  // the plan endpoint's `blocked` state (pipeline_plan._classify_plan).
+  //
+  // If a plan refresh is queued or in-flight and Classify is enabled, we
+  // can't trust the blocked check yet: _stageStateFor falls back to
+  // "will-run" when _pipelinePlan is null, and a stale plan from before the
+  // user's latest model/label change might still say "will-run". Treat
+  // "Classify on, plan not current" as not ready and disable Start until
+  // the fresh response lands — otherwise a fast click during the debounce
+  // window posts /api/jobs/pipeline and hits the missing-labels failure.
+  if (!btn.disabled) {
+    var classifyEnableCb = document.getElementById('enableClassify');
+    var classifyOn = classifyEnableCb && classifyEnableCb.checked;
+    if (classifyOn && (_pipelinePlan === null || _planRefreshPending)) {
+      btn.disabled = true;
+      if (actionStatus) {
+        actionStatus.textContent = 'Checking pipeline plan…';
+        actionStatus.className = 'status-msg';
+      }
+    } else if (_classifyBlocked()) {
+      btn.disabled = true;
+      if (actionStatus) {
+        actionStatus.textContent =
+          'Classify needs a species list — download one in Settings › Labels, '
+          + 'or turn Classify off to run the other stages.';
+        actionStatus.className = 'status-msg error';
+      }
     }
   }
 
@@ -2255,18 +2800,26 @@ function updateStartButton() {
   var previewHint = document.getElementById('previewFoldersHint');
   if (previewBtn) {
     var hasSources = _sourceFolders.length > 0;
-    var hasDest = _copyMode && document.getElementById('cfgDestination').value.trim();
+    var remoteMode = _copyMode && !!pipelineRemoteTargetId();
+    var hasDest = _copyMode && !remoteMode
+      && document.getElementById('cfgDestination').value.trim();
     if (hasSources && hasDest) {
       if (!_folderPreviewShown) previewBtn.disabled = false;
       previewHint.textContent = '';
     } else {
       previewBtn.disabled = true;
-      previewHint.textContent = 'Select source and destination to preview';
+      // The preview walks the destination on the local filesystem; an SSH
+      // target isn't locally walkable, so say the check doesn't run rather
+      // than pretending it did (existing remote files are still handled —
+      // the archive stage merges and refuses on content conflicts).
+      previewHint.textContent = remoteMode && hasSources
+        ? 'Folder preview isn’t available for SSH targets — existing remote files are checked at archive time'
+        : 'Select source and destination to preview';
     }
   }
 
   // Update stage 1 indicator and auto-expand stage 2 when source is ready
-  var sourceReady = !btn.disabled;
+  // (sourceReady was captured above, before the classify gates).
   var numSource = document.getElementById('numSource');
   if (sourceReady) {
     numSource.classList.add('complete');
@@ -2323,6 +2876,74 @@ function onStageToggle(stage) {
   schedulePlanRefresh();
 }
 
+// -- Pipeline slot poller --
+// Server-side queue (Step 4 of pipeline-concurrency) lets a click
+// while another run is active land on the queue instead of failing.
+// We poll /api/pipeline/slots to (1) flip the Start button label to
+// "Queue Pipeline" when no slot is free, and (2) show a small
+// "N running . M queued" status line linking to /jobs.
+var _slotInfo = { active: 0, queued: 0, slot_cap: 1 };
+var _slotPollTimer = null;
+var _SLOT_POLL_MS = 2000;
+
+function _applySlotInfo(info) {
+  _slotInfo = info || _slotInfo;
+  // Label flip — only when *this tab* isn't itself running a pipeline,
+  // because while it is, the same button is the Stop button.
+  if (!_pipelineRunning) {
+    var btn = document.getElementById('btnStartPipeline');
+    if (btn) {
+      var queueing = _slotInfo.active >= _slotInfo.slot_cap;
+      btn.textContent = queueing ? 'Queue Pipeline' : 'Start Pipeline';
+    }
+  }
+  // Status line: hidden when there's nothing to report.
+  var line = document.getElementById('pipelineSlotStatus');
+  var counts = document.getElementById('pipelineSlotCounts');
+  if (!line || !counts) return;
+  if (_slotInfo.active === 0 && _slotInfo.queued === 0) {
+    line.style.display = 'none';
+    return;
+  }
+  counts.textContent = _slotInfo.active + ' running • ' + _slotInfo.queued + ' queued';
+  line.style.display = '';
+}
+
+async function refreshSlotInfo() {
+  try {
+    var data = await safeFetch('/api/pipeline/slots', {}, { toast: false });
+    if (data) _applySlotInfo(data);
+  } catch(e) {
+    // Network blip — keep last known state; don't toast.
+  }
+}
+
+function _startSlotPolling() {
+  if (_slotPollTimer !== null) return;
+  refreshSlotInfo();
+  _slotPollTimer = setInterval(refreshSlotInfo, _SLOT_POLL_MS);
+}
+
+function _stopSlotPolling() {
+  if (_slotPollTimer !== null) {
+    clearInterval(_slotPollTimer);
+    _slotPollTimer = null;
+  }
+}
+
+document.addEventListener('visibilitychange', function() {
+  if (document.hidden) {
+    _stopSlotPolling();
+  } else {
+    _startSlotPolling();
+  }
+});
+
+// Kick off polling only when visible; hidden tabs should stay paused.
+if (!document.hidden) {
+  _startSlotPolling();
+}
+
 // -- Pipeline orchestration --
 var _pipelineRunning = false;
 var _pipelineAbort = false;
@@ -2333,11 +2954,46 @@ var _currentPipelineJobId = null;
 
 async function startPipeline() {
   if (_pipelineRunning) return;
+
+  // Belt-and-suspenders: updateStartButton() should already have disabled
+  // this button when Classify is enabled and the plan is mid-refresh, but
+  // a click can still beat the gate (race against debounce, programmatic
+  // invocation, etc.). If a refresh is queued or in-flight, await it now
+  // and bail if the fresh plan reports Classify is blocked — never POST
+  // /api/jobs/pipeline only to crash at the missing-labels classify step.
+  var classifyEnableCb = document.getElementById('enableClassify');
+  var classifyOn = classifyEnableCb && classifyEnableCb.checked;
+  if (classifyOn && (_pipelinePlan === null || _planRefreshPending)) {
+    if (_planDebounceTimer) {
+      clearTimeout(_planDebounceTimer);
+      _planDebounceTimer = null;
+    }
+    await refreshPipelinePlan();
+    // refreshPipelinePlan() already called updateStartButton(), which will
+    // have written the "Classify needs a species list" message if blocked.
+    if (_classifyBlocked()) return;
+    // If we still don't have a plan (e.g. import preview is still loading
+    // so refreshPipelinePlan returned without fetching), we genuinely can't
+    // verify whether Classify will be blocked. Bail with a clear message
+    // rather than gamble on a run that may crash mid-pipeline.
+    if (_pipelinePlan === null) {
+      var actionStatus = document.getElementById('pipelineActionStatus');
+      if (actionStatus) {
+        actionStatus.textContent =
+          'Still computing the pipeline plan — try again in a moment.';
+        actionStatus.className = 'status-msg';
+      }
+      return;
+    }
+  }
+
   _pipelineRunning = true;
   _pipelineAbort = false;
   _pipelineCancelling = false;
   _currentPipelineJobId = null;
   document.getElementById('modelWarningBanner').style.display = 'none';
+  var _prevErrBanner = document.getElementById('pipelineErrorBanner');
+  if (_prevErrBanner) _prevErrBanner.style.display = 'none';
 
   // Create new workspace if requested
   if (_destWorkspaceMode === 'new') {
@@ -2361,8 +3017,12 @@ async function startPipeline() {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ current_path: window.location.pathname })
       });
-      // Update the navbar workspace display
-      var wsBtn = document.getElementById('wsDropdownBtn');
+      if (window.vireoEditNav) window.vireoEditNav.clearWorkspaceScopedCursors();
+      // Update the navbar workspace display ('wsCurrentName' is the
+      // navbar's actual element — the old 'wsDropdownBtn' id never
+      // existed, so the navbar kept showing the previous workspace for
+      // the whole run).
+      var wsBtn = document.getElementById('wsCurrentName');
       if (wsBtn) wsBtn.textContent = wsName;
       document.getElementById('lblCurrentWsName').textContent = '(' + wsName + ')';
     } catch(e) {
@@ -2403,8 +3063,23 @@ async function startPipeline() {
       if (excluded.length > 0) body.exclude_paths = excluded;
     }
     if (_copyMode) {
-      body.destination = document.getElementById('cfgDestination').value.trim();
+      var remoteTargetId = pipelineRemoteTargetId();
+      if (remoteTargetId) {
+        // Remote (SSH) archive: same request shape as the Move page —
+        // saved target id + relative subpath — and always local processing
+        // (the backend rejects anything else).
+        var subResult = normalizeRemoteSubpath(
+          document.getElementById('cfgRemoteSubpath').value);
+        body.remote_target_id = remoteTargetId;
+        body.remote_subpath = subResult.value;
+        body.local_processing = true;
+      } else {
+        body.destination = document.getElementById('cfgDestination').value.trim();
+        var localProcessing = document.getElementById('chkLocalProcessing');
+        body.local_processing = !!(localProcessing && localProcessing.checked);
+      }
       body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
+      body.verify_by_hash = document.getElementById('chkVerifyByHash').checked;
       body.folder_template = getSelectedFolderTemplate();
     }
   } else if (_sourceMode === 'new_images') {
@@ -2432,9 +3107,6 @@ async function startPipeline() {
       if (excludedIds.length > 0) body.exclude_photo_ids = excludedIds;
     }
   }
-
-  // Preview size
-  body.preview_max_size = parseInt(document.getElementById('cfgPreviewSize').value);
 
   // Optional stages
   var classifyEnabled = document.getElementById('enableClassify').checked;
@@ -2543,6 +3215,10 @@ async function startPipeline() {
     btn.textContent = 'Start Pipeline';
     btn.onclick = startPipeline;
     updateStartButton();
+    // Resync the Start/Queue label and "N running . M queued" line
+    // right away — the run we just finished freed a slot, but other
+    // tabs/processes may still be running pipelines.
+    refreshSlotInfo();
     // The pipeline just wrote new detections, masks, keypoints, etc. —
     // refresh the plan so the next run's pills reflect the new state of
     // the world (e.g. "Already done" for stages that just completed).
@@ -2552,6 +3228,7 @@ async function startPipeline() {
 
 // Map pipeline stage names to UI card element suffixes
 var _stageToCard = {
+  storage: 'Destination',
   ingest: 'Source',
   scan: 'Scan',
   thumbnails: 'Previews',
@@ -2561,6 +3238,7 @@ var _stageToCard = {
   extract_masks: 'Extract',
   eye_keypoints: 'EyeKeypoints',
   regroup: 'Group',
+  archive: 'Destination',
 };
 
 // Reverse of _stageToCard: cardSuffix -> [backend stage names]. Used by
@@ -2599,6 +3277,23 @@ function _formatETA(seconds) {
   var h = Math.floor(seconds / 3600);
   var m = Math.round((seconds % 3600) / 60);
   return h + 'h ' + m + 'm';
+}
+
+// Ingest is the only stage that ever reads the source (SD card/etc.) — every
+// later stage works off the copy it made. Once it reports success, surface
+// that explicitly instead of leaving the user to guess whether the card is
+// still in use (`ingestInfo.copied` is absent entirely in scan-in-place mode,
+// where there was never a copy and the card stays needed for the whole run).
+function _showSourceEjectSafe(ingestInfo) {
+  if (!ingestInfo || typeof ingestInfo.copied !== 'number') return;
+  var statusSourceEl = document.getElementById('statusSource');
+  if (!statusSourceEl) return;
+  var parts = [ingestInfo.copied.toLocaleString() + ' copied'];
+  if (ingestInfo.skipped_duplicate) {
+    parts.push(ingestInfo.skipped_duplicate.toLocaleString() + ' already present');
+  }
+  statusSourceEl.textContent = parts.join(', ') + ' — the card is safe to eject.';
+  statusSourceEl.className = 'status-msg ok';
 }
 
 function _updatePipelineStageUI(p) {
@@ -2675,6 +3370,7 @@ function _updatePipelineStageUI(p) {
       if (a.completed > 0) {
         _stageOutcomes[cardSuffix2] = 'done';
         _setPill(cardSuffix2, 'done');
+        if (cardSuffix2 === 'Source') _showSourceEjectSafe(stages['ingest']);
       } else {
         // Every substage was skipped. Backend 'skipped' covers both
         // user-disabled stages and auto-skip; pick the right label so a
@@ -2767,6 +3463,22 @@ function _updatePipelineStageUI(p) {
   }
 }
 
+// Strip the internal "[stage] Fatal:" prefix so the banner reads as a plain,
+// actionable sentence (the stage is already conveyed by the failed card pill).
+function _humanizePipelineError(msg) {
+  return String(msg).replace(/^\[\w+\]\s*/, '').replace(/^Fatal:\s*/i, '');
+}
+
+// Show a prominent, dismissible error banner with the full failure message(s).
+function _showPipelineError(messages) {
+  var banner = document.getElementById('pipelineErrorBanner');
+  var text = document.getElementById('pipelineErrorText');
+  if (!banner || !text) return;
+  text.textContent = messages.join('\n');
+  banner.style.display = '';
+  banner.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+}
+
 function _onPipelineComplete(result) {
   if (result.status === 'cancelled') {
     var actionStatus = document.getElementById('pipelineActionStatus');
@@ -2774,11 +3486,14 @@ function _onPipelineComplete(result) {
       actionStatus.textContent = 'Pipeline cancelled.';
       actionStatus.className = 'status-msg';
     }
-    ['Source', 'Scan', 'Previews', 'Classify', 'Extract', 'EyeKeypoints', 'Group'].forEach(function(cardSuffix) {
+    ['Source', 'Destination', 'Scan', 'Previews', 'Classify', 'Extract', 'EyeKeypoints', 'Group'].forEach(function(cardSuffix) {
       if (_runningStages[cardSuffix]) {
         delete _runningStages[cardSuffix];
-        _stageOutcomes[cardSuffix] = 'will-skip';
-        _setPill(cardSuffix, 'will-skip', 'Cancelled');
+        // Record a real 'cancelled' outcome so later refreshPipelineUI
+        // calls keep rendering "Cancelled" — a 'will-skip' outcome would
+        // be re-labeled with the future-tense "Will skip" on the next
+        // refresh, which lies about what happened to a mid-run stage.
+        _stageOutcomes[cardSuffix] = 'cancelled';
       }
     });
     refreshPipelineUI();
@@ -2805,8 +3520,12 @@ function _onPipelineComplete(result) {
     var fillSource = document.getElementById('fillSource');
     if (fillSource && fillSource.style.width && fillSource.style.width !== '0%') {
       fillSource.style.width = '100%';
-      var statusSourceEl = document.getElementById('statusSource');
-      if (statusSourceEl) { statusSourceEl.textContent = 'Done!'; statusSourceEl.className = 'status-msg ok'; }
+      if (stageResults.ingest && typeof stageResults.ingest.copied === 'number') {
+        _showSourceEjectSafe(stageResults.ingest);
+      } else {
+        var statusSourceEl = document.getElementById('statusSource');
+        if (statusSourceEl) { statusSourceEl.textContent = 'Done!'; statusSourceEl.className = 'status-msg ok'; }
+      }
     }
   }
 
@@ -2900,6 +3619,7 @@ function _onPipelineComplete(result) {
       var stage = match ? match[1] : 'unknown';
       errorStages[stage] = err;
     });
+    var firstFailedCard = null;
     for (var stage in errorStages) {
       var cardSuffix = _stageToCard[stage];
       if (cardSuffix) {
@@ -2908,7 +3628,19 @@ function _onPipelineComplete(result) {
         delete _runningStages[cardSuffix];
         _stageOutcomes[cardSuffix] = 'failed';
         _setPill(cardSuffix, 'failed');
+        if (!firstFailedCard) firstFailedCard = cardSuffix;
       }
+    }
+    // The per-card status span is easy to miss (and invisible when the card
+    // is collapsed), and errors whose stage has no card aren't shown at all.
+    // Surface the full, actionable message in a top-level banner and open the
+    // failed card so the user actually sees why the run stopped.
+    _showPipelineError(Object.keys(errorStages).map(function(s) {
+      return _humanizePipelineError(errorStages[s]);
+    }));
+    if (firstFailedCard) {
+      var failedCardEl = document.getElementById('card-' + firstFailedCard.toLowerCase());
+      if (failedCardEl) failedCardEl.classList.add('expanded');
     }
   }
 
@@ -3042,6 +3774,7 @@ async function runImportStep() {
     if (_copyMode) {
       body.destination = destination;
       body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
+      body.verify_by_hash = document.getElementById('chkVerifyByHash').checked;
       body.folder_template = getSelectedFolderTemplate();
     }
 
@@ -3180,27 +3913,364 @@ function updateLabelsPickerState() {
   }
 }
 
-async function loadLabels() {
+function getSelectedLabelFiles() {
+  var files = [];
+  document.querySelectorAll('.labels-run-cb:checked').forEach(function(cb) {
+    files.push(cb.value);
+  });
+  return files;
+}
+
+var pipelineSelectedPlaceId = null;
+var pipelineSelectedPlaceName = '';
+var pipelineLabelsSearchTimer = null;
+var pipelineLabelsSearchRequestId = 0;
+var pipelineLabelsFormLoaded = false;
+var pipelineLabelsEscHandler = null;
+
+function openPipelineLabelsModal() {
+  var modal = document.getElementById('pipelineLabelsModal');
+  if (!modal) return;
+  modal.classList.add('open');
+  resetPipelineLabelsStatus();
+  if (!pipelineLabelsFormLoaded) {
+    pipelineLabelsFormLoaded = true;
+    loadPipelineTaxonGroups();
+    loadPipelineObservationFilters();
+  }
+  pipelineLabelsEscHandler = function(e) {
+    if (e.key === 'Escape') closePipelineLabelsModal();
+  };
+  document.addEventListener('keydown', pipelineLabelsEscHandler);
+  setTimeout(function() {
+    var input = document.getElementById('pipelinePlaceSearch');
+    if (input) input.focus();
+  }, 0);
+}
+
+function closePipelineLabelsModal() {
+  var modal = document.getElementById('pipelineLabelsModal');
+  if (modal) modal.classList.remove('open');
+  if (pipelineLabelsEscHandler) {
+    document.removeEventListener('keydown', pipelineLabelsEscHandler);
+    pipelineLabelsEscHandler = null;
+  }
+}
+
+function resetPipelineLabelsStatus() {
+  var status = document.getElementById('pipelineFetchLabelsStatus');
+  var progress = document.getElementById('pipelineFetchLabelsProgress');
+  var fill = document.getElementById('pipelineFetchLabelsFill');
+  var btn = document.getElementById('pipelineFetchLabelsBtn');
+  if (status) {
+    status.textContent = '';
+    status.style.color = 'var(--text-dim)';
+  }
+  if (progress) progress.style.display = 'none';
+  if (fill) fill.style.width = '0%';
+  if (btn) btn.disabled = !pipelineSelectedPlaceId;
+}
+
+async function loadPipelineTaxonGroups() {
+  var box = document.getElementById('pipelineTaxonCheckboxes');
+  if (!box) return;
+  box.textContent = 'Loading...';
   try {
+    var groups = await safeFetch('/api/labels/taxon-groups', {}, { toast: false });
+    box.textContent = '';
+    groups.forEach(function(g) {
+      var label = document.createElement('label');
+      label.style.cssText = 'font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:4px;cursor:pointer;';
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.className = 'pipeline-taxon-cb';
+      cb.value = g.key;
+      cb.checked = g.key === 'birds';
+      cb.style.cssText = 'accent-color:var(--accent);';
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(g.name));
+      box.appendChild(label);
+    });
+  } catch(e) {
+    box.innerHTML = '<span style="color:var(--danger);font-size:12px;">Failed to load taxa</span>';
+  }
+}
+
+async function loadPipelineObservationFilters() {
+  var box = document.getElementById('pipelineObservationFilterRadios');
+  if (!box) return;
+  box.textContent = 'Loading...';
+  try {
+    var filters = await safeFetch('/api/labels/observation-filters', {}, { toast: false });
+    box.textContent = '';
+    filters.forEach(function(f) {
+      var label = document.createElement('label');
+      label.style.cssText = 'font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:4px;cursor:pointer;line-height:1.35;';
+      var radio = document.createElement('input');
+      radio.type = 'radio';
+      radio.name = 'pipeline-obs-filter';
+      radio.value = f.key;
+      radio.checked = f.key === 'research';
+      radio.style.cssText = 'accent-color:var(--accent);';
+      label.appendChild(radio);
+      label.appendChild(document.createTextNode(f.name + ' '));
+      var desc = document.createElement('span');
+      desc.style.cssText = 'color:var(--text-faint);';
+      desc.textContent = '- ' + f.description;
+      label.appendChild(desc);
+      box.appendChild(label);
+    });
+  } catch(e) {
+    box.innerHTML = '<span style="color:var(--danger);font-size:12px;">Failed to load observation filters</span>';
+  }
+}
+
+function searchPipelinePlacesDebounced() {
+  if (pipelineSelectedPlaceId) {
+    pipelineSelectedPlaceId = null;
+    pipelineSelectedPlaceName = '';
+    var btn = document.getElementById('pipelineFetchLabelsBtn');
+    var input = document.getElementById('pipelinePlaceSearch');
+    if (btn) btn.disabled = true;
+    if (input) input.style.borderColor = 'var(--border-secondary)';
+  }
+  resetPipelineLabelsStatus();
+  if (pipelineLabelsSearchTimer) clearTimeout(pipelineLabelsSearchTimer);
+  pipelineLabelsSearchTimer = setTimeout(searchPipelinePlaces, 300);
+}
+
+async function searchPipelinePlaces() {
+  var input = document.getElementById('pipelinePlaceSearch');
+  var dropdown = document.getElementById('pipelinePlaceDropdown');
+  if (!input || !dropdown) return;
+  var q = input.value.trim();
+  if (q.length < 2) {
+    dropdown.textContent = '';
+    return;
+  }
+  var requestId = ++pipelineLabelsSearchRequestId;
+  try {
+    var places = await safeFetch('/api/labels/search-places?q=' + encodeURIComponent(q), {}, { toast: false });
+    if (
+      requestId !== pipelineLabelsSearchRequestId ||
+      input.value.trim() !== q
+    ) {
+      return;
+    }
+    dropdown.textContent = '';
+    if (places.length === 0) {
+      var empty = document.createElement('div');
+      empty.style.cssText = 'padding:8px 10px;font-size:12px;color:var(--text-dim);';
+      empty.textContent = 'No places found';
+      dropdown.appendChild(empty);
+      return;
+    }
+    places.slice(0, 8).forEach(function(p) {
+      var dn = p.display_name || p.name || '';
+      var option = document.createElement('div');
+      option.className = 'pipeline-place-option';
+      option.textContent = dn;
+      option.addEventListener('click', function() {
+        selectPipelinePlace(p.id, dn);
+      });
+      dropdown.appendChild(option);
+    });
+  } catch(e) {
+    if (
+      requestId !== pipelineLabelsSearchRequestId ||
+      input.value.trim() !== q
+    ) {
+      return;
+    }
+    dropdown.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:var(--danger);">Search failed</div>';
+  }
+}
+
+function selectPipelinePlace(id, name) {
+  pipelineSelectedPlaceId = parseInt(id, 10);
+  pipelineSelectedPlaceName = name;
+  var dropdown = document.getElementById('pipelinePlaceDropdown');
+  var input = document.getElementById('pipelinePlaceSearch');
+  var btn = document.getElementById('pipelineFetchLabelsBtn');
+  if (dropdown) dropdown.textContent = '';
+  if (input) {
+    input.value = name;
+    input.style.borderColor = 'var(--accent)';
+  }
+  if (btn) btn.disabled = false;
+  resetPipelineLabelsStatus();
+}
+
+async function startPipelineLabelEmbeddingPrecompute(precompute) {
+  if (!precompute || !precompute.model_id || !precompute.labels_file) return;
+  var modelName = precompute.model_name || 'active model';
+  try {
+    var data = await safeFetch('/api/jobs/precompute-embeddings', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        model_id: precompute.model_id,
+        labels_file: precompute.labels_file
+      }),
+    }, { toast: false });
+    showToast('Pre-computing embeddings for ' + modelName + ' in background', 'info');
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onComplete: function(result) {
+        if (result.status === 'completed') {
+          showToast('Embeddings cached for ' + modelName, 'success');
+          updateReadiness();
+          schedulePlanRefresh();
+        } else {
+          showToast('Embedding precompute failed; classification can compute them later', 'warning');
+        }
+      },
+      onError: function() {
+        updateReadiness();
+      }
+    });
+  } catch(e) {
+    showToast('Species list downloaded; embedding precompute did not start', 'warning');
+  }
+}
+
+async function fetchPipelineLabels() {
+  if (!pipelineSelectedPlaceId) return;
+  var groups = [];
+  document.querySelectorAll('.pipeline-taxon-cb:checked').forEach(function(cb) {
+    groups.push(cb.value);
+  });
+  if (groups.length === 0) {
+    var noGroupsStatus = document.getElementById('pipelineFetchLabelsStatus');
+    if (noGroupsStatus) {
+      noGroupsStatus.textContent = 'Select at least one taxon group.';
+      noGroupsStatus.style.color = 'var(--danger)';
+    }
+    return;
+  }
+
+  var btn = document.getElementById('pipelineFetchLabelsBtn');
+  var status = document.getElementById('pipelineFetchLabelsStatus');
+  var progress = document.getElementById('pipelineFetchLabelsProgress');
+  var fill = document.getElementById('pipelineFetchLabelsFill');
+  if (btn) btn.disabled = true;
+  if (status) {
+    status.textContent = 'Starting download...';
+    status.style.color = 'var(--text-dim)';
+  }
+  if (progress) progress.style.display = '';
+  if (fill) fill.style.width = '0%';
+
+  try {
+    var data = await safeFetch('/api/jobs/fetch-labels', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        place_id: pipelineSelectedPlaceId,
+        place_name: pipelineSelectedPlaceName,
+        taxon_groups: groups,
+        observation_filter: (document.querySelector('input[name="pipeline-obs-filter"]:checked') || {}).value || 'research',
+      }),
+    }, { toast: false });
+    if (status) status.textContent = 'Fetching species...';
+
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(p) {
+        if (status && p.current_file) status.textContent = p.current_file;
+        if (fill && p.total > 0 && p.current > 0) {
+          fill.style.width = Math.round((p.current / p.total) * 100) + '%';
+        }
+      },
+      onComplete: function(result) {
+        var newFile = result && result.result ? result.result.labels_file : '';
+        if (result && result.status === 'completed' && result.result) {
+          if (status) {
+            status.textContent = 'Downloaded ' + (result.result.species_count || 0).toLocaleString() + ' species.';
+            status.style.color = 'var(--accent)';
+          }
+          if (fill) fill.style.width = '100%';
+          var precompute = result.result.embedding_precompute;
+          var selectFiles = getSelectedLabelFiles();
+          if (newFile && selectFiles.indexOf(newFile) === -1) selectFiles.push(newFile);
+          var saveSelectionFailed = false;
+          safeFetch('/api/labels/active', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({labels_files: selectFiles}),
+          }, { toast: false }).catch(function(e) {
+            saveSelectionFailed = true;
+            if (status) {
+              status.textContent = 'Downloaded, but could not save the active label selection: ' + (e.message || e);
+              status.style.color = 'var(--warning)';
+            }
+          }).then(function() {
+            return loadLabels({ selectFiles: selectFiles });
+          }).then(function() {
+            updateLabelsPickerState();
+            updateReadiness();
+            schedulePlanRefresh();
+            if (precompute) startPipelineLabelEmbeddingPrecompute(precompute);
+            if (!saveSelectionFailed) setTimeout(closePipelineLabelsModal, 900);
+          });
+        } else {
+          if (status) {
+            status.textContent = 'Failed: ' + ((result.errors || []).join(', ') || 'download did not complete');
+            status.style.color = 'var(--danger)';
+          }
+        }
+        if (btn) btn.disabled = !pipelineSelectedPlaceId;
+      },
+      onError: function() {
+        if (status) {
+          status.textContent = 'Connection lost while downloading labels.';
+          status.style.color = 'var(--danger)';
+        }
+        if (btn) btn.disabled = !pipelineSelectedPlaceId;
+      }
+    });
+  } catch(e) {
+    if (status) {
+      status.textContent = 'Error: ' + (e.message || e);
+      status.style.color = 'var(--danger)';
+    }
+    if (btn) btn.disabled = !pipelineSelectedPlaceId;
+  }
+}
+
+async function loadLabels(options) {
+  try {
+    options = options || {};
     var data = await safeFetch('/api/labels', {}, { toast: false });
     var div = document.getElementById('labelsPicker');
     var active = data.active || [];
-    var activePaths = new Set(active.map(function(a) { return a.labels_file; }));
+    var activePaths = new Set(
+      options.selectFiles || active.map(function(a) { return a.labels_file; })
+    );
 
+    div.textContent = '';
     if (!data.labels || data.labels.length === 0) {
-      div.innerHTML = '<span style="color:var(--text-dim);font-size:12px;">(Tree of Life — all species)</span>';
+      var empty = document.createElement('span');
+      empty.style.cssText = 'color:var(--text-dim);font-size:12px;';
+      empty.textContent = '(Tree of Life — all species)';
+      div.appendChild(empty);
     } else {
-      var html = '';
       data.labels.forEach(function(l) {
         var isActive = activePaths.has(l.labels_file);
-        html += '<label style="display:flex;align-items:center;gap:4px;color:var(--text-secondary);cursor:pointer;padding:2px 0;">' +
-          '<input type="checkbox" class="labels-run-cb" value="' + l.labels_file.replace(/"/g, '&quot;') + '"' +
-          (isActive ? ' checked' : '') + ' onchange="updateReadiness(); schedulePlanRefresh();" style="accent-color:var(--accent);"> ' +
-          l.name + ' (' + (l.species_count || 0) + ')</label>';
+        var label = document.createElement('label');
+        label.style.cssText = 'display:flex;align-items:center;gap:4px;color:var(--text-secondary);cursor:pointer;padding:2px 0;';
+        var cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.className = 'labels-run-cb';
+        cb.value = l.labels_file;
+        cb.checked = isActive;
+        cb.onchange = function() { updateReadiness(); schedulePlanRefresh(); };
+        cb.style.cssText = 'accent-color:var(--accent);';
+        label.appendChild(cb);
+        label.appendChild(document.createTextNode(' ' + l.name + ' (' + (l.species_count || 0) + ')'));
+        div.appendChild(label);
       });
-      div.innerHTML = html;
     }
 
+    updateLabelsPickerState();
   } catch(e) {}
 }
 
@@ -3222,9 +4292,9 @@ async function updateReadiness() {
 
     // Model status
     if (r.model_ready) {
-      items.push('<span style="color:var(--accent,#24E5CA);">&#10003;</span> Model: <b>' + r.model_name + '</b> — ready');
+      items.push('<span style="color:var(--accent,#24E5CA);">&#10003;</span> Model: <b>' + escapeHtml(r.model_name) + '</b> — ready');
     } else if (r.needs_download) {
-      items.push('<span style="color:var(--warning,#f0c040);">&#9679;</span> Model: <b>' + r.model_name + '</b> — will download <b>' + (r.model_size_mb >= 1000 ? (r.model_size_mb / 1000).toFixed(1) + ' GB' : r.model_size_mb + ' MB') + '</b> on first run');
+      items.push('<span style="color:var(--warning,#f0c040);">&#9679;</span> Model: <b>' + escapeHtml(r.model_name) + '</b> — will download <b>' + (r.model_size_mb >= 1000 ? (r.model_size_mb / 1000).toFixed(1) + ' GB' : r.model_size_mb + ' MB') + '</b> on first run');
     } else {
       items.push('<span style="color:var(--danger,#e74c3c);">&#10007;</span> No model available — download one in Settings');
     }
@@ -3234,7 +4304,7 @@ async function updateReadiness() {
       items.push('<span style="color:var(--info,#7ec8e3);">&#9679;</span> Labels: <b>Tree of Life</b> — classifying against all species (slower, less accurate than regional labels)');
     } else if (r.labels_count > 0) {
       var labelDisplay = r.labels_name.length > 60 ? r.labels_name.substring(0, 57) + '...' : r.labels_name;
-      items.push('<span style="color:var(--accent,#24E5CA);">&#10003;</span> Labels: <b>' + labelDisplay + '</b> — ' + r.labels_count.toLocaleString() + ' species');
+      items.push('<span style="color:var(--accent,#24E5CA);">&#10003;</span> Labels: <b>' + escapeHtml(labelDisplay) + '</b> — ' + r.labels_count.toLocaleString() + ' species');
     }
 
     // Embeddings status
@@ -3725,7 +4795,7 @@ var _pipelineState = {
 // and a single global would let one stage's status update clobber another's
 // "Running…" pill on the next refresh.
 var _runningStages = {};  // suffix -> true while that stage is running
-var _stageOutcomes = {};  // suffix -> 'done' | 'failed' | 'will-skip' | 'done-prior'
+var _stageOutcomes = {};  // suffix -> 'done' | 'failed' | 'cancelled' | 'will-skip' | 'done-prior'
 
 // Plan response from POST /api/pipeline/plan, keyed by stage suffix:
 //   { Classify: { state, summary, detail }, Extract: ..., ... }
@@ -3737,6 +4807,12 @@ var _stageOutcomes = {};  // suffix -> 'done' | 'failed' | 'will-skip' | 'done-p
 var _pipelinePlan = null;
 var _planFetchSeq = 0;
 var _planDebounceTimer = null;
+// True while a /api/pipeline/plan refresh is queued (debounce timer set) or
+// the latest fetch is in-flight. Used by updateStartButton() so a fast click
+// during the debounce window — when _pipelinePlan is null or stale relative
+// to the user's most recent selection — can't enable Start and let the
+// missing-labels classify run slip through the blocked gate.
+var _planRefreshPending = false;
 
 var _STAGES = [
   { suffix: 'Scan',         label: 'Scan & Import',          enable: null },
@@ -3768,26 +4844,29 @@ var _PILL_LABELS = {
   'running':    'Running…',
   'done':       'Done',
   'failed':     'Failed',
+  'cancelled':  'Cancelled',
   'will-run':   'Will run',
   'will-skip':  'Will skip',
   'done-prior': 'Already done',
+  'blocked':    'Needs labels',
 };
 
 // Map a stage's plan entry to the pill text, including counts and the
 // staleness signal. Returns the literal string to display.
 //
 // The plan endpoint emits `state: 'will-run'` for both fresh and
-// outdated cases; the distinction lives in `detail.fingerprint_outdated`
-// / `detail.fingerprint_invalidated`. We surface that here as a distinct
-// "Outdated" label so users see settings-changed staleness directly,
-// not buried in the summary text.
+// settings-changed cases; the distinction lives in
+// `detail.fingerprint_outdated` / `detail.fingerprint_invalidated`.
+// Classify gets a more specific label when only the BioCLIP label set changed.
 function _formatPillLabel(stage, planEntry, state) {
   // Special-cased states (running/done/failed/will-skip) have static
   // labels — counts during a run come from a separate channel.
   if (state === 'running')   return 'Running…';
   if (state === 'done')      return 'Done';
   if (state === 'failed')    return 'Failed';
+  if (state === 'cancelled') return 'Cancelled';
   if (state === 'will-skip') return 'Will skip';
+  if (state === 'blocked')   return 'Needs labels';
 
   if (!planEntry) {
     // No plan entry yet (page still loading) — fall back to the bare
@@ -3798,12 +4877,21 @@ function _formatPillLabel(stage, planEntry, state) {
   var pending  = (typeof detail.pending  === 'number') ? detail.pending  : null;
   var eligible = (typeof detail.eligible === 'number') ? detail.eligible : null;
   var outdated = !!(detail.fingerprint_outdated || detail.fingerprint_invalidated);
+  var labelSetChanged = outdated
+    && stage
+    && stage.suffix === 'Classify'
+    && detail.fingerprint_reason === 'label_set_changed';
 
   // No quantifiable work — fall back to the state-only label, but still
   // surface the outdated flag for stages that don't have a per-photo
   // unit (e.g., Group emits fingerprint_outdated with no eligible count).
   if (eligible === null || eligible === 0) {
+    if (state === 'will-run' && labelSetChanged) return 'Different label set';
     if (state === 'will-run' && outdated) return 'Outdated';
+    // All-duplicates import: the stage executes but processes nothing.
+    // A bare "Will run" pill reads as "work will happen" — put the zero
+    // on the pill itself so the user doesn't have to open the card.
+    if (state === 'will-run' && detail.import_no_new) return 'Will run (0 photos)';
     return state === 'done-prior' ? 'Already done' : 'Will run';
   }
 
@@ -3812,6 +4900,7 @@ function _formatPillLabel(stage, planEntry, state) {
   }
 
   // state === 'will-run' from here on.
+  if (labelSetChanged)           return 'Different label set (' + (pending || eligible) + ' to classify)';
   if (outdated)                  return 'Outdated (' + (pending || eligible) + ' to redo)';
   if (pending !== null && pending > 0 && pending < eligible) {
     return 'Resume (' + pending + ' left)';
@@ -3869,6 +4958,19 @@ function _stageStateFor(stage) {
   return fromPlan.state || 'will-run';
 }
 
+// True when the Classify stage is enabled but the plan reports it can't run
+// because the selected model(s) have no labels and can't classify label-free.
+// A user-disabled Classify stage resolves to 'will-skip' via _stageStateFor,
+// so this correctly returns false and does not gate Start in that case.
+function _classifyBlocked() {
+  for (var i = 0; i < _STAGES.length; i++) {
+    if (_STAGES[i].suffix === 'Classify') {
+      return _stageStateFor(_STAGES[i]) === 'blocked';
+    }
+  }
+  return false;
+}
+
 function _stageSummaryFor(stage) {
   if (!_pipelinePlan) return '';
   var fromPlan = _pipelinePlan.stages && _pipelinePlan.stages[stage.suffix];
@@ -3895,7 +4997,7 @@ function _renderPlanSummary() {
       '<div class="plan-stage-row ' + state + '">' +
         '<span class="plan-stage-name">' + stage.label + '</span>' +
         '<span class="plan-stage-pill">' + pillLabel + '</span>' +
-        '<span class="plan-stage-summary">' + (summary || '') + '</span>' +
+        '<span class="plan-stage-summary">' + escapeHtml(summary || '') + '</span>' +
       '</div>'
     );
   });
@@ -3987,14 +5089,15 @@ function _buildPlanBody() {
     // clears — both accurate states.
     body.source_paths = selectedPaths;
 
-    // Copy-mode imports with skip_duplicates=true dedupe by file_hash, not
-    // by source path. The /api/import/check-duplicates SSE feed has
-    // already populated _duplicateResults with the hash-matched preview
-    // paths; pass that subset along so the plan counts those as already
-    // known instead of new (otherwise pills overstate work for files
-    // ingest() will silently skip). Only send when the duplicate gate is
-    // actually on; toggling it off must drop the field so the backend
-    // doesn't keep treating the cache as live.
+    // Copy-mode imports with skip_duplicates=true dedupe by duplicate
+    // identity (metadata key or content hash — same DuplicateChecker as
+    // ingest), not by source path. The /api/import/check-duplicates SSE
+    // feed has already populated _duplicateResults with the matched
+    // preview paths; pass that subset along so the plan counts those as
+    // already known instead of new (otherwise pills overstate work for
+    // files ingest() will silently skip). Only send when the duplicate
+    // gate is actually on; toggling it off must drop the field so the
+    // backend doesn't keep treating the cache as live.
     var skipDup = document.getElementById('chkSkipDuplicates');
     if (_copyMode && skipDup && skipDup.checked
         && Object.keys(_duplicateResults).length > 0) {
@@ -4004,6 +5107,18 @@ function _buildPlanBody() {
       });
       if (hashDupPaths.length) body.hash_duplicate_paths = hashDupPaths;
     }
+
+    // The planner's "0 new photos to import, nothing to …" claim for an
+    // all-duplicates selection is only true in local-processing mode:
+    // the post-ingest scan then walks the local staging root (empty when
+    // everything deduplicated), while plain copy mode re-scans the real
+    // destination and can surface existing unprocessed rows as downstream
+    // work. Send the toggle state so the backend can tell the modes
+    // apart — mirrors how /api/jobs/pipeline carries local_processing.
+    if (_sourceMode === 'import' && _copyMode) {
+      var lp = document.getElementById('chkLocalProcessing');
+      body.local_processing = !!(lp && lp.checked);
+    }
   }
 
   body.skip_classify       = !document.getElementById('enableClassify').checked;
@@ -4011,16 +5126,8 @@ function _buildPlanBody() {
   body.skip_eye_keypoints  = !document.getElementById('enableEyeKeypoints').checked;
   body.skip_regroup        = !document.getElementById('enableGroup').checked;
 
-  // Send the user's currently-selected preview tier so the Previews plan
-  // entry counts pending work against the right preview_cache size. A
-  // value of 0 ("Full resolution") tells the backend the previews
-  // substage will skip, so the plan summary doesn't promise N previews
-  // that will never be generated.
-  var prevSelect = document.getElementById('cfgPreviewSize');
-  if (prevSelect) {
-    var pms = parseInt(prevSelect.value, 10);
-    if (!isNaN(pms)) body.preview_max_size = pms;
-  }
+  // Preview size is a workspace/library setting. Omit preview_max_size so
+  // the backend planner and job both use the same workspace-effective value.
 
   if (!body.skip_classify) {
     var modelIds = [];
@@ -4041,11 +5148,32 @@ function _buildPlanBody() {
   return body;
 }
 
+function _planIsWaitingForImportPreview() {
+  if (_sourceMode === 'import') {
+    return _sourceFolders.length > 0 && getIngestFileTypes().length > 0
+      && (_previewLoading || !_previewData);
+  }
+  if (_sourceMode === 'new_images') {
+    return newImagesSnapshotId !== null && (_previewLoading || !_previewData);
+  }
+  return false;
+}
+
 async function refreshPipelinePlan() {
   // Don't fetch a plan while a pipeline is running — live state is
   // authoritative, and the running stages would race the plan response.
   if (_pipelineRunning) return;
+  _planRefreshPending = true;
   var seq = ++_planFetchSeq;
+  if (_planIsWaitingForImportPreview()) {
+    _pipelinePlan = null;
+    updateSamVariantWarning(null);
+    // Preview is loading; another refresh will fire when it completes.
+    // Leave _planRefreshPending true so Start stays gated until then.
+    refreshPipelineUI();
+    updateStartButton();
+    return;
+  }
   try {
     var data = await safeFetch('/api/pipeline/plan', {
       method: 'POST',
@@ -4055,6 +5183,8 @@ async function refreshPipelinePlan() {
     // Drop responses that arrived after a newer request — otherwise a slow
     // request can overwrite the result of a fresher one and the UI flickers
     // back to stale state right after the user changed a setting.
+    // Leave _planRefreshPending alone: the newer fetch still owns it and
+    // will clear it on its own completion.
     if (seq !== _planFetchSeq) return;
     _pipelinePlan = data;
     var extract = data && data.stages ? data.stages.Extract : null;
@@ -4066,16 +5196,27 @@ async function refreshPipelinePlan() {
     _pipelinePlan = null;
     updateSamVariantWarning(null);
   }
+  // Only the latest fetch clears the pending flag (older stale responses
+  // returned above without touching it).
+  _planRefreshPending = false;
   refreshPipelineUI();
+  // The plan can flip Classify to 'blocked' (missing labels), which gates
+  // Start — recompute the button now that _pipelinePlan has been updated.
+  updateStartButton();
 }
 
 // Debounced version for chatty controls (label checkboxes, model picker).
 function schedulePlanRefresh() {
   if (_planDebounceTimer) clearTimeout(_planDebounceTimer);
+  _planRefreshPending = true;
   _planDebounceTimer = setTimeout(function() {
     _planDebounceTimer = null;
     refreshPipelinePlan();
   }, 150);
+  // Reflect the pending state on Start immediately — the control change
+  // that triggered this may have invalidated the previous classify
+  // blocked/will-run answer.
+  updateStartButton();
 }
 
 function updateCardStates() {
@@ -4176,6 +5317,12 @@ function closeFolderBrowser() {
 function browseTo(path) {
   var listEl = document.getElementById('fbList');
   listEl.innerHTML = '<div class="folder-browser-loading">Loading\u2026</div>';
+  // Clear _fbCurrentPath before the async fetch resolves so New Folder
+  // cannot target the previous location's path if the user clicks it
+  // while the new browse is still in flight. updateNewFolderButton()
+  // re-disables the button until the fetch sets _fbCurrentPath again.
+  _fbCurrentPath = '';
+  updateNewFolderButton();
   _fbSelectedDir = '';
   _fbSelectedDirs = [];
   _fbSelectAnchorPath = '';
@@ -4191,6 +5338,34 @@ function browseTo(path) {
   if (path === '__pictures__') {
     url = '/api/browse?path=' + encodeURIComponent(_fbHomePath + '/Pictures');
   } else if (path === '__volumes__') {
+    // Windows has no single "volumes root" directory — drives live at C:\,
+    // D:\, etc. /api/volumes enumerates them via the Win32 API; render the
+    // drive list directly as a synthetic listing the user can drill into.
+    if (navigator.userAgent.indexOf('Win') >= 0) {
+      fetch('/api/volumes').then(function(r) {
+        if (!r.ok) return r.json().then(function(d) { throw new Error(d.error || 'Failed to enumerate volumes'); });
+        return r.json();
+      }).then(function(volumes) {
+        _fbCurrentPath = '';
+        _fbSelectedDir = '';
+        _fbSelectedDirs = [];
+        _fbSelectAnchorPath = '';
+        document.getElementById('fbSelectedPath').textContent = '';
+        updateFbSelectButtonLabel();
+        updateNewFolderButton();
+        var bc = document.getElementById('fbBreadcrumb');
+        bc.innerHTML = '<span class="current">Volumes</span>';
+        bc.onclick = null;
+        // Skip recursive photo counts on the synthetic drive-root list:
+        // /api/volumes includes the system drive, and counting it would
+        // recursively walk all of C:\ before the user has picked anything.
+        // Counts resume once the user drills into a specific drive.
+        renderFolderList(volumes, { skipCounts: true });
+      }).catch(function(err) {
+        listEl.innerHTML = '<div class="folder-browser-error">' + escapeHtml(err.message) + '</div>';
+      });
+      return;
+    }
     var volDir = navigator.userAgent.indexOf('Mac') >= 0 ? '/Volumes' : '/media';
     url = '/api/browse?path=' + encodeURIComponent(volDir);
   } else if (path) {
@@ -4202,6 +5377,7 @@ function browseTo(path) {
     return r.json();
   }).then(function(data) {
     _fbCurrentPath = data.path;
+    updateNewFolderButton();
     if (!path) _fbHomePath = data.path;
     // Implicit fallback: selectFolder() uses _fbSelectedDir when the user
     // hits Select without clicking any subfolder. Keep _fbSelectedDirs empty
@@ -4213,7 +5389,15 @@ function browseTo(path) {
     document.getElementById('fbSelectedPath').textContent = data.path;
     updateFbSelectButtonLabel();
     renderBreadcrumb(data.path);
-    renderFolderList(data.dirs);
+    // Drilling into a Windows drive root (e.g. C:\, D:/) lists top-level
+    // system directories like Users, Windows, Program Files. Recursive
+    // photo counts on those would scan the entire volume and hang the
+    // UI/server, so skip counts here and resume once the user drills in
+    // one more level. The synthetic Volumes list is handled separately
+    // (with skipCounts:true) above; this guard covers the post-drill
+    // path that /api/browse renders.
+    var isWindowsDriveRoot = /^[A-Za-z]:[\\\/]?$/.test(data.path || '');
+    renderFolderList(data.dirs, { skipCounts: isWindowsDriveRoot });
   }).catch(function(err) {
     listEl.innerHTML = '<div class="folder-browser-error">' + escapeHtml(err.message) + '</div>';
   });
@@ -4239,7 +5423,7 @@ function renderBreadcrumb(path) {
   };
 }
 
-function renderFolderList(dirs) {
+function renderFolderList(dirs, opts) {
   var listEl = document.getElementById('fbList');
   if (!dirs.length) {
     listEl.innerHTML = '<div class="folder-browser-empty">No subfolders</div>';
@@ -4254,8 +5438,10 @@ function renderFolderList(dirs) {
   }
   listEl.innerHTML = html;
   // In source mode, asynchronously fetch recursive photo counts for each
-  // subfolder so users can see which ones contain photos.
-  if (_fbMode === 'source') {
+  // subfolder so users can see which ones contain photos. Callers can pass
+  // skipCounts to avoid this for synthetic listings (e.g. Windows drive
+  // roots) where counting would recursively walk an entire volume.
+  if (_fbMode === 'source' && !(opts && opts.skipCounts)) {
     fetchFolderCounts(dirs.map(function(d) { return d.path; }));
   }
   // Event delegation: click to select, double-click to drill in.
@@ -4415,9 +5601,24 @@ function cancelNewFolder() {
   document.getElementById('fbNewFolderInput').value = '';
 }
 
+function updateNewFolderButton() {
+  // The synthetic Windows Volumes listing leaves _fbCurrentPath empty —
+  // letting users click New Folder there would POST mkdir to '/<name>'
+  // (the current drive root on Windows) instead of a real selected path.
+  var btn = document.getElementById('fbNewFolderBtn');
+  if (!btn) return;
+  btn.disabled = !_fbCurrentPath;
+  btn.style.opacity = _fbCurrentPath ? '' : '0.5';
+  btn.title = _fbCurrentPath ? '' : 'Open a drive to create folders inside it';
+}
+
 function createNewFolder() {
   var name = document.getElementById('fbNewFolderInput').value.trim();
   if (!name) return;
+  if (!_fbCurrentPath) {
+    alert('Open a drive before creating a folder.');
+    return;
+  }
   var newPath = _fbCurrentPath.replace(/\/+$/, '') + '/' + name;
   fetch('/api/browse/mkdir', {
     method: 'POST',
@@ -4459,7 +5660,7 @@ var _fbHomePath = '';
     </div>
     <div class="folder-browser-list" id="fbList"></div>
     <div class="folder-browser-footer">
-      <button class="btn btn-secondary" onclick="showNewFolderInput()" style="font-size:12px;flex-shrink:0;">New Folder</button>
+      <button id="fbNewFolderBtn" class="btn btn-secondary" onclick="showNewFolderInput()" style="font-size:12px;flex-shrink:0;">New Folder</button>
       <div style="display:flex;align-items:center;flex:1;min-width:0;margin-left:12px;">
         <span class="folder-browser-path" id="fbSelectedPath"></span>
         <button class="btn btn-secondary" onclick="closeFolderBrowser()" style="font-size:12px;flex-shrink:0;">Cancel</button>

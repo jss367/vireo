@@ -14,6 +14,11 @@ import onnx_runtime
 
 log = logging.getLogger(__name__)
 
+
+class ClassificationCancelled(RuntimeError):
+    """Raised when caller-local cancellation interrupts classifier setup."""
+
+
 CACHE_DIR = os.path.expanduser("~/.vireo/embedding_cache")
 _MANIFEST_PATH = os.path.join(CACHE_DIR, "manifest.json")
 
@@ -252,8 +257,16 @@ def _run_text_batched(text_session, text_input_name, tokens, model_dir=None):
     races) are passed through unchanged so a transient runtime error
     can't permanently flag a healthy install for Repair.
     """
+    # Serialise GPU access across concurrent pipelines: when two pipelines
+    # load BioCLIP with different label fingerprints, both factories run
+    # concurrently under the cache's load_lock-per-key, and each one
+    # computes its own label embeddings here. Without this lock, both
+    # text encoders run on the GPU at the same time and can OOM.
+    # Skipped for CPU-only sessions (same rationale as image_session).
+    from pipeline_locks import acquire_gpu_if_session_uses_it
     try:
-        return text_session.run(None, {text_input_name: tokens})[0]
+        with acquire_gpu_if_session_uses_it(text_session):
+            return text_session.run(None, {text_input_name: tokens})[0]
     except Exception as e:
         if not _looks_like_stale_batched_export(e):
             raise
@@ -284,6 +297,7 @@ def _compute_embeddings_with_progress(
     tokenizer,
     labels,
     progress_callback=None,
+    cancel_check=None,
     model_dir=None,
 ):
     """Compute text embeddings for labels with progress logging.
@@ -297,6 +311,7 @@ def _compute_embeddings_with_progress(
         tokenizer: tokenizers.Tokenizer instance
         labels: list of label strings
         progress_callback: optional callable(current, total) for UI progress
+        cancel_check: optional callable() -> bool checked between labels
 
     Returns:
         numpy float32 array of shape (embedding_dim, num_labels) --
@@ -309,6 +324,8 @@ def _compute_embeddings_with_progress(
 
     all_features = []
     for i, classname in enumerate(labels):
+        if cancel_check and cancel_check():
+            raise ClassificationCancelled("classification cancelled")
         txts = [template(classname) for template in OPENAI_IMAGENET_TEMPLATE]
         tokens = _tokenize(tokenizer, txts)
         txt_features = _run_text_batched(
@@ -325,6 +342,8 @@ def _compute_embeddings_with_progress(
         done = i + 1
         if progress_callback:
             progress_callback(done, total)
+        if cancel_check and cancel_check():
+            raise ClassificationCancelled("classification cancelled")
         if done % 50 == 0 or done == total:
             log.info("Computing label embeddings: %d/%d", done, total)
 
@@ -347,6 +366,7 @@ class Classifier:
                         from the correct place.
         embedding_progress_callback: optional callable(current, total) for
                                      embedding computation progress
+        cancel_check: optional callable() -> bool checked during slow setup
     """
 
     def __init__(
@@ -355,6 +375,7 @@ class Classifier:
         model_str="ViT-B-16",
         pretrained_str=None,
         embedding_progress_callback=None,
+        cancel_check=None,
     ):
         # Resolve model directory.
         # pretrained_str may be a configured weights_path (e.g. from a custom
@@ -472,12 +493,16 @@ class Classifier:
                     )
 
             if os.path.exists(cache_path):
+                if cancel_check and cancel_check():
+                    raise ClassificationCancelled("classification cancelled")
                 log.info(
                     "Loading cached label embeddings for %d labels...", len(labels)
                 )
                 self._txt_embeddings = np.load(cache_path)
                 log.info("Label embeddings loaded from cache")
             else:
+                if cancel_check and cancel_check():
+                    raise ClassificationCancelled("classification cancelled")
                 log.info(
                     "Computing label embeddings for %d labels "
                     "(first run -- will be cached for next time)...",
@@ -529,16 +554,21 @@ class Classifier:
                         self._mean = preproc["mean"]
                         self._std = preproc["std"]
 
+                    if cancel_check and cancel_check():
+                        raise ClassificationCancelled("classification cancelled")
                     self._txt_embeddings = _compute_embeddings_with_progress(
                         text_session,
                         text_input_name,
                         tokenizer,
                         self._classes,
                         progress_callback=embedding_progress_callback,
+                        cancel_check=cancel_check,
                         model_dir=self._model_dir,
                     )
                 finally:
                     del text_session
+                if cancel_check and cancel_check():
+                    raise ClassificationCancelled("classification cancelled")
                 os.makedirs(CACHE_DIR, exist_ok=True)
                 np.save(cache_path, self._txt_embeddings)
                 # Update manifest with human-readable metadata
@@ -609,16 +639,27 @@ class Classifier:
             numpy float32 array of shape (1, embedding_dim) -- normalized
         """
         from PIL import Image as PILImage
+        from pipeline_locks import acquire_gpu_if_session_uses_it
 
-        if isinstance(image, (str, os.PathLike)):
+        if isinstance(image, str | os.PathLike):
             with PILImage.open(image) as img:
                 input_arr = self._preprocess(img)
         else:
             input_arr = self._preprocess(image)
 
-        features = self._image_session.run(
-            None, {self._image_input_name: input_arr}
-        )[0]
+        # GPU serialisation across concurrent pipelines, scoped tightly to
+        # the forward pass. Preprocessing above (load/decode/resize) and the
+        # normalisation below run without the lock so concurrent pipelines
+        # can use the GPU while this one does CPU work. Skipped entirely
+        # for CPU-only sessions — Apple Silicon excludes CoreML when an
+        # external-data ONNX is present, and CPU-only installs likewise
+        # report no GPU provider; taking the semaphore there would block
+        # real GPU stages in other pipelines for work that never touches
+        # the GPU.
+        with acquire_gpu_if_session_uses_it(self._image_session):
+            features = self._image_session.run(
+                None, {self._image_input_name: input_arr}
+            )[0]
         features = features.astype(np.float32)
         return _normalize(features)
 

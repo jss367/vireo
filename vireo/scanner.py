@@ -15,12 +15,23 @@ from pathlib import Path
 
 import imagehash
 from db import commit_with_retry
-from image_loader import RAW_EXTENSIONS, SUPPORTED_EXTENSIONS, extract_working_copy
+from exif_orientation import orientation_swaps_axes as _orientation_swaps_axes
+from image_loader import (
+    RAW_EXTENSIONS,
+    SUPPORTED_EXTENSIONS,
+    extract_working_copy,
+    is_excluded_scan_path,
+    safe_iter_dir,
+    safe_scan_walk,
+)
 from metadata import extract_metadata
 from PIL import Image
+from render_source import exif_orientation as _exif_orientation_from_data
+from render_source import is_undersized
 from xmp import read_hierarchical_keywords, read_keywords
 
 log = logging.getLogger(__name__)
+EMPTY_FILE_SHA256 = hashlib.sha256(b"").hexdigest()
 
 # scan() runs inside JobRunner/pipeline_job background threads, so the
 # default POSIX "fork" start method is unsafe here: forking a
@@ -44,6 +55,40 @@ _SCAN_MP_METHOD = (
 # (the WaitForMultipleObjects handle limit). Clamp on Windows so scans
 # don't fail on high-core-count machines or misconfigured scan_workers.
 _WINDOWS_MAX_WORKERS = 61
+
+
+def _scaled_dimensions(width, height, max_size):
+    try:
+        width = int(width or 0)
+        height = int(height or 0)
+    except (TypeError, ValueError):
+        return 0, 0
+    if width <= 0 or height <= 0:
+        return 0, 0
+    if max_size and max_size > 0:
+        long_edge = max(width, height)
+        if long_edge > max_size:
+            scale = max_size / long_edge
+            width = round(width * scale)
+            height = round(height * scale)
+    return width, height
+
+
+def _oriented_dimensions(width, height, exif_data):
+    """Return (width, height) rotated to match what extract_working_copy writes.
+
+    Stored ``width``/``height`` come straight from the sensor/file metadata,
+    so for portrait shots taken on a landscape sensor they're the unrotated
+    axes (e.g. 6000x4000 with EXIF Orientation 6). The request-path helpers
+    in thumbnails/app/export/pipeline normalize these to display orientation
+    before comparing against rendered pixels; scanner's RAW-undersize check
+    must do the same or it sees the orientation-normalized JPEG written by
+    ``extract_working_copy`` (4000x6000) as catastrophically undersized vs.
+    the raw 6000x4000 and falls back to the companion JPEG.
+    """
+    if _orientation_swaps_axes(_exif_orientation_from_data(exif_data)):
+        return height, width
+    return width, height
 
 
 def compute_file_hash(file_path, chunk_size=65536):
@@ -194,7 +239,7 @@ def _extract_timestamp(exif_group):
         return None
 
 
-def _pair_raw_jpeg_companions(db):
+def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
     """Find raw+JPEG pairs in the same folder and merge them.
 
     When both IMG_001.cr3 and IMG_001.jpg exist in the same folder,
@@ -251,7 +296,14 @@ def _pair_raw_jpeg_companions(db):
         if primary_full["rating"] == 0 and companion_full["rating"] != 0:
             updates.append("rating = ?")
             params.append(companion_full["rating"])
-        if primary_full["flag"] == "none" and companion_full["flag"] != "none":
+        if (
+            primary_full["flag"] == "none"
+            and companion_full["flag"] not in ("none", "rejected")
+        ):
+            # Never copy 'rejected': the duplicate auto-resolver runs earlier
+            # in the same scan and rejects companion JPEGs that lose to a
+            # byte-identical twin elsewhere — stamping that onto the RAW
+            # would silently hide a unique photo.
             updates.append("flag = ?")
             params.append(companion_full["flag"])
         if primary_full["latitude"] is None and companion_full["latitude"] is not None:
@@ -289,11 +341,119 @@ def _pair_raw_jpeg_companions(db):
         )
 
         # Transfer detections (and their cascaded predictions) from companion to primary.
-        # Detections are linked to photos; predictions cascade through detection_id.
-        db.conn.execute(
-            "UPDATE detections SET photo_id = ? WHERE photo_id = ?",
-            (primary["id"], companion["id"]),
-        )
+        # Detection IDs are content-addressed on (photo_id, detector_model, box,
+        # category) — see vireo/detection_id.py. A bare `UPDATE photo_id` would
+        # leave the row's `id` column stale (still hashed against the companion's
+        # photo_id); a later detector run on the primary that produced the same
+        # box would then either collide on the stale id (if SQLite reused the
+        # companion's rowid for a new photo) or, more commonly, never match and
+        # so the stale row would be reaped by the stale-cleanup DELETE in
+        # `_upsert_detection_rows`, cascading away its predictions. Recompute
+        # the id, redirect predictions to the new id, then drop the stale row.
+        from detection_id import detection_id as _detection_id
+
+        moving = db.conn.execute(
+            "SELECT id, detector_model, box_x, box_y, box_w, box_h,"
+            " detector_confidence, category"
+            " FROM detections WHERE photo_id = ?",
+            (companion["id"],),
+        ).fetchall()
+        for det in moving:
+            new_id = _detection_id(
+                primary["id"], det["detector_model"],
+                (det["box_x"], det["box_y"], det["box_w"], det["box_h"]),
+                det["category"],
+            )
+            if new_id == det["id"]:
+                # Cannot happen in practice (photo_id changed) but defensive.
+                db.conn.execute(
+                    "UPDATE detections SET photo_id = ? WHERE id = ?",
+                    (primary["id"], det["id"]),
+                )
+                continue
+            # Insert the row under the new id. If the primary already has a
+            # detection for the same (model, box, category), the UPSERT no-ops
+            # and we just discard the companion's row below.
+            db.conn.execute(
+                "INSERT INTO detections"
+                " (id, photo_id, detector_model, box_x, box_y, box_w, box_h,"
+                "  detector_confidence, category)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(id) DO NOTHING",
+                (new_id, primary["id"], det["detector_model"],
+                 det["box_x"], det["box_y"], det["box_w"], det["box_h"],
+                 det["detector_confidence"], det["category"]),
+            )
+            # Redirect predictions to the new detection id. ON CONFLICT in
+            # predictions is unlikely (would require the primary already had
+            # a prediction for this species against the same detection) but
+            # IGNORE keeps us defensive.
+            db.conn.execute(
+                "UPDATE OR IGNORE predictions SET detection_id = ? WHERE detection_id = ?",
+                (new_id, det["id"]),
+            )
+            # If a companion prediction collided with an existing primary
+            # prediction, its row stayed on the old detection id. Preserve any
+            # workspace review state by moving it onto the surviving prediction
+            # before the old detection delete cascades the duplicate away.
+            db.conn.execute(
+                """INSERT INTO prediction_review
+                     (prediction_id, workspace_id, status, reviewed_at,
+                      individual, group_id, vote_count, total_votes)
+                   SELECT survivor.id, pr.workspace_id, pr.status,
+                          pr.reviewed_at, pr.individual, pr.group_id,
+                          pr.vote_count, pr.total_votes
+                     FROM predictions duplicate
+                     JOIN predictions survivor
+                       ON survivor.detection_id = ?
+                      AND survivor.classifier_model = duplicate.classifier_model
+                      AND survivor.labels_fingerprint = duplicate.labels_fingerprint
+                      AND survivor.species IS duplicate.species
+                     JOIN prediction_review pr
+                       ON pr.prediction_id = duplicate.id
+                    WHERE duplicate.detection_id = ?
+                   ON CONFLICT(prediction_id, workspace_id)
+                   DO UPDATE SET status = excluded.status,
+                                 reviewed_at = excluded.reviewed_at,
+                                 individual = COALESCE(
+                                     excluded.individual,
+                                     prediction_review.individual
+                                 ),
+                                 group_id = COALESCE(
+                                     excluded.group_id,
+                                     prediction_review.group_id
+                                 ),
+                                 vote_count = COALESCE(
+                                     excluded.vote_count,
+                                     prediction_review.vote_count
+                                 ),
+                                 total_votes = COALESCE(
+                                     excluded.total_votes,
+                                     prediction_review.total_votes
+                                 )
+                    WHERE prediction_review.status = 'pending'
+                      AND excluded.status <> 'pending'""",
+                (new_id, det["id"]),
+            )
+            # Redirect classifier_runs too — they're the cache key the
+            # non-reclassify gate consults. Without this, paired photos with
+            # cached predictions would look unclassified to
+            # `get_classifier_run_keys(new_id)` and rerun the classifier
+            # after every pair-up. Same OR IGNORE pattern as predictions:
+            # primary's own run rows win on (detection_id, classifier_model,
+            # labels_fingerprint) conflicts.
+            db.conn.execute(
+                "UPDATE OR IGNORE classifier_runs SET detection_id = ? WHERE detection_id = ?",
+                (new_id, det["id"]),
+            )
+            # Drop any predictions/classifier_runs that lost the UPDATE race
+            # (duplicate-key) along with the now-orphan companion detection
+            # row — CASCADE on both FKs cleans up any remaining rows tied to
+            # the old id.
+            db.conn.execute(
+                "DELETE FROM detections WHERE id = ?",
+                (det["id"],),
+            )
 
         # Transfer pending_changes from companion to primary. No dedup needed
         # here (unlike the inat_submissions block below): pending_changes has
@@ -316,6 +476,47 @@ def _pair_raw_jpeg_companions(db):
             "UPDATE inat_submissions SET photo_id = ? WHERE photo_id = ?",
             (primary["id"], companion["id"]),
         )
+        # Preserve non-destructive edits when a JPEG companion is folded into
+        # a RAW primary. If both already have recipes, the primary wins.
+        transferred_recipe = db.conn.execute(
+            """INSERT OR IGNORE INTO photo_edit_recipes
+                   (photo_id, recipe_json, updated_at)
+               SELECT ?, recipe_json, updated_at
+               FROM photo_edit_recipes
+               WHERE photo_id = ?""",
+            (primary["id"], companion["id"]),
+        )
+        if transferred_recipe.rowcount:
+            db.conn.execute(
+                """UPDATE edit_history_items
+                   SET photo_id = ?
+                   WHERE photo_id = ?
+                     AND edit_id IN (
+                         SELECT id FROM edit_history
+                         WHERE action_type = 'edit_recipe'
+                     )""",
+                (primary["id"], companion["id"]),
+            )
+            if vireo_dir:
+                # Local-adjustment mask snapshots are looked up by
+                # (photo_id, ref); the transferred recipe now points at
+                # primary["id"], so the files must move with it or every
+                # render silently disables the local pass.
+                from local_masks import transfer_snapshots
+                transfer_snapshots(vireo_dir, companion["id"], primary["id"])
+                _invalidate_derived_caches(
+                    db, vireo_dir, primary["id"],
+                    thumb_cache_dir=thumb_cache_dir,
+                )
+            else:
+                db.conn.execute(
+                    "UPDATE photos SET thumb_path = NULL WHERE id = ?",
+                    (primary["id"],),
+                )
+                db.conn.execute(
+                    "DELETE FROM preview_cache WHERE photo_id = ?",
+                    (primary["id"],),
+                )
         # Remove keyword associations then the duplicate JPEG record
         db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (companion["id"],))
         db.conn.execute("DELETE FROM photos WHERE id = ?", (companion["id"],))
@@ -392,7 +593,8 @@ def _invalidate_derived_caches(db, vireo_dir, photo_id, thumb_cache_dir=None):
     db.conn.execute(
         "UPDATE photos SET working_copy_path = NULL,"
         " working_copy_failed_at = NULL,"
-        " working_copy_failed_mtime = NULL"
+        " working_copy_failed_mtime = NULL,"
+        " working_copy_failed_source = NULL"
         " WHERE id = ?",
         (photo_id,),
     )
@@ -661,7 +863,7 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
     rows = db.conn.execute(
         f"""
         SELECT p.id, p.filename, p.companion_path, p.working_copy_path,
-               p.extension, p.width, p.height, p.file_mtime,
+               p.extension, p.width, p.height, p.exif_data, p.file_mtime,
                f.path AS folder_path
           FROM photos p
           JOIN folders f ON f.id = p.folder_id
@@ -692,24 +894,129 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
         wc_rel = f"working/{row['id']}.jpg"
         wc_abs = os.path.join(vireo_dir, wc_rel)
 
-        # Prefer companion JPEG if available
-        source = os.path.join(row["folder_path"], row["filename"])
+        # Working copies are the edit-quality source. For non-RAW primaries
+        # we still prefer the companion JPEG outright (fast path). For RAW
+        # primaries we decode the RAW with image_loader's highlight-preserving
+        # settings instead of baking in a camera JPEG that may already have
+        # clipped highlights — but if libraw cannot decode this RAW variant
+        # (and the embedded thumb is unusable too) we still fall back to the
+        # companion so an extractable JPEG copy isn't refused outright.
+        primary_path = os.path.join(row["folder_path"], row["filename"])
+        primary_is_raw = (
+            os.path.splitext(row["filename"])[1].lower() in RAW_EXTENSIONS
+        )
+        companion_path = None
         if row["companion_path"]:
-            companion = os.path.join(row["folder_path"], row["companion_path"])
-            if os.path.isfile(companion):
-                source = companion
+            candidate = os.path.join(row["folder_path"], row["companion_path"])
+            if os.path.isfile(candidate):
+                companion_path = candidate
+
+        if not primary_is_raw and companion_path:
+            source = companion_path
+            failure_source = "companion"
+        else:
+            source = primary_path
+            failure_source = "source"
 
         # extract_working_copy is slow (RAW decode + JPEG encode); run it
         # before any DB write so no transaction is open while it runs.
         ok = extract_working_copy(source, wc_abs, max_size=wc_max_size, quality=wc_quality)
-        if ok:
-            db.conn.execute(
-                "UPDATE photos SET working_copy_path=?,"
-                " working_copy_failed_at=NULL,"
-                " working_copy_failed_mtime=NULL"
-                " WHERE id=?",
-                (wc_rel, row["id"]),
+        raw_failed_then_companion = False
+        # libraw returns an embedded JPEG when it can't demosaic a RAW; that
+        # preview is often a fraction of sensor resolution, so ok=True here
+        # can still produce an undersized working copy. Treat a substantially
+        # undersized RAW extraction the same as a hard failure so the
+        # companion-fallback branch below replaces it instead of caching the
+        # downscaled preview.
+        if (
+            ok
+            and primary_is_raw
+            and companion_path
+            and row["width"]
+            and row["height"]
+        ):
+            # Stored width/height are the unrotated sensor axes; swap them
+            # before scaling so portrait files (e.g. 6000x4000 + Orientation 6)
+            # produce the same expected dimensions as the orientation-normalized
+            # JPEG that extract_working_copy actually writes.
+            oriented_w, oriented_h = _oriented_dimensions(
+                row["width"], row["height"], row["exif_data"],
             )
+            expected_w, expected_h = _scaled_dimensions(
+                oriented_w, oriented_h, wc_max_size,
+            )
+            try:
+                with Image.open(wc_abs) as _wc:
+                    wc_w, wc_h = _wc.size
+            except Exception:
+                # PIL couldn't open the file: corrupt / truncated /
+                # unsupported. Treat as a failed extraction so the
+                # companion fallback below runs instead of caching an
+                # unreadable working copy.
+                log.info(
+                    "RAW working-copy extraction for photo %s produced "
+                    "an unreadable file %s; retrying from companion "
+                    "JPEG %s",
+                    row["id"], wc_abs, companion_path,
+                )
+                wc_w = wc_h = 0
+                ok = False
+            # Use a 1% relative tolerance (not the request paths' 1px slack):
+            # libraw can emit the active image area a few pixels narrower than
+            # the full sensor, and a strict check would mark a valid extraction
+            # as failed and route every edited render away from the RAW.
+            if ok and is_undersized(
+                wc_w, wc_h, expected_w, expected_h, abs_slack=0, rel_slack=0.01,
+            ):
+                log.info(
+                    "RAW working-copy extraction for photo %s produced "
+                    "undersized result (%dx%d, expected %dx%d); "
+                    "retrying from companion JPEG %s",
+                    row["id"], wc_w, wc_h, expected_w, expected_h,
+                    companion_path,
+                )
+                ok = False
+        if not ok and primary_is_raw and companion_path:
+            log.info(
+                "RAW working-copy extraction failed for photo %s (%s); "
+                "falling back to companion JPEG %s",
+                row["id"], primary_path, companion_path,
+            )
+            source = companion_path
+            # Keep failure_source = "source": the RAW already failed, and
+            # _has_current_working_copy_failure ignores "companion" markers
+            # while both files exist — overwriting here would silently
+            # un-shield request paths from the known RAW failure if the
+            # companion extraction also fails.
+            ok = extract_working_copy(
+                source, wc_abs, max_size=wc_max_size, quality=wc_quality,
+            )
+            raw_failed_then_companion = ok
+        if ok:
+            if raw_failed_then_companion:
+                # The companion-derived working copy is usable, but request
+                # paths still need to know the RAW itself failed: edited RAW
+                # render paths (preview/edit-preview/original/export) gate
+                # companion selection in _recipe_render_source on a present
+                # "source" failure marker. Clearing it here would push those
+                # paths back through the unsupported RAW decode and 500.
+                db.conn.execute(
+                    "UPDATE photos SET working_copy_path=?,"
+                    " working_copy_failed_at=datetime('now'),"
+                    " working_copy_failed_mtime=?,"
+                    " working_copy_failed_source='source'"
+                    " WHERE id=?",
+                    (wc_rel, row["file_mtime"], row["id"]),
+                )
+            else:
+                db.conn.execute(
+                    "UPDATE photos SET working_copy_path=?,"
+                    " working_copy_failed_at=NULL,"
+                    " working_copy_failed_mtime=NULL,"
+                    " working_copy_failed_source=NULL"
+                    " WHERE id=?",
+                    (wc_rel, row["id"]),
+                )
         else:
             # Mark failure gated on current file_mtime so a future content
             # change (mtime bump) clears the gate and we retry. The
@@ -725,9 +1032,10 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
             )
             db.conn.execute(
                 "UPDATE photos SET working_copy_failed_at=datetime('now'),"
-                " working_copy_failed_mtime=?"
+                " working_copy_failed_mtime=?,"
+                " working_copy_failed_source=?"
                 " WHERE id=?",
-                (row["file_mtime"], row["id"]),
+                (row["file_mtime"], failure_source, row["id"]),
             )
         commit_with_retry(db.conn)
 
@@ -784,7 +1092,9 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         extract_full_metadata: if True, store full ExifTool JSON in exif_data column
         photo_callback: optional callable(photo_id, path_str) called after each photo is committed
         skip_paths: optional set of absolute path strings to exclude from scanning
-        status_callback: optional callable(message) for phase status updates
+        status_callback: optional callable(message) for phase status updates.
+            Callers may also accept keyword-only ``phase_current``,
+            ``phase_total``, and ``phase_label`` for sub-phase progress.
         recursive: if True (default), scan subfolders; if False, only scan root directory
         restrict_dirs: optional list of directory paths to scan instead of the
             full tree. When provided, only files in these directories are
@@ -817,6 +1127,22 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             RuntimeError("scan cancelled") at cancellation checkpoints.
     """
     root_path = Path(root)
+    # Don't open the root at all if the root is, or sits inside, an
+    # other-app data bundle. prune_scan_dirs below only filters
+    # *children*, so a root of e.g.
+    # ``~/Pictures/Photos Library.photoslibrary`` — or a directly
+    # selected/stale subfolder like ``.../Photos Library.photoslibrary/originals``
+    # — would still trigger the macOS "access data from other apps" TCC
+    # prompt this guard exists to avoid. Check every ancestor, not just
+    # the leaf name. This must run BEFORE ``root_path.is_dir()``: is_dir
+    # follows symlinks and stat's the target, so for a directly selected
+    # bundle (or a symlink to one), the existence test alone is enough
+    # to trip the TCC prompt — mirroring the restrict_dirs branch below.
+    if is_excluded_scan_path(root_path):
+        log.info(
+            "Skipping other-app data bundle as scan root: %s", root_path,
+        )
+        return
     if not root_path.is_dir():
         log.warning("Root path does not exist or is not a directory: %s", root)
         return
@@ -825,11 +1151,29 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         if cancel_check is not None and cancel_check():
             raise RuntimeError("scan cancelled")
 
+    def _emit_status(message, phase_current=None, phase_total=None, phase_label=None):
+        if not status_callback:
+            return
+        if phase_current is None and phase_total is None and phase_label is None:
+            status_callback(message)
+            return
+        try:
+            status_callback(
+                message,
+                phase_current=phase_current,
+                phase_total=phase_total,
+                phase_label=phase_label,
+            )
+        except TypeError:
+            # Keep compatibility with older one-argument callbacks in tests and
+            # utility callers.
+            status_callback(message)
+
     # Discover all image files (incremental enumeration for progress reporting)
     log.info("Discovering files in %s ...", root)
     _check_cancelled()
     if status_callback:
-        status_callback("Discovering files...")
+        _emit_status("Discovering files...")
     image_files = []
 
     # os.walk + onerror, not Path.rglob: rglob silently skips any
@@ -867,6 +1211,14 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         else:
             log.warning("os.walk error at %s: %s", err.filename, err)
 
+    # Tracks restrict_dirs entries that survive the bundle guard, so the
+    # working-copy extraction pass below scopes its SQL query to the same
+    # set the discovery loop actually visited. Without this, a stale folder
+    # row inside an excluded bundle (carried over from before the guard)
+    # would be re-touched by ``_extract_working_copies`` reading
+    # ``folder_path/filename`` — re-tripping the macOS TCC prompt this guard
+    # exists to avoid.
+    effective_restrict_dirs = []
     if restrict_dirs is not None:
         # Only enumerate files in the specified directories (non-recursive).
         # root is still used as the folder hierarchy root for _ensure_folder.
@@ -874,22 +1226,37 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         for d in restrict_dirs:
             _check_cancelled()
             dp = Path(d)
+            # The outer ``is_excluded_scan_path(root_path)`` guard above only
+            # covers ``root``. restrict_dirs entries can independently point
+            # into an other-app data bundle — e.g. a stale folder row from
+            # before this guard, or a duplicate the caller built from
+            # workspace_folders pointing at
+            # ``~/Pictures/Photos Library.photoslibrary/originals``. Calling
+            # ``dp.is_dir()`` / ``dp.iterdir()`` on that subtree would still
+            # trip the macOS "access data from other apps" TCC prompt this
+            # guard exists to avoid. Reject before any filesystem access.
+            if is_excluded_scan_path(dp):
+                log.info(
+                    "Skipping other-app data bundle in restrict_dirs: %s", dp,
+                )
+                continue
+            effective_restrict_dirs.append(d)
             if dp.is_dir():
-                # iterdir() raises PermissionError when the kernel refuses
-                # enumeration (macOS TCC EPERM, POSIX EACCES). Route through
-                # _on_walk_error so denials are surfaced via
-                # permission_error_callback the same way the recursive path
-                # does. _on_walk_error re-raises when no callback is
-                # registered, so callers like pipeline_job's repair scan
-                # (which counts unreachable folders via `except OSError`)
-                # keep their failure semantics; only callers that opted in
-                # to partial-success by passing the callback fall through to
-                # `continue`.
-                try:
-                    entries = list(dp.iterdir())
-                except PermissionError as e:
-                    _on_walk_error(e)
-                    continue
+                # safe_iter_dir mirrors iterdir() but drops excluded
+                # bundle children (direct ``Photos Library.photoslibrary``
+                # entries or symlinks pointing into one) before the
+                # is_file()/suffix filter below would stat them — that
+                # stat alone would re-trip the macOS "access data from
+                # other apps" TCC prompt this guard exists to avoid.
+                # Permission denials route through _on_walk_error: when
+                # ``permission_error_callback`` is registered the helper
+                # logs + invokes it and returns, so the generator yields
+                # nothing and the for-loop falls through to the next
+                # ``d``. Without a callback, _on_walk_error re-raises so
+                # callers like pipeline_job's repair scan (``except
+                # (OSError, RuntimeError)``) keep their loud failure
+                # semantics — we deliberately don't catch that raise.
+                entries = list(safe_iter_dir(str(dp), onerror=_on_walk_error))
                 for f in entries:
                     _check_cancelled()
                     if (f.is_file()
@@ -902,7 +1269,14 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     else:
         if recursive:
             checked = 0
-            for dirpath, _dirnames, filenames in os.walk(
+            # safe_scan_walk replaces os.walk + prune_scan_dirs. It excludes
+            # other-app data bundles (e.g. "Photos Library.photoslibrary"
+            # sitting in ~/Pictures) without ever stat-following a symlink
+            # to one — os.walk's classification call follows symlinks and
+            # would re-trip the macOS "access data from other apps" TCC
+            # prompt for a child like ``LibraryAlias -> Photos
+            # Library.photoslibrary`` before prune_scan_dirs could reject it.
+            for dirpath, _dirnames, filenames in safe_scan_walk(
                 str(root_path), onerror=_on_walk_error,
             ):
                 _check_cancelled()
@@ -911,7 +1285,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                     if checked % 100 == 0:
                         _check_cancelled()
                     if checked % 500 == 0 and status_callback:
-                        status_callback(
+                        _emit_status(
                             f"Discovering files... ({len(image_files)} found)"
                         )
                     ext = os.path.splitext(name)[1].lower()
@@ -931,16 +1305,23 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                             continue
                         image_files.append(Path(full))
         else:
-            try:
-                entries = list(root_path.iterdir())
-            except PermissionError as e:
-                _on_walk_error(e)
-                entries = []
+            # safe_iter_dir mirrors iterdir() but drops excluded bundle
+            # children before the is_file() filter below would stat
+            # them. A normal root like ~/Pictures can hold ``Photos
+            # Library.photoslibrary`` (or a symlink to one) as a direct
+            # child; a bare iterdir + is_file() would stat that bundle
+            # and re-trip the macOS "access data from other apps" TCC
+            # prompt this guard exists to avoid, even though the
+            # extension filter would have rejected it afterwards.
+            # Permission denials route through _on_walk_error (callback
+            # → empty entries, no callback → re-raise) the same way the
+            # restrict_dirs branch above does.
+            entries = list(safe_iter_dir(str(root_path), onerror=_on_walk_error))
             for checked, f in enumerate(entries, 1):
                 if checked % 100 == 0:
                     _check_cancelled()
                 if checked % 500 == 0 and status_callback:
-                    status_callback(
+                    _emit_status(
                         f"Discovering files... ({len(image_files)} found)"
                     )
                 if (f.is_file()
@@ -958,12 +1339,17 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
 
     # Build existing photo lookup for incremental mode
     existing_photos = {}
+    existing_file_hashes = {}
     exif_extracted = set()  # photo IDs where ExifTool has already run
     if incremental:
         all_photos = db.get_photos(per_page=999999)
         for p in all_photos:
             # Key by folder_id + filename won't work easily, so use a second lookup
             existing_photos[p["id"]] = p
+        existing_file_hashes = {
+            row["id"]: row["file_hash"]
+            for row in db.conn.execute("SELECT id, file_hash FROM photos")
+        }
         # Build a path-based lookup: we need folder path + filename
         existing_by_path = {}
         folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
@@ -979,6 +1365,23 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     # Build folder cache: path -> folder_id
     folder_cache = {}
 
+    # When the scan is restricted to specific subfolders, those subfolders —
+    # not the broad scan root — are the user-facing workspace roots. A
+    # templated copy-import lands files in ``<destination>/<template>/...``
+    # dirs and passes those leaf dirs as ``restrict_dirs`` while keeping the
+    # destination base as ``root`` only for parent-chain creation. Promoting
+    # the base to a workspace root would make the new-images walk treat every
+    # un-imported sibling under it as "new" (e.g. a whole archive of past
+    # shoots sharing the destination). Mark the restricted dirs as roots
+    # instead; the base stays linked but is_root=0. See
+    # ``new_images.mapped_roots``. ``effective_restrict_dirs`` (bundle-filtered)
+    # is the set actually enumerated, so root marking matches what was scanned.
+    _restrict_root_paths = None
+    if restrict_dirs is not None:
+        _restrict_root_paths = {
+            os.path.normpath(str(d)) for d in effective_restrict_dirs
+        }
+
     def _ensure_folder(folder_path):
         """Ensure a folder and all its parents exist in the DB. Returns folder_id."""
         folder_str = str(folder_path)
@@ -989,11 +1392,16 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         if folder_path != root_path:
             parent_id = _ensure_folder(folder_path.parent)
 
+        if _restrict_root_paths is not None:
+            is_ws_root = os.path.normpath(folder_str) in _restrict_root_paths
+        else:
+            is_ws_root = (folder_path == root_path)
+
         folder_id = db.add_folder(
             path=folder_str,
             name=folder_path.name,
             parent_id=parent_id,
-            workspace_root=(folder_path == root_path),
+            workspace_root=is_ws_root,
         )
         folder_cache[folder_str] = folder_id
         return folder_id
@@ -1056,15 +1464,35 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         if restrict_dirs is not None:
             for d in restrict_dirs:
                 dp = Path(d)
+                # Same bundle guard as the discovery loop above — never
+                # register or stat a path inside an other-app data bundle,
+                # even when the caller stuffed one into ``restrict_dirs``.
+                if is_excluded_scan_path(dp):
+                    continue
                 if dp.is_dir():
                     _ensure_folder(dp)
 
         for image_path in image_files:
             _check_cancelled()
-            stat = image_path.stat()
+            try:
+                stat = image_path.stat()
+            except OSError:
+                # File deleted/renamed between discovery and this pass —
+                # skip it instead of aborting the whole scan (the discovery
+                # walk has the same guard for broken symlinks).
+                log.info("File vanished during scan, skipping: %s", image_path)
+                processed_count += 1
+                if progress_callback:
+                    progress_callback(processed_count, total)
+                continue
             file_mtime = stat.st_mtime
             xmp_path = image_path.with_suffix(".xmp")
-            xmp_mtime = xmp_path.stat().st_mtime if xmp_path.exists() else None
+            try:
+                xmp_mtime = xmp_path.stat().st_mtime
+            except OSError:
+                # Covers both "no sidecar" and a sidecar deleted between
+                # exists() and stat() — same outcome either way.
+                xmp_mtime = None
 
             if incremental:
                 full_path_str = str(image_path)
@@ -1089,8 +1517,17 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                         (existing["timestamp"] is None or dims_suspect)
                         and existing["id"] not in exif_extracted
                     )
+                    existing_file_hash = existing_file_hashes.get(existing["id"])
+                    empty_hash_needs_repair = (
+                        existing["file_size"] == 0
+                        and existing_file_hash == EMPTY_FILE_SHA256
+                    )
 
-                    if file_unchanged and xmp_unchanged and not metadata_missing:
+                    if (
+                        file_unchanged and xmp_unchanged
+                        and not metadata_missing
+                        and not empty_hash_needs_repair
+                    ):
                         processed_count += 1
                         if photo_callback:
                             photo_callback(existing["id"], full_path_str)
@@ -1106,8 +1543,22 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                             (xmp_mtime, existing["id"]),
                         )
                         commit_with_retry(db.conn)
+                    elif not xmp_unchanged:
+                        # Sidecar deleted: clear the stored mtime so the row
+                        # converges instead of looking "XMP changed" on every
+                        # later scan (this skip path never reaches the main
+                        # loop, so nothing else would ever reset it).
+                        db.conn.execute(
+                            "UPDATE photos SET xmp_mtime = NULL WHERE id = ?",
+                            (existing["id"],),
+                        )
+                        commit_with_retry(db.conn)
 
-                    if file_unchanged and not metadata_missing:
+                    if (
+                        file_unchanged
+                        and not metadata_missing
+                        and not empty_hash_needs_repair
+                    ):
                         processed_count += 1
                         if photo_callback:
                             photo_callback(existing["id"], full_path_str)
@@ -1133,9 +1584,27 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     # Batch extract metadata via ExifTool only for files that need processing
     paths_to_extract = [str(ip) for ip in files_to_process]
     if paths_to_extract and status_callback:
-        status_callback(f"Extracting metadata ({len(paths_to_extract)} files)...")
+        metadata_total = len(paths_to_extract)
+        _emit_status(
+            f"Extracting metadata (0 / {metadata_total} files)...",
+            phase_current=0,
+            phase_total=metadata_total,
+            phase_label="Extracting metadata",
+        )
     _check_cancelled()
-    metadata_map = extract_metadata(paths_to_extract) if paths_to_extract else {}
+
+    def _metadata_progress(current, total):
+        _emit_status(
+            f"Extracting metadata ({current} / {total} files)...",
+            phase_current=current,
+            phase_total=total,
+            phase_label="Extracting metadata",
+        )
+
+    metadata_map = (
+        extract_metadata(paths_to_extract, progress_callback=_metadata_progress)
+        if paths_to_extract else {}
+    )
     _check_cancelled()
 
     # Compute phash + file_hash in parallel across all files that need
@@ -1145,7 +1614,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     # while the main thread commits the head — no O(n) buffer of features.
     workers = _resolve_worker_count(files_to_process)
     if paths_to_extract and status_callback:
-        status_callback(
+        _emit_status(
             f"Hashing {len(paths_to_extract)} files ({workers} worker{'s' if workers != 1 else ''})..."
         )
 
@@ -1194,17 +1663,36 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     try:
         for image_path, (phash, file_hash) in _iter_features():
             _check_cancelled()
+
+            # File stats — first touch of the path in this loop. A file
+            # deleted/renamed between discovery and here must skip, not
+            # abort the scan and flag every folder in scope 'partial'.
+            try:
+                stat = image_path.stat()
+            except OSError:
+                log.info("File vanished during scan, skipping: %s", image_path)
+                processed_count += 1
+                if progress_callback:
+                    progress_callback(processed_count, total)
+                continue
+
             folder_id = _ensure_folder(image_path.parent)
             touched_folder_ids.add(folder_id)
-
-            # File stats
-            stat = image_path.stat()
             file_size = stat.st_size
             file_mtime = stat.st_mtime
+            if file_size == 0 and file_hash == EMPTY_FILE_SHA256:
+                log.warning(
+                    "Empty image file detected; skipping duplicate identity hash: %s",
+                    image_path,
+                )
+                file_hash = None
 
             # XMP sidecar
             xmp_path = image_path.with_suffix(".xmp")
-            xmp_mtime = xmp_path.stat().st_mtime if xmp_path.exists() else None
+            try:
+                xmp_mtime = xmp_path.stat().st_mtime
+            except OSError:
+                xmp_mtime = None
 
             # Get pre-extracted metadata for this file
             file_meta = metadata_map.get(str(image_path), {})
@@ -1261,7 +1749,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             # for them avoids O(N) wasted UPDATE + commit round-trips on
             # large initial scans.
             existing_row = db.conn.execute(
-                "SELECT file_hash FROM photos WHERE folder_id = ? AND filename = ?",
+                "SELECT file_hash, flag FROM photos WHERE folder_id = ? AND filename = ?",
                 (folder_id, image_path.name),
             ).fetchone()
             row_already_existed = existing_row is not None
@@ -1307,6 +1795,30 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             if file_hash is not None:
                 updates.append("file_hash=?")
                 update_params.append(file_hash)
+                if row_already_existed and prev_file_hash != file_hash:
+                    # The stored baseline is being replaced, so any prior
+                    # integrity verdict applied to bytes that no longer
+                    # exist. Clear the verification markers rather than
+                    # carry them forward — the audit summary must only
+                    # claim "checked" for baselines verify_hashes (or an
+                    # explicit user accept) actually vouched for. A rescan
+                    # that recomputes the same hash leaves coverage intact.
+                    updates.append("hash_checked_at=NULL")
+                    updates.append("hash_status=NULL")
+            elif file_size == 0:
+                updates.append("file_hash=NULL")
+                if row_already_existed and prev_file_hash is not None:
+                    updates.append("hash_checked_at=NULL")
+                    updates.append("hash_status=NULL")
+                # Historical rows where the empty SHA leaked in are repaired
+                # here by clearing file_hash above. We deliberately leave the
+                # ``flag`` column untouched: a 'rejected' value could come
+                # from the user (Browse / culling) just as easily as from
+                # past duplicate auto-resolution, and we have no marker that
+                # distinguishes them. Silently un-rejecting a user's
+                # placeholder would be worse than leaving it as-is; the
+                # duplicates page already flags empty-byte groups for
+                # manual review.
             if file_meta and extract_full_metadata:
                 updates.append("exif_data=?")
                 update_params.append(json.dumps(file_meta))
@@ -1315,6 +1827,28 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 # extract_full_metadata is off) — prevents perpetual retry
                 updates.append("exif_data=COALESCE(exif_data, ?)")
                 update_params.append("{}")
+            if row_already_existed:
+                # add_photo is INSERT OR IGNORE, so the fresh stat values it
+                # was passed never reach an existing row. Without these the
+                # incremental pre-pass keeps comparing against the stale
+                # stored mtime and re-processes a changed file on every scan
+                # forever. Only advance file_mtime/file_size when the content
+                # hash succeeded: _compute_file_features hashes every
+                # processed file, so file_hash is None only when the bytes
+                # couldn't be read (transient permission/I-O error). Marking
+                # such a file's mtime current would make the next incremental
+                # scan skip it forever with a stale hash and stale derived
+                # caches; leaving the old mtime in place retries it instead.
+                if file_hash is not None or file_size == 0:
+                    updates.extend(["file_mtime=?", "file_size=?"])
+                    update_params.extend([file_mtime, file_size])
+                # xmp_mtime stays unconditional — the sidecar is a separate
+                # file whose keyword import below runs regardless of image
+                # hash success, and it may be None here: writing NULL is
+                # correct (a deleted sidecar otherwise re-trips the "XMP
+                # changed" check on every scan).
+                updates.append("xmp_mtime=?")
+                update_params.append(xmp_mtime)
             if updates:
                 update_params.append(photo_id)
                 db.conn.execute(
@@ -1328,15 +1862,33 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             # stale. Includes the NULL → concrete transition for legacy
             # rows that predate hash tracking — we can't prove their
             # caches match current bytes, so safer to flush and
-            # regenerate. Gated on ``row_already_existed`` so brand-new
-            # inserts (prev_file_hash is always NULL there) don't
-            # trigger pointless UPDATE + commit round-trips on large
-            # initial scans. Requires explicit vireo_dir; callers must
-            # pass it (scan can't guess because --db and --thumb-dir
-            # are independently configurable).
+            # regenerate. Also fires when a file is truncated to zero
+            # bytes: file_hash is None in that branch (empty files don't
+            # carry duplicate identity), so the plain
+            # ``file_hash is not None`` guard would otherwise leave
+            # thumbnails and working copies from the old bytes in place.
+            # The zero-byte clause covers BOTH non-empty → empty and
+            # legacy NULL → empty: a pre-hash row whose file is now
+            # truncated still has thumbnails rendered from its old
+            # non-empty bytes, and before this fix the previous code
+            # path (which stored the concrete empty SHA) would have
+            # invalidated it via the NULL → concrete branch. Skips the
+            # empty → empty repair case (prev was already the empty SHA)
+            # because the bytes didn't actually change. Gated on
+            # ``row_already_existed`` so brand-new inserts
+            # (prev_file_hash is always NULL there) don't trigger
+            # pointless UPDATE + commit round-trips on large initial
+            # scans. Requires explicit vireo_dir; callers must pass it
+            # (scan can't guess because --db and --thumb-dir are
+            # independently configurable).
+            content_identity_changed = (
+                file_hash is not None and prev_file_hash != file_hash
+            ) or (
+                file_size == 0
+                and prev_file_hash != EMPTY_FILE_SHA256
+            )
             if (row_already_existed
-                    and file_hash is not None
-                    and prev_file_hash != file_hash
+                    and content_identity_changed
                     and vireo_dir):
                 _invalidate_derived_caches(
                     db, vireo_dir, photo_id, thumb_cache_dir=thumb_cache_dir,
@@ -1397,7 +1949,9 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     # counts — otherwise update_folder_counts()'s commit would persist
     # half-applied pairing or working-copy records.
     try:
-        _pair_raw_jpeg_companions(db)
+        _pair_raw_jpeg_companions(
+            db, vireo_dir=vireo_dir, thumb_cache_dir=thumb_cache_dir,
+        )
 
         # Extract working copies for RAW photos (after pairing so companion is known).
         # Scope to the folders the caller just scanned so a fresh import doesn't
@@ -1415,7 +1969,13 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         # backward. ``status_callback`` still announces the phase.
         if vireo_dir:
             if restrict_dirs is not None:
-                wc_scope = [(str(d), "exact") for d in restrict_dirs]
+                # Use the bundle-filtered list — see ``effective_restrict_dirs``
+                # above. Reusing the raw ``restrict_dirs`` here would let a
+                # stale DB row inside an excluded bundle re-enter the
+                # working-copy extractor, which reads ``folder_path/filename``
+                # and re-trips the macOS TCC prompt the scan loop's guard
+                # already skipped.
+                wc_scope = [(str(d), "exact") for d in effective_restrict_dirs]
             elif not recursive:
                 wc_scope = [(str(root_path), "exact")]
             else:

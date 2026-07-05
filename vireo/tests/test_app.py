@@ -1,12 +1,24 @@
 import json
 import os
 
+from wait import wait_for_job_via_client
 
-def test_index_redirects_to_browse(app_and_db, monkeypatch):
-    """GET / redirects to /browse when a model is available."""
+
+def test_index_redirects_to_browse(app_and_db, monkeypatch, tmp_path):
+    """GET / redirects to /browse when classification is usable (a label-free
+    Tree-of-Life model needs no species list). The classification-readiness
+    gate is now disk-aware — it checks that the ToL artifacts are actually
+    installed — so the mocked model needs a real weights dir with the
+    artifact stubs, otherwise the redirect falls through to /welcome."""
     import models
+    weights = tmp_path / "bioclip-2"
+    weights.mkdir()
+    (weights / "tol_embeddings.npy").write_bytes(b"stub")
+    (weights / "tol_classes.json").write_bytes(b"[]")
     monkeypatch.setattr(models, "get_active_model", lambda: {
-        "id": "test", "name": "Test", "downloaded": True
+        "id": "bioclip-2", "name": "BioCLIP-2", "downloaded": True,
+        "model_str": "hf-hub:imageomics/bioclip-2",
+        "weights_path": str(weights),
     })
     app, _ = app_and_db
     client = app.test_client()
@@ -123,6 +135,303 @@ def test_api_photos_extensions_scoped_to_active_workspace(app_and_db):
     # .cr2 belongs to "Other" workspace and must not appear here.
     assert '.cr2' not in resp.get_json()
     assert '.jpg' in resp.get_json()
+
+
+def test_offline_cache_job_copies_original_and_xmp(client_with_photo):
+    """Selected photos can be copied into the managed offline cache."""
+    app, db, pid = client_with_photo
+    client = app.test_client()
+
+    photo = db.get_photo(pid)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+    ).fetchone()
+    stem, _ = os.path.splitext(photo["filename"])
+    xmp_path = os.path.join(folder["path"], f"{stem}.xmp")
+    with open(xmp_path, "w", encoding="utf-8") as fh:
+        fh.write("<x:xmpmeta></x:xmpmeta>")
+
+    resp = client.post("/api/jobs/offline-cache", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+
+    row = db.offline_original_get(pid)
+    assert row is not None
+    assert row["status"] == "cached"
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    assert os.path.isfile(os.path.join(vireo_dir, row["original_path"]))
+    assert os.path.isfile(os.path.join(vireo_dir, row["xmp_path"]))
+
+
+def test_offline_cache_picks_up_uppercase_xmp_sidecar(client_with_photo):
+    """Offline cache copies sidecars whose extension is `.XMP` (not just `.xmp`)."""
+    app, db, pid = client_with_photo
+    client = app.test_client()
+
+    photo = db.get_photo(pid)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+    ).fetchone()
+    stem, _ = os.path.splitext(photo["filename"])
+    xmp_path = os.path.join(folder["path"], f"{stem}.XMP")
+    with open(xmp_path, "w", encoding="utf-8") as fh:
+        fh.write("<x:xmpmeta></x:xmpmeta>")
+
+    resp = client.post("/api/jobs/offline-cache", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+
+    row = db.offline_original_get(pid)
+    assert row is not None
+    assert row["status"] == "cached"
+    assert row["xmp_path"], "expected uppercase .XMP sidecar to be cached"
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    cached_xmp_abs = os.path.join(vireo_dir, row["xmp_path"])
+    assert os.path.isfile(cached_xmp_abs)
+    # Verify the .XMP source content actually made it into the cache so
+    # this can't accidentally pass by caching an empty or wrong file.
+    with open(cached_xmp_abs, encoding="utf-8") as fh:
+        assert fh.read() == "<x:xmpmeta></x:xmpmeta>"
+
+
+def test_offline_cache_refreshes_and_removes_xmp_sidecar(client_with_photo):
+    """Re-caching refreshes changed sidecars and removes stale cached ones."""
+    app, db, pid = client_with_photo
+    client = app.test_client()
+
+    photo = db.get_photo(pid)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+    ).fetchone()
+    companion_name = "test-companion.jpg"
+    companion_path = os.path.join(folder["path"], companion_name)
+    with open(companion_path, "w", encoding="utf-8") as fh:
+        fh.write("companion 1")
+    db.conn.execute(
+        "UPDATE photos SET companion_path=? WHERE id=?", (companion_name, pid)
+    )
+    db.conn.commit()
+
+    stem, _ = os.path.splitext(photo["filename"])
+    xmp_path = os.path.join(folder["path"], f"{stem}.xmp")
+    with open(xmp_path, "w", encoding="utf-8") as fh:
+        fh.write("version 1")
+
+    resp = client.post("/api/jobs/offline-cache", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+
+    row = db.offline_original_get(pid)
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    cached_xmp = os.path.join(vireo_dir, row["xmp_path"])
+    cached_companion = os.path.join(vireo_dir, row["companion_path"])
+    assert open(cached_xmp, encoding="utf-8").read() == "version 1"
+    assert open(cached_companion, encoding="utf-8").read() == "companion 1"
+
+    with open(xmp_path, "w", encoding="utf-8") as fh:
+        fh.write("version 2")
+    with open(companion_path, "w", encoding="utf-8") as fh:
+        fh.write("companion 2")
+    newer = os.path.getmtime(xmp_path) + 10
+    os.utime(xmp_path, (newer, newer))
+    os.utime(companion_path, (newer, newer))
+
+    resp = client.post("/api/jobs/offline-cache", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+    row = db.offline_original_get(pid)
+    cached_xmp = os.path.join(vireo_dir, row["xmp_path"])
+    cached_companion = os.path.join(vireo_dir, row["companion_path"])
+    assert open(cached_xmp, encoding="utf-8").read() == "version 2"
+    assert open(cached_companion, encoding="utf-8").read() == "companion 2"
+
+    os.remove(xmp_path)
+    os.remove(companion_path)
+    resp = client.post("/api/jobs/offline-cache", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+    row = db.offline_original_get(pid)
+    assert row["xmp_path"] is None
+    assert row["companion_path"] is None
+    assert not os.path.exists(cached_xmp)
+    assert not os.path.exists(cached_companion)
+
+
+def test_original_route_uses_offline_cache_when_source_missing(client_with_photo):
+    """Full-res viewing falls back to the cached original when the source is gone."""
+    app, db, pid = client_with_photo
+    client = app.test_client()
+
+    resp = client.post("/api/jobs/offline-cache", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+
+    photo = db.get_photo(pid)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+    ).fetchone()
+    source = os.path.join(folder["path"], photo["filename"])
+    with open(source, "rb") as fh:
+        source_bytes = fh.read()
+    os.remove(source)
+    assert not os.path.isfile(source)
+
+    offline_resp = client.get(f"/photos/{pid}/original")
+    assert offline_resp.status_code == 200
+    assert offline_resp.data == source_bytes
+
+
+def test_original_route_uses_offline_cache_despite_recent_raw_failure_marker(
+    client_with_photo,
+):
+    """A RAW failure marker should not block an available offline original."""
+    app, db, pid = client_with_photo
+    client = app.test_client()
+
+    resp = client.post("/api/jobs/offline-cache", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+
+    photo = db.get_photo(pid)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+    ).fetchone()
+    source = os.path.join(folder["path"], photo["filename"])
+    os.remove(source)
+    assert not os.path.isfile(source)
+
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='missing.NEF', extension='.nef',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (photo["file_mtime"], pid),
+    )
+    db.conn.commit()
+
+    offline_resp = client.get(f"/photos/{pid}/original")
+
+    assert offline_resp.status_code == 200
+    row = db.offline_original_get(pid)
+    assert row is not None and row["bytes"] > 0
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    with open(os.path.join(vireo_dir, row["original_path"]), "rb") as f:
+        assert offline_resp.data == f.read()
+
+
+def test_offline_cache_rerun_preserves_cache_when_source_missing(client_with_photo):
+    """Re-running Make Offline with the source unavailable keeps the cached copy."""
+    app, db, pid = client_with_photo
+    client = app.test_client()
+
+    resp = client.post("/api/jobs/offline-cache", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+
+    row = db.offline_original_get(pid)
+    assert row is not None and row["status"] == "cached"
+    cached_original_path = row["original_path"]
+    cached_bytes = row["bytes"]
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    assert os.path.isfile(os.path.join(vireo_dir, cached_original_path))
+
+    photo = db.get_photo(pid)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+    ).fetchone()
+    source = os.path.join(folder["path"], photo["filename"])
+    os.remove(source)
+    assert not os.path.isfile(source)
+
+    resp = client.post("/api/jobs/offline-cache", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+    assert job["result"]["skipped"] == 1
+    assert job["result"]["failed"] == 0
+
+    row = db.offline_original_get(pid)
+    assert row["status"] == "cached"
+    assert row["original_path"] == cached_original_path
+    assert row["bytes"] == cached_bytes
+    assert os.path.isfile(os.path.join(vireo_dir, cached_original_path))
+
+    offline_resp = client.get(f"/photos/{pid}/original")
+    assert offline_resp.status_code == 200
+    assert len(offline_resp.data) == cached_bytes
+
+
+def test_offline_cache_rejects_non_object_body(client_with_photo):
+    """POST with a top-level non-object JSON body returns 400, not 500."""
+    app, _, _ = client_with_photo
+    client = app.test_client()
+    resp = client.post("/api/jobs/offline-cache", json=[1, 2, 3])
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "request body must be a JSON object"
+    resp = client.post("/api/jobs/offline-cache", json="oops")
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "request body must be a JSON object"
+
+
+def test_offline_cache_rejects_non_integer_photo_ids(client_with_photo):
+    """Float and bool photo_ids are rejected instead of silently coerced."""
+    app, _, _ = client_with_photo
+    client = app.test_client()
+    # Floats would otherwise truncate via int() and cache the wrong photo.
+    resp = client.post("/api/jobs/offline-cache", json={"photo_ids": [1.9]})
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "photo_ids must be integers"
+    resp = client.post("/api/jobs/offline-cache", json={"photo_ids": [2.0]})
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "photo_ids must be integers"
+    # bool is an int subclass; reject it too.
+    resp = client.post("/api/jobs/offline-cache", json={"photo_ids": [True]})
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "photo_ids must be integers"
+
+
+def test_offline_cache_files_removed_when_photo_deleted(client_with_photo):
+    """Deleting a photo removes its offline cache files from disk."""
+    app, db, pid = client_with_photo
+    client = app.test_client()
+
+    photo = db.get_photo(pid)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+    ).fetchone()
+    stem, _ = os.path.splitext(photo["filename"])
+    xmp_path = os.path.join(folder["path"], f"{stem}.xmp")
+    with open(xmp_path, "w", encoding="utf-8") as fh:
+        fh.write("<x:xmpmeta></x:xmpmeta>")
+
+    resp = client.post("/api/jobs/offline-cache", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+
+    row = db.offline_original_get(pid)
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    cached_original = os.path.join(vireo_dir, row["original_path"])
+    cached_xmp = os.path.join(vireo_dir, row["xmp_path"])
+    assert os.path.isfile(cached_original)
+    assert os.path.isfile(cached_xmp)
+
+    resp = client.post("/api/audit/remove-orphans", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+
+    assert db.offline_original_get(pid) is None
+    assert not os.path.exists(cached_original)
+    assert not os.path.exists(cached_xmp)
 
 
 def test_api_coverage(app_and_db):
@@ -290,6 +599,31 @@ def test_encounter_species_confirm(app_and_db):
     kw_adds = [c for c in pending if c["change_type"] == "keyword_add"
                and c["value"] == "Blue Jay"]
     assert len(kw_adds) == len(photo_ids)
+
+
+def test_encounter_species_confirm_ignores_corrupt_pipeline_cache(app_and_db):
+    """A bad pipeline cache must not turn species confirmation into a 500."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    photo_id = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 1").fetchone()["id"]
+    cache_dir = os.path.dirname(db._db_path)
+    cache_path = os.path.join(cache_dir, f"pipeline_results_ws{db._active_workspace_id}.json")
+    with open(cache_path, "w") as f:
+        f.write('{"photos": [], "encounters": [{"photo_ids"')
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Blue Jay", "photo_ids": [photo_id]},
+    )
+
+    assert resp.status_code == 200
+    assert any(t["name"] == "Blue Jay" for t in db.get_photo_keywords(photo_id))
+    assert not os.path.exists(cache_path)
+    assert len([
+        name for name in os.listdir(cache_dir)
+        if name.startswith(f"pipeline_results_ws{db._active_workspace_id}.json.corrupt-")
+    ]) == 1
 
 
 def test_encounter_species_validation(app_and_db):
@@ -533,7 +867,22 @@ def test_encounter_species_change_cancels_pending_add(app_and_db):
     """Changing the confirmed species before sync cancels the stale add."""
     app, db = app_and_db
     client = app.test_client()
-    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+    # The conftest fixture pre-tags one photo with "Sparrow" via a direct
+    # db.tag_photo (no pending add). Restrict this test to photos that do NOT
+    # already carry Sparrow so the first confirm genuinely queues a pending
+    # add for every photo — that pending add is what the replacement should
+    # cancel (rather than queueing a keyword_remove for a never-synced tag).
+    sparrow_pre = db.conn.execute(
+        """SELECT pk.photo_id FROM photo_keywords pk
+           JOIN keywords k ON k.id = pk.keyword_id
+           WHERE k.name = 'Sparrow'"""
+    ).fetchall()
+    pre_tagged = {r["photo_id"] for r in sparrow_pre}
+    photo_ids = [
+        p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()
+        if p["id"] not in pre_tagged
+    ]
+    assert photo_ids, "expected at least one photo not pre-tagged with Sparrow"
 
     _seed_encounter_cache(app, db, photo_ids)
 
@@ -767,6 +1116,108 @@ def test_encounter_species_replacement_redo_reapplies(app_and_db):
         names = {k["name"] for k in db.get_photo_keywords(pid)}
         assert "Blue Jay" in names
         assert "Sparrow" not in names
+
+
+def test_encounter_species_no_op_when_all_already_tagged(app_and_db):
+    """Confirming a species every submitted photo already carries records NO
+    new keyword_add edit, so there's nothing on the undo stack to later
+    destructively remove the pre-existing keyword.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+
+    _seed_encounter_cache(app, db, photo_ids)
+    # First confirm tags every photo and records one keyword_add.
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Blue Jay", "photo_ids": photo_ids})
+    assert resp.status_code == 200
+    assert len(db.get_edit_history()) == 1
+
+    # Re-confirm the SAME species on the SAME photos: all already tagged.
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Blue Jay", "photo_ids": photo_ids})
+    assert resp.status_code == 200
+    assert resp.get_json()["ok"] is True
+
+    # No new edit-history entry: the redundant confirm was a no-op.
+    assert len(db.get_edit_history()) == 1
+
+    # The pre-existing keyword survives — undoing leaves it intact (there's
+    # nothing the redundant confirm could have queued to remove).
+    for pid in photo_ids:
+        names = {k["name"] for k in db.get_photo_keywords(pid)}
+        assert "Blue Jay" in names
+
+
+def test_encounter_species_records_only_newly_tagged(app_and_db):
+    """A mixed set (some already carry the species, some don't) records edit
+    items ONLY for the newly-tagged photos.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+    assert len(photo_ids) >= 2
+
+    # Pre-tag the first photo with the species keyword directly.
+    kid = db.add_keyword("Blue Jay", is_species=True)
+    db.tag_photo(photo_ids[0], kid)
+
+    _seed_encounter_cache(app, db, photo_ids)
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Blue Jay", "photo_ids": photo_ids})
+    assert resp.status_code == 200
+
+    history = db.get_edit_history()
+    assert len(history) == 1
+    assert history[0]["action_type"] == "keyword_add"
+    # Only the (len - 1) newly-tagged photos are in the edit items.
+    assert history[0]["item_count"] == len(photo_ids) - 1
+
+    # Undoing removes the species only from the photos that were newly tagged;
+    # the pre-tagged photo keeps it.
+    db.undo_last_edit()
+    assert "Blue Jay" in {k["name"] for k in db.get_photo_keywords(photo_ids[0])}
+    for pid in photo_ids[1:]:
+        assert "Blue Jay" not in {k["name"] for k in db.get_photo_keywords(pid)}
+
+
+def test_encounter_species_replacement_only_for_changed_photos(app_and_db):
+    """Replacement records the replace only for photos that actually had the
+    old species, and the add side only for photos that actually gained the new
+    one.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+    assert len(photo_ids) >= 2
+
+    _seed_encounter_cache(app, db, photo_ids)
+    # Confirm Sparrow on ALL photos.
+    client.post("/api/encounters/species",
+                json={"species": "Sparrow", "photo_ids": photo_ids})
+    # Then untag the last photo's Sparrow so it no longer carries the old
+    # species (simulates a partially-tagged burst on re-confirm).
+    sparrow_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name='Sparrow' AND is_species=1"
+    ).fetchone()["id"]
+    db.untag_photo(photo_ids[-1], sparrow_id)
+    db.conn.execute("DELETE FROM edit_history")
+    db.conn.commit()
+
+    # Replace Sparrow -> Blue Jay across all photos.
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Blue Jay", "photo_ids": photo_ids})
+    assert resp.status_code == 200
+
+    history = db.get_edit_history()
+    assert len(history) == 1
+    assert history[0]["action_type"] == "species_replace"
+    # All photos gained Blue Jay (none had it), so all are recorded.
+    assert history[0]["item_count"] == len(photo_ids)
+    for pid in photo_ids:
+        assert "Blue Jay" in {k["name"] for k in db.get_photo_keywords(pid)}
+        assert "Sparrow" not in {k["name"] for k in db.get_photo_keywords(pid)}
 
 
 def test_encounter_species_rejects_photo_ids_not_in_burst(app_and_db):
@@ -1265,6 +1716,98 @@ def test_api_photo_pipeline_predictions_honor_threshold_and_fingerprint(app_and_
         f"predictions must match detections (one current-fingerprint "
         f"row, no stale, no below-threshold); got {species}"
     )
+    diag = data["classification_diagnostics"]
+    assert diag["raw_detection_count"] == 2
+    assert diag["visible_detection_count"] == 1
+    assert diag["hidden_detection_count"] == 1
+    assert diag["current_prediction_count"] == 2
+    assert diag["visible_prediction_count"] == 1
+    assert diag["hidden_prediction_count"] == 1
+
+
+def test_api_photo_pipeline_diagnoses_threshold_hidden_predictions(app_and_db):
+    """A photo can be classified while the inspector has no visible predictions.
+
+    Low-confidence detections are stored globally and may have predictions from
+    the run that produced them. The visible inspector lists still honor the
+    active detector threshold, but diagnostics must make the hidden state clear.
+    """
+    app, db = app_and_db
+    pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    det_id = db.save_detections(pid, [
+        {"box": {"x": 0.6, "y": 0.6, "w": 0.3, "h": 0.3},
+         "confidence": 0.05, "category": "animal"},
+    ], detector_model="MDV6")[0]
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Sparrow', 0.9, '2026-04-24')",
+        (det_id,),
+    )
+    db.conn.execute(
+        "INSERT INTO classifier_runs (detection_id, classifier_model, "
+        "labels_fingerprint, prediction_count) VALUES (?, 'bioclip-2', 'fp-new', 1)",
+        (det_id,),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get(f"/api/photos/{pid}/pipeline")
+    assert resp.status_code == 200
+    data = resp.get_json()
+
+    assert data["detections"] == []
+    assert data["predictions"] == []
+    diag = data["classification_diagnostics"]
+    assert diag["raw_detection_count"] == 1
+    assert diag["visible_detection_count"] == 0
+    assert diag["hidden_detection_count"] == 1
+    assert diag["current_prediction_count"] == 1
+    assert diag["visible_prediction_count"] == 0
+    assert diag["hidden_prediction_count"] == 1
+    assert diag["classifier_run_count"] == 1
+    assert diag["hidden_classifier_run_count"] == 1
+
+
+def test_api_photo_pipeline_diagnoses_full_image_predictions(app_and_db):
+    """Synthetic full-image anchors are not below-threshold detector boxes."""
+    app, db = app_and_db
+    pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.update_workspace(db._active_workspace_id, config_overrides={
+        "detector_confidence": 0.0,
+    })
+    det_id = db.save_detections(pid, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
+         "confidence": 0, "category": "animal"},
+    ], detector_model="full-image")[0]
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Robin', 0.8, '2026-04-24')",
+        (det_id,),
+    )
+    db.conn.execute(
+        "INSERT INTO classifier_runs (detection_id, classifier_model, "
+        "labels_fingerprint, prediction_count) VALUES (?, 'bioclip-2', 'fp-new', 1)",
+        (det_id,),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get(f"/api/photos/{pid}/pipeline")
+    assert resp.status_code == 200
+    data = resp.get_json()
+
+    assert data["detections"] == []
+    assert data["predictions"] == []
+    diag = data["classification_diagnostics"]
+    assert diag["raw_detection_count"] == 0
+    assert diag["hidden_detection_count"] == 0
+    assert diag["current_prediction_count"] == 0
+    assert diag["hidden_prediction_count"] == 0
+    assert diag["classifier_run_count"] == 0
+    assert diag["full_image_prediction_count"] == 1
+    assert diag["full_image_classifier_run_count"] == 1
 
 
 def test_compare_predictions_api_requires_collection(app_and_db):
@@ -1283,6 +1826,88 @@ def test_pipeline_has_model_checkboxes(app_and_db):
     assert resp.status_code == 200
     assert b'model-checkbox' in resp.data
     assert b'id="cfgModel"' not in resp.data  # old single select removed
+
+
+def test_pipeline_exposes_inline_label_download_modal(app_and_db):
+    """Pipeline page lets users download species labels without leaving."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/pipeline')
+    assert resp.status_code == 200
+    html = resp.data.decode()
+    assert 'openPipelineLabelsModal()' in html
+    assert 'id="pipelineLabelsModal"' in html
+    assert 'id="pipelineFetchLabelsBtn"' in html
+
+
+def test_fetch_labels_returns_embedding_precompute_metadata_without_inline_compute(
+    app_and_db, monkeypatch, tmp_path,
+):
+    """Species-list download should finish before label embeddings compute."""
+    import classifier
+    import labels
+    import models
+
+    labels_dir = tmp_path / "labels"
+    monkeypatch.setattr(labels, "LABELS_DIR", str(labels_dir))
+    monkeypatch.setattr(
+        labels,
+        "fetch_species_list",
+        lambda *args, **kwargs: ["Blue Jay", "American Robin", "Blue Jay"],
+    )
+    monkeypatch.setattr(
+        models,
+        "get_active_model",
+        lambda: {
+            "id": "bioclip-2.5-vith14",
+            "name": "BioCLIP-2.5",
+            "downloaded": True,
+            "model_type": "bioclip",
+            "model_str": "hf-hub:imageomics/bioclip-2.5-vith14",
+            "weights_path": str(tmp_path / "model"),
+        },
+    )
+    monkeypatch.setattr(
+        classifier,
+        "_resolve_model_dir",
+        lambda *args, **kwargs: str(tmp_path / "model"),
+    )
+    monkeypatch.setattr(
+        classifier,
+        "_embedding_cache_path",
+        lambda *args, **kwargs: str(tmp_path / "missing-cache.npy"),
+    )
+
+    classifier_calls = []
+
+    def fail_if_classifier_constructed(*args, **kwargs):
+        classifier_calls.append((args, kwargs))
+        raise AssertionError("fetch-labels must not compute embeddings inline")
+
+    monkeypatch.setattr(classifier, "Classifier", fail_if_classifier_constructed)
+
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/jobs/fetch-labels",
+        json={
+            "place_id": 1,
+            "place_name": "Test Place",
+            "taxon_groups": ["birds"],
+        },
+    )
+
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+
+    assert job["status"] == "completed"
+    assert classifier_calls == []
+    assert job["result"]["species_count"] == 2
+    assert job["result"]["embedding_precompute"] == {
+        "model_id": "bioclip-2.5-vith14",
+        "model_name": "BioCLIP-2.5",
+        "labels_file": job["result"]["labels_file"],
+    }
 
 
 def test_cull_page_uses_pipeline_controls(app_and_db):
@@ -1365,6 +1990,21 @@ def test_pages_no_inline_escapeHtml(app_and_db):
         # The <script src="...vireo-utils.js"> tag won't contain the function text.
         assert html.count('function escapeHtml') == 0, \
             f"{page} still has inline escapeHtml definition"
+
+
+def test_browse_calendar_day_sets_bare_date(app_and_db):
+    """Heatmap day click must set #dateTo to a bare date.
+
+    #dateTo is <input type="date">: assigning 'YYYY-MM-DDT23:59:59' is
+    rejected and silently blanks the input, so the request went out with
+    no upper bound. The backend pads bare dates to end-of-day
+    (_inclusive_date_to), so the suffix is never needed client-side.
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/browse')
+    assert resp.status_code == 200
+    assert "T23:59:59" not in resp.data.decode()
 
 
 def test_health_endpoint(app_and_db):
@@ -1476,6 +2116,61 @@ def test_templates_jinja_free_except_includes():
     )
 
 
+def test_file_manager_labels_per_platform(monkeypatch):
+    """Reveal/placeholder wording is OS-appropriate so Linux/Windows users
+    don't see macOS-only 'Finder' terminology."""
+    import app as app_module
+
+    monkeypatch.setattr(app_module.sys, "platform", "linux")
+    linux = app_module._file_manager_labels()
+    assert linux["reveal"] == "Reveal in File Manager"
+    assert linux["editor_placeholder"].startswith("/")
+    assert "Applications" not in linux["editor_placeholder"]
+
+    monkeypatch.setattr(app_module.sys, "platform", "darwin")
+    mac = app_module._file_manager_labels()
+    assert mac["reveal"] == "Reveal in Finder"
+    assert mac["editor_placeholder"].endswith(".app")
+
+    monkeypatch.setattr(app_module.sys, "platform", "win32")
+    win = app_module._file_manager_labels()
+    assert "Explorer" in win["reveal"]
+    assert win["editor_placeholder"].endswith(".exe")
+
+
+def test_config_defaults_js_exposes_platform_globals(app_and_db):
+    """/config-defaults.js publishes the platform-aware globals the templates
+    read (they are Jinja-free, so this is the only injection channel)."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/config-defaults.js')
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    assert 'window.VIREO_REVEAL_LABEL' in body
+    assert 'window.VIREO_EDITOR_PATH_PLACEHOLDER' in body
+    assert 'window.VIREO_PLATFORM' in body
+
+
+def test_trash_via_finder_guarded_off_mac(monkeypatch):
+    """The AppleScript Finder fallback only runs on macOS; elsewhere it raises
+    instead of spawning a doomed osascript subprocess."""
+    import app as app_module
+
+    monkeypatch.setattr(app_module.sys, "platform", "linux")
+    called = []
+    monkeypatch.setattr(
+        app_module.subprocess, "run",
+        lambda *a, **k: called.append(a) or None,
+    )
+    try:
+        app_module._trash_via_finder("/some/file.jpg")
+        raised = False
+    except OSError:
+        raised = True
+    assert raised, "expected OSError on non-macOS"
+    assert called == [], "osascript must not be spawned off macOS"
+
+
 def test_navbar_js_fallbacks_match_python_constants():
     """The hardcoded fallback lists in _navbar.html must mirror the
     canonical Python lists. The navbar's JS uses these fallbacks when
@@ -1509,7 +2204,7 @@ def test_navbar_js_fallbacks_match_python_constants():
     def js_to_json(s):
         s = s.rstrip(';').strip()
         s = s.replace("'", '"')
-        s = re.sub(r'(\b)(id|label|href)(\s*:)', r'\1"\2"\3', s)
+        s = re.sub(r'(\b)(id|label|href|keywords)(\s*:)', r'\1"\2"\3', s)
         return s
 
     js_tabs = json.loads(js_to_json(tabs_match.group(1)))
@@ -1599,6 +2294,128 @@ def test_text_search_no_embeddings_returns_reason(app_and_db, monkeypatch):
     assert data.get("reason") == "no_embeddings"
 
 
+def test_text_search_returns_ranked_enriched_results(app_and_db, monkeypatch):
+    """Text search ranks by embedding similarity and returns browse card metadata."""
+    import numpy as np
+
+    app, db = app_and_db
+    client = app.test_client()
+    monkeypatch.setattr(
+        "models.get_active_model",
+        lambda: {
+            "name": "BioCLIP-2",
+            "model_type": "bioclip",
+            "model_str": "hf-hub:imageomics/bioclip-2",
+            "downloaded": True,
+        },
+    )
+    monkeypatch.setattr(
+        "text_encoder.encode_text",
+        lambda query, model_str, pretrained_str=None: np.array([1.0, 0.0], dtype=np.float32),
+    )
+
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos ORDER BY id"
+    ).fetchall()
+    by_name = {row["filename"]: row["id"] for row in rows}
+    p1 = by_name["bird1.jpg"]
+    p2 = by_name["bird2.jpg"]
+    p3 = by_name["bird3.jpg"]
+    for pid, emb in [
+        (p1, [1.0, 0.0]),
+        (p2, [0.6, 0.8]),
+        (p3, [0.0, 1.0]),
+    ]:
+        db.upsert_photo_embedding(
+            pid, "BioCLIP-2", np.array(emb, dtype=np.float32).tobytes()
+        )
+    db.save_detections(
+        p1,
+        [{"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
+          "confidence": 0.91, "category": "bird"}],
+        detector_model="test-detector",
+    )
+    species_id = db.add_keyword("Search Cardinal", is_species=True)
+    db.tag_photo(p1, species_id)
+
+    resp = client.get("/api/photos/search?q=bird&threshold=0.15")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert [r["photo"]["id"] for r in data["results"]] == [p1, p2]
+    assert data["total_matches"] == 2
+    first = data["results"][0]["photo"]
+    assert "Search Cardinal" in first["species"]
+    assert first["detections"][0]["category"] == "bird"
+
+
+def test_text_search_applies_browse_scope_filters(app_and_db, monkeypatch):
+    """Text search honors normal browse filters, collections, and visible folders."""
+    import json
+
+    import numpy as np
+
+    app, db = app_and_db
+    client = app.test_client()
+    monkeypatch.setattr(
+        "models.get_active_model",
+        lambda: {
+            "name": "BioCLIP-2",
+            "model_type": "bioclip",
+            "model_str": "hf-hub:imageomics/bioclip-2",
+            "downloaded": True,
+        },
+    )
+    monkeypatch.setattr(
+        "text_encoder.encode_text",
+        lambda query, model_str, pretrained_str=None: np.array([1.0, 0.0], dtype=np.float32),
+    )
+
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos ORDER BY id"
+    ).fetchall()
+    by_name = {row["filename"]: row["id"] for row in rows}
+    p1 = by_name["bird1.jpg"]
+    p2 = by_name["bird2.jpg"]
+    p3 = by_name["bird3.jpg"]
+    missing_fid = db.add_folder("/photos/missing", name="missing")
+    missing_pid = db.add_photo(
+        folder_id=missing_fid,
+        filename="missing.jpg",
+        extension=".jpg",
+        file_size=1,
+        file_mtime=1.0,
+        timestamp="2024-01-01T00:00:00",
+    )
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (missing_fid,)
+    )
+    db.conn.commit()
+    for pid, emb in [
+        (p1, [1.0, 0.0]),
+        (p2, [0.6, 0.8]),
+        (p3, [0.0, 1.0]),
+        (missing_pid, [2.0, 0.0]),
+    ]:
+        db.upsert_photo_embedding(
+            pid, "BioCLIP-2", np.array(emb, dtype=np.float32).tobytes()
+        )
+
+    rating_resp = client.get("/api/photos/search?q=bird&threshold=-1&rating_min=5")
+    assert rating_resp.status_code == 200
+    assert [r["photo"]["id"] for r in rating_resp.get_json()["results"]] == [p3]
+
+    cid = db.add_collection(
+        "Search Scope",
+        json.dumps([{"field": "photo_ids", "value": [p2, p3, missing_pid]}]),
+    )
+    collection_resp = client.get(
+        f"/api/photos/search?q=bird&threshold=-1&collection_id={cid}"
+    )
+    assert collection_resp.status_code == 200
+    assert [r["photo"]["id"] for r in collection_resp.get_json()["results"]] == [p2, p3]
+
+
 def test_settings_has_edit_history_config(app_and_db):
     """Settings page includes the max_edit_history config field."""
     app, _ = app_and_db
@@ -1662,6 +2479,58 @@ def test_pipeline_detach_burst(app_and_db):
     # New encounter predictions should reflect photo 3
     new_species = [sp["species"] for sp in data["encounters"][1]["species_predictions"]]
     assert "Eagle" in new_species
+
+
+def test_pipeline_detach_burst_computes_time_ranges(app_and_db):
+    """detach-burst must compute time_range from photo timestamps for both the
+    new encounter and the shrunken source encounter. A [None, None] range would
+    sort detached encounters to the extremes under the review page's time sorts
+    and render a blank time label in the encounter header."""
+    import json as _json
+    app, db = app_and_db
+    client = app.test_client()
+
+    cache_dir = os.path.dirname(app.config["DB_PATH"])
+    ws_id = db._active_workspace_id
+    results = {
+        "encounters": [
+            {
+                "species": ["Robin", 0.9],
+                "confirmed_species": None,
+                "species_predictions": [],
+                "species_confirmed": False,
+                "photo_count": 3,
+                "burst_count": 2,
+                # Deliberately stale/missing — the handler must recompute it.
+                "time_range": [None, None],
+                "photo_ids": [1, 2, 3],
+                "bursts": [
+                    {"photo_ids": [1, 2], "species_predictions": [], "species_override": None},
+                    {"photo_ids": [3], "species_predictions": [], "species_override": None},
+                ],
+            }
+        ],
+        "photos": [
+            {"id": 1, "label": "KEEP", "filename": "a.jpg", "timestamp": "2024-01-01T10:00:00", "species_top5": []},
+            {"id": 2, "label": "KEEP", "filename": "b.jpg", "timestamp": "2024-01-01T10:00:05", "species_top5": []},
+            {"id": 3, "label": "REVIEW", "filename": "c.jpg", "timestamp": "2024-01-01T10:05:00", "species_top5": []},
+        ],
+        "summary": {"total_photos": 3, "encounter_count": 1, "burst_count": 2,
+                     "keep_count": 2, "review_count": 1, "reject_count": 0, "rarity_protected": 0},
+    }
+    path = os.path.join(cache_dir, f"pipeline_results_ws{ws_id}.json")
+    with open(path, "w") as f:
+        _json.dump(results, f)
+
+    resp = client.post("/api/pipeline/detach-burst",
+                       json={"encounter_index": 0, "burst_index": 1})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Source encounter range recomputed to the surviving photos (1, 2).
+    assert data["encounters"][0]["time_range"] == ["2024-01-01T10:00:00", "2024-01-01T10:00:05"]
+    # New encounter range computed from the detached photo (3), not [None, None].
+    assert data["encounters"][1]["photo_ids"] == [3]
+    assert data["encounters"][1]["time_range"] == ["2024-01-01T10:05:00", "2024-01-01T10:05:00"]
 
 
 def test_pipeline_detach_photo(app_and_db):
@@ -2142,10 +3011,12 @@ def test_all_keywords_scoped_by_workspace(app_and_db):
         names = [k["name"] for k in data]
         # Child keyword tagged in workspace A — present
         assert "Hawk" in names
-        # Parent keyword not tagged but is ancestor of Hawk — present with photo_count=0
+        # Parent keyword not tagged but is ancestor of Hawk — present with
+        # descendant photo count, plus direct count for callers that need it.
         assert "Birds" in names
         birds = next(k for k in data if k["name"] == "Birds")
-        assert birds["photo_count"] == 0
+        assert birds["photo_count"] == 1
+        assert birds["direct_photo_count"] == 0
         # Keyword only in workspace B — absent
         assert "Penguin" not in names
 
@@ -2354,6 +3225,61 @@ def test_rename_keyword_queues_sidecar_changes(app_and_db):
     actions = [(c["change_type"], c["value"]) for c in changes]
     assert ("keyword_remove", "OldBird") in actions
     assert ("keyword_add", "NewBird") in actions
+
+
+def test_rename_keyword_updates_photo_preferences(app_and_db):
+    """Representative-photo preferences follow species keyword renames."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("OldBird", is_species=True)
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.tag_photo(p1, kid)
+    db.set_photo_preference("life_list", "OldBird", p1)
+    db.set_photo_preference("highlights", "OldBird", p1)
+
+    resp = client.put(f"/api/keywords/{kid}", json={"name": "NewBird"})
+    assert resp.status_code == 200
+
+    assert db.get_photo_preferences("life_list") == {"NewBird": p1}
+    assert db.get_photo_preferences("highlights") == {"NewBird": p1}
+
+
+def test_rename_keyword_photo_preferences_keep_existing_target(app_and_db):
+    """Renaming into an existing preference keeps the target preference."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid_old = db.add_keyword("OldBird", is_species=True)
+    rows = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 2").fetchall()
+    p_old = rows[0]["id"]
+    p_new = rows[1]["id"]
+    db.tag_photo(p_old, kid_old)
+    db.set_photo_preference("life_list", "OldBird", p_old)
+    db.set_photo_preference("life_list", "NewBird", p_new)
+
+    resp = client.put(f"/api/keywords/{kid_old}", json={"name": "NewBird"})
+    assert resp.status_code == 200
+
+    assert db.get_photo_preferences("life_list") == {"NewBird": p_new}
+
+
+def test_rename_homonym_non_species_keyword_leaves_species_preferences(app_and_db):
+    """Renaming an unrelated same-name keyword must not rewrite species prefs."""
+    app, db = app_and_db
+    client = app.test_client()
+    species_kid = db.add_keyword("Robin", is_species=True)
+    parent_kid = db.add_keyword("Places", kw_type="general")
+    place_kid = db.add_keyword("Robin", parent_id=parent_kid, kw_type="general")
+    rows = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 2").fetchall()
+    species_photo = rows[0]["id"]
+    place_photo = rows[1]["id"]
+    db.tag_photo(species_photo, species_kid)
+    db.tag_photo(place_photo, place_kid)
+    db.set_photo_preference("life_list", "Robin", species_photo)
+
+    resp = client.put(f"/api/keywords/{place_kid}", json={"name": "Backyard Robin"})
+    assert resp.status_code == 200
+
+    assert db.get_photo_preferences("life_list") == {"Robin": species_photo}
 
 
 def test_delete_keyword_queues_sidecar_removals(app_and_db):
@@ -2568,6 +3494,76 @@ def test_api_browse_invalid_path(app_and_db):
     assert resp.status_code == 400
 
 
+def test_api_browse_rejects_macos_other_app_bundle_root(app_and_db, tmp_path, monkeypatch):
+    """GET /api/browse must reject an app-managed bundle root BEFORE ``os.path.isdir``.
+
+    The folder picker passes the user-selected path straight to this endpoint;
+    ``os.path.isdir`` on a Photos or Music Library bundle (or a symlink to one)
+    trips the macOS "access data from other apps" TCC prompt the exclusion guards
+    exist to avoid, so the check has to happen first. Monkey-patch
+    ``os.path.isdir`` to fail loudly if it ever runs on the bundle path.
+    """
+    bundles = [
+        tmp_path / "Photos Library.photoslibrary",
+        tmp_path / "Music Library.musiclibrary",
+    ]
+    for bundle in bundles:
+        bundle.mkdir()
+
+    real_isdir = os.path.isdir
+
+    def guarded_isdir(p):
+        if any(str(p) == str(bundle) for bundle in bundles):
+            raise AssertionError(f"os.path.isdir called on excluded bundle: {p}")
+        return real_isdir(p)
+
+    monkeypatch.setattr(os.path, "isdir", guarded_isdir)
+    app, _ = app_and_db
+    client = app.test_client()
+    for bundle in bundles:
+        resp = client.get(f'/api/browse?path={bundle}')
+        assert resp.status_code == 400
+
+
+def test_api_browse_skips_macos_other_app_bundle_children(app_and_db, tmp_path, monkeypatch):
+    """GET /api/browse must omit app-managed bundle children from the listing
+    without stat'ing them.
+
+    When the picker opens ``~/Pictures``, this endpoint enumerates every child
+    and would normally call ``os.path.isdir`` on each. For a sibling like
+    ``Photos Library.photoslibrary`` or ``Music Library.musiclibrary`` that
+    stat itself trips the macOS TCC prompt; verify the guard skips it before
+    any stat and that regular siblings are still returned.
+    """
+    parent = tmp_path / "pictures"
+    parent.mkdir()
+    (parent / "real").mkdir()
+    photos_bundle = parent / "Photos Library.photoslibrary"
+    photos_bundle.mkdir()
+    (photos_bundle / "originals").mkdir()
+    music_bundle = parent / "Music Library.musiclibrary"
+    music_bundle.mkdir()
+    (music_bundle / "Media.localized").mkdir()
+    bundles = [photos_bundle, music_bundle]
+
+    real_isdir = os.path.isdir
+
+    def guarded_isdir(p):
+        if any(str(p).startswith(str(bundle)) for bundle in bundles):
+            raise AssertionError(f"os.path.isdir called on excluded bundle child: {p}")
+        return real_isdir(p)
+
+    monkeypatch.setattr(os.path, "isdir", guarded_isdir)
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get(f'/api/browse?path={parent}')
+    assert resp.status_code == 200
+    names = [d['name'] for d in resp.get_json()['dirs']]
+    assert 'real' in names
+    assert 'Photos Library.photoslibrary' not in names
+    assert 'Music Library.musiclibrary' not in names
+
+
 def test_api_browse_mkdir(app_and_db, tmp_path):
     """POST /api/browse/mkdir creates a new directory."""
     new_dir = str(tmp_path / "new_folder")
@@ -2690,6 +3686,44 @@ def test_api_browse_photo_counts_skips_non_string_entries(app_and_db, tmp_path):
     assert resp.status_code == 200
     data = resp.get_json()
     assert data["counts"] == {str(real): 1}
+
+
+def test_api_browse_photo_counts_skips_macos_other_app_bundles(app_and_db, tmp_path):
+    """POST /api/browse/photo-counts must reject macOS app-managed library
+    bundles (``.photoslibrary`` etc.) BEFORE ``os.path.isdir`` runs.
+
+    The folder browser fires this endpoint with every child of the picker
+    root the moment it opens — for ``~/Pictures`` that includes ``Photos
+    Library.photoslibrary``. ``os.path.isdir`` on that path itself trips
+    the macOS "access data from other apps" TCC prompt the exclusion
+    guards exist to avoid, so the check has to happen first.
+    """
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "img.jpg").write_bytes(b"x")
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    bundle.mkdir()
+    (bundle / "originals").mkdir()
+    (bundle / "originals" / "managed.jpg").write_bytes(b"x")
+    nested = bundle / "originals"
+
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        '/api/browse/photo-counts',
+        json={
+            "paths": [str(real), str(bundle), str(nested)],
+            "file_types": [".jpg"],
+        },
+        content_type='application/json',
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["counts"][str(real)] == 1
+    # Bundle root and a path nested inside it must both report 0 without
+    # recursing into the managed contents.
+    assert data["counts"][str(bundle)] == 0
+    assert data["counts"][str(nested)] == 0
 
 
 def test_api_browse_photo_counts_respects_file_types(app_and_db, tmp_path):
@@ -3511,8 +4545,8 @@ def test_api_folder_relocate_rebases_cascaded_child_developed_dirs(app_and_db, t
 
     old_parent = str(tmp_path / "old_parent")
     new_parent = str(tmp_path / "new_parent")
-    old_child = old_parent + "/child"
-    new_child = new_parent + "/child"
+    old_child = os.path.join(old_parent, "child")
+    new_child = os.path.join(new_parent, "child")
     os.makedirs(new_child)
 
     pfid = db.add_folder(old_parent, name="parent")
@@ -3655,41 +4689,649 @@ def test_highlights_page(app_and_db):
     assert resp.status_code == 200
 
 
+def test_highlights_page_renders_after_redesign(app_and_db):
+    """The page template still renders against the new API shape."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/highlights")
+    assert resp.status_code == 200
+    assert b"Auto-ID confidence" in resp.data
+    assert b"Per row" in resp.data
+
+
 def test_highlights_get_empty(app_and_db):
-    """GET /api/highlights returns empty when no quality data exists."""
+    """GET /api/highlights returns empty buckets when no quality data exists."""
     app, _ = app_and_db
     client = app.test_client()
     resp = client.get("/api/highlights")
     assert resp.status_code == 200
     data = resp.get_json()
-    assert data["photos"] == []
-    assert "folders" in data
-    assert "meta" in data
+    assert data["buckets"] == []
+    assert data["unidentified"]["photo_count"] == 0
+    assert data["folders"] == []
+    assert data["meta"]["eligible"] == 0
 
 
-def test_highlights_get_with_data(app_and_db):
-    """GET /api/highlights returns highlight photos for a folder with quality data."""
+def test_highlights_buckets_by_accepted_species(app_and_db):
+    """Photos with accepted species keywords populate species buckets."""
     app, db = app_and_db
     client = app.test_client()
     fid = db.conn.execute(
-        "INSERT INTO folders (path, name, status) VALUES ('/highlights_test', 'highlights_test', 'ok')"
+        "INSERT INTO folders (path, name, status) VALUES ('/b', 'b', 'ok')"
     ).lastrowid
     db.conn.execute(
         "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
         (db._ws_id(), fid),
     )
-    for i in range(20):
+    apapane_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('ʻApapane', 'taxonomy', 1)"
+    ).lastrowid
+    for i, q in enumerate([0.9, 0.7, 0.5]):
+        pid = db.conn.execute(
+            "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+            "VALUES (?, ?, ?, 'none')",
+            (fid, f"a{i}.jpg", q),
+        ).lastrowid
         db.conn.execute(
-            "INSERT INTO photos (folder_id, filename, quality_score, flag) VALUES (?, ?, ?, 'none')",
-            (fid, f"img{i}.jpg", 0.9 - i * 0.03),
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (pid, apapane_kw),
         )
     db.conn.commit()
 
-    resp = client.get(f"/api/highlights?folder_id={fid}&count=5")
+    resp = client.get(f"/api/highlights?folder_id={fid}")
     assert resp.status_code == 200
     data = resp.get_json()
-    assert len(data["photos"]) == 5
-    assert data["meta"]["total_in_folder"] == 20
+    assert len(data["buckets"]) == 1
+    bucket = data["buckets"][0]
+    assert bucket["species"] == "ʻApapane"
+    assert bucket["is_accepted"] is True
+    assert bucket["photo_count"] == 3
+    assert bucket["best_quality"] == 0.9
+    # Photos ordered by quality_score desc
+    qs = [p["quality_score"] for p in bucket["photos"]]
+    assert qs == sorted(qs, reverse=True)
+
+
+def test_highlights_bucket_mixed_accepted_predicted_is_not_accepted(app_and_db):
+    """A bucket whose photos are a mix of accepted-tag and prediction-only
+    must report is_accepted=False. The "Confirmed" badge means the whole
+    row is confirmed, not just some of it (UI transparency rule)."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/m', 'm', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    apapane_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('ʻApapane', 'taxonomy', 1)"
+    ).lastrowid
+
+    # Photo 1: accepted ʻApapane keyword.
+    accepted_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'a.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (accepted_pid, apapane_kw),
+    )
+
+    # Photo 2: no accepted keyword, only a prediction of ʻApapane above the
+    # default threshold so it lands in the same bucket.
+    predicted_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'b.jpg', 0.7, 'none')",
+        (fid,),
+    ).lastrowid
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (predicted_pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, species, confidence) "
+        "VALUES (?, 'm', 'ʻApapane', 0.95)",
+        (did,),
+    )
+    db.conn.commit()
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&confidence_threshold=0.7")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data["buckets"]) == 1
+    bucket = data["buckets"][0]
+    assert bucket["species"] == "ʻApapane"
+    assert bucket["photo_count"] == 2
+    # Mixed bucket: one accepted, one prediction-only → NOT fully confirmed.
+    assert bucket["is_accepted"] is False
+
+
+def test_highlights_confirmation_filter_splits_confirmed_and_unconfirmed(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hf', 'hf', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    apapane_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('ʻApapane', 'taxonomy', 1)"
+    ).lastrowid
+
+    accepted_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'accepted.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (accepted_pid, apapane_kw),
+    )
+
+    predicted_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'predicted.jpg', 0.8, 'none')",
+        (fid,),
+    ).lastrowid
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (predicted_pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, species, confidence) "
+        "VALUES (?, 'm', 'ʻApapane', 0.95)",
+        (did,),
+    )
+
+    unidentified_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'unknown.jpg', 0.7, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.commit()
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&confirmation=all")
+    data = resp.get_json()
+    assert data["meta"]["eligible"] == 3
+    assert data["buckets"][0]["photo_count"] == 2
+    assert data["buckets"][0]["is_accepted"] is False
+    assert data["unidentified"]["photo_count"] == 1
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&confirmation=confirmed")
+    data = resp.get_json()
+    assert data["meta"]["confirmation"] == "confirmed"
+    assert data["meta"]["eligible"] == 1
+    assert data["buckets"][0]["photo_count"] == 1
+    assert data["buckets"][0]["photos"][0]["id"] == accepted_pid
+    assert data["buckets"][0]["is_accepted"] is True
+    assert data["unidentified"]["photo_count"] == 0
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&confirmation=unconfirmed")
+    data = resp.get_json()
+    assert data["meta"]["confirmation"] == "unconfirmed"
+    assert data["meta"]["eligible"] == 2
+    assert data["buckets"][0]["photo_count"] == 1
+    assert data["buckets"][0]["photos"][0]["id"] == predicted_pid
+    assert data["buckets"][0]["is_accepted"] is False
+    assert data["unidentified"]["photo_count"] == 1
+    assert data["unidentified"]["photos"][0]["id"] == unidentified_pid
+
+    resp = client.get(
+        "/api/highlights/bucket",
+        query_string={
+            "folder_id": fid,
+            "species": "ʻApapane",
+            "confirmation": "confirmed",
+        },
+    )
+    data = resp.get_json()
+    assert data["photo_count"] == 1
+    assert data["photos"][0]["id"] == accepted_pid
+
+    resp = client.get(
+        "/api/highlights/bucket",
+        query_string={
+            "folder_id": fid,
+            "species": "ʻApapane",
+            "confirmation": "unconfirmed",
+        },
+    )
+    data = resp.get_json()
+    assert data["photo_count"] == 1
+    assert data["photos"][0]["id"] == predicted_pid
+
+
+def test_highlights_predictions_above_threshold_populate_buckets(app_and_db):
+    """Predictions at or above confidence_threshold count as the photo's species."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/p', 'p', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'p.jpg', 0.6, 'none')",
+        (fid,),
+    ).lastrowid
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, species, confidence) "
+        "VALUES (?, 'm', 'ʻIʻiwi', 0.82)",
+        (did,),
+    )
+    db.conn.commit()
+
+    # Threshold 0.70 — prediction wins, populates species bucket
+    resp = client.get(f"/api/highlights?folder_id={fid}&confidence_threshold=0.70")
+    data = resp.get_json()
+    assert len(data["buckets"]) == 1
+    assert data["buckets"][0]["species"] == "ʻIʻiwi"
+    assert data["buckets"][0]["is_accepted"] is False
+    photo = data["buckets"][0]["photos"][0]
+    assert photo["prediction_id"] is not None
+    assert photo["predicted_species"] == "ʻIʻiwi"
+    assert photo["predicted_confidence"] == 0.82
+    assert photo["is_confirmable_prediction"] is True
+    assert data["unidentified"]["photo_count"] == 0
+
+    # Threshold 0.90 — prediction below threshold, photo falls to Unidentified
+    resp = client.get(f"/api/highlights?folder_id={fid}&confidence_threshold=0.90")
+    data = resp.get_json()
+    assert data["buckets"] == []
+    assert data["unidentified"]["photo_count"] == 1
+    photo = data["unidentified"]["photos"][0]
+    assert photo["prediction_id"] is not None
+    assert photo["predicted_species"] == "ʻIʻiwi"
+    assert photo["is_confirmable_prediction"] is False
+
+
+def test_highlights_confirm_accepts_current_prediction(app_and_db):
+    """POST /api/highlights/confirm accepts the server-resolved top prediction."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hc', 'hc', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'confirm.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    det = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(det, "Bald Eagle", 0.91, "m")
+    db.add_prediction(det, "House Sparrow", 0.42, "m")
+    pred = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
+        (det, "Bald Eagle"),
+    ).fetchone()
+    sibling = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
+        (det, "House Sparrow"),
+    ).fetchone()
+
+    resp = client.post("/api/highlights/confirm", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+    assert resp.get_json()["ok"] is True
+    assert db.get_review_status(pred["id"], db._ws_id()) == "accepted"
+    assert db.get_review_status(sibling["id"], db._ws_id()) == "rejected"
+    assert "Bald Eagle" in {kw["name"] for kw in db.get_photo_keywords(pid)}
+    history = db.get_edit_history(limit=1)
+    assert history[0]["action_type"] == "prediction_accept"
+
+
+def test_highlights_confirm_accepts_reviewed_prediction(app_and_db):
+    """Highlights Confirm accepts non-rejected predictions it displays."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hcr', 'hcr', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'reviewed.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    det = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(det, "Bald Eagle", 0.91, "m", status="reviewed")
+    pred = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
+        (det, "Bald Eagle"),
+    ).fetchone()
+
+    resp = client.post("/api/highlights/confirm", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+    assert db.get_review_status(pred["id"], db._ws_id()) == "accepted"
+    assert "Bald Eagle" in {kw["name"] for kw in db.get_photo_keywords(pid)}
+
+
+def test_highlights_confirm_skips_taxonomy_keyword_photo(app_and_db):
+    """Taxonomy keywords already count as confirmed for Highlights confirm."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hct', 'hct', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    taxonomy_kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('Bald Eagle', 'taxonomy', 0)"
+    ).lastrowid
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'taxonomy.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, taxonomy_kid)
+    det = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(det, "Bald Eagle", 0.91, "m")
+    pred = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
+        (det, "Bald Eagle"),
+    ).fetchone()
+
+    resp = client.post("/api/highlights/confirm", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+    assert resp.get_json()["skipped"] == [
+        {"photo_id": pid, "reason": "already_confirmed"}
+    ]
+    assert db.get_review_status(pred["id"], db._ws_id()) == "pending"
+
+
+def test_highlights_confirm_group_limited_to_submitted_photos(app_and_db):
+    """Grouped Highlights confirm does not tag hidden or unsubmitted group photos."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hcg', 'hcg', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    pid1 = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'group-1.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    pid2 = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'group-2.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    existing_kid = db.add_keyword("House Sparrow", is_species=True)
+    db.tag_photo(pid2, existing_kid)
+    det1 = db.save_detections(
+        pid1,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
+        detector_model="MDV6",
+    )[0]
+    det2 = db.save_detections(
+        pid2,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(det1, "Bald Eagle", 0.91, "m", group_id="group-1")
+    db.add_prediction(det2, "Bald Eagle", 0.89, "m", group_id="group-1")
+    pred1 = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
+        (det1, "Bald Eagle"),
+    ).fetchone()
+    pred2 = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
+        (det2, "Bald Eagle"),
+    ).fetchone()
+
+    resp = client.post("/api/highlights/confirm", json={"photo_ids": [pid1]})
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert [item["photo_id"] for item in body["affected"]] == [pid1]
+    assert db.get_review_status(pred1["id"], db._ws_id()) == "accepted"
+    assert db.get_review_status(pred2["id"], db._ws_id()) == "pending"
+    assert "Bald Eagle" in {kw["name"] for kw in db.get_photo_keywords(pid1)}
+    pid2_keywords = {kw["name"] for kw in db.get_photo_keywords(pid2)}
+    assert "House Sparrow" in pid2_keywords
+    assert "Bald Eagle" not in pid2_keywords
+
+
+def test_highlights_relabel_rejects_prediction_and_replaces_species(app_and_db):
+    """POST /api/highlights/relabel retags photos and rejects the stale prediction."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hr', 'hr', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Bald Eagle", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'relabel.jpg', 0.8, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, old_kid)
+    det = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(det, "Bald Eagle", 0.88, "m")
+    pred = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
+        (det, "Bald Eagle"),
+    ).fetchone()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "House Sparrow"},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["ok"] is True
+    assert db.get_review_status(pred["id"], db._ws_id()) == "rejected"
+    keywords = {kw["name"] for kw in db.get_photo_keywords(pid)}
+    assert "House Sparrow" in keywords
+    assert "Bald Eagle" not in keywords
+    history = db.get_edit_history(limit=1)
+    assert history[0]["action_type"] == "species_replace"
+
+
+def test_highlights_relabel_undo_restores_rejected_prediction(app_and_db):
+    """Undoing a Highlights relabel restores both species tags and prediction status."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hru', 'hru', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Bald Eagle", is_species=True)
+    old_taxonomy_kid = db.add_keyword("Haliaeetus", kw_type="taxonomy")
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'undo-relabel.jpg', 0.8, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, old_kid)
+    db.tag_photo(pid, old_taxonomy_kid)
+    det = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(det, "Bald Eagle", 0.88, "m")
+    pred = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
+        (det, "Bald Eagle"),
+    ).fetchone()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "House Sparrow"},
+    )
+    assert resp.status_code == 200
+    assert db.get_review_status(pred["id"], db._ws_id()) == "rejected"
+
+    undone = db.undo_last_edit()
+    assert undone["action_type"] == "species_replace"
+    assert db.get_review_status(pred["id"], db._ws_id()) == "pending"
+    keywords = {kw["name"] for kw in db.get_photo_keywords(pid)}
+    assert "Bald Eagle" in keywords
+    assert "Haliaeetus" in keywords
+    assert "House Sparrow" not in keywords
+
+    redone = db.redo_last_undo()
+    assert redone["action_type"] == "species_replace"
+    assert db.get_review_status(pred["id"], db._ws_id()) == "rejected"
+    keywords = {kw["name"] for kw in db.get_photo_keywords(pid)}
+    assert "House Sparrow" in keywords
+    assert "Bald Eagle" not in keywords
+    assert "Haliaeetus" not in keywords
+
+
+def test_highlights_relabel_prediction_only_undo_restores_prediction(app_and_db):
+    """Undoing relabel on a prediction-only photo restores the predicted bucket."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrup', 'hrup', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'undo-predicted.jpg', 0.8, 'none')",
+        (fid,),
+    ).lastrowid
+    det = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(det, "Bald Eagle", 0.88, "m")
+    pred = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
+        (det, "Bald Eagle"),
+    ).fetchone()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "House Sparrow"},
+    )
+    assert resp.status_code == 200
+    assert db.get_review_status(pred["id"], db._ws_id()) == "rejected"
+    assert db.get_edit_history(limit=1)[0]["action_type"] == "keyword_add"
+
+    undone = db.undo_last_edit()
+    assert undone["action_type"] == "keyword_add"
+    assert db.get_review_status(pred["id"], db._ws_id()) == "pending"
+    assert "House Sparrow" not in {kw["name"] for kw in db.get_photo_keywords(pid)}
+
+
+def test_highlights_relabel_unidentified_sets_species(app_and_db):
+    """Relabel also works for unidentified photos with no prediction to reject."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hu', 'hu', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'unid.jpg', 0.7, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.commit()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Song Sparrow"},
+    )
+    assert resp.status_code == 200
+    assert "Song Sparrow" in {kw["name"] for kw in db.get_photo_keywords(pid)}
+
+
+def test_highlights_accepted_species_wins_over_higher_confidence_prediction(app_and_db):
+    """Manual species tag is authoritative even when a high-confidence
+    prediction disagrees."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/c', 'c', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    accepted_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('Real Bird', 'taxonomy', 1)"
+    ).lastrowid
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'x.jpg', 0.7, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, accepted_kw),
+    )
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, species, confidence) "
+        "VALUES (?, 'm', 'Wrong Bird', 0.99)",
+        (did,),
+    )
+    db.conn.commit()
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&confidence_threshold=0.5")
+    data = resp.get_json()
+    assert len(data["buckets"]) == 1
+    assert data["buckets"][0]["species"] == "Real Bird"
+    assert data["buckets"][0]["is_accepted"] is True
 
 
 def test_highlights_save(app_and_db):
@@ -3725,116 +5367,37 @@ def test_highlights_save(app_and_db):
 
 
 def test_highlights_scope_workspace_blends_folders(app_and_db):
-    """GET /api/highlights?scope=workspace draws candidates from every
-    folder in the active workspace, so a shoot split across multiple dated
-    folders produces one combined highlight pool."""
+    """scope=workspace blends candidates across every folder in the
+    active workspace (matches existing folder-scope behavior)."""
     app, db = app_and_db
     client = app.test_client()
-    f1 = db.conn.execute(
-        "INSERT INTO folders (path, name, status) VALUES ('/shoot/2024-01-15', '2024-01-15', 'ok')"
+    apapane_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('ʻApapane', 'taxonomy', 1)"
     ).lastrowid
-    f2 = db.conn.execute(
-        "INSERT INTO folders (path, name, status) VALUES ('/shoot/2024-01-16', '2024-01-16', 'ok')"
-    ).lastrowid
-    for fid in (f1, f2):
+    for fname in ("2024-01-15", "2024-01-16"):
+        fid = db.conn.execute(
+            "INSERT INTO folders (path, name, status) VALUES (?, ?, 'ok')",
+            (f"/shoot/{fname}", fname),
+        ).lastrowid
         db.conn.execute(
             "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
             (db._ws_id(), fid),
         )
-    # 3 photos in each folder with strong quality scores.
-    for fid, prefix in [(f1, "a"), (f2, "b")]:
-        for i in range(3):
-            db.conn.execute(
-                "INSERT INTO photos (folder_id, filename, quality_score, flag) "
-                "VALUES (?, ?, ?, 'none')",
-                (fid, f"{prefix}{i}.jpg", 0.9 - i * 0.01),
-            )
-    db.conn.commit()
-
-    resp = client.get("/api/highlights?scope=workspace&count=6&max_per_species=10")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    filenames = {p["filename"] for p in data["photos"]}
-    # All six photos across both folders are eligible and selected. The
-    # fixture photos lack quality scores so they do not show up here.
-    assert filenames == {"a0.jpg", "a1.jpg", "a2.jpg", "b0.jpg", "b1.jpg", "b2.jpg"}
-    # scope=workspace blends candidates from every folder visible in the
-    # active workspace, which the API advertises via meta.scope.
-    assert data["scope"] == "workspace"
-    assert data["meta"]["eligible"] == 6
-
-
-def test_highlights_scope_workspace_isolates_other_workspaces(app_and_db):
-    """Folders in a non-active workspace must not leak into the scope=workspace pool."""
-    app, db = app_and_db
-    client = app.test_client()
-    active_ws = db._ws_id()
-    other_ws = db.create_workspace("Other")
-
-    # Folder in the active workspace.
-    f_active = db.conn.execute(
-        "INSERT INTO folders (path, name, status) VALUES ('/active', 'active', 'ok')"
-    ).lastrowid
-    db.conn.execute(
-        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
-        (active_ws, f_active),
-    )
-    # Folder only in the other workspace.
-    f_other = db.conn.execute(
-        "INSERT INTO folders (path, name, status) VALUES ('/other', 'other', 'ok')"
-    ).lastrowid
-    db.conn.execute(
-        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
-        (other_ws, f_other),
-    )
-    db.conn.execute(
-        "INSERT INTO photos (folder_id, filename, quality_score, flag) VALUES (?, 'keep.jpg', 0.8, 'none')",
-        (f_active,),
-    )
-    db.conn.execute(
-        "INSERT INTO photos (folder_id, filename, quality_score, flag) VALUES (?, 'leaked.jpg', 0.95, 'none')",
-        (f_other,),
-    )
-    db.conn.commit()
-
-    resp = client.get("/api/highlights?scope=workspace&count=10&max_per_species=10")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    filenames = {p["filename"] for p in data["photos"]}
-    assert "leaked.jpg" not in filenames
-    assert filenames == {"keep.jpg"}
-
-
-def test_highlights_folder_scope_still_works(app_and_db):
-    """Regression: omitting scope (or passing a folder_id) still filters by folder."""
-    app, db = app_and_db
-    client = app.test_client()
-    f1 = db.conn.execute(
-        "INSERT INTO folders (path, name, status) VALUES ('/a', 'a', 'ok')"
-    ).lastrowid
-    f2 = db.conn.execute(
-        "INSERT INTO folders (path, name, status) VALUES ('/b', 'b', 'ok')"
-    ).lastrowid
-    for fid in (f1, f2):
+        pid = db.conn.execute(
+            "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+            "VALUES (?, ?, 0.8, 'none')",
+            (fid, f"{fname}.jpg"),
+        ).lastrowid
         db.conn.execute(
-            "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
-            (db._ws_id(), fid),
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (pid, apapane_kw),
         )
-    db.conn.execute(
-        "INSERT INTO photos (folder_id, filename, quality_score, flag) VALUES (?, 'only_a.jpg', 0.8, 'none')",
-        (f1,),
-    )
-    db.conn.execute(
-        "INSERT INTO photos (folder_id, filename, quality_score, flag) VALUES (?, 'only_b.jpg', 0.9, 'none')",
-        (f2,),
-    )
     db.conn.commit()
 
-    resp = client.get(f"/api/highlights?folder_id={f1}&count=10&max_per_species=10")
-    assert resp.status_code == 200
+    resp = client.get("/api/highlights?scope=workspace")
     data = resp.get_json()
-    filenames = {p["filename"] for p in data["photos"]}
-    assert filenames == {"only_a.jpg"}
+    assert len(data["buckets"]) == 1
+    assert data["buckets"][0]["photo_count"] == 2
 
 
 def test_api_import_folder_preview(app_and_db, tmp_path):
@@ -4632,6 +6195,7 @@ def test_regroup_live_scopes_to_collection(tmp_path, monkeypatch):
             species = "robin" if enc_idx == 0 else "eagle"
             db.add_prediction(det_ids[0], species, 0.9 - i * 0.05, "bioclip", category="match")
             (collection_pids if enc_idx == 0 else other_pids).append(pid)
+    db.set_photo_edit_recipe(collection_pids[0], {"rotation": 90})
 
     import json as _json
     cid = db.add_collection(
@@ -4668,6 +6232,8 @@ def test_regroup_live_scopes_to_collection(tmp_path, monkeypatch):
         f"scoped response leaked non-collection photos: "
         f"{scoped_pids ^ set(collection_pids)}"
     )
+    scoped_recipes = {p["id"]: p.get("edit_recipe") for p in scoped["photos"]}
+    assert scoped_recipes[collection_pids[0]] == {"version": 1, "rotation": 90}
     for enc in scoped["encounters"]:
         for pid in enc["photo_ids"]:
             assert pid in collection_pids, (
@@ -4688,8 +6254,11 @@ def test_regroup_live_scopes_to_collection(tmp_path, monkeypatch):
         json={"config": {}, "collection_id": cid},
     )
     assert resp.status_code == 200, resp.get_json()
-    reflow_pids = {p["id"] for p in resp.get_json()["photos"]}
+    reflow = resp.get_json()
+    reflow_pids = {p["id"] for p in reflow["photos"]}
     assert reflow_pids == set(collection_pids)
+    reflow_recipes = {p["id"]: p.get("edit_recipe") for p in reflow["photos"]}
+    assert reflow_recipes[collection_pids[0]] == {"version": 1, "rotation": 90}
     cached_after_reflow = load_results_raw(cache_dir, ws_id)
     assert {p["id"] for p in cached_after_reflow["photos"]} == cached_before_pids
 
@@ -4843,19 +6412,19 @@ def test_save_grouping_defaults_rejects_bad_values(tmp_path, monkeypatch):
     saved = cfg.load()
     pipe = saved.get("pipeline", {})
     if "hard_cut_time" in pipe:
-        assert isinstance(pipe["hard_cut_time"], (int, float))
+        assert isinstance(pipe["hard_cut_time"], int | float)
     if "w_species" in pipe:
-        assert isinstance(pipe["w_species"], (int, float))
+        assert isinstance(pipe["w_species"], int | float)
         assert 0.0 <= pipe["w_species"] <= 1.0
     if "hard_cut_score" in pipe:
-        assert isinstance(pipe["hard_cut_score"], (int, float))
+        assert isinstance(pipe["hard_cut_score"], int | float)
         assert 0.0 <= pipe["hard_cut_score"] <= 1.0
     if "w_time" in pipe:
-        assert isinstance(pipe["w_time"], (int, float))
+        assert isinstance(pipe["w_time"], int | float)
         assert pipe["w_time"] is not True  # bool guard
     if "tau_enc" in pipe:
         import math as _math
-        assert isinstance(pipe["tau_enc"], (int, float))
+        assert isinstance(pipe["tau_enc"], int | float)
         assert _math.isfinite(pipe["tau_enc"])
 
 
@@ -4989,3 +6558,261 @@ def test_collection_preview_does_not_mask_db_failures(app_and_db, monkeypatch):
     # is that it's *not* a 400, which would mislabel a backend fault as a
     # client error.
     assert resp.status_code >= 500
+
+
+# -- Regression tests: route hardening (workspace verification, validation,
+# config locking) --
+
+
+def test_update_workspace_unknown_id_returns_404(app_and_db):
+    """PUT /api/workspaces/<id> must 404 for an unknown workspace instead of
+    crashing on dict(None) after update_workspace silently no-ops."""
+    app, _db = app_and_db
+    client = app.test_client()
+    resp = client.put('/api/workspaces/999999', json={"name": "ghost"})
+    assert resp.status_code == 404
+    assert "error" in resp.get_json()
+
+
+def test_update_workspace_rejects_non_dict_config_overrides(app_and_db):
+    """PUT /api/workspaces/<id> must reject non-dict config_overrides —
+    persisting e.g. a list would crash the labels accessors later."""
+    app, db = app_and_db
+    client = app.test_client()
+    ws_id = db._active_workspace_id
+
+    for bad in ([], "x", 5, True):
+        resp = client.put(f'/api/workspaces/{ws_id}',
+                          json={"config_overrides": bad})
+        assert resp.status_code == 400, f"expected 400 for {bad!r}"
+
+    # None (clear) and a dict remain accepted.
+    resp = client.put(f'/api/workspaces/{ws_id}',
+                      json={"config_overrides": {"classification_threshold": 0.5}})
+    assert resp.status_code == 200
+    resp = client.put(f'/api/workspaces/{ws_id}', json={"config_overrides": None})
+    assert resp.status_code == 200
+
+
+def test_add_workspace_folder_unknown_ids_return_404(app_and_db):
+    """POST /api/workspaces/<ws>/folders must 404 for unknown workspace or
+    folder ids instead of hitting the workspace_folders FK and 500ing."""
+    app, db = app_and_db
+    client = app.test_client()
+    ws_id = db._active_workspace_id
+    fid = db.get_folder_tree()[0]["id"]
+
+    resp = client.post(f'/api/workspaces/{ws_id}/folders',
+                       json={"folder_id": 999999})
+    assert resp.status_code == 404
+    assert "Folder" in resp.get_json()["error"]
+
+    resp = client.post('/api/workspaces/999999/folders',
+                       json={"folder_id": fid})
+    assert resp.status_code == 404
+    assert "Workspace" in resp.get_json()["error"]
+
+
+def test_setup_complete_does_not_pin_defaults(app_and_db):
+    """POST /api/setup/complete must persist only setup_complete (plus keys
+    the user already set) — not the full DEFAULTS-merged config."""
+    import json as _json
+
+    import config as cfg
+
+    app, _db = app_and_db
+    with open(cfg.CONFIG_PATH, "w") as f:
+        _json.dump({"inat_token": "abc"}, f)
+
+    client = app.test_client()
+    resp = client.post('/api/setup/complete')
+    assert resp.status_code == 200
+
+    with open(cfg.CONFIG_PATH) as f:
+        raw = _json.load(f)
+    assert raw == {"inat_token": "abc", "setup_complete": True}
+
+
+def test_detach_endpoints_reject_non_integer_indices(app_and_db):
+    """detach-burst/detach-photo must 400 on non-integer indices instead of
+    raising TypeError at the `enc_idx < 0` comparison."""
+    app, _db = app_and_db
+    client = app.test_client()
+
+    resp = client.post('/api/pipeline/detach-burst',
+                       json={"encounter_index": "0", "burst_index": 0})
+    assert resp.status_code == 400
+    assert "encounter_index" in resp.get_json()["error"]
+
+    resp = client.post('/api/pipeline/detach-burst',
+                       json={"encounter_index": 0, "burst_index": [1]})
+    assert resp.status_code == 400
+    assert "burst_index" in resp.get_json()["error"]
+
+    resp = client.post('/api/pipeline/detach-photo',
+                       json={"encounter_index": "0", "burst_index": 0,
+                             "photo_id": 1})
+    assert resp.status_code == 400
+    assert "encounter_index" in resp.get_json()["error"]
+
+    resp = client.post('/api/pipeline/detach-photo',
+                       json={"encounter_index": 0, "burst_index": True,
+                             "photo_id": 1})
+    assert resp.status_code == 400
+    assert "burst_index" in resp.get_json()["error"]
+
+
+def test_sync_discard_reports_true_count(app_and_db):
+    """POST /api/sync/discard must report rows actually deleted, not the
+    request size — stale/foreign ids are silently skipped by clear_pending."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.queue_change(pid, "keyword_add", "Test Bird")
+    change_id = db.get_pending_changes()[0]["id"]
+
+    resp = client.post('/api/sync/discard',
+                       json={"change_ids": [change_id, 999999]})
+    assert resp.status_code == 200
+    assert resp.get_json()["discarded"] == 1
+    assert db.get_pending_changes() == []
+
+
+def test_audit_resolve_validates_direction_and_photo_id(app_and_db):
+    """POST /api/audit/resolve must 400 on unknown directions (resolve_drift
+    silently no-ops on them) and non-integer photo_id."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+
+    resp = client.post('/api/audit/resolve',
+                       json={"photo_id": pid, "direction": "use_database"})
+    assert resp.status_code == 400
+
+    resp = client.post('/api/audit/resolve',
+                       json={"photo_id": "abc", "direction": "use_db"})
+    assert resp.status_code == 400
+
+    resp = client.post('/api/audit/resolve',
+                       json={"photo_id": pid, "direction": "use_db"})
+    assert resp.status_code == 200
+
+    # resolve-all shares the same silent no-op hazard.
+    resp = client.post('/api/audit/resolve-all', json={"direction": "bogus"})
+    assert resp.status_code == 400
+
+
+def test_encounter_species_chunks_large_photo_id_lists(app_and_db):
+    """POST /api/encounters/species must chunk its IN-clause queries so id
+    lists beyond the SQLite bound-parameter cap don't raise OperationalError."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.get_folder_tree()[0]["id"]
+    # More ids than one 900-param chunk so the query must split.
+    photo_ids = [
+        db.add_photo(folder_id=fid, filename=f"chunk{i}.jpg", extension=".jpg",
+                     file_size=1, file_mtime=1.0)
+        for i in range(950)
+    ]
+
+    resp = client.post('/api/encounters/species',
+                       json={"species": "Chunk Finch", "photo_ids": photo_ids})
+    assert resp.status_code == 200
+    assert resp.get_json()["photo_count"] == len(photo_ids)
+    # Both chunks were validated and tagged.
+    for pid in (photo_ids[0], photo_ids[-1]):
+        assert any(t["name"] == "Chunk Finch" for t in db.get_photo_keywords(pid))
+
+
+def test_api_exiftool_status_reports_missing(app_and_db, monkeypatch):
+    """/api/exiftool/status surfaces a missing binary with an install hint."""
+    app, db = app_and_db
+    import metadata
+    monkeypatch.setattr(metadata.shutil, "which", lambda name: None)
+
+    client = app.test_client()
+    resp = client.get('/api/exiftool/status')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["available"] is False
+    assert data["path"] == ""
+    assert data["hint"]
+
+
+def test_api_exiftool_status_reports_present(app_and_db, monkeypatch):
+    """/api/exiftool/status reports the resolved path and version when found."""
+    app, db = app_and_db
+    import metadata
+    monkeypatch.setattr(metadata.shutil, "which", lambda name: "/usr/bin/exiftool")
+
+    class _Result:
+        returncode = 0
+        stdout = "12.76\n"
+
+    monkeypatch.setattr(metadata.subprocess, "run", lambda *a, **k: _Result())
+
+    client = app.test_client()
+    resp = client.get('/api/exiftool/status')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["available"] is True
+    assert data["path"] == "/usr/bin/exiftool"
+    assert data["version"] == "12.76"
+
+
+def _touch_jpeg(path):
+    """Create a real 1x1 JPEG at ``path`` for endpoint-level scan tests."""
+    from PIL import Image
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    Image.new("RGB", (1, 1), "white").save(path, "JPEG")
+
+
+def test_api_audit_import_untracked_warns_when_exiftool_missing(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """/api/audit/import-untracked surfaces the degraded-scan warning when
+    ExifTool is unavailable. Without it the UI silently refreshes after a
+    scan that lost capture date / GPS / camera info."""
+    app, _db = app_and_db
+    import metadata
+    monkeypatch.setattr(metadata, "exiftool_available", lambda: False)
+
+    img_path = tmp_path / "shoot" / "IMG_0001.JPG"
+    _touch_jpeg(str(img_path))
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/audit/import-untracked",
+        json={"paths": [str(img_path)]},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["ok"] is True
+    assert data["imported"] == 1
+    assert "warning" in data
+    assert "ExifTool" in data["warning"]
+
+
+def test_api_audit_import_untracked_silent_when_exiftool_present(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """When ExifTool runs cleanly the endpoint must NOT inject a warning
+    field — a stray warning would render as a false-positive toast on every
+    audit import."""
+    app, _db = app_and_db
+    import metadata
+    monkeypatch.setattr(metadata, "exiftool_available", lambda: True)
+
+    img_path = tmp_path / "shoot" / "IMG_0001.JPG"
+    _touch_jpeg(str(img_path))
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/audit/import-untracked",
+        json={"paths": [str(img_path)]},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["ok"] is True
+    assert data["imported"] == 1
+    assert "warning" not in data

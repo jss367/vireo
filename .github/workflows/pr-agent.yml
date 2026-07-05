@@ -119,7 +119,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check for open review threads
+        id: threads
+        uses: ./.github/actions/has-open-threads
+        with:
+          repo: ${{ github.repository }}
+          pr: ${{ github.event.pull_request.number }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # A non-empty review body from a human reviewer carries actionable
+      # feedback even when no inline threads exist, so fire on body in that
+      # case. Codex's review body is always the stock template and carries
+      # no signal — its findings come as inline comments handled by the
+      # thread gate — so skip body-firing when the actor is the Codex bot.
+      - name: Check for actionable review body
+        id: body
+        env:
+          REVIEW_BODY: ${{ github.event.review.body }}
+          REVIEW_ACTOR: ${{ github.actor }}
+        shell: bash
+        run: |
+          if [[ -n "$REVIEW_BODY" && "$REVIEW_ACTOR" != "chatgpt-codex-connector[bot]" ]]; then
+            echo "has_actionable_body=true" >> "$GITHUB_OUTPUT"
+            echo "Review by ${REVIEW_ACTOR} has a non-empty body; will fire routine."
+          else
+            echo "has_actionable_body=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Fire routine
+        if: steps.threads.outputs.needs_response == 'true' || steps.body.outputs.has_actionable_body == 'true'
         uses: ./.github/actions/fire-routine
         with:
           url: ${{ secrets.CLAUDE_ROUTINE_URL }}
@@ -165,8 +193,17 @@ jobs:
       - uses: actions/checkout@v4
         if: steps.fork-check.outputs.is_fork == 'false'
 
-      - name: Fire routine
+      - name: Check for open review threads
+        id: threads
         if: steps.fork-check.outputs.is_fork == 'false'
+        uses: ./.github/actions/has-open-threads
+        with:
+          repo: ${{ github.repository }}
+          pr: ${{ github.event.pull_request.number }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fire routine
+        if: steps.fork-check.outputs.is_fork == 'false' && steps.threads.outputs.needs_response == 'true'
         uses: ./.github/actions/fire-routine
         with:
           url: ${{ secrets.CLAUDE_ROUTINE_URL }}
@@ -311,12 +348,13 @@ jobs:
             Task: resolve-conflicts
             PRs: ${{ steps.conflicts.outputs.pr_csv }}
 
-  # Enable squash auto-merge after an approving review on an agent PR.
+  # Enable squash auto-merge after an approving review from a trusted actor.
+  # Not gated on the claude-agent label — a trusted approval should be
+  # sufficient regardless of how the PR was created.
   merge-on-approval:
     if: >-
       github.event_name == 'pull_request_review'
       && github.event.review.state == 'approved'
-      && contains(github.event.pull_request.labels.*.name, 'claude-agent')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -364,14 +402,14 @@ jobs:
             --subject "${title} (#${PR})"
           echo "Auto-merge enabled on PR #${PR}. GitHub will merge when CI passes."
 
-  # Enable squash auto-merge after a trusted thumbs-up comment on an agent PR.
+  # Enable squash auto-merge after a trusted thumbs-up comment. Not gated on
+  # the claude-agent label — see merge-on-approval above.
   merge-on-thumbsup:
     if: >-
       github.event_name == 'issue_comment'
       && github.event.issue.pull_request
       && (github.event.comment.body == '+1'
           || github.event.comment.body == '👍')
-      && contains(github.event.issue.labels.*.name, 'claude-agent')
       && (github.event.comment.author_association == 'OWNER'
           || github.event.comment.author_association == 'COLLABORATOR'
           || github.actor == 'chatgpt-codex-connector[bot]')
@@ -386,7 +424,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.issue.number }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
         run: |
+          if [[ " $TRUSTED_ACTORS " != *" $COMMENT_AUTHOR "* ]]; then
+            echo "PR #${PR}: +1 from ${COMMENT_AUTHOR} is not in TRUSTED_ACTORS; skipping auto-merge."
+            exit 0
+          fi
+
           base=$(gh pr view "$PR" --repo "$REPO" --json baseRefName -q .baseRefName)
           head=$(gh pr view "$PR" --repo "$REPO" --json headRefName -q .headRefName)
           head_sha=$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q .headRefOid)
@@ -435,9 +479,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Not gated on the claude-agent label — a trusted reaction should
+          # be sufficient regardless of how the PR was created.
           prs=$(gh pr list --repo "${{ github.repository }}" \
             --state open \
-            --label "$AGENT_LABEL" \
             --limit 1000 \
             --json number -q '.[].number')
 

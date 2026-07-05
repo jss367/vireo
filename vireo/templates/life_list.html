@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/png" href="/favicon.ico">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/vireo-base.css">
+<title>Vireo - Life List</title>
+<style>
+  .lifelist-controls { display:flex; align-items:center; gap:20px; padding:12px 24px; background:var(--bg-secondary); border-bottom:1px solid var(--border-primary); flex-wrap:wrap; }
+  .control-group { display:flex; align-items:center; gap:8px; }
+  .control-group label { font-size:13px; color:var(--text-secondary); white-space:nowrap; }
+  .control-group input[type=search], .control-group select { font-size:13px; padding:4px 8px; background:var(--bg-input); color:var(--text-primary); border:1px solid var(--border-secondary); border-radius:4px; }
+  .control-group input[type=search] { width:180px; }
+  .publish-btn { margin-left:auto; border:1px solid var(--accent); background:transparent; color:var(--accent); border-radius:4px; padding:5px 10px; font-size:12px; cursor:pointer; }
+  .publish-btn:hover { background:rgba(99, 179, 237, 0.08); }
+  .publish-path-row { display:flex; gap:8px; align-items:center; }
+  .publish-path-row .modal-input { flex:1; }
+  .publish-option { display:flex; gap:8px; align-items:flex-start; margin-top:12px; font-size:13px; color:var(--text-secondary); }
+  .publish-status { min-height:16px; margin-top:10px; font-size:12px; color:var(--text-secondary); }
+
+  .lifelist-meta { padding:8px 24px; font-size:12px; color:var(--text-secondary); }
+
+  .lifelist-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); gap:16px; padding:16px 24px; }
+  .species-card { position:relative; border-radius:8px; overflow:hidden; background:var(--bg-secondary); border:1px solid var(--border-primary); cursor:pointer; }
+  .species-card:hover { border-color:var(--accent); }
+  .species-card img { width:100%; aspect-ratio:3/2; object-fit:cover; display:block; background:var(--bg-tertiary); }
+  .lifer-number { position:absolute; top:8px; left:8px; padding:2px 8px; border-radius:999px; background:rgba(0,0,0,0.65); color:#fff; font-size:11px; font-weight:700; letter-spacing:0.5px; }
+  .lifelist-ribbon { position:absolute; top:8px; right:8px; padding:2px 7px; border-radius:999px; background:var(--accent); color:var(--accent-text); font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; }
+  .species-info { padding:10px 12px 12px; }
+  .species-name { font-size:15px; font-weight:600; color:var(--text-primary); }
+  .species-sci { font-size:12px; font-style:italic; color:var(--text-secondary); margin-top:1px; }
+  .species-meta { font-size:12px; color:var(--text-secondary); margin-top:6px; }
+  .species-locations { display:flex; flex-wrap:wrap; gap:4px; margin-top:6px; }
+  .loc-chip { padding:1px 7px; border-radius:999px; background:var(--bg-tertiary); color:var(--text-secondary); font-size:11px; white-space:nowrap; }
+
+  .lifelist-empty { text-align:center; padding:80px 24px; color:var(--text-secondary); }
+  .lifelist-empty a { color:var(--accent); }
+  /* .lifelist-lb-panel styles now live in _navbar.html — the "Add to Life
+     List" lightbox panel is shared across every page's lightbox. */
+</style>
+</head>
+<body>
+{% include '_navbar.html' %}
+
+<div class="lifelist-controls" id="controlsBar">
+  <div class="control-group">
+    <label for="speciesSearch">Species</label>
+    <input type="search" id="speciesSearch" placeholder="Cardinal">
+  </div>
+  <div class="control-group">
+    <label for="sortSelect">Sort</label>
+    <select id="sortSelect">
+      <option value="newest">Newest lifer first</option>
+      <option value="life-order">Life order (oldest first)</option>
+      <option value="alpha">A&ndash;Z</option>
+      <option value="most-photos">Most photos</option>
+    </select>
+  </div>
+  <button class="publish-btn" onclick="openPublishModal()">Publish Site</button>
+</div>
+
+<div class="lifelist-meta" id="meta"></div>
+
+<div class="modal-overlay" id="publishModal">
+  <div class="modal">
+    <h3>Publish Website Data</h3>
+    <label class="modal-label" for="publishDest">Destination folder</label>
+    <div class="publish-path-row">
+      <input id="publishDest" class="modal-input" type="text" placeholder="/path/to/site/public">
+      <button class="modal-btn modal-btn-cancel" onclick="browsePublishDest()">Browse</button>
+    </div>
+    <div class="modal-hint">
+      Writes data/site.json, data/life-list.json, data/highlights.json, and optimized images.
+    </div>
+
+    <label class="publish-option">
+      <input id="publishLocations" type="checkbox">
+      <span>Include location keywords in the published life list.</span>
+    </label>
+
+    <label class="modal-label" for="publishMaxSize" style="margin-top:12px;">Image max long edge</label>
+    <select id="publishMaxSize" class="modal-input">
+      <option value="2400">2400 px</option>
+      <option value="2048">2048 px</option>
+      <option value="1600">1600 px</option>
+      <option value="">Original size</option>
+    </select>
+
+    <div class="publish-status" id="publishStatus"></div>
+    <div class="modal-actions">
+      <button id="publishSubmitBtn" class="modal-btn modal-btn-primary" onclick="startPublishSite()">Publish</button>
+      <button class="modal-btn modal-btn-cancel" onclick="closePublishModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div class="lifelist-grid" id="content"></div>
+
+<div id="emptyState" class="lifelist-empty" style="display:none;">
+  <p>No confirmed species yet.</p>
+  <p>Your life list grows as you tag photos with species &mdash; confirm
+     predictions on the <a href="/highlights">Highlights</a> page or tag
+     photos while browsing.</p>
+</div>
+
+<script>
+var currentData = null;
+var debounceTimer = null;
+
+// All dynamic values rendered into card HTML pass through escapeAttr —
+// same escaping convention as highlights.html.
+function escapeAttr(s) {
+  if (s === null || s === undefined) return '';
+  return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function formatDate(iso) {
+  if (!iso) return null;
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) return null;
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+async function loadLifeList() {
+  var meta = document.getElementById('meta');
+  meta.textContent = 'Loading life list…';
+  try {
+    currentData = await safeFetch('/api/life-list');
+  } catch (e) {
+    meta.textContent = 'Failed to load life list.';
+    return;
+  }
+  render();
+}
+
+function sortedSpecies() {
+  var sort = document.getElementById('sortSelect').value;
+  var list = (currentData.species || []).slice();
+  list.sort(function(a, b) {
+    if (sort === 'alpha') return a.species.localeCompare(b.species);
+    if (sort === 'most-photos') return b.photo_count - a.photo_count;
+    if (sort === 'life-order') return a.number - b.number;
+    // 'newest' default — by first_seen desc, undated species last so they
+    // don't masquerade as the newest lifers (server gives them the highest
+    // life-list numbers for stable numbering, so reversing number is wrong).
+    var af = a.first_seen, bf = b.first_seen;
+    if (!af && !bf) return a.species.localeCompare(b.species);
+    if (!af) return 1;
+    if (!bf) return -1;
+    if (af < bf) return 1;
+    if (af > bf) return -1;
+    return a.species.localeCompare(b.species);
+  });
+  return list;
+}
+
+function photoThumbnailUrl(photo) {
+  if (!photo || photo.id == null) return '';
+  return window.vireoThumbnailUrl
+    ? window.vireoThumbnailUrl(photo)
+    : '/thumbnails/' + photo.id + '.jpg';
+}
+
+function renderCard(entry) {
+  var best = entry.best;
+  var thumb = best ? photoThumbnailUrl(best) : '';
+  var sci = entry.scientific_name && entry.scientific_name !== entry.species
+    ? '<div class="species-sci">' + escapeAttr(entry.scientific_name) + '</div>'
+    : '';
+  var metaParts = [entry.photo_count + ' photo' + (entry.photo_count === 1 ? '' : 's')];
+  var first = formatDate(entry.first_seen);
+  var last = formatDate(entry.last_seen);
+  if (first) metaParts.push('first ' + first);
+  if (last && last !== first) metaParts.push('latest ' + last);
+  var locations = (entry.locations || []).slice(0, 3).map(function(l) {
+    return '<span class="loc-chip">' + escapeAttr(l) + '</span>';
+  }).join('');
+  var extraLocs = (entry.locations || []).length - 3;
+  if (extraLocs > 0) locations += '<span class="loc-chip">+' + extraLocs + ' more</span>';
+  return '<div class="species-card" data-species="' + escapeAttr(entry.species) + '" title="'
+    + escapeAttr((entry.locations || []).join(', ')) + '">'
+    + '<div class="lifer-number">#' + entry.number + '</div>'
+    + (best && best.is_life_list_photo ? '<div class="lifelist-ribbon">Life List</div>' : '')
+    + (best ? '<img src="' + escapeAttr(thumb) + '" data-photo-id="' + escapeAttr(best.id) + '" alt="' + escapeAttr(best.filename) + '" loading="lazy">' : '')
+    + '<div class="species-info">'
+    + '<div class="species-name">' + escapeAttr(entry.species) + '</div>'
+    + sci
+    + '<div class="species-meta">' + metaParts.join(' &middot; ') + '</div>'
+    + (locations ? '<div class="species-locations">' + locations + '</div>' : '')
+    + '</div></div>';
+}
+
+function render() {
+  var content = document.getElementById('content');
+  var empty = document.getElementById('emptyState');
+  var meta = document.getElementById('meta');
+  var controls = document.getElementById('controlsBar');
+
+  if (!currentData || !currentData.species.length) {
+    content.innerHTML = '';
+    meta.textContent = '';
+    controls.style.display = 'none';
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+  controls.style.display = '';
+
+  var search = document.getElementById('speciesSearch').value.trim().toLowerCase();
+  var list = sortedSpecies();
+  if (search) {
+    list = list.filter(function(e) {
+      return e.species.toLowerCase().indexOf(search) >= 0
+        || (e.scientific_name || '').toLowerCase().indexOf(search) >= 0
+        || (e.common_name || '').toLowerCase().indexOf(search) >= 0;
+    });
+  }
+
+  meta.textContent = currentData.meta.species_count + ' species on your life list · '
+    + currentData.meta.photo_count + ' tagged photos'
+    + (search ? ' · ' + list.length + ' matching' : '');
+
+  content.innerHTML = list.map(renderCard).join('')
+    || '<div class="lifelist-empty" style="grid-column:1/-1;"><p>No species match this search.</p></div>';
+
+  content.querySelectorAll('.species-card').forEach(function(card) {
+    card.addEventListener('click', function() {
+      var sp = card.getAttribute('data-species');
+      var entry = (currentData.species || []).find(function(e) { return e.species === sp; });
+      if (entry && entry.best && window.openLightbox) {
+        // The lightbox set is this species' top photos so the user can
+        // flip through their best shots of the lifer. The shared lightbox
+        // panel (see _navbar.html) renders its own "Add to Life List" control.
+        openLightbox(entry.best.id, entry.best.filename, entry.photos || [entry.best]);
+      }
+    });
+  });
+}
+
+function debounceRender() {
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(render, 150);
+}
+
+document.getElementById('speciesSearch').addEventListener('input', debounceRender);
+document.getElementById('sortSelect').addEventListener('change', function() {
+  if (currentData) render();
+});
+
+function openPublishModal() {
+  var modal = document.getElementById('publishModal');
+  var status = document.getElementById('publishStatus');
+  if (status) status.textContent = '';
+  modal.classList.add('open');
+  setTimeout(function() {
+    var input = document.getElementById('publishDest');
+    if (input) input.focus();
+  }, 0);
+}
+
+function closePublishModal() {
+  document.getElementById('publishModal').classList.remove('open');
+}
+
+async function browsePublishDest() {
+  if (typeof pickDirectory !== 'function') {
+    showToast('Folder picker is available in the desktop app.', 'info');
+    return;
+  }
+  var selected = await pickDirectory('Select website publish folder');
+  if (selected) document.getElementById('publishDest').value = selected;
+}
+
+async function startPublishSite() {
+  var dest = document.getElementById('publishDest').value.trim();
+  var status = document.getElementById('publishStatus');
+  var btn = document.getElementById('publishSubmitBtn');
+  if (!dest) {
+    status.textContent = 'Destination folder is required.';
+    return;
+  }
+  btn.disabled = true;
+  status.textContent = 'Starting publish job...';
+  try {
+    var maxSize = document.getElementById('publishMaxSize').value;
+    var data = await safeFetch('/api/jobs/publish-site', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        destination: dest,
+        max_size: maxSize,
+        include_locations: document.getElementById('publishLocations').checked,
+      }),
+    });
+    status.textContent = 'Publish job started: ' + data.job_id;
+    if (typeof showToast === 'function') showToast('Publishing website data...', 'info');
+    setTimeout(closePublishModal, 700);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// The "Add to Life List" lightbox panel is shared (see _navbar.html) and
+// works on every page. When it changes a representative photo, it dispatches
+// `lifelist:changed`; refresh this page's grid + ribbons in response.
+document.addEventListener('lifelist:changed', function() {
+  loadLifeList();
+});
+
+loadLifeList();
+</script>
+</body>
+</html>

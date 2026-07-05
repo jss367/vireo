@@ -2,6 +2,7 @@
 import logging
 import os
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -98,6 +99,99 @@ def test_job_runner_still_records_novel_exception_text():
     assert len(job['errors']) == 2
     assert "stage warning: something odd" in job['errors']
     assert "orchestrator failure: unexpected state" in job['errors']
+
+
+def test_job_result_ok_false_marks_failed(tmp_path):
+    """A work function that returns normally but signals failure via
+    {"ok": False, "errors": [...]} must be recorded as 'failed', not
+    'completed' — and its result errors must be folded into error_count.
+
+    This is the move-folder case: rsync times out, move_folder returns
+    {"moved": 0, "errors": [...]} (no exception), and the run used to read
+    as "completed, 0 errors" in history.
+    """
+    from jobs import JobRunner
+
+    runner = JobRunner()
+
+    def work(job):
+        return {"moved": 0, "errors": ["rsync timed out"], "ok": False}
+
+    job_id = runner.start('move-folder', work)
+
+    job = wait_for_job_via_runner(runner, job_id)
+    assert job['status'] == 'failed'
+    assert "rsync timed out" in job['errors']
+
+
+def test_job_result_ok_true_with_warnings_stays_completed(tmp_path):
+    """A work function returning {"ok": True, "errors": [...]} represents a
+    partial success: the job completes, but the result errors are still
+    folded into the job's error tally so the count is honest."""
+    from jobs import JobRunner
+
+    runner = JobRunner()
+
+    def work(job):
+        return {"moved": 5, "errors": ["one file skipped"], "ok": True}
+
+    job_id = runner.start('move-folder', work)
+
+    job = wait_for_job_via_runner(runner, job_id)
+    assert job['status'] == 'completed'
+    assert "one file skipped" in job['errors']
+
+
+def test_job_result_without_ok_key_unaffected(tmp_path):
+    """The ok/errors folding is opt-in: a result dict with no "ok" key keeps
+    today's behavior (completed, runner-level error list untouched)."""
+    from jobs import JobRunner
+
+    runner = JobRunner()
+
+    def work(job):
+        return {"moved": 0, "errors": ["informational note"]}
+
+    job_id = runner.start('test', work)
+
+    job = wait_for_job_via_runner(runner, job_id)
+    assert job['status'] == 'completed'
+    assert job['errors'] == []
+
+
+def test_job_result_ok_false_persists_failed_with_error_count(tmp_path):
+    """End-to-end: an ok=False result is persisted to job_history with
+    status='failed' and error_count reflecting the result errors."""
+    from db import Database
+    from jobs import JobRunner
+
+    db = Database(str(tmp_path / "test.db"))
+    runner = JobRunner(db=db)
+
+    def work(job):
+        return {
+            "moved": 0,
+            "errors": ["rsync timed out", "renameat: Operation timed out"],
+            "ok": False,
+            "summary": "Move failed — rsync timed out",
+        }
+
+    job_id = runner.start('move-folder', work)
+
+    row = None
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        row = db.conn.execute(
+            "SELECT status, error_count, summary FROM job_history WHERE id = ?",
+            (job_id,),
+        ).fetchone()
+        if row is not None:
+            break
+        time.sleep(0.05)
+    assert row is not None
+    assert row["status"] == "failed"
+    assert row["error_count"] == 2, f"expected error_count=2, got {row['error_count']}"
+    assert row["summary"] == "Move failed — rsync timed out"
 
 
 def test_failed_job_history_preserves_structured_result(tmp_path):
@@ -285,10 +379,11 @@ def test_job_history_persistence(tmp_path):
 
     job_id = runner.start('scan', work, config={'root': '/photos'})
 
-    wait_for_job_via_runner(runner, job_id)
-
-    # Give it a moment to persist
-    time.sleep(0.1)
+    # wait_for_history=True blocks until the worker thread has flushed the
+    # row to SQLite (job["_persisted"]). The previous fixed time.sleep(0.1)
+    # was too short on slow Windows CI runners, where the worker thread had
+    # not yet committed by the time db.conn read the row.
+    wait_for_job_via_runner(runner, job_id, wait_for_history=True)
 
     rows = db.conn.execute("SELECT * FROM job_history WHERE id = ?", (job_id,)).fetchall()
     assert len(rows) == 1
@@ -320,6 +415,44 @@ def test_ephemeral_job_skips_history_persistence(tmp_path):
         "SELECT * FROM job_history WHERE id = ?", (job_id,)
     ).fetchall()
     assert rows == [], "ephemeral jobs must not be persisted to job_history"
+
+
+def test_jobs_count_for_badge_by_default():
+    """Jobs opt into attention badges unless explicitly marked ambient."""
+    from jobs import JobRunner
+
+    runner = JobRunner()
+    release = threading.Event()
+
+    def work(job):
+        release.wait(timeout=2)
+
+    job_id = runner.start("scan", work)
+    try:
+        job = runner.get(job_id)
+        assert job["counts_for_badge"] is True
+    finally:
+        release.set()
+        wait_for_job_via_runner(runner, job_id)
+
+
+def test_job_can_opt_out_of_badge_counting():
+    """Ambient jobs stay listed but do not contribute to app badges."""
+    from jobs import JobRunner
+
+    runner = JobRunner()
+    release = threading.Event()
+
+    def work(job):
+        release.wait(timeout=2)
+
+    job_id = runner.start("new_images_walk", work, counts_for_badge=False)
+    try:
+        job = runner.get(job_id)
+        assert job["counts_for_badge"] is False
+    finally:
+        release.set()
+        wait_for_job_via_runner(runner, job_id)
 
 
 def test_ephemeral_failed_job_skips_history_persistence(tmp_path):
@@ -395,7 +528,6 @@ def test_job_steps_tracking(tmp_path):
 def test_job_history_persists_steps_tree(tmp_path):
     """Completed jobs persist their step tree to job_history."""
     import json
-    import time
 
     from db import Database
     from jobs import JobRunner
@@ -418,9 +550,10 @@ def test_job_history_persists_steps_tree(tmp_path):
 
     job_id = runner.start("scan", work, workspace_id=ws_id)
 
-    wait_for_job_via_runner(runner, job_id)
-
-    time.sleep(0.5)
+    # wait_for_history=True blocks until the worker thread has flushed the
+    # job_history row; the previous fixed time.sleep(0.5) raced the worker
+    # on slower Windows I/O and left get_history returning [].
+    wait_for_job_via_runner(runner, job_id, wait_for_history=True)
 
     history = runner.get_history(db, limit=1)
     assert len(history) > 0
@@ -435,8 +568,6 @@ def test_job_history_persists_steps_tree(tmp_path):
 
 def test_job_history_prunes_to_100(tmp_path):
     """Job history prunes entries beyond 100 per workspace."""
-    import time
-
     from db import Database
     from jobs import JobRunner
 
@@ -458,9 +589,12 @@ def test_job_history_prunes_to_100(tmp_path):
     def work(job):
         return {}
 
+    # Pruning happens inside _persist_job (INSERT + retention DELETE), and
+    # _persisted flips true only after both commit. A fixed sleep raced the
+    # worker thread on slower Windows I/O; wait_for_history is the exact
+    # sync point.
     job_id = runner.start("test", work, workspace_id=ws_id)
-    wait_for_job_via_runner(runner, job_id)
-    time.sleep(0.5)
+    wait_for_job_via_runner(runner, job_id, wait_for_history=True)
 
     count = db.conn.execute(
         "SELECT COUNT(*) FROM job_history WHERE workspace_id = ?", (ws_id,)

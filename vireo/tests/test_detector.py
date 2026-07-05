@@ -432,3 +432,86 @@ def test_megadetector_onnx_model_file_valid():
     # Check file is non-trivially sized (ONNX models are at least a few MB)
     size = os.path.getsize(detector.MEGADETECTOR_ONNX_PATH)
     assert size > 1_000_000, f"Model file too small ({size} bytes), may be corrupted"
+
+
+def test_detect_animals_holds_gpu_lock_for_gpu_session(monkeypatch, tmp_path):
+    """``detect_animals`` must take the process-wide GPU semaphore around
+    ``session.run`` when the session reports a GPU provider.
+    """
+    from unittest.mock import MagicMock
+
+    import detector
+    import pipeline_locks
+
+    fake_session = MagicMock()
+    fake_input = MagicMock()
+    fake_input.name = "images"
+    fake_session.get_inputs.return_value = [fake_input]
+    fake_session.get_providers.return_value = [
+        "CUDAExecutionProvider", "CPUExecutionProvider",
+    ]
+
+    snapshots = {}
+
+    def fake_run(output_names, feed_dict):
+        snapshots["during_run"] = pipeline_locks._GPU_SEMAPHORE._value
+        # Return a degenerate empty output that _postprocess can swallow.
+        import numpy as np
+        return [np.zeros((1, 0, 8), dtype=np.float32)]
+
+    fake_session.run = fake_run
+    monkeypatch.setattr(detector, "_get_session", lambda: fake_session)
+
+    # Fake a loadable image so _preprocess succeeds.
+    img_path = tmp_path / "stub.jpg"
+    from PIL import Image
+    Image.new("RGB", (640, 480), color="black").save(img_path)
+
+    baseline = pipeline_locks._GPU_SEMAPHORE._value
+    detector.detect_animals(str(img_path))
+
+    assert snapshots["during_run"] == baseline - 1, (
+        "GPU lock must be held during session.run for GPU sessions"
+    )
+    assert pipeline_locks._GPU_SEMAPHORE._value == baseline, (
+        "semaphore must be released after detection"
+    )
+
+
+def test_detect_animals_skips_gpu_lock_for_cpu_only_session(monkeypatch, tmp_path):
+    """When MegaDetector falls back to CPU (Apple Silicon excludes CoreML
+    for external-data ONNX, or CPU-only installs), ``detect_animals``
+    must not take the process-wide GPU semaphore — concurrent SAM/DINO
+    on the GPU would otherwise stall on detector's CPU work.
+    """
+    from unittest.mock import MagicMock
+
+    import detector
+    import pipeline_locks
+
+    fake_session = MagicMock()
+    fake_input = MagicMock()
+    fake_input.name = "images"
+    fake_session.get_inputs.return_value = [fake_input]
+    fake_session.get_providers.return_value = ["CPUExecutionProvider"]
+
+    snapshots = {}
+
+    def fake_run(output_names, feed_dict):
+        snapshots["during_run"] = pipeline_locks._GPU_SEMAPHORE._value
+        import numpy as np
+        return [np.zeros((1, 0, 8), dtype=np.float32)]
+
+    fake_session.run = fake_run
+    monkeypatch.setattr(detector, "_get_session", lambda: fake_session)
+
+    img_path = tmp_path / "stub.jpg"
+    from PIL import Image
+    Image.new("RGB", (640, 480), color="black").save(img_path)
+
+    baseline = pipeline_locks._GPU_SEMAPHORE._value
+    detector.detect_animals(str(img_path))
+
+    assert snapshots["during_run"] == baseline, (
+        "CPU-only detector session must not take the GPU semaphore"
+    )

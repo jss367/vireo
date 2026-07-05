@@ -12,21 +12,55 @@
   .control-group { display:flex; align-items:center; gap:8px; }
   .control-group label { font-size:13px; color:var(--text-secondary); white-space:nowrap; }
   .control-group input[type=range] { width:120px; }
-  .control-group select { font-size:13px; padding:4px 8px; background:var(--bg-input); color:var(--text-primary); border:1px solid var(--border-secondary); border-radius:4px; }
-  .control-value { font-size:13px; color:var(--text-primary); min-width:30px; }
+  .control-group input[type=search], .control-group select { font-size:13px; padding:4px 8px; background:var(--bg-input); color:var(--text-primary); border:1px solid var(--border-secondary); border-radius:4px; }
+  .control-group input[type=search] { width:180px; }
+  .control-value { font-size:13px; color:var(--text-primary); min-width:36px; }
   .save-btn { margin-left:auto; padding:6px 16px; background:var(--accent); color:var(--accent-text); border:none; border-radius:4px; cursor:pointer; font-size:13px; }
   .save-btn:hover { opacity:0.9; }
-  .highlights-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); gap:12px; padding:24px; }
+
+  .bucket { padding:16px 24px; border-bottom:1px solid var(--border-primary); }
+  .bucket-header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:10px; }
+  .bucket-heading { display:flex; align-items:baseline; gap:8px; min-width:0; flex-wrap:wrap; }
+  .bucket-title { font-size:16px; color:var(--text-primary); font-weight:600; }
+  .bucket-meta { font-size:13px; color:var(--text-secondary); }
+  .bucket-badge { display:inline-block; margin-left:8px; font-size:10px; padding:2px 6px; border-radius:8px; background:var(--bg-tertiary); color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.5px; }
+  .bucket-badge.predicted { background:var(--bg-tertiary); color:var(--text-secondary); }
+  .bucket-badge.likely { background:rgba(34,139,34,0.16); color:var(--success); }
+  .bucket-badge.candidate { background:rgba(229,194,51,0.18); color:var(--warning); }
+  .bucket-badge.accepted { background:var(--accent); color:var(--accent-text); }
+  .bucket-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+  .bucket-action { padding:4px 10px; border-radius:4px; border:1px solid var(--border-secondary); background:var(--bg-secondary); color:var(--text-primary); cursor:pointer; font-size:12px; }
+  .bucket-action.primary { background:var(--accent); color:var(--accent-text); border-color:var(--accent); }
+  .bucket-action:hover { border-color:var(--accent); }
+  .bucket-action:disabled { opacity:0.55; cursor:default; }
+  .bucket-strip { display:grid; grid-template-columns:repeat(auto-fill, minmax(180px, 1fr)); gap:10px; }
   .highlights-card { position:relative; border-radius:6px; overflow:hidden; background:var(--bg-secondary); cursor:pointer; border:1px solid var(--border-primary); }
   .highlights-card:hover { border-color:var(--accent); }
+  .highlights-card.best-card { border-color:var(--accent); }
+  .best-ribbon { position:absolute; top:6px; left:6px; padding:2px 6px; border-radius:999px; background:var(--accent); color:var(--accent-text); font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; }
   .highlights-card img { width:100%; aspect-ratio:3/2; object-fit:cover; display:block; background:var(--bg-tertiary); }
-  .card-info { padding:6px 8px; font-size:12px; display:flex; justify-content:space-between; }
-  .card-species { color:var(--text-primary); }
-  .card-quality { color:var(--text-secondary); }
-  .highlights-summary { padding:8px 24px; font-size:13px; color:var(--text-secondary); border-top:1px solid var(--border-primary); }
+  .card-info { padding:6px 8px; font-size:11px; color:var(--text-secondary); display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:4px; min-height:28px; }
+  .card-chip { padding:1px 5px; border-radius:999px; background:var(--bg-tertiary); white-space:nowrap; }
+  .card-chip.score { color:var(--text-primary); font-weight:600; }
+  .card-chip.conf { color:var(--text-secondary); }
+  .card-chip.reason { color:var(--text-secondary); max-width:100%; overflow:hidden; text-overflow:ellipsis; }
+  .bucket-expand { margin-top:8px; font-size:13px; color:var(--accent); cursor:pointer; background:none; border:none; padding:0; }
+  .bucket-expand:hover { text-decoration:underline; }
+
+  .unid-divider { padding:20px 24px 8px; font-size:11px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:1px; border-top:2px solid var(--border-primary); margin-top:8px; }
+
   .highlights-empty { text-align:center; padding:80px 24px; color:var(--text-secondary); }
   .highlights-empty a { color:var(--accent); }
-  /* Save modal */
+  .highlights-meta { padding:8px 24px; font-size:12px; color:var(--text-secondary); }
+  .highlight-undo { display:none; align-items:center; justify-content:space-between; gap:12px; margin:8px 24px 0; padding:8px 12px; border:1px solid var(--border-secondary); border-radius:6px; background:var(--bg-secondary); color:var(--text-primary); font-size:13px; }
+  .highlight-undo.open { display:flex; }
+  .highlight-undo span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .highlight-undo-actions { display:flex; align-items:center; gap:8px; flex-shrink:0; }
+  .highlight-undo button { padding:4px 10px; border-radius:4px; border:1px solid var(--border-secondary); background:var(--bg-tertiary); color:var(--text-primary); cursor:pointer; font-size:12px; }
+  .highlight-undo button.primary { background:var(--accent); color:var(--accent-text); border-color:var(--accent); }
+  .highlight-undo button:disabled { opacity:0.6; cursor:default; }
+
+  /* Save modal (unchanged) */
   .save-modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:500; align-items:center; justify-content:center; }
   .save-modal-overlay.open { display:flex; }
   .save-modal { background:var(--bg-primary); border:1px solid var(--border-primary); border-radius:8px; padding:24px; min-width:360px; }
@@ -34,6 +68,22 @@
   .save-modal input[type=text] { width:100%; padding:8px; font-size:14px; border:1px solid var(--border-secondary); border-radius:4px; box-sizing:border-box; margin-bottom:12px; background:var(--bg-input); color:var(--text-primary); }
   .save-modal-actions { display:flex; gap:8px; justify-content:flex-end; }
   .save-modal-actions button { padding:6px 16px; border-radius:4px; border:none; cursor:pointer; font-size:13px; }
+
+  .species-modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:700; align-items:center; justify-content:center; }
+  .species-modal-overlay.open { display:flex; }
+  .species-modal { width:min(420px, calc(100vw - 32px)); background:var(--bg-primary); border:1px solid var(--border-primary); border-radius:8px; padding:20px; box-shadow:0 16px 48px rgba(0,0,0,0.35); }
+  .species-modal h3 { margin:0 0 12px; font-size:16px; color:var(--text-primary); }
+  .species-modal p { margin:0 0 12px; color:var(--text-secondary); font-size:13px; }
+  .species-modal input[type=text] { width:100%; padding:8px; font-size:14px; border:1px solid var(--border-secondary); border-radius:4px; box-sizing:border-box; background:var(--bg-input); color:var(--text-primary); }
+  .species-modal-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:14px; }
+  .species-modal-actions button { padding:6px 16px; border-radius:4px; border:1px solid var(--border-secondary); background:var(--bg-secondary); color:var(--text-primary); cursor:pointer; font-size:13px; }
+  .species-modal-actions .primary { background:var(--accent); color:var(--accent-text); border-color:var(--accent); }
+
+  .highlight-lb-panel { display:flex; align-items:center; gap:8px; flex-wrap:wrap; min-height:32px; padding:4px 8px; border-radius:4px; background:rgba(12,14,16,0.88); border:1px solid rgba(255,255,255,0.42); color:#f4f7f8; font-size:12px; font-weight:650; text-shadow:0 1px 1px rgba(0,0,0,0.75); }
+  .highlight-lb-panel button { min-height:24px; border:1px solid rgba(255,255,255,0.42); background:rgba(255,255,255,0.12); color:#fff; border-radius:4px; padding:4px 9px; cursor:pointer; font-size:12px; font-weight:650; }
+  .highlight-lb-panel button:hover { background:rgba(255,255,255,0.2); border-color:rgba(255,255,255,0.72); }
+  .highlight-lb-panel button:disabled { color:rgba(255,255,255,0.48); border-color:rgba(255,255,255,0.22); background:rgba(255,255,255,0.06); cursor:default; }
+  .highlight-lb-panel button.primary { border-color:rgba(255,224,102,0.84); color:#ffe066; }
 </style>
 </head>
 <body>
@@ -45,30 +95,60 @@
     <select id="folderSelect"></select>
   </div>
   <div class="control-group">
-    <label for="countSlider">Count</label>
-    <input type="range" id="countSlider" min="1" max="100" value="20">
-    <span class="control-value" id="countValue">20</span>
+    <label for="speciesSearch">Species</label>
+    <input type="search" id="speciesSearch" placeholder="Cardinal">
   </div>
   <div class="control-group">
-    <label for="speciesSlider">Max/species</label>
-    <input type="range" id="speciesSlider" min="1" max="20" value="5">
-    <span class="control-value" id="speciesValue">5</span>
+    <label for="confirmationFilter">Status</label>
+    <select id="confirmationFilter">
+      <option value="all">All</option>
+      <option value="confirmed">Confirmed only</option>
+      <option value="unconfirmed">Unconfirmed only</option>
+    </select>
   </div>
   <div class="control-group">
     <label for="qualitySlider">Min quality</label>
     <input type="range" id="qualitySlider" min="0" max="100" value="0" step="5">
     <span class="control-value" id="qualityValue">0.00</span>
   </div>
+  <div class="control-group">
+    <label for="confidenceSlider">Auto-ID confidence</label>
+    <input type="range" id="confidenceSlider" min="50" max="95" value="70" step="5">
+    <span class="control-value" id="confidenceValue">0.70</span>
+  </div>
+  <div class="control-group">
+    <label for="perRowSlider">Per row</label>
+    <input type="range" id="perRowSlider" min="1" max="20" value="5">
+    <span class="control-value" id="perRowValue">5</span>
+  </div>
+  <div class="control-group">
+    <label for="sortSelect">Sort</label>
+    <select id="sortSelect">
+      <option value="best">Best photo first</option>
+      <option value="fewest">Fewest photos</option>
+      <option value="most">Most photos</option>
+      <option value="worst">Worst photo first</option>
+    </select>
+  </div>
   <button class="save-btn" id="saveBtn" onclick="showSaveModal()">Save as Collection</button>
 </div>
 
-<div id="grid" class="highlights-grid"></div>
+<div class="highlights-meta" id="meta"></div>
+<div id="highlightUndo" class="highlight-undo" role="status" aria-live="polite">
+  <span id="highlightUndoText"></span>
+  <div class="highlight-undo-actions">
+    <button id="highlightUndoBtn" class="primary" type="button" onclick="undoLastHighlightReject()">Undo</button>
+    <button type="button" onclick="hideHighlightUndo()">Dismiss</button>
+  </div>
+</div>
+
+<div id="content"></div>
+
 <div id="emptyState" class="highlights-empty" style="display:none;">
   <p>No highlights available yet.</p>
   <p>Run a pipeline with quality scoring enabled to generate highlights.</p>
   <p><a href="/jobs">Go to Jobs</a></p>
 </div>
-<div class="highlights-summary" id="summary"></div>
 
 <!-- Save modal -->
 <div class="save-modal-overlay" id="saveModal">
@@ -84,46 +164,96 @@
   </div>
 </div>
 
+<!-- Species correction modal -->
+<div class="species-modal-overlay" id="speciesModal" onclick="if (event.target === this) closeSpeciesModal();">
+  <div class="species-modal">
+    <h3 id="speciesModalTitle">Set species</h3>
+    <p id="speciesModalSummary"></p>
+    <input type="text" id="speciesModalInput" list="highlightSpeciesList" placeholder="Species name" autocomplete="off">
+    <datalist id="highlightSpeciesList"></datalist>
+    <div class="species-modal-actions">
+      <button onclick="closeSpeciesModal()">Cancel</button>
+      <button class="primary" id="speciesModalSubmit" onclick="submitSpeciesModal()">Apply</button>
+    </div>
+  </div>
+</div>
+
 <script>
-var currentPhotos = [];
-var currentFolders = [];
+var WORKSPACE_SCOPE = '__workspace__';
+var currentData = null;          // last API response
+var expandedBuckets = new Set(); // species names whose row is expanded
+var unidentifiedExpanded = false;
 var currentFolderName = '';
 var debounceTimer = null;
 var existingCollections = [];
+var speciesSuggestionsLoaded = false;
+var speciesModalPhotoIds = [];
+var activeLightboxPhotoId = null;
+// Photos the user has rejected from the lightbox this session and not since
+// un-rejected. Drives grid removal AND guards reloads (see loadHighlights).
+var rejectedFromGrid = new Set();
+var lastHighlightReject = null;
+// Monotonic counter bumped each time a highlights reload is *issued*, plus the
+// counter value captured at each photo's rejection. Together they let the
+// reload prune ONLY photos rejected at/after the in-flight request was sent
+// (whose response predates the rejection) — never photos the backend restored
+// out-of-band (another tab, Undo panel), which it must be trusted to include.
+var highlightsLoadSeq = 0;
+var rejectedAtLoadSeq = {};
 
 function escapeAttr(s) {
-  if (!s) return '';
-  return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  if (s === null || s === undefined) return '';
+  return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// Sentinel dropdown value that means "aggregate across every folder in the
-// active workspace" (one shoot often spans multiple dated subfolders).
-var WORKSPACE_SCOPE = '__workspace__';
+function formatScore(v) {
+  return v == null ? '—' : Number(v).toFixed(2);
+}
 
-async function loadHighlights() {
+function formatPercent(v) {
+  return v == null ? '' : Math.round(Number(v) * 100) + '%';
+}
+
+function requestScopeParams() {
   var params = new URLSearchParams();
   var folderSelect = document.getElementById('folderSelect');
-  // First load runs before the dropdown is populated (folderSelect.value is
-  // empty). The code below will prepend WORKSPACE_SCOPE as the first option
-  // and it becomes the default selection, so send scope=workspace up front
-  // to keep the data aligned with the option the user will see selected.
   var firstLoad = folderSelect.options.length === 0;
   if (folderSelect.value === WORKSPACE_SCOPE || firstLoad) {
     params.set('scope', 'workspace');
   } else if (folderSelect.value) {
     params.set('folder_id', folderSelect.value);
   }
-  params.set('count', document.getElementById('countSlider').value);
-  params.set('max_per_species', document.getElementById('speciesSlider').value);
   params.set('min_quality', (parseInt(document.getElementById('qualitySlider').value) / 100).toFixed(2));
+  params.set('confidence_threshold', (parseInt(document.getElementById('confidenceSlider').value) / 100).toFixed(2));
+  params.set('confirmation', document.getElementById('confirmationFilter').value || 'all');
+  return params;
+}
 
+async function loadHighlights() {
+  var params = requestScopeParams();
+  var folderSelect = document.getElementById('folderSelect');
+  var speciesSearch = document.getElementById('speciesSearch').value.trim();
+  params.set('limit_per_bucket', Math.max(20, parseInt(document.getElementById('perRowSlider').value)));
+  if (speciesSearch) params.set('species', speciesSearch);
+
+  // Capture the issue-time sequence so the prune below can tell rejections that
+  // happened after this request was sent (response is stale for them) from
+  // older ones the backend already excludes — or out-of-band restores it now
+  // includes and we must not strip.
+  var loadSeq = ++highlightsLoadSeq;
   var data = await safeFetch('/api/highlights?' + params);
+  currentData = data;
 
-  currentPhotos = data.photos;
-  currentFolders = data.folders;
+  // Guard against a reload issued against backend state from before a rejection
+  // landed (e.g. un-reject starts a restore reload, then the photo is rejected
+  // again before it returns). Only prune photos rejected at/after this request
+  // was issued; a photo restored out-of-band has an older rejection seq, so the
+  // authoritative response that now includes it is left intact.
+  rejectedFromGrid.forEach(function(id) {
+    if ((rejectedAtLoadSeq[id] || 0) >= loadSeq) removeRejectedPhotoFromModel(id);
+  });
 
-  // Populate folder dropdown on first load. A "whole workspace" entry leads
-  // the list so users can pick it without hunting through folder names.
+  // Populate folder dropdown on first load.
   if (!folderSelect.options.length) {
     var wsOpt = document.createElement('option');
     wsOpt.value = WORKSPACE_SCOPE;
@@ -136,83 +266,594 @@ async function loadHighlights() {
       folderSelect.appendChild(opt);
     });
   }
-
   currentFolderName = folderSelect.options[folderSelect.selectedIndex]
     ? folderSelect.options[folderSelect.selectedIndex].textContent.replace(/\s*\(\d+\)$/, '')
     : '';
 
-  var grid = document.getElementById('grid');
-  var emptyState = document.getElementById('emptyState');
-  var summary = document.getElementById('summary');
+  render();
+}
 
-  if (!data.folders.length) {
-    grid.style.display = 'none';
-    emptyState.style.display = 'block';
-    summary.textContent = '';
-    document.getElementById('controlsBar').style.display = 'none';
+function sortedBuckets() {
+  var sort = document.getElementById('sortSelect').value;
+  var buckets = (currentData.buckets || []).slice();
+  buckets.sort(function(a, b) {
+    if (sort === 'most') return b.photo_count - a.photo_count;
+    if (sort === 'best') return (b.best_score || 0) - (a.best_score || 0);
+    if (sort === 'worst') return (a.best_score || 0) - (b.best_score || 0);
+    return a.photo_count - b.photo_count; // 'fewest' default
+  });
+  return buckets;
+}
+
+function photoThumbnailUrl(p) {
+  if (!p || p.id == null) return '';
+  return window.vireoThumbnailUrl
+    ? window.vireoThumbnailUrl(p)
+    : '/thumbnails/' + p.id + '.jpg';
+}
+
+function renderCard(p, idx) {
+  var thumbSrc = photoThumbnailUrl(p);
+  var conf = p.has_accepted_species
+    ? '<span class="card-chip conf">Tagged</span>'
+    : (p.predicted_confidence != null ? '<span class="card-chip conf">ID ' + formatPercent(p.predicted_confidence) + '</span>' : '');
+  var reasons = (p.reasons || []).slice(0, 2).map(function(r) {
+    return '<span class="card-chip reason">' + escapeAttr(r) + '</span>';
+  }).join('');
+  var title = (p.reasons || []).join(', ');
+  var ribbon = p.is_highlights_photo
+    ? '<div class="best-ribbon">Highlight</div>'
+    : (idx === 0 ? '<div class="best-ribbon">Best</div>' : '');
+  return '<div class="highlights-card' + (idx === 0 ? ' best-card' : '') + '" data-photo-id="' + p.id + '" title="' + escapeAttr(title) + '">'
+    + ribbon
+    + '<img src="' + thumbSrc + '" alt="' + escapeAttr(p.filename) + '" loading="lazy">'
+    + '<div class="card-info"><span class="card-chip score">' + formatScore(p.highlight_score) + '</span>' + conf + reasons + '</div>'
+    + '</div>';
+}
+
+function attachCardClicks(container, photoSet) {
+  // photoSet is the full list of photos in this bucket — used as the
+  // lightbox navigation set so users can flip through every photo of
+  // the species, not just the visible ones.
+  container.querySelectorAll('.highlights-card').forEach(function(card) {
+    card.addEventListener('click', function() {
+      var pid = parseInt(card.getAttribute('data-photo-id'));
+      var photo = photoSet.find(function(p) { return p.id === pid; });
+      if (window.openLightbox && photo) {
+        activeLightboxPhotoId = pid;
+        openLightbox(pid, photo.filename, photoSet);
+      }
+    });
+  });
+}
+
+async function ensureFullBucketLoaded(species, isUnidentified) {
+  var target = isUnidentified
+    ? (currentData && currentData.unidentified)
+    : (currentData && currentData.buckets || []).find(function(b) { return b.species === species; });
+  if (!target) return [];
+  while (target.has_more) {
+    await loadMoreBucket(species, isUnidentified);
+  }
+  return target.photos || [];
+}
+
+async function bucketPhotoIds(bucket) {
+  var photos = await ensureFullBucketLoaded(bucket.species, false);
+  return photos.map(function(p) { return p.id; });
+}
+
+async function unidPhotoIds() {
+  var photos = await ensureFullBucketLoaded(null, true);
+  return photos
+    .map(function(p) { return p.id; });
+}
+
+function photoCurrentLabel(photo) {
+  if (!photo) return '';
+  if (photo.has_accepted_species && photo.species) {
+    return 'Confirmed: ' + photo.species;
+  }
+  if (photo.predicted_species) {
+    var conf = photo.predicted_confidence != null
+      ? ' (' + Math.round(photo.predicted_confidence * 100) + '%)'
+      : '';
+    return 'Predicted: ' + photo.predicted_species + conf;
+  }
+  return 'Unidentified';
+}
+
+function photoSpeciesName(photo) {
+  if (!photo) return '';
+  if (photo.has_accepted_species && photo.species) return photo.species;
+  if (photo.predicted_species) return photo.predicted_species;
+  return '';
+}
+
+async function confirmPhotoIds(photoIds, button) {
+  if (!photoIds.length) return;
+  if (button) button.disabled = true;
+  try {
+    await safeFetch('/api/highlights/confirm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ photo_ids: photoIds }),
+    });
+    await loadHighlights();
+    if (typeof showToast === 'function') showToast('Prediction confirmed', 'success');
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function loadSpeciesSuggestions() {
+  if (speciesSuggestionsLoaded) return;
+  speciesSuggestionsLoaded = true;
+  try {
+    var keywords = await safeFetch('/api/keywords/all', {}, { toast: false });
+    var list = document.getElementById('highlightSpeciesList');
+    list.innerHTML = '';
+    (keywords || []).filter(function(k) {
+      return k && k.name && (k.type === 'taxonomy' || k.taxon_name || k.taxon_common_name);
+    }).forEach(function(k) {
+      var opt = document.createElement('option');
+      opt.value = k.name;
+      list.appendChild(opt);
+    });
+  } catch (e) {
+    speciesSuggestionsLoaded = false;
+    // Free typing still works if suggestions cannot be loaded.
+  }
+}
+
+function showSpeciesModal(title, summary, photoIds, initialSpecies) {
+  speciesModalPhotoIds = photoIds.slice();
+  document.getElementById('speciesModalTitle').textContent = title;
+  document.getElementById('speciesModalSummary').textContent = summary;
+  var input = document.getElementById('speciesModalInput');
+  input.value = initialSpecies || '';
+  document.getElementById('speciesModal').classList.add('open');
+  loadSpeciesSuggestions();
+  setTimeout(function() { input.focus(); input.select(); }, 0);
+}
+
+function closeSpeciesModal() {
+  document.getElementById('speciesModal').classList.remove('open');
+  speciesModalPhotoIds = [];
+}
+
+async function submitSpeciesModal() {
+  var input = document.getElementById('speciesModalInput');
+  var species = input.value.trim();
+  if (!species || !speciesModalPhotoIds.length) return;
+  var submit = document.getElementById('speciesModalSubmit');
+  submit.disabled = true;
+  try {
+    await safeFetch('/api/highlights/relabel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ photo_ids: speciesModalPhotoIds, species: species }),
+    });
+    closeSpeciesModal();
+    await loadHighlights();
+    updateHighlightsLightboxControls(activeLightboxPhotoId);
+    if (typeof showToast === 'function') showToast('Species updated', 'success');
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+async function setPhotoPreference(purpose, species, photoId, button) {
+  if (!purpose || !species || !photoId) return;
+  if (button) button.disabled = true;
+  try {
+    await safeFetch('/api/photo-preferences', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ purpose: purpose, species: species, photo_id: photoId }),
+    });
+    await loadHighlights();
+    updateHighlightsLightboxControls(activeLightboxPhotoId);
+    if (typeof showToast === 'function') {
+      showToast(purpose === 'life_list' ? 'Life List photo set' : 'Highlights photo set', 'success');
+    }
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+function renderBucket(bucket) {
+  var perRow = parseInt(document.getElementById('perRowSlider').value);
+  var expanded = expandedBuckets.has(bucket.species);
+  var visible = expanded ? bucket.photos : bucket.photos.slice(0, perRow);
+  var remaining = bucket.photo_count - visible.length;
+  var badgeClass = bucket.is_accepted ? 'accepted' : (bucket.certainty === 'likely' ? 'likely' : 'candidate');
+  var badgeText = bucket.is_accepted ? 'Confirmed' : (bucket.certainty === 'likely' ? 'Likely ID' : 'Top candidates');
+  var badge = bucket.is_accepted
+    ? '<span class="bucket-badge accepted">Confirmed</span>'
+    : '<span class="bucket-badge ' + badgeClass + '">' + badgeText + '</span>';
+  var meta = bucket.photo_count + ' photo' + (bucket.photo_count === 1 ? '' : 's')
+    + ' · best ' + formatScore(bucket.best_score);
+  if (!bucket.is_accepted && bucket.avg_confidence != null) meta += ' · ID ' + formatPercent(bucket.avg_confidence);
+  var expandBtn = '';
+  // Show the affordance whenever photos are hidden (more loaded than one row)
+  // or unloaded (has_more). Gating on photo_count > perRow alone would strand
+  // backend rows after a rejection drops photo_count to perRow while has_more
+  // is still true — leaving no way to load the rest without a refresh.
+  if (bucket.photos.length > perRow || bucket.has_more) {
+    expandBtn = '<button class="bucket-expand" data-species="'
+      + escapeAttr(bucket.species) + '">'
+      + (expanded ? (bucket.has_more ? 'Load more' : 'Show fewer') : '+ ' + remaining + ' more')
+      + '</button>';
+  }
+  var actions = '<div class="bucket-actions">';
+  if (!bucket.is_accepted) {
+    actions += '<button class="bucket-action primary" data-action="confirm-bucket" data-species="'
+      + escapeAttr(bucket.species) + '">Confirm</button>';
+  }
+  actions += '<button class="bucket-action" data-action="change-bucket" data-species="'
+    + escapeAttr(bucket.species) + '">Change</button></div>';
+  return '<section class="bucket">'
+    + '<div class="bucket-header">'
+    + '<div class="bucket-heading"><div class="bucket-title">' + escapeAttr(bucket.species) + badge + '</div>'
+    + '<div class="bucket-meta">' + meta + '</div></div>'
+    + actions
+    + '</div>'
+    + '<div class="bucket-strip">' + visible.map(renderCard).join('') + '</div>'
+    + expandBtn
+    + '</section>';
+}
+
+function renderUnidentified() {
+  var unid = currentData.unidentified;
+  if (!unid || !unid.photo_count) return '';
+  var perRow = parseInt(document.getElementById('perRowSlider').value);
+  var visible = unidentifiedExpanded ? unid.photos : unid.photos.slice(0, perRow);
+  var remaining = unid.photo_count - visible.length;
+  var expandBtn = '';
+  // Same as renderBucket: keep the load/expand affordance while photos are
+  // hidden or unloaded, so a rejection that drops photo_count to perRow with
+  // has_more still true doesn't strand the remaining backend rows.
+  if (unid.photos.length > perRow || unid.has_more) {
+    expandBtn = '<button class="bucket-expand" data-unid="1">'
+      + (unidentifiedExpanded ? (unid.has_more ? 'Load more' : 'Show fewer') : '+ ' + remaining + ' more')
+      + '</button>';
+  }
+  return '<div class="unid-divider">Unidentified — Vireo couldn\'t ID these</div>'
+    + '<section class="bucket">'
+    + '<div class="bucket-header">'
+    + '<div class="bucket-heading"><div class="bucket-title">Unidentified</div>'
+    + '<div class="bucket-meta">' + unid.photo_count + ' photos</div></div>'
+    + '<div class="bucket-actions"><button class="bucket-action" data-action="change-unidentified">Set species</button></div>'
+    + '</div>'
+    + '<div class="bucket-strip">' + visible.map(renderCard).join('') + '</div>'
+    + expandBtn
+    + '</section>';
+}
+
+async function loadMoreBucket(species, isUnidentified) {
+  var params = requestScopeParams();
+  var target = isUnidentified ? currentData.unidentified : (currentData.buckets || []).find(function(b) { return b.species === species; });
+  if (!target || !target.has_more) return;
+  params.set('species', isUnidentified ? '__unidentified__' : species);
+  params.set('offset', target.photos.length);
+  params.set('limit', 500);
+  var data = await safeFetch('/api/highlights/bucket?' + params);
+  target.photos = target.photos.concat(data.photos || []);
+  target.loaded_count = data.loaded_count;
+  target.has_more = data.has_more;
+}
+
+function render() {
+  var content = document.getElementById('content');
+  var empty = document.getElementById('emptyState');
+  var meta = document.getElementById('meta');
+  var controls = document.getElementById('controlsBar');
+
+  if (!currentData.folders.length) {
+    content.innerHTML = '';
+    empty.style.display = 'block';
+    meta.textContent = '';
+    controls.style.display = 'none';
     return;
   }
+  empty.style.display = 'none';
+  controls.style.display = '';
 
-  emptyState.style.display = 'none';
-  grid.style.display = '';
-  document.getElementById('controlsBar').style.display = '';
+  var buckets = sortedBuckets();
+  var speciesSearch = document.getElementById('speciesSearch').value.trim();
+  var confirmation = document.getElementById('confirmationFilter').value;
+  var filterLabel = speciesSearch ? ' matching' : '';
+  if (confirmation === 'confirmed') filterLabel += ' confirmed';
+  if (confirmation === 'unconfirmed') filterLabel += ' unconfirmed';
+  meta.textContent = buckets.length + filterLabel + ' species · '
+    + currentData.meta.eligible + ' of '
+    + currentData.meta.total_in_scope + ' photos scored';
 
-  // Update count slider max and clamp value
-  var countSlider = document.getElementById('countSlider');
-  countSlider.max = Math.min(data.meta.eligible, 100);
-  if (parseInt(countSlider.value) > parseInt(countSlider.max)) {
-    countSlider.value = countSlider.max;
-    document.getElementById('countValue').textContent = countSlider.value;
-  }
+  var html = buckets.map(renderBucket).join('') + renderUnidentified();
+  content.innerHTML = html || '<div class="highlights-empty"><p>Nothing matches these filters.</p></div>';
 
-  // Render grid
-  grid.innerHTML = '';
-  data.photos.forEach(function(p) {
-    var card = document.createElement('div');
-    card.className = 'highlights-card';
-    card.onclick = function() { if (window.openLightbox) openLightbox(p.id, p.filename, currentPhotos); };
-    var thumbSrc = '/thumbnails/' + p.id + '.jpg';
-    card.innerHTML = '<img src="' + thumbSrc + '" alt="' + escapeAttr(p.filename) + '" loading="lazy">'
-      + '<div class="card-info">'
-      + '<span class="card-species">' + escapeAttr(p.species || 'Unidentified') + '</span>'
-      + '<span class="card-quality">' + (p.quality_score != null ? p.quality_score.toFixed(2) : '\u2014') + '</span>'
-      + '</div>';
-    grid.appendChild(card);
+  // Wire up clicks for cards and expand buttons.
+  // Attach card clicks: pick the right photo set per section by walking sections in DOM order.
+  var sections = content.querySelectorAll('section.bucket');
+  sections.forEach(function(section, idx) {
+    var photoSet;
+    if (idx < buckets.length) {
+      photoSet = buckets[idx].photos;
+    } else {
+      photoSet = currentData.unidentified.photos;
+    }
+    attachCardClicks(section, photoSet);
   });
 
-  // Summary
-  var speciesCount = Object.keys(data.meta.species_breakdown).length;
-  summary.textContent = 'Showing ' + data.photos.length + ' highlights from ' + data.meta.total_in_folder
-    + ' photos \u00b7 Species: ' + speciesCount + ' \u00b7 Avg quality: ' + data.meta.avg_quality;
+  // Expand buttons
+  content.querySelectorAll('.bucket-expand').forEach(function(btn) {
+    btn.addEventListener('click', async function() {
+      if (btn.hasAttribute('data-unid')) {
+        if (!unidentifiedExpanded || currentData.unidentified.has_more) {
+          unidentifiedExpanded = true;
+          await loadMoreBucket(null, true);
+        } else {
+          unidentifiedExpanded = false;
+        }
+      } else {
+        var sp = btn.getAttribute('data-species');
+        var bucket = (currentData.buckets || []).find(function(b) { return b.species === sp; });
+        if (!expandedBuckets.has(sp) || (bucket && bucket.has_more)) {
+          expandedBuckets.add(sp);
+          await loadMoreBucket(sp, false);
+        } else {
+          expandedBuckets.delete(sp);
+        }
+      }
+      render();
+    });
+  });
+
+  content.querySelectorAll('.bucket-action').forEach(function(btn) {
+    btn.addEventListener('click', async function() {
+      var action = btn.getAttribute('data-action');
+      btn.disabled = true;
+      try {
+        if (action === 'confirm-bucket') {
+          var species = btn.getAttribute('data-species');
+          var bucket = buckets.find(function(b) { return b.species === species; });
+          if (bucket) await confirmPhotoIds(await bucketPhotoIds(bucket), btn);
+        } else if (action === 'change-bucket') {
+          var changeSpecies = btn.getAttribute('data-species');
+          var changeBucket = buckets.find(function(b) { return b.species === changeSpecies; });
+          if (changeBucket) {
+            var changeIds = await bucketPhotoIds(changeBucket);
+            showSpeciesModal(
+              'Change species',
+              changeIds.length + ' photo' + (changeIds.length === 1 ? '' : 's'),
+              changeIds,
+              changeBucket.species
+            );
+          }
+        } else if (action === 'change-unidentified') {
+          var ids = await unidPhotoIds();
+          showSpeciesModal(
+            'Set species',
+            ids.length + ' unidentified photo' + (ids.length === 1 ? '' : 's'),
+            ids,
+            ''
+          );
+        }
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
+  updateHighlightsLightboxControls(activeLightboxPhotoId);
 }
+
+function findHighlightPhoto(photoId) {
+  if (!currentData || photoId == null) return null;
+  var buckets = currentData.buckets || [];
+  for (var i = 0; i < buckets.length; i++) {
+    var match = (buckets[i].photos || []).find(function(p) { return p.id === photoId; });
+    if (match) return match;
+  }
+  var unid = currentData.unidentified && currentData.unidentified.photos || [];
+  return unid.find(function(p) { return p.id === photoId; }) || null;
+}
+
+function lightboxIsOpenOnPhoto(photoId) {
+  var overlay = document.getElementById('lightboxOverlay');
+  return !!(
+    overlay &&
+    overlay.classList.contains('active') &&
+    typeof _lightboxCurrentId !== 'undefined' &&
+    _lightboxCurrentId === photoId
+  );
+}
+
+function advanceHighlightLightboxAfterReject(photoId) {
+  if (!lightboxIsOpenOnPhoto(photoId)) return;
+  if (!Array.isArray(_lightboxPhotoList) || !_lightboxPhotoList.length) return;
+
+  var idx = _lightboxPhotoList.findIndex(function(p) { return p.id === photoId; });
+  if (idx < 0) return;
+  var nextList = _lightboxPhotoList.filter(function(p) {
+    return p.id !== photoId && p.flag !== 'rejected';
+  });
+  if (!nextList.length) {
+    closeLightbox();
+    return;
+  }
+  var nextIdx = Math.min(idx, nextList.length - 1);
+  var next = nextList[nextIdx];
+  openLightbox(next.id, next.filename || '', nextList);
+}
+
+function showHighlightUndo(photo, previousFlag) {
+  lastHighlightReject = {
+    photoId: photo.id,
+    filename: photo.filename || 'photo',
+    previousFlag: previousFlag || 'none',
+  };
+  var bar = document.getElementById('highlightUndo');
+  var text = document.getElementById('highlightUndoText');
+  var btn = document.getElementById('highlightUndoBtn');
+  if (!bar || !text || !btn) return;
+  text.textContent = 'Rejected ' + lastHighlightReject.filename + '.';
+  btn.disabled = false;
+  bar.classList.add('open');
+}
+
+function hideHighlightUndo() {
+  lastHighlightReject = null;
+  var bar = document.getElementById('highlightUndo');
+  if (bar) bar.classList.remove('open');
+}
+
+async function undoLastHighlightReject() {
+  if (!lastHighlightReject) return;
+  var undo = lastHighlightReject;
+  var btn = document.getElementById('highlightUndoBtn');
+  if (btn) btn.disabled = true;
+  try {
+    await safeFetch('/api/photos/' + undo.photoId + '/flag', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ flag: undo.previousFlag }),
+    });
+    rejectedFromGrid.delete(undo.photoId);
+    delete rejectedAtLoadSeq[undo.photoId];
+    hideHighlightUndo();
+    await loadHighlights();
+    updateHighlightsLightboxControls(activeLightboxPhotoId);
+    if (typeof showToast === 'function') showToast('Reject undone', 'success');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function ensureHighlightsLightboxPanel() {
+  var actions = document.getElementById('lightboxActions');
+  if (!actions) return null;
+  var panel = document.getElementById('highlightLightboxPanel');
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.id = 'highlightLightboxPanel';
+    panel.className = 'highlight-lb-panel';
+    actions.insertBefore(panel, actions.firstChild);
+  }
+  return panel;
+}
+
+function updateHighlightsLightboxControls(photoId) {
+  var panel = ensureHighlightsLightboxPanel();
+  if (!panel) return;
+  var photo = findHighlightPhoto(photoId);
+  if (!photo && !lastHighlightReject) {
+    panel.style.display = 'none';
+    panel.innerHTML = '';
+    return;
+  }
+  panel.style.display = '';
+  var html = photo
+    ? '<span>' + escapeAttr(photoCurrentLabel(photo)) + '</span>'
+    : '<span>Highlight photo removed</span>';
+  if (photo) {
+    var highlightSpecies = photoSpeciesName(photo);
+    if (highlightSpecies) {
+      html += '<button data-lb-action="set-highlight"'
+        + (photo.is_highlights_photo ? ' class="primary"' : '') + '>'
+        + (photo.is_highlights_photo ? 'Highlights Photo' : 'Use as Highlights') + '</button>';
+    }
+    if (photo.has_accepted_species && photo.species) {
+      html += '<button data-lb-action="set-life-list">Use as Life List</button>';
+    }
+    if (photo.is_confirmable_prediction) {
+      html += '<button class="primary" data-lb-action="confirm">Confirm</button>';
+    }
+    html += '<button data-lb-action="change">' + (photo.is_confirmable_prediction || photo.has_accepted_species ? 'Change' : 'Set species') + '</button>';
+  }
+  if (lastHighlightReject) {
+    html += '<button class="primary" data-lb-action="undo-reject">Undo Reject</button>';
+  }
+  panel.innerHTML = html;
+  panel.querySelectorAll('button').forEach(function(btn) {
+    btn.addEventListener('click', function(event) {
+      event.stopPropagation();
+      var action = btn.getAttribute('data-lb-action');
+      if (action === 'undo-reject') {
+        undoLastHighlightReject();
+      } else if (!photo) {
+        return;
+      } else if (action === 'confirm') {
+        confirmPhotoIds([photo.id], btn);
+      } else if (action === 'set-highlight') {
+        setPhotoPreference('highlights', photoSpeciesName(photo), photo.id, btn);
+      } else if (action === 'set-life-list') {
+        setPhotoPreference('life_list', photo.species, photo.id, btn);
+      } else {
+        var modalTitle = (photo.is_confirmable_prediction || photo.has_accepted_species)
+          ? 'Change species'
+          : 'Set species';
+        showSpeciesModal(modalTitle, photo.filename || '', [photo.id], photoSpeciesName(photo));
+      }
+    });
+  });
+}
+
+document.addEventListener('lightbox:photochanged', function(event) {
+  activeLightboxPhotoId = event.detail ? event.detail.photoId : null;
+  updateHighlightsLightboxControls(activeLightboxPhotoId);
+});
+
+document.getElementById('speciesModalInput').addEventListener('keydown', function(event) {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    submitSpeciesModal();
+  } else if (event.key === 'Escape') {
+    closeSpeciesModal();
+  }
+});
 
 function debounceLoad() {
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(loadHighlights, 300);
 }
 
-// Slider value display updates
-document.getElementById('countSlider').addEventListener('input', function() {
-  document.getElementById('countValue').textContent = this.value;
-  debounceLoad();
-});
-document.getElementById('speciesSlider').addEventListener('input', function() {
-  document.getElementById('speciesValue').textContent = this.value;
-  debounceLoad();
-});
 document.getElementById('qualitySlider').addEventListener('input', function() {
   document.getElementById('qualityValue').textContent = (this.value / 100).toFixed(2);
   debounceLoad();
 });
-document.getElementById('folderSelect').addEventListener('change', loadHighlights);
+document.getElementById('confidenceSlider').addEventListener('input', function() {
+  document.getElementById('confidenceValue').textContent = (this.value / 100).toFixed(2);
+  debounceLoad();
+});
+document.getElementById('speciesSearch').addEventListener('input', function() {
+  debounceLoad();
+});
+document.getElementById('confirmationFilter').addEventListener('change', function() {
+  expandedBuckets.clear();
+  unidentifiedExpanded = false;
+  loadHighlights();
+});
+document.getElementById('perRowSlider').addEventListener('input', function() {
+  document.getElementById('perRowValue').textContent = this.value;
+  if (currentData) render();
+});
+document.getElementById('sortSelect').addEventListener('change', function() {
+  if (currentData) render();
+});
+document.getElementById('folderSelect').addEventListener('change', function() {
+  // Reset per-row expand state when the user picks a different folder
+  // so the new folder's rows don't inherit the previous folder's state.
+  expandedBuckets.clear();
+  unidentifiedExpanded = false;
+  loadHighlights();
+});
 
 // Save modal
 async function showSaveModal() {
   document.getElementById('saveNameInput').value = 'Highlights - ' + currentFolderName;
   document.getElementById('saveDuplicateWarning').style.display = 'none';
   document.getElementById('replaceBtn').style.display = 'none';
-
-  // Check for existing collection with same name
   existingCollections = await safeFetch('/api/collections');
   var proposed = document.getElementById('saveNameInput').value;
   var existing = existingCollections.find(function(c) { return c.name === proposed; });
@@ -229,10 +870,27 @@ function closeSaveModal() {
   document.getElementById('saveModal').classList.remove('open');
 }
 
+function collectVisiblePhotoIds() {
+  // "What's currently visible on the page" = the photos rendered in
+  // each bucket (respecting expand state) plus unidentified if shown.
+  var ids = [];
+  var perRow = parseInt(document.getElementById('perRowSlider').value);
+  sortedBuckets().forEach(function(b) {
+    var visible = expandedBuckets.has(b.species) ? b.photos : b.photos.slice(0, perRow);
+    visible.forEach(function(p) { ids.push(p.id); });
+  });
+  if (currentData.unidentified && currentData.unidentified.photo_count) {
+    var u = currentData.unidentified.photos;
+    var v = unidentifiedExpanded ? u : u.slice(0, perRow);
+    v.forEach(function(p) { ids.push(p.id); });
+  }
+  return ids;
+}
+
 async function doSave(mode) {
   var name = document.getElementById('saveNameInput').value.trim();
   if (!name) return;
-  var photoIds = currentPhotos.map(function(p) { return p.id; });
+  var photoIds = collectVisiblePhotoIds();
 
   if (mode === 'replace') {
     var existing = existingCollections.find(function(c) { return c.name === name; });
@@ -240,7 +898,6 @@ async function doSave(mode) {
       await safeFetch('/api/collections/' + existing.id, { method: 'DELETE' });
     }
   } else if (mode === 'new') {
-    // If name already taken, append number
     var baseName = name;
     var counter = 2;
     var names = existingCollections.map(function(c) { return c.name; });
@@ -258,7 +915,75 @@ async function doSave(mode) {
   closeSaveModal();
 }
 
-// Initial load
+// Drop a photo from the in-memory model after it is rejected, so the grid
+// matches the backend query (which excludes rejected photos). Returns true if
+// anything changed.
+function removeRejectedPhotoFromModel(photoId) {
+  if (!currentData) return false;
+  var changed = false;
+
+  function pruneSection(section) {
+    if (!section || !Array.isArray(section.photos)) return;
+    var before = section.photos.length;
+    // Replace (don't splice) the array so any open lightbox keeps navigating
+    // its original, stable photo set.
+    var kept = section.photos.filter(function(p) { return p.id !== photoId; });
+    if (kept.length !== before) {
+      section.photos = kept;
+      section.photo_count = Math.max(0, (section.photo_count || before) - 1);
+      if (typeof section.loaded_count === 'number') {
+        section.loaded_count = Math.max(0, section.loaded_count - 1);
+      }
+      changed = true;
+    }
+  }
+
+  (currentData.buckets || []).forEach(pruneSection);
+  pruneSection(currentData.unidentified);
+
+  if (changed) {
+    // Drop only buckets fully emptied by the rejection. A large bucket may
+    // still have eligible photos behind `has_more` even after every loaded
+    // card is rejected (photo_count stays positive), so keep it — its expand
+    // button is the user's only way to load the rest without a refresh.
+    if (currentData.buckets) {
+      currentData.buckets = currentData.buckets.filter(function(b) {
+        return (b.photo_count || 0) > 0 || (b.photos || []).length > 0;
+      });
+    }
+    if (currentData.meta && typeof currentData.meta.eligible === 'number') {
+      currentData.meta.eligible = Math.max(0, currentData.meta.eligible - 1);
+    }
+  }
+  return changed;
+}
+
+document.addEventListener('lightbox:flagchanged', function(e) {
+  var detail = e && e.detail;
+  if (!detail || detail.photoId == null) return;
+  if (detail.flag === 'rejected') {
+    var photo = findHighlightPhoto(detail.photoId);
+    if (photo) showHighlightUndo(photo, detail.previousFlag || photo.flag || 'none');
+    advanceHighlightLightboxAfterReject(detail.photoId);
+    // Track before mutating: during an in-flight restore reload the photo may
+    // not be in currentData yet, so removeRejectedPhotoFromModel returns false
+    // — but the id must still be remembered so the reload's prune drops it.
+    // Stamp the current load seq so only reloads issued no later than now prune
+    // it (a reload issued afterward already reflects the rejection server-side).
+    rejectedFromGrid.add(detail.photoId);
+    rejectedAtLoadSeq[detail.photoId] = highlightsLoadSeq;
+    if (removeRejectedPhotoFromModel(detail.photoId)) render();
+  } else if (rejectedFromGrid.has(detail.photoId)) {
+    // A previously-rejected photo was un-rejected — it re-qualifies for
+    // highlights, so refetch to restore it (and the Save-as-Collection list)
+    // in its correct bucket. Tracking the set keeps this scoped to genuine
+    // reappearances, not every Pick/Unflag on a photo still in the grid.
+    rejectedFromGrid.delete(detail.photoId);
+    delete rejectedAtLoadSeq[detail.photoId];
+    loadHighlights();
+  }
+});
+
 loadHighlights();
 </script>
 </body>

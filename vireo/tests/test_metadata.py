@@ -105,6 +105,129 @@ def test_extract_metadata_empty_list():
     assert extract_metadata([]) == {}
 
 
+def test_extract_metadata_reports_batch_progress(monkeypatch):
+    """Batch progress advances once per ExifTool invocation."""
+    import metadata
+
+    paths = [f"/photos/img{i}.jpg" for i in range(5)]
+    progress = []
+
+    def fake_run(file_paths, extra_args=None):
+        return [{"SourceFile": path, "EXIF:Make": "TestCam"} for path in file_paths]
+
+    monkeypatch.setattr(metadata, "_BATCH_SIZE", 2)
+    monkeypatch.setattr(metadata, "_run_exiftool", fake_run)
+
+    results = metadata.extract_metadata(
+        paths,
+        progress_callback=lambda current, total: progress.append((current, total)),
+    )
+
+    assert set(results) == set(paths)
+    assert progress == [(2, 5), (4, 5), (5, 5)]
+
+
+def test_extract_metadata_retries_failed_batches(monkeypatch):
+    """A failed ExifTool batch should be split so good files still get metadata."""
+    import metadata
+
+    paths = [f"/photos/img{i}.jpg" for i in range(4)]
+    calls = []
+
+    def fake_run(file_paths, extra_args=None):
+        calls.append(list(file_paths))
+        if len(file_paths) > 1:
+            return metadata._TIMEOUT
+        path = file_paths[0]
+        return [{"SourceFile": path, "EXIF:Make": "TestCam"}]
+
+    monkeypatch.setattr(metadata, "_run_exiftool", fake_run)
+
+    results = metadata.extract_metadata(paths)
+
+    assert set(results) == set(paths)
+    assert all(results[p]["EXIF"]["Make"] == "TestCam" for p in paths)
+    assert calls == [
+        paths,
+        paths[:2],
+        paths[:1],
+        paths[1:2],
+        paths[2:],
+        paths[2:3],
+        paths[3:],
+    ]
+
+
+def test_extract_metadata_does_not_retry_permanent_failures(monkeypatch):
+    """Permanent ExifTool failures should not split into many retries."""
+    import metadata
+
+    paths = [f"/photos/img{i}.jpg" for i in range(4)]
+    calls = []
+
+    def fake_run(file_paths, extra_args=None):
+        calls.append(list(file_paths))
+        return []
+
+    monkeypatch.setattr(metadata, "_run_exiftool", fake_run)
+
+    assert metadata.extract_metadata(paths) == {}
+    assert calls == [paths]
+
+
+def test_extract_metadata_timeout_retries_isolate_slow_file(monkeypatch):
+    """Timed-out ExifTool batches split until a slow file is isolated."""
+    import metadata
+
+    bad_path = "/photos/bad.jpg"
+    paths = [f"/photos/img{i}.jpg" for i in range(7)] + [bad_path]
+    calls = []
+
+    def fake_run(file_paths, extra_args=None):
+        calls.append(list(file_paths))
+        if bad_path in file_paths:
+            return metadata._TIMEOUT
+        return [
+            {"SourceFile": path, "EXIF:Make": "TestCam"}
+            for path in file_paths
+        ]
+
+    monkeypatch.setattr(metadata, "_run_exiftool", fake_run)
+
+    results = metadata.extract_metadata(paths)
+
+    assert set(results) == set(paths) - {bad_path}
+    assert bad_path not in results
+    assert [bad_path] in calls
+    assert all(results[p]["EXIF"]["Make"] == "TestCam" for p in results)
+
+
+def test_extract_metadata_timeout_retries_are_bounded(monkeypatch):
+    """Repeated ExifTool timeouts stop after the configured split budget."""
+    import metadata
+
+    paths = [f"/photos/img{i}.jpg" for i in range(8)]
+    calls = []
+
+    def fake_run(file_paths, extra_args=None):
+        calls.append(list(file_paths))
+        return metadata._TIMEOUT
+
+    monkeypatch.setattr(metadata, "_MAX_TIMEOUT_SPLIT_ATTEMPTS", 3)
+    monkeypatch.setattr(metadata, "_run_exiftool", fake_run)
+
+    assert metadata.extract_metadata(paths) == {}
+    assert calls == [
+        paths,
+        paths[:4],
+        paths[:2],
+        paths[:1],
+        paths[1:2],
+        paths[2:4],
+        paths[4:],
+    ]
+
+
 @requires_exiftool
 def test_extract_metadata_with_restricted_tags(tmp_path):
     """extract_metadata can restrict which tags are returned."""
@@ -244,3 +367,151 @@ def test_extract_metadata_integration_with_summary(tmp_path):
     assert summary["exposure_time"] == 0.0005
     assert summary["iso"] == 3200
     assert summary["datetime_original"] == "2026:03:15 08:30:00"
+
+
+# ---- exiftool presence detection (exiftool_available / exiftool_status) ----
+
+
+def test_exiftool_available_requires_runnable_binary(monkeypatch):
+    """exiftool_available is True only when PATH resolves AND the probe runs."""
+    import metadata
+
+    class _Ok:
+        returncode = 0
+        stdout = "12.76\n"
+
+    monkeypatch.setattr(metadata.shutil, "which", lambda name: "/usr/bin/exiftool")
+    monkeypatch.setattr(metadata.subprocess, "run", lambda *a, **k: _Ok())
+    assert metadata.exiftool_available() is True
+
+    monkeypatch.setattr(metadata.shutil, "which", lambda name: None)
+    assert metadata.exiftool_available() is False
+
+
+def test_exiftool_available_false_for_broken_install(monkeypatch):
+    """A PATH hit with a failing -ver probe is treated as unavailable.
+
+    Without this, scans would silently lose metadata while the UI rendered
+    a green "installed" state — the exact black box ``CORE_PHILOSOPHY``
+    forbids and Codex flagged on PR #1017.
+    """
+    import metadata
+
+    monkeypatch.setattr(metadata.shutil, "which", lambda name: "/usr/bin/exiftool")
+    monkeypatch.setattr(metadata.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("broken perl")))
+    assert metadata.exiftool_available() is False
+
+
+def test_exiftool_status_missing(monkeypatch):
+    """When exiftool is absent, status reports unavailable with an install hint."""
+    import metadata
+
+    monkeypatch.setattr(metadata.shutil, "which", lambda name: None)
+    status = metadata.exiftool_status()
+
+    assert status["available"] is False
+    assert status["path"] == ""
+    assert status["version"] is None
+    assert status["hint"]  # platform-appropriate, non-empty
+
+
+def test_exiftool_status_present(monkeypatch):
+    """When exiftool resolves, status reports the path and parsed version."""
+    import metadata
+
+    monkeypatch.setattr(metadata.shutil, "which", lambda name: "/usr/bin/exiftool")
+
+    class _Result:
+        returncode = 0
+        stdout = "12.76\n"
+
+    monkeypatch.setattr(
+        metadata.subprocess, "run", lambda *a, **k: _Result(),
+    )
+    status = metadata.exiftool_status()
+
+    assert status["available"] is True
+    assert status["path"] == "/usr/bin/exiftool"
+    assert status["version"] == "12.76"
+
+
+def test_exiftool_status_present_but_unrunnable(monkeypatch):
+    """A resolvable-but-broken binary is reported unavailable with the path kept.
+
+    Keeping the path lets the UI distinguish "not installed" from "broken
+    install" so the user can act on it.
+    """
+    import metadata
+
+    monkeypatch.setattr(metadata.shutil, "which", lambda name: "/usr/bin/exiftool")
+
+    def _boom(*a, **k):
+        raise OSError("broken perl")
+
+    monkeypatch.setattr(metadata.subprocess, "run", _boom)
+    status = metadata.exiftool_status()
+
+    assert status["available"] is False
+    assert status["path"] == "/usr/bin/exiftool"
+    assert status["version"] is None
+    assert status["error"] and "broken perl" in status["error"]
+    assert "/usr/bin/exiftool" in status["hint"]
+
+
+def test_scan_metadata_warning_silent_when_available(monkeypatch):
+    """scan_metadata_warning returns None when exiftool runs cleanly."""
+    import metadata
+
+    class _Ok:
+        returncode = 0
+        stdout = "12.76\n"
+
+    monkeypatch.setattr(metadata.shutil, "which", lambda name: "/usr/bin/exiftool")
+    monkeypatch.setattr(metadata.subprocess, "run", lambda *a, **k: _Ok())
+    assert metadata.scan_metadata_warning() is None
+
+
+def test_scan_metadata_warning_warns_when_missing(monkeypatch):
+    """scan_metadata_warning returns a user-facing string when exiftool is gone."""
+    import metadata
+
+    monkeypatch.setattr(metadata.shutil, "which", lambda name: None)
+    warning = metadata.scan_metadata_warning()
+    assert warning is not None
+    assert "ExifTool" in warning
+    assert "capture date" in warning.lower()
+
+
+def test_scan_metadata_warning_warns_for_broken_install(monkeypatch):
+    """A broken (PATH-resolvable but unrunnable) install still triggers the warning."""
+    import metadata
+
+    monkeypatch.setattr(metadata.shutil, "which", lambda name: "/usr/bin/exiftool")
+    monkeypatch.setattr(
+        metadata.subprocess, "run",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("broken perl")),
+    )
+    warning = metadata.scan_metadata_warning()
+    assert warning is not None
+    assert "ExifTool" in warning
+
+
+def test_exiftool_status_present_but_nonzero_returncode(monkeypatch):
+    """A returncode != 0 from -ver also marks the install unavailable."""
+    import metadata
+
+    monkeypatch.setattr(metadata.shutil, "which", lambda name: "/usr/bin/exiftool")
+
+    class _Bad:
+        returncode = 2
+        stdout = ""
+        stderr = "Can't locate Image/ExifTool.pm"
+
+    monkeypatch.setattr(metadata.subprocess, "run", lambda *a, **k: _Bad())
+    status = metadata.exiftool_status()
+
+    assert status["available"] is False
+    assert status["path"] == "/usr/bin/exiftool"
+    assert status["version"] is None
+    assert "Can't locate Image/ExifTool.pm" in status["error"]

@@ -22,7 +22,7 @@
     <div id="syncPreviewContent">Loading...</div>
     <div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end;">
       <button onclick="discardAllChanges()" style="background:none;color:var(--danger);border:1px solid var(--danger);border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">Discard All</button>
-      <button onclick="closeSyncPreview(); runSync();" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:500;">Sync to XMP</button>
+      <button onclick="runVisibleSync()" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:500;">Sync to XMP</button>
     </div>
   </div>
 </div>
@@ -33,6 +33,8 @@
 var _syncPreviewData = null;
 var _syncThumbSize = 120;
 var _syncActiveFilters = null;
+var _syncModalOpen = false;
+var _syncLightboxPanelEl = null;
 
 async function checkPendingSync() {
   try {
@@ -49,16 +51,29 @@ async function checkPendingSync() {
   } catch(e) {}
 }
 
-async function runSync() {
+async function runSync(changeIds) {
   var status = document.getElementById('syncStatus');
   status.textContent = 'Syncing...';
+  status.style.color = 'var(--text-dim)';
   try {
-    var data = await safeFetch('/api/jobs/sync', {method: 'POST'}, { toast: false });
+    var requestOptions = {method: 'POST'};
+    if (Array.isArray(changeIds)) {
+      if (changeIds.length === 0) {
+        status.textContent = 'No checked changes to sync.';
+        status.style.color = 'var(--text-dim)';
+        return;
+      }
+      requestOptions.headers = {'Content-Type': 'application/json'};
+      requestOptions.body = JSON.stringify({change_ids: changeIds});
+    }
+    var data = await safeFetch('/api/jobs/sync', requestOptions, { toast: false });
 
     safeEventSource('/api/jobs/' + data.job_id + '/stream', {
       onProgress: function(p) {
         if (p.total > 0) {
           status.textContent = 'Writing XMP: ' + p.current + '/' + p.total;
+        } else if (p.current_file || p.phase) {
+          status.textContent = p.current_file || p.phase;
         }
       },
       onComplete: function(result) {
@@ -92,6 +107,7 @@ function updateSyncThumbSize(val) {
 
 async function openSyncPreview() {
   _syncActiveFilters = null;
+  _syncModalOpen = true;
   var overlay = document.getElementById('syncPreviewOverlay');
   var content = document.getElementById('syncPreviewContent');
   overlay.style.display = 'block';
@@ -124,7 +140,7 @@ function renderSyncPreview() {
   }
 
   var html = '<div style="display:flex;gap:12px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">';
-  html += '<span style="font-size:12px;color:var(--text-dim);">Show:</span>';
+  html += '<span style="font-size:12px;color:var(--text-dim);">Include:</span>';
   typeList.forEach(function(t) {
     var label = t.replace(/_/g, ' ');
     var color = t === 'keyword_add' ? 'var(--accent)' : t === 'keyword_remove' ? 'var(--danger)' : 'var(--warning)';
@@ -146,9 +162,9 @@ function renderSyncPreview() {
   });
 
   html += '<div style="display:flex;gap:8px;margin-bottom:12px;">' +
-    '<span style="font-size:12px;color:var(--text-dim);flex:1;">' + visibleCount + ' change(s) across ' + visiblePhotos + ' photo(s)</span>' +
+    '<span style="font-size:12px;color:var(--text-dim);flex:1;">' + visibleCount + ' checked change(s) across ' + visiblePhotos + ' photo(s)</span>' +
     '<button onclick="discardAllChanges()" style="background:none;color:var(--danger);border:1px solid var(--danger);border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Discard All</button>' +
-    '<button onclick="closeSyncPreview(); runSync();" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:500;">Sync All to XMP</button>' +
+    '<button onclick="runVisibleSync()" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:500;">Sync to XMP</button>' +
   '</div>';
 
   data.photos.forEach(function(p) {
@@ -159,8 +175,11 @@ function renderSyncPreview() {
 
     html += '<div style="display:flex;gap:12px;padding:12px 0;border-bottom:1px solid var(--border-subtle);">';
 
+    var thumbUrl = window.vireoThumbnailUrl
+      ? window.vireoThumbnailUrl(p)
+      : '/thumbnails/' + p.photo_id + '.jpg';
     html += '<div style="flex-shrink:0;">';
-    html += '<img class="sync-preview-thumb" src="/thumbnails/' + p.photo_id + '.jpg" style="width:' + _syncThumbSize + 'px;height:' + Math.round(_syncThumbSize * 2 / 3) + 'px;object-fit:cover;border-radius:4px;cursor:pointer;display:block;" data-photo-id="' + p.photo_id + '" data-filename="' + escapeAttr(p.filename) + '">';
+    html += '<img class="sync-preview-thumb" src="' + escapeAttr(thumbUrl) + '" style="width:' + _syncThumbSize + 'px;height:' + Math.round(_syncThumbSize * 2 / 3) + 'px;object-fit:cover;border-radius:4px;cursor:pointer;display:block;" data-photo-id="' + p.photo_id + '" data-filename="' + escapeAttr(p.filename) + '">';
     html += '</div>';
 
     html += '<div style="flex:1;min-width:0;">';
@@ -191,12 +210,190 @@ function renderSyncPreview() {
 /* Delegate sync preview thumb clicks for lightbox (XSS-safe) */
 document.getElementById('syncPreviewContent').addEventListener('click', function(e) {
   var thumb = e.target.closest('img[data-photo-id]');
-  if (thumb) openLightbox(parseInt(thumb.dataset.photoId, 10), thumb.dataset.filename || '');
+  if (!thumb) return;
+  // Pass the list of currently-visible photos so the lightbox arrows can navigate
+  // between pending-change items. Without this, _lightboxPhotoList stays empty
+  // and lightboxNav() bails out immediately.
+  var photoList = [];
+  if (_syncPreviewData && _syncPreviewData.photos && _syncActiveFilters) {
+    _syncPreviewData.photos.forEach(function(p) {
+      var hasVisible = p.changes.some(function(c) { return _syncActiveFilters.has(c.type); });
+      if (hasVisible) photoList.push({ id: p.photo_id, filename: p.filename });
+    });
+  }
+  openLightbox(parseInt(thumb.dataset.photoId, 10), thumb.dataset.filename || '', photoList);
 });
 
 function closeSyncPreview() {
   document.getElementById('syncPreviewOverlay').style.display = 'none';
+  _syncModalOpen = false;
+  _syncDestroyLightboxPanel();
   checkPendingSync();
+}
+
+function getVisibleSyncChangeIds() {
+  var ids = [];
+  if (!_syncPreviewData || !_syncPreviewData.photos || !_syncActiveFilters) return ids;
+  _syncPreviewData.photos.forEach(function(p) {
+    p.changes.forEach(function(c) {
+      if (_syncActiveFilters.has(c.type)) ids.push(c.id);
+    });
+  });
+  return ids;
+}
+
+function runVisibleSync() {
+  var changeIds = getVisibleSyncChangeIds();
+  if (changeIds.length === 0) {
+    var status = document.getElementById('syncStatus');
+    status.textContent = 'No checked changes to sync.';
+    status.style.color = 'var(--text-dim)';
+    return;
+  }
+  closeSyncPreview();
+  runSync(changeIds);
+}
+
+function _syncFindPhotoData(photoId) {
+  if (!_syncPreviewData || !_syncPreviewData.photos) return null;
+  return _syncPreviewData.photos.find(function(p) { return p.photo_id === photoId; }) || null;
+}
+
+function _syncVisibleChangesFor(photo) {
+  if (!photo) return [];
+  if (!_syncActiveFilters) return photo.changes.slice();
+  return photo.changes.filter(function(c) { return _syncActiveFilters.has(c.type); });
+}
+
+function _syncEnsureLightboxPanel() {
+  if (_syncLightboxPanelEl && _syncLightboxPanelEl.parentNode) return _syncLightboxPanelEl;
+  var overlay = document.getElementById('lightboxOverlay');
+  if (!overlay) return null;
+  var panel = document.createElement('div');
+  panel.id = 'syncLightboxPanel';
+  panel.style.cssText = 'position:absolute;top:56px;right:16px;max-width:340px;background:rgba(0,0,0,0.7);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:6px;padding:10px 12px;font-size:12px;z-index:10002;box-shadow:0 4px 16px rgba(0,0,0,0.5);';
+  // Handle discard clicks on the panel itself: we stopPropagation() so the
+  // lightbox overlay's onclick doesn't close the lightbox out from under the
+  // user, which means a document-level delegate would never see these events.
+  panel.addEventListener('click', function(e) {
+    var changeBtn = e.target.closest('button[data-sync-discard-change]');
+    if (changeBtn) {
+      var changeId = parseInt(changeBtn.getAttribute('data-sync-discard-change'), 10);
+      if (!isNaN(changeId)) _syncDiscardFromLightbox([changeId], _lightboxCurrentId);
+    } else {
+      var photoBtn = e.target.closest('button[data-sync-discard-photo]');
+      if (photoBtn) {
+        var pid = parseInt(photoBtn.getAttribute('data-sync-discard-photo'), 10);
+        var photo = _syncFindPhotoData(pid);
+        if (photo) {
+          var ids = _syncVisibleChangesFor(photo).map(function(c) { return c.id; });
+          _syncDiscardFromLightbox(ids, pid);
+        }
+      }
+    }
+    e.stopPropagation();
+  });
+  overlay.appendChild(panel);
+  _syncLightboxPanelEl = panel;
+  return panel;
+}
+
+function _syncDestroyLightboxPanel() {
+  if (_syncLightboxPanelEl && _syncLightboxPanelEl.parentNode) {
+    _syncLightboxPanelEl.parentNode.removeChild(_syncLightboxPanelEl);
+  }
+  _syncLightboxPanelEl = null;
+}
+
+function _syncRenderLightboxPanel(photoId) {
+  if (!_syncModalOpen) { _syncDestroyLightboxPanel(); return; }
+  var photo = _syncFindPhotoData(photoId);
+  var visible = _syncVisibleChangesFor(photo);
+  if (!photo || visible.length === 0) {
+    _syncDestroyLightboxPanel();
+    return;
+  }
+  var panel = _syncEnsureLightboxPanel();
+  if (!panel) return;
+  var html = '<div style="font-weight:600;margin-bottom:6px;color:var(--accent);">Pending changes</div>';
+  visible.forEach(function(c) {
+    var icon = c.type === 'keyword_add' ? '+' : c.type === 'keyword_remove' ? '−' : '~';
+    var color = c.type === 'keyword_add' ? 'var(--accent)' : c.type === 'keyword_remove' ? 'var(--danger)' : 'var(--warning)';
+    var typeLabel = c.type.replace(/_/g, ' ');
+    html += '<div style="display:flex;align-items:center;gap:6px;padding:3px 0;">' +
+      '<span style="color:' + color + ';font-weight:700;width:12px;text-align:center;">' + icon + '</span>' +
+      '<span style="flex:1;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(c.value) + '</span>' +
+      '<span style="font-size:10px;color:var(--text-dim);">' + typeLabel + '</span>' +
+      '<button data-sync-discard-change="' + c.id + '" style="background:none;border:none;color:var(--text-ghost);cursor:pointer;padding:0 4px;font-size:16px;line-height:1;" title="Discard this change">&times;</button>' +
+      '</div>';
+  });
+  html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;gap:8px;">' +
+    '<span style="font-size:11px;color:var(--text-dim);">Use ← → to navigate</span>' +
+    '<button data-sync-discard-photo="' + photoId + '" style="background:none;border:1px solid var(--danger);color:var(--danger);border-radius:4px;font-size:11px;cursor:pointer;padding:3px 8px;">Discard all</button>' +
+    '</div>';
+  panel.innerHTML = html;
+}
+
+async function _syncDiscardFromLightbox(changeIds, photoId) {
+  if (!changeIds || changeIds.length === 0) return;
+  try {
+    await safeFetch('/api/sync/discard', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ change_ids: changeIds }),
+    });
+  } catch(e) { return; }
+
+  _syncForgetChanges(changeIds);
+
+  var photoAfter = _syncFindPhotoData(photoId);
+  var visibleAfter = _syncVisibleChangesFor(photoAfter);
+
+  renderSyncPreview();
+
+  if (visibleAfter.length > 0) {
+    _syncRenderLightboxPanel(photoId);
+    return;
+  }
+
+  // No more visible changes for this photo — advance the lightbox to the next
+  // photo with visible changes, or close if none remain.
+  var newList = [];
+  if (_syncPreviewData && _syncPreviewData.photos) {
+    _syncPreviewData.photos.forEach(function(p) {
+      if (_syncVisibleChangesFor(p).length > 0) {
+        newList.push({ id: p.photo_id, filename: p.filename });
+      }
+    });
+  }
+  var prevList = window._lightboxPhotoList || [];
+  var prevIdx = prevList.findIndex(function(p) { return p.id === photoId; });
+  if (newList.length === 0) {
+    closeLightbox();
+    return;
+  }
+  var nextIdx = prevIdx >= 0 ? Math.min(prevIdx, newList.length - 1) : 0;
+  var next = newList[nextIdx];
+  openLightbox(next.id, next.filename, newList);
+}
+
+document.addEventListener('lightbox:photochanged', function(e) {
+  if (!_syncModalOpen) return;
+  _syncRenderLightboxPanel(e.detail && e.detail.photoId);
+});
+
+document.addEventListener('lightbox:closed', function() {
+  _syncDestroyLightboxPanel();
+});
+
+function _syncForgetChanges(changeIds) {
+  if (!_syncPreviewData || !_syncPreviewData.photos || !changeIds || changeIds.length === 0) return;
+  var drop = {};
+  changeIds.forEach(function(id) { drop[id] = true; });
+  _syncPreviewData.photos.forEach(function(p) {
+    p.changes = p.changes.filter(function(c) { return !drop[c.id]; });
+  });
+  _syncPreviewData.photos = _syncPreviewData.photos.filter(function(p) { return p.changes.length > 0; });
 }
 
 async function discardChange(changeId, rowEl) {
@@ -206,6 +403,7 @@ async function discardChange(changeId, rowEl) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({change_ids: [changeId]}),
     });
+    _syncForgetChanges([changeId]);
     if (rowEl) {
       rowEl.style.opacity = '0.3';
       rowEl.style.textDecoration = 'line-through';
@@ -220,6 +418,7 @@ async function discardPhotoChanges(changeIds, btn) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({change_ids: changeIds}),
     });
+    _syncForgetChanges(changeIds);
     var row = btn.closest('[style*="border-bottom"]');
     if (row) row.style.display = 'none';
   } catch(e) {}

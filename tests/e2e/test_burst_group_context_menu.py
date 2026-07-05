@@ -2,11 +2,11 @@ import pytest
 from playwright.sync_api import expect
 
 
-def _seed_burst_group(db, group_id="grp-test-1", model="test-classifier"):
+def _seed_burst_group(db, group_id="grp-test-1", model="BioCLIP-2"):
     """Promote the fixture's three hawk predictions into a single burst group.
 
     ``seed_e2e_data`` in conftest.py creates three hawk photos with one
-    prediction each (species=Red-tailed Hawk, classifier_model=test-classifier).
+    prediction each (species=Red-tailed Hawk, classifier_model=BioCLIP-2).
     Group state (``group_id``, ``vote_count``, ``total_votes``) lives in the
     workspace-scoped ``prediction_review`` table, so we upsert one row per
     prediction in the active workspace. Setting a non-null ``quality_score``
@@ -137,6 +137,33 @@ def test_burst_right_click_force_selects_card(live_server, page):
     assert str(selected) == target_pid
 
 
+def test_burst_native_open_browse_uses_selected_card(live_server, page):
+    """Native Photo > Open in Browse should understand burst modal selection."""
+    n = _seed_burst_group(live_server["db"])
+    if n < 1:
+        pytest.skip("could not seed burst group")
+
+    url = live_server["url"]
+    page.goto(f"{url}/review")
+    page.wait_for_load_state("networkidle")
+    _open_burst_modal(page)
+
+    page.locator("#grmOverlay .grm-card[data-photo-id]").first.wait_for(
+        state="visible", timeout=2000,
+    )
+    pid = page.evaluate("String(grmState.selected)")
+    assert pid and pid != "null"
+
+    page.evaluate("window.handleNativeMenuCommand('photo_open_browse')")
+
+    page.wait_for_function(
+        "expectedPid => location.pathname === '/browse'"
+        " && new URLSearchParams(location.search).get('photo_id') === expectedPid",
+        arg=pid,
+        timeout=5000,
+    )
+
+
 def test_burst_menu_has_chip_rows(live_server, page):
     """Burst menu includes rating chips (0-5) and flag chips (3)."""
     n = _seed_burst_group(live_server["db"])
@@ -211,7 +238,8 @@ def test_burst_multi_selected_cards_drag_together(live_server, page):
     assert first_pid and second_pid
 
     # Start from an empty selection so this exercises normal click + additive
-    # Ctrl-click rather than depending on the modal's auto-selected AI best.
+    # Cmd-style additive click rather than depending on the modal's
+    # auto-selected AI best.
     page.evaluate(
         """() => {
           grmState.selected = null;
@@ -224,7 +252,7 @@ def test_burst_multi_selected_cards_drag_together(live_server, page):
     first = page.locator(f'#grmOverlay .grm-card[data-photo-id="{first_pid}"]')
     second = page.locator(f'#grmOverlay .grm-card[data-photo-id="{second_pid}"]')
     first.click()
-    second.click(modifiers=["Control"])
+    second.click(modifiers=["Meta"])
 
     selected = page.evaluate("Array.from(grmState.selectedIds).map(String).sort()")
     assert selected == sorted([first_pid, second_pid])
@@ -250,6 +278,74 @@ def test_burst_multi_selected_cards_drag_together(live_server, page):
     assert abs(offsets["a"]["ty"] - offsets["b"]["ty"]) < 0.01
     assert abs(offsets["a"]["tx"]) > 0
     assert abs(offsets["a"]["ty"]) > 0
+
+
+def test_burst_loupe_drag_offsets_selected_cards_only(live_server, page):
+    """Dragging the right preview should nudge only the selected burst cards."""
+    n = _seed_burst_group(live_server["db"])
+    if n < 2:
+        pytest.skip("need at least 2 burst cards")
+
+    url = live_server["url"]
+    page.goto(f"{url}/review")
+    page.wait_for_load_state("networkidle")
+    _open_burst_modal(page)
+
+    cards = page.locator("#grmOverlay .grm-card[data-photo-id]")
+    assert cards.count() >= 2
+    first_pid = cards.nth(0).get_attribute("data-photo-id")
+    second_pid = cards.nth(1).get_attribute("data-photo-id")
+    third_pid = cards.nth(2).get_attribute("data-photo-id") if cards.count() >= 3 else None
+    assert first_pid and second_pid
+
+    page.evaluate(
+        """() => {
+          grmState.selected = null;
+          grmState.selectedIds.clear();
+          grmState.selectionAnchor = null;
+          renderGroupModal();
+        }"""
+    )
+
+    page.locator(f'#grmOverlay .grm-card[data-photo-id="{first_pid}"]').click()
+    selected_pids = [first_pid]
+    untouched_pid = second_pid
+    if third_pid:
+        page.locator(f'#grmOverlay .grm-card[data-photo-id="{second_pid}"]').click(modifiers=["Meta"])
+        selected_pids.append(second_pid)
+        untouched_pid = third_pid
+    selected = page.evaluate("Array.from(grmState.selectedIds).map(String).sort()")
+    assert selected == sorted(selected_pids)
+
+    loupe = page.locator("#grmLoupeImg")
+    bbox = loupe.bounding_box()
+    assert bbox is not None
+    x = bbox["x"] + bbox["width"] / 2
+    y = bbox["y"] + bbox["height"] / 2
+    page.mouse.move(x, y)
+    page.mouse.down()
+    drag_started = page.evaluate("_grmLoupeAlignDragging ? _grmLoupeAlignDragging.targets.length : 0")
+    assert drag_started == len(selected_pids)
+    page.mouse.move(x + 28, y + 14)
+    page.mouse.up()
+
+    offsets = page.evaluate(
+        """([selected, untouched]) => ({
+          selected: selected.map((pid) => _grmOffsets[pid]),
+          untouched: _grmOffsets[untouched],
+          locked: _grmLoupeLocked,
+        })""",
+        [selected_pids, untouched_pid],
+    )
+    assert all(offsets["selected"])
+    assert offsets["untouched"] is None
+    assert offsets["locked"] is False
+    first_offset = offsets["selected"][0]
+    for offset in offsets["selected"][1:]:
+        assert abs(first_offset["tx"] - offset["tx"]) < 0.01
+        assert abs(first_offset["ty"] - offset["ty"]) < 0.01
+    assert abs(first_offset["tx"]) > 0
+    assert abs(first_offset["ty"]) > 0
 
 
 def test_review_card_menu_has_no_burst_items(live_server, page):

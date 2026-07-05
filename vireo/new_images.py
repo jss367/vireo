@@ -5,7 +5,11 @@ import threading
 import time
 from pathlib import Path
 
-from image_loader import SUPPORTED_EXTENSIONS
+from image_loader import (
+    SUPPORTED_EXTENSIONS,
+    is_excluded_scan_path,
+    safe_scan_walk,
+)
 
 log = logging.getLogger(__name__)
 
@@ -48,38 +52,49 @@ def _known_raw_stems_for_workspace(db, workspace_id):
 
 
 def mapped_roots(db, workspace_id):
-    """Return the workspace's mapped roots — linked folders whose ancestor chain
-    contains no other linked folder. Skips folders marked 'missing'. Folders
-    flagged ``'partial'`` from an interrupted scan are kept so a rescan can
-    pick up where the previous one stopped.
+    """Return the workspace's user-facing roots — folders linked to the
+    workspace with ``is_root = 1`` and no ``is_root = 1`` ancestor also linked
+    here. Skips folders marked 'missing'. Folders flagged ``'partial'`` from an
+    interrupted scan are kept so a rescan can pick up where it stopped.
 
-    Checking only the immediate parent would over-include when an intermediate
-    folder was unlinked but a deeper descendant is still linked (e.g. /A linked,
-    /A/B unlinked, /A/B/C linked — both /A and /A/B/C would otherwise be roots
-    and the walk would double-count files under /A/B/C).
+    Scoping by ``is_root`` (the canonical "user-facing root" flag, same as
+    ``get_workspace_folder_roots``) rather than by mere linkage is what keeps
+    the new-images walk aligned with what the user actually imported. A
+    templated copy-import records its leaf destination subfolders as roots and
+    links the destination *base* as a non-root parent (is_root=0) so photo
+    queries and the folder tree still work. Walking by linkage would treat that
+    base as a root and surface every un-imported sibling under it — a whole
+    archive of past shoots — as "new". The is_root migration backfills
+    is_root=1 for exactly the topmost-linked folder of each chain, so this is
+    behaviour-identical to the old topology walk for every pre-existing
+    workspace; it only diverges for the import-container case above.
+
+    The ancestor check still guards against double-counting when two folders in
+    one chain are both marked roots (e.g. /A and /A/B/C with /A/B unlinked):
+    os.walk'ing both would count files under /A/B/C twice.
     """
     rows = db.conn.execute(
-        """SELECT f.id, f.path, f.parent_id
+        """SELECT f.id, f.path, f.parent_id, wf.is_root
            FROM folders f
            JOIN workspace_folders wf ON wf.folder_id = f.id
            WHERE wf.workspace_id = ? AND f.status IN ('ok', 'partial')""",
         (workspace_id,),
     ).fetchall()
-    linked_ids = {r["id"] for r in rows}
-    if not linked_ids:
+    root_ids = {r["id"] for r in rows if r["is_root"]}
+    if not root_ids:
         return []
 
     # Load parent_id for every folder — needed to walk arbitrary-depth ancestor
-    # chains where intermediate folders may not be linked.
+    # chains where intermediate folders may not themselves be roots.
     parent_of = {
         r["id"]: r["parent_id"]
         for r in db.conn.execute("SELECT id, parent_id FROM folders").fetchall()
     }
 
-    def has_linked_ancestor(folder_id):
+    def has_root_ancestor(folder_id):
         parent = parent_of.get(folder_id)
         while parent is not None:
-            if parent in linked_ids:
+            if parent in root_ids:
                 return True
             parent = parent_of.get(parent)
         return False
@@ -87,7 +102,7 @@ def mapped_roots(db, workspace_id):
     return [
         {"id": r["id"], "path": r["path"]}
         for r in rows
-        if not has_linked_ancestor(r["id"])
+        if r["is_root"] and not has_root_ancestor(r["id"])
     ]
 
 
@@ -126,12 +141,30 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
 
     for root in roots:
         root_path = root["path"]
+        # prune_scan_dirs filters only children; if the root is, or sits
+        # inside, an excluded bundle (e.g. user added
+        # ``~/Pictures/Photos Library.photoslibrary`` directly, or a stale
+        # folder row points at ``.../Photos Library.photoslibrary/originals``),
+        # os.walk would still open it and inflate the banner with managed
+        # images the scanner never ingests. This must run BEFORE
+        # ``os.path.isdir`` — isdir follows symlinks and stat's the target,
+        # so for a directly selected bundle (or a symlink to one) the
+        # existence test alone is enough to trip the macOS TCC prompt.
+        if is_excluded_scan_path(root_path):
+            per_root.append({"folder_id": root["id"], "path": root_path, "new_count": 0})
+            continue
         if not os.path.isdir(root_path):
             per_root.append({"folder_id": root["id"], "path": root_path, "new_count": 0})
             continue
 
         root_new = 0
-        for dirpath, _dirnames, filenames in os.walk(root_path):
+        # safe_scan_walk skips other-app data bundles (e.g.
+        # "Photos Library.photoslibrary") without stat-following any
+        # symlinked child that points at one — the os.walk classification
+        # stat alone is enough to trip the macOS TCC prompt. Mirror what
+        # scanner.scan() will eventually pick up, so the "new images"
+        # banner can't be inflated by files the scanner will never ingest.
+        for dirpath, _dirnames, filenames in safe_scan_walk(root_path):
             for name in filenames:
                 files_checked += 1
                 # Mirror ``vireo/scanner.py``: skip dotfiles (e.g. macOS
@@ -147,6 +180,13 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
                     continue
                 full = os.path.join(dirpath, name)
                 if full in known:
+                    _maybe_emit()
+                    continue
+                # Mirror ``vireo/scanner.py``: os.walk lists broken symlinks
+                # in `filenames`, but scanner refuses to ingest them
+                # (os.path.isfile == False). Counting them as "new" would
+                # leave the banner stuck on files no scan can clear.
+                if not os.path.isfile(full):
                     _maybe_emit()
                     continue
                 # Suppress JPG working-copy companions of already-imported
@@ -168,7 +208,12 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
     if progress_callback is not None:
         progress_callback(files_checked, total)
 
-    return {"new_count": total, "per_root": per_root, "sample": sample}
+    return {
+        "new_count": total,
+        "per_root": per_root,
+        "sample": sample,
+        "sample_complete": sample_limit is None or len(sample) >= total,
+    }
 
 
 class NewImagesCache:
@@ -232,6 +277,33 @@ class NewImagesCache:
                 del self._entries[key]
                 return None
             return result
+
+    def get_entry_set_at(self, db_path, workspace_id):
+        """Return the monotonic timestamp at which the current cache entry was
+        written, or ``None`` if there is no live entry. Callers use this to
+        distinguish a cache write that happened *before* their request from
+        one that happened *after*, so that a snapshot POST can tell whether
+        the cached sample reflects disk state at click time or was left over
+        from an earlier navbar probe."""
+        key = (db_path, workspace_id)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                return None
+            _result, set_at = entry
+            if time.monotonic() - set_at > self._ttl:
+                del self._entries[key]
+                return None
+            return set_at
+
+    def has_inflight(self, db_path, workspace_id):
+        """Return True if a background compute is currently running for
+        ``(db_path, workspace_id)``. Callers use this to coalesce onto an
+        existing walk instead of tearing it down with a fresh invalidation.
+        """
+        key = (db_path, workspace_id)
+        with self._lock:
+            return key in self._inflight
 
     def get_generation(self, db_path, workspace_id):
         """Return the current generation for ``(db_path, workspace_id)`` (0 if unseen)."""

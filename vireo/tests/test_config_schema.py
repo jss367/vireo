@@ -209,6 +209,12 @@ def test_validate_int_enforces_range():
         validate_value("photos_per_page", 5000)
 
 
+def test_preview_max_size_allows_zero_for_originals():
+    from config_schema import validate_value
+
+    assert validate_value("preview_max_size", 0) == 0
+
+
 def test_validate_int_rejects_fractional_float():
     from config_schema import ValidationError, validate_value
 
@@ -334,6 +340,24 @@ def test_validate_enum_rejects_unknown():
         validate_value("keyword_case", "screaming-snake")
 
 
+def test_validate_nullable_enum_accepts_null():
+    """pipeline.default_strategy is nullable — a workspace override of null
+    (or the settings UI's empty-string proxy for null) must round-trip to
+    Python None so the import→process chaining hook short-circuits."""
+    from config_schema import validate_value
+
+    assert validate_value("pipeline.default_strategy", None) is None
+    assert validate_value("pipeline.default_strategy", "") is None
+    assert validate_value("pipeline.default_strategy", "full") == "full"
+
+
+def test_validate_nullable_enum_rejects_unknown_non_null():
+    from config_schema import ValidationError, validate_value
+
+    with pytest.raises(ValidationError):
+        validate_value("pipeline.default_strategy", "not_a_strategy")
+
+
 def test_validate_string_passthrough():
     from config_schema import validate_value
 
@@ -390,4 +414,3 @@ def test_schema_parent_prefixes_covers_dotted_namespaces():
     # Known dotted namespaces in DEFAULTS show up.
     assert "pipeline" in prefixes
     assert "ingest" in prefixes
-

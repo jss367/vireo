@@ -65,6 +65,7 @@
   width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
 }
 .job-list-item-dot.running { background: var(--accent); animation: pulse-dot 1.5s ease-in-out infinite; }
+.job-list-item-dot.queued { background: var(--text-muted, #888); border: 1px solid var(--accent); }
 .job-list-item-dot.completed { background: var(--success, #4caf50); }
 .job-list-item-dot.failed { background: var(--danger); }
 .job-list-item-dot.cancelled { background: var(--text-ghost); }
@@ -84,10 +85,10 @@
   overflow: hidden; text-overflow: ellipsis;
 }
 .job-list-item-progress {
-  margin-top: 4px; height: 3px; background: var(--bg-tertiary); border-radius: 2px;
+  margin-top: 5px; height: 6px; background: var(--bg-tertiary); border-radius: 3px;
 }
 .job-list-item-progress-fill {
-  height: 100%; background: var(--accent); border-radius: 2px; transition: width 0.3s;
+  height: 100%; background: var(--accent); border-radius: 3px; transition: width 0.3s;
 }
 .jobs-detail-pane {
   flex: 1; overflow-y: auto; padding: 0;
@@ -110,6 +111,7 @@
   font-size: 12px; padding: 3px 10px; border-radius: 4px; font-weight: 500;
 }
 .job-detail-status.running { background: var(--accent); color: var(--accent-text); }
+.job-detail-status.queued { background: var(--bg-tertiary); color: var(--text-muted, #888); border: 1px solid var(--border-secondary); }
 .job-detail-status.completed { background: color-mix(in srgb, var(--success, #4caf50) 20%, transparent); color: var(--success, #4caf50); }
 .job-detail-status.failed { background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }
 .job-detail-meta {
@@ -150,6 +152,7 @@
 .tree-status-icon.running { color: var(--accent); animation: pulse-step 1.5s ease-in-out infinite; }
 .tree-status-icon.completed { color: var(--success, #4caf50); }
 .tree-status-icon.failed { color: var(--danger); }
+.tree-status-icon.cancelled { color: var(--text-muted); }
 @keyframes pulse-step {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
@@ -307,13 +310,45 @@
       case 'running': return '<span class="tree-status-icon running">\u25CB</span>';
       case 'completed': return '<span class="tree-status-icon completed">\u2713</span>';
       case 'failed': return '<span class="tree-status-icon failed">\u2717</span>';
+      case 'cancelled': return '<span class="tree-status-icon cancelled">\u2298</span>';
       default: return '<span class="tree-status-icon pending">\u25CB</span>';
     }
   }
 
+  function activeProgress(progress) {
+    if (!progress) return null;
+    if (typeof progress.phase_current === 'number' && progress.phase_total > 0) {
+      return {
+        current: progress.phase_current,
+        total: progress.phase_total,
+        label: progress.phase_label || progress.phase || 'Current phase',
+        phase: true,
+      };
+    }
+    if (progress.total > 0) {
+      return {
+        current: progress.current || 0,
+        total: progress.total,
+        label: 'Overall',
+        phase: false,
+      };
+    }
+    return null;
+  }
+
+  function progressPct(info) {
+    if (!info || !info.total) return 0;
+    return Math.max(0, Math.min(100, Math.round((info.current / info.total) * 100)));
+  }
+
   function renderJobCard(job, options) {
     options = options || {};
-    var isLive = job.status === 'running';
+    // Queued pipelines are "live" for UI purposes: they have a real
+    // backend identity, they're cancellable (runner.cancel_job handles
+    // the queued case), and dropping them out of the active section
+    // strands them — the user has no way to find or cancel a queued
+    // pipeline until the slot opens.
+    var isLive = job.status === 'running' || job.status === 'queued';
     var elapsed = '';
     if (isLive && job.started_at) {
       elapsed = formatElapsed((Date.now() - new Date(job.started_at).getTime()) / 1000);
@@ -345,8 +380,9 @@
     html += '<div class="job-detail-meta">';
     html += '<span>Started: ' + new Date(job.started_at).toLocaleTimeString() + '</span>';
     html += '<span>Elapsed: ' + elapsed + '</span>';
-    if (job.progress && job.progress.total > 0) {
-      html += '<span>Overall: ' + Math.round((job.progress.current / job.progress.total) * 100) + '%</span>';
+    var visibleProgress = activeProgress(job.progress);
+    if (visibleProgress) {
+      html += '<span>' + esc(visibleProgress.label) + ': ' + progressPct(visibleProgress) + '%</span>';
     }
     html += '</div>';
 
@@ -362,10 +398,11 @@
       // Fallback for running jobs without steps
       html += '<div class="job-tree"><div style="padding:8px;font-size:13px;color:var(--text-muted);">';
       if (job.progress.phase) html += '<div style="color:var(--accent);font-weight:500;margin-bottom:8px;">' + esc(job.progress.phase) + '</div>';
-      if (job.progress.total > 0) {
-        var pct = Math.round((job.progress.current / job.progress.total) * 100);
+      var fallbackProgress = activeProgress(job.progress);
+      if (fallbackProgress) {
+        var pct = progressPct(fallbackProgress);
         html += '<div class="tree-step-bar" style="width:200px;margin-bottom:4px;"><div class="tree-step-bar-fill" style="width:' + pct + '%"></div></div>';
-        html += '<div>' + job.progress.current.toLocaleString() + ' / ' + job.progress.total.toLocaleString() + '</div>';
+        html += '<div>' + esc(fallbackProgress.label) + ': ' + fallbackProgress.current.toLocaleString() + ' / ' + fallbackProgress.total.toLocaleString() + '</div>';
       }
       if (job.progress.current_file) html += '<div style="margin-top:4px;">' + esc(job.progress.current_file) + '</div>';
       html += '</div></div>';
@@ -413,8 +450,11 @@
       }
     }
 
-    // 7: Summary for completed steps
-    if (step.status === 'completed' && step.summary) {
+    // 7: Summary for terminal steps. The backend writes explanatory
+    // summaries on completed, cancelled ("Cancelled (N animals detected
+    // so far)"), and some failed steps (e.g. scan) — show them all.
+    var isTerminal = step.status === 'completed' || step.status === 'cancelled' || step.status === 'failed';
+    if (isTerminal && step.summary) {
       html += '<span class="tree-step-summary">(' + esc(step.summary) + ')</span>';
     }
 
@@ -523,12 +563,27 @@
         });
         updateList();
         updateRunningBadge();
-        if (currentView === 'active') renderActiveOverview();
+        if (selectedSource === 'active' && selectedJobId) {
+          var selected = activeJobs.find(function(j) { return j.id === selectedJobId; });
+          if (selected) {
+            renderDetail(selected);
+          } else {
+            var historical = historyJobs.find(function(j) { return j.id === selectedJobId; });
+            if (historical) {
+              selectedSource = 'history';
+              renderHistoryDetail(historical);
+            } else {
+              fetchHistory(true);
+            }
+          }
+        } else if (currentView === 'active') {
+          renderActiveOverview();
+        }
       })
       .catch(function() {});
   }
 
-  function fetchHistory() {
+  function fetchHistory(refreshMissingSelection) {
     fetch('/api/jobs/history?limit=100')
       .then(function(r) { return r.json(); })
       .then(function(data) {
@@ -543,6 +598,20 @@
         });
         updateList();
         populateTypeFilter();
+        if (refreshMissingSelection && selectedSource === 'active' && selectedJobId) {
+          var historical = historyJobs.find(function(j) { return j.id === selectedJobId; });
+          if (historical) {
+            selectedSource = 'history';
+            renderHistoryDetail(historical);
+          } else {
+            currentView = 'active';
+            selectedJobId = null;
+            selectedSource = null;
+            renderActiveOverview();
+            updateList();
+          }
+          return;
+        }
         if (currentView === 'history') renderHistoryOverview();
       })
       .catch(function() {});
@@ -571,7 +640,12 @@
     var statusFilter = document.getElementById('filterStatus').value;
     var html = '';
 
-    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+    // Active = running OR queued. Queued pipelines waiting behind a busy
+    // slot are findable + cancellable here; without this, opening /jobs
+    // after queuing from another tab would show the queued run nowhere.
+    var running = activeJobs.filter(function(j) {
+      return j.status === 'running' || j.status === 'queued';
+    });
     html += '<div class="jobs-list-divider clickable' + (currentView === 'active' ? ' selected' : '') + '" data-view="active">Active' +
       (running.length > 0 ? ' (' + running.length + ')' : '') + '</div>';
     running.forEach(function(j) { html += renderListItem(j, 'active'); });
@@ -598,8 +672,12 @@
       time = timeAgo(j.started_at);
     }
     var detail = '';
+    var visibleProgress = activeProgress(j.progress);
     if (j.status === 'running' && j.progress && j.progress.phase) {
       detail = esc(j.progress.phase);
+      if (visibleProgress && visibleProgress.phase) {
+        detail += ' ' + visibleProgress.current.toLocaleString() + '/' + visibleProgress.total.toLocaleString();
+      }
     } else if (j.summary) {
       detail = esc(j.summary);
     } else if (j.status === 'failed' && j.errors && j.errors.length > 0) {
@@ -608,8 +686,8 @@
       detail = formatElapsed(j.duration);
     }
     var pct = 0;
-    if (j.progress && j.progress.total > 0) {
-      pct = Math.round((j.progress.current / j.progress.total) * 100);
+    if (visibleProgress) {
+      pct = progressPct(visibleProgress);
     }
     var html = '<div class="job-list-item' + selected + '" data-job-id="' + esc(j.id) + '" data-job-source="' + source + '">';
     html += '<div class="job-list-item-header">';
@@ -626,7 +704,9 @@
   }
 
   function updateRunningBadge() {
-    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+    var running = activeJobs.filter(function(j) {
+      return j.status === 'running' || j.status === 'queued';
+    });
     var badge = document.getElementById('runningBadge');
     if (running.length > 0) { badge.textContent = running.length; badge.style.display = ''; }
     else { badge.style.display = 'none'; }
@@ -657,7 +737,7 @@
     if (sseSource) { sseSource.close(); sseSource = null; }
     if (source === 'active') {
       var job = activeJobs.find(function(j) { return j.id === jobId; });
-      if (job) { renderDetail(job); if (job.status === 'running') connectSSE(jobId); }
+      if (job) { renderDetail(job); if (job.status === 'running' || job.status === 'queued') connectSSE(jobId); }
     } else {
       var job = historyJobs.find(function(j) { return j.id === jobId; });
       if (job) renderHistoryDetail(job);
@@ -679,6 +759,16 @@
       }
     });
     sseSource.addEventListener('complete', function(e) {
+      var data = {};
+      try { data = JSON.parse(e.data); } catch(ex) {}
+      var job = activeJobs.find(function(j) { return j.id === jobId; });
+      if (job) {
+        job.status = data.status || job.status;
+        if (data.result !== undefined) job.result = data.result;
+        if (data.duration !== undefined) job.duration = data.duration;
+        if (data.errors !== undefined) job.errors = data.errors;
+        if (selectedJobId === jobId) renderDetail(job);
+      }
       if (sseSource) { sseSource.close(); sseSource = null; }
       fetchJobs();
       fetchHistory();
@@ -767,7 +857,9 @@
 
   function renderActiveOverview() {
     var pane = document.getElementById('jobDetailPane');
-    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+    var running = activeJobs.filter(function(j) {
+      return j.status === 'running' || j.status === 'queued';
+    });
 
     if (running.length === 0) {
       pane.innerHTML = '<div class="jobs-overview-empty">No active jobs.<br><span style="font-size:12px;margin-top:8px;display:inline-block;">Start a pipeline from the Pipeline page, or run individual jobs from Browse.</span></div>';

@@ -4,41 +4,276 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  changes:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      python: ${{ steps.filter.outputs.python }}
+      website: ${{ steps.filter.outputs.website }}
+      build: ${{ steps.filter.outputs.build }}
+
+    steps:
+      - name: Classify changed files
+        id: filter
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              per_page: 100,
+            });
+
+            const paths = files.flatMap((file) =>
+              [file.filename, file.previous_filename].filter(Boolean)
+            );
+            const touchesTestWorkflow = paths.includes(".github/workflows/test.yml");
+
+            const python = touchesTestWorkflow || paths.some((path) =>
+              path.startsWith("vireo/") ||
+              path.startsWith("tests/") ||
+              (path.startsWith("scripts/") && path.endsWith(".py")) ||
+              ["pyproject.toml", "uv.lock"].includes(path)
+            );
+
+            const website = touchesTestWorkflow || paths.some((path) =>
+              path.startsWith("website/") ||
+              path === "vireo/static/help.json" ||
+              path === ".github/workflows/deploy-website.yml"
+            );
+
+            const build = paths.some((path) =>
+              path.startsWith("src-tauri/") ||
+              path === "package.json" ||
+              path === "package-lock.json" ||
+              path === ".github/workflows/build-release.yml"
+            );
+
+            core.setOutput("python", String(python));
+            core.setOutput("website", String(website));
+            core.setOutput("build", String(build));
+
+            await core.summary
+              .addHeading("Change classification")
+              .addList([
+                `Python tests: ${python ? "run" : "skip"}`,
+                `Website build: ${website ? "run" : "skip"}`,
+                `Build-only paths changed: ${build ? "yes" : "no"}`,
+              ])
+              .write();
+
+  test-os:
+    needs: changes
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
 
     steps:
+      - name: Skip Python tests
+        if: needs.changes.outputs.python != 'true'
+        run: |
+          echo "No Python application, script, or test files changed."
+          echo "Build-only paths changed: ${{ needs.changes.outputs.build }}"
+
       - uses: actions/checkout@v4
+        if: needs.changes.outputs.python == 'true'
 
       - name: Set up Python
+        if: needs.changes.outputs.python == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.14"
 
-      - name: Install dependencies
+      - name: Install test dependencies
+        if: needs.changes.outputs.python == 'true'
+        # ``run`` defaults to PowerShell on Windows, where ``$RUNNER_TEMP``
+        # doesn't expand (it would need ``$env:RUNNER_TEMP``). Pin bash so the
+        # same ``cd "$RUNNER_TEMP"`` works across all three OS legs.
+        shell: bash
         run: |
-          pip install pytest pytest-cov pytest-timeout pytest-xdist
-          pip install -e .
+          cd "$RUNNER_TEMP"
+          pip install pytest pytest-cov pytest-timeout pytest-xdist "huggingface_hub>=1.4.1"
 
-      - name: Run tests with coverage
-        run: python -m pytest tests/ vireo/tests/ -n auto -v --tb=short --cov=vireo --cov-report=term-missing --cov-fail-under=40
+      # Cache MegaDetector V6 weights across runs so the Windows/macOS legs
+      # don't restart a cold ~300 MB download for every PR. Without this,
+      # ``-n 2`` xdist workers each kick off their own ``hf_hub_download``
+      # the first time they hit a test that calls ``ensure_megadetector_weights``,
+      # and the resulting bursts of parallel HEAD requests to
+      # ``huggingface.co/jss367/vireo-onnx-models`` get throttled with 429s,
+      # crashing the worker and cascading dozens of unrelated test failures.
+      - name: Cache MegaDetector weights
+        id: cache-mdv6
+        if: needs.changes.outputs.python == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.vireo/models/megadetector-v6
+          key: megadetector-v6-${{ runner.os }}-v1
 
-  lint:
+      # Sequential single-process pre-download. If the cache missed we fetch
+      # the weights once before the tests fan out — orders of magnitude less
+      # likely to trip the 429 rate limiter than two xdist workers each
+      # starting their own download simultaneously. Retry a few times with
+      # backoff so a single transient throttle doesn't poison the whole run.
+      #
+      # We download with the ``huggingface_hub`` library before installing the
+      # PR package, so PR-controlled editable installs/dependency hooks cannot
+      # affect this token-bearing interpreter. The inline script imports only
+      # huggingface_hub + stdlib and hard-codes the repo/filename, so no
+      # PR-authored module (detector.py, models.py, ...) ever runs with the
+      # token in scope. huggingface_hub also sends HF_TOKEN only to
+      # huggingface.co and follows the presigned CDN redirect without it, so the
+      # secret is never forwarded across the cross-host redirect the way a
+      # hand-rolled ``curl -L -H Authorization`` can. Tests never download -
+      # they mock the downloader / detect_animals or skip when the file is
+      # absent - so the weights just need to land where detector.py expects.
+      - name: Pre-download MegaDetector weights
+        if: needs.changes.outputs.python == 'true' && steps.cache-mdv6.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # Keep the PR-controlled checkout off sys.path so the ``import
+          # huggingface_hub`` below resolves to the installed package and can't
+          # be shadowed by a PR-added huggingface_hub.py — ``python -c``
+          # otherwise prepends the working directory as sys.path[0].
+          PYTHONSAFEPATH: "1"
+        run: |
+          # Belt-and-suspenders with PYTHONSAFEPATH: run from outside the
+          # checkout too, so even the cwd that ``python -c`` uses for
+          # sys.path[0] holds no PR-authored files.
+          cd "$RUNNER_TEMP"
+          # Track success explicitly: a bash ``for`` loop exits with the
+          # status of its last command, and ``sleep`` always succeeds —
+          # without this flag, five consecutive download failures would
+          # still pass the step, fanning out to xdist without the weights
+          # and triggering exactly the parallel-download 429 cascade this
+          # pre-download is meant to prevent.
+          success=0
+          for i in 1 2 3 4 5; do
+            if python -c "import os, shutil; from huggingface_hub import hf_hub_download; d = os.path.expanduser('~/.vireo/models/megadetector-v6'); os.makedirs(d, exist_ok=True); shutil.copy2(hf_hub_download(repo_id='jss367/vireo-onnx-models', filename='model.onnx', subfolder='megadetector-v6'), os.path.join(d, 'model.onnx'))"; then
+              success=1
+              break
+            fi
+            echo "Pre-download attempt $i failed; sleeping $((i * 15))s before retry"
+            sleep $((i * 15))
+          done
+          if [ "$success" -ne 1 ]; then
+            echo "Pre-download failed after 5 attempts; failing the step to avoid cascading xdist worker failures."
+            exit 1
+          fi
+
+      - name: Install package
+        if: needs.changes.outputs.python == 'true'
+        run: pip install -e .
+
+      # Linux is the canonical full run and enforces the coverage threshold.
+      # Cap xdist workers at 2 for the same reason as macOS/Windows below: with
+      # ``-n auto`` (one worker per core) several heavy ML/pipeline tests can
+      # load models on parallel workers at once, spike memory, and trip the
+      # Linux OOM killer — which takes out the runner agent and surfaces as an
+      # intermittent ``The runner has received a shutdown signal`` cancellation
+      # rather than a test failure. ``-n 2`` halves peak memory; the canonical
+      # run is a few minutes slower but well under the 60-minute job timeout.
+      - name: Run tests with coverage (Linux)
+        if: needs.changes.outputs.python == 'true' && runner.os == 'Linux'
+        run: python -m pytest tests/ vireo/tests/ -n 2 -v --tb=short --timeout=120 --timeout-method=thread --cov=vireo --cov-report=term-missing --cov-fail-under=40
+
+      # macOS/Windows verify platform-specific code paths. The coverage gate is
+      # skipped here because POSIX-only tests don't run on Windows, which would
+      # otherwise push coverage below the threshold for reasons unrelated to the change.
+      # These runners are smaller/slower, so cap xdist workers at 2 to avoid OOM
+      # worker crashes on the heavier ML tests.
+      - name: Run tests (macOS / Windows)
+        if: needs.changes.outputs.python == 'true' && runner.os != 'Linux'
+        run: python -m pytest tests/ vireo/tests/ -n 2 -v --tb=short --timeout=120 --timeout-method=thread
+
+  # Aggregate gate: a single check named ``test`` that branch protection can
+  # require, independent of how many OS legs the matrix above runs. A matrix
+  # job reports per-leg checks (``test-os (ubuntu-latest)`` …), so a bare
+  # ``test`` required context would never report and would block every PR.
+  # This job collapses the matrix result into one stable ``test`` check.
+  test:
+    needs: test-os
+    if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
     steps:
+      - name: Verify all OS test legs succeeded
+        run: |
+          result='${{ needs.test-os.result }}'
+          echo "test-os matrix result: $result"
+          if [ "$result" != "success" ]; then
+            echo "One or more OS test legs did not succeed."
+            exit 1
+          fi
+
+  lint:
+    runs-on: ubuntu-latest
+    needs: changes
+    timeout-minutes: 5
+
+    steps:
+      - name: Skip Python lint
+        if: needs.changes.outputs.python != 'true'
+        run: echo "No Python application, script, or test files changed."
+
       - uses: actions/checkout@v4
+        if: needs.changes.outputs.python == 'true'
 
       - name: Set up Python
+        if: needs.changes.outputs.python == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.14"
 
       - name: Install ruff
+        if: needs.changes.outputs.python == 'true'
         run: pip install ruff
 
       - name: Run ruff check
+        if: needs.changes.outputs.python == 'true'
         run: ruff check vireo/ tests/
+
+  website:
+    runs-on: ubuntu-latest
+    needs: changes
+    timeout-minutes: 10
+
+    steps:
+      - name: Skip website build
+        if: needs.changes.outputs.website != 'true'
+        run: echo "No website files changed."
+
+      - uses: actions/checkout@v4
+        if: needs.changes.outputs.website == 'true'
+
+      - name: Set up Node.js
+        if: needs.changes.outputs.website == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - name: Install website dependencies
+        if: needs.changes.outputs.website == 'true'
+        working-directory: website
+        run: npm ci
+
+      - name: Build website
+        if: needs.changes.outputs.website == 'true'
+        working-directory: website
+        run: npm run build

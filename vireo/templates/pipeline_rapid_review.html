@@ -782,6 +782,10 @@ function escapeHtml(s) {
   });
 }
 
+function escapeAttr(s) {
+  return escapeHtml(s);
+}
+
 function photoPreviewUrl(id) {
   return '/photos/' + id + '/preview?size=2560';
 }
@@ -790,8 +794,11 @@ function photoOriginalUrl(id) {
   return '/photos/' + id + '/original';
 }
 
-function thumbUrl(id) {
-  return '/thumbnails/' + id + '.jpg';
+function thumbUrl(photoOrId) {
+  var photoId = photoOrId && typeof photoOrId === 'object' ? photoOrId.id : photoOrId;
+  return window.vireoThumbnailUrl
+    ? window.vireoThumbnailUrl(photoOrId)
+    : '/thumbnails/' + photoId + '.jpg';
 }
 
 function burstIds(burst) {
@@ -1473,6 +1480,19 @@ function renderCurrent() {
   var img = document.getElementById('currentPhoto');
   var empty = document.getElementById('stageEmpty');
   var pill = document.getElementById('statusPill');
+  if (p && !rapid.seeded && !rapid.loadError) {
+    img.removeAttribute('src');
+    img.style.display = 'none';
+    empty.style.display = '';
+    empty.textContent = 'Loading burst state...';
+    pill.style.display = 'none';
+    document.getElementById('filename').textContent = 'Loading burst state...';
+    document.getElementById('metricQuality').textContent = '-';
+    document.getElementById('metricSharpness').textContent = '-';
+    document.getElementById('metricLabel').textContent = '-';
+    document.getElementById('metricReviewed').textContent = rapid.reviewed.size + '/' + rapid.items.length;
+    return;
+  }
   if (!p) {
     resetRapidZoom();
     img.removeAttribute('src');
@@ -1516,7 +1536,7 @@ function thumbClass(p) {
 function renderFilmstrip() {
   var html = rapid.items.map(function(p) {
     return '<button class="' + thumbClass(p) + '" onclick="selectPhoto(' + p.id + ')" title="' + escapeHtml(p.filename || '') + '">' +
-      '<img src="' + thumbUrl(p.id) + '" alt=""></button>';
+      '<img src="' + escapeAttr(thumbUrl(p)) + '" alt=""></button>';
   }).join('');
   document.getElementById('filmstrip').innerHTML = html;
 }
@@ -1525,7 +1545,7 @@ function renderLane(id, photos) {
   var html = photos.map(function(p) {
     var muted = (!rapid.queue.includeRejected && photoFlag(p) === 'rejected') ? ' rejected-muted' : '';
     return '<button class="mini-thumb' + muted + '" onclick="selectPhoto(' + p.id + ')" title="' + escapeHtml(p.filename || '') + '">' +
-      '<img src="' + thumbUrl(p.id) + '" alt=""></button>';
+      '<img src="' + escapeAttr(thumbUrl(p)) + '" alt=""></button>';
   }).join('');
   document.getElementById(id).innerHTML = html;
 }
@@ -1619,7 +1639,10 @@ function rapidComputeApplyDiff() {
     var hasSpeciesKeyword = species &&
       rapid.keywordStateSpecies === species &&
       !!rapid.initialSpeciesKeywords[p.id];
-    if (species && newFlag === 'flagged' && !hasSpeciesKeyword) diff.tagNew++;
+    // Apply tags EVERY frame in the burst with the species keyword (matching
+    // the grid / the persisted pipeline decision), not just picks. Count all
+    // current-burst members that don't already carry it.
+    if (species && !hasSpeciesKeyword) diff.tagNew++;
   });
   return diff;
 }
@@ -1641,7 +1664,7 @@ function rapidApplyTitle(diff, openNext) {
   if (diff.clearNew > 0) actions.push('clear flags on ' + diff.clearNew + ' ' + rapidPlural(diff.clearNew, 'photo'));
   if (diff.speciesChanged) actions.push('set confirmed species to "' + diff.species + '"');
   if (diff.tagNew > 0) {
-    actions.push('add species keyword "' + diff.species + '" to ' + diff.tagNew + ' ' + rapidPlural(diff.tagNew, 'pick'));
+    actions.push('add species keyword "' + diff.species + '" to ' + diff.tagNew + ' ' + rapidPlural(diff.tagNew, 'burst frame'));
   }
   var text = actions.length ? ('Apply will ' + actions.join(', ') + '.') : 'Apply will make no database changes for this burst.';
   if (openNext) text += ' Then open the next burst.';
@@ -1662,12 +1685,31 @@ function renderApplyState() {
   var applyBtn = document.getElementById('applyBtn');
   var applyNextBtn = document.getElementById('applyNextBtn');
   var diff = rapidComputeApplyDiff();
+  var waitingForState = !rapid.seeded && rapid.sessionIndex >= 0 && rapid.items && rapid.items.length && !rapid.loadError;
+  var stateFailed = !rapid.seeded && rapid.loadError;
   applyBtn.disabled = disabled;
   applyNextBtn.disabled = disabled || rapid.sessionIndex >= rapid.sessions.length - 1;
-  applyBtn.textContent = rapid.applying ? 'Applying...' : rapidApplyButtonText('Apply', diff);
-  applyNextBtn.textContent = rapid.applying ? 'Applying...' : rapidApplyButtonText('Apply & Next', diff);
-  applyBtn.title = rapidApplyTitle(diff, false);
-  applyNextBtn.title = rapidApplyTitle(diff, true);
+  if (rapid.applying) {
+    applyBtn.textContent = 'Applying...';
+    applyNextBtn.textContent = 'Applying...';
+    applyBtn.title = 'Applying changes to this burst.';
+    applyNextBtn.title = 'Applying changes to this burst.';
+  } else if (waitingForState) {
+    applyBtn.textContent = 'Loading burst state...';
+    applyNextBtn.textContent = 'Loading burst state...';
+    applyBtn.title = 'Apply will be available after burst state loads.';
+    applyNextBtn.title = 'Apply & Next will be available after burst state loads.';
+  } else if (stateFailed) {
+    applyBtn.textContent = 'Apply unavailable';
+    applyNextBtn.textContent = 'Apply & Next unavailable';
+    applyBtn.title = 'Apply is unavailable because burst state failed to load.';
+    applyNextBtn.title = 'Apply & Next is unavailable because burst state failed to load.';
+  } else {
+    applyBtn.textContent = rapidApplyButtonText('Apply', diff);
+    applyNextBtn.textContent = rapidApplyButtonText('Apply & Next', diff);
+    applyBtn.title = rapidApplyTitle(diff, false);
+    applyNextBtn.title = rapidApplyTitle(diff, true);
+  }
   applyBtn.setAttribute('aria-label', applyBtn.title);
   applyNextBtn.setAttribute('aria-label', applyNextBtn.title);
 }
@@ -1702,6 +1744,51 @@ async function applyCurrent(openNext) {
   var items = rapid.items.slice();
   var pickSet = new Set(picks);
   var rejectSet = new Set(rejects);
+  // Capture the species THIS burst is ALREADY confirmed as, BEFORE any
+  // optimistic local mutation below. Mirrors the burst-group modal's
+  // initialConfirmedSpecies (pipeline_review.html openGroupReview): prefer a
+  // confirmed burst override, else the encounter's confirmed species, else ''
+  // (unconfirmed). The species POST is gated on an ACTUAL change against this
+  // baseline — applying cull-only changes to a burst already tagged as X must
+  // NOT re-post X, because /api/encounters/species records a keyword_add
+  // edit-history entry per submitted frame even when tag_photo is an
+  // INSERT-OR-IGNORE no-op, and undoing that no-op add would strip the
+  // existing species keywords. Snapshot off rapid.results (not live rapid.*)
+  // since openSession() can run during the awaits below.
+  var alreadyConfirmedSpecies = '';
+  var snapEnc = (rapid.results.encounters || [])[session.encIdx];
+  if (snapEnc) {
+    var snapBursts = (snapEnc.bursts && snapEnc.bursts.length) ? snapEnc.bursts : null;
+    var snapBurst = snapBursts ? snapBursts[session.burstIdx] : null;
+    if (snapBurst && snapBurst.species_override && snapBurst.species_override.confirmed === true && snapBurst.species_override.species) {
+      alreadyConfirmedSpecies = snapBurst.species_override.species;
+    } else if (snapEnc.species_confirmed && snapEnc.confirmed_species) {
+      alreadyConfirmedSpecies = snapEnc.confirmed_species;
+    }
+  }
+  // Gate the species POST on ACTUAL species/tag work, mirroring
+  // rapidComputeApplyDiff(): post when the confirmed species changes
+  // (speciesChanged) OR when one or more current-burst frames are missing the
+  // species keyword (tagNeeded). The latter covers a burst already confirmed as
+  // X that still has untagged frames (e.g. legacy data that only tagged picks):
+  // the Apply button advertises "Tag N", so the POST must run to write those
+  // keywords — /api/pipeline/group/apply above is flags-only and never tags.
+  // Skipping the POST when there is NO species change AND nothing left to tag
+  // avoids the destructive no-op keyword_add (an undoable add that, when undone,
+  // strips the existing species keywords). Per-photo keyword state is reliably
+  // seeded client-side (rapid.initialSpeciesKeywords / keywordStateSpecies; see
+  // openSession + the keyword-state refresh), so the tagNeeded signal is real,
+  // not invented.
+  var speciesChanged = !!(species && species !== alreadyConfirmedSpecies);
+  var tagNeeded = false;
+  if (species) {
+    for (var ti = 0; ti < items.length; ti++) {
+      var hasKw = rapid.keywordStateSpecies === species &&
+        !!rapid.initialSpeciesKeywords[items[ti].id];
+      if (!hasKw) { tagNeeded = true; break; }
+    }
+  }
+  var speciesPostNeeded = speciesChanged || tagNeeded;
 
   try {
     var resp = await safeFetch('/api/pipeline/group/apply', {
@@ -1711,7 +1798,6 @@ async function applyCurrent(openNext) {
         picks: picks,
         rejects: rejects,
         candidates: candidates,
-        species: species,
       }),
     });
     items.forEach(function(p) {
@@ -1724,7 +1810,6 @@ async function applyCurrent(openNext) {
       if (pickSet.has(p.id)) p.flag = 'flagged';
       else if (rejectSet.has(p.id)) p.flag = 'rejected';
       else p.flag = 'none';
-      if (species && pickSet.has(p.id)) p.confirmed_species = species;
     });
     if (resp && resp.photos) {
       Object.keys(resp.photos).forEach(function(pidStr) {
@@ -1732,26 +1817,63 @@ async function applyCurrent(openNext) {
         var p = rapid.photoMap[pid];
         if (p) {
           p.flag = resp.photos[pidStr].flag;
+          // /group/apply is flags-only, so has_species_keyword is always
+          // false here in production; confirmed species comes from the
+          // adopted /api/encounters/species response below. Kept only because
+          // some rapid-review tests still mock the old response shape.
           if (species && resp.photos[pidStr].has_species_keyword) p.confirmed_species = species;
         }
       });
     }
-    var enc = rapid.results.encounters[session.encIdx];
-    if (species && enc) {
-      enc.confirmed_species = species;
-      enc.species_confirmed = true;
-      // sessions[].species is cached at page load, so update every burst in
-      // this encounter — otherwise Apply Next stops tagging picks with the
-      // confirmed species until the user retypes it for each burst. Iterate
-      // allSessions, not the filtered rapid.sessions: a queue filter/toggle
-      // can hide sibling bursts, and they must still get the confirmed
-      // species so they aren't stale when they re-enter the queue.
-      rapid.allSessions.forEach(function(s) {
-        if (s.encIdx === session.encIdx && !s.hasBurstOverride) {
-          s.species = species;
-          s.subtitle = s.ids.length + ' photos - ' + species;
-        }
+    // /group/apply is flags-only now; persist the species through the same
+    // unified endpoint the grid uses so confirmation actually lands server-side
+    // (tags all burst frames, handles species replacement + auto-detach).
+    // The server now OWNS confirmation: it sets species_confirmed on the
+    // correct encounter and returns the authoritative structure via
+    // spResp.encounters. We do not write enc.confirmed_species/species_confirmed
+    // locally — after an auto-detach the encounter indices shift, so the cached
+    // session.encIdx may point at a different (or out-of-bounds) encounter, and
+    // a local write would corrupt it and then be persisted by save-cache below.
+    if (speciesPostNeeded) {
+      var spResp = await safeFetch('/api/encounters/species', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          species: species,
+          photo_ids: items.map(function(p) { return p.id; }),
+          burst_index: session.burstIdx,
+        }),
       });
+      // Adopt the authoritative structure (the endpoint may auto-detach on a
+      // species mismatch), so the save-cache below doesn't clobber its restructure.
+      if (spResp && spResp.encounters) {
+        rapid.results.encounters = spResp.encounters;
+        if (spResp.summary) rapid.results.summary = spResp.summary;
+        // Rebuild the sidebar sessions from the server's authoritative
+        // encounters rather than trying to patch the old layout in place.
+        // buildSessions() derives each session's encIdx/burstIdx, species
+        // (via burstSpecies, which reads enc.confirmed_species /
+        // burst.species_override) and hasBurstOverride straight from the
+        // adopted payload, so this single rebuild covers BOTH cases the old
+        // count heuristic tried to distinguish:
+        //   - no detach: the server set confirmed_species on the encounter, so
+        //     sibling bursts pick up the just-confirmed species (the Apply-Next
+        //     pre-fill hint) for free.
+        //   - auto-detach (count-changing OR count-equal merge into an adjacent
+        //     same-species encounter): the shifted encIdx/burstIdx and divergent
+        //     species are reflected exactly, so the sidebar and openClassic()
+        //     navigate server truth instead of stale indices.
+        rapid.allSessions = buildSessions(rapid.results);
+      }
+      // Only now that the species call has SUCCEEDED do we mirror the
+      // confirmation onto the local photos. The endpoint tags EVERY frame in
+      // `items` (picks and non-picks alike), so mark them all — marking only
+      // picks would leave non-pick frames in the "Needs species" queue / without
+      // a confirmed-species chip until a reload. Doing this before the call
+      // (or in the label loop above) would leave the cache claiming confirmation
+      // even when /api/encounters/species fails, hiding the burst from "Needs
+      // species" locally until reload (the catch path doesn't roll it back).
+      items.forEach(function(p) { p.confirmed_species = species; });
     }
     updateSummaryFromPhotos();
     await safeFetch('/api/pipeline/save-cache', {

@@ -12,6 +12,66 @@ from PIL import Image
 
 
 @pytest.fixture(autouse=True)
+def _expanduser_prefers_test_home(monkeypatch):
+    """Make HOME-based tests portable to Windows.
+
+    Windows normally resolves ``~`` from USERPROFILE, while this suite uses
+    HOME to isolate app state. Read HOME dynamically so per-test monkeypatches
+    are honored after fixture setup.
+    """
+    real_expanduser = os.path.expanduser
+
+    def expanduser(path):
+        if isinstance(path, bytes):
+            if path == b"~" or path.startswith((b"~/", b"~\\")):
+                home = os.environ.get("HOME")
+                if home:
+                    return os.fsencode(home) + path[1:]
+        elif path == "~" or path.startswith(("~/", "~\\")):
+            home = os.environ.get("HOME")
+            if home:
+                return home + path[1:]
+        return real_expanduser(path)
+
+    monkeypatch.setattr(os.path, "expanduser", expanduser)
+
+
+@pytest.fixture(autouse=True)
+def _disable_startup_backfill_timers(monkeypatch):
+    """Stop ``create_app``'s deferred working-copy / thumb-path backfill
+    Timers from firing during tests.
+
+    Concrete failure this prevents: a fast-finishing test (e.g. a
+    synchronous ``/photos/<id>/preview`` request) returns in milliseconds,
+    but its app's 5/6-second Timer fires later — sometimes during a
+    completely unrelated next test — and runs the JobRunner backfill
+    thread against the now-stale tmp_path DB. The backfill's
+    ``extract_working_copy`` calls ``image_loader.load_image`` via the
+    module's global binding, so the *next* test's
+    ``monkeypatch.setattr(image_loader, "load_image", ...)`` intercepts
+    the call from the *previous* test's leaked job. Tests that exercise
+    the backfill paths still invoke ``app._kickoff_*_backfill()``
+    directly, so coverage is unaffected.
+    """
+    monkeypatch.setenv("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS", "1")
+
+
+@pytest.fixture(autouse=True)
+def _reset_model_cache():
+    """Drop the process-wide ModelCache between tests.
+
+    The cache is keyed by (model_id, fingerprint, ...) so a monkeypatched
+    ``Classifier`` stub from one test would otherwise be served to the
+    next test that reuses the same model id. Reset is cheap and only
+    affects tests; production keeps the singleton for the process lifetime.
+    """
+    from model_cache import reset_default_cache_for_tests
+    reset_default_cache_for_tests()
+    yield
+    reset_default_cache_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _restore_global_config_paths():
     """Snapshot/restore ``config.CONFIG_PATH`` (and ``models``' equivalents)
     around every test so a leak from a fixture that direct-assigns these

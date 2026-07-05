@@ -281,6 +281,22 @@ body { padding-bottom: 36px; }
   margin-top: 4px;
 }
 
+/* Resolved-destination preview under the Move-folder destination input */
+.dest-preview {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 6px;
+  word-break: break-all;
+}
+.dest-preview .dest-preview-path {
+  color: var(--text-secondary);
+  font-family: var(--font-mono, monospace);
+}
+.dest-status {
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
 /* Empty state */
 .empty-state {
   text-align: center;
@@ -297,6 +313,25 @@ body { padding-bottom: 36px; }
 }
 
 /* Folder browser modal (move-specific, reuses modal base from navbar) */
+.browser-shortcuts {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.browser-shortcuts button {
+  padding: 5px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-secondary);
+}
+.browser-shortcuts button:hover {
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
 .browser-breadcrumb {
   font-size: 12px;
   color: var(--text-secondary);
@@ -361,10 +396,19 @@ body { padding-bottom: 36px; }
       <div class="form-row">
         <label>Destination</label>
         <div class="dest-row">
-          <input type="text" id="quickDestInput" placeholder="/path/to/destination">
-          <button class="btn btn-secondary btn-small" onclick="openBrowser('quickDestInput')">Browse</button>
+          <select id="quickDestMode" onchange="onQuickDestModeChange()">
+            <option value="local">Local path</option>
+          </select>
         </div>
       </div>
+      <div class="dest-row" id="quickLocalRow" style="margin-bottom:8px;">
+        <input type="text" id="quickDestInput" placeholder="/path/to/destination" oninput="updateQuickMoveBtn()">
+        <button class="btn btn-secondary btn-small" onclick="openBrowser('quickDestInput')">Browse</button>
+      </div>
+      <div class="dest-row" id="quickRemoteRow" style="display:none; margin-bottom:8px;">
+        <input type="text" id="quickSubpathInput" placeholder="Optional subfolder under the target (e.g. USA/2026)" oninput="updateQuickMoveBtn()">
+      </div>
+      <div class="dest-preview" id="quickDestPreview"></div>
 
       <div style="margin-top:16px;">
         <button class="btn btn-primary" id="quickMoveBtn" onclick="startQuickMove()" disabled>Move Folder</button>
@@ -429,6 +473,11 @@ body { padding-bottom: 36px; }
 <div class="modal-overlay" id="moveBrowserModal" style="z-index:1001;">
   <div class="modal" style="max-width:600px;width:85%;">
     <h3>Select Folder</h3>
+    <div class="browser-shortcuts">
+      <button onclick="browseTo(null)">Home</button>
+      <button onclick="browseTo('__pictures__')">Pictures</button>
+      <button onclick="browseTo('__volumes__')">Volumes</button>
+    </div>
     <div class="browser-breadcrumb" id="moveBrowserBreadcrumb"></div>
     <div id="moveBrowserList" style="height:300px;overflow-y:auto;border:1px solid var(--border-primary);border-radius:4px;margin-bottom:12px;"></div>
     <div class="new-folder-row">
@@ -462,14 +511,57 @@ var selectedPhotos = new Set();
 var lastSelectedIdx = -1;
 var browserTargetInput = null;
 var browserPath = '';
+var browserHomePath = '';
+var browseSeq = 0;
 var confirmCallback = null;
 var editingRuleId = null;
+var quickMoveBusy = false;
 
 /* ---------- Init ---------- */
 document.addEventListener('DOMContentLoaded', function() {
   loadFolders();
+  loadRemoteTargets();
   loadRules();
 });
+
+/* ---------- Remote (SSH) move targets ---------- */
+var quickRemoteTargets = [];
+var quickRsyncAvailable = false;
+
+async function loadRemoteTargets() {
+  try {
+    var data = await safeFetch('/api/remote-targets');
+    quickRemoteTargets = (data && data.targets) || [];
+    quickRsyncAvailable = !!(data && data.rsync_available);
+  } catch (e) {
+    quickRemoteTargets = [];
+    quickRsyncAvailable = false;
+  }
+  var sel = document.getElementById('quickDestMode');
+  if (!sel) return;
+  // Rebuild remote options, keeping the "Local path" option at index 0.
+  while (sel.options.length > 1) sel.remove(1);
+  quickRemoteTargets.forEach(function(t) {
+    var opt = document.createElement('option');
+    opt.value = 'remote:' + t.id;
+    opt.textContent = t.name + ' — ' + t.user + '@' + t.host + ' (SSH)';
+    sel.appendChild(opt);
+  });
+}
+
+// The remote target id when the destination mode is a remote target, else ''.
+function quickRemoteTargetId() {
+  var el = document.getElementById('quickDestMode');
+  var v = el ? el.value : 'local';
+  return v.indexOf('remote:') === 0 ? v.slice(7) : '';
+}
+
+function onQuickDestModeChange() {
+  var remoteId = quickRemoteTargetId();
+  document.getElementById('quickLocalRow').style.display = remoteId ? 'none' : '';
+  document.getElementById('quickRemoteRow').style.display = remoteId ? '' : 'none';
+  updateQuickMoveBtn();
+}
 
 /* ---------- Tab Switching ---------- */
 function switchTab(name) {
@@ -536,36 +628,430 @@ function onQuickFolderChange() {
 
 function updateQuickMoveBtn() {
   var fid = document.getElementById('quickFolderSelect').value;
-  var dest = document.getElementById('quickDestInput').value.trim();
-  document.getElementById('quickMoveBtn').disabled = !(fid && dest);
+  var remoteId = quickRemoteTargetId();
+  var btn = document.getElementById('quickMoveBtn');
+  var ready;
+  if (remoteId) {
+    // Remote needs a usable GNU rsync; no destination text is required (the
+    // target carries it). An optional subpath refines where under it.
+    ready = !!fid && quickRsyncAvailable;
+  } else {
+    ready = !!(fid && document.getElementById('quickDestInput').value.trim());
+  }
+  btn.disabled = quickMoveBusy || !ready;
+  btn.textContent = quickMoveBusy ? 'Checking...' : 'Move Folder';
+  updateQuickMovePreview();
 }
 
-function startQuickMove() {
+function setQuickMoveBusy(isBusy) {
+  quickMoveBusy = !!isBusy;
+  updateQuickMoveBtn();
+}
+
+// Compute the final landing path, mirroring move.py move_folder():
+// the source folder is placed *inside* the destination, keeping its name.
+// Detect Windows-style paths (containing '\') so the preview matches
+// os.path.join on a Windows backend, where 'C:\Archive\' + 'Birds' is
+// 'C:\Archive\Birds', not 'C:\Archive\/Birds'. Also lets the folder.name
+// fallback split a backslash-delimited source path.
+function resolvedMoveDest(folder, destination) {
+  var srcPath = (folder && folder.path) || '';
+  var winStyle = destination.indexOf('\\') !== -1 || srcPath.indexOf('\\') !== -1;
+  var sep = winStyle ? '\\' : '/';
+  var trimRe = winStyle ? /[\\\/]+$/ : /\/+$/;
+  var splitRe = winStyle ? /[\\\/]/ : /\//;
+
+  var folderName = (folder && folder.name) ||
+    srcPath.replace(trimRe, '').split(splitRe).pop();
+  return destination.replace(trimRe, '') + sep + folderName;
+}
+
+function updateQuickMovePreview() {
+  var preview = document.getElementById('quickDestPreview');
   var fid = parseInt(document.getElementById('quickFolderSelect').value);
+  var remoteId = quickRemoteTargetId();
+  if (!fid) { preview.textContent = ''; return; }
+  var folder = allFolders.find(function(f) { return f.id === fid; });
+
+  if (remoteId) {
+    var t = quickRemoteTargets.find(function(x) { return x.id === remoteId; });
+    if (!t) { preview.textContent = ''; return; }
+    // Use the same normalization the backend does, so the preview path
+    // matches what move.py / sanitize_subpath will actually write. Without
+    // this the UI can show e.g. "/volume1/Photo/USA" while the move
+    // ultimately rejects "/USA" (absolute) or lands at a different path
+    // because the backend collapses ".", strips backslashes, etc.
+    var subResult = normalizeRemoteSubpath(
+      document.getElementById('quickSubpathInput').value);
+    if (subResult.error) {
+      preview.textContent = '';
+      preview.appendChild(_destWarn('⚠ ' + subResult.error));
+      return;
+    }
+    var sub = subResult.value;
+    var folderName = (folder && folder.name) ||
+      ((folder && folder.path) || '').replace(/\/+$/, '').split('/').pop();
+    var base = t.remote_path.replace(/\/+$/, '') + (sub ? '/' + sub : '');
+    var finalPath = base + '/' + folderName;
+
+    preview.textContent = '';
+    var line = document.createElement('div');
+    line.textContent = 'Transferring over SSH to: ';
+    var span = document.createElement('span');
+    span.className = 'dest-preview-path';
+    span.textContent = rsyncDestSpec(t.user, t.host, finalPath);
+    line.appendChild(span);
+    preview.appendChild(line);
+
+    if (!quickRsyncAvailable) {
+      preview.appendChild(_destWarn('⚠ No GNU rsync found — remote moves need '
+        + 'it. Install GNU rsync or set its path under Settings → Paths.'));
+    }
+    if (!t.mount_path) {
+      preview.appendChild(_destWarn('⚠ This target has no local mount path, so '
+        + 'moved photos can’t stay in your library. Add one in Settings.'));
+    } else if (!_isAbsolutePath(t.mount_path)) {
+      // The backend refuses a relative mount path before starting the
+      // move (the catalog would point at a non-resolving location after).
+      // Surface that here so the user sees it before clicking Move.
+      preview.appendChild(_destWarn('⚠ This target’s local mount path must be '
+        + 'absolute (e.g. "/Volumes/Photos"). Fix it under Settings → '
+        + 'Remote targets.'));
+    }
+    var rstatus = document.createElement('div');
+    rstatus.id = 'quickDestStatus';
+    rstatus.className = 'dest-status';
+    preview.appendChild(rstatus);
+    scheduleQuickPreflight(fid, null, remoteId, sub);
+    return;
+  }
+
   var dest = document.getElementById('quickDestInput').value.trim();
-  if (!fid || !dest) return;
+  if (!dest) { preview.textContent = ''; return; }
+  var finalPath = resolvedMoveDest(folder, dest);
+
+  // The resolved path is computable client-side, so show it instantly.
+  preview.textContent = '';
+  var pathLine = document.createElement('div');
+  pathLine.textContent = 'Folder will be moved to: ';
+  var pathSpan = document.createElement('span');
+  pathSpan.className = 'dest-preview-path';
+  pathSpan.textContent = finalPath;
+  pathLine.appendChild(pathSpan);
+  preview.appendChild(pathLine);
+
+  // Whether the destination already exists (and how much is in it) requires
+  // hitting the filesystem, so fetch it from the preflight endpoint and fill
+  // in this line asynchronously. Debounced so typing a path doesn't spam it.
+  var status = document.createElement('div');
+  status.id = 'quickDestStatus';
+  status.className = 'dest-status';
+  preview.appendChild(status);
+  scheduleQuickPreflight(fid, dest, '', '');
+}
+
+function _destWarn(text) {
+  var d = document.createElement('div');
+  d.className = 'dest-status';
+  d.style.color = 'var(--warning)';
+  d.textContent = text;
+  return d;
+}
+
+// True if `p` looks absolute on either backend OS (POSIX leading slash,
+// Windows drive like "C:\foo", or UNC "\\server\share"). Matches what
+// Python's os.path.isabs would say on the corresponding platform — the
+// JS side has no way to know which platform the backend is running, so
+// accept any form. Used to warn before the backend refuses a relative
+// mount path on the remote target.
+function _isAbsolutePath(p) {
+  if (!p) return false;
+  return p.charAt(0) === '/' || /^[A-Za-z]:[\\\/]/.test(p) || /^\\\\/.test(p);
+}
+
+// Mirror move.py rsync_dest_spec(): rsync's user@host:path form parses the
+// FIRST colon as the host/path separator, so an IPv6 literal like
+// 2001:db8::1 needs brackets to avoid being chopped at "2001". DNS/IPv4
+// hosts have no colons and pass through unchanged. The backend formats the
+// /api/move-folder/preflight resolved_dest with the same rule; this helper
+// keeps the move-form's local preview honest before the user has typed
+// anything that would trigger the preflight call.
+function rsyncDestSpec(user, host, path) {
+  var hostToken = host && host.indexOf(':') !== -1 ? '[' + host + ']' : host;
+  return user + '@' + hostToken + ':' + path;
+}
+
+// Normalize a remote-target subpath the same way move.py sanitize_subpath
+// does: trim, fold backslashes to forward slashes, reject absolute paths
+// (POSIX, Windows drive, or UNC), drop empty / `.` segments, and reject any
+// `..` traversal. Returns {value, error}: callers either use `value` or
+// surface `error`. Sharing one helper between the preview, scheduled
+// preflight, and the actual move submission means the path the UI shows
+// matches the path the backend will write — a UI-transparency requirement.
+function normalizeRemoteSubpath(raw) {
+  var trimmed = (raw || '').trim();
+  if (!trimmed) return {value: '', error: ''};
+  var s = trimmed.replace(/\\/g, '/');
+  if (s.charAt(0) === '/' || /^[A-Za-z]:/.test(s)) {
+    return {value: '', error: 'Subpath must be relative.'};
+  }
+  var parts = [];
+  var segs = s.split('/');
+  for (var i = 0; i < segs.length; i++) {
+    var seg = segs[i];
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') return {value: '', error: "Subpath may not contain '..'."};
+    parts.push(seg);
+  }
+  return {value: parts.join('/'), error: ''};
+}
+
+var quickPreflightSeq = 0;
+var quickPreflightTimer = null;
+
+function scheduleQuickPreflight(fid, dest, remoteId, subpath) {
+  if (quickPreflightTimer) clearTimeout(quickPreflightTimer);
+  // Bump the sequence on *every* call, not just when a request starts. Any
+  // change to the destination must immediately invalidate an in-flight
+  // response for the previous value — otherwise a response landing during the
+  // 350ms debounce window, or when the new value is non-absolute (so no new
+  // request is scheduled), would still pass the seq guard and write stale
+  // exists/new-folder text for the wrong destination.
+  var seq = ++quickPreflightSeq;
+  if (remoteId) {
+    var body = {folder_id: fid, remote_target_id: remoteId, subpath: subpath || ''};
+    quickPreflightTimer = setTimeout(function() { runQuickPreflight(seq, body); }, 350);
+    return;
+  }
+  // The preflight route rejects non-absolute paths, so wait until the input
+  // looks absolute before asking. Accept POSIX '/...', Windows drive paths
+  // ('C:\...'), and Windows UNC paths ('\\server\share') — all of which
+  // os.path.isabs() treats as absolute on their respective backends.
+  var isAbs = dest.charAt(0) === '/' || /^[A-Za-z]:[\\\/]/.test(dest) || /^\\\\/.test(dest);
+  if (!isAbs) return;
+  quickPreflightTimer = setTimeout(function() {
+    runQuickPreflight(seq, {folder_id: fid, destination: dest});
+  }, 350);
+}
+
+async function runQuickPreflight(seq, body) {
+  var status = document.getElementById('quickDestStatus');
+  if (status) {
+    status.textContent = 'Checking destination…';
+    status.style.color = 'var(--text-dim)';
+  }
+  // Plain fetch (not safeFetch): this fires while the user types, so a
+  // transient failure must stay silent rather than raising an error toast.
+  var data;
+  try {
+    var resp = await fetch('/api/move-folder/preflight', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) { if (seq === quickPreflightSeq) clearQuickDestStatus(); return; }
+    data = await resp.json();
+  } catch (e) {
+    if (seq === quickPreflightSeq) clearQuickDestStatus();
+    return;
+  }
+  if (seq !== quickPreflightSeq) return;  // a newer keystroke superseded us
+  status = document.getElementById('quickDestStatus');
+  if (!status) return;
+  if (data.remote && data.reachable === false) {
+    status.textContent = '⚠ Couldn’t reach the target over SSH'
+      + (data.error ? (': ' + data.error) : '') + '.';
+    status.style.color = 'var(--warning)';
+  } else if (data.exists) {
+    setDestExistsStatus(status, data.file_count, data.file_count_truncated);
+    // The fast count caps out at 1000. When it was truncated, fetch the exact
+    // number in the background and update the line in place — without blocking
+    // the user or holding up typing. Local-path only: the exact walk re-scans
+    // a local dir, so for a remote target the capped "at least N" line stands.
+    if (!data.remote && data.file_count_truncated) {
+      requestExactDestCount(body.folder_id, body.destination, seq);
+    }
+  } else {
+    status.textContent = '✓ New folder — nothing exists at this location yet.';
+    status.style.color = 'var(--text-dim)';
+  }
+}
+
+// Render the "destination already exists" warning. When `truncated` is true
+// the count is a floor (the fast scan stopped at its cap), so say "at least N"
+// rather than implying an exact total — the line must mean what it says.
+function setDestExistsStatus(status, n, truncated) {
+  var countText = truncated ? ('at least ' + n.toLocaleString()) : n.toLocaleString();
+  status.textContent = '⚠ Destination already exists — contains ' + countText + ' file' +
+    (n !== 1 || truncated ? 's' : '') + '. Files already there are left untouched; only missing files are copied. If a same-name file differs, the merge is canceled and nothing is changed.';
+  status.style.color = 'var(--warning)';
+}
+
+// Background, non-blocking exact count. Reuses the keystroke seq guard so a
+// result landing after the user has changed the destination is discarded
+// instead of overwriting the line for the wrong path. Stays silent on failure:
+// the capped "at least N" line is already a valid answer.
+function requestExactDestCount(fid, dest, seq) {
+  fetch('/api/move-folder/preflight', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({folder_id: fid, destination: dest, mode: 'exact'}),
+  }).then(function(resp) {
+    return resp.ok ? resp.json() : null;
+  }).then(function(data) {
+    if (!data || !data.exists) return;
+    if (seq !== quickPreflightSeq) return;  // a newer keystroke superseded us
+    var status = document.getElementById('quickDestStatus');
+    if (status) setDestExistsStatus(status, data.file_count, data.file_count_truncated);
+  }).catch(function() { /* background nicety — leave the capped line in place */ });
+}
+
+function clearQuickDestStatus() {
+  var status = document.getElementById('quickDestStatus');
+  if (status) status.textContent = '';
+}
+
+async function startQuickMove() {
+  if (quickMoveBusy) return;
+  var fid = parseInt(document.getElementById('quickFolderSelect').value);
+  if (!fid) return;
+  var remoteId = quickRemoteTargetId();
+
+  // Build the destination half of the request body — a local path or a
+  // remote target + optional subpath. The same shape is reused for both the
+  // preflight and the move so they can't disagree.
+  var destBody;
+  if (remoteId) {
+    if (!quickRsyncAvailable) {
+      showToast('No GNU rsync found for remote moves. Install it or set its '
+        + 'path under Settings → Paths.', 'error');
+      return;
+    }
+    // Normalize once, here, so the path the user is about to confirm matches
+    // the path the backend will actually write. A raw .trim() would let an
+    // absolute or `..` subpath through; the move would then fail mid-flight
+    // after the user has clicked "Move", which is a worse UX than refusing
+    // here with the same error string the preview surfaces.
+    var subResult = normalizeRemoteSubpath(
+      document.getElementById('quickSubpathInput').value);
+    if (subResult.error) {
+      showToast(subResult.error, 'error');
+      return;
+    }
+    destBody = {
+      remote_target_id: remoteId,
+      subpath: subResult.value,
+    };
+  } else {
+    var dest = document.getElementById('quickDestInput').value.trim();
+    if (!dest) return;
+    destBody = {destination: dest};
+  }
 
   var folder = allFolders.find(function(f) { return f.id === fid; });
   var folderName = folder ? folder.path : 'folder #' + fid;
   var photoCount = folder ? (folder.photo_count || 0) : '?';
 
-  showConfirm(
-    'Move Folder',
-    'Move "' + folderName + '" (' + photoCount + ' photos) to "' + dest + '"? Files will be copied and verified before originals are removed.',
-    function() {
-      executeQuickMove(fid, dest);
+  // Ask the backend for the resolved destination and whether it already
+  // exists, so we can offer merge/resume instead of failing on collision.
+  var pf;
+  setQuickMoveBusy(true);
+  try {
+    // mode:'preview' also reports how many source files would actually copy
+    // vs. be skipped as already present — the number the user really needs
+    // before committing to a merge. This is a deliberate click, so the
+    // server-side source-tree walk it triggers is acceptable here (unlike on
+    // the keystroke-driven status line above).
+    pf = await safeFetch('/api/move-folder/preflight', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(Object.assign({folder_id: fid, mode: 'preview'}, destBody)),
+    });
+  } catch (e) {
+    return;  // safeFetch already shows error toast
+  } finally {
+    setQuickMoveBusy(false);
+  }
+
+  if (pf.remote && pf.reachable === false) {
+    showToast('Couldn’t reach the remote target over SSH'
+      + (pf.error ? (': ' + pf.error) : '') + '.', 'error');
+    return;
+  }
+
+  var finalPath = pf.resolved_dest;
+  var verifyText = remoteId
+    ? ' Transferred over SSH and verified by checksum before originals are removed.'
+    : ' Files will be copied and verified before originals are removed.';
+  if (pf.exists) {
+    var p = pf.preview || {};
+    var copyN = p.will_copy;
+    var skipN = p.will_skip;
+    var blockN = p.will_block || 0;
+    var msg;
+    if (typeof copyN === 'number') {
+      // Truthful transfer counts. These count every file under the source
+      // (sidecars included), not just tracked photos — that's what rsync moves.
+      // Files already present are left untouched, never overwritten; a
+      // same-name file whose content differs cancels the whole merge, so only
+      // mention that caveat when there are overlapping files (skipN > 0).
+      // blockN is the count of source files whose destination entry is a
+      // symlink, a directory, or otherwise not a plain file: rsync would skip
+      // those by name, but the post-copy verifier rejects them and the merge
+      // would abort with "Verification failed". Surface the block so the
+      // dialog never says "all already present" when the move would not in
+      // fact complete.
+      var conflictNote = skipN ? ' If a same-name file differs, the merge is canceled and nothing is changed.' : '';
+      var blockNote = blockN ?
+        ' ⚠ ' + blockN.toLocaleString() + ' source file' + (blockN !== 1 ? 's have' : ' has') +
+        ' a destination entry that is a symlink or non-file — the merge will be canceled at the verify step before any originals are removed.' : '';
+      if (copyN === 0 && blockN === 0) {
+        msg = 'All ' + skipN.toLocaleString() + ' file' + (skipN !== 1 ? 's' : '') +
+          ' from "' + folderName + '" are already present at "' + finalPath +
+          '". Merging copies nothing new.' + conflictNote +
+          ' Originals are removed only after every source file is verified at the destination. Continue?';
+      } else {
+        var skipPart = skipN ? ', ' + skipN.toLocaleString() + ' already present will be left untouched' : '';
+        var blockPart = blockN ? ', ' + blockN.toLocaleString() + ' blocked by a non-file at the destination' : '';
+        msg = 'Merge "' + folderName + '" into "' + finalPath + '"? ' +
+          copyN.toLocaleString() + ' file' + (copyN !== 1 ? 's' : '') + ' will be copied' +
+          skipPart + blockPart + '.' + conflictNote + blockNote +
+          ' Originals are removed only after every source file is verified at the destination.';
+      }
+    } else {
+      // Preview unavailable (e.g. server omitted it) — fall back to the
+      // destination file count rather than inventing a transfer number.
+      var n = pf.file_count || 0;
+      var countText = pf.file_count_truncated ? ('at least ' + n.toLocaleString()) : n.toLocaleString();
+      msg = '"' + finalPath + '" already exists and contains ' + countText + ' file' + (n !== 1 || pf.file_count_truncated ? 's' : '') +
+        '. Merge "' + folderName + '" (' + photoCount + ' photos) into it? Files already there are left untouched; only missing files are copied. If a same-name file differs, the merge is canceled and nothing is changed. Originals are removed only after every source file is verified at the destination.';
     }
-  );
+    showConfirm(
+      'Destination Exists — Merge & Resume',
+      msg,
+      function() {
+        executeQuickMove(Object.assign({folder_id: fid, merge: true}, destBody));
+      }
+    );
+  } else {
+    showConfirm(
+      'Move Folder',
+      'Move "' + folderName + '" (' + photoCount + ' photos) to "' + finalPath + '"?' + verifyText,
+      function() {
+        executeQuickMove(Object.assign({folder_id: fid, merge: false}, destBody));
+      }
+    );
+  }
 }
 
-async function executeQuickMove(folderId, destination) {
+async function executeQuickMove(body) {
   try {
     var resp = await safeFetch('/api/jobs/move-folder', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({folder_id: folderId, destination: destination}),
+      body: JSON.stringify(body),
     });
-    showToast('Move started (job ' + resp.job_id + ') — track progress in the bottom panel');
+    showToast((body.merge ? 'Merge' : 'Move') + ' started (job ' + resp.job_id + ') — track progress in the bottom panel', 'info');
   } catch (e) {
     // safeFetch already shows error toast
   }
@@ -605,8 +1091,9 @@ function renderPhotoGrid() {
   var html = '<div class="photo-grid">';
   photoList.forEach(function(p, idx) {
     var selClass = selectedPhotos.has(p.id) ? ' selected' : '';
+    var thumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(p) : '/thumbnails/' + p.id + '.jpg';
     html += '<div class="grid-card' + selClass + '" data-id="' + p.id + '" data-idx="' + idx + '" onclick="handlePhotoClick(event, ' + p.id + ', ' + idx + ')">';
-    html += '<div class="grid-card-img-wrap"><img src="/thumb/' + p.id + '" loading="lazy" alt=""></div>';
+    html += '<div class="grid-card-img-wrap"><img src="' + escapeAttr(thumbUrl) + '" loading="lazy" alt=""></div>';
     html += '<div class="grid-card-info"><div class="grid-card-name" title="' + escapeAttr(p.filename) + '">' + escapeHtml(p.filename) + '</div></div>';
     html += '</div>';
   });
@@ -692,7 +1179,7 @@ async function executePhotoMove(photoIds, destination) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({photo_ids: photoIds, destination: destination}),
     });
-    showToast('Move started (job ' + resp.job_id + ') — track progress in the bottom panel');
+    showToast('Move started (job ' + resp.job_id + ') — track progress in the bottom panel', 'info');
     // Clear selection after starting
     clearPhotoSelection();
   } catch (e) {
@@ -913,14 +1400,14 @@ async function saveRule() {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({name: name, destination: dest, criteria: criteria}),
       });
-      showToast('Rule updated');
+      showToast('Rule updated', 'success');
     } else {
       await safeFetch('/api/move-rules', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({name: name, destination: dest, criteria: criteria}),
       });
-      showToast('Rule created');
+      showToast('Rule created', 'success');
     }
     hideRuleForm();
     loadRules();
@@ -938,7 +1425,7 @@ async function deleteRule(ruleId) {
   showConfirm('Delete Rule', 'Are you sure you want to delete this rule? This cannot be undone.', async function() {
     try {
       await safeFetch('/api/move-rules/' + ruleId, {method: 'DELETE'});
-      showToast('Rule deleted');
+      showToast('Rule deleted', 'success');
       loadRules();
     } catch (e) {
       // safeFetch handles error toast
@@ -976,7 +1463,7 @@ async function runRule(ruleId) {
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({photo_ids: photoIds, destination: rule.destination, rule_id: ruleId}),
           });
-          showToast('Rule running (job ' + resp.job_id + ') — track progress in the bottom panel');
+          showToast('Rule running (job ' + resp.job_id + ') — track progress in the bottom panel', 'info');
         } catch (e) {
           // safeFetch handles error toast
         }
@@ -1003,33 +1490,86 @@ function closeBrowser() {
 }
 
 async function browseTo(path) {
-  var url = path ? '/api/browse?path=' + encodeURIComponent(path) : '/api/browse';
-  try {
-    var data = await safeFetch(url);
-    browserPath = data.path;
-
-    document.getElementById('moveBrowserBreadcrumb').textContent = data.path;
-
-    var list = document.getElementById('moveBrowserList');
-    var html = '';
-    var parent = data.path.substring(0, data.path.lastIndexOf('/')) || '/';
-    if (data.path !== '/') {
-      html += '<div class="browser-folder-item" ondblclick="browseTo(\'' + escapeAttr(parent) + '\')">&#128194; ..</div>';
-    }
-    if (data.dirs) {
-      data.dirs.forEach(function(d) {
-        html += '<div class="browser-folder-item" ondblclick="browseTo(\'' + escapeAttr(d.path) + '\')">&#128194; ' + escapeHtml(d.name) + '</div>';
-      });
-    }
-    if (!data.dirs || data.dirs.length === 0) {
-      if (data.path === '/') {
-        html += '<div style="padding:10px;color:var(--text-dim);font-size:13px;">No subdirectories</div>';
+  // Stamp each browse so a slow initial fetch can't clobber a later
+  // shortcut click. Without this, opening the modal with a prefilled
+  // destination and immediately clicking Pictures/Volumes can leave the
+  // list and browserPath silently reverted to the destination's listing.
+  var seq = ++browseSeq;
+  var url = '/api/browse';
+  if (path === '__pictures__') {
+    // When the modal opens with a prefilled destination we skip the
+    // browseTo(null) call that would otherwise cache the home path, so
+    // resolve it on demand here. Without this, '/Pictures' is sent as an
+    // absolute path and lands at the wrong root.
+    if (!browserHomePath) {
+      try {
+        var home = await safeFetch('/api/browse');
+        if (seq !== browseSeq) return;
+        browserHomePath = home.path;
+      } catch (e) {
+        return;
       }
     }
-    list.innerHTML = html;
+    url = '/api/browse?path=' + encodeURIComponent(browserHomePath + '/Pictures');
+  } else if (path === '__volumes__') {
+    // Mac's /Volumes is a real directory the browse endpoint can list.
+    // Windows drive letters and Linux mount roots (/media, /run/media,
+    // /mnt) vary per host, so use /api/volumes — which scans all of
+    // them — and render a synthetic root list.
+    if (navigator.userAgent.indexOf('Mac') < 0) {
+      try {
+        var volumes = await safeFetch('/api/volumes');
+        if (seq !== browseSeq) return;
+        browserPath = '';
+        renderBrowserList({path: '', dirs: volumes}, {syntheticRoot: true});
+      } catch (e) {
+        // safeFetch handles error toast
+      }
+      return;
+    }
+    url = '/api/browse?path=' + encodeURIComponent('/Volumes');
+  } else if (path) {
+    url = '/api/browse?path=' + encodeURIComponent(path);
+  }
+  try {
+    var data = await safeFetch(url);
+    if (seq !== browseSeq) return;
+    browserPath = data.path;
+    if (!path) browserHomePath = data.path;
+    renderBrowserList(data);
   } catch (e) {
     // safeFetch handles error toast
   }
+}
+
+function renderBrowserList(data, opts) {
+  document.getElementById('moveBrowserBreadcrumb').textContent = data.path || 'Volumes';
+
+  var list = document.getElementById('moveBrowserList');
+  var html = '';
+  var isSyntheticRoot = opts && opts.syntheticRoot;
+  var parent = '';
+  if (data.path && data.path.indexOf('\\') !== -1) {
+    parent = data.path.replace(/[\\\/]?[^\\\/]+[\\\/]?$/, '') || data.path;
+    // Drive-root edge case: 'C:\Users'.replace(...) yields 'C:', which the
+    // backend treats as the drive's process-local cwd. Restore the trailing
+    // backslash so '..' returns to the drive root instead.
+    if (/^[A-Za-z]:$/.test(parent)) parent += '\\';
+  } else if (data.path) {
+    parent = data.path.substring(0, data.path.lastIndexOf('/')) || '/';
+  }
+  if (data.path && data.path !== '/' && parent !== data.path) {
+    html += '<div class="browser-folder-item" data-browse-path="' + escapeAttr(parent) + '">&#128194; ..</div>';
+  }
+  if (data.dirs) {
+    data.dirs.forEach(function(d) {
+      html += '<div class="browser-folder-item" data-browse-path="' + escapeAttr(d.path) + '">&#128194; ' + escapeHtml(d.name) + '</div>';
+    });
+  }
+  if ((!data.dirs || data.dirs.length === 0) && (data.path === '/' || isSyntheticRoot)) {
+    html += '<div style="padding:10px;color:var(--text-dim);font-size:13px;">No subdirectories</div>';
+  }
+  list.innerHTML = html;
 }
 
 function selectBrowserFolder() {
@@ -1086,6 +1626,16 @@ document.addEventListener('DOMContentLoaded', function() {
 
   var photoDest = document.getElementById('photoDestInput');
   if (photoDest) photoDest.addEventListener('input', updatePhotoSelectionUI);
+
+  // Delegated handler so folder paths (which can contain backslashes on
+  // Windows, e.g. C:\) don't have to be JS-escaped into inline handlers.
+  var moveBrowserList = document.getElementById('moveBrowserList');
+  if (moveBrowserList) {
+    moveBrowserList.addEventListener('dblclick', function(e) {
+      var item = e.target.closest('.browser-folder-item[data-browse-path]');
+      if (item) browseTo(item.getAttribute('data-browse-path'));
+    });
+  }
 });
 
 /* ---------- Utility ---------- */

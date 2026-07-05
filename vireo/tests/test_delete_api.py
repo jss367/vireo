@@ -590,11 +590,16 @@ def test_api_batch_delete_chunked_success_prunes_pipeline_cache(
 
 
 def test_api_batch_delete_disk_permanent_retry_with_paths(app_and_db, tmp_path):
-    """disk_permanent retry works with paths after DB rows are already gone."""
+    """disk_permanent retry works with paths after DB rows are already gone.
+
+    The photo rows are deleted by the initial call, but their folder rows
+    survive — the retry validates paths against those.
+    """
     app, db = app_and_db
     client = app.test_client()
 
-    # Create files to delete
+    # Create files to delete, inside a Vireo-managed folder
+    db.add_folder(str(tmp_path), name=tmp_path.name)
     file1 = str(tmp_path / "photo1.jpg")
     file2 = str(tmp_path / "photo2.jpg")
     Image.new("RGB", (10, 10)).save(file1)
@@ -614,6 +619,31 @@ def test_api_batch_delete_disk_permanent_retry_with_paths(app_and_db, tmp_path):
     assert data["trashed"] == 2
     assert not os.path.exists(file1)
     assert not os.path.exists(file2)
+
+
+def test_api_batch_delete_retry_refuses_paths_outside_vireo_folders(app_and_db, tmp_path):
+    """The disk_permanent retry must not delete arbitrary client-supplied
+    paths — only files directly inside a known Vireo folder."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    outside = str(tmp_path / "secrets.txt")
+    with open(outside, "w") as f:
+        f.write("not a vireo photo")
+
+    resp = client.post("/api/batch/delete", json={
+        "mode": "disk_permanent",
+        "paths": [outside],
+    })
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["trashed"] == 0
+    assert os.path.exists(outside)  # file untouched
+    assert any(
+        t["path"] == outside and "not in a Vireo folder" in t.get("error", "")
+        for t in data["trash_failed"]
+    )
 
 
 def test_api_batch_delete_disk_deletes_companion_file(app_and_db, tmp_path):
@@ -789,3 +819,60 @@ def test_delete_photos_no_pipeline_cache_does_not_raise(app_and_db):
 
     result = db.delete_photos([photos[0]["id"]])
     assert result["deleted"] == 1
+
+
+def test_delete_photos_with_companions_chunks_expanded_ids(tmp_path):
+    """``include_companions=True`` can double the id count inside
+    ``delete_photos`` (each input id may pull in its companion), so the
+    internal ``IN (?, ?, …)`` DELETEs must chunk on the expanded list,
+    not on the caller's input. The api/batch/delete endpoint pre-chunks
+    by 900 (under SQLite's legacy 999 ``SQLITE_LIMIT_VARIABLE_NUMBER``),
+    but after companion expansion the all_ids list can reach ~1800 —
+    which then trips "too many SQL variables" after the file-trash
+    step already ran.
+
+    The host's actual cap is build-dependent (999 on old, 250000+ on
+    new), so we lower the cap via ``setlimit`` to the legacy value. The
+    input chunk (900) stays under it, but the expanded all_ids (1800)
+    would exceed it without internal chunking.
+    """
+    import sqlite3
+
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder(str(tmp_path / "lib"), name="lib")
+
+    # 900 primaries + 900 companions = 1800 expanded ids.
+    primary_ids = []
+    companion_filenames = []
+    for i in range(900):
+        comp_name = f"img_{i:04d}.jpg.xmp"
+        companion_filenames.append(comp_name)
+        pid = db.add_photo(
+            folder_id=fid, filename=f"img_{i:04d}.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        db.add_photo(
+            folder_id=fid, filename=comp_name, extension=".xmp",
+            file_size=10, file_mtime=1.0,
+        )
+        primary_ids.append(pid)
+
+    # Link primary → companion so include_companions resolves the sidecar.
+    db.conn.executemany(
+        "UPDATE photos SET companion_path = ? WHERE id = ?",
+        list(zip(companion_filenames, primary_ids, strict=True)),
+    )
+    db.conn.commit()
+
+    # Legacy SQLite cap — 900 input fits, 1800 expanded does not.
+    db.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+
+    result = db.delete_photos(primary_ids, include_companions=True)
+
+    assert result["deleted"] == 1800  # primaries + companions
+    remaining = db.conn.execute("SELECT COUNT(*) AS n FROM photos").fetchone()["n"]
+    assert remaining == 0

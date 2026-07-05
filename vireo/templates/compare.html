@@ -169,12 +169,26 @@ body { padding-bottom: 36px; }
   gap: 9px;
   min-width: 0;
 }
-.photo-cell img {
+.photo-thumb-button {
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  cursor: zoom-in;
+  flex: 0 0 auto;
+  overflow: hidden;
+}
+.photo-thumb-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.photo-thumb-button img {
   width: 44px;
   height: 44px;
   object-fit: cover;
-  border-radius: 4px;
-  flex: 0 0 auto;
+  display: block;
 }
 .photo-name {
   color: var(--text-primary);
@@ -553,15 +567,49 @@ function renderTable(rows) {
 
 function renderPhotoCell(photo) {
   var meta = [];
+  var thumbUrl = window.vireoThumbnailUrl
+    ? window.vireoThumbnailUrl(photo)
+    : '/thumbnails/' + photo.photo_id + '.jpg';
   if (photo.timestamp) meta.push(photo.timestamp.replace('T', ' ').substring(0, 16));
   if (photo.rating) meta.push(photo.rating + ' star' + (photo.rating === 1 ? '' : 's'));
   if (photo.flag && photo.flag !== 'none') meta.push(photo.flag);
   return '<div class="photo-cell">' +
-    '<img src="/thumbnails/' + photo.photo_id + '.jpg" loading="lazy" alt="">' +
+    '<button type="button" class="photo-thumb-button" title="View larger" onclick="openCompareLightbox(' +
+    photo.photo_id + ')"><img src="' + escapeAttr(thumbUrl) + '" loading="lazy" alt="' +
+    escapeAttr(photo.filename) + '"></button>' +
     '<div><div class="photo-name">' + escapeHtml(photo.filename) + '</div>' +
     '<div class="photo-meta">' + escapeHtml(meta.join(' · ')) + '</div>' +
     '<div class="pred-actions"><a class="inline-btn" href="/browse?photo_id=' +
-    encodeURIComponent(photo.photo_id) + '">Open photo</a></div></div></div>';
+    encodeURIComponent(photo.photo_id) + '">Browse</a></div></div></div>';
+}
+
+function compareLightboxPhotoList() {
+  return filteredRows().map(function(photo) {
+    return {
+      id: photo.photo_id,
+      filename: photo.filename || '',
+      flag: photo.flag || 'none',
+      wildlife_excluded: !!photo.wildlife_excluded,
+    };
+  });
+}
+
+function openCompareLightbox(photoId) {
+  var list = compareLightboxPhotoList();
+  var current = list.find(function(photo) { return photo.id === photoId; });
+  if (!current) {
+    var fallback = (compareData && compareData.photos || []).find(function(photo) {
+      return photo.photo_id === photoId;
+    });
+    current = {
+      id: photoId,
+      filename: fallback ? (fallback.filename || '') : '',
+      flag: fallback ? (fallback.flag || 'none') : 'none',
+      wildlife_excluded: !!(fallback && fallback.wildlife_excluded),
+    };
+    list = [current];
+  }
+  openLightbox(current.id, current.filename, list);
 }
 
 function isSpeciesKeyword(k) {

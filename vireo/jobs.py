@@ -13,6 +13,19 @@ log = logging.getLogger(__name__)
 # How long to keep completed/failed jobs in memory before eviction (seconds)
 _JOB_RETENTION_SECS = 3600  # 1 hour
 
+_PROMOTION_RETRY_DELAY_SECS = 0.1
+
+
+# Maximum number of pipeline jobs allowed to run concurrently. Bumped
+# to 2 in Step 6 of the concurrency rollout (Steps 1-3 added the
+# ModelCache + GPU/regroup locks that make this safe; Steps 4-5 added
+# the queue + UI). The cap is intentionally low: the gains from
+# overlapping two pipelines come from one's GPU phase running while
+# another's I/O / CPU phases progress. A third pipeline would mostly
+# queue at the GPU lock without adding throughput.
+# See docs/plans/2026-05-26-pipeline-concurrency-design.md.
+SLOT_CAP = 2
+
 
 class JobRunner:
     """Runs long operations in background threads with progress tracking.
@@ -27,10 +40,30 @@ class JobRunner:
         self._subscribers = {}  # job_id -> list of queues
         self._lock = threading.Lock()
         self._cancelled = set()  # job ids that have been cancelled
+        # job ids past an uninterruptible commit point (e.g. the
+        # local-processing archive move). Once a job is in here, any
+        # late ``cancel_job`` call is a no-op so the terminal status can
+        # no longer be flipped to "cancelled" by a Stop press that
+        # landed after the commit finished but before _run_job recorded
+        # the result. Cleared by _prune_finished_jobs alongside
+        # _cancelled.
+        self._uncancellable = set()
         self._db_path = None
+        # Pending pipeline work, keyed by job_id. Populated by
+        # ``enqueue_pipeline`` and consumed by ``_try_promote_queued``
+        # when a slot opens. The work_fn closure can't be persisted
+        # cross-process, so a process restart will see queued rows in
+        # job_history without a matching entry here; the startup sweep
+        # promotes such rows to 'failed'.
+        self._queued_pipelines = {}  # job_id -> dict(work_fn, config, ...)
+        # Monotonic suffix so two enqueues landing in the same
+        # millisecond don't collide on the PRIMARY KEY.
+        self._enqueue_counter = 0
+        self._promotion_retry_scheduled = False
         if db:
             self._db_path = db.conn.execute("PRAGMA database_list").fetchone()[2]
             self._ensure_history_table(db)
+            self._startup_sweep(db)
 
     def _ensure_history_table(self, db):
         db.conn.execute(
@@ -70,8 +103,264 @@ class JobRunner:
         except Exception:
             db.conn.execute("ALTER TABLE job_history ADD COLUMN summary TEXT DEFAULT ''")
 
+    def _startup_sweep(self, db):
+        """Reconcile job_history with the fact that we just started.
+
+        On a clean shutdown a job thread either finishes or is cancelled
+        and the row is updated accordingly. On a crash or kill, threads
+        die without persisting — so rows with ``status='running'`` from
+        a prior process are orphans. Mark them ``'failed'``. Queued rows
+        from a prior process likewise lose their in-process work closure;
+        mark them ``'failed'`` too so they don't linger forever waiting
+        for a slot.
+
+        Future PR: rebuild work closures from the ``config`` blob on
+        startup so queued runs survive restart. For this PR we just
+        clear the rot.
+        """
+        now = datetime.now().isoformat()
+        msg = "Interrupted by Vireo restart"
+        for status in ("running", "queued"):
+            rows = db.conn.execute(
+                "SELECT id FROM job_history WHERE status = ?", (status,),
+            ).fetchall()
+            if not rows:
+                continue
+            payload = json.dumps({"error": msg})
+            for row in rows:
+                db.conn.execute(
+                    "UPDATE job_history "
+                    "SET status='failed', finished_at=?, result=?, error_count=1 "
+                    "WHERE id = ?",
+                    (now, payload, row["id"]),
+                )
+        db.conn.commit()
+
+    def enqueue_pipeline(self, work_fn, config=None, workspace_id=None,
+                         runtime_warning=None):
+        """Enqueue a pipeline job. Promotes immediately when a slot is free.
+
+        Unlike ``start`` (which spawns a worker thread synchronously),
+        ``enqueue_pipeline`` persists the job to ``job_history`` with
+        ``status='queued'``, stashes the work closure in-process, and
+        then asks the scheduler to promote it. With ``SLOT_CAP=1`` and
+        no other pipelines active, promotion happens before this method
+        returns and the work thread is already running.
+
+        Returns the job id.
+        """
+        with self._lock:
+            self._enqueue_counter += 1
+            seq = self._enqueue_counter
+        job_id = f"pipeline-{int(time.time() * 1000)}-{seq}"
+        now_iso = datetime.now().isoformat()
+        config_blob = config or {}
+
+        # Persist the queued row using a thread-local connection so we
+        # don't share the caller's DB handle across thread boundaries.
+        if self._db_path:
+            import sqlite3
+            conn = sqlite3.connect(self._db_path, timeout=30)
+            try:
+                conn.execute(
+                    "INSERT INTO job_history "
+                    "(id, type, status, started_at, config, workspace_id, "
+                    " error_count) "
+                    "VALUES (?, 'pipeline', 'queued', ?, ?, ?, 0)",
+                    (job_id, now_iso, json.dumps(config_blob), workspace_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+        with self._lock:
+            self._queued_pipelines[job_id] = {
+                "work_fn": work_fn,
+                "config": config_blob,
+                "workspace_id": workspace_id,
+                "runtime_warning": runtime_warning,
+                "started_at": now_iso,
+            }
+
+        # Promote eagerly so a free slot is filled before we return.
+        self._try_promote_queued()
+        return job_id
+
+    def _try_promote_queued(self):
+        """Promote the oldest queued pipeline if a slot is open.
+
+        Single-pass: count active and in-flight promotions under
+        ``self._lock`` and mark the oldest queued context as promoting, then
+        release the lock before the conditional SQLite UPDATE. If a Cancel
+        lands first, rowcount==0 and promotion quietly gives up.
+        """
+        with self._lock:
+            active = sum(
+                1 for j in self._jobs.values()
+                if j["type"] == "pipeline" and j["status"] == "running"
+            )
+            if active >= SLOT_CAP:
+                return
+            promoting = sum(
+                1 for ctx in self._queued_pipelines.values()
+                if ctx.get("_promoting")
+            )
+            if active + promoting >= SLOT_CAP:
+                return
+            candidates = sorted(
+                (
+                    item for item in self._queued_pipelines.items()
+                    if not item[1].get("_promoting")
+                ),
+                key=lambda kv: kv[1]["started_at"],
+            )
+            if not candidates:
+                return
+            job_id, ctx = candidates[0]
+            ctx["_promoting"] = True
+
+        promoted = True
+        try:
+            # Atomic queued->running flip. If a concurrent cancel beat us
+            # to it, rowcount is 0 and the row stays in its final state.
+            if self._db_path:
+                import sqlite3
+                conn = sqlite3.connect(self._db_path, timeout=30)
+                try:
+                    cur = conn.execute(
+                        "UPDATE job_history SET status='running' "
+                        "WHERE id = ? AND status = 'queued'",
+                        (job_id,),
+                    )
+                    promoted = cur.rowcount == 1
+                    conn.commit()
+                finally:
+                    conn.close()
+        except Exception:
+            with self._lock:
+                if self._queued_pipelines.get(job_id) is ctx:
+                    ctx.pop("_promoting", None)
+                    self._schedule_promotion_retry_locked()
+            log.exception("Failed to promote queued pipeline %s", job_id)
+            return
+
+        retry_promotion = False
+        record_terminal = False
+        with self._lock:
+            if self._queued_pipelines.get(job_id) is not ctx:
+                retry_promotion = True
+            else:
+                ctx.pop("_promoting", None)
+                if not promoted:
+                    # The row was modified elsewhere (cancelled).
+                    self._queued_pipelines.pop(job_id, None)
+                    record_terminal = True
+                    retry_promotion = True
+                else:
+                    # Move from queue context into the live jobs dict.
+                    del self._queued_pipelines[job_id]
+                    job = {
+                        "id": job_id,
+                        "type": "pipeline",
+                        "status": "running",
+                        "started_at": ctx["started_at"],
+                        "finished_at": None,
+                        "progress": {"current": 0, "total": 0, "current_file": ""},
+                        "result": None,
+                        "errors": [],
+                        "config": ctx["config"],
+                        "workspace_id": ctx["workspace_id"],
+                        "steps": [],
+                        "ephemeral": False,
+                        "counts_for_badge": True,
+                        "runtime_warning": ctx["runtime_warning"],
+                        # Pre-seeded for iteration safety — see start().
+                        "_start_time": time.time(),
+                        "_ended_at": None,
+                        "_persisted": False,
+                        "_fatal_error": None,
+                    }
+                    self._prune_finished_jobs()
+                    self._jobs[job_id] = job
+                    self._events[job_id] = deque(maxlen=1000)
+                    # setdefault, NOT assignment: clients can subscribe to the
+                    # SSE stream while the pipeline is still queued. Replacing
+                    # the list at promotion time would silently drop those
+                    # waiters' queues.
+                    self._subscribers.setdefault(job_id, [])
+                    work_fn = ctx["work_fn"]
+                    if job_id in self._cancelled:
+                        def work_fn(job):
+                            return None
+
+        if record_terminal:
+            self._record_terminal_queued_pipeline(job_id, ctx, status="cancelled")
+            self.push_event(
+                job_id,
+                "complete",
+                {
+                    "status": "cancelled",
+                    "result": None,
+                    "duration": 0.0,
+                    "errors": [],
+                },
+            )
+        if retry_promotion:
+            self._try_promote_queued()
+            return
+
+        thread = threading.Thread(
+            target=self._run_job, args=(job, work_fn), daemon=True,
+        )
+        thread.start()
+
+    def _schedule_promotion_retry_locked(self):
+        """Retry queue promotion after a transient DB failure.
+
+        Must be called with self._lock held.
+        """
+        if self._promotion_retry_scheduled:
+            return
+        self._promotion_retry_scheduled = True
+
+        def retry():
+            time.sleep(_PROMOTION_RETRY_DELAY_SECS)
+            with self._lock:
+                self._promotion_retry_scheduled = False
+            self._try_promote_queued()
+
+        thread = threading.Thread(target=retry, daemon=True)
+        thread.start()
+
+    def _record_terminal_queued_pipeline(self, job_id, ctx, status="cancelled"):
+        """Keep a terminal queued pipeline in the normal in-memory lifecycle."""
+        finished_at = datetime.now().isoformat()
+        job = {
+            "id": job_id,
+            "type": "pipeline",
+            "status": status,
+            "started_at": ctx["started_at"],
+            "finished_at": finished_at,
+            "progress": {"current": 0, "total": 0, "current_file": ""},
+            "result": None,
+            "errors": [],
+            "config": ctx["config"],
+            "workspace_id": ctx["workspace_id"],
+            "steps": [],
+            "ephemeral": False,
+            "counts_for_badge": True,
+            "runtime_warning": ctx.get("runtime_warning"),
+            "_ended_at": time.time(),
+            "_persisted": True,
+        }
+        with self._lock:
+            self._prune_finished_jobs()
+            self._jobs[job_id] = job
+            self._events.setdefault(job_id, deque(maxlen=1000))
+            self._subscribers.setdefault(job_id, [])
+
     def start(self, job_type, work_fn, config=None, workspace_id=None,
-              ephemeral=False, runtime_warning=None):
+              ephemeral=False, runtime_warning=None, counts_for_badge=True):
         """Start a background job.
 
         Args:
@@ -88,11 +377,20 @@ class JobRunner:
                        it to clutter the history list.
             runtime_warning: optional user-facing warning metadata to expose
                        while the job is running.
+            counts_for_badge: if False, the job remains visible in job lists
+                       but does not contribute to app/Dock attention badges.
 
         Returns:
             job_id string
         """
-        job_id = f"{job_type}-{int(time.time() * 1000)}"
+        # Monotonic suffix (shared with enqueue_pipeline) so two same-type
+        # starts in the same millisecond can't collide — a collision makes
+        # the second registration overwrite the first in _jobs/_events and
+        # clobber its history row.
+        with self._lock:
+            self._enqueue_counter += 1
+            seq = self._enqueue_counter
+        job_id = f"{job_type}-{int(time.time() * 1000)}-{seq}"
         now = datetime.now().isoformat()
 
         job = {
@@ -108,7 +406,17 @@ class JobRunner:
             "workspace_id": workspace_id,
             "steps": [],
             "ephemeral": ephemeral,
+            "counts_for_badge": counts_for_badge,
             "runtime_warning": runtime_warning,
+            # Pre-seeded so later writes from worker threads update an
+            # existing key instead of inserting a new one: key insertion
+            # while a request handler iterates the same dict (jsonify of
+            # /api/jobs) raises "dictionary changed size during iteration";
+            # same-key updates don't resize the dict.
+            "_start_time": time.time(),
+            "_ended_at": None,
+            "_persisted": False,
+            "_fatal_error": None,
         }
 
         with self._lock:
@@ -142,6 +450,7 @@ class JobRunner:
             self._events.pop(jid, None)
             self._subscribers.pop(jid, None)
             self._cancelled.discard(jid)
+            self._uncancellable.discard(jid)
 
     def _run_job(self, job, work_fn):
         start_time = time.time()
@@ -157,7 +466,27 @@ class JobRunner:
                     self._cancelled.discard(job_id)
                 else:
                     job["status"] = "completed"
+                    # A work function can return normally yet still have
+                    # failed (e.g. move-folder returns {"moved": 0, "errors":
+                    # [...]} when rsync times out). When the result opts into
+                    # the convention by carrying an "ok" key, honor it: fold
+                    # its errors into the job's tally so error_count is
+                    # accurate, and demote a falsy "ok" to "failed" so the
+                    # history doesn't read "completed, 0 errors" for a run
+                    # that accomplished nothing.
+                    if isinstance(result, dict) and "ok" in result:
+                        for err in (result.get("errors") or []):
+                            err_str = str(err)
+                            if err_str not in job["errors"]:
+                                job["errors"].append(err_str)
+                        if result["ok"] is False:
+                            job["status"] = "failed"
                 job["result"] = result
+            if job["status"] == "failed":
+                log.warning(
+                    "Job %s reported failure via result: %s",
+                    job["id"], "; ".join(job["errors"]) or "(no detail)",
+                )
         except Exception as e:
             # Cancellation takes precedence over failure: if the user cancelled
             # while the work function was raising (e.g. a stage crash happened
@@ -200,6 +529,12 @@ class JobRunner:
             # can synchronize with `job_history` reads. Ephemeral jobs are
             # also flagged so callers waiting on this don't hang.
             job["_persisted"] = True
+            # A pipeline slot just opened — let any queued pipeline take
+            # its turn. Non-pipeline jobs (scan, thumbnails, etc.) also
+            # call through here but the queue check is cheap and the
+            # method is a no-op when nothing is queued.
+            if job["type"] == "pipeline":
+                self._try_promote_queued()
 
     def _persist_job(self, job, duration):
         """Persist job to history table using a thread-local connection."""
@@ -243,6 +578,7 @@ class JobRunner:
         )
 
         for attempt in range(3):
+            conn = None
             try:
                 conn = sqlite3.connect(self._db_path, timeout=30)
                 conn.execute(
@@ -254,17 +590,27 @@ class JobRunner:
                 )
                 ws_id = job.get("workspace_id")
                 if ws_id is not None:
+                    # Retention: keep the 100 most-recent TERMINAL rows
+                    # per workspace. Excluding non-terminal rows is
+                    # load-bearing: a queued pipeline waiting behind a
+                    # busy slot can sit in the table for a long time;
+                    # if its row got pruned by an unrelated job
+                    # completing, the next promotion attempt would see
+                    # rowcount==0 on its conditional UPDATE and treat
+                    # that as a cancel, silently dropping the run.
                     conn.execute(
                         """DELETE FROM job_history
-                           WHERE workspace_id = ? AND id NOT IN (
+                           WHERE workspace_id = ?
+                             AND status IN ('completed', 'failed', 'cancelled')
+                             AND id NOT IN (
                                SELECT id FROM job_history
                                WHERE workspace_id = ?
+                                 AND status IN ('completed', 'failed', 'cancelled')
                                ORDER BY started_at DESC LIMIT 100
                            )""",
                         (ws_id, ws_id),
                     )
                 conn.commit()
-                conn.close()
                 return
             except sqlite3.OperationalError:
                 if attempt < 2:
@@ -274,6 +620,11 @@ class JobRunner:
                         "Failed to persist job history for %s after 3 attempts",
                         job["id"],
                     )
+            finally:
+                # Close on every path — a failed execute/commit previously
+                # leaked the connection (one per retry).
+                if conn is not None:
+                    conn.close()
 
     def _build_summary(self, job):
         """Build a one-line summary from job steps or result."""
@@ -305,21 +656,82 @@ class JobRunner:
         )
         return f"{pretty_type} {job['status']}"
 
+    def _synthesize_queued_view(self, job_id, ctx):
+        """Render a queued pipeline's in-memory context as a job-shaped dict.
+
+        Queued pipelines aren't in ``self._jobs`` yet — they live in
+        ``self._queued_pipelines`` until the scheduler promotes them.
+        ``get()`` and ``list_jobs()`` both need to surface them in the
+        same shape as a live job so callers (UI, SSE, the navbar's
+        active-jobs polling) can render and cancel them uniformly.
+        """
+        return {
+            "id": job_id,
+            "type": "pipeline",
+            "status": "queued",
+            "started_at": ctx["started_at"],
+            "finished_at": None,
+            "progress": {"current": 0, "total": 0, "current_file": ""},
+            "result": None,
+            "errors": [],
+            "config": dict(ctx["config"]),
+            "workspace_id": ctx["workspace_id"],
+            "steps": [],
+            "ephemeral": False,
+            "counts_for_badge": True,
+            "runtime_warning": ctx.get("runtime_warning"),
+        }
+
+    @staticmethod
+    def _snapshot_job(job):
+        """Copy a job dict for callers outside the lock.
+
+        The top-level copy alone isn't enough: handlers jsonify the nested
+        progress/steps containers while worker threads mutate them, and a
+        key insertion during that iteration raises RuntimeError. Snapshot
+        the nested mutable containers under the lock too.
+        """
+        snap = dict(job)
+        snap["progress"] = dict(job.get("progress") or {})
+        snap["steps"] = [dict(s) for s in (job.get("steps") or [])]
+        snap["errors"] = list(job.get("errors") or [])
+        return snap
+
     def get(self, job_id):
-        """Get a job by id. Returns a shallow copy so callers don't mutate shared state."""
+        """Get a job by id. Returns a copy so callers don't mutate (or race
+        with) shared state."""
         with self._lock:
             job = self._jobs.get(job_id)
-            if job is None:
+            if job is not None:
+                return self._snapshot_job(job)
+            ctx = self._queued_pipelines.get(job_id)
+            if ctx is None:
                 return None
-            return dict(job)
+            return self._synthesize_queued_view(job_id, ctx)
 
     def list_jobs(self):
-        """List all tracked jobs (active and recently completed)."""
+        """List all tracked jobs (active, queued, and recently completed).
+
+        Includes synthetic queued-pipeline entries so the navbar and
+        /jobs page can render and cancel them; otherwise a queued run
+        disappears from the UI between enqueue and promotion. Returns
+        snapshots, not live dicts — see _snapshot_job.
+        """
         with self._lock:
-            return list(self._jobs.values())
+            jobs = [self._snapshot_job(j) for j in self._jobs.values()]
+            for job_id, ctx in self._queued_pipelines.items():
+                jobs.append(self._synthesize_queued_view(job_id, ctx))
+            return jobs
 
     def get_history(self, db, limit=10):
         """Get recent job history from the database.
+
+        Only TERMINAL rows (completed/failed/cancelled) are returned —
+        ``queued`` and ``running`` rows represent live state and surface
+        through ``list_jobs()`` / ``get()`` so the UI can render and
+        cancel them. Including them in history would make queued runs
+        show up under "last run" / Jobs-page history with no cancel
+        affordance, which is exactly the wrong UX.
 
         Args:
             db: Database instance (must be from the calling thread)
@@ -327,15 +739,21 @@ class JobRunner:
         """
         try:
             ws_id = db._active_workspace_id
+            terminal = ("completed", "failed", "cancelled")
+            placeholders = ",".join(["?"] * len(terminal))
             if ws_id is not None:
                 rows = db.conn.execute(
-                    "SELECT * FROM job_history WHERE workspace_id = ? ORDER BY started_at DESC LIMIT ?",
-                    (ws_id, limit),
+                    f"SELECT * FROM job_history "
+                    f"WHERE workspace_id = ? AND status IN ({placeholders}) "
+                    f"ORDER BY started_at DESC LIMIT ?",
+                    (ws_id, *terminal, limit),
                 ).fetchall()
             else:
                 rows = db.conn.execute(
-                    "SELECT * FROM job_history ORDER BY started_at DESC LIMIT ?",
-                    (limit,),
+                    f"SELECT * FROM job_history "
+                    f"WHERE status IN ({placeholders}) "
+                    f"ORDER BY started_at DESC LIMIT ?",
+                    (*terminal, limit),
                 ).fetchall()
             result = []
             for r in rows:
@@ -460,7 +878,10 @@ class JobRunner:
                     new_status = kwargs.get("status")
                     if new_status == "running" and step["status"] == "pending":
                         step["started_at"] = datetime.now().isoformat()
-                    if new_status in ("completed", "failed") and step["started_at"]:
+                    # "cancelled" is terminal too — classify/pipeline steps
+                    # report it on user cancel; without it here those steps
+                    # persist with no finished_at/duration.
+                    if new_status in ("completed", "failed", "cancelled") and step["started_at"]:
                         step["finished_at"] = datetime.now().isoformat()
                         start = datetime.fromisoformat(step["started_at"])
                         end = datetime.fromisoformat(step["finished_at"])
@@ -470,25 +891,184 @@ class JobRunner:
                             step[key] = kwargs[key]
                     break
 
-    def cancel_job(self, job_id):
-        """Request cancellation of a running job.
+    def cancel_job(self, job_id, expected_status=None, promote_after_cancel=True):
+        """Request cancellation of a running OR queued job.
 
-        The job's work function should periodically check
-        runner.is_cancelled(job_id) and exit early if True.
+        For running jobs: the work function should periodically check
+        ``runner.is_cancelled(job_id)`` and exit early if True. The
+        terminal status flip happens in ``_run_job``.
 
-        Returns True if the job was found and marked for cancellation.
+        For queued pipelines: atomically transition the persisted row
+        to ``status='cancelled'`` and remove the in-memory context.
+        If promotion already flipped the row to ``running`` but has not
+        installed the job in ``_jobs`` yet, preserve the cancellation
+        request so the promoted worker exits as cancelled.
+
+        Args:
+            job_id: id to cancel.
+            expected_status: optional status guard. When set, cancellation only
+                proceeds if the latest in-memory state still has this status.
+            promote_after_cancel: if True, immediately re-check the queue after
+                removing a queued job. Bulk queued cancellation sets this False
+                so the whole snapshot can be cancelled before another queued job
+                is promoted.
+
+        Returns True if the job was found and either marked for
+        cancellation (running) or transitioned to cancelled (queued).
         """
+        emit_complete = False
+        retry_promotion = False
+        queued_cancel = None
         with self._lock:
             job = self._jobs.get(job_id)
-            if not job or job["status"] != "running":
+            if job is not None and job["status"] == "running":
+                if expected_status and expected_status != "running":
+                    return False
+                # Stop is a no-op once the job has entered an
+                # uninterruptible commit step (e.g. the local-processing
+                # archive move). Without this guard a Stop landing after
+                # clear_cancellation() but before _run_job's terminal
+                # check would re-add the job to _cancelled and record
+                # the run as "cancelled" even though the archive
+                # already committed to disk.
+                if job_id in self._uncancellable:
+                    return False
+                self._cancelled.add(job_id)
+                return True
+            if job is not None:
                 return False
-            self._cancelled.add(job_id)
-            return True
+            # Queued case: still in _queued_pipelines, not _jobs yet.
+            if job_id in self._queued_pipelines:
+                if expected_status and expected_status != "queued":
+                    return False
+                cancelled_at = datetime.now().isoformat()
+                queued_cancel = self._queued_pipelines[job_id]
+            else:
+                return False
+
+        cancelled = True
+        if self._db_path:
+            import sqlite3
+            conn = sqlite3.connect(self._db_path, timeout=30)
+            try:
+                cur = conn.execute(
+                    "UPDATE job_history "
+                    "SET status='cancelled', finished_at=? "
+                    "WHERE id = ? AND status = 'queued'",
+                    (cancelled_at, job_id),
+                )
+                conn.commit()
+                cancelled = cur.rowcount == 1
+            finally:
+                conn.close()
+
+        with self._lock:
+            # rowcount==0 means a concurrent promotion beat us — the row is
+            # now 'running' and the worker will see the cancellation flag.
+            if not cancelled:
+                job = self._jobs.get(job_id)
+                if (
+                    job is not None
+                    and job["status"] == "running"
+                    and (expected_status is None or expected_status == "running")
+                ):
+                    # Same uncancellable guard as the first running-job
+                    # branch above; the post-commit Stop race exists on
+                    # this path too when promotion beat the queued
+                    # cancel.
+                    if job_id in self._uncancellable:
+                        return False
+                    self._cancelled.add(job_id)
+                    return True
+                if self._queued_pipelines.get(job_id) is queued_cancel:
+                    self._cancelled.add(job_id)
+                    return True
+                return False
+            if self._queued_pipelines.get(job_id) is queued_cancel:
+                self._queued_pipelines.pop(job_id, None)
+                retry_promotion = True
+            emit_complete = True
+        if emit_complete:
+            self._record_terminal_queued_pipeline(
+                job_id, queued_cancel, status="cancelled",
+            )
+        # Emit the terminal SSE event AFTER releasing the lock — clients
+        # subscribed to /api/jobs/<id>/stream while the job was queued
+        # need a ``complete`` event with status='cancelled' so they
+        # close cleanly. Without this they'd see ``get(job_id) is None``
+        # on the next keepalive and report the job as ``expired``.
+        if emit_complete:
+            self.push_event(
+                job_id,
+                "complete",
+                {
+                    "status": "cancelled",
+                    "result": None,
+                    "duration": 0.0,
+                    "errors": [],
+                },
+            )
+        if retry_promotion and promote_after_cancel:
+            self._try_promote_queued()
+        return True
+
+    def cancel_queued_jobs(self, workspace_id=None):
+        """Cancel queued pipelines, optionally scoped to one workspace."""
+        with self._lock:
+            job_ids = [
+                job_id
+                for job_id, ctx in self._queued_pipelines.items()
+                if workspace_id is None or ctx.get("workspace_id") == workspace_id
+            ]
+        cancelled = []
+        for job_id in job_ids:
+            if self.cancel_job(
+                job_id,
+                promote_after_cancel=False,
+            ):
+                cancelled.append(job_id)
+        if cancelled:
+            self._try_promote_queued()
+        return cancelled
 
     def is_cancelled(self, job_id):
         """Check whether a job has been marked for cancellation."""
         with self._lock:
             return job_id in self._cancelled
+
+    def begin_uncancellable(self, job_id):
+        """Atomically enter an uninterruptible phase if not cancelled.
+
+        Returns False when a cancellation is already pending, leaving that flag
+        intact so ``_run_job`` can record the job as cancelled. Once this
+        returns True, later ``cancel_job`` calls are ignored until the job
+        reaches a terminal state.
+        """
+        with self._lock:
+            if job_id in self._cancelled:
+                return False
+            self._uncancellable.add(job_id)
+            return True
+
+    def clear_cancellation(self, job_id):
+        """Consume any pending cancellation flag for ``job_id`` and
+        mark the job uncancellable.
+
+        Used by stages that have entered an uninterruptible commit step
+        (e.g. the local-processing archive move) where a Stop press
+        cannot be honored without leaving a partial published artifact.
+        Without consuming the flag, ``_run_job``'s atomic terminal check
+        would record the job as "cancelled" even though the commit
+        succeeded — confusing the user about whether the archive landed.
+
+        The flag is consumed AND the job is added to ``_uncancellable``
+        so a Stop press that lands after this call but before
+        ``_run_job`` flips to a terminal status can't re-add the
+        cancellation flag and override the committed result.
+        """
+        with self._lock:
+            self._cancelled.discard(job_id)
+            self._uncancellable.add(job_id)
 
 
 class LogBroadcaster(logging.Handler):

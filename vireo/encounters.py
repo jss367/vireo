@@ -111,6 +111,43 @@ def sim_embedding(emb_a, emb_b):
     return _cosine_sim(emb_a, emb_b)
 
 
+def _has_similarity_signal(photo):
+    """True if a photo carries any signal the score cut can act on.
+
+    Used to decide whether a pair of timestamp-less photos can be judged by
+    similarity (screenshots/exports with embeddings) or is genuinely
+    signal-less (unreadable files — no detection ran, so no embeddings or
+    species) and must instead be grouped by file order.
+
+    A detector verdict counts too: subject_absent/subject_present means
+    detection ran. compute_s_enc turns an absent-vs-present pair into an
+    active dissimilarity (score cut), so we must NOT force-group such a pair
+    by file order.
+
+    Metadata counts too: sim_meta always contributes to compute_s_enc, so a
+    usable focal length (> 0) or a GPS fix (both latitude and longitude) lets
+    the score cut distinguish two timestamp-less photos (e.g. imported images
+    with stripped capture dates but retained lens/GPS data). Force-grouping
+    those by file order would discard the signal sim_meta would have produced.
+
+    Only rows where detection genuinely never ran (no embeddings, no species,
+    no detector verdict) AND that carry no usable metadata (no focal length,
+    no GPS) are signal-less.
+    """
+    fl = photo.get("focal_length")
+    has_focal = fl is not None and fl > 0
+    has_gps = photo.get("latitude") is not None and photo.get("longitude") is not None
+    return (
+        photo.get("dino_subject_embedding") is not None
+        or photo.get("dino_global_embedding") is not None
+        or bool(photo.get("species_top5"))
+        or bool(photo.get("subject_absent"))
+        or bool(photo.get("subject_present"))
+        or has_focal
+        or has_gps
+    )
+
+
 def sim_species(species_a, species_b):
     """Species similarity via Bhattacharyya coefficient on shared top-5 species.
 
@@ -331,10 +368,19 @@ def cut_microsegments(photos, config=None, emit_trace=False):
             return ([photos] if photos else []), []
         return [photos] if photos else []
 
-    # Sort by timestamp
+    # Sort by timestamp. Null-timestamp photos (scan I/O errors, unreadable
+    # files) sort AFTER all timestamped photos — never datetime.min, which
+    # would pile them at the top of the review timeline and read as "the whole
+    # pipeline failed to group." Within the null group, order by
+    # (folder_id, filename) so consecutive frames from one shoot stay adjacent
+    # even without EXIF, letting the both-null branch below keep them together.
     sorted_photos = sorted(
         photos,
-        key=lambda p: _parse_timestamp(p.get("timestamp")) or datetime.min,
+        key=lambda p: (
+            (0, _parse_timestamp(p.get("timestamp")), 0, "")
+            if _parse_timestamp(p.get("timestamp")) is not None
+            else (1, datetime.min, p.get("folder_id") or 0, p.get("filename") or "")
+        ),
     )
 
     cuts = set()
@@ -358,12 +404,62 @@ def cut_microsegments(photos, config=None, emit_trace=False):
         bid_b = sorted_photos[i + 1].get("burst_id")
         decision = None
 
+        both_null = ts_a is None and ts_b is None
+        folder_a = sorted_photos[i].get("folder_id")
+        folder_b = sorted_photos[i + 1].get("folder_id")
+        # A folder change between two null-timestamp photos is a hard cut.
+        # The null sort key (1, datetime.min, folder_id, filename) places the
+        # last null of one folder adjacent to the first null of the next, and
+        # folder_id is NOT part of compute_s_enc — so without an explicit
+        # boundary cut, two undated photos from DIFFERENT shoots could merge
+        # whether they're unreadable (score ~0, force-grouped by file order)
+        # or signalful (visually similar embeddings/species sliding under the
+        # score cut). Treat distinct or missing folder_id as a boundary; only
+        # same, non-null folders are "unchanged". (Missing folder_id shouldn't
+        # happen in production scans — cutting there stays on the safe side.)
+        folder_changed = folder_a is None or folder_a != folder_b
+        # "Signal-less" = no timestamp AND no usable similarity signal on
+        # either side (no embeddings, no species). Unreadable files are
+        # signal-less; undated-but-readable photos (e.g. screenshots, which
+        # still get embeddings) are NOT — they must be judged on the score
+        # cut, not force-grouped by file order. Requires the same folder so
+        # contiguous nulls only group within a single shoot.
+        signal_less = (
+            both_null
+            and not folder_changed
+            and not (
+                _has_similarity_signal(sorted_photos[i])
+                or _has_similarity_signal(sorted_photos[i + 1])
+            )
+        )
+
         if bid_a is not None and bid_b is not None and bid_a == bid_b:
             decision = "burst_id_kept"
             recent_scores.append(score)
             if len(recent_scores) > 3:
                 recent_scores.pop(0)
-        elif dt > cfg["hard_cut_time"]:
+        elif signal_less:
+            # No time signal and no embeddings/species — every similarity
+            # score is ~0, so the score cut would split the whole null run
+            # into singletons. With no reliable basis to separate them, keep
+            # contiguous nulls together by file order.
+            decision = "kept_no_timestamp"
+            recent_scores = []
+        elif both_null and folder_changed:
+            # Both null but across a folder boundary — hard cut, regardless of
+            # similarity signal. dt is inf for both-null pairs, so the time cut
+            # below never fires for them; folder_id isn't in compute_s_enc
+            # either, so a signalful pair would otherwise slide under the score
+            # cut and merge two separate shoots. Cut here to keep them apart.
+            cuts.add(i)
+            recent_scores = []
+            decision = "cut_folder"
+        elif not both_null and dt > cfg["hard_cut_time"]:
+            # Time cut only applies when at least one side has a timestamp.
+            # Asymmetric pairs (one null, one real) give dt=inf and cut here,
+            # so the null cluster never absorbs a real photo. Both-null pairs
+            # in the SAME folder that reached this point DO have a similarity
+            # signal and fall through to the score cut below.
             cuts.add(i)
             recent_scores = []
             decision = "cut_time"

@@ -32,6 +32,120 @@ def test_generate_thumbnail_creates_jpeg(tmp_path):
         assert max(img.size) <= 400
 
 
+def test_generate_thumbnail_bounds_non_crop_recipe_load(tmp_path, monkeypatch):
+    import thumbnails
+    from thumbnails import generate_thumbnail
+
+    src = str(tmp_path / "source.jpg")
+    Image.new("RGB", (2000, 1500), color="red").save(src)
+
+    cache_dir = str(tmp_path / "thumbs")
+    os.makedirs(cache_dir)
+    original_load_image = thumbnails.load_image
+    seen_max_sizes = []
+
+    def tracking_load_image(file_path, max_size=1024):
+        seen_max_sizes.append(max_size)
+        return original_load_image(file_path, max_size=max_size)
+
+    monkeypatch.setattr(thumbnails, "load_image", tracking_load_image)
+
+    result = generate_thumbnail(1, src, cache_dir, recipe={"rotation": 90})
+
+    assert result is not None
+    assert seen_max_sizes == [400]
+
+
+def test_generate_thumbnail_forwards_raw_decode(tmp_path, monkeypatch):
+    """generate_thumbnail must forward raw_decode to load_image so an
+    edited RAW thumbnail demosaics with highlight preservation. Without
+    the override, the EDIT_MATH_VERSION cache purge would regenerate the
+    thumb through the default JPEG-first decode and diverge from the
+    preview / export pipeline.
+    """
+    import thumbnails
+    from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS
+    from thumbnails import generate_thumbnail
+
+    src = str(tmp_path / "source.jpg")
+    Image.new("RGB", (400, 300), color="red").save(src)
+    cache_dir = str(tmp_path / "thumbs")
+    os.makedirs(cache_dir)
+
+    seen_raw_decode = []
+    original_load_image = thumbnails.load_image
+
+    def tracking_load_image(file_path, max_size=1024, raw_decode=None):
+        seen_raw_decode.append(raw_decode)
+        return original_load_image(file_path, max_size=max_size)
+
+    monkeypatch.setattr(thumbnails, "load_image", tracking_load_image)
+
+    # Caller passes raw_decode through.
+    result = generate_thumbnail(
+        1, src, cache_dir, raw_decode=RAW_DECODE_PRESERVE_HIGHLIGHTS,
+    )
+    assert result is not None
+    assert seen_raw_decode == [RAW_DECODE_PRESERVE_HIGHLIGHTS]
+
+    # Caller omits raw_decode → load_image gets its default.
+    seen_raw_decode.clear()
+    os.remove(result)
+    assert generate_thumbnail(1, src, cache_dir) is not None
+    assert seen_raw_decode == [None]
+
+
+def test_recipe_source_path_uses_exif_oriented_dimensions(tmp_path):
+    import json
+
+    import pipeline_job
+    import render_source
+    import thumbnails
+
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    original = folder / "portrait.jpg"
+    Image.new("RGB", (600, 400), color="red").save(original)
+
+    vireo_dir = tmp_path / "vireo"
+    working_dir = vireo_dir / "working"
+    working_dir.mkdir(parents=True)
+    working = working_dir / "1.jpg"
+    Image.new("RGB", (400, 400), color="blue").save(working)
+
+    photo = {
+        "id": 1,
+        "folder_id": 10,
+        "filename": "portrait.jpg",
+        "working_copy_path": "working/1.jpg",
+        "companion_path": None,
+        "width": 600,
+        "height": 400,
+        "exif_data": json.dumps({"EXIF": {"Orientation": 6}}),
+    }
+    folders = {10: str(folder)}
+    recipe = {"crop": {"x": 0.0, "y": 0.0, "w": 0.5, "h": 1.0}}
+
+    # thumbnails / pipeline source selection both delegate to the shared
+    # resolver, which returns just the path here.
+    assert thumbnails._recipe_source_path(
+        photo, recipe, 500, str(vireo_dir), folders,
+    ) == str(original)
+    assert pipeline_job._recipe_render_source(
+        photo, recipe, 500, str(vireo_dir), folders,
+    ) == str(original)
+
+    exif = Image.Exif()
+    exif[274] = 6
+    oriented_working = working_dir / "2.jpg"
+    Image.new("RGB", (600, 400), color="blue").save(oriented_working, exif=exif)
+
+    # Orientation-aware render-size check lives in render_source now.
+    assert render_source.path_satisfies_recipe_render(
+        str(oriented_working), photo, recipe, 500,
+    )
+
+
 def test_generate_thumbnail_skips_existing(tmp_path):
     """generate_thumbnail skips if thumbnail already exists."""
     from thumbnails import generate_thumbnail
@@ -129,14 +243,136 @@ def test_generate_all_routes_through_canonical_helper(tmp_path, monkeypatch):
         width=200, height=150,
     )
 
+    # Source resolution routes through render_source (shared by thumbnails,
+    # app, pipeline and export); patch it there.
+    import render_source
     mock_helper = MagicMock(return_value=str(src))
-    monkeypatch.setattr(thumbnails, "get_canonical_image_path", mock_helper)
+    monkeypatch.setattr(render_source, "get_canonical_image_path", mock_helper)
 
     thumb_dir = vireo_dir / "thumbs"
     thumbnails.generate_all(db, str(thumb_dir), vireo_dir=str(vireo_dir))
 
     assert mock_helper.called, \
         "generate_all should route source-path resolution through get_canonical_image_path"
+
+
+def test_generate_all_retries_edited_raw_thumbnail_with_companion(
+    tmp_path, monkeypatch,
+):
+    """Standalone thumbnail generation should mirror app/pipeline fallback.
+
+    Edited RAW thumbnails try the RAW first for highlight preservation. If that
+    decode fails, a usable sidecar JPEG should still generate the grid thumb and
+    stamp the source failure marker for later source selection.
+    """
+    import thumbnails
+    from db import Database
+
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    raw_path = photos_dir / "source.NEF"
+    raw_path.write_bytes(b"unsupported raw")
+    companion_path = photos_dir / "source.jpg"
+    Image.new("RGB", (800, 600), "green").save(companion_path, "JPEG")
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    db = Database(str(vireo_dir / "test.db"))
+    folder_id = db.add_folder(str(photos_dir), name="photos")
+    photo_id = db.add_photo(
+        folder_id,
+        "source.NEF",
+        ".nef",
+        file_size=raw_path.stat().st_size,
+        file_mtime=1234.0,
+        width=800,
+        height=600,
+    )
+    db.conn.execute(
+        "UPDATE photos SET companion_path='source.jpg' WHERE id=?",
+        (photo_id,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+
+    loaded_paths = []
+    original_load_image = thumbnails.load_image
+
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        loaded_paths.append(str(file_path))
+        if str(file_path).lower().endswith(".nef"):
+            return None
+        return original_load_image(file_path, max_size=max_size, **kwargs)
+
+    monkeypatch.setattr(thumbnails, "load_image", tracking_load_image)
+
+    thumb_dir = vireo_dir / "thumbs"
+    result = thumbnails.generate_all(db, str(thumb_dir), vireo_dir=str(vireo_dir))
+
+    assert result["generated"] == 1
+    assert result["failed"] == 0
+    assert loaded_paths[0] == str(raw_path)
+    assert loaded_paths[1] == str(companion_path)
+    assert os.path.exists(thumb_dir / f"{photo_id}.jpg")
+    row = db.conn.execute(
+        "SELECT working_copy_failed_source FROM photos WHERE id=?",
+        (photo_id,),
+    ).fetchone()
+    assert row["working_copy_failed_source"] == "source"
+
+
+def test_generate_all_retries_when_raw_thumbnail_short_edge_is_smaller(
+    tmp_path, monkeypatch,
+):
+    import thumbnails
+    from db import Database
+
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    raw_path = photos_dir / "source.NEF"
+    raw_path.write_bytes(b"unsupported raw")
+    companion_path = photos_dir / "source.jpg"
+    Image.new("RGB", (6000, 4000), "green").save(companion_path, "JPEG")
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    db = Database(str(vireo_dir / "test.db"))
+    folder_id = db.add_folder(str(photos_dir), name="photos")
+    photo_id = db.add_photo(
+        folder_id,
+        "source.NEF",
+        ".nef",
+        file_size=raw_path.stat().st_size,
+        file_mtime=1234.0,
+        width=6000,
+        height=4000,
+    )
+    db.conn.execute(
+        "UPDATE photos SET companion_path='source.jpg' WHERE id=?",
+        (photo_id,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+
+    loaded_paths = []
+    original_load_image = thumbnails.load_image
+
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        loaded_paths.append(str(file_path))
+        if str(file_path).lower().endswith(".nef"):
+            return Image.new("RGB", (400, 225), "red")
+        return original_load_image(file_path, max_size=max_size, **kwargs)
+
+    monkeypatch.setattr(thumbnails, "load_image", tracking_load_image)
+
+    thumb_dir = vireo_dir / "thumbs"
+    result = thumbnails.generate_all(db, str(thumb_dir), vireo_dir=str(vireo_dir))
+
+    assert result["generated"] == 1
+    assert result["failed"] == 0
+    assert loaded_paths == [str(raw_path), str(companion_path)]
+    with Image.open(thumb_dir / f"{photo_id}.jpg") as img:
+        assert img.size == (267, 400)
 
 
 def test_generate_all_creates_missing(tmp_path):
@@ -209,7 +445,8 @@ def test_generate_all_does_not_record_thumb_path_on_failure(tmp_path, monkeypatc
 
     monkeypatch.setattr(
         thumbnails_mod, "generate_thumbnail",
-        lambda photo_id, src, cache_dir, size=400, quality=85: None,
+        lambda photo_id, src, cache_dir, size=400, quality=85,
+        recipe=None, **kwargs: None,
     )
 
     cache_dir = str(tmp_path / "thumbs")
@@ -217,6 +454,70 @@ def test_generate_all_does_not_record_thumb_path_on_failure(tmp_path, monkeypatc
     thumbnails_mod.generate_all(db, cache_dir)
 
     row = db.conn.execute("SELECT thumb_path FROM photos").fetchone()
+    assert row["thumb_path"] is None
+
+
+def test_generate_all_skips_current_raw_marker_after_crop_rejects_working_copy(
+    tmp_path, monkeypatch,
+):
+    """Batch thumbnails must not retry a RAW that has a current source failure."""
+    import thumbnails as thumbnails_mod
+    from db import Database
+
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    raw_path = photos_dir / "bad.NEF"
+    raw_path.write_bytes(b"not a decodable raw")
+
+    vireo_dir = tmp_path / "vireo"
+    working_dir = vireo_dir / "working"
+    working_dir.mkdir(parents=True)
+    wc_path = working_dir / "1.jpg"
+    Image.new("RGB", (200, 150), color="red").save(wc_path, "JPEG")
+
+    db = Database(str(vireo_dir / "test.db"))
+    fid = db.add_folder(str(photos_dir), name="photos")
+    photo_id = db.add_photo(
+        folder_id=fid,
+        filename="bad.NEF",
+        extension=".nef",
+        file_size=raw_path.stat().st_size,
+        file_mtime=raw_path.stat().st_mtime,
+        width=800,
+        height=600,
+    )
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (photo_id,),
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET working_copy_path=?,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?,
+               working_copy_failed_source='source'
+           WHERE id=?""",
+        ("working/1.jpg", file_mtime, photo_id),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        photo_id,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+    )
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("batch thumbnail generation retried failed RAW")
+
+    monkeypatch.setattr(thumbnails_mod, "generate_thumbnail", fail_if_called)
+
+    result = thumbnails_mod.generate_all(
+        db, str(vireo_dir / "thumbnails"), vireo_dir=str(vireo_dir),
+    )
+
+    assert result["generated"] == 0
+    assert result["failed"] == 1
+    row = db.conn.execute(
+        "SELECT thumb_path FROM photos WHERE id=?", (photo_id,),
+    ).fetchone()
     assert row["thumb_path"] is None
 
 
@@ -356,6 +657,8 @@ def _make_app_with_real_photo(tmp_path, monkeypatch, filename="bird.jpg"):
     monkeypatch.setenv("HOME", str(tmp_path))
     import config as cfg
     import models
+    import scanner
+    import thumbnails as _thumbnails_module
     from app import create_app
     from db import Database
 
@@ -365,6 +668,24 @@ def _make_app_with_real_photo(tmp_path, monkeypatch, filename="bird.jpg"):
     )
     monkeypatch.setattr(
         models, "CONFIG_PATH", str(tmp_path / "models.json"),
+    )
+
+    # ``create_app`` schedules two ``threading.Timer`` kickoffs (5s and 6s)
+    # that fire ``scanner.backfill_working_copies`` / ``thumbnails.backfill_thumb_paths``
+    # in background threads. Slow Windows runners can leave these timers
+    # alive long enough that the backfill thread races the assertions in
+    # tests that set ``working_copy_failed_at`` directly (it re-stamps the
+    # marker to ``datetime('now')`` when the fake source can't be decoded).
+    # The kickoffs short-circuit when ``*_candidate_count`` returns 0, so
+    # stub the predicates here — tests in this file exercise the route
+    # logic, not the startup backfill.
+    monkeypatch.setattr(
+        scanner, "working_copy_backfill_candidate_count", lambda *a, **kw: 0,
+    )
+    monkeypatch.setattr(
+        _thumbnails_module,
+        "thumb_path_backfill_candidate_count",
+        lambda *a, **kw: 0,
     )
 
     photos_dir = tmp_path / "photos"
@@ -700,6 +1021,192 @@ def test_serve_thumbnail_404s_when_source_is_unreadable(tmp_path, monkeypatch):
     client = app.test_client()
     resp = client.get(f"/thumbnails/{pid}.jpg")
     assert resp.status_code == 404
+
+
+def test_serve_thumbnail_skips_recent_failed_raw_working_copy(
+    tmp_path, monkeypatch,
+):
+    """A RAW row that already failed working-copy extraction at the current
+    mtime must not retry RAW decode in the thumbnail request thread.
+    """
+    import thumbnails
+
+    app, db, pid, _thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (pid,),
+    ).fetchone()
+    with open(os.path.join(folder["path"], "bad.NEF"), "wb") as f:
+        f.write(b"not a decodable raw")
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (pid,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (file_mtime, pid),
+    )
+    db.conn.commit()
+
+    called = {"generate": False}
+
+    def fail_if_called(*_args, **_kwargs):
+        called["generate"] = True
+        raise AssertionError("thumbnail request retried failed RAW decode")
+
+    monkeypatch.setattr(thumbnails, "generate_thumbnail", fail_if_called)
+
+    client = app.test_client()
+    resp = client.get(f"/thumbnails/{pid}.jpg")
+
+    assert resp.status_code == 404
+    assert called["generate"] is False
+
+
+def test_serve_thumbnail_skips_failed_raw_after_crop_rejects_working_copy(
+    tmp_path, monkeypatch,
+):
+    """A crop-insufficient WC must not mask a current RAW failure marker."""
+    import thumbnails
+
+    app, db, pid, thumb_dir = _make_app_with_real_photo(
+        tmp_path, monkeypatch, filename="bad.NEF",
+    )
+    vireo_dir = os.path.dirname(thumb_dir)
+    wc_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(wc_dir, exist_ok=True)
+    wc_path = os.path.join(wc_dir, f"{pid}.jpg")
+    Image.new("RGB", (200, 150), (50, 200, 50)).save(wc_path, "JPEG")
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (pid,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET extension='.nef',
+               width=800,
+               height=600,
+               working_copy_path=?,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?,
+               working_copy_failed_source='source'
+           WHERE id=?""",
+        (f"working/{pid}.jpg", file_mtime, pid),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        pid,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+    )
+
+    called = {"generate": False}
+
+    def fail_if_called(*_args, **_kwargs):
+        called["generate"] = True
+        raise AssertionError("thumbnail request retried failed RAW decode")
+
+    monkeypatch.setattr(thumbnails, "generate_thumbnail", fail_if_called)
+
+    client = app.test_client()
+    resp = client.get(f"/thumbnails/{pid}.jpg")
+
+    assert resp.status_code == 404
+    assert called["generate"] is False
+
+
+def test_serve_thumbnail_refreshes_failure_marker_when_stale_retry_fails(
+    tmp_path, monkeypatch,
+):
+    """A stale RAW failure may retry once; if thumbnail regeneration still
+    fails, the route should refresh the marker so later requests fail fast."""
+    import thumbnails
+
+    app, db, pid, _thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (pid,),
+    ).fetchone()
+    with open(os.path.join(folder["path"], "bad.NEF"), "wb") as f:
+        f.write(b"not a decodable raw")
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (pid,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now', '-48 hours'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (file_mtime, pid),
+    )
+    db.conn.commit()
+
+    monkeypatch.setattr(
+        thumbnails, "generate_thumbnail", lambda *args, **kwargs: None,
+    )
+
+    client = app.test_client()
+    resp = client.get(f"/thumbnails/{pid}.jpg")
+
+    assert resp.status_code == 404
+    row = db.conn.execute(
+        """SELECT working_copy_failed_mtime,
+                  (julianday('now') - julianday(working_copy_failed_at))
+                  * 24 * 60 * 60 AS age_seconds
+           FROM photos WHERE id=?""",
+        (pid,),
+    ).fetchone()
+    assert row["working_copy_failed_mtime"] == file_mtime
+    assert row["age_seconds"] is not None and row["age_seconds"] < 60
+
+
+def test_serve_thumbnail_does_not_refresh_raw_marker_on_cache_write_error(
+    tmp_path, monkeypatch,
+):
+    """Thumbnail cache write failures should not be recorded as RAW failures."""
+    import thumbnails
+
+    app, db, pid, _thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (pid,),
+    ).fetchone()
+    with open(os.path.join(folder["path"], "bad.NEF"), "wb") as f:
+        f.write(b"raw bytes")
+    file_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id=?", (pid,)
+    ).fetchone()["file_mtime"]
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               working_copy_path=NULL,
+               working_copy_failed_at=datetime('now', '-48 hours'),
+               working_copy_failed_mtime=?
+           WHERE id=?""",
+        (file_mtime, pid),
+    )
+    db.conn.commit()
+
+    def fail_write(*_args, **_kwargs):
+        raise OSError("thumbnail cache is unwritable")
+
+    monkeypatch.setattr(thumbnails, "generate_thumbnail", fail_write)
+
+    client = app.test_client()
+    resp = client.get(f"/thumbnails/{pid}.jpg")
+
+    assert resp.status_code == 404
+    row = db.conn.execute(
+        """SELECT (julianday('now') - julianday(working_copy_failed_at))
+                  * 24 * 60 * 60 AS age_seconds
+           FROM photos WHERE id=?""",
+        (pid,),
+    ).fetchone()
+    assert row["age_seconds"] is not None and row["age_seconds"] > 24 * 60 * 60
 
 
 def test_serve_thumbnail_resolves_when_folder_status_is_missing(tmp_path, monkeypatch):

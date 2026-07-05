@@ -268,6 +268,10 @@ def detect_keypoints(image, bbox, model_name):
     arr = arr[np.newaxis, :, :, :]
 
     session = _load_session(model_name)
+    # NOTE: no acquire_gpu() here. The keypoints session is hardcoded
+    # to CPUExecutionProvider (see _load_session). Wrapping the call in
+    # the GPU semaphore would needlessly block real GPU stages in
+    # concurrent pipelines for work that doesn't touch the GPU.
     outputs = session.run(None, {"pixel_values": arr})
 
     output_type = cfg.get("output_type", "heatmap")

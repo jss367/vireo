@@ -6,17 +6,61 @@ import os
 import re
 import shutil
 
-from image_loader import load_image
+from image_edits import apply_recipe_to_loaded_image
+from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS, RAW_EXTENSIONS, load_image
+from render_source import (
+    companion_image_can_replace_raw_result,
+    image_is_smaller_than_expected,
+    rendered_recipe_long_edge,
+    scaled_recipe_source_dimensions,
+)
+from render_source import (
+    image_size_after_exif_orientation as _image_size_after_exif_orientation,
+)
+from render_source import (
+    recipe_source_dimensions as _recipe_source_dimensions,
+)
 
 log = logging.getLogger(__name__)
 
 # Characters not allowed in filenames (covers Windows + macOS + Linux)
 _UNSAFE_RE = re.compile(r'[<>:"/|?*\\]')
+_OUTPUT_FORMATS = {
+    "jpg": {"extension": "jpg", "pil_format": "JPEG", "quality": True},
+    "jpeg": {"extension": "jpg", "pil_format": "JPEG", "quality": True},
+    "png": {"extension": "png", "pil_format": "PNG", "quality": False},
+    "tif": {"extension": "tiff", "pil_format": "TIFF", "quality": False},
+    "tiff": {"extension": "tiff", "pil_format": "TIFF", "quality": False},
+}
 
 
 def sanitize_filename(name):
     """Replace filesystem-unsafe characters with underscores."""
     return _UNSAFE_RE.sub("_", name)
+
+
+def normalize_output_format(output_format):
+    """Return export format metadata for a user/API format value."""
+    fmt = str(output_format or "jpg").strip().lower()
+    if fmt not in _OUTPUT_FORMATS:
+        supported = ", ".join(sorted({"jpg", "png", "tiff"}))
+        raise ValueError(f"format must be one of: {supported}")
+    return _OUTPUT_FORMATS[fmt]
+
+
+def normalize_quality(quality, default=92):
+    """Return an integer JPEG quality in Pillow's accepted 1-100 range."""
+    if quality in (None, ""):
+        quality = default
+    if isinstance(quality, bool):
+        raise ValueError("quality must be an integer from 1 to 100")
+    try:
+        value = int(quality)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("quality must be an integer from 1 to 100") from exc
+    if value < 1 or value > 100:
+        raise ValueError("quality must be an integer from 1 to 100")
+    return value
 
 
 def resolve_template(template, photo, species=None, seq=1):
@@ -71,6 +115,7 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
         options: dict with keys:
             naming_template: str (default "{original}")
             max_size: int or None -- max long-edge pixels
+            format: str -- output format: jpg, png, or tiff (default jpg)
             quality: int 1-100 (default 92)
             working_copy_max_size: int -- the cap used when generating
                 working copies (default 4096); used to decide whether
@@ -99,7 +144,11 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
     max_size = options.get("max_size")
     if max_size is not None:
         max_size = int(max_size)
-    quality = options.get("quality", 92)
+    format_info = normalize_output_format(
+        options.get("format", options.get("output_format", "jpg"))
+    )
+    output_ext = format_info["extension"]
+    quality = normalize_quality(options.get("quality", 92))
     try:
         wc_max = int(options.get("working_copy_max_size", 4096))
     except (ValueError, TypeError):
@@ -110,9 +159,11 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
 
     photos_map = db.get_photos_by_ids(photo_ids)
     folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+    exif_data_map = _get_photo_exif_data(db, photo_ids)
 
     # Get species keywords for all photos in one query
     species_map = db.get_species_keywords_for_photos(photo_ids)
+    edit_recipes = db.get_photo_edit_recipes(photo_ids)
 
     # Track sequence numbers per subdirectory
     seq_counters = {}
@@ -141,24 +192,51 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
         #   2. working copy when resizing to a size it can satisfy.
         #   3. original file (default; also used for full-res exports).
         folder_path = folders.get(photo["folder_id"], "")
-        source_path = _find_developed_output(
+        recipe = edit_recipes.get(pid)
+        exif_data = exif_data_map.get(pid)
+        source_path = None
+        for dev_candidate in _iter_developed_outputs(
             photo["filename"],
             folder_path,
             developed_dir,
             developed_index,
-        )
-        # Guard against silent downscaling: darktable's develop job can
-        # write the output at --width=N, so a developed file may be
-        # smaller than the original. If it can't satisfy the requested
-        # export size, fall through to the working-copy / original
-        # source.
-        if source_path and not _developed_can_satisfy_size(
-            source_path, photo, max_size
+            preferred_exts=_developed_ext_preference(output_ext),
         ):
-            source_path = None
+            # Guard against silent downscaling: darktable's develop job
+            # can write the output at --width=N, so a developed file may
+            # be smaller than the original. Keep trying lower-preference
+            # developed candidates before falling through to the working
+            # copy / original source.
+            if _developed_can_satisfy_size(
+                dev_candidate, photo, max_size, recipe, exif_data=exif_data
+            ):
+                source_path = dev_candidate
+                break
         if not source_path:
-            use_wc = bool(max_size) and max_size <= wc_max
-            source_path = _resolve_source(photo, vireo_dir, folders, use_working_copy=use_wc)
+            use_wc = _working_copy_can_satisfy_export(
+                photo, recipe, max_size, wc_max, vireo_dir,
+                exif_data=exif_data, folder_path=folder_path,
+            )
+            source_path = None
+            if not use_wc:
+                primary_path = (
+                    os.path.join(folder_path, photo["filename"])
+                    if folder_path else ""
+                )
+                primary_is_raw = (
+                    os.path.splitext(photo["filename"])[1].lower()
+                    in RAW_EXTENSIONS
+                )
+                source_path = _companion_can_satisfy_export(
+                    photo, folder_path, recipe, max_size, exif_data=exif_data,
+                    skip_raw_primary=(
+                        not primary_is_raw or os.path.isfile(primary_path)
+                    ),
+                )
+            if not source_path:
+                source_path = _resolve_source(
+                    photo, vireo_dir, folders, use_working_copy=use_wc,
+                )
         if not source_path or not os.path.isfile(source_path):
             errors.append(f"{photo['filename']}: source file missing")
             if progress_cb:
@@ -192,7 +270,7 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
         # Guard against path traversal: strip leading slashes/dots so that
         # absolute paths and ".." segments cannot escape the destination dir.
         rel_path_safe = os.path.normpath(rel_path).lstrip(os.sep + ".")
-        out_path = os.path.join(destination, rel_path_safe + ".jpg")
+        out_path = os.path.join(destination, rel_path_safe + f".{output_ext}")
         # Final containment check: resolved path must start with destination.
         # dest_real may already end with os.sep when destination is a root dir
         # (e.g. "/" on POSIX), so avoid doubling the separator.
@@ -215,13 +293,91 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
 
         # Load, resize, and save
         try:
-            img = load_image(source_path, max_size=max_size or None)
+            load_max_size = (
+                None if recipe and recipe.get("crop") else (max_size or None)
+            )
+            source_is_raw = (
+                os.path.splitext(source_path)[1].lower() in RAW_EXTENSIONS
+            )
+            raw_decode = (
+                RAW_DECODE_PRESERVE_HIGHLIGHTS if recipe and source_is_raw else None
+            )
+            load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
+            img = load_image(source_path, max_size=load_max_size, **load_kwargs)
+            if source_is_raw:
+                # RAW decode either failed outright (`img is None`) or
+                # silently fell back to the embedded JPEG. ``_load_raw``
+                # returns ``raw.extract_thumb()`` when libraw cannot
+                # demosaic the RAW; that preview can be much smaller than
+                # the full-size companion JPEG, so the export would
+                # quietly produce undersized bytes for unsupported RAW+JPEG
+                # files. Compare *both* loaded dimensions against the
+                # source's expected dimensions (capped by
+                # ``load_max_size`` when set) — a long-edge-only check
+                # accepts e.g. 6000x3376 embedded previews for 6000x4000
+                # photos, dropping short-edge content.
+                needs_companion = img is None
+                expected_w, expected_h = 0, 0
+                if img is not None:
+                    expected_w, expected_h = scaled_recipe_source_dimensions(
+                        photo, load_max_size, exif_data,
+                    )
+                    if image_is_smaller_than_expected(img, expected_w, expected_h):
+                        needs_companion = True
+                if needs_companion:
+                    companion_fallback = _companion_can_satisfy_export(
+                        photo, folder_path, recipe, max_size,
+                        exif_data=exif_data, skip_raw_primary=False,
+                    )
+                    if companion_fallback:
+                        companion_img = load_image(
+                            companion_fallback, max_size=load_max_size,
+                        )
+                        # Prefer companion when it covers img on both
+                        # axes — a long-edge-only check misses cases
+                        # like a 6000x3376 embedded preview "tying" a
+                        # 6000x4000 sidecar and losing the short-edge
+                        # content.
+                        if companion_image_can_replace_raw_result(
+                            companion_img, img, expected_w, expected_h,
+                        ):
+                            if img is None:
+                                log.info(
+                                    "RAW decode failed for %s; falling back "
+                                    "to companion JPEG",
+                                    photo["filename"],
+                                )
+                            else:
+                                log.info(
+                                    "RAW decode fell back to undersized "
+                                    "embedded JPEG (%dx%d, expected %dx%d) "
+                                    "for %s; using companion JPEG (%dx%d) "
+                                    "instead",
+                                    img.size[0], img.size[1],
+                                    expected_w, expected_h,
+                                    photo["filename"],
+                                    companion_img.size[0],
+                                    companion_img.size[1],
+                                )
+                                img.close()
+                            img = companion_img
+                        elif companion_img is not None:
+                            companion_img.close()
             if img is None:
                 errors.append(f"{photo['filename']}: failed to load image")
                 if progress_cb:
                     progress_cb(i + 1, len(photo_ids), photo["filename"])
                 continue
-            img.save(out_path, "JPEG", quality=quality)
+            if recipe:
+                import local_masks
+                img = apply_recipe_to_loaded_image(
+                    img, recipe, max_size=max_size,
+                    native_size=_recipe_source_dimensions(photo, exif_data),
+                    local_mask=local_masks.load_snapshot(
+                        vireo_dir, pid, recipe,
+                    ),
+                )
+            _save_export_image(img, out_path, format_info, quality)
             img.close()
             exported += 1
         except Exception as exc:
@@ -234,10 +390,81 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
     return {"exported": exported, "errors": errors, "destination": destination}
 
 
+def _save_export_image(img, out_path, format_info, quality):
+    """Save a rendered export image in the requested output format."""
+    pil_format = format_info["pil_format"]
+    save_img = img
+    if pil_format == "JPEG" and img.mode not in ("RGB", "L"):
+        save_img = img.convert("RGB")
+    save_kwargs = {}
+    if format_info["quality"]:
+        save_kwargs["quality"] = quality
+    elif pil_format == "TIFF":
+        save_kwargs["compression"] = "tiff_lzw"
+    try:
+        save_img.save(out_path, pil_format, **save_kwargs)
+    finally:
+        if save_img is not img:
+            save_img.close()
+
+
 _PREFERRED_DEVELOPED_EXTS = ("jpg", "jpeg", "tiff", "tif")
+_TIFF_FIRST_DEVELOPED_EXTS = ("tiff", "tif", "jpg", "jpeg")
 
 
-def _developed_can_satisfy_size(dev_path, photo, max_size):
+def _developed_ext_preference(output_ext):
+    """Return source developed-output preference for the requested export type."""
+    if output_ext != "jpg":
+        return _TIFF_FIRST_DEVELOPED_EXTS
+    return _PREFERRED_DEVELOPED_EXTS
+
+
+def _get_photo_exif_data(db, photo_ids):
+    """Return a photo_id -> exif_data map without bloating list photo queries."""
+    if not photo_ids or not hasattr(db, "conn"):
+        return {}
+    out = {}
+    for i in range(0, len(photo_ids), 999):
+        chunk = photo_ids[i:i + 999]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = db.conn.execute(
+            f"SELECT id, exif_data FROM photos WHERE id IN ({placeholders})",
+            list(chunk),
+        ).fetchall()
+        for row in rows:
+            out[row["id"]] = row["exif_data"]
+    return out
+
+
+def _recipe_result_dimensions(width, height, recipe):
+    """Return rendered dimensions after right-angle rotation and crop."""
+    rotation = (recipe or {}).get("rotation", 0)
+    if rotation in (90, 270):
+        width, height = height, width
+    crop = (recipe or {}).get("crop") if recipe else None
+    if crop:
+        width = float(crop["w"]) * width
+        height = float(crop["h"]) * height
+    return width, height
+
+
+def _scale_dimensions_to_max(width, height, max_size):
+    if max_size is None:
+        return width, height
+    long_edge = max(width, height)
+    if long_edge > max_size:
+        scale = max_size / long_edge
+        width = round(width * scale)
+        height = round(height * scale)
+    return width, height
+
+
+def _recipe_result_long_edge(width, height, recipe):
+    """Return the rendered long edge after right-angle rotation and crop."""
+    return rendered_recipe_long_edge(width, height, recipe)
+
+
+def _developed_can_satisfy_size(dev_path, photo, max_size, recipe=None, exif_data=None):
     """Return True if the developed file is large enough for this export.
 
     The develop job may have written a downscaled output (`--width` is
@@ -259,18 +486,18 @@ def _developed_can_satisfy_size(dev_path, photo, max_size):
 
     try:
         with Image.open(dev_path) as img:
-            dev_long = max(img.size)
+            dev_w, dev_h = _image_size_after_exif_orientation(img)
     except Exception:
         return True
+    dev_long = _recipe_result_long_edge(dev_w, dev_h, recipe)
+    original_w, original_h = _recipe_source_dimensions(photo, exif_data)
+    if original_w and original_h:
+        required_long = _recipe_result_long_edge(original_w, original_h, recipe)
+        if max_size is not None:
+            required_long = min(max_size, required_long)
+        return dev_long >= required_long
     if max_size is not None:
         return dev_long >= max_size
-    try:
-        original_w = photo["width"]
-        original_h = photo["height"]
-    except (KeyError, IndexError):
-        return True
-    if original_w and original_h:
-        return dev_long >= max(original_w, original_h)
     return True
 
 
@@ -378,7 +605,7 @@ class _DevelopedDirIndex:
     def __init__(self):
         self._cache = {}
 
-    def lookup(self, base, stem):
+    def _entries_for_base(self, base):
         entries = self._cache.get(base)
         if entries is None:
             entries = {}
@@ -412,15 +639,25 @@ class _DevelopedDirIndex:
                 if raw_ext == ext_key and existing_ext != ext_key:
                     entries[key] = os.path.join(base, name)
             self._cache[base] = entries
-        for ext in _PREFERRED_DEVELOPED_EXTS:
+        return entries
+
+    def iter_matches(self, base, stem, preferred_exts=None):
+        entries = self._entries_for_base(base)
+        for ext in preferred_exts or _PREFERRED_DEVELOPED_EXTS:
             path = entries.get((stem, ext))
             if path and os.path.isfile(path):
-                return path
+                yield path
+
+    def lookup(self, base, stem, preferred_exts=None):
+        for path in self.iter_matches(base, stem, preferred_exts=preferred_exts):
+            return path
         return None
 
 
-def _find_developed_output(filename, folder_path, developed_dir, index=None):
-    """Return the path to a darktable-developed output for this photo, or None.
+def _iter_developed_outputs(
+    filename, folder_path, developed_dir, index=None, preferred_exts=None,
+):
+    """Yield darktable-developed outputs for this photo in preference order.
 
     Lookup locations are probed in order:
 
@@ -449,7 +686,8 @@ def _find_developed_output(filename, folder_path, developed_dir, index=None):
     the same folder on a case-sensitive filesystem) resolve to distinct
     developed files.
 
-    JPG is preferred over TIFF when both exist.
+    JPG is preferred over TIFF when both exist unless the caller passes a
+    TIFF-first preference for TIFF exports.
 
     Pass `index` (a _DevelopedDirIndex) to amortize directory scans
     across many photos in the same export.
@@ -465,9 +703,128 @@ def _find_developed_output(filename, folder_path, developed_dir, index=None):
     if index is None:
         index = _DevelopedDirIndex()
     for base in candidates:
-        hit = index.lookup(base, stem)
-        if hit:
-            return hit
+        yield from index.iter_matches(base, stem, preferred_exts=preferred_exts)
+
+
+def _find_developed_output(
+    filename, folder_path, developed_dir, index=None, preferred_exts=None,
+):
+    """Return the first darktable-developed output for this photo, or None."""
+    for path in _iter_developed_outputs(
+        filename, folder_path, developed_dir, index, preferred_exts=preferred_exts,
+    ):
+        return path
+    return None
+
+
+def _working_copy_can_satisfy_export(
+    photo, recipe, max_size, wc_max, vireo_dir, exif_data=None, folder_path=None
+):
+    """Return True when the working copy can preserve requested export pixels."""
+    if not max_size or max_size <= 0:
+        return False
+    if max_size > wc_max:
+        return False
+    # For RAW primaries with an edit recipe, the working copy is unreliable
+    # while the RAW source is available: libraries built before the
+    # highlight-preserving RAW decode landed carry working copies derived
+    # from clipped sources (camera JPEG or the JPEG-first RAW path), and
+    # EDIT_MATH_VERSION purges previews/thumbnails but not working copies.
+    # Reusing such a copy would silently apply the recipe to clipped bytes.
+    # If the RAW source is offline/missing, though, the working copy is the
+    # only local fallback for resized exports.
+    if (
+        recipe
+        and os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+        and folder_path
+        and os.path.exists(os.path.join(folder_path, photo["filename"]))
+    ):
+        return False
+    wc_rel = photo["working_copy_path"]
+    if not wc_rel:
+        return False
+    wc_path = os.path.join(vireo_dir, wc_rel)
+    if not os.path.exists(wc_path):
+        return False
+    try:
+        from PIL import Image
+        with Image.open(wc_path) as wc_img:
+            wc_w, wc_h = wc_img.size
+    except Exception:
+        return False
+
+    wc_render_long = _recipe_result_long_edge(wc_w, wc_h, recipe)
+    crop = (recipe or {}).get("crop") if recipe else None
+
+    width, height = _recipe_source_dimensions(photo, exif_data)
+    if not crop:
+        if width > 0 and height > 0:
+            required_long = min(max_size, max(width, height))
+        else:
+            required_long = max_size
+        return wc_render_long >= required_long
+
+    if width <= 0 or height <= 0:
+        # Missing dimensions: prefer the original over silently exporting a
+        # cropped derivative from an undersized working copy.
+        return False
+
+    original_render_long = _recipe_result_long_edge(width, height, recipe)
+    if original_render_long <= 0:
+        return False
+    required_long = min(max_size, original_render_long)
+    return wc_render_long >= required_long
+
+
+def _companion_can_satisfy_export(
+    photo, folder_path, recipe, max_size, exif_data=None,
+    *, skip_raw_primary=True,
+):
+    """Return a full-resolution companion path when it can satisfy edited export.
+
+    By default RAW primaries are skipped so the export decodes the RAW with
+    ``RAW_DECODE_PRESERVE_HIGHLIGHTS`` instead of the camera JPEG (whose
+    highlights are already clipped). Pass ``skip_raw_primary=False`` to get
+    the companion path as a fallback when the RAW decode itself fails — a
+    rendered camera JPEG is still better than a failed export.
+    """
+    if not recipe:
+        return None
+    if (
+        skip_raw_primary
+        and os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+    ):
+        return None
+    companion_rel = photo["companion_path"]
+    if not companion_rel or not folder_path:
+        return None
+    companion = os.path.join(folder_path, companion_rel)
+    if not os.path.isfile(companion):
+        return None
+    try:
+        from PIL import Image
+        with Image.open(companion) as img:
+            comp_w, comp_h = _image_size_after_exif_orientation(img)
+    except Exception:
+        return None
+
+    original_w, original_h = _recipe_source_dimensions(photo, exif_data)
+    if original_w <= 0 or original_h <= 0:
+        return None
+    required_w, required_h = _recipe_result_dimensions(
+        original_w, original_h, recipe,
+    )
+    comp_render_w, comp_render_h = _recipe_result_dimensions(
+        comp_w, comp_h, recipe,
+    )
+    required_w, required_h = _scale_dimensions_to_max(
+        required_w, required_h, max_size,
+    )
+    comp_render_w, comp_render_h = _scale_dimensions_to_max(
+        comp_render_w, comp_render_h, max_size,
+    )
+    if comp_render_w + 1 >= required_w and comp_render_h + 1 >= required_h:
+        return companion
     return None
 
 

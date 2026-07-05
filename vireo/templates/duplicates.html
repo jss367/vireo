@@ -462,6 +462,9 @@
     var resolvedGroupCount = result.resolved_group_count || resolved.length;
     var resolvedLoserCount = result.resolved_loser_count ||
       resolved.reduce(function(n, p) { return n + (p.losers || []).length; }, 0);
+    var emptyFileGroupCount = resolved.reduce(function(n, p) {
+      return n + (p.empty_file_group ? 1 : 0);
+    }, 0);
     var resolvedBytes = 0;
     resolved.forEach(function(p) {
       (p.losers || []).forEach(function(l) {
@@ -490,6 +493,12 @@
           '<div class="label">Cleanup pending</div></div>' +
         '<div class="summary-stat"><div class="num">' + formatBytes(resolvedBytes) + '</div>' +
           '<div class="label">Extra files on disk</div></div>';
+      if (emptyFileGroupCount > 0) {
+        summaryHtml +=
+          '<div class="summary-stat"><div class="num" style="color:var(--warning, #d69e2e);">' +
+            emptyFileGroupCount + '</div>' +
+            '<div class="label">Empty-file groups</div></div>';
+      }
     }
     summaryHtml += '</div>';
     summary.innerHTML = summaryHtml;
@@ -542,10 +551,14 @@
           '<h2 class="' + toggleClass + '" id="resolvedToggle" onclick="toggleResolvedSection()">' +
             '<span class="chev">&#9656;</span> Resolved — cleanup pending' +
           '</h2>' +
-          '<div class="section-sub">Vireo already picked which copy to keep for ' +
-          resolvedGroupCount + ' group' + (resolvedGroupCount === 1 ? '' : 's') +
-          ', but the extra copies (' + formatBytes(resolvedBytes) +
-          ') are still on disk. Move them to Trash to finish cleanup.</div>' +
+          '<div class="section-sub">' +
+          (emptyFileGroupCount === resolvedGroupCount
+            ? 'These groups are zero-byte files, usually from an interrupted copy or storage problem. Check the original source or backup before deleting anything.'
+            : 'Vireo already picked which copy to keep for ' +
+              resolvedGroupCount + ' group' + (resolvedGroupCount === 1 ? '' : 's') +
+              ', but the extra copies (' + formatBytes(resolvedBytes) +
+              ') are still on disk. Empty-file groups need source or backup checks before cleanup.') +
+          '</div>' +
         '</div>';
       // Hide the bulk button entirely when every remaining resolved group is
       // protected — otherwise it sticks around as a no-op that always toasts
@@ -588,6 +601,14 @@
     var losers = group.losers || [];
     var winnerMissing = winner.exists === false;
     var anyLoserMissing = losers.some(function(l) { return l.exists === false; });
+    if (group.empty_file_group) {
+      return '<div class="group-warning severe">' +
+        '<b>Zero-byte image files detected.</b> These are not real duplicate photos; ' +
+        'they are empty placeholders, usually from an interrupted copy, failed import, ' +
+        'or storage issue. Check the camera card, original source, or backup before ' +
+        'moving files to Trash. After restoring or deleting them, rescan this folder.' +
+        '</div>';
+    }
     if (allMissing) {
       return '<div class="group-warning severe">' +
         '<b>All files in this group are missing on disk.</b> ' +
@@ -648,7 +669,7 @@
     });
     html += '<button class="keep-btn reveal-btn" onclick="revealBucketFolders(' + bi + ')" ' +
       'title="Open all bucket folders in your OS file manager">' +
-      'Reveal in Finder</button>';
+      escapeHtml(window.VIREO_REVEAL_LABEL) + '</button>';
     html += '<label class="delete-toggle">' +
       '<input type="checkbox" data-bi="' + bi + '" data-delete-toggle> ' +
       'Also move extras to Trash</label>';
@@ -881,10 +902,15 @@
     var html = '<div class="dup-group" data-hash="' + escapeHtml(hash) + '"' +
                (winnerMissing ? ' data-protected="winner-missing"' : '') + '>';
     html += '<div class="dup-group-header">';
-    html += '<label style="cursor:default;">' +
-            losers.length + ' extra ' +
-            (losers.length === 1 ? 'copy' : 'copies') +
-            ' rejected during scan</label>';
+    if (group.empty_file_group) {
+      html += '<label style="cursor:default;">' +
+              (losers.length + 1) + ' zero-byte files detected</label>';
+    } else {
+      html += '<label style="cursor:default;">' +
+              losers.length + ' extra ' +
+              (losers.length === 1 ? 'copy' : 'copies') +
+              ' rejected during scan</label>';
+    }
     html += '<span class="hash">' + escapeHtml(hash.substring(0, 16)) + '...</span>';
     html += '</div>';
     html += renderGroupWarning(group);
@@ -902,7 +928,9 @@
     var missing = photo.exists === false;
     if (missing) cls += ' missing';
     var badge = isWinner ? 'KEEP' : (isResolvedLoser ? 'REJECTED' : 'WILL REJECT');
-    var thumbUrl = photo.id != null ? ('/thumbnails/' + photo.id + '.jpg') : null;
+    var thumbUrl = photo.id != null
+      ? (window.vireoThumbnailUrl ? window.vireoThumbnailUrl(photo) : '/thumbnails/' + photo.id + '.jpg')
+      : null;
     var html = '<div class="dup-card ' + cls + '" data-photo-id="' +
                (photo.id != null ? photo.id : '') + '">';
     if (thumbUrl) {

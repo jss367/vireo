@@ -58,11 +58,16 @@ class PipelinePlanParams:
     # at plan time, since hashing thousands of files synchronously inside
     # a plan request would block the UI on every settings change.
     hash_duplicate_paths: list | None = None
-    # User's currently-selected preview pyramid tier from the cfgPreviewSize
-    # picker. Determines whether the previews substage runs at all (0 =
-    # "serve originals"; the substage no-ops) and which size's
-    # preview_cache rows count as "already done". ``None`` falls back to
-    # the workspace-effective config in ``_previews_plan``.
+    # True when the import run stages files on local disk first (copy mode
+    # with the "Use local disk while processing" toggle on). This changes
+    # what the post-ingest scan walks — the local staging root instead of
+    # the real destination — which is why _import_without_new_files() is
+    # only safe to assert in this mode (see its docstring).
+    local_processing: bool = False
+    # Optional API override for the preview tier. Normal pipeline runs leave
+    # this unset so the previews substage uses the workspace-effective
+    # preview_max_size setting. Explicit 0 means "serve originals"; the
+    # previews substage no-ops.
     preview_max_size: int | None = None
 
 
@@ -91,6 +96,10 @@ def _resolve_models(model_ids):
             "model_str": m.get("model_str") or "",
             "model_type": m.get("model_type", "bioclip"),
             "downloaded": m.get("downloaded", False),
+            # Needed by the label-free ToL check downstream so the planner
+            # doesn't return a fingerprint that promises label-free
+            # coverage for a model whose ToL artifacts aren't installed.
+            "weights_path": m.get("weights_path"),
         })
     return out
 
@@ -129,10 +138,8 @@ def _resolve_labels_for_models(models, labels_files, db):
         else:
             labels = _load(get_active_labels())
 
-    tol_supported = {
-        "hf-hub:imageomics/bioclip",
-        "hf-hub:imageomics/bioclip-2",
-    }
+    from models import tree_of_life_ready
+
     out = {}
     for m in models:
         if m["model_type"] == "timm":
@@ -141,7 +148,12 @@ def _resolve_labels_for_models(models, labels_files, db):
             # and the inventory page keys intrinsic timm coverage this way too.
             out[m["id"]] = {"fingerprint": TOL_SENTINEL, "n": 0}
         elif not labels:
-            if m["model_str"] in tol_supported:
+            # tree_of_life_ready (not just supports_tree_of_life) so a
+            # model whose ToL artifacts are declared optional and were
+            # skipped at download time is treated as blocked in
+            # label-free mode instead of returning a plan the pipeline
+            # will crash executing.
+            if tree_of_life_ready(m["model_str"], m.get("weights_path")):
                 out[m["id"]] = {"fingerprint": TOL_SENTINEL, "n": 0}
             else:
                 out[m["id"]] = {"fingerprint": None, "n": 0, "blocked": True}
@@ -151,6 +163,37 @@ def _resolve_labels_for_models(models, labels_files, db):
                 "n": len(labels),
             }
     return out
+
+
+def _import_without_new_files(params, photo_ids, new_count):
+    """True when import mode is active but the run brings no per-photo work.
+
+    Every selected file is already imported (``new_count == 0``, typically
+    via the hash/metadata duplicate gate) and none of the known copies fall
+    into scope at the selected paths (``photo_ids`` empty — the copies live
+    at other, already-cataloged paths). The per-photo stages will all
+    execute over an empty set, so their "Will run" summaries must say the
+    run imports 0 new photos instead of implying work is coming.
+
+    Only asserted for local-processing imports. In plain copy mode the
+    claim isn't airtight: when ingest copies nothing (everything
+    deduplicated), the post-ingest scan runs with ``restrict=None`` over
+    the REAL destination tree, and ``scanner.scan`` fires the photo
+    callback for existing cataloged rows there — so downstream
+    workspace-scoped stages (classify/extract/regroup) can still find
+    real work among previously-unprocessed destination photos. With
+    local processing on, the post-ingest scan targets the local staging
+    root instead, which stays empty when every file deduplicates (ingest
+    creates the staging dir but copies nothing into it), so "nothing
+    to …" is genuinely true. Copy mode keeps the pre-existing
+    forward-looking summaries and lets Group see upstream will-run.
+    """
+    return (
+        params.local_processing
+        and params.source_paths is not None
+        and new_count == 0
+        and not photo_ids
+    )
 
 
 def _classify_plan(db, params, photo_ids, new_count=0):
@@ -186,6 +229,31 @@ def _classify_plan(db, params, photo_ids, new_count=0):
     )
     eligible = total_dets * unblocked_count
 
+    # Every selected model is blocked on missing labels and can't run
+    # label-free (Tree of Life). The classify stage cannot do any work for
+    # ANY scope — including a fresh import with no detections cached yet, so
+    # this must run BEFORE the total_dets == 0 early-return below. Surface a
+    # distinct "blocked" state (not "will-run") so the UI can gate Start and
+    # point the user at Settings > Labels, rather than letting the job crash
+    # mid-pipeline at classify_job._load_labels (which is exactly the
+    # fresh-install failure this guards against).
+    if unblocked_count == 0:
+        blocked_all = [m["name"] for m in models]
+        return {
+            "state": "blocked",
+            "summary": (
+                "Blocked — download a species list (Settings › Labels) "
+                f"for: {', '.join(blocked_all)}"
+            ),
+            "detail": {
+                "blocked_models": blocked_all,
+                "pending": 0,
+                "eligible": 0,
+                "stale": 0,
+                "fingerprint_outdated": False,
+            },
+        }
+
     stale_total = 0
     if total_dets > 0 and not params.reclassify:
         for m in models:
@@ -200,12 +268,55 @@ def _classify_plan(db, params, photo_ids, new_count=0):
             )
     # Reclassify is a user override, not a settings-change signal.
     fingerprint_outdated = stale_total > 0 and not params.reclassify
+    fingerprint_reason = "label_set_changed" if fingerprint_outdated else None
 
     if total_dets == 0:
+        # Mixed shape with no detections cached yet: some selected models
+        # can run (label-free, or have labels) and others are blocked on
+        # missing labels. The earlier unblocked_count==0 guard doesn't fire
+        # here because at least one model is runnable, but classify_job
+        # iterates every selected model and the blocked ones will fail at
+        # _load_labels once MegaDetector creates detections. Emit "blocked"
+        # (gates Start) instead of "will-run" with no blocked_models, so
+        # the user fixes labels or deselects the blocked model before
+        # launching — same failure this PR is meant to prevent.
+        blocked_now = [
+            m["name"] for m in models
+            if label_resolution[m["id"]].get("blocked")
+        ]
+        if blocked_now:
+            return {
+                "state": "blocked",
+                "summary": (
+                    f"Blocked — {len(blocked_now)} model"
+                    f"{_plural(len(blocked_now))} need labels: "
+                    f"{', '.join(blocked_now)}"
+                ),
+                "detail": {
+                    "blocked_models": blocked_now,
+                    "total_dets": 0,
+                    "photos_with_dets": 0,
+                    "models": [m["name"] for m in models],
+                    "pending": 0,
+                    "eligible": 0,
+                    "new_photos": new_count,
+                    "stale": stale_total,
+                    "fingerprint_outdated": fingerprint_outdated,
+                    "fingerprint_reason": fingerprint_reason,
+                },
+            }
+        import_no_new = _import_without_new_files(params, photo_ids, new_count)
         if new_count > 0:
             summary = (
                 f"Will run — {new_count} new photo{_plural(new_count)} "
                 f"to detect & classify (MegaDetector runs first)"
+            )
+        elif import_no_new:
+            # All-duplicates import: MegaDetector will get 0 photos, so
+            # "will run first" would falsely promise detection work.
+            summary = (
+                "Will run — 0 new photos to import, nothing to "
+                "detect or classify"
             )
         else:
             summary = (
@@ -224,6 +335,8 @@ def _classify_plan(db, params, photo_ids, new_count=0):
                 "new_photos": new_count,
                 "stale": stale_total,
                 "fingerprint_outdated": fingerprint_outdated,
+                "fingerprint_reason": fingerprint_reason,
+                "import_no_new": import_no_new,
             },
         }
 
@@ -248,14 +361,19 @@ def _classify_plan(db, params, photo_ids, new_count=0):
             pending_per_model[m["name"]] = pending
             pending_total += pending
 
-    if blocked and not pending_total:
-        # eligible=0 here even when some unblocked models happen to be
-        # fully cached — the stage is functionally blocked on missing
-        # labels and the summary text already explains that. Returning
-        # eligible>0 with pending=0 would let the UI render
-        # "Resume (0 left)" against a state that's actually "Blocked".
+    if blocked:
+        # Any selected model that's blocked on missing labels prevents
+        # launching the stage: pipeline_job.classify_stage iterates every
+        # selected resolved spec, and the blocked model fails at
+        # classify_job._load_labels. Emit "blocked" (gates Start) whether or
+        # not the other unblocked models have pending work — returning
+        # "will-run" in the mixed pending case left Start enabled and let the
+        # missing-labels failure through on launch. The user fixes labels or
+        # deselects the blocked model before the rest can run. eligible=0
+        # (not eligible>0 with pending=0, which would render "Resume (0
+        # left)" against a stage that's actually blocked).
         return {
-            "state": "will-run",
+            "state": "blocked",
             "summary": (
                 f"Blocked — {len(blocked)} model{_plural(len(blocked))} "
                 f"need labels: {', '.join(blocked)}"
@@ -266,6 +384,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
                 "eligible": 0,
                 "stale": stale_total,
                 "fingerprint_outdated": fingerprint_outdated,
+                "fingerprint_reason": fingerprint_reason,
             },
         }
 
@@ -291,6 +410,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
                     "new_photos": new_count,
                     "stale": stale_total,
                     "fingerprint_outdated": fingerprint_outdated,
+                    "fingerprint_reason": fingerprint_reason,
                 },
             }
         return {
@@ -308,6 +428,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
                 "eligible": eligible,
                 "stale": stale_total,
                 "fingerprint_outdated": fingerprint_outdated,
+                "fingerprint_reason": fingerprint_reason,
             },
         }
 
@@ -322,10 +443,17 @@ def _classify_plan(db, params, photo_ids, new_count=0):
         breakdown = ", ".join(
             f"{n} for {name}" for name, n in pending_per_model.items()
         )
-        summary = (
-            f"Will classify {pending_total} new "
-            f"pair{_plural(pending_total)} ({breakdown})"
-        )
+        if fingerprint_outdated:
+            summary = (
+                f"Current label set differs from cached classifications — "
+                f"will classify {pending_total} "
+                f"pair{_plural(pending_total)} ({breakdown})"
+            )
+        else:
+            summary = (
+                f"Will classify {pending_total} new "
+                f"pair{_plural(pending_total)} ({breakdown})"
+            )
     if new_count > 0:
         # Mixed scope: some existing detections still to classify *and*
         # N new photos coming in (each will get its own detections + class).
@@ -342,11 +470,10 @@ def _classify_plan(db, params, photo_ids, new_count=0):
         "eligible": eligible + new_count,
         "stale": stale_total,
         "fingerprint_outdated": fingerprint_outdated,
+        "fingerprint_reason": fingerprint_reason,
     }
     if new_count > 0:
         detail["new_photos"] = new_count
-    if blocked:
-        detail["blocked_models"] = blocked
     return {"state": "will-run", "summary": summary, "detail": detail}
 
 
@@ -385,14 +512,22 @@ def _extract_plan(db, params, photo_ids, pipeline_cfg, new_count=0):
                     "stale": 0, "fingerprint_outdated": False,
                 },
             }
-        return {
-            "state": "will-run",
-            "summary": (
+        import_no_new = _import_without_new_files(params, photo_ids, new_count)
+        if import_no_new:
+            # All-duplicates import: classify has 0 photos to produce
+            # detections from, so nothing will ever become eligible here.
+            summary = "Will run — 0 new photos to import, nothing to extract"
+        else:
+            summary = (
                 "Will run after classify produces detections "
                 "(no eligible photos yet)"
-            ),
+            )
+        return {
+            "state": "will-run",
+            "summary": summary,
             "detail": {"eligible": 0, "pending": 0,
-                       "stale": 0, "fingerprint_outdated": False},
+                       "stale": 0, "fingerprint_outdated": False,
+                       "import_no_new": import_no_new},
         }
     if pending == 0 and stale == 0 and new_count == 0:
         return {
@@ -482,17 +617,25 @@ def _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg, new_count=0):
                     "fingerprint_outdated": stale > 0,
                 },
             }
-        return {
-            "state": "will-run",
-            "summary": (
+        import_no_new = _import_without_new_files(params, photo_ids, new_count)
+        if import_no_new:
+            # All-duplicates import: upstream stages run over 0 photos, so
+            # no masks or predictions are coming for this stage to consume.
+            summary = "Will run — 0 new photos to import, nothing to process"
+        else:
+            summary = (
                 "Will run after upstream produces masks + species "
                 "predictions (no eligible photos yet)"
-            ),
+            )
+        return {
+            "state": "will-run",
+            "summary": summary,
             "detail": {
                 "eligible": 0,
                 "pending": 0,
                 "stale": stale,
                 "fingerprint_outdated": stale > 0,
+                "import_no_new": import_no_new,
             },
         }
     if pending == 0 and new_count == 0:
@@ -542,10 +685,10 @@ def _previews_plan(db, params, photo_ids, new_count, effective_cfg):
 
     The card aggregates two pipeline substages (thumbnails + previews) so
     one plan entry has to answer for both. The accurate signal needs the
-    user's currently-selected preview size (a 1280px run is genuinely
-    "Already done" while the same library at 3840px isn't), so the
-    planner consults ``preview_max_size`` from the plan params (or the
-    workspace-effective config as a fallback).
+    active preview size (a 1280px library policy is genuinely "Already
+    done" while the same library at 3840px isn't), so the planner consults
+    an explicit ``preview_max_size`` API override when present, otherwise
+    the workspace-effective config.
 
     States:
       - ``will-skip``: only when both substages no-op. Today that's
@@ -582,13 +725,26 @@ def _previews_plan(db, params, photo_ids, new_count, effective_cfg):
 
     if eligible == 0 and new_count == 0:
         # Empty scope. The stages will run (the loop is just empty), but
-        # there's nothing to count. Be honest about that.
-        summary = (
-            "Will run — no photos in scope yet"
-            if not previews_skipped
-            else "Will run for thumbnails — no photos in scope (previews "
-                 "skipped: serves originals at full resolution)"
-        )
+        # there's nothing to count. Be honest about that — and when the
+        # emptiness comes from an all-duplicates import, say so outright:
+        # "no photos in scope yet" reads as "photos are coming", but this
+        # run will import 0 new photos.
+        import_no_new = _import_without_new_files(params, photo_ids, new_count)
+        if import_no_new:
+            summary = (
+                "Will run — 0 new photos to import, nothing to process"
+                if not previews_skipped
+                else "Will run for thumbnails — 0 new photos to import, "
+                     "nothing to process (previews skipped: serves "
+                     "originals at full resolution)"
+            )
+        else:
+            summary = (
+                "Will run — no photos in scope yet"
+                if not previews_skipped
+                else "Will run for thumbnails — no photos in scope (previews "
+                     "skipped: serves originals at full resolution)"
+            )
         return {
             "state": "will-run",
             "summary": summary,
@@ -600,6 +756,7 @@ def _previews_plan(db, params, photo_ids, new_count, effective_cfg):
                 "preview_size": preview_size,
                 "previews_skipped": previews_skipped,
                 "new_photos": 0,
+                "import_no_new": import_no_new,
             },
         }
 
@@ -706,7 +863,8 @@ def _previews_plan(db, params, photo_ids, new_count, effective_cfg):
     }
 
 
-def _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg):
+def _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg,
+                  import_no_new=False):
     if params.skip_regroup:
         return {
             "state": "will-skip",
@@ -716,6 +874,23 @@ def _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg):
         os.path.dirname(db_path), f"pipeline_results_ws{ws_id}.json",
     )
     cache_exists = os.path.exists(cache_path)
+    if import_no_new:
+        # All-duplicates local-processing import: ingest copies nothing into
+        # the staging root, the post-ingest scan collects 0 photos, so the
+        # job never creates a collection (collection_stage returns on
+        # `if not collected_photo_ids`) and regroup_stage skips on
+        # `not collection_id` (pipeline_job.py). The cache/fingerprint
+        # checks below would promise a Group run the job cannot perform —
+        # say the truth instead.
+        return {
+            "state": "will-skip",
+            "summary": "Will skip — 0 new photos to import, nothing to group",
+            "detail": {
+                "cache_exists": cache_exists,
+                "upstream_will_run": False,
+                "import_no_new": True,
+            },
+        }
     if upstream_will_run:
         return {
             "state": "will-run",
@@ -984,9 +1159,6 @@ def compute_plan(db, params, db_path):
     if params.collection_id is not None:
         from pipeline import _resolve_collection_photo_ids
         photo_ids = _resolve_collection_photo_ids(db, params.collection_id)
-        if params.exclude_photo_ids:
-            excl = set(params.exclude_photo_ids)
-            photo_ids = {pid for pid in photo_ids if pid not in excl}
     elif params.source_paths is not None:
         if not params.source_paths:
             # Import / new-images mode with every preview file deselected.
@@ -1039,14 +1211,36 @@ def compute_plan(db, params, db_path):
             {os.path.dirname(p) for p in unique_paths if p not in hash_dup_paths}
         )
 
+    # Exclusions apply in EVERY mode — the running job filters excluded ids
+    # in every stage, so a plan that only honored them for collections
+    # overstated the pending counts (the proxy drift this module forbids).
+    # Whole-workspace scope materializes the id set first so the same
+    # subtraction works; _scope_clause stages large sets in a temp table.
+    if params.exclude_photo_ids:
+        excl = set(params.exclude_photo_ids)
+        if photo_ids is None:
+            photo_ids = set(db.get_photo_ids())
+        photo_ids = {pid for pid in photo_ids if pid not in excl}
+
     classify = _classify_plan(db, params, photo_ids, new_count)
     extract = _extract_plan(db, params, photo_ids, pipeline_cfg, new_count)
     eye = _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg, new_count)
     previews = _previews_plan(db, params, photo_ids, new_count, effective_cfg)
-    upstream_will_run = any(
-        s["state"] == "will-run" for s in (classify, extract, eye)
+    # An all-duplicates import leaves every upstream stage "will-run" over
+    # an empty photo set — that is not new work, and letting it force the
+    # Group stage into "upstream stages have new work to do" would be a
+    # false claim. It also means the job never builds a collection, so
+    # regroup_stage itself will skip — _regroup_plan reports "Will skip"
+    # instead of falling through to its cache/fingerprint check.
+    import_no_new = _import_without_new_files(params, photo_ids, new_count)
+    upstream_will_run = (
+        not import_no_new
+        and any(s["state"] == "will-run" for s in (classify, extract, eye))
     )
-    regroup = _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg)
+    regroup = _regroup_plan(
+        db, params, db_path, ws_id, upstream_will_run, effective_cfg,
+        import_no_new=import_no_new,
+    )
 
     stages = {
         "Previews": previews,

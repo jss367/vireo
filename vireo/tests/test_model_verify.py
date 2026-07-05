@@ -310,6 +310,134 @@ def test_verify_model_without_revision_file_uses_main(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# verify_model — optional_files handling
+# Regression coverage for Codex P2 on PR #1077: HF tree returns every LFS
+# file, including declared-optional files (e.g. bioclip-2.5's ToL artifacts
+# once uploaded). If verify_model treats those as required, an install that
+# skipped its optionals (list_repo_files failed / optional download failed
+# / optionals not yet uploaded at download time) is flagged as corrupt on
+# the next verification pass and blocks even label-list classification.
+# ---------------------------------------------------------------------------
+
+
+def test_verify_model_ignores_absent_optional_files(tmp_path, monkeypatch):
+    """An expected LFS file that's declared optional AND missing locally
+    must NOT be reported as missing — the install is still ok."""
+    import model_verify
+
+    h_required = _write_with_hash(
+        tmp_path, "image_encoder.onnx.data", b"weights" * 10000
+    )
+    # tol_embeddings.npy is expected by HF but not written locally.
+
+    monkeypatch.setattr(
+        model_verify,
+        "fetch_expected_hashes",
+        lambda subdir, revision="main": {
+            "image_encoder.onnx.data": h_required,
+            "tol_embeddings.npy": "a" * 64,
+        },
+    )
+
+    result = model_verify.verify_model(
+        str(tmp_path), "bioclip-2.5-vith14",
+        optional_files=("tol_embeddings.npy", "tol_classes.json"),
+    )
+    assert result.ok is True
+    assert result.missing == []
+    assert result.mismatches == []
+
+
+def test_verify_model_verifies_present_optional_files(tmp_path, monkeypatch):
+    """An optional file that IS present must still be hash-checked — a
+    corrupt optional still needs to surface (mismatches list), even
+    though absence would be tolerated. Without this, silent bit-rot in
+    a downloaded ToL artifact would go undetected."""
+    import model_verify
+
+    h_required = _write_with_hash(
+        tmp_path, "image_encoder.onnx.data", b"weights" * 10000
+    )
+    # Optional file present locally but with the wrong bytes for the
+    # expected hash — must be caught as a mismatch.
+    (tmp_path / "tol_embeddings.npy").write_bytes(b"tampered")
+
+    monkeypatch.setattr(
+        model_verify,
+        "fetch_expected_hashes",
+        lambda subdir, revision="main": {
+            "image_encoder.onnx.data": h_required,
+            "tol_embeddings.npy": "a" * 64,
+        },
+    )
+
+    result = model_verify.verify_model(
+        str(tmp_path), "bioclip-2.5-vith14",
+        optional_files=("tol_embeddings.npy", "tol_classes.json"),
+    )
+    assert result.ok is False
+    assert result.mismatches == ["tol_embeddings.npy"]
+    assert result.missing == []
+
+
+def test_verify_model_still_flags_required_missing_with_optional_set(
+    tmp_path, monkeypatch,
+):
+    """Passing optional_files must not accidentally suppress reporting of
+    a genuinely missing required file. A required file absent locally
+    still shows up in `missing`."""
+    import model_verify
+
+    # image_encoder.onnx.data is expected but never written.
+    monkeypatch.setattr(
+        model_verify,
+        "fetch_expected_hashes",
+        lambda subdir, revision="main": {
+            "image_encoder.onnx.data": "a" * 64,
+            "tol_embeddings.npy": "b" * 64,
+        },
+    )
+
+    result = model_verify.verify_model(
+        str(tmp_path), "bioclip-2.5-vith14",
+        optional_files=("tol_embeddings.npy",),
+    )
+    assert result.ok is False
+    assert result.missing == ["image_encoder.onnx.data"]
+    assert result.mismatches == []
+
+
+def test_verify_if_needed_forwards_optional_files_to_verify_model(
+    tmp_path, monkeypatch,
+):
+    """verify_if_needed must forward optional_files down to verify_model,
+    so a pinned 2.5 install whose optional ToL files are absent doesn't
+    raise ModelCorruptError on the pipeline start path."""
+    import model_verify
+
+    (tmp_path / model_verify.REVISION_FILE).write_text("deadbeef")
+    h_required = _write_with_hash(
+        tmp_path, "image_encoder.onnx.data", b"weights" * 10000
+    )
+
+    monkeypatch.setattr(
+        model_verify,
+        "fetch_expected_hashes",
+        lambda subdir, revision="main": {
+            "image_encoder.onnx.data": h_required,
+            "tol_embeddings.npy": "a" * 64,
+        },
+    )
+
+    # Would raise ModelCorruptError if optional_files weren't forwarded.
+    model_verify.verify_if_needed(
+        "bioclip-2.5-vith14", str(tmp_path), "bioclip-2.5-vith14",
+        optional_files=("tol_embeddings.npy", "tol_classes.json"),
+    )
+    assert not (tmp_path / model_verify.VERIFY_FAILED_SENTINEL).exists()
+
+
+# ---------------------------------------------------------------------------
 # verify_if_needed — lazy, per-process cache, sentinel writing
 # ---------------------------------------------------------------------------
 
@@ -345,9 +473,12 @@ def test_verify_if_needed_calls_verify_model_once_per_process(
     call_count = {"n": 0}
     real_verify = model_verify.verify_model
 
-    def counting(model_dir, hf_subdir, revision=None):
+    def counting(model_dir, hf_subdir, revision=None, optional_files=None):
         call_count["n"] += 1
-        return real_verify(model_dir, hf_subdir, revision=revision)
+        return real_verify(
+            model_dir, hf_subdir, revision=revision,
+            optional_files=optional_files,
+        )
 
     monkeypatch.setattr(model_verify, "verify_model", counting)
 
@@ -616,7 +747,9 @@ def test_verify_all_models_reports_per_model_results(tmp_path, monkeypatch):
     for m in fake_models:
         os.makedirs(m["weights_path"], exist_ok=True)
 
-    def fake_verify_model(model_dir, hf_subdir, revision=None):
+    def fake_verify_model(
+        model_dir, hf_subdir, revision=None, optional_files=None,
+    ):
         if "good" in hf_subdir:
             return model_verify.VerifyResult(ok=True)
         return model_verify.VerifyResult(ok=False, mismatches=["weights"])
@@ -662,7 +795,7 @@ def test_verify_all_models_skips_sentinel_on_verify_error(tmp_path, monkeypatch)
         "source": "hf-hub:test",
     }]
 
-    def raise_verify_error(d, s, revision=None):
+    def raise_verify_error(d, s, revision=None, optional_files=None):
         raise model_verify.VerifyError("connection refused")
 
     monkeypatch.setattr(model_verify, "verify_model", raise_verify_error)
@@ -700,8 +833,8 @@ def test_verify_all_models_writes_sentinel_on_pinned_mismatch(tmp_path, monkeypa
     monkeypatch.setattr(
         model_verify,
         "verify_model",
-        lambda d, s, revision=None: model_verify.VerifyResult(
-            ok=False, mismatches=["weights"]
+        lambda d, s, revision=None, optional_files=None: (
+            model_verify.VerifyResult(ok=False, mismatches=["weights"])
         ),
     )
     import models
@@ -731,8 +864,8 @@ def test_verify_all_models_no_sentinel_on_unpinned_mismatch(tmp_path, monkeypatc
     monkeypatch.setattr(
         model_verify,
         "verify_model",
-        lambda d, s, revision=None: model_verify.VerifyResult(
-            ok=False, mismatches=["weights"]
+        lambda d, s, revision=None, optional_files=None: (
+            model_verify.VerifyResult(ok=False, mismatches=["weights"])
         ),
     )
     monkeypatch.setattr(
@@ -779,8 +912,8 @@ def test_verify_all_models_unpinned_mismatch_clears_stale_verify_skipped(
     monkeypatch.setattr(
         model_verify,
         "verify_model",
-        lambda d, s, revision=None: model_verify.VerifyResult(
-            ok=False, mismatches=["weights"]
+        lambda d, s, revision=None, optional_files=None: (
+            model_verify.VerifyResult(ok=False, mismatches=["weights"])
         ),
     )
     monkeypatch.setattr(
@@ -810,7 +943,9 @@ def test_verify_if_needed_catches_verify_error_and_fails_open(tmp_path, monkeypa
     # Pin so we exercise the standard (pinned) path.
     (tmp_path / model_verify.REVISION_FILE).write_text("abc123")
 
-    def always_raises(model_dir, hf_subdir, revision=None):
+    def always_raises(
+        model_dir, hf_subdir, revision=None, optional_files=None,
+    ):
         raise model_verify.VerifyError("network timeout")
 
     monkeypatch.setattr(model_verify, "verify_model", always_raises)
@@ -835,7 +970,9 @@ def test_verify_if_needed_skips_network_within_ttl_after_verify_error(tmp_path, 
 
     call_count = {"n": 0}
 
-    def counting_verify(model_dir, hf_subdir, revision=None):
+    def counting_verify(
+        model_dir, hf_subdir, revision=None, optional_files=None,
+    ):
         call_count["n"] += 1
         raise model_verify.VerifyError("still down")
 
@@ -863,7 +1000,9 @@ def test_verify_if_needed_retries_after_error_ttl_expires(tmp_path, monkeypatch)
 
     call_count = {"n": 0}
 
-    def counting_verify(model_dir, hf_subdir, revision=None):
+    def counting_verify(
+        model_dir, hf_subdir, revision=None, optional_files=None,
+    ):
         call_count["n"] += 1
         raise model_verify.VerifyError("timeout")
 

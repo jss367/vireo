@@ -314,3 +314,134 @@ def test_get_models_includes_model_type():
     models = get_models()
     for m in models:
         assert "model_type" in m, f"Model {m['id']} missing model_type from get_models()"
+
+
+# ── GPU lock scope ────────────────────────────────────────────────────────
+
+
+def test_classify_holds_gpu_lock_around_session_run_only(tmp_path):
+    """``TimmClassifier.classify`` must hold the GPU lock around
+    ``session.run`` only — not around preprocessing or softmax.
+
+    Regression for Codex P2 on PR #899: the lock has been pushed down
+    out of ``classify_job._flush_batch`` and into the classifier
+    implementations so concurrent pipelines aren't blocked on CPU work.
+    """
+    import pipeline_locks
+
+    clf = _make_fake_classifier(tmp_path)
+    # Declare a GPU provider so the conditional lock engages — this is
+    # the on-GPU code path; the CPU-only skip is covered in its own test
+    # below.
+    clf._session.get_providers.return_value = [
+        "CUDAExecutionProvider", "CPUExecutionProvider",
+    ]
+
+    snapshots = {}
+    original_run = clf._session.run.side_effect  # underlying fake_run
+
+    def record_during_run(output_names, input_dict):
+        snapshots["during_run"] = pipeline_locks._GPU_SEMAPHORE._value
+        return original_run(output_names, input_dict)
+
+    clf._session.run.side_effect = record_during_run
+
+    baseline = pipeline_locks._GPU_SEMAPHORE._value
+    img = Image.new("RGB", (500, 400), color="green")
+    clf.classify(img)
+
+    assert pipeline_locks._GPU_SEMAPHORE._value == baseline, (
+        "semaphore must be released on the way out"
+    )
+    assert snapshots["during_run"] == baseline - 1, (
+        "GPU lock must be held during _session.run"
+    )
+
+
+def test_classify_batch_holds_gpu_lock_around_session_run_only(tmp_path):
+    """``TimmClassifier.classify_batch`` must hold the GPU lock around
+    the single batched ``session.run`` call — not around per-image
+    preprocessing or the result-building loop.
+    """
+    import pipeline_locks
+
+    clf = _make_fake_classifier(tmp_path)
+    clf._session.get_providers.return_value = [
+        "CUDAExecutionProvider", "CPUExecutionProvider",
+    ]
+
+    snapshots = {}
+    original_run = clf._session.run.side_effect
+
+    def record_during_run(output_names, input_dict):
+        snapshots["during_run"] = pipeline_locks._GPU_SEMAPHORE._value
+        return original_run(output_names, input_dict)
+
+    clf._session.run.side_effect = record_during_run
+
+    baseline = pipeline_locks._GPU_SEMAPHORE._value
+    images = [Image.new("RGB", (500, 400), color="green") for _ in range(4)]
+    results = clf.classify_batch(images)
+
+    assert len(results) == 4
+    assert pipeline_locks._GPU_SEMAPHORE._value == baseline, (
+        "semaphore must be released on the way out"
+    )
+    assert snapshots["during_run"] == baseline - 1, (
+        "GPU lock must be held during _session.run"
+    )
+
+
+def test_classify_skips_gpu_lock_for_cpu_only_session(tmp_path):
+    """When the timm session runs on CPU (Apple Silicon excludes CoreML
+    for external-data models; CPU-only installs likewise), classify()
+    must not take the process-wide GPU semaphore. Codex P2 on PR #899:
+    blocking real GPU stages in other pipelines for CPU-only work
+    defeats the concurrency this design enables.
+    """
+    import pipeline_locks
+
+    clf = _make_fake_classifier(tmp_path)
+    clf._session.get_providers.return_value = ["CPUExecutionProvider"]
+
+    snapshots = {}
+    original_run = clf._session.run.side_effect
+
+    def record_during_run(output_names, input_dict):
+        snapshots["during_run"] = pipeline_locks._GPU_SEMAPHORE._value
+        return original_run(output_names, input_dict)
+
+    clf._session.run.side_effect = record_during_run
+
+    baseline = pipeline_locks._GPU_SEMAPHORE._value
+    img = Image.new("RGB", (500, 400), color="green")
+    clf.classify(img)
+
+    assert snapshots["during_run"] == baseline, (
+        "CPU-only session must not take the GPU semaphore"
+    )
+
+
+def test_classify_batch_skips_gpu_lock_for_cpu_only_session(tmp_path):
+    """Same CPU-only skip as classify(), but for the batched path."""
+    import pipeline_locks
+
+    clf = _make_fake_classifier(tmp_path)
+    clf._session.get_providers.return_value = ["CPUExecutionProvider"]
+
+    snapshots = {}
+    original_run = clf._session.run.side_effect
+
+    def record_during_run(output_names, input_dict):
+        snapshots["during_run"] = pipeline_locks._GPU_SEMAPHORE._value
+        return original_run(output_names, input_dict)
+
+    clf._session.run.side_effect = record_during_run
+
+    baseline = pipeline_locks._GPU_SEMAPHORE._value
+    images = [Image.new("RGB", (500, 400), color="green") for _ in range(3)]
+    clf.classify_batch(images)
+
+    assert snapshots["during_run"] == baseline, (
+        "CPU-only session must not take the GPU semaphore in the batched path"
+    )

@@ -1,0 +1,409 @@
+# vireo/tests/test_pipeline_locks.py
+import os
+import sys
+import threading
+import time
+
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.dirname(__file__))
+
+from pipeline_locks import (
+    _GPU_SEMAPHORE,
+    acquire_gpu,
+    acquire_gpu_if_session_uses_it,
+    acquire_photo_mask,
+    acquire_workspace_regroup,
+    release_archive_destination,
+    try_reserve_archive_destination,
+)
+
+
+class _FakeSession:
+    def __init__(self, providers):
+        self._providers = list(providers)
+
+    def get_providers(self):
+        return list(self._providers)
+
+
+def test_acquire_gpu_if_session_uses_it_takes_lock_for_cuda_session():
+    sess = _FakeSession(["CUDAExecutionProvider", "CPUExecutionProvider"])
+    before = _GPU_SEMAPHORE._value
+    with acquire_gpu_if_session_uses_it(sess):
+        held = _GPU_SEMAPHORE._value
+    after = _GPU_SEMAPHORE._value
+    assert before == 1
+    assert held == 0, "semaphore should be acquired for GPU sessions"
+    assert after == 1
+
+
+def test_acquire_gpu_if_session_uses_it_takes_lock_for_coreml_session():
+    sess = _FakeSession(["CoreMLExecutionProvider", "CPUExecutionProvider"])
+    with acquire_gpu_if_session_uses_it(sess):
+        assert _GPU_SEMAPHORE._value == 0
+
+
+def test_acquire_gpu_if_session_uses_it_skips_lock_for_cpu_only_session():
+    sess = _FakeSession(["CPUExecutionProvider"])
+    before = _GPU_SEMAPHORE._value
+    with acquire_gpu_if_session_uses_it(sess):
+        held = _GPU_SEMAPHORE._value
+    after = _GPU_SEMAPHORE._value
+    assert before == 1
+    assert held == 1, "CPU-only session must not take the GPU semaphore"
+    assert after == 1
+
+
+def test_acquire_gpu_if_session_uses_it_defaults_to_lock_when_providers_missing():
+    """A session that doesn't expose get_providers (or raises) must
+    conservatively take the lock — same behavior as before this check existed.
+    """
+    class _NoProviders:
+        pass
+
+    with acquire_gpu_if_session_uses_it(_NoProviders()):
+        assert _GPU_SEMAPHORE._value == 0
+
+
+def _wait_until(predicate, timeout=1.0, interval=0.005):
+    """Poll ``predicate`` until true or timeout; assert on timeout.
+
+    Replaces unbounded ``while not <cond>: time.sleep(...)`` loops that
+    would otherwise hang the suite if a thread stalls.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return
+        time.sleep(interval)
+    raise AssertionError(f"condition not met within {timeout}s")
+
+
+def test_gpu_lock_serialises_two_threads():
+    """Only one thread holds the GPU lock at a time."""
+    held = []
+    release_first = threading.Event()
+    second_started = threading.Event()
+
+    def first():
+        with acquire_gpu():
+            held.append("first-in")
+            second_started.wait(timeout=2.0)
+            time.sleep(0.05)  # ensure second is blocked, not racing
+            held.append("first-out")
+        # released
+        time.sleep(0.05)
+
+    def second():
+        second_started.set()
+        with acquire_gpu():
+            held.append("second-in")
+
+    t1 = threading.Thread(target=first)
+    t2 = threading.Thread(target=second)
+    t1.start()
+    _wait_until(lambda: "first-in" in held)
+    t2.start()
+    t1.join(timeout=3.0)
+    t2.join(timeout=3.0)
+    assert not t1.is_alive(), "first thread did not finish"
+    assert not t2.is_alive(), "second thread did not finish"
+
+    assert held == ["first-in", "first-out", "second-in"], (
+        f"second must wait for first to release; got {held}"
+    )
+
+
+def test_gpu_lock_released_after_with_block():
+    """Sequential `with acquire_gpu()` calls don't deadlock — release works."""
+    for _ in range(3):
+        with acquire_gpu():
+            pass
+    # If release was broken, the second iteration would deadlock and the
+    # test timeout would fire. Reaching here is the assertion.
+
+
+def test_workspace_regroup_lock_serialises_same_workspace():
+    """Two threads regrouping the same workspace take turns."""
+    held = []
+    second_started = threading.Event()
+
+    def first():
+        with acquire_workspace_regroup(42):
+            held.append("first-in")
+            second_started.wait(timeout=2.0)
+            time.sleep(0.05)
+            held.append("first-out")
+
+    def second():
+        second_started.set()
+        with acquire_workspace_regroup(42):
+            held.append("second-in")
+
+    t1 = threading.Thread(target=first)
+    t2 = threading.Thread(target=second)
+    t1.start()
+    _wait_until(lambda: "first-in" in held)
+    t2.start()
+    t1.join(timeout=3.0)
+    t2.join(timeout=3.0)
+    assert not t1.is_alive(), "first thread did not finish"
+    assert not t2.is_alive(), "second thread did not finish"
+
+    assert held == ["first-in", "first-out", "second-in"], (
+        f"second on same workspace must wait; got {held}"
+    )
+
+
+def test_workspace_regroup_lock_does_not_block_other_workspaces():
+    """Different workspace IDs use independent locks; second runs immediately."""
+    held = []
+    first_holding = threading.Event()
+    let_first_go = threading.Event()
+
+    def first():
+        with acquire_workspace_regroup(1):
+            held.append("first-in")
+            first_holding.set()
+            let_first_go.wait(timeout=2.0)
+            held.append("first-out")
+
+    def second():
+        with acquire_workspace_regroup(2):
+            held.append("second-in")
+
+    t1 = threading.Thread(target=first)
+    t2 = threading.Thread(target=second)
+    t1.start()
+    assert first_holding.wait(timeout=1.0)
+    t2.start()
+    t2.join(timeout=1.0)
+    assert not t2.is_alive(), "second thread should not be blocked by a different workspace"
+    assert "second-in" in held, "different workspace must not be blocked"
+    let_first_go.set()
+    t1.join(timeout=2.0)
+    assert not t1.is_alive(), "first thread did not finish"
+
+
+def test_workspace_regroup_lock_reentrant_keys_share_one_lock():
+    """The lock object for a given workspace_id is stable across calls."""
+    from pipeline_locks import _workspace_regroup_lock_for_tests
+    lock1 = _workspace_regroup_lock_for_tests(7)
+    lock2 = _workspace_regroup_lock_for_tests(7)
+    assert lock1 is lock2
+
+
+def test_photo_mask_lock_serialises_same_photo():
+    """Two threads writing the same photo's mask take turns."""
+    held = []
+
+    def first():
+        with acquire_photo_mask(42):
+            held.append("first-in")
+            time.sleep(0.05)
+            held.append("first-out")
+
+    def second():
+        with acquire_photo_mask(42):
+            held.append("second-in")
+
+    t1 = threading.Thread(target=first)
+    t2 = threading.Thread(target=second)
+    t1.start()
+    _wait_until(lambda: "first-in" in held)
+    t2.start()
+    t1.join(timeout=3.0)
+    t2.join(timeout=3.0)
+    assert not t1.is_alive() and not t2.is_alive()
+    assert held == ["first-in", "first-out", "second-in"], held
+
+
+def test_photo_mask_lock_does_not_block_different_photo():
+    """Different photo IDs don't contend — common case."""
+    held = []
+    first_holding = threading.Event()
+    let_first_go = threading.Event()
+
+    def first():
+        with acquire_photo_mask(1):
+            held.append("first-in")
+            first_holding.set()
+            let_first_go.wait(timeout=2.0)
+
+    def second():
+        with acquire_photo_mask(2):
+            held.append("second-in")
+
+    t1 = threading.Thread(target=first)
+    t2 = threading.Thread(target=second)
+    t1.start()
+    assert first_holding.wait(timeout=1.0)
+    t2.start()
+    t2.join(timeout=1.0)
+    assert not t2.is_alive(), "different photo must not be blocked"
+    assert "second-in" in held
+    let_first_go.set()
+    t1.join(timeout=2.0)
+
+
+def test_photo_mask_lock_serialises_same_photo_across_variants():
+    """Same photo, DIFFERENT SAM variants still take turns.
+
+    Cross-variant serialisation is load-bearing: ``set_active_mask_variant``
+    and ``update_photo_embeddings`` denormalise into the same ``photos``
+    row regardless of variant, so interleaved writes between two
+    pipelines on the same photo with different variants would corrupt
+    the row (e.g. active_mask_variant=large but dino embedding cropped
+    from small's mask). The lock keys on photo_id only — variant is
+    intentionally NOT part of the key.
+
+    The pipeline_job call site passes only photo_id; this test exercises
+    the lock primitive directly to lock in the cross-variant guarantee.
+    """
+    held = []
+    first_holding = threading.Event()
+    let_first_go = threading.Event()
+
+    def first():
+        # Caller treats lock as photo-scoped — variant is irrelevant.
+        with acquire_photo_mask(42):
+            held.append("first-in")
+            first_holding.set()
+            let_first_go.wait(timeout=2.0)
+            held.append("first-out")
+
+    def second():
+        with acquire_photo_mask(42):
+            held.append("second-in")
+
+    t1 = threading.Thread(target=first)
+    t2 = threading.Thread(target=second)
+    t1.start()
+    assert first_holding.wait(timeout=1.0)
+    t2.start()
+    # Second must block until first releases — even though semantically
+    # the two pipelines might be working different variants.
+    assert not held.count("second-in"), (
+        "second thread ran while first held the photo lock"
+    )
+    let_first_go.set()
+    t1.join(timeout=2.0)
+    t2.join(timeout=2.0)
+    assert held == ["first-in", "first-out", "second-in"], held
+
+
+def test_photo_mask_lock_reentrant_keys_share_one_lock():
+    """The lock object for a given photo_id is stable across calls."""
+    from pipeline_locks import _photo_mask_lock_for_tests
+    lock1 = _photo_mask_lock_for_tests(7)
+    lock2 = _photo_mask_lock_for_tests(7)
+    assert lock1 is lock2
+
+
+def test_archive_destination_reserve_rejects_exact_match():
+    """Two pipelines targeting the same destination cannot both reserve."""
+    try:
+        assert try_reserve_archive_destination("/Photos/Shoot") is True
+        assert try_reserve_archive_destination("/Photos/Shoot") is False
+    finally:
+        release_archive_destination("/Photos/Shoot")
+
+
+def test_archive_destination_reserve_rejects_descendant():
+    """A child of an already-reserved root is rejected before processing starts.
+
+    Without this the parent run can create a tracked folder row that the
+    child later tries to archive into, leaving overlapping folder roots in
+    the catalog after the second job moves staging into the already-claimed
+    tree.
+    """
+    try:
+        assert try_reserve_archive_destination("/Photos/Shoot") is True
+        assert try_reserve_archive_destination("/Photos/Shoot/Subset") is False
+    finally:
+        release_archive_destination("/Photos/Shoot")
+
+
+def test_archive_destination_reserve_rejects_ancestor():
+    """A parent of an already-reserved leaf is rejected too.
+
+    Symmetry matters because either run can land first; once the leaf is
+    in flight, a second pipeline aiming at the enclosing root would later
+    have to reparent the in-flight subtree, which ``move_folder_path``
+    doesn't do.
+    """
+    try:
+        assert try_reserve_archive_destination("/Photos/Shoot/Subset") is True
+        assert try_reserve_archive_destination("/Photos/Shoot") is False
+    finally:
+        release_archive_destination("/Photos/Shoot/Subset")
+
+
+def test_archive_destination_reserve_allows_sibling_prefix_lookalike():
+    """``/Photos/Shoot`` and ``/Photos/ShootSubset`` are siblings, not nested.
+
+    A naive ``startswith`` overlap check would false-positive here and
+    block an unrelated archive. ``commonpath`` correctly returns
+    ``/Photos`` for both, which equals neither leaf.
+    """
+    try:
+        assert try_reserve_archive_destination("/Photos/Shoot") is True
+        assert try_reserve_archive_destination("/Photos/ShootSubset") is True
+    finally:
+        release_archive_destination("/Photos/Shoot")
+        release_archive_destination("/Photos/ShootSubset")
+
+
+def test_archive_destination_release_allows_reacquire():
+    """After release, the same destination (or a nested one) can be claimed."""
+    assert try_reserve_archive_destination("/Photos/Shoot") is True
+    release_archive_destination("/Photos/Shoot")
+    try:
+        # Same path is reusable.
+        assert try_reserve_archive_destination("/Photos/Shoot") is True
+        release_archive_destination("/Photos/Shoot")
+        # And a previously-blocked nested path is also reusable.
+        assert try_reserve_archive_destination("/Photos/Shoot/Subset") is True
+    finally:
+        release_archive_destination("/Photos/Shoot/Subset")
+
+
+def test_archive_destination_reserve_normalises_relative_paths():
+    """Relative and absolute spellings of the same target collide."""
+    abs_path = os.path.abspath("Photos/Shoot")
+    try:
+        assert try_reserve_archive_destination("Photos/Shoot") is True
+        assert try_reserve_archive_destination(abs_path) is False
+    finally:
+        release_archive_destination("Photos/Shoot")
+
+
+def test_archive_destination_reserve_rejects_symlinked_alias(tmp_path):
+    """A symlink and its real path resolve to the same archive root.
+
+    Without realpath in the normalisation, two jobs choosing the same
+    physical destination via different spellings (a real path and a
+    symlink to it) could both pass the reservation check; with two
+    pipeline slots they would then race into the same archive root before
+    ``move_folder``'s catalog-side guards run.
+    """
+    real_target = tmp_path / "real_dest"
+    real_target.mkdir()
+    symlink = tmp_path / "link_dest"
+    try:
+        symlink.symlink_to(real_target)
+    except OSError as exc:
+        pytest.skip(f"symlinks not supported on this filesystem: {exc}")
+
+    real_child = str(real_target / "Shoot")
+    aliased_child = str(symlink / "Shoot")
+
+    try:
+        assert try_reserve_archive_destination(real_child) is True
+        # Aliased path resolves through realpath to the same physical
+        # directory — the second reservation must collide.
+        assert try_reserve_archive_destination(aliased_child) is False
+    finally:
+        release_archive_destination(real_child)

@@ -5,6 +5,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from datetime import datetime
 
+import pytest
 from db import Database
 from ingest import build_destination_path, discover_source_files, ingest, preview_destination
 from PIL import Image
@@ -132,6 +133,195 @@ def test_discover_source_files_nonexistent_dir():
     assert files == []
 
 
+def test_discover_source_files_skips_excluded_root_itself(tmp_path):
+    """Picking a Photos library bundle directly as an import source must
+    return no candidates — without a root-level guard, os.walk would still
+    open the bundle (prune_scan_dirs only filters children) and trip the
+    macOS TCC prompt this guard exists to avoid."""
+    src = tmp_path / "Photos Library.photoslibrary"
+    _create_test_files(str(src / "originals"), ["managed.jpg"])
+    assert discover_source_files(str(src), file_types="both") == []
+
+
+def test_discover_source_files_skips_source_nested_in_excluded_bundle(tmp_path):
+    """Picking a *subfolder* of a Photos library bundle as an import source
+    must also return no candidates. A leaf-only check would let
+    ``.../Photos Library.photoslibrary/originals`` through (basename
+    ``originals`` is unremarkable) and os.walk would open the protected
+    bundle subtree and re-trip the macOS TCC prompt this guard exists to
+    avoid. The guard must check every ancestor."""
+    src = tmp_path / "Photos Library.photoslibrary" / "originals"
+    _create_test_files(str(src / "0"), ["managed.jpg"])
+    assert discover_source_files(str(src), file_types="both") == []
+
+
+def test_discover_source_files_non_recursive_skips_bundle_children(tmp_path):
+    """``discover_source_files(recursive=False)`` on a normal source
+    like ``~/Pictures`` must drop excluded bundle children (direct
+    ``Photos Library.photoslibrary`` entries or symlinks pointing at
+    one) before the ``is_file()`` filter would stat them. A bare
+    ``iterdir() + is_file()`` would follow the symlink to the bundle
+    target and re-trip the macOS "access data from other apps" TCC
+    prompt this guard exists to avoid.
+    """
+    import sys
+    if sys.platform == "win32":
+        pytest.skip("POSIX symlinks required")
+
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    _create_test_files(str(bundle / "originals"), ["managed.jpg"])
+
+    src = tmp_path / "sd_card"
+    _create_test_files(str(src), ["real.jpg"])
+    # Direct bundle child as a sibling.
+    _create_test_files(
+        str(src / "Photos Library.photoslibrary" / "originals"),
+        ["direct_managed.jpg"],
+    )
+    # Symlinked bundle child.
+    os.symlink(str(bundle), str(src / "LibraryAlias"))
+
+    files = discover_source_files(
+        str(src), file_types="both", recursive=False
+    )
+    names = {f.name for f in files}
+    assert names == {"real.jpg"}
+
+
+def test_discover_source_files_non_recursive_does_not_stat_bundle_children(
+    tmp_path, monkeypatch
+):
+    """Belt-and-braces guard for the non-recursive branch. Fails if
+    ``Path.is_file`` is ever called on an excluded child — that
+    ``is_file`` follows symlinks and would re-trip the macOS TCC
+    prompt before the extension filter could reject the entry.
+    """
+    import sys
+    if sys.platform == "win32":
+        pytest.skip("POSIX symlinks required")
+    from pathlib import Path
+
+    from image_loader import is_excluded_scan_path
+
+    real_is_file = Path.is_file
+
+    def guarded_is_file(self):
+        if is_excluded_scan_path(self):
+            raise AssertionError(
+                f"is_file() called on excluded path before guard: {self}"
+            )
+        return real_is_file(self)
+
+    monkeypatch.setattr(Path, "is_file", guarded_is_file)
+
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    _create_test_files(str(bundle / "originals"), ["managed.jpg"])
+
+    src = tmp_path / "sd_card"
+    _create_test_files(str(src), ["real.jpg"])
+    _create_test_files(
+        str(src / "Photos Library.photoslibrary" / "originals"),
+        ["direct_managed.jpg"],
+    )
+    os.symlink(str(bundle), str(src / "LibraryAlias"))
+
+    files = discover_source_files(
+        str(src), file_types="both", recursive=False
+    )
+    names = {f.name for f in files}
+    assert names == {"real.jpg"}
+
+
+def test_discover_source_files_recursive_streams_candidates(
+    tmp_path, monkeypatch
+):
+    """The recursive walk must stream candidate paths through the
+    image-extension/``is_file()`` filter rather than collecting every
+    walked filename first. A source like a home directory or external
+    disk root can yield millions of non-image filenames; buffering them
+    all before the filter would balloon memory proportional to the whole
+    tree and stall the preview before any photo is copied. The previous
+    ``Path.rglob`` implementation was consumed lazily by ``sorted()`` —
+    keep the same streaming behaviour.
+
+    Verified by tracking the interleave of ``safe_scan_walk`` yields
+    and ``Path.is_file`` filter calls. If the recursive branch buffers
+    every yield first, every ``is_file`` call happens *after* every
+    yield; streaming produces interleaved calls.
+    """
+    from pathlib import Path
+
+    import ingest as ingest_mod
+
+    real_walk = ingest_mod.safe_scan_walk
+    real_is_file = Path.is_file
+
+    events = []
+
+    def tracking_walk(top, onerror=None):
+        # Yield one filename per tuple so each name's emission is its own
+        # observable event in `events`.
+        for dirpath, _dirnames, filenames in real_walk(top, onerror=onerror):
+            for name in filenames:
+                events.append(("yield", name))
+                yield dirpath, [], [name]
+
+    def tracking_is_file(self):
+        events.append(("is_file", self.name))
+        return real_is_file(self)
+
+    monkeypatch.setattr(ingest_mod, "safe_scan_walk", tracking_walk)
+    monkeypatch.setattr(Path, "is_file", tracking_is_file)
+
+    src = tmp_path / "src"
+    _create_test_files(str(src), ["a.jpg", "b.txt", "c.jpg", "d.txt"])
+
+    files = discover_source_files(str(src), file_types="both")
+    assert {f.name for f in files} == {"a.jpg", "c.jpg"}
+
+    yield_indices = [i for i, (kind, _) in enumerate(events) if kind == "yield"]
+    is_file_indices = [
+        i for i, (kind, _) in enumerate(events) if kind == "is_file"
+    ]
+    assert yield_indices and is_file_indices
+    assert min(is_file_indices) < max(yield_indices), (
+        "discover_source_files buffered every walked candidate before "
+        "running the image filter — see the streaming requirement in "
+        "ingest.discover_source_files. Event order: " + repr(events)
+    )
+
+
+def test_discover_source_files_rejects_excluded_source_before_statting(
+    tmp_path, monkeypatch
+):
+    """The bundle guard must run BEFORE ``Path.is_dir`` on the source.
+
+    ``Path.is_dir`` follows symlinks and stat's the target, which alone
+    trips the macOS TCC prompt for a directly selected bundle or a
+    symlink to one. Fails the test if ``Path.is_dir`` is called on a
+    path the exclusion check covers — if the order is wrong, the stat
+    sneaks in before the guard returns.
+    """
+    from pathlib import Path
+
+    from image_loader import is_excluded_scan_path
+
+    real_is_dir = Path.is_dir
+
+    def guarded_is_dir(self):
+        if is_excluded_scan_path(self):
+            raise AssertionError(
+                f"is_dir() called on excluded path before guard: {self}"
+            )
+        return real_is_dir(self)
+
+    monkeypatch.setattr(Path, "is_dir", guarded_is_dir)
+
+    src = tmp_path / "Photos Library.photoslibrary"
+    _create_test_files(str(src / "originals"), ["managed.jpg"])
+    assert discover_source_files(str(src), file_types="both") == []
+
+
 def test_ingest_copies_files_to_date_folders(tmp_path):
     """Files are copied to destination organized by EXIF date (falls back to mtime)."""
     src = tmp_path / "sd_card"
@@ -152,6 +342,78 @@ def test_ingest_copies_files_to_date_folders(tmp_path):
     assert result["copied"] == 1
     assert result["total"] == 1
     assert (dst / "2026" / "2026-03-28" / "photo.jpg").exists()
+
+
+def test_ingest_uses_metadata_dates_when_lightweight_exif_fails(
+    tmp_path, monkeypatch
+):
+    """ExifTool metadata keeps copied files split by capture date."""
+    import import_dedup as import_dedup_module
+    import metadata as metadata_module
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    files = ["a.jpg", "b.jpg"]
+    for i, name in enumerate(files):
+        Image.new("RGB", (100, 100), color=(i * 80, 0, 0)).save(str(src / name))
+        mtime = datetime(2026, 3, 30, 12, 0, 0).timestamp()
+        os.utime(str(src / name), (mtime, mtime))
+
+    monkeypatch.setattr(
+        import_dedup_module, "read_exif_timestamp", lambda _path: None
+    )
+
+    def fake_extract_metadata(paths, restricted_tags=None):
+        return {
+            str(src / "a.jpg"): {"EXIF": {"DateTimeOriginal": "2026:03:25 10:00:00"}},
+            str(src / "b.jpg"): {"EXIF": {"DateTimeOriginal": "2026:03:26 10:00:00"}},
+        }
+
+    monkeypatch.setattr(metadata_module, "extract_metadata", fake_extract_metadata)
+
+    db = Database(str(tmp_path / "test.db"))
+    result = ingest(str(src), str(dst), db=db)
+
+    assert result["copied"] == 2
+    assert (dst / "2026" / "2026-03-25" / "a.jpg").exists()
+    assert (dst / "2026" / "2026-03-26" / "b.jpg").exists()
+    assert not (dst / "2026" / "2026-03-30" / "a.jpg").exists()
+
+
+def test_ingest_duplicate_only_reimport_skips_all(tmp_path, monkeypatch):
+    """A card whose files all match extra_known_hashes copies nothing.
+
+    The heuristic gate resolves EXIF capture times up front (cheap header
+    reads — that's the point of the metadata-first design), but files
+    matching known hashes must still be skipped without being copied.
+    """
+    from scanner import compute_file_hash
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    files = ["a.jpg", "b.jpg"]
+    hashes = set()
+    for i, name in enumerate(files):
+        Image.new("RGB", (100, 100), color=(i * 80, 0, 0)).save(str(src / name))
+        hashes.add(compute_file_hash(str(src / name)))
+
+    db = Database(str(tmp_path / "test.db"))
+    result = ingest(
+        str(src),
+        str(dst),
+        db=db,
+        skip_duplicates=True,
+        extra_known_hashes=hashes,
+    )
+
+    assert result["copied"] == 0
+    assert result["skipped_duplicate"] == 2
 
 
 def test_ingest_unsorted_fallback(tmp_path):
@@ -198,6 +460,93 @@ def test_ingest_skip_duplicates(tmp_path):
     assert result2["skipped_duplicate"] == 1
 
 
+def test_ingest_skip_duplicates_within_single_batch(tmp_path):
+    """Two byte-identical source files (different names) in one import are deduped.
+
+    Regression: the two-pass ingest (hash → partition → copy) must still
+    suppress intra-batch duplicates the way the prior single-pass loop
+    did, where each copied hash was visible to subsequent iterations.
+    """
+    import shutil
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    # Same bytes, two filenames. Different mtimes so a naive
+    # "different timestamp → different destination folder" path
+    # would copy both — only the hash check catches it.
+    Image.new("RGB", (100, 100), color="blue").save(str(src / "IMG_001.jpg"))
+    shutil.copyfile(str(src / "IMG_001.jpg"), str(src / "IMG_002.jpg"))
+    mtime_a = datetime(2026, 3, 28).timestamp()
+    mtime_b = datetime(2026, 4, 15).timestamp()
+    os.utime(str(src / "IMG_001.jpg"), (mtime_a, mtime_a))
+    os.utime(str(src / "IMG_002.jpg"), (mtime_b, mtime_b))
+
+    db = Database(str(tmp_path / "test.db"))
+    result = ingest(str(src), str(dst), db=db, skip_duplicates=True)
+
+    assert result["copied"] == 1
+    assert result["skipped_duplicate"] == 1
+    # Exactly one file on disk under dst.
+    on_disk = [p for p in dst.rglob("*") if p.is_file()]
+    assert len(on_disk) == 1
+
+
+def test_ingest_intra_batch_dup_retries_after_primary_failure(
+    tmp_path, monkeypatch
+):
+    """If the primary copy of a duplicate pair fails in pass 2, a
+    byte-identical sibling in the same batch still gets a chance to
+    import the bytes.
+
+    Regression: when intra-batch dedup was eagerly marked in pass 1, a
+    failed primary copy left every byte-identical sibling permanently
+    skipped — no copy ever landed for that content even though the user
+    asked for ``skip_duplicates=True`` (which only means "don't import
+    bytes I already have", not "give up if the first try fails").
+    """
+    import shutil
+
+    import ingest as ingest_module
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    # Two byte-identical files; same mtime so they target the same date folder.
+    Image.new("RGB", (100, 100), color="green").save(str(src / "IMG_001.jpg"))
+    shutil.copyfile(str(src / "IMG_001.jpg"), str(src / "IMG_002.jpg"))
+    mtime = datetime(2026, 3, 28).timestamp()
+    os.utime(str(src / "IMG_001.jpg"), (mtime, mtime))
+    os.utime(str(src / "IMG_002.jpg"), (mtime, mtime))
+
+    # Fail the primary's copy only; the sibling's copy must proceed.
+    real_copy2 = ingest_module.shutil.copy2
+
+    def failing_copy2(src_path, dst_path):
+        if str(src_path).endswith("IMG_001.jpg"):
+            raise OSError("simulated copy failure")
+        return real_copy2(src_path, dst_path)
+
+    monkeypatch.setattr(ingest_module.shutil, "copy2", failing_copy2)
+
+    db = Database(str(tmp_path / "test.db"))
+    result = ingest(str(src), str(dst), db=db, skip_duplicates=True)
+
+    assert result["failed"] == 1, result
+    assert result["copied"] == 1, result
+    assert result["skipped_duplicate"] == 0, result
+    # The sibling should have landed under the date folder.
+    dest_folder = dst / "2026" / "2026-03-28"
+    files_on_disk = sorted(
+        p.name for p in dest_folder.iterdir() if p.is_file()
+    )
+    assert "IMG_002.jpg" in files_on_disk, files_on_disk
+
+
 def test_ingest_custom_folder_template(tmp_path):
     """Custom folder template is used for organization."""
     src = tmp_path / "sd_card"
@@ -215,6 +564,51 @@ def test_ingest_custom_folder_template(tmp_path):
 
     assert result["copied"] == 1
     assert (dst / "2026" / "03" / "photo.jpg").exists()
+
+
+def test_ingest_skip_duplicates_zero_byte_destination_collision(tmp_path):
+    """A zero-byte source that finds a zero-byte file at the exact
+    destination path must be treated as a duplicate skip — not as a
+    name collision needing ``name_1.ext``.
+
+    Pass 1 deliberately clears ``file_hash`` to ``None`` for zero-byte
+    sources so ``EMPTY_FILE_SHA256`` doesn't enter the global
+    duplicate-identity index. Pass 2's hash-based exact-match check
+    therefore can't recognise the collision; without an explicit
+    zero-byte branch a ``skip_duplicates`` retry of an interrupted card
+    import would fall through to the numeric-suffix branch and keep
+    minting empty placeholders forever.
+    """
+    src = tmp_path / "card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    empty = src / "DSC_0001.NEF"
+    empty.write_bytes(b"")
+    mtime = datetime(2026, 3, 28).timestamp()
+    os.utime(str(empty), (mtime, mtime))
+
+    db = Database(str(tmp_path / "test.db"))
+    first = ingest(str(src), str(dst), db=db, skip_duplicates=True)
+    assert first["copied"] == 1
+    assert first["skipped_duplicate"] == 0
+
+    date_folder = dst / "2026" / "2026-03-28"
+    assert sorted(p.name for p in date_folder.iterdir()) == ["DSC_0001.NEF"]
+
+    # Retry the same card: the destination already holds a zero-byte
+    # file at the exact path. The retry must skip it, not create
+    # ``DSC_0001_1.NEF``.
+    second = ingest(str(src), str(dst), db=db, skip_duplicates=True)
+    assert second["copied"] == 0, (
+        f"retry created an extra placeholder: {second!r}"
+    )
+    assert second["skipped_duplicate"] == 1
+    assert sorted(p.name for p in date_folder.iterdir()) == ["DSC_0001.NEF"], (
+        "retry produced a name_1 sibling instead of skipping the existing "
+        "zero-byte file"
+    )
 
 
 def test_ingest_filename_collision(tmp_path):
@@ -508,6 +902,63 @@ def test_ingest_duplicate_folders_rejects_sql_like_wildcard_siblings(tmp_path):
         )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: ``\\`` is a path separator on Windows, so "
+    "``tmp_path / 'photos\\\\archive'`` parses as a child of dest "
+    "rather than the literal sibling this test exercises.",
+)
+def test_ingest_duplicate_folders_rejects_posix_backslash_sibling(tmp_path):
+    """duplicate_folders must not leak a literal sibling whose name
+    contains ``\\`` on POSIX hosts.
+
+    Regression for the Codex P2 on PR #977 (discussion r3416819572):
+    the SQL prefilter previously ran ``REPLACE(f.path, '\\', '/')``
+    unconditionally, so a stored row like ``/tmp/photos\\archive``
+    (a sibling literally named ``photos\\archive``) compared equal to
+    the destination ``/tmp/photos``'s LIKE prefix ``/tmp/photos/%``,
+    then passed the ``_path_under_root`` post-filter for the same
+    reason, and ended up in duplicate_folders. The pipeline then walked
+    that out-of-tree sibling as if it were under the destination.
+    """
+    src = tmp_path / "sd_card"
+    dest = tmp_path / "photos"
+    # Literal sibling whose name contains a backslash. On POSIX this is
+    # a single folder, NOT a child of "photos".
+    sibling = tmp_path / "photos\\archive"
+    for d in [src, dest, sibling]:
+        d.mkdir(parents=True)
+
+    img = Image.new("RGB", (100, 100), color="magenta")
+    img.save(str(sibling / "shot.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    from scanner import scan
+    scan(str(sibling), db)
+
+    import shutil
+    shutil.copy2(str(sibling / "shot.jpg"), str(src / "shot.jpg"))
+
+    result = ingest(str(src), str(dest), db=db, skip_duplicates=True)
+
+    # The byte-identical file in the sibling counts as a known hash, so
+    # the ingest still skips it as a duplicate — but the sibling folder
+    # must NOT be reported as a destination duplicate_folder.
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+    dup_folders = result.get("duplicate_folders", [])
+    assert str(sibling) not in dup_folders, (
+        f"duplicate_folders leaked POSIX backslash-named sibling "
+        f"{str(sibling)!r}; got {dup_folders!r}"
+    )
+    # Defense in depth: nothing outside dest slipped through.
+    for f in dup_folders:
+        assert f == str(dest) or f.startswith(str(dest) + "/"), (
+            f"duplicate_folders contains {f!r} which is not under "
+            f"destination {str(dest)!r}"
+        )
+
+
 def test_ingest_duplicate_folders_excludes_folder_deleted_from_disk(tmp_path):
     """duplicate_folders must not contain folders that no longer exist on
     disk, even if their DB status is stale ('ok').
@@ -680,6 +1131,62 @@ def test_ingest_duplicate_folders_flat_import_root_duplicate(tmp_path):
     )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: on Windows, destination ``\"/\"`` is drive-relative "
+    "(resolves to the current drive root, e.g. ``D:\\``), so a library "
+    "scanned on a different drive (e.g. ``C:\\Users\\...\\tmp\\...``) "
+    "is correctly NOT under the root destination. The Windows drive-scope "
+    "branch is covered by "
+    "test_path_under_root_scopes_root_relative_to_current_drive_on_windows.",
+)
+def test_ingest_duplicate_folders_matches_under_posix_root_destination(tmp_path):
+    """When destination_dir is the POSIX filesystem root ("/"), the SQL
+    prefilter must still match duplicate folders that live anywhere under
+    root.
+
+    Regression: building the LIKE prefix from the fallback ``"/"`` produces
+    ``"//%"`` which never matches paths beginning with a single ``"/"``.
+    The prefix must instead be derived from the rstrip-ed destination
+    (empty string for root → ``"/%"``).
+    """
+    import shutil
+
+    # tmp_path is itself an absolute POSIX path (e.g. /tmp/pytest-of-.../).
+    # It satisfies all four prefilter guards relative to "/": status=ok
+    # after scan, the SQL prefix "/%" matches, it is_relative_to("/"), and
+    # is_dir() is True.
+    src = tmp_path / "sd_card"
+    library = tmp_path / "library_under_root"
+    for d in [src, library]:
+        d.mkdir()
+
+    img = Image.new("RGB", (100, 100), color="yellow")
+    img.save(str(library / "shot.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    from scanner import scan
+    scan(str(library), db)
+
+    shutil.copy2(str(library / "shot.jpg"), str(src / "shot.jpg"))
+
+    # destination_dir="/" — skip_duplicates=True means every source file
+    # is a known duplicate, so ingest never attempts to mkdir or copy
+    # under "/" on the test host.
+    result = ingest(
+        str(src), "/", db=db,
+        skip_duplicates=True, folder_template="",
+    )
+
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+    dup_folders = result.get("duplicate_folders", [])
+    assert str(library) in dup_folders, (
+        f"root-destination ingest should surface duplicate folder "
+        f"{str(library)!r} under '/'; got duplicate_folders={dup_folders!r}"
+    )
+
+
 def test_ingest_duplicate_folders_matches_unnormalized_stored_path(tmp_path):
     """When the DB holds a folder row whose path contains ``..`` segments
     because a previous scan was run with an unnormalized root, ingesting
@@ -800,6 +1307,306 @@ def test_ingest_duplicate_folders_rejects_dot_dot_escape(tmp_path):
         )
 
 
+def test_path_under_root_is_case_insensitive_on_windows(monkeypatch):
+    """On Windows the slash-normalized subtree check must be
+    case-insensitive to preserve the previous ``Path.is_relative_to``
+    behaviour on ``WindowsPath`` (and to match NTFS/FAT semantics).
+
+    Regression guard for the Codex review on PR #977: a destination
+    passed as ``c:\\photos`` must still be recognised as the parent of
+    folder rows scanned as ``C:\\Photos\\sub`` so duplicate-only ingests
+    do not leave ``duplicate_folders`` empty.
+    """
+    import ingest
+
+    monkeypatch.setattr(ingest, "_WINDOWS", True)
+
+    assert ingest._path_under_root(r"C:\Photos\sub\file.jpg", r"c:\photos")
+    assert ingest._path_under_root(r"c:\PHOTOS", r"C:\photos")
+    assert ingest._path_under_root(r"C:\Photos\Sub", r"c:\photos\sub")
+    # A sibling whose case-folded form differs from root must still be
+    # rejected so the Windows fold does not over-match.
+    assert not ingest._path_under_root(r"C:\Photos2\file.jpg", r"C:\photos")
+
+
+def test_path_under_root_is_case_sensitive_on_posix(monkeypatch):
+    """POSIX hosts keep case-sensitive matching: ``/Photos`` and
+    ``/photos`` are distinct directories and the subtree check must
+    not collapse them.
+    """
+    import ingest
+
+    monkeypatch.setattr(ingest, "_WINDOWS", False)
+
+    assert ingest._path_under_root("/photos/sub", "/photos")
+    assert not ingest._path_under_root("/Photos/sub", "/photos")
+    assert not ingest._path_under_root("/photos/sub", "/Photos")
+
+
+def test_path_under_root_collapses_dotdot(monkeypatch):
+    """``..`` segments must be collapsed before the prefix comparison so a
+    candidate like ``/photos/sub/../other`` is recognised as a sibling of
+    ``/photos/sub`` rather than a child.
+    """
+    import ingest
+
+    monkeypatch.setattr(ingest, "_WINDOWS", False)
+    # POSIX: forward-slash ``..`` segments collapse via posixpath.normpath.
+    assert not ingest._path_under_root("/photos/sub/../other", "/photos/sub")
+    assert ingest._path_under_root("/photos/sub/../other", "/photos")
+
+    monkeypatch.setattr(ingest, "_WINDOWS", True)
+    # Windows: backslash separators are converted then collapsed.
+    assert not ingest._path_under_root(r"C:\dest\sub\..\other", r"C:\dest\sub")
+    assert ingest._path_under_root(r"C:\dest\sub\..\other", r"C:\dest")
+    # Forward-slash ``..`` segments also collapse on Windows.
+    assert ingest._path_under_root("C:/dest/sub/../other", "C:/dest")
+
+
+def test_path_under_root_scopes_root_relative_to_current_drive_on_windows(
+    monkeypatch,
+):
+    """On Windows, ``/`` and ``\\`` are drive-relative paths meaning the
+    *current* drive root (e.g. ``C:\\``), not every drive or UNC share.
+
+    A duplicate-only ingest into ``/`` previously fell into the
+    ``root_norm in {"", "/"}`` branch and was accepted by
+    ``os.path.isabs(...)`` for any absolute candidate, so folder rows on
+    ``D:\\...`` or ``\\\\server\\share\\...`` leaked into
+    ``duplicate_folders`` and the follow-up restricted scan could link
+    folders outside the selected destination.
+
+    Regression guard for the Codex P2 on PR #977 (discussion r3417096143).
+    """
+    import ingest
+
+    monkeypatch.setattr(ingest, "_WINDOWS", True)
+    # Simulate a Windows process whose current drive is C:, so that
+    # ``os.path.abspath('/')`` resolves to ``C:\``. On the POSIX test
+    # host abspath would otherwise return ``/`` (which strips back to
+    # empty and re-enters the fallback we're trying to test around).
+    monkeypatch.setattr(
+        ingest.os.path,
+        "abspath",
+        lambda p: "C:\\" if p in ("/", "\\") else p,
+    )
+
+    # Candidates on the current drive are accepted.
+    assert ingest._path_under_root(r"C:\photos\foo.jpg", "/")
+    assert ingest._path_under_root(r"C:\photos\foo.jpg", "\\")
+    assert ingest._path_under_root(r"C:\\", "/")
+    # Candidates on a different drive must be rejected.
+    assert not ingest._path_under_root(r"D:\photos\foo.jpg", "/")
+    assert not ingest._path_under_root(r"D:\photos\foo.jpg", "\\")
+    # UNC paths must be rejected — they are not on any local drive root.
+    assert not ingest._path_under_root(
+        r"\\server\share\photos\foo.jpg", "/"
+    )
+
+
+def test_path_under_root_distinguishes_drive_relative_root_on_windows(
+    monkeypatch,
+):
+    """On Windows, ``C:`` (drive letter and colon, no separator) is a
+    drive-relative path meaning the current directory on drive C —
+    NOT the root of C drive. Folder rows on ``C:\\Photos\\...`` must
+    only be classified as inside a destination given as ``C:`` when
+    they actually live under that per-drive cwd. ``C:\\`` (drive root)
+    keeps its previous "all of C:" semantics.
+
+    Previously both ``C:`` and ``C:\\`` collapsed to ``c:`` after
+    ``posixpath.normpath`` stripped the trailing slash, so the SQL
+    prefilter plus ``_path_under_root`` treated rows like
+    ``C:\\Photos\\...`` as inside a destination the user gave as ``C:``,
+    and duplicate-only imports could return ``duplicate_folders`` from
+    the whole C: drive.
+
+    Regression guard for the Codex P2 on PR #977 (discussion r3417302365).
+    """
+    import ingest
+
+    monkeypatch.setattr(ingest, "_WINDOWS", True)
+    # Simulate a Windows process whose per-drive cwd on C: is
+    # ``C:\Users\me``. On the POSIX test host abspath would otherwise
+    # return ``{cwd}/C:``, which doesn't model the real Windows
+    # drive-relative resolution.
+    def fake_abspath(p):
+        if p == "C:":
+            return r"C:\Users\me"
+        if p in ("/", "\\"):
+            return "C:\\"
+        return p
+    monkeypatch.setattr(ingest.os.path, "abspath", fake_abspath)
+
+    # ``C:`` resolves to the per-drive cwd; only paths under it are inside.
+    assert ingest._path_under_root(r"C:\Users\me\photos\foo.jpg", "C:")
+    assert ingest._path_under_root(r"C:\Users\Me\Photos\foo.jpg", "c:")
+    # A sibling on the same drive but outside the cwd must be rejected.
+    assert not ingest._path_under_root(r"C:\photos\foo.jpg", "C:")
+    assert not ingest._path_under_root(r"C:\Users\other\foo.jpg", "C:")
+
+    # ``C:\`` keeps drive-root semantics — every path on C: is inside.
+    assert ingest._path_under_root(r"C:\photos\foo.jpg", "C:\\")
+    assert ingest._path_under_root(r"C:\Users\me\photos\foo.jpg", "C:\\")
+    # But a different drive is still rejected.
+    assert not ingest._path_under_root(r"D:\photos\foo.jpg", "C:\\")
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: monkeypatching ``ingest._WINDOWS = False`` does not "
+    "swap ``os.path`` to ``posixpath``, so the fallback "
+    "``os.path.isabs(\"/foo\")`` still uses Windows semantics — and on "
+    "Python 3.13+ Windows returns False for drive-less paths. The POSIX "
+    "branch is exercised by the Ubuntu leg of the CI matrix.",
+)
+def test_path_under_root_root_slash_still_accepts_absolutes_on_posix(
+    monkeypatch,
+):
+    """POSIX behaviour for root ``/`` is unchanged: every absolute path
+    is under it. Only the Windows branch is drive-scoped.
+    """
+    import ingest
+
+    monkeypatch.setattr(ingest, "_WINDOWS", False)
+
+    assert ingest._path_under_root("/photos/foo.jpg", "/")
+    assert ingest._path_under_root("/anywhere/else", "/")
+    # Relative candidate (no leading slash) is not under root ``/``.
+    assert not ingest._path_under_root("relative/path", "/")
+
+
+def test_path_under_root_treats_backslash_as_literal_on_posix(monkeypatch):
+    """On POSIX, ``\\`` is a valid filename character, not a separator.
+    A stored sibling literally named ``photos\\archive`` at the root of
+    the destination's parent must NOT be classified as a child of
+    ``/photos``; the SQL prefilter would already accept the row, so the
+    post-filter prefix check has to reject it.
+
+    Regression guard for the Codex P2 on PR #977 (discussion r3416819572):
+    unconditionally converting backslashes to forward slashes was letting
+    out-of-tree siblings slip into ``duplicate_folders`` on POSIX hosts.
+    """
+    import ingest
+
+    monkeypatch.setattr(ingest, "_WINDOWS", False)
+
+    # Sibling literally named "photos\archive" at the same level as
+    # "photos" must not be treated as a child of "photos".
+    assert not ingest._path_under_root("/photos\\archive", "/photos")
+    assert not ingest._path_under_root(
+        "/dest/photos\\archive/sub", "/dest/photos"
+    )
+    # The legitimate child is still matched.
+    assert ingest._path_under_root("/photos/archive", "/photos")
+
+
+def test_ingest_duplicate_folders_matches_case_variant_destination_on_windows(
+    tmp_path, monkeypatch
+):
+    """Stored folder rows with one case variant must still match a
+    destination passed with a different case variant when running on
+    Windows. Without case-folding the SQL prefilter (``=`` is
+    case-sensitive on SQLite) and the post-filter
+    ``_path_under_root`` both miss the row and ``duplicate_folders``
+    comes back empty, defeating the restricted scan that links the
+    existing duplicates to the active workspace.
+    """
+    import shutil
+
+    import ingest as ingest_mod
+    from scanner import scan
+
+    monkeypatch.setattr(ingest_mod, "_WINDOWS", True)
+
+    src = tmp_path / "sd_card"
+    library = tmp_path / "Library"
+    for d in [src, library]:
+        d.mkdir()
+
+    img = Image.new("RGB", (100, 100), color="purple")
+    img.save(str(library / "shot.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(str(library), db)
+
+    shutil.copy2(str(library / "shot.jpg"), str(src / "shot.jpg"))
+
+    # Pass the destination with a different case from how the folder
+    # was scanned. On a real Windows host these resolve to the same
+    # NTFS path; on the test host (Linux) the directory still exists
+    # under the original case, so we rely on ``Path(...).is_dir()``
+    # accepting the canonical-case path that came back from the DB.
+    miscased_dst = str(library).lower()
+    result = ingest_mod.ingest(
+        str(src), miscased_dst, db=db,
+        skip_duplicates=True, folder_template="",
+    )
+
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+    dup_folders = result.get("duplicate_folders", [])
+    assert str(library) in dup_folders, (
+        "case-insensitive Windows match should surface duplicate folder "
+        f"{str(library)!r} when destination is passed as {miscased_dst!r}; "
+        f"got duplicate_folders={dup_folders!r}"
+    )
+
+
+def test_ingest_duplicate_folders_matches_non_ascii_case_variant_on_windows(
+    tmp_path, monkeypatch
+):
+    """Windows case-folding for the SQL prefilter must be Unicode-aware.
+
+    SQLite's built-in ``LOWER()`` only folds ASCII characters, so a stored
+    folder row like ``Älbum`` would stay ``Älbum`` while the Python-side
+    destination ``älbum`` lowers via ``str.lower()`` to ``älbum``. Without
+    a Unicode-aware SQL ``LOWER`` the prefilter drops the row before the
+    ``_path_under_root`` post-filter (which uses Python's Unicode-aware
+    folding) ever sees it, leaving ``duplicate_folders`` empty even though
+    the hash is skipped.
+    """
+    import shutil
+
+    import ingest as ingest_mod
+    from scanner import scan
+
+    monkeypatch.setattr(ingest_mod, "_WINDOWS", True)
+
+    src = tmp_path / "sd_card"
+    # Folder name has a non-ASCII character (Ä) that SQLite's ASCII-only
+    # LOWER() would leave untouched.
+    library = tmp_path / "Älbum"
+    for d in [src, library]:
+        d.mkdir()
+
+    img = Image.new("RGB", (100, 100), color="purple")
+    img.save(str(library / "shot.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(str(library), db)
+
+    shutil.copy2(str(library / "shot.jpg"), str(src / "shot.jpg"))
+
+    # Destination passed with the non-ASCII character in lowercase form.
+    # On a case-insensitive Windows filesystem these resolve to the same
+    # path; the prefilter must accept the stored row regardless of case.
+    miscased_dst = str(library).lower()
+    result = ingest_mod.ingest(
+        str(src), miscased_dst, db=db,
+        skip_duplicates=True, folder_template="",
+    )
+
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+    dup_folders = result.get("duplicate_folders", [])
+    assert str(library) in dup_folders, (
+        "Unicode-aware case folding should surface duplicate folder "
+        f"{str(library)!r} when destination is passed as {miscased_dst!r}; "
+        f"got duplicate_folders={dup_folders!r}"
+    )
+
+
 def test_ingest_file_types_filter(tmp_path):
     """Only selected file types are copied."""
     src = tmp_path / "sd_card"
@@ -901,8 +1708,51 @@ def test_preview_destination_groups_by_date(tmp_path):
     assert "2026/2026-03-25" in by_path
     assert by_path["2026/2026-03-25"]["count"] == 2
     assert by_path["2026/2026-03-25"]["exists"] is False
+    assert by_path["2026/2026-03-25"]["full_path"] == str(dst / "2026" / "2026-03-25")
     assert "2026/2026-03-26" in by_path
     assert by_path["2026/2026-03-26"]["count"] == 1
+
+
+def test_preview_destination_uses_metadata_dates_when_lightweight_exif_fails(
+    tmp_path, monkeypatch
+):
+    """Preview keeps capture-date folders when ExifTool has the date."""
+    import import_dedup as import_dedup_module
+    import metadata as metadata_module
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    for name in ("a.jpg", "b.jpg"):
+        Image.new("RGB", (100, 100)).save(str(src / name))
+        mtime = datetime(2026, 3, 30, 12, 0, 0).timestamp()
+        os.utime(str(src / name), (mtime, mtime))
+
+    monkeypatch.setattr(
+        import_dedup_module, "read_exif_timestamp", lambda _path: None
+    )
+
+    def fake_extract_metadata(paths, restricted_tags=None):
+        return {
+            str(src / "a.jpg"): {"EXIF": {"DateTimeOriginal": "2026:03:25 10:00:00"}},
+            str(src / "b.jpg"): {"EXIF": {"DateTimeOriginal": "2026:03:26 10:00:00"}},
+        }
+
+    monkeypatch.setattr(metadata_module, "extract_metadata", fake_extract_metadata)
+
+    result = preview_destination(
+        sources=[str(src)],
+        destination=str(dst),
+        folder_template="%Y/%Y-%m-%d",
+    )
+
+    by_path = {f["path"]: f for f in result["folders"]}
+    assert result["total_folders"] == 2
+    assert by_path["2026/2026-03-25"]["count"] == 1
+    assert by_path["2026/2026-03-26"]["count"] == 1
+    assert "2026/2026-03-30" not in by_path
 
 
 def test_preview_destination_detects_existing_folders(tmp_path):
@@ -973,6 +1823,7 @@ def test_preview_destination_flat_template(tmp_path):
 
     assert result["total_folders"] == 1
     assert result["folders"][0]["path"] == "."
+    assert result["folders"][0]["full_path"] == str(dst)
     # dst itself exists, so flat folder should show exists=True
     assert result["folders"][0]["exists"] is True
 

@@ -62,6 +62,43 @@ body {
   color: var(--text-faint);
   font-variant-numeric: tabular-nums;
 }
+.tree-item .collection-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tree-item .collection-kind-badge {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border: 1px solid var(--border-secondary);
+  border-radius: 4px;
+  color: var(--text-faint);
+  font-size: 9px;
+  line-height: 1.3;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+.tree-item .collection-kind-badge.smart {
+  border-color: color-mix(in srgb, var(--info) 50%, var(--border-secondary));
+  color: var(--info);
+}
+.tree-item .collection-kind-badge.manual {
+  border-color: var(--border-primary);
+  color: var(--text-ghost);
+}
+.collection-resolve-btn {
+  background: var(--bg-tertiary);
+  color: var(--accent);
+  border: 1px solid var(--border-secondary);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 10px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.collection-resolve-btn:hover { border-color: var(--accent); }
 .tree-item .folder-status-partial {
   margin-left: 6px;
   font-size: 10px;
@@ -278,6 +315,11 @@ body {
 .summary-panel.hidden { display: none; }
 .detail-content { display: none; }
 .detail-content.visible { display: block; }
+/* Batch mode: the detail panel is reused as a multi-select inspector.
+   Single-photo-only sections are hidden; Rating/Flag/Color/Location/keyword
+   controls remain and act on the whole selection. */
+.detail-content.batch-mode .single-only { display: none !important; }
+.batch-mixed { font-size: 11px; font-weight: 400; color: var(--warning); text-transform: none; letter-spacing: 0; }
 .summary-stat { margin-bottom: 16px; }
 .summary-stat-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
 .summary-stat-value { font-size: 20px; font-weight: 600; color: var(--text-primary); }
@@ -339,6 +381,215 @@ body {
   font-size: 12px;
   line-height: 1.4;
 }
+.selection-action-btn {
+  width: 100%;
+  background: var(--accent);
+  color: var(--accent-text);
+  border: none;
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.selection-action-btn:hover { filter: brightness(1.05); }
+.selection-action-hint {
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.capture-time-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.capture-time-field label,
+.capture-time-option {
+  display: block;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+.capture-time-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 8px 0 12px;
+}
+.capture-time-preview {
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  max-height: 220px;
+  overflow: auto;
+  margin: 10px 0 12px;
+}
+.capture-time-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 1fr) minmax(145px, 1fr) minmax(145px, 1fr);
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-primary);
+  font-size: 12px;
+  align-items: center;
+}
+.capture-time-row:last-child { border-bottom: none; }
+.capture-time-row.header {
+  color: var(--text-ghost);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: var(--bg-secondary);
+}
+.capture-time-filename {
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.capture-time-before { color: var(--text-muted); }
+.capture-time-after { color: var(--accent); }
+
+.best-batch-modal {
+  width: min(1120px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+}
+.best-batch-head {
+  display: grid;
+  grid-template-columns: minmax(260px, 360px) 1fr;
+  gap: 16px;
+  min-height: 240px;
+}
+.best-batch-pick {
+  position: relative;
+  background: var(--bg-primary);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.best-batch-pick img {
+  width: 100%;
+  aspect-ratio: 3/2;
+  object-fit: cover;
+  display: block;
+  background: var(--bg-tertiary);
+}
+.best-batch-pick-meta {
+  padding: 10px 12px;
+}
+.best-batch-eyebrow {
+  font-size: 10px;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 4px;
+}
+.best-batch-title {
+  color: var(--text-primary);
+  font-size: 16px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.best-batch-score {
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.best-batch-summary {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.best-batch-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+.best-batch-reason {
+  border: 1px solid var(--border-primary);
+  border-radius: 999px;
+  padding: 4px 8px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  background: var(--bg-tertiary);
+}
+.best-batch-list {
+  margin-top: 16px;
+  overflow: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+  padding-right: 4px;
+}
+.best-batch-card {
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg-primary);
+}
+.best-batch-card.best { border-color: var(--accent); }
+.best-batch-card.reject { opacity: 0.72; }
+.best-batch-card img {
+  width: 100%;
+  aspect-ratio: 3/2;
+  object-fit: cover;
+  display: block;
+}
+.best-batch-card-body {
+  padding: 7px 8px;
+  min-height: 88px;
+}
+.best-batch-card-name {
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.best-batch-card-line {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.best-batch-role {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.best-batch-role.best { color: var(--accent); }
+.best-batch-role.alternate { color: var(--warning); }
+.best-batch-role.reject { color: var(--danger); }
+.best-batch-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+.best-batch-empty {
+  padding: 28px;
+  text-align: center;
+  color: var(--text-dim);
+}
+@media (max-width: 760px) {
+  .best-batch-head {
+    grid-template-columns: 1fr;
+    min-height: 0;
+  }
+  .best-batch-actions {
+    flex-wrap: wrap;
+    justify-content: stretch;
+  }
+  .best-batch-actions .modal-btn {
+    flex: 1 1 150px;
+  }
+}
+
 .detail-close {
   float: right;
   background: none;
@@ -511,6 +762,11 @@ body {
   padding: 4px 0;
 }
 .keyword-suggestion-list.open { display: block; }
+.location-keyword-suggestion-list {
+  top: auto;
+  bottom: calc(100% + 2px);
+  z-index: 10001;
+}
 .keyword-suggestion-option {
   display: flex;
   align-items: center;
@@ -977,6 +1233,50 @@ body {
 .modal-btn-primary { background: var(--accent); color: var(--bg-primary); }
 .modal-btn-cancel { background: var(--bg-tertiary); color: var(--text-secondary); }
 .modal-preview { font-size: 12px; color: var(--text-dim); margin-top: 8px; }
+.gps-resolve-summary {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+  line-height: 1.4;
+}
+.gps-resolve-list {
+  max-height: 280px;
+  overflow-y: auto;
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  margin-bottom: 12px;
+}
+.gps-resolve-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-primary);
+}
+.gps-resolve-row:last-child { border-bottom: 0; }
+.gps-resolve-place {
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gps-resolve-samples {
+  color: var(--text-dim);
+  font-size: 11px;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gps-resolve-count {
+  flex-shrink: 0;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+}
 .export-var-pill {
   background: var(--bg-tertiary);
   color: var(--text-secondary);
@@ -1137,12 +1437,15 @@ body {
       <button onclick="batchSetFlag('flagged')" style="background:var(--bg-tertiary);color:var(--accent);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Flag</button>
       <button onclick="batchSetFlag('rejected')" style="background:var(--bg-tertiary);color:var(--danger);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Reject</button>
       <button onclick="batchAddKeyword()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Keyword</button>
+      <button id="resolveGpsSelectedBtn" onclick="openGpsResolveForSelection()" style="background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Resolve GPS</button>
       <button onclick="addToCollection()" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Collection</button>
+      <button onclick="openCaptureTimeModal()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Adjust Time</button>
       <button id="compareBtn" onclick="openBrowseCompare()" title="Compare two selected photos side by side" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Compare</button>
+      <button id="bestBatchBtn" onclick="openBestBatch()" title="Find and rank neighboring frames around the selected photo" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Best Batch</button>
       <button id="burstReviewBtn" onclick="openSelectedInBurstReview()" title="Open selected photos in burst review" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Review Burst</button>
       <button id="developBtn" onclick="developSelected()" title="Develop selected RAW photos with darktable" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Develop</button>
-      <button onclick="openInEditorBatch(event)" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Open in Editor</button>
       <button onclick="batchSubmitInat()" style="background:var(--bg-tertiary);color:#74ac00;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">iNaturalist</button>
+      <button onclick="makeAvailableOffline()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Make Offline</button>
       <button onclick="openExportModal()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Export</button>
       <button onclick="batchDelete()" style="background:var(--danger);color:white;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;" title="Delete selected photos">Delete</button>
       <button onclick="clearSelection()" style="background:none;color:var(--text-faint);border:none;padding:4px 8px;font-size:12px;cursor:pointer;margin-left:auto;">Clear</button>
@@ -1150,11 +1453,28 @@ body {
 
     <!-- Export Modal -->
     <div id="exportOverlay" class="modal-overlay">
-      <div class="modal" style="width:500px;">
+      <div class="modal" style="width:540px;">
         <h3>Export Photos</h3>
 
         <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Destination folder</label>
         <input id="exportDest" class="modal-input" type="text" placeholder="/path/to/export/folder">
+
+        <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Preset</label>
+        <select id="exportPreset" class="modal-input" style="cursor:pointer;">
+          <option value="original-jpg">Full-size JPEG</option>
+          <option value="web-jpg">Web JPEG, 2048 px</option>
+          <option value="small-jpg">Small JPEG, 1080 px</option>
+          <option value="archive-tiff">Full-size TIFF</option>
+          <option value="png">Full-size PNG</option>
+          <option value="custom">Custom</option>
+        </select>
+
+        <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Format</label>
+        <select id="exportFormat" class="modal-input" style="cursor:pointer;">
+          <option value="jpg">JPEG</option>
+          <option value="png">PNG</option>
+          <option value="tiff">TIFF</option>
+        </select>
 
         <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Resize (max long edge)</label>
         <select id="exportResize" class="modal-input" style="cursor:pointer;">
@@ -1167,8 +1487,8 @@ body {
         </select>
         <input id="exportResizeCustom" class="modal-input" type="number" placeholder="Max pixels (long edge)" min="100" max="20000" style="display:none;">
 
-        <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Quality</label>
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+        <label id="exportQualityLabel" style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Quality</label>
+        <div id="exportQualityRow" style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
           <input id="exportQuality" type="range" min="1" max="100" value="92" style="flex:1;">
           <span id="exportQualityVal" style="font-size:13px;color:var(--text-secondary);min-width:32px;">92</span>
         </div>
@@ -1237,6 +1557,11 @@ body {
     <!-- Multi-select Detail -->
     <div class="selection-panel hidden" id="selectionPanel">
       <div class="selection-heading" id="selectionCount">0 photos selected</div>
+      <div class="detail-section" id="pasteEditSection" hidden>
+        <div class="detail-section-title">Edit Settings</div>
+        <button class="selection-action-btn" id="pasteEditBtn" type="button" onclick="pasteEditSettingsToSelection()">Paste Edit Settings</button>
+        <div class="selection-action-hint" id="pasteEditHint"></div>
+      </div>
       <div class="detail-section">
         <div class="detail-section-title">Fill Missing Keywords</div>
         <div class="selection-keyword-list" id="selectionKeywordSuggestions"></div>
@@ -1246,16 +1571,16 @@ body {
     <!-- Photo Detail (shown when a photo is selected) -->
     <div class="detail-content" id="detailContent">
       <button class="detail-close" onclick="closeDetail()">&times;</button>
-      <img class="detail-preview" id="detailImg" src="" alt="" style="cursor:pointer;" onclick="openLightbox(window._detailPhotoId, document.getElementById('detailFilename').textContent, photos)">
-      <div class="detail-filename" id="detailFilename"></div>
+      <img class="detail-preview single-only" id="detailImg" src="" alt="" style="cursor:pointer;" onclick="openLightbox(window._detailPhotoId, document.getElementById('detailFilename').textContent, photos)">
+      <div class="detail-filename single-only" id="detailFilename"></div>
 
       <div class="detail-section">
-        <div class="detail-section-title">Rating</div>
+        <div class="detail-section-title">Rating <span class="batch-mixed" id="ratingMixed" hidden>· Mixed</span></div>
         <div class="detail-rating" id="detailRating"></div>
       </div>
 
       <div class="detail-section">
-        <div class="detail-section-title">Flag</div>
+        <div class="detail-section-title">Flag <span class="batch-mixed" id="flagMixed" hidden>· Mixed</span></div>
         <div class="detail-flags" id="detailFlags">
           <button class="detail-flag-btn" onclick="setFlag('none')">None</button>
           <button class="detail-flag-btn" onclick="setFlag('flagged')">Flag (P)</button>
@@ -1263,13 +1588,13 @@ body {
         </div>
       </div>
 
-      <div class="detail-section">
+      <div class="detail-section single-only">
         <div class="detail-section-title">Wildlife Classification</div>
         <button class="detail-wildlife-btn" id="detailWildlifeExcluded" onclick="toggleDetailWildlifeExcluded()">Not Wildlife</button>
       </div>
 
       <div class="detail-section">
-        <div class="detail-section-title">Color Label</div>
+        <div class="detail-section-title">Color Label <span class="batch-mixed" id="colorMixed" hidden>· Mixed</span></div>
         <div class="detail-colors" id="detailColors">
           <button class="detail-color-btn" data-color="red" onclick="setColorLabel('red')" title="Red (6)"></button>
           <button class="detail-color-btn" data-color="yellow" onclick="setColorLabel('yellow')" title="Yellow (7)"></button>
@@ -1281,9 +1606,12 @@ body {
 
       <div class="detail-section location-section" id="locationSection">
         <div class="detail-section-title">Location</div>
-        <div id="locationFilled" hidden></div>
+        <div id="locationFilled" class="single-only" hidden></div>
         <div id="locationEmpty">
-          <input type="text" id="locationInput" class="add-kw-input" placeholder="📍 Add location..." autocomplete="off">
+          <div class="keyword-autocomplete">
+            <input type="text" id="locationInput" class="add-kw-input" placeholder="📍 Add location..." autocomplete="off">
+            <div class="keyword-suggestion-list location-keyword-suggestion-list" id="locationKeywordSuggestions" role="listbox"></div>
+          </div>
           <div id="locationExifSuggestion" class="location-suggestion" hidden></div>
           <div id="locationError" class="location-error" hidden></div>
         </div>
@@ -1291,25 +1619,25 @@ body {
 
       <div class="detail-section">
         <div class="detail-section-title">Keywords</div>
-        <div id="detailKeywords"></div>
+        <div id="detailKeywords" class="single-only"></div>
         <div class="keyword-autocomplete">
           <input class="add-kw-input" id="addKeywordInput" placeholder="Add keyword..." autocomplete="off">
           <div class="keyword-suggestion-list" id="addKeywordSuggestions" role="listbox"></div>
         </div>
       </div>
 
-      <div class="detail-section">
+      <div class="detail-section single-only">
         <div class="detail-section-title">XMP Sidecar</div>
         <div id="detailXmp" style="font-size:12px;color:var(--text-dim);">—</div>
       </div>
 
-      <div class="detail-section">
+      <div class="detail-section single-only">
         <div class="detail-section-title">Info</div>
         <div class="detail-summary" id="detailSummary"></div>
         <div class="detail-path" id="detailPath"></div>
       </div>
 
-      <div class="detail-section" id="detailMetadataSection" style="display:none;">
+      <div class="detail-section single-only" id="detailMetadataSection" style="display:none;">
         <div class="detail-section-title">All Metadata</div>
         <input type="text" id="metadataSearch" class="add-kw-input"
                placeholder="Search metadata..."
@@ -1318,15 +1646,12 @@ body {
         <div id="metadataGroups"></div>
       </div>
 
-      <div class="detail-section" style="display:flex;gap:8px;">
+      <div class="detail-section single-only" style="display:flex;gap:8px;">
         <button onclick="findSimilar(window._detailPhotoId)" style="flex:1;background:var(--bg-tertiary);color:var(--info);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
           Find Similar
         </button>
         <button onclick="openPipeline(window._detailPhotoId)" style="flex:1;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
           Inspect Pipeline
-        </button>
-        <button onclick="openInEditorWithPicker([window._detailPhotoId], event)" style="flex:1;background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
-          Open in Editor
         </button>
       </div>
     </div>
@@ -1374,6 +1699,71 @@ body {
     <div class="modal-actions">
       <button class="modal-btn modal-btn-primary" onclick="confirmBatchCollection()">Add</button>
       <button class="modal-btn modal-btn-cancel" onclick="hideBatchCollectionModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Resolve GPS Locations Modal -->
+<div class="modal-overlay" id="gpsResolveModal">
+  <div class="modal" style="width:560px;max-width:calc(100vw - 32px);">
+    <h3>Resolve GPS Locations</h3>
+    <div id="gpsResolveSummary" class="gps-resolve-summary">Loading...</div>
+    <div id="gpsResolveGroups" class="gps-resolve-list"></div>
+    <div class="modal-preview" id="gpsResolveNote"></div>
+    <div class="modal-actions">
+      <button class="modal-btn modal-btn-primary" id="gpsResolveApplyBtn" onclick="applyGpsResolve()">Apply</button>
+      <button class="modal-btn modal-btn-cancel" onclick="hideGpsResolveModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Best Batch Modal -->
+<div class="modal-overlay" id="bestBatchModal">
+  <div class="modal best-batch-modal">
+    <h3>Best Batch</h3>
+    <div id="bestBatchContent" class="best-batch-empty">Loading batch...</div>
+    <div class="best-batch-actions">
+      <button class="modal-btn modal-btn-cancel" onclick="hideBestBatch()">Close</button>
+      <button class="modal-btn" id="bestBatchReviewBtn" onclick="openBestBatchInReview()" style="background:var(--bg-tertiary);color:var(--text-secondary);">Review Burst</button>
+      <button class="modal-btn modal-btn-primary" id="bestBatchFlagBtn" onclick="applyBestBatchPickOnly()">Flag Best</button>
+      <button class="modal-btn" id="bestBatchRejectBtn" onclick="applyBestBatchPickAndReject()" style="background:var(--danger);color:white;">Flag Best + Reject Rest</button>
+    </div>
+  </div>
+</div>
+
+<!-- Capture Time Modal -->
+<div class="modal-overlay" id="captureTimeModal">
+  <div class="modal" style="width:720px;max-width:calc(100vw - 32px);">
+    <h3 id="captureTimeTitle">Adjust Capture Time</h3>
+    <div class="capture-time-hint">
+      Use this when a camera was left in the wrong timezone. Preserving the instant shifts the wall-clock time by the offset difference.
+    </div>
+    <div class="capture-time-grid">
+      <div class="capture-time-field">
+        <label for="captureTimeTargetOffset">Target offset</label>
+        <input class="modal-input" id="captureTimeTargetOffset" value="-10:00" placeholder="-10:00" oninput="updateCaptureTimePreview()">
+      </div>
+      <div class="capture-time-field">
+        <label for="captureTimeManualShift">Manual shift, minutes</label>
+        <input class="modal-input" id="captureTimeManualShift" type="number" value="0" step="1" oninput="updateCaptureTimePreview()">
+      </div>
+    </div>
+    <label class="capture-time-option">
+      <input type="radio" name="captureTimeMode" value="preserve_instant" checked onchange="syncCaptureTimeFieldState(); updateCaptureTimePreview()">
+      Set offset and preserve actual instant
+    </label>
+    <label class="capture-time-option">
+      <input type="radio" name="captureTimeMode" value="manual" onchange="syncCaptureTimeFieldState(); updateCaptureTimePreview()">
+      Use manual time shift
+    </label>
+    <label class="capture-time-option">
+      <input type="checkbox" id="captureTimeKeepBackups" checked>
+      Keep ExifTool backup files
+    </label>
+    <div id="captureTimePreview" class="capture-time-preview"></div>
+    <div class="modal-actions">
+      <button class="modal-btn modal-btn-primary" id="captureTimeApplyBtn" onclick="startCaptureTimeJob()">Apply</button>
+      <button class="modal-btn modal-btn-cancel" onclick="hideCaptureTimeModal()">Cancel</button>
     </div>
   </div>
 </div>
@@ -1435,8 +1825,14 @@ var showDetectionBoxes = false;
 var cardFields = ["filename", "rating", "flag", "color_label", "sharpness"]; // default, overridden by config
 var inatSubmitted = {};  // {photo_id: true}
 var colorLabels = {};    // {photo_id: color_string}
+// Which photo ids we've confirmed color-label state for. `colorLabels[id]`
+// missing is ambiguous — either the photo has no color set OR we haven't
+// fetched its color labels yet — so the batch inspector needs this to avoid
+// rendering "everything is uncoloured" for a still-loading selection.
+var colorLabelsFetched = new Set();
 var colorLabelGen = 0;   // bumped on local edits; guards against stale fetch responses
 var loadEpoch = 0;       // bumped on any grid reset; guards against stale loadPhotos responses
+var selectAllRequestSeq = 0; // bumped to ignore stale async select-all responses
 var filterRating = 0;
 var flagFilter = '';
 var activeFolderId = null;
@@ -1447,7 +1843,9 @@ var calendarYear = new Date().getFullYear();
 var selectedDay = null;
 var calendarData = null;
 var clipSearchActive = false;
+var clipSearchSeq = 0;
 var searchFilterTimer = null;
+var bestBatchData = null;
 var keywordAutocompleteCache = null;
 var keywordAutocompletePromise = null;
 var keywordAutocompleteStates = {};
@@ -1482,6 +1880,7 @@ async function loadKeywordAutocompleteOptions(force) {
             id: k.id,
             name: k.name,
             type: k.type || 'general',
+            place_id: k.place_id || null,
             photo_count: k.photo_count || 0,
             search: String(k.name || '').toLowerCase(),
           };
@@ -1763,6 +2162,95 @@ function renderCardInfo(p) {
   return infoHtml;
 }
 
+function renderPhotoCard(p, idx) {
+  var selectedClass = (p.id === selectedPhotoId || selectedPhotos.has(p.id)) ? ' selected' : '';
+  if (
+    typeof window.vireoRememberPhotoEditRecipe === 'function' &&
+    Object.prototype.hasOwnProperty.call(p, 'edit_recipe')
+  ) {
+    window.vireoRememberPhotoEditRecipe(p.id, p.edit_recipe, {
+      skipIfLocallyWritten: true,
+    });
+  }
+  var hideDetectionOverlays = (
+    typeof window.vireoPhotoHasOrientationEdit === 'function' &&
+    window.vireoPhotoHasOrientationEdit(p.id)
+  );
+
+  // Detection box overlays — render one per detection in the photo
+  var boxHtml = '';
+  if (showDetectionBoxes && Array.isArray(p.detections)) {
+    p.detections.forEach(function(d) {
+      if (d == null || d.x == null) return;
+      var conf = (d.confidence != null) ? Math.round(d.confidence * 100) + '%' : '';
+      var cat = (d.category && d.category !== 'animal') ? escapeHtml(d.category) + ' ' : '';
+      boxHtml += '<div class="det-box" data-photo-id="' + p.id + '" style="' + (hideDetectionOverlays ? 'display:none;' : '') + 'left:' + (d.x * 100) + '%;top:' + (d.y * 100) + '%;width:' + (d.w * 100) + '%;height:' + (d.h * 100) + '%;">' +
+        ((cat || conf) ? '<span class="det-box-label">' + cat + conf + '</span>' : '') +
+      '</div>';
+    });
+  }
+
+  var clipBadge = '';
+  if (p._similarity !== undefined) {
+    clipBadge = '<span class="clip-score-badge">' + Math.round(p._similarity * 100) + '%</span>';
+  }
+  var inatBadge = inatSubmitted[String(p.id)] ? '<span class="inat-badge">iNat</span>' : '';
+  var wildlifeBadge = p.wildlife_excluded ? '<span class="no-wildlife-badge">No Wildlife</span>' : '';
+
+  // Species badges on image overlay (only when NOT in cardFields — if in cardFields, rendered below)
+  var speciesBadgeHtml = '';
+  if (cardFields.indexOf('species') === -1 && p.species && p.species.length > 0) {
+    var maxShow = 3;
+    var shown = p.species.slice(0, maxShow);
+    speciesBadgeHtml = '<div class="species-badges">';
+    shown.forEach(function(s) {
+      speciesBadgeHtml += '<span class="species-badge">' + escapeHtml(s) + '</span>';
+    });
+    if (p.species.length > maxShow) {
+      speciesBadgeHtml += '<span class="species-badge-overflow">+' + (p.species.length - maxShow) + ' more</span>';
+    }
+    speciesBadgeHtml += '</div>';
+  }
+
+  var thumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(p) : '/thumbnails/' + p.id + '.jpg';
+  return '<div class="grid-card' + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" data-filename="' + escapeAttr(p.filename) + '" onclick="selectPhoto(event,' + p.id + ',' + idx + ')">' +
+    '<div class="grid-card-img-wrap">' +
+      '<img src="' + escapeAttr(thumbUrl) + '" loading="lazy" decoding="async" alt="' + escapeAttr(p.filename) + '">' +
+      clipBadge +
+      boxHtml +
+      inatBadge +
+      wildlifeBadge +
+      speciesBadgeHtml +
+    '</div>' +
+    '<div class="grid-card-info">' +
+      renderCardInfo(p) +
+    '</div>' +
+  '</div>';
+}
+
+document.addEventListener('lightbox:renderchanged', function(e) {
+  var ids = e && e.detail && Array.isArray(e.detail.photoIds) ? e.detail.photoIds : [];
+  ids.forEach(function(id) {
+    var hideDetectionOverlays = (
+      typeof window.vireoPhotoHasOrientationEdit === 'function' &&
+      window.vireoPhotoHasOrientationEdit(id)
+    );
+    document.querySelectorAll('.grid-card[data-id="' + id + '"] .det-box').forEach(function(box) {
+      box.style.display = hideDetectionOverlays ? 'none' : '';
+    });
+  });
+});
+
+function appendGridPhotos(newPhotos, startIdx) {
+  if (!newPhotos.length) return;
+  var grid = document.getElementById('grid');
+  var html = '';
+  newPhotos.forEach(function(p, offset) {
+    html += renderPhotoCard(p, startIdx + offset);
+  });
+  grid.insertAdjacentHTML('beforeend', html);
+}
+
 function refreshGridCards(photoIds) {
   photoIds.forEach(function(id) {
     var p = photos.find(function(x) { return x.id === id; });
@@ -1771,6 +2259,18 @@ function refreshGridCards(photoIds) {
     if (!card) return;
     var info = card.querySelector('.grid-card-info');
     if (info) info.innerHTML = renderCardInfo(p);
+    // iNat badge lives in img-wrap (not grid-card-info), so sync it explicitly
+    // when async metadata arrives after the card was appended.
+    var wrap = card.querySelector('.grid-card-img-wrap');
+    if (wrap) {
+      var existing = wrap.querySelector('.inat-badge');
+      var shouldShow = !!inatSubmitted[String(id)];
+      if (shouldShow && !existing) {
+        wrap.insertAdjacentHTML('beforeend', '<span class="inat-badge">iNat</span>');
+      } else if (!shouldShow && existing) {
+        existing.remove();
+      }
+    }
   });
 }
 
@@ -1841,6 +2341,7 @@ async function bootstrapBrowse() {
   if (new URLSearchParams(window.location.search).get('photo_id')) return;
   // Prevent the IntersectionObserver from triggering loadPhotos() while bootstrap is in flight
   loading = true;
+  var bootstrapSucceeded = false;
   try {
     applyBrowseConfig(await _cfgPromise);
     var data = await safeFetch('/api/browse/init?per_page=' + perPage + '&sort=' + document.getElementById('sortSelect').value);
@@ -1863,10 +2364,12 @@ async function bootstrapBrowse() {
     document.getElementById('loadingState').style.display = 'none';
     // Lazy-load collection photo counts to avoid N+1 on init
     loadCollectionCounts();
+    bootstrapSucceeded = true;
   } catch(e) {
     document.getElementById('loadingState').textContent = 'Error loading.';
   }
   loading = false;
+  if (bootstrapSucceeded) rearmInfiniteScrollObserver();
 }
 
 function renderCollectionList(collections) {
@@ -1875,8 +2378,16 @@ function renderCollectionList(collections) {
   collections.forEach(function(c) {
     collectionsById[c.id] = c;
     var count = c.photo_count != null ? c.photo_count : '';
-    html += '<div class="tree-item" data-collection-id="' + c.id + '" onclick="filterByCollection(' + c.id + ')">' +
-      '<span>' + escapeHtml(c.name) + '</span>' +
+    var canAddPhotos = collectionAcceptsManualPhotos(c);
+    var kind = canAddPhotos ? 'manual' : 'smart';
+    var kindLabel = canAddPhotos ? 'Manual' : 'Smart';
+    var resolveBtn = (c.name === 'GPS Without Location Keyword')
+      ? '<button class="collection-resolve-btn" type="button" title="Resolve locations from GPS" onclick="event.stopPropagation(); openGpsResolveForCollection(' + c.id + ')">Resolve GPS</button>'
+      : '';
+    html += '<div class="tree-item" data-collection-id="' + c.id + '" data-collection-kind="' + kind + '" onclick="filterByCollection(' + c.id + ')">' +
+      '<span class="collection-name">' + escapeHtml(c.name) + '</span>' +
+      '<span class="collection-kind-badge ' + kind + '">' + kindLabel + '</span>' +
+      resolveBtn +
       '<span class="count">' + count + '</span></div>';
   });
   document.getElementById('collectionList').innerHTML = html || '<div style="font-size:12px;color:var(--text-ghost);padding:4px 8px;">No collections</div>';
@@ -1960,7 +2471,7 @@ function filterByFolder(folderId) {
   }
   activeCollectionId = null;
   if (timelineMode) loadCalendarData();
-  resetAndLoad();
+  reloadBrowseResults();
   // Update active state
   document.querySelectorAll('#folderTree .tree-item').forEach(function(el) {
     el.classList.toggle('active', parseInt(el.dataset.folderId) === activeFolderId);
@@ -2025,7 +2536,7 @@ function filterByKeyword(name) {
   activeCollectionId = null;
   document.getElementById('searchInput').value = activeKeyword || '';
   if (timelineMode) loadCalendarData();
-  resetAndLoad();
+  reloadBrowseResults();
   document.querySelectorAll('#keywordTree .tree-item').forEach(function(el) {
     el.classList.toggle('active', el.dataset.keyword === activeKeyword);
   });
@@ -2072,19 +2583,36 @@ function scheduleCollectionCountsRefresh() {
   }, 150);
 }
 
+function refreshActiveCollectionAfterMembershipChange() {
+  if (!activeCollectionId) return;
+  filterByCollection(activeCollectionId, { preserveAnchor: false });
+}
+
 function refreshBrowseSidebarCounts() {
   loadFolders();
   loadKeywords();
   loadCollectionCounts();
 }
 
-async function filterByCollection(id) {
+async function filterByCollection(id, options) {
   cancelScheduledSearchFilter();
-  var anchor = captureSelectedPhotoAnchor();
+  var preserveAnchor = !(options && options.preserveAnchor === false);
+  var anchor = preserveAnchor ? captureSelectedPhotoAnchor() : null;
   var restoreEpoch = anchor ? ++anchorRestoreEpoch : null;
   activeFolderId = null;
   activeKeyword = null;
   activeCollectionId = id;
+  if (clipSearchActive && getClipSearchQuery()) {
+    selectedPhotos.clear();
+    selectedPhotoId = null;
+    selectedIndex = -1;
+    closeDetail();
+    refreshCardSelectionVisuals();
+    updateBatchBar();
+    document.getElementById('gridContainer').scrollTop = 0;
+    await runClipSearch();
+    return;
+  }
   photos = [];
   currentPage = 1;
   allLoaded = false;
@@ -2163,6 +2691,7 @@ var FIELD_OPS = {
   has_mask: ['equals'],
   active_mask_variant: ['is', 'is not', 'contains'],
   has_gps: ['equals'],
+  has_location_keyword: ['equals'],
   wildlife_excluded: ['equals'],
   location_keyword_missing: ['equals'],
   inat_submitted: ['equals'],
@@ -2189,6 +2718,7 @@ var FIELD_LABELS = {
   has_mask: 'Has Mask',
   active_mask_variant: 'Mask Variant',
   has_gps: 'Has GPS',
+  has_location_keyword: 'Has Location Keyword',
   wildlife_excluded: 'Not Wildlife',
   location_keyword_missing: 'GPS Without Location Keyword',
   inat_submitted: 'iNaturalist Submitted',
@@ -2228,8 +2758,8 @@ function defaultValueForRule(field, op) {
   if (field === 'active_mask_variant') return 'sam2-large';
   if (field === 'prediction_status') return 'pending';
   if (field === 'wildlife_excluded') return 0;
-  if (['has_mask', 'has_gps', 'location_keyword_missing', 'inat_submitted',
-       'is_duplicate', 'needs_review'].indexOf(field) !== -1) return 1;
+  if (['has_mask', 'has_gps', 'has_location_keyword', 'location_keyword_missing',
+       'inat_submitted', 'is_duplicate', 'needs_review'].indexOf(field) !== -1) return 1;
   return '';
 }
 
@@ -2460,8 +2990,9 @@ function renderRuleValueInput(r, i) {
   if (r.field === 'all') {
     return '<span style="flex:1;color:var(--text-ghost);font-size:12px;">Matches every photo in this workspace</span>';
   }
-  if (['has_mask', 'has_gps', 'wildlife_excluded', 'location_keyword_missing',
-       'inat_submitted', 'is_duplicate', 'needs_review'].indexOf(r.field) !== -1) {
+  if (['has_mask', 'has_gps', 'has_location_keyword', 'wildlife_excluded',
+       'location_keyword_missing', 'inat_submitted', 'is_duplicate',
+       'needs_review'].indexOf(r.field) !== -1) {
     var boolVal = (r.value === true || r.value === 1 || r.value === '1' || r.value === 'true') ? '1' : '0';
     return '<select onchange="updateRule(\'' + p + '\',\'value\',this.value)" style="flex:1;">' +
         '<option value="1"' + (boolVal==='1'?' selected':'') + '>Yes</option>' +
@@ -2619,8 +3150,9 @@ function coerceRuleForSave(node) {
        'noise_estimate', 'crop_complete', 'prediction_confidence'].indexOf(node.field) !== -1) {
     val = parseFloat(val);
     if (isNaN(val)) val = 0;
-  } else if (['has_mask', 'has_gps', 'location_keyword_missing', 'inat_submitted',
-              'is_duplicate', 'needs_review', 'all'].indexOf(node.field) !== -1) {
+  } else if (['has_mask', 'has_gps', 'has_location_keyword',
+              'location_keyword_missing', 'inat_submitted', 'is_duplicate',
+              'needs_review', 'all'].indexOf(node.field) !== -1) {
     val = (val === true || val === 1 || val === '1' || val === 'true') ? 1 : 0;
   } else if (node.field === 'timestamp' && node.op === 'recent_days') {
     val = parseInt(val, 10) || 0;
@@ -2667,10 +3199,16 @@ async function saveCollection() {
 /* ---------- Photo Loading ---------- */
 function resetAndLoad() {
   cancelScheduledSearchFilter();
+  if (clipSearchActive) {
+    clipSearchActive = false;
+    document.getElementById('clipSearchInput').value = '';
+    document.getElementById('clipClearBtn').style.display = 'none';
+  }
   photos = [];
   currentPage = 1;
   allLoaded = false;
   loadEpoch++;
+  selectAllRequestSeq++;
   loading = false;
   // Dataset is about to change; any prior selection (multi-select Set or
   // single-focus id) points at photos that may not exist in the new view.
@@ -2687,11 +3225,39 @@ function resetAndLoad() {
   loadPhotos();
 }
 
-async function loadPhotos() {
+function buildCurrentBrowseParams() {
+  var params = new URLSearchParams();
+  params.set('sort', document.getElementById('sortSelect').value);
+
+  if (activeFolderId) params.set('folder_id', activeFolderId);
+  if (filterRating > 0) params.set('rating_min', filterRating);
+  if (flagFilter) params.set('flag', flagFilter);
+
+  var colorFilter = document.getElementById('colorFilter').value;
+  if (colorFilter) params.set('color_label', colorFilter);
+
+  var dateFrom = document.getElementById('dateFrom').value;
+  var dateTo = document.getElementById('dateTo').value;
+  if (dateFrom) params.set('date_from', dateFrom);
+  if (dateTo) params.set('date_to', dateTo);
+
+  var search = document.getElementById('searchInput').value.trim();
+  if (search) params.set('keyword', search);
+  if (activeKeyword) params.set('keyword', activeKeyword);
+  return params;
+}
+
+async function loadPhotos(options) {
   if (loading || allLoaded) return;
   loading = true;
   var epoch = loadEpoch;
-  document.getElementById('loadingState').style.display = 'block';
+  var loadSucceeded = false;
+  var showLoading = !(options && options.silent) && photos.length === 0;
+  var loadingState = document.getElementById('loadingState');
+  if (showLoading && loadingState) {
+    loadingState.textContent = 'Loading...';
+    loadingState.style.display = 'block';
+  }
 
   var url;
   if (activeCollectionId) {
@@ -2700,26 +3266,9 @@ async function loadPhotos() {
     cparams.set('per_page', perPage);
     url = '/api/collections/' + activeCollectionId + '/photos?' + cparams.toString();
   } else {
-    var params = new URLSearchParams();
+    var params = buildCurrentBrowseParams();
     params.set('page', currentPage);
     params.set('per_page', perPage);
-    params.set('sort', document.getElementById('sortSelect').value);
-
-    if (activeFolderId) params.set('folder_id', activeFolderId);
-    if (filterRating > 0) params.set('rating_min', filterRating);
-    if (flagFilter) params.set('flag', flagFilter);
-
-    var colorFilter = document.getElementById('colorFilter').value;
-    if (colorFilter) params.set('color_label', colorFilter);
-
-    var dateFrom = document.getElementById('dateFrom').value;
-    var dateTo = document.getElementById('dateTo').value;
-    if (dateFrom) params.set('date_from', dateFrom);
-    if (dateTo) params.set('date_to', dateTo);
-
-    var search = document.getElementById('searchInput').value.trim();
-    if (search) params.set('keyword', search);
-    if (activeKeyword) params.set('keyword', activeKeyword);
     url = '/api/photos?' + params.toString();
   }
 
@@ -2727,27 +3276,43 @@ async function loadPhotos() {
     var data = await safeFetch(url);
     if (epoch !== loadEpoch) return;  // grid was reset mid-flight; drop stale response
     totalPhotos = data.total;
+    var firstNewIdx = photos.length;
 
     if (data.photos.length === 0) {
       allLoaded = true;
     } else {
       photos = photos.concat(data.photos);
-      var newIds = data.photos.map(function(p) { return p.id; });
-      loadInatStatus(newIds);
-      fetchColorLabels(newIds);
       currentPage++;
       if (photos.length >= totalPhotos) allLoaded = true;
     }
 
-    renderGrid();
+    if (firstNewIdx === 0) renderGrid();
+    else appendGridPhotos(data.photos, firstNewIdx);
     updateFilterSummary();
+
+    // Refresh appended cards once async metadata resolves — appendGridPhotos
+    // only renders each page once, so badges/labels would otherwise stay
+    // missing until an unrelated full grid render.
+    if (data.photos.length > 0) {
+      var refreshIds = data.photos.map(function(p) { return p.id; });
+      loadInatStatus(refreshIds).then(function() {
+        if (epoch === loadEpoch) refreshGridCards(refreshIds);
+      });
+      fetchColorLabels(refreshIds).then(function() {
+        if (epoch === loadEpoch) refreshGridCards(refreshIds);
+      });
+    }
+    loadSucceeded = true;
   } catch(e) {
     if (epoch !== loadEpoch) return;
-    document.getElementById('loadingState').textContent = 'Error loading photos.';
+    if (showLoading && loadingState) {
+      loadingState.textContent = 'Error loading photos.';
+    }
   } finally {
     if (epoch === loadEpoch) {
       loading = false;
-      document.getElementById('loadingState').style.display = 'none';
+      if (showLoading && loadingState) loadingState.style.display = 'none';
+      if (loadSucceeded) rearmInfiniteScrollObserver();
     }
   }
 }
@@ -2890,10 +3455,14 @@ function selectCalendarDay(dateStr, count) {
   document.getElementById('calSelectionText').textContent = formatted + ' \u00b7 ' + count + ' photo' + (count !== 1 ? 's' : '');
   document.getElementById('calSelection').classList.add('active');
 
-  // Update date inputs and reload
+  // Update date inputs and reload. #dateTo is <input type="date">, which
+  // rejects datetime strings (the value would silently blank and the filter
+  // would lose its upper bound). A bare date is correct: the backend pads
+  // date_to to end-of-day (_inclusive_date_to in db.py).
   document.getElementById('dateFrom').value = dateStr;
-  document.getElementById('dateTo').value = dateStr + 'T23:59:59';
-  resetAndLoad();
+  document.getElementById('dateTo').value = dateStr;
+  activeCollectionId = null;
+  reloadBrowseResults();
   renderCalendar(); // update selected state
 }
 
@@ -2902,7 +3471,8 @@ function clearCalendarSelection() {
   document.getElementById('calSelection').classList.remove('active');
   document.getElementById('dateFrom').value = '';
   document.getElementById('dateTo').value = '';
-  resetAndLoad();
+  activeCollectionId = null;
+  reloadBrowseResults();
   if (calendarData) renderCalendar();
 }
 
@@ -2915,12 +3485,14 @@ function calendarChangeYear(delta) {
   document.getElementById('dateFrom').value = '';
   document.getElementById('dateTo').value = '';
   loadCalendarData();
-  resetAndLoad();
+  activeCollectionId = null;
+  reloadBrowseResults();
 }
 
 function applyFilters() {
   if (timelineMode) loadCalendarData();
-  resetAndLoad();
+  activeCollectionId = null;
+  reloadBrowseResults();
 }
 
 function scheduleSearchFilter() {
@@ -2952,14 +3524,16 @@ function setFilterRating(val) {
   document.querySelectorAll('.rating-filter .rating-star').forEach(function(el) {
     el.classList.toggle('active', parseInt(el.dataset.val) <= filterRating);
   });
-  resetAndLoad();
+  activeCollectionId = null;
+  reloadBrowseResults();
 }
 
 function setFlagFilter(flag) {
   flagFilter = flagFilter === flag ? '' : flag;
   updateFlagFilterButtons();
   if (timelineMode) loadCalendarData();
-  resetAndLoad();
+  activeCollectionId = null;
+  reloadBrowseResults();
 }
 
 function updateFlagFilterButtons() {
@@ -2985,13 +3559,53 @@ function toggleDetectionBoxes() {
   renderGrid();
 }
 
+function getClipSearchQuery() {
+  var input = document.getElementById('clipSearchInput');
+  return input ? input.value.trim() : '';
+}
+
+function appendClipSearchScopeParams(params) {
+  if (activeCollectionId) {
+    params.set('collection_id', activeCollectionId);
+    return;
+  }
+  if (activeFolderId) params.set('folder_id', activeFolderId);
+  if (filterRating > 0) params.set('rating_min', filterRating);
+  if (flagFilter) params.set('flag', flagFilter);
+
+  var colorFilter = document.getElementById('colorFilter').value;
+  if (colorFilter) params.set('color_label', colorFilter);
+
+  var dateFrom = document.getElementById('dateFrom').value;
+  var dateTo = document.getElementById('dateTo').value;
+  if (dateFrom) params.set('date_from', dateFrom);
+  if (dateTo) params.set('date_to', dateTo);
+
+  var search = document.getElementById('searchInput').value.trim();
+  if (search) params.set('keyword', search);
+  if (activeKeyword) params.set('keyword', activeKeyword);
+}
+
+function reloadBrowseResults() {
+  if (clipSearchActive && getClipSearchQuery()) {
+    runClipSearch();
+  } else {
+    resetAndLoad();
+  }
+}
+
 async function runClipSearch() {
-  var query = document.getElementById('clipSearchInput').value.trim();
+  var query = getClipSearchQuery();
   if (!query) {
     if (clipSearchActive) clearClipSearch();
     return;
   }
 
+  var searchSeq = ++clipSearchSeq;
+  loadEpoch++;
+  selectAllRequestSeq++;
+  var epoch = loadEpoch;
+  loading = false;
   photos = [];
   allLoaded = true;
   selectedPhotos.clear();
@@ -3003,13 +3617,16 @@ async function runClipSearch() {
   document.getElementById('loadingState').textContent = 'Searching...';
   clipSearchActive = true;
   document.getElementById('clipClearBtn').style.display = '';
+  var keepLoadingMessage = false;
 
   try {
     var params = new URLSearchParams();
     params.set('q', query);
     params.set('limit', 100);
     params.set('threshold', 0.15);
+    appendClipSearchScopeParams(params);
     var data = await safeFetch('/api/photos/search?' + params.toString());
+    if (searchSeq !== clipSearchSeq || epoch !== loadEpoch) return;
 
     if (data.reason) {
       var msg = {
@@ -3018,6 +3635,7 @@ async function runClipSearch() {
         'no_model': 'No model available. Download one in Settings.'
       }[data.reason] || 'Search returned no results.';
       document.getElementById('loadingState').textContent = msg;
+      keepLoadingMessage = true;
       return;
     }
 
@@ -3030,17 +3648,29 @@ async function runClipSearch() {
     allLoaded = true;
 
     renderGrid();
+    var refreshIds = photos.map(function(p) { return p.id; });
+    loadInatStatus(refreshIds).then(function() {
+      if (searchSeq === clipSearchSeq && epoch === loadEpoch) refreshGridCards(refreshIds);
+    });
+    fetchColorLabels(refreshIds).then(function() {
+      if (searchSeq === clipSearchSeq && epoch === loadEpoch) refreshGridCards(refreshIds);
+    });
     var summary = document.getElementById('filterSummary');
     summary.textContent = data.total_matches + ' matches' + (data.model_used ? ' (' + data.model_used + ')' : '');
   } catch(e) {
+    if (searchSeq !== clipSearchSeq || epoch !== loadEpoch) return;
     document.getElementById('loadingState').textContent = 'Search failed: ' + (e.message || e);
+    keepLoadingMessage = true;
     return;
+  } finally {
+    if (searchSeq === clipSearchSeq && epoch === loadEpoch && !keepLoadingMessage) {
+      document.getElementById('loadingState').style.display = 'none';
+    }
   }
-
-  document.getElementById('loadingState').style.display = 'none';
 }
 
 function clearClipSearch() {
+  clipSearchSeq++;
   clipSearchActive = false;
   document.getElementById('clipSearchInput').value = '';
   document.getElementById('clipClearBtn').style.display = 'none';
@@ -3124,56 +3754,7 @@ function renderGrid() {
 
   var html = '';
   photos.forEach(function(p, idx) {
-    var selectedClass = (p.id === selectedPhotoId || selectedPhotos.has(p.id)) ? ' selected' : '';
-
-    // Detection box overlays — render one per detection in the photo
-    var boxHtml = '';
-    if (showDetectionBoxes && Array.isArray(p.detections)) {
-      p.detections.forEach(function(d) {
-        if (d == null || d.x == null) return;
-        var conf = (d.confidence != null) ? Math.round(d.confidence * 100) + '%' : '';
-        var cat = (d.category && d.category !== 'animal') ? escapeHtml(d.category) + ' ' : '';
-        boxHtml += '<div class="det-box" style="left:' + (d.x * 100) + '%;top:' + (d.y * 100) + '%;width:' + (d.w * 100) + '%;height:' + (d.h * 100) + '%;">' +
-          ((cat || conf) ? '<span class="det-box-label">' + cat + conf + '</span>' : '') +
-        '</div>';
-      });
-    }
-
-    var clipBadge = '';
-    if (p._similarity !== undefined) {
-      clipBadge = '<span class="clip-score-badge">' + Math.round(p._similarity * 100) + '%</span>';
-    }
-    var inatBadge = inatSubmitted[String(p.id)] ? '<span class="inat-badge">iNat</span>' : '';
-    var wildlifeBadge = p.wildlife_excluded ? '<span class="no-wildlife-badge">No Wildlife</span>' : '';
-
-    // Species badges on image overlay (only when NOT in cardFields — if in cardFields, rendered below)
-    var speciesBadgeHtml = '';
-    if (cardFields.indexOf('species') === -1 && p.species && p.species.length > 0) {
-      var maxShow = 3;
-      var shown = p.species.slice(0, maxShow);
-      speciesBadgeHtml = '<div class="species-badges">';
-      shown.forEach(function(s) {
-        speciesBadgeHtml += '<span class="species-badge">' + escapeHtml(s) + '</span>';
-      });
-      if (p.species.length > maxShow) {
-        speciesBadgeHtml += '<span class="species-badge-overflow">+' + (p.species.length - maxShow) + ' more</span>';
-      }
-      speciesBadgeHtml += '</div>';
-    }
-
-    html += '<div class="grid-card' + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" data-filename="' + escapeAttr(p.filename) + '" onclick="selectPhoto(event,' + p.id + ',' + idx + ')">' +
-      '<div class="grid-card-img-wrap">' +
-        '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="' + escapeAttr(p.filename) + '">' +
-        clipBadge +
-        boxHtml +
-        inatBadge +
-        wildlifeBadge +
-        speciesBadgeHtml +
-      '</div>' +
-      '<div class="grid-card-info">' +
-        renderCardInfo(p) +
-      '</div>' +
-    '</div>';
+    html += renderPhotoCard(p, idx);
   });
   grid.innerHTML = html;
 }
@@ -3226,14 +3807,40 @@ function browseKeyMatchesConfiguredShortcut(e) {
 }
 
 /* ---------- Infinite Scroll ---------- */
+var gridContainer = document.getElementById('gridContainer');
+var infiniteScrollObserverDisconnected = false;
 var observer = new IntersectionObserver(function(entries) {
-  if (entries[0].isIntersecting) loadPhotos();
-}, { rootMargin: '200px' });
+  if (entries[0].isIntersecting) loadPhotos({ silent: photos.length > 0 });
+}, { root: gridContainer, rootMargin: '3200px 0px' });
+
+var _observerObserve = observer.observe.bind(observer);
+var _observerDisconnect = observer.disconnect.bind(observer);
+observer.observe = function(target) {
+  infiniteScrollObserverDisconnected = false;
+  return _observerObserve(target);
+};
+observer.disconnect = function() {
+  infiniteScrollObserverDisconnected = true;
+  return _observerDisconnect();
+};
 observer.observe(document.getElementById('scrollSentinel'));
+
+function rearmInfiniteScrollObserver() {
+  // With the 1200px root margin, the sentinel can remain intersecting after
+  // bootstrap or page loads. Re-observing asks IntersectionObserver to deliver
+  // a fresh callback for the current layout instead of waiting for a scroll
+  // transition that may never occur.
+  if (infiniteScrollObserverDisconnected) return;
+  if (allLoaded || typeof observer === 'undefined') return;
+  var sentinel = document.getElementById('scrollSentinel');
+  if (!sentinel) return;
+  observer.unobserve(sentinel);
+  observer.observe(sentinel);
+}
 
 /* ---------- Scroll Position Tracking ---------- */
 var scrollTimer = null;
-document.getElementById('gridContainer').addEventListener('scroll', function() {
+gridContainer.addEventListener('scroll', function() {
   if (scrollTimer) clearTimeout(scrollTimer);
   scrollTimer = setTimeout(updateScrollPosition, 50);
 });
@@ -3276,6 +3883,22 @@ function selectPhoto(e, id, idx) {
         if (summary) summary.classList.remove('hidden');
         loadSummary();
       }
+      // Same reason as closeDetail: the dropped anchor's EXIF suggestion is
+      // still tagged with its data-photo-id (hidden along with the detail
+      // panel). This path bypasses closeDetail entirely, so without an
+      // explicit scrub a later Select All (or any batch that still contains
+      // the dropped photo) would satisfy renderLocationEmpty's owner-in-
+      // selection check and resurrect the anchor's Accept line for the
+      // whole batch — clicking it would apply the dropped anchor's GPS
+      // place to every selected photo. Codex P2 on PR #1097.
+      clearExifSuggestion();
+      // And null the ambient detail-photo pointer maybeShowExifSuggestion's
+      // post-await guard reads. If A's reverse-geocode is still in flight
+      // when we drop A here, the completion runs later; leaving
+      // _detailPhotoId pointing at A means a subsequent Select All that
+      // contains A would let the async paint path resurrect A's Accept line
+      // into the batch inspector. Codex P2 on PR #1097 (17:04Z follow-up).
+      window._detailPhotoId = null;
     }
   } else {
     // Normal click: single select
@@ -3307,6 +3930,61 @@ function getActiveSelection() {
   return [];
 }
 
+async function selectAllMatchingPhotos() {
+  anchorRestoreEpoch++;
+  selectedPhotoId = null;
+  selectedIndex = -1;
+  var requestSeq = ++selectAllRequestSeq;
+  var requestEpoch = loadEpoch;
+
+  if (clipSearchActive) {
+    var query = document.getElementById('clipSearchInput').value.trim();
+    if (!query) return;
+    var searchParams = new URLSearchParams();
+    searchParams.set('q', query);
+    searchParams.set('threshold', 0.15);
+    searchParams.set('ids_only', '1');
+    appendClipSearchScopeParams(searchParams);
+    showToast('Selecting all matching search results...');
+    try {
+      var searchData = await safeFetch('/api/photos/search?' + searchParams.toString(), {}, { toast: false });
+      if (requestSeq !== selectAllRequestSeq || requestEpoch !== loadEpoch) return;
+      selectedPhotos.clear();
+      (searchData.photo_ids || []).forEach(function(id) { selectedPhotos.add(id); });
+      renderGrid();
+      updateBatchBar();
+      showToast('Selected ' + selectedPhotos.size.toLocaleString() + ' search result' + (selectedPhotos.size === 1 ? '' : 's'));
+    } catch(e) {
+      showToast('Could not select all search results: ' + (e.message || e), 'error');
+    }
+    return;
+  }
+
+  var url;
+  if (activeCollectionId) {
+    url = '/api/collections/' + activeCollectionId + '/photo-ids';
+  } else {
+    url = '/api/photos/ids?' + buildCurrentBrowseParams().toString();
+  }
+
+  showToast('Selecting all matching photos...');
+  try {
+    var data = await safeFetch(url, {}, { toast: false });
+    if (requestSeq !== selectAllRequestSeq || requestEpoch !== loadEpoch) return;
+    selectedPhotos.clear();
+    (data.photo_ids || []).forEach(function(id) { selectedPhotos.add(id); });
+    renderGrid();
+    updateBatchBar();
+    showToast('Selected ' + selectedPhotos.size.toLocaleString() + ' photo' + (selectedPhotos.size === 1 ? '' : 's'));
+  } catch(e) {
+    showToast('Could not select all photos: ' + (e.message || e), 'error');
+  }
+}
+
+function selectionIdsKey(ids) {
+  return ids.slice().sort(function(a, b) { return a - b; }).join(',');
+}
+
 function isBrowseCompareOpen() {
   var overlay = document.getElementById('browseCompareOverlay');
   return !!(overlay && overlay.classList.contains('active'));
@@ -3318,6 +3996,14 @@ function updateCompareButton(ids) {
   var canCompare = ids.length >= 2;
   btn.style.display = canCompare ? '' : 'none';
   btn.disabled = !canCompare;
+}
+
+function updateBestBatchButton(ids) {
+  var btn = document.getElementById('bestBatchBtn');
+  if (!btn) return;
+  var canFind = ids.length >= 1;
+  btn.style.display = canFind ? '' : 'none';
+  btn.disabled = !canFind;
 }
 
 function updateBurstReviewButton(ids) {
@@ -3338,11 +4024,12 @@ function updateBatchBar() {
   var ids = getActiveSelection();
   if (ids.length >= 1) {
     bar.style.display = 'flex';
-    document.getElementById('batchCount').textContent = ids.length + ' selected';
+    document.getElementById('batchCount').textContent = ids.length.toLocaleString() + ' selected';
   } else {
     bar.style.display = 'none';
   }
   updateCompareButton(ids);
+  updateBestBatchButton(ids);
   updateBurstReviewButton(ids);
   updateSelectionPanel(ids);
 }
@@ -3366,10 +4053,166 @@ function openSelectedInBurstReview() {
   window.location.href = '/pipeline/review?browse_burst=1';
 }
 
+function bestBatchSeedId() {
+  if (selectedPhotoId != null) return selectedPhotoId;
+  var ids = getActiveSelection();
+  return ids.length ? ids[0] : null;
+}
+
+function hideBestBatch() {
+  var modal = document.getElementById('bestBatchModal');
+  if (modal) modal.classList.remove('open');
+}
+
+function bestBatchRoleLabel(role) {
+  if (role === 'best') return 'Best';
+  if (role === 'alternate') return 'Alt';
+  return 'Reject';
+}
+
+function bestBatchScoreText(card) {
+  var parts = [];
+  if (card.quality_pct != null) parts.push('Q ' + card.quality_pct);
+  if (card.focus != null) parts.push('F ' + Math.round(card.focus * 100));
+  if (card.sharpness != null) parts.push('S ' + Math.round(card.sharpness));
+  return parts.join(' · ') || 'No score';
+}
+
+function renderBestBatch(data) {
+  bestBatchData = data;
+  var content = document.getElementById('bestBatchContent');
+  if (!content) return;
+  var best = (data.cards || []).find(function(c) { return c.id === data.best_photo_id; }) || (data.cards || [])[0];
+  if (!best) {
+    content.className = 'best-batch-empty';
+    content.textContent = 'No scored photos found in this batch.';
+    return;
+  }
+  var countText = data.count + ' photos';
+  if (data.sequence_range) {
+    countText += ' · #' + data.sequence_range[0] + '–' + data.sequence_range[1];
+  }
+  var reasonHtml = (data.best_reasons || []).map(function(r) {
+    return '<span class="best-batch-reason">' + escapeHtml(r) + '</span>';
+  }).join('');
+  var cards = (data.cards || []).map(function(card) {
+    var reasons = (card.reasons || []).slice(0, 2).map(escapeHtml).join(' · ');
+    var thumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(card) : '/thumbnails/' + card.id + '.jpg';
+    return '<div class="best-batch-card ' + escapeAttr(card.role || '') + '" data-photo-id="' + card.id + '">' +
+      '<img src="' + escapeAttr(thumbUrl) + '" alt="' + escapeAttr(card.filename || '') + '" loading="lazy">' +
+      '<div class="best-batch-card-body">' +
+        '<div class="best-batch-role ' + escapeAttr(card.role || '') + '">#' + card.rank + ' ' + bestBatchRoleLabel(card.role) + '</div>' +
+        '<div class="best-batch-card-name" title="' + escapeAttr(card.filename || '') + '">' + escapeHtml(card.filename || '') + '</div>' +
+        '<div class="best-batch-card-line">' + escapeHtml(bestBatchScoreText(card)) + '</div>' +
+        '<div class="best-batch-card-line">' + reasons + '</div>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+  var bestThumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(best) : '/thumbnails/' + best.id + '.jpg';
+  content.className = '';
+  content.innerHTML =
+    '<div class="best-batch-head">' +
+      '<div class="best-batch-pick">' +
+        '<img src="' + escapeAttr(bestThumbUrl) + '" alt="' + escapeAttr(best.filename || '') + '">' +
+        '<div class="best-batch-pick-meta">' +
+          '<div class="best-batch-eyebrow">Best Pick</div>' +
+          '<div class="best-batch-title">' + escapeHtml(best.filename || '') + '</div>' +
+          '<div class="best-batch-score">' + escapeHtml(bestBatchScoreText(best)) + '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="best-batch-summary">' +
+        '<div class="best-batch-eyebrow">' + escapeHtml(countText) + '</div>' +
+        '<div>' + escapeHtml(best.filename || 'This photo') + ' is the top-ranked frame in the detected batch.</div>' +
+        '<div class="best-batch-reasons">' + reasonHtml + '</div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="best-batch-list">' + cards + '</div>';
+}
+
+function openBestBatchForIds(ids, seedId) {
+  ids = Array.isArray(ids) ? ids.filter(function(id) { return id != null; }) : [];
+  seedId = seedId || (ids.length ? ids[0] : bestBatchSeedId());
+  if (!seedId) {
+    showToast('Select a photo first.', 'error');
+    return;
+  }
+  try {
+    window.sessionStorage.setItem('vireo.bestBatchIds', JSON.stringify(ids));
+    window.sessionStorage.setItem('vireo.bestBatchSeedId', String(seedId));
+  } catch (e) {
+    showToast('Could not open Best Batch for this selection.', 'error');
+    return;
+  }
+  window.location.href = '/best-batch?photo_id=' + encodeURIComponent(seedId);
+}
+
+function openBestBatch() {
+  var ids = getActiveSelection();
+  openBestBatchForIds(ids, bestBatchSeedId());
+}
+
+function openBestBatchInReview() {
+  if (!bestBatchData || !bestBatchData.photo_ids || bestBatchData.photo_ids.length < 2) return;
+  try {
+    window.sessionStorage.setItem('vireo.browseBurstReviewIds', JSON.stringify(bestBatchData.photo_ids));
+  } catch (e) {
+    showToast('Could not open burst review for this batch.', 'error');
+    return;
+  }
+  window.location.href = '/pipeline/review?browse_burst=1';
+}
+
+async function applyBestBatchPickOnly() {
+  if (!bestBatchData || !bestBatchData.best_photo_id) return;
+  var bestId = bestBatchData.best_photo_id;
+  try {
+    await safeFetch('/api/batch/flag', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: [bestId], flag: 'flagged'}),
+    });
+  } catch(e) { return; }
+  var p = photos.find(function(x) { return x.id === bestId; });
+  if (p) p.flag = 'flagged';
+  refreshGridCards([bestId]);
+  scheduleCollectionCountsRefresh();
+  showUndoToast();
+  showToast('Flagged best photo.', 'success');
+}
+
+async function applyBestBatchPickAndReject() {
+  if (!bestBatchData || !bestBatchData.best_photo_id) return;
+  var bestId = bestBatchData.best_photo_id;
+  var rejectIds = (bestBatchData.suggested_reject_ids || []).filter(function(id) { return id !== bestId; });
+  try {
+    await safeFetch('/api/batch/best-batch-flags', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({best_photo_id: bestId, reject_photo_ids: rejectIds}),
+    });
+  } catch(e) { return; }
+  [bestId].concat(rejectIds).forEach(function(id) {
+    var p = photos.find(function(x) { return x.id === id; });
+    if (p) p.flag = id === bestId ? 'flagged' : 'rejected';
+  });
+  refreshGridCards([bestId].concat(rejectIds));
+  scheduleCollectionCountsRefresh();
+  showUndoToast();
+  showToast('Applied best-batch flags.', 'success');
+  hideBestBatch();
+}
+
 function updateSelectionPanel(ids) {
   var panel = document.getElementById('selectionPanel');
   if (!panel) return;
   if (ids.length <= 1) {
+    var dc = document.getElementById('detailContent');
+    if (dc) dc.classList.remove('batch-mode');
+    // Clear batch-only Mixed markers immediately so they can't linger while the
+    // single-photo detail fetch is in flight.
+    _batchToggleMixed('ratingMixed', false);
+    _batchToggleMixed('flagMixed', false);
+    _batchToggleMixed('colorMixed', false);
     var wasVisible = !panel.classList.contains('hidden');
     panel.classList.add('hidden');
     selectionKeywordKey = '';
@@ -3392,10 +4235,97 @@ function updateSelectionPanel(ids) {
   var detail = document.getElementById('detailContent');
   var summary = document.getElementById('summaryPanel');
   if (summary) summary.classList.add('hidden');
-  if (detail) detail.classList.toggle('visible', detailMatchesSelectedPhoto());
+  // Reuse the detail panel as a batch inspector for the whole selection:
+  // Rating/Flag/Color/Location act on all selected photos, single-photo-only
+  // sections are hidden via .batch-mode CSS.
+  if (detail) {
+    detail.classList.add('visible');
+    detail.classList.add('batch-mode');
+  }
   panel.classList.remove('hidden');
-  document.getElementById('selectionCount').textContent = ids.length + ' photos selected';
+  document.getElementById('selectionCount').textContent = ids.length.toLocaleString() + ' photos selected';
+  updatePasteEditSection(ids);
+  // Keep any EXIF suggestion fetched for the anchor photo: Accept is
+  // batch-aware (_locationApplyPhotoIds), so growing the selection is the
+  // designed way to apply one suggestion to many photos.
+  renderBatchInspector(ids, { preserveExifSuggestion: true });
+  if (ids.length > 1000) {
+    selectionKeywordKey = selectionIdsKey(ids);
+    selectionKeywordMissingById = {};
+    selectionKeywordRequestSeq++;
+    var list = document.getElementById('selectionKeywordSuggestions');
+    if (list) {
+      list.innerHTML = '<div class="selection-empty">Keyword suggestions are available for selections of 1,000 photos or fewer.</div>';
+    }
+    return;
+  }
   loadSelectionKeywordSuggestions(ids);
+}
+
+function updatePasteEditSection(ids) {
+  var section = document.getElementById('pasteEditSection');
+  var hint = document.getElementById('pasteEditHint');
+  if (!section) return;
+  var copied = window.vireoEditNav ? window.vireoEditNav.getCopiedRecipe() : null;
+  if (!copied || !copied.recipe) {
+    section.hidden = true;
+    return;
+  }
+  section.hidden = false;
+  if (hint) {
+    var n = ids.length.toLocaleString();
+    hint.textContent = copied.source
+      ? 'Copied from ' + copied.source + ' — applies to ' + n + ' selected photos.'
+      : 'Applies the copied edit settings to ' + n + ' selected photos.';
+  }
+}
+
+async function pasteEditSettingsToSelection() {
+  var ids = getActiveSelection();
+  if (ids.length < 1) { showToast('Select photos first.', 'error'); return; }
+  var copied = window.vireoEditNav ? window.vireoEditNav.getCopiedRecipe() : null;
+  if (!copied || !copied.recipe) {
+    showToast('No copied edit settings. Use "Copy Settings" in the editor first.', 'error');
+    return;
+  }
+  var btn = document.getElementById('pasteEditBtn');
+  if (btn) btn.disabled = true;
+  try {
+    var data = await safeFetch('/api/photos/edit-recipe/apply', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        recipe: copied.recipe,
+        photo_ids: ids,
+        description: copied.source ? ('Pasted edit settings from ' + copied.source) : 'Pasted edit settings',
+      }),
+    }, {toast: false});
+    var count = data.count || 0;
+    var skipped = Array.isArray(data.skipped) ? data.skipped.length : 0;
+    if (typeof window.vireoRefreshEditRecipeCache === 'function' && Array.isArray(data.applied)) {
+      // Prefer the server's per-id recipe map: with local adjustments each
+      // target now carries its own mask-snapshot ref, so reusing the copied
+      // recipe (or the first applied one) would cache wrong refs on all
+      // non-first ids until a full refetch.
+      var recipes = data.recipes && typeof data.recipes === 'object' ? data.recipes : null;
+      var updates = {};
+      data.applied.forEach(function(pid) {
+        var key = String(pid);
+        updates[key] = (recipes && recipes[key]) || data.recipe || copied.recipe;
+      });
+      window.vireoRefreshEditRecipeCache(updates);
+    }
+    var appliedMsg = 'Pasted edit settings to ' + count.toLocaleString() + ' photo' + (count === 1 ? '' : 's');
+    if (skipped > 0) {
+      showToast(appliedMsg + '; skipped ' + skipped.toLocaleString() + '.', 'warning');
+    } else {
+      showToast(appliedMsg, 'success');
+    }
+  } catch (e) {
+    showToast(e.message || 'Could not paste edit settings', 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 function openBrowseCompare() {
@@ -3516,7 +4446,7 @@ async function renderBrowseCompare() {
 }
 
 async function loadSelectionKeywordSuggestions(ids) {
-  var key = ids.slice().sort(function(a, b) { return a - b; }).join(',');
+  var key = selectionIdsKey(ids);
   if (key === selectionKeywordKey) return;
   selectionKeywordKey = key;
   var seq = ++selectionKeywordRequestSeq;
@@ -3576,8 +4506,25 @@ async function applySelectionKeyword(keywordId) {
   selectionKeywordKey = '';
   loadSelectionKeywordSuggestions(getActiveSelection());
   loadKeywords();
+  scheduleCollectionCountsRefresh();
+  refreshActiveCollectionAfterMembershipChange();
   refreshPendingSyncBanner();
   showUndoToast();
+}
+
+// If the batch inspector is visible, keep its Mixed/active state in sync with
+// the mutation we just applied. Keyboard shortcuts (rate_*, flag, color_*) go
+// straight through batchSetRating/Flag/ColorLabel without touching the sidebar
+// re-render path, so without this the stars/flag/color chips display the
+// pre-edit state — and clicking the same star clears the value the shortcut
+// just applied (batchRate treats matching-unanimous as toggle-off).
+function _refreshBatchInspectorIfActive() {
+  var detail = document.getElementById('detailContent');
+  if (detail && detail.classList.contains('batch-mode')) {
+    // State-only refresh — the selection did not change. Preserve any
+    // in-progress location input the user is typing.
+    renderBatchInspector(getActiveSelection(), { preserveLocation: true });
+  }
 }
 
 async function batchSetRating(rating) {
@@ -3593,6 +4540,7 @@ async function batchSetRating(rating) {
     if (p) p.rating = rating;
   });
   refreshGridCards(ids);
+  _refreshBatchInspectorIfActive();
   scheduleCollectionCountsRefresh();
   refreshPendingSyncBanner();
   showUndoToast();
@@ -3614,6 +4562,7 @@ async function batchSetFlag(flag) {
   if (selectedPhotoId != null && ids.indexOf(selectedPhotoId) !== -1) {
     updateDetailFlagButtons(flag);
   }
+  _refreshBatchInspectorIfActive();
   scheduleCollectionCountsRefresh();
   showUndoToast();
 }
@@ -3631,8 +4580,10 @@ async function batchSetColorLabel(color) {
   ids.forEach(function(id) {
     if (color) colorLabels[id] = color;
     else delete colorLabels[id];
+    colorLabelsFetched.add(id);
   });
   refreshGridCards(ids);
+  _refreshBatchInspectorIfActive();
   scheduleCollectionCountsRefresh();
   showUndoToast();
 }
@@ -3676,6 +4627,7 @@ async function confirmBatchKeyword() {
   loadSelectionKeywordSuggestions(ids);
   loadKeywords();
   scheduleCollectionCountsRefresh();
+  refreshActiveCollectionAfterMembershipChange();
   refreshPendingSyncBanner();
   showUndoToast();
 }
@@ -3712,6 +4664,35 @@ function batchDelete() {
 var _batchCollections = [];
 var _batchCollectionSelectedId = null;
 
+function collectionAcceptsManualPhotos(collection) {
+  if (typeof collection.can_add_photos === 'boolean') {
+    return collection.can_add_photos;
+  }
+
+  function rulesAcceptManualPhotos(node) {
+    if (Array.isArray(node)) {
+      return node.every(rulesAcceptManualPhotos);
+    }
+    if (!node || typeof node !== 'object') return false;
+    if (node.field === 'photo_ids') {
+      return Array.isArray(node.value || []);
+    }
+    if (!node.field && Array.isArray(node.rules)) {
+      return (node.mode || 'all') === 'all' && node.rules.every(rulesAcceptManualPhotos);
+    }
+    return false;
+  }
+
+  try {
+    var rules = typeof collection.rules === 'string'
+      ? JSON.parse(collection.rules)
+      : collection.rules;
+    return rulesAcceptManualPhotos(rules);
+  } catch(e) {
+    return false;
+  }
+}
+
 async function addToCollection() {
   var activeIds = getActiveSelection();
   if (activeIds.length === 0) {
@@ -3727,6 +4708,7 @@ async function addToCollection() {
     return;
   }
 
+  collections = collections.filter(collectionAcceptsManualPhotos);
   _batchCollections = collections;
   _batchCollectionSelectedId = null;
   document.getElementById('batchCollectionTitle').textContent = 'Add ' + activeIds.length + ' photo(s) to collection';
@@ -3736,7 +4718,7 @@ async function addToCollection() {
     listHtml += '<div class="batch-coll-item" data-id="' + c.id + '" onclick="pickBatchCollection(' + c.id + ')" style="padding:6px 10px;cursor:pointer;border-radius:4px;font-size:13px;color:var(--text-primary);">' + escapeHtml(c.name) + '</div>';
   });
   if (collections.length === 0) {
-    listHtml = '<div style="font-size:12px;color:var(--text-dim);padding:4px 10px;">No collections yet</div>';
+    listHtml = '<div style="font-size:12px;color:var(--text-dim);padding:4px 10px;">No manual collections yet</div>';
   }
   document.getElementById('batchCollectionList').innerHTML = listHtml;
   document.getElementById('batchCollectionNewName').value = '';
@@ -3800,6 +4782,304 @@ async function confirmBatchCollection() {
   clearSelection();
 }
 
+var _gpsResolveSource = null;
+var _gpsResolvePreview = null;
+
+function gpsResolveReasonLabel(reason) {
+  var labels = {
+    missing_gps: 'No GPS',
+    invalid_gps: 'Invalid GPS',
+    no_api_key: 'No Google Maps key',
+    no_match: 'No place found',
+    transient_error: 'Temporary lookup failure',
+    already_has_location: 'Already has location',
+  };
+  return labels[reason] || reason || 'Unresolved';
+}
+
+function renderGpsResolvePreview(data) {
+  _gpsResolvePreview = data || {};
+  var total = _gpsResolvePreview.total || 0;
+  var resolvable = _gpsResolvePreview.resolvable || 0;
+  var groups = _gpsResolvePreview.groups || [];
+  var unresolved = _gpsResolvePreview.unresolved || [];
+  var skipped = _gpsResolvePreview.skipped || [];
+  var summary = document.getElementById('gpsResolveSummary');
+  var groupEl = document.getElementById('gpsResolveGroups');
+  var note = document.getElementById('gpsResolveNote');
+  var applyBtn = document.getElementById('gpsResolveApplyBtn');
+
+  summary.textContent = resolvable.toLocaleString() + ' of ' + total.toLocaleString()
+    + ' photos can be assigned across ' + groups.length.toLocaleString()
+    + ' place' + (groups.length === 1 ? '' : 's') + '.';
+
+  groupEl.innerHTML = groups.map(function(g) {
+    var samples = (g.sample_filenames || []).join(', ');
+    return '<div class="gps-resolve-row">' +
+      '<div style="min-width:0;">' +
+        '<div class="gps-resolve-place">' + escapeHtml(g.summary || g.name || g.place_id || 'Unknown place') + '</div>' +
+        (samples ? '<div class="gps-resolve-samples">' + escapeHtml(samples) + '</div>' : '') +
+      '</div>' +
+      '<div class="gps-resolve-count">' + (g.count || 0).toLocaleString() + '</div>' +
+    '</div>';
+  }).join('') || '<div class="gps-resolve-row"><div class="gps-resolve-place">No resolvable GPS locations</div></div>';
+
+  var notes = [];
+  if (unresolved.length) {
+    var reasonCounts = {};
+    unresolved.forEach(function(item) {
+      var reason = item.reason || 'unresolved';
+      reasonCounts[reason] = (reasonCounts[reason] || 0) + 1;
+    });
+    var reasonText = Object.keys(reasonCounts).map(function(reason) {
+      return reasonCounts[reason].toLocaleString() + ' ' + gpsResolveReasonLabel(reason);
+    }).join(', ');
+    notes.push(unresolved.length.toLocaleString() + ' unresolved: ' + reasonText);
+  }
+  if (skipped.length) {
+    notes.push(skipped.length.toLocaleString() + ' skipped because they already have a location.');
+  }
+  note.textContent = notes.join(' ');
+  applyBtn.disabled = resolvable === 0;
+  applyBtn.style.opacity = resolvable === 0 ? '0.55' : '';
+}
+
+async function openGpsResolve(source) {
+  _gpsResolveSource = source;
+  _gpsResolvePreview = null;
+  document.getElementById('gpsResolveSummary').textContent = 'Loading...';
+  document.getElementById('gpsResolveGroups').innerHTML = '';
+  document.getElementById('gpsResolveNote').textContent = '';
+  document.getElementById('gpsResolveApplyBtn').disabled = true;
+  document.getElementById('gpsResolveModal').classList.add('open');
+  try {
+    var data = await safeFetch('/api/batch/location/from-exif', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(Object.assign({apply: false}, source)),
+    });
+    renderGpsResolvePreview(data);
+  } catch(e) {
+    hideGpsResolveModal();
+  }
+}
+
+function openGpsResolveForCollection(collectionId) {
+  openGpsResolve({collection_id: collectionId});
+}
+
+function openGpsResolveForSelection() {
+  var ids = getActiveSelection();
+  if (!ids.length) return;
+  openGpsResolve({photo_ids: ids});
+}
+
+function hideGpsResolveModal() {
+  document.getElementById('gpsResolveModal').classList.remove('open');
+  _gpsResolveSource = null;
+  _gpsResolvePreview = null;
+  window._vireoNativeMenuPhotoIdsOverride = null;
+}
+
+async function applyGpsResolve() {
+  if (!_gpsResolveSource || !_gpsResolvePreview || !_gpsResolvePreview.resolvable) return;
+  var btn = document.getElementById('gpsResolveApplyBtn');
+  btn.disabled = true;
+  btn.textContent = 'Applying...';
+  try {
+    var data = await safeFetch('/api/batch/location/from-exif', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(Object.assign({apply: true}, _gpsResolveSource)),
+    });
+    var updated = data.updated || 0;
+    var updatedIds = [];
+    (data.groups || []).forEach(function(g) {
+      (g.photo_ids || []).forEach(function(id) { updatedIds.push(id); });
+    });
+    hideGpsResolveModal();
+    invalidateKeywordAutocompleteCache();
+    loadKeywords();
+    scheduleCollectionCountsRefresh();
+    refreshPendingSyncBanner();
+    var detailPhotoId = updatedIds.indexOf(selectedPhotoId) !== -1 ? selectedPhotoId : null;
+    await _afterLocationMutation(updatedIds, detailPhotoId);
+    var errors = (data.group_errors || []).length;
+    showToast(
+      'Resolved GPS locations for ' + updated.toLocaleString() + ' photo' + (updated === 1 ? '' : 's')
+      + (errors ? '; ' + errors + ' place group' + (errors === 1 ? '' : 's') + ' failed' : '')
+    );
+    if (updated > 0) showUndoToast();
+  } catch(e) {
+    btn.disabled = false;
+  } finally {
+    btn.textContent = 'Apply';
+  }
+}
+
+var captureTimePreviewSeq = 0;
+
+function getCaptureTimeMode() {
+  var selected = document.querySelector('input[name="captureTimeMode"]:checked');
+  return selected ? selected.value : 'preserve_instant';
+}
+
+function buildCaptureTimePayload() {
+  var ids = getActiveSelection();
+  var mode = getCaptureTimeMode();
+  var targetOffset = document.getElementById('captureTimeTargetOffset').value.trim();
+  var shiftRaw = document.getElementById('captureTimeManualShift').value;
+  var shiftMinutes = parseInt(shiftRaw, 10);
+  if (isNaN(shiftMinutes)) shiftMinutes = 0;
+  return {
+    photo_ids: ids,
+    mode: mode,
+    target_offset: mode === 'manual' ? null : (targetOffset || null),
+    shift_minutes: shiftMinutes,
+    keep_backups: document.getElementById('captureTimeKeepBackups').checked,
+  };
+}
+
+function syncCaptureTimeFieldState() {
+  var mode = getCaptureTimeMode();
+  var targetInput = document.getElementById('captureTimeTargetOffset');
+  var shiftInput = document.getElementById('captureTimeManualShift');
+  if (!targetInput || !shiftInput) return;
+  if (mode === 'manual') {
+    targetInput.disabled = true;
+    targetInput.title = 'Not used in manual shift mode';
+    shiftInput.disabled = false;
+    shiftInput.title = '';
+  } else {
+    targetInput.disabled = false;
+    targetInput.title = '';
+    shiftInput.disabled = true;
+    shiftInput.title = 'Not used in preserve-instant mode';
+  }
+}
+
+function formatShiftMinutes(mins) {
+  var sign = mins >= 0 ? '+' : '';
+  var hours = mins / 60;
+  var hoursPart = Number.isInteger(hours) ? ' (' + (hours >= 0 ? '+' : '') + hours + ' hours)' : '';
+  return sign + mins + ' minutes' + hoursPart;
+}
+
+function renderCaptureTimePreview(data) {
+  var rows = data.samples || [];
+  var shiftsVary = !!data.shifts_vary;
+  var html = '<div class="capture-time-row header">' +
+    '<div>File</div><div>Current</div><div>After</div></div>';
+  rows.forEach(function(row) {
+    var before = (row.before_time || 'No capture time') + (row.before_offset ? ' ' + row.before_offset : '');
+    var after = (row.after_time || 'No capture time') + (row.after_offset ? ' ' + row.after_offset : '');
+    var perRowShift = '';
+    if (shiftsVary && typeof row.shift_minutes === 'number') {
+      perRowShift = ' <span style="color:var(--text-muted);font-size:11px;">(' + formatShiftMinutes(row.shift_minutes) + ')</span>';
+    }
+    html += '<div class="capture-time-row">' +
+      '<div class="capture-time-filename" title="' + escapeAttr(row.filename || '') + '">' + escapeHtml(row.filename || '') + '</div>' +
+      '<div class="capture-time-before">' + escapeHtml(before) + '</div>' +
+      '<div class="capture-time-after">' + escapeHtml(after) + perRowShift + '</div>' +
+    '</div>';
+  });
+  var summary;
+  if (shiftsVary) {
+    summary = 'Shift varies per photo (each photo is shifted to land on the target offset).';
+  } else if (typeof data.shift_minutes === 'number') {
+    summary = 'Resolved shift: ' + formatShiftMinutes(data.shift_minutes);
+  } else {
+    summary = 'No shift will be applied.';
+  }
+  html += '<div class="capture-time-hint" style="padding:0 10px 10px;margin:0;">' + escapeHtml(summary) + '</div>';
+  document.getElementById('captureTimePreview').innerHTML = html;
+}
+
+async function updateCaptureTimePreview() {
+  var modal = document.getElementById('captureTimeModal');
+  if (!modal.classList.contains('open')) return;
+  var payload = buildCaptureTimePayload();
+  var previewEl = document.getElementById('captureTimePreview');
+  var applyBtn = document.getElementById('captureTimeApplyBtn');
+  if (!payload.photo_ids.length) {
+    previewEl.innerHTML = '<div class="capture-time-hint" style="padding:10px;margin:0;">No photos selected.</div>';
+    applyBtn.disabled = true;
+    return;
+  }
+  var seq = ++captureTimePreviewSeq;
+  applyBtn.disabled = true;
+  previewEl.innerHTML = '<div class="capture-time-hint" style="padding:10px;margin:0;">Loading preview...</div>';
+  try {
+    var data = await safeFetch('/api/capture-time/preview', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    }, { toast: false });
+    if (seq !== captureTimePreviewSeq) return;
+    renderCaptureTimePreview(data);
+    applyBtn.disabled = false;
+    applyBtn.textContent = 'Apply to ' + payload.photo_ids.length + ' photo' + (payload.photo_ids.length === 1 ? '' : 's');
+  } catch(e) {
+    if (seq !== captureTimePreviewSeq) return;
+    previewEl.innerHTML = '<div class="capture-time-hint" style="padding:10px;margin:0;color:var(--danger);">' + escapeHtml(e.message || 'Could not build preview') + '</div>';
+    applyBtn.disabled = true;
+  }
+}
+
+function openCaptureTimeModal() {
+  var ids = getActiveSelection();
+  if (!ids.length) return;
+  document.getElementById('captureTimeTitle').textContent = 'Adjust Capture Time for ' + ids.length + ' photo' + (ids.length === 1 ? '' : 's');
+  document.getElementById('captureTimeApplyBtn').textContent = 'Apply';
+  document.getElementById('captureTimeApplyBtn').disabled = true;
+  document.getElementById('captureTimeModal').classList.add('open');
+  syncCaptureTimeFieldState();
+  updateCaptureTimePreview();
+}
+
+function hideCaptureTimeModal() {
+  document.getElementById('captureTimeModal').classList.remove('open');
+  window._vireoNativeMenuPhotoIdsOverride = null;
+}
+
+async function startCaptureTimeJob() {
+  var payload = buildCaptureTimePayload();
+  if (!payload.photo_ids.length) return;
+  var applyBtn = document.getElementById('captureTimeApplyBtn');
+  applyBtn.disabled = true;
+  try {
+    var data = await safeFetch('/api/jobs/capture-time', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    hideCaptureTimeModal();
+    showToast('Adjusting capture time for ' + payload.photo_ids.length + ' photo' + (payload.photo_ids.length === 1 ? '' : 's') + '...');
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(prog) {
+        showToast('Adjusting capture time: ' + prog.current + '/' + prog.total + ' — ' + (prog.current_file || ''));
+      },
+      onComplete: function(done) {
+        if (done.status && done.status !== 'completed') {
+          var errors = done.errors || [];
+          showToast('Capture time failed: ' + (errors[0] || done.status), 'error');
+          return;
+        }
+        var result = done.result || {};
+        var skippedText = result.skipped ? ', ' + result.skipped + ' skipped' : '';
+        showToast('Capture time updated: ' + (result.updated || 0) + ' updated' + skippedText + ', ' + (result.failed || 0) + ' failed', result.failed ? 'error' : 'success');
+        resetAndLoad();
+        loadSummary();
+      },
+      onError: function() {
+        applyBtn.disabled = false;
+      },
+    });
+  } catch(e) {
+    applyBtn.disabled = false;
+  }
+}
+
 function clearSelection() {
   anchorRestoreEpoch++;
   // Clear both tracks that feed getActiveSelection(), otherwise the batch bar
@@ -3807,6 +5087,23 @@ function clearSelection() {
   selectedPhotos.clear();
   selectedPhotoId = null;
   selectedIndex = -1;
+  // Batch-bar Clear (and every other caller) has to scrub the EXIF suggestion
+  // too. Without this, the suggestion element keeps its data-photo-id and
+  // Accept button after clearing, so a later Select All that still contains
+  // the previously-open anchor satisfies renderLocationEmpty's owner-in-
+  // selection check and resurrects the anchor's Accept line for the whole
+  // batch — one click would apply the anchor's GPS-derived place to every
+  // selected photo. Codex P2 on PR #1097.
+  clearExifSuggestion();
+  // Also drop the ambient detail-photo pointer maybeShowExifSuggestion's
+  // post-await path uses as its owner check. Scrubbing the DOM alone isn't
+  // enough: a reverse-geocode fetch that was in flight when the user clicked
+  // Clear still resolves later, and if _detailPhotoId still points at the
+  // departed anchor a subsequent Select All that contains that photo
+  // re-satisfies both async guards and repaints A's Accept line into the
+  // batch inspector — clicking it would apply A's EXIF place to every
+  // selected photo. Codex P2 on PR #1097 (17:04Z follow-up).
+  window._detailPhotoId = null;
   document.querySelectorAll('.grid-card').forEach(function(el) {
     el.classList.remove('selected');
   });
@@ -3828,6 +5125,9 @@ async function undoLast() {
   try {
     var data = await safeFetch('/api/undo', { method: 'POST' });
     showToast('Undone: ' + data.undone + ' — Ctrl+Shift+Z to redo');
+    if (typeof window.vireoRefreshEditRecipeCache === 'function') {
+      window.vireoRefreshEditRecipeCache(data.edit_recipes);
+    }
     resetAndLoad();
     scheduleCollectionCountsRefresh();
     refreshPendingSyncBanner();
@@ -3838,6 +5138,9 @@ async function redoLast() {
   try {
     var data = await safeFetch('/api/redo', { method: 'POST' });
     showToast('Redone: ' + data.redone);
+    if (typeof window.vireoRefreshEditRecipeCache === 'function') {
+      window.vireoRefreshEditRecipeCache(data.edit_recipes);
+    }
     resetAndLoad();
     scheduleCollectionCountsRefresh();
     refreshPendingSyncBanner();
@@ -3854,13 +5157,40 @@ async function showUndoToast() {
 /* showToast is now provided globally by _navbar.html */
 
 async function loadDetail(id) {
+  // If a multi-selection is already active, skip this single-photo load — it
+  // would strip .batch-mode and rewire the sidebar (rating stars → setRating(id))
+  // to the anchor while the user still has N photos selected. Common flow:
+  // click A, then Cmd/Ctrl-click B before A's fetch returns. selectedPhotoId
+  // stays A, so both the sync class removal below and the post-await
+  // renderDetail(A) would overwrite the batch inspector the Cmd-click just set up.
+  if (selectedPhotos.size > 1) return;
   document.getElementById('summaryPanel').classList.add('hidden');
   var detail = document.getElementById('detailContent');
+  // Loading a single photo's detail always exits batch mode.
+  if (detail) detail.classList.remove('batch-mode');
   if (detail) detail.classList.toggle('visible', window._detailPhotoId === id);
+
+  // Kill any stale EXIF suggestion tagged for a *different* photo before the
+  // fetch returns. Otherwise: open A (suggestion shown, data-photo-id=A) →
+  // click B → Select All lands before B's /api/photos response resolves.
+  // renderBatchInspector's preserveExifSuggestion check finds A's stale
+  // data-photo-id, sees A is in the Select All ids, and resurrects A's
+  // Accept line for the whole batch — clicking it applies A's GPS place to
+  // every selected photo. Also null _detailPhotoId so any in-flight
+  // reverse-geocode for A can't repaint through maybeShowExifSuggestion's
+  // post-await guard once the batch inspector is on screen. Codex P2 on
+  // PR #1097 (17:23Z).
+  if (window._detailPhotoId !== id) {
+    clearExifSuggestion();
+    window._detailPhotoId = null;
+  }
 
   try {
     var photo = await safeFetch('/api/photos/' + id, {}, { toast: false });
-    if (selectedPhotoId === id) {
+    // Re-check after the fetch: a Cmd/Ctrl-click landing during the await can
+    // promote the selection to multi. The batch inspector is already rendered;
+    // don't clobber it with this stale single-photo response.
+    if (selectedPhotoId === id && selectedPhotos.size <= 1) {
       renderDetail(photo);
       if (detail) detail.classList.add('visible');
     }
@@ -3869,7 +5199,20 @@ async function loadDetail(id) {
 
 function renderDetail(photo) {
   window._detailPhotoId = photo.id;
-  document.getElementById('detailImg').src = '/thumbnails/' + photo.id + '.jpg';
+  // Single-photo view: clear any Mixed markers left over from batch mode.
+  _batchToggleMixed('ratingMixed', false);
+  _batchToggleMixed('flagMixed', false);
+  _batchToggleMixed('colorMixed', false);
+  if (
+    typeof window.vireoRememberPhotoEditRecipe === 'function' &&
+    Object.prototype.hasOwnProperty.call(photo, 'edit_recipe')
+  ) {
+    window.vireoRememberPhotoEditRecipe(photo.id, photo.edit_recipe, {
+      skipIfLocallyWritten: true,
+    });
+  }
+  var detailThumb = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(photo) : '/thumbnails/' + photo.id + '.jpg';
+  document.getElementById('detailImg').src = detailThumb;
   document.getElementById('detailFilename').textContent = photo.filename;
 
   // Rating stars
@@ -4119,6 +5462,21 @@ function closeDetail() {
   hideDetailPanel();
   selectedPhotoId = null;
   selectedIndex = -1;
+  // Drop any lingering EXIF suggestion attached to the closed detail photo.
+  // Without this, the element keeps its data-photo-id and Accept button; a
+  // later Ctrl+A (or any batch that still contains that photo) would satisfy
+  // renderLocationEmpty's owner-in-selection check and resurrect the anchor's
+  // Accept line for the whole batch — clicking it would apply the anchor's
+  // GPS-derived place to every selected photo. Codex P2 on PR #1097.
+  clearExifSuggestion();
+  // Null the ambient detail-photo pointer for the same reason. maybeShowExif
+  // Suggestion's post-await guard uses window._detailPhotoId as its owner
+  // check: if a reverse-geocode was in flight when we closed the panel, the
+  // fetch keeps running and later resolves. With the pointer still set, a
+  // Ctrl+A that includes the departed photo would satisfy both async guards
+  // and repaint A's Accept line into the batch inspector. Codex P2 on
+  // PR #1097 (17:04Z follow-up).
+  window._detailPhotoId = null;
   // Re-highlight any cmd/shift-click selections that survive detail close.
   // A blanket .remove('selected') would leave selectedPhotos armed for batch
   // actions with no visible indicator — e.g. click A -> cmd-click B -> cmd-click
@@ -4200,6 +5558,17 @@ async function setRating(photoId, rating) {
 }
 
 async function setFlag(flag) {
+  var sel = getActiveSelection();
+  if (sel.length > 1) {
+    var st = _batchAllLoaded(sel) ? _batchFlagState(sel) : { unanimous: false };
+    var target = (st.unanimous && st.value === flag) ? 'none' : flag;
+    // batchSetFlag runs _refreshBatchInspectorIfActive() against the *current*
+    // selection when the request resolves, so the sidebar reflects whatever is
+    // selected now. Re-rendering with the captured `sel` here would clobber a
+    // fresh render if the user changed the selection during the await.
+    await batchSetFlag(target);
+    return;
+  }
   if (!selectedPhotoId) return;
   var photoId = selectedPhotoId;
   try {
@@ -4260,10 +5629,28 @@ async function fetchColorLabels(photoIds) {
       photoIds.forEach(function(id) { delete colorLabels[id]; });
     }
     for (var id in data) colorLabels[id] = data[id];
+    // Mark every requested id as fetched — an absent id in `data` means "no
+    // color set" now that we've asked, so the batch inspector can trust
+    // colorLabels[id] === undefined for these ids as a definite value.
+    photoIds.forEach(function(id) { colorLabelsFetched.add(id); });
+    // A batch selection that included any of these ids may have rendered as
+    // unanimous no-colour with no Mixed marker; refresh it now that we can
+    // trust the state.
+    _refreshBatchInspectorIfActive();
   }
 }
 
 async function setColorLabel(color) {
+  var sel = getActiveSelection();
+  if (sel.length > 1) {
+    var st = _batchAllLoaded(sel) ? _batchColorState(sel) : { unanimous: false };
+    var target = (st.unanimous && st.value === color) ? null : color;
+    // See setFlag: batchSetColorLabel already refreshes the inspector for the
+    // current selection, so re-rendering with the captured `sel` risks stomping
+    // a fresh render if the user changed the selection during the await.
+    await batchSetColorLabel(target);
+    return;
+  }
   if (!selectedPhotoId) return;
   colorLabelGen++;
   var photoId = selectedPhotoId;
@@ -4279,20 +5666,133 @@ async function setColorLabel(color) {
   } else {
     delete colorLabels[photoId];
   }
+  colorLabelsFetched.add(photoId);
   if (selectedPhotoId === photoId) updateDetailColors();
   refreshGridCards([photoId]);
   scheduleCollectionCountsRefresh();
 }
 
-function updateDetailColors() {
-  var current = colorLabels[selectedPhotoId] || null;
+function updateDetailColorsValue(current) {
   document.querySelectorAll('.detail-color-btn').forEach(function(btn) {
     btn.classList.toggle('active', btn.dataset.color === current);
   });
 }
 
+function updateDetailColors() {
+  updateDetailColorsValue(colorLabels[selectedPhotoId] || null);
+}
+
+// --- Multi-select (batch) inspector ---------------------------------------
+// When >1 photos are selected, the detail panel is reused as a batch editor
+// (see updateSelectionPanel). Rating/Flag/Color reflect the selection's shared
+// value when unanimous, or a "Mixed" marker when the selected photos differ,
+// and edits apply to the whole selection.
+
+function _batchToggleMixed(id, show) {
+  var el = document.getElementById(id);
+  if (el) el.hidden = !show;
+}
+
+// Returns {unanimous, value}. get(id) yields the per-photo value.
+function _batchUnanimous(ids, get) {
+  if (!ids.length) return { unanimous: false, value: null };
+  var first = get(ids[0]);
+  for (var i = 1; i < ids.length; i++) {
+    if (get(ids[i]) !== first) return { unanimous: false, value: null };
+  }
+  return { unanimous: true, value: first };
+}
+
+function _batchRatingState(ids) {
+  return _batchUnanimous(ids, function(id) {
+    var p = photos.find(function(x) { return x.id === id; });
+    return p ? (p.rating || 0) : 0;
+  });
+}
+function _batchFlagState(ids) {
+  return _batchUnanimous(ids, function(id) {
+    var p = photos.find(function(x) { return x.id === id; });
+    return p ? (p.flag || 'none') : 'none';
+  });
+}
+function _batchColorState(ids) {
+  return _batchUnanimous(ids, function(id) { return colorLabels[id] || null; });
+}
+
+// Only trust unanimity when every selected photo is loaded in the current grid
+// (and thus its rating/flag/color is known). A selection that reaches beyond the
+// loaded page — e.g. "select all search results" — is shown as Mixed rather than
+// asserting a shared value we can't actually verify.
+function _batchAllLoaded(ids) {
+  return ids.every(function(id) {
+    return photos.some(function(p) { return p.id === id; });
+  });
+}
+
+// Colour labels arrive from a separate async /api/photos/color_labels fetch, so
+// having each photo row loaded (via _batchAllLoaded) is not enough to trust the
+// colour column: a selection made before that fetch returns would otherwise
+// render as unanimous no-colour without a Mixed marker.
+function _batchColorLoaded(ids) {
+  return ids.every(function(id) { return colorLabelsFetched.has(id); });
+}
+
+function renderBatchInspector(ids, opts) {
+  opts = opts || {};
+  var known = _batchAllLoaded(ids);
+
+  var rs = known ? _batchRatingState(ids) : { unanimous: false, value: 0 };
+  var r = rs.unanimous ? rs.value : 0;
+  var ratingHtml = '';
+  for (var i = 1; i <= 5; i++) {
+    ratingHtml += '<span class="' + (i <= r ? 'detail-star active' : 'detail-star') +
+      '" onclick="batchRate(' + i + ')">&#9733;</span>';
+  }
+  document.getElementById('detailRating').innerHTML = ratingHtml;
+  // Show Mixed whenever we can't confirm unanimity — including partially-loaded
+  // selections where `known` is false. Hiding Mixed there made "0 stars / None /
+  // no color" render identically to a truly unanimous no-value selection.
+  _batchToggleMixed('ratingMixed', !(known && rs.unanimous));
+
+  var fs = known ? _batchFlagState(ids) : { unanimous: false, value: 'none' };
+  updateDetailFlagButtons(fs.unanimous ? fs.value : 'none');
+  _batchToggleMixed('flagMixed', !(known && fs.unanimous));
+
+  var colorKnown = known && _batchColorLoaded(ids);
+  var cs = colorKnown ? _batchColorState(ids) : { unanimous: false, value: null };
+  updateDetailColorsValue(cs.unanimous ? cs.value : null);
+  _batchToggleMixed('colorMixed', !(colorKnown && cs.unanimous));
+
+  // Location input shares the batch-aware submit path (_locationApplyPhotoIds);
+  // show the empty input rather than any single photo's saved location.
+  // Skip the reset on state-only refreshes (opts.preserveLocation) — the user
+  // may be mid-way through typing a batch location when an async event
+  // (e.g. a /api/photos/color_labels fetch resolving, a batch rating shortcut)
+  // triggers _refreshBatchInspectorIfActive, and we'd otherwise erase it.
+  if (!opts.preserveLocation) {
+    renderLocationEmpty({
+      preserveExifSuggestion: opts.preserveExifSuggestion,
+      selectionIds: ids,
+    });
+  }
+}
+
+async function batchRate(rating) {
+  var ids = getActiveSelection();
+  if (ids.length < 1) return;
+  var st = _batchAllLoaded(ids) ? _batchRatingState(ids) : { unanimous: false };
+  var target = (st.unanimous && st.value === rating) ? 0 : rating;
+  // batchSetRating already refreshes the inspector for the current selection.
+  // A follow-up render using the captured `ids` would clobber that fresh render
+  // if the user changed the selection during the await.
+  await batchSetRating(target);
+}
+
 async function addKeyword(keyword) {
-  if (!selectedPhotoId) return;
+  var ids = getActiveSelection();
+  var useBatch = ids.length > 1;
+  var batchSelectionKey = selectionIdsKey(ids);
+  if (!selectedPhotoId && !useBatch) return;
   var input = document.getElementById('addKeywordInput');
   var name = input.value.trim();
   if (!name) return;
@@ -4305,8 +5805,12 @@ async function addKeyword(keyword) {
   var payload = selectedKeyword && selectedKeyword.id
     ? { keyword_id: selectedKeyword.id }
     : { name: name };
+  if (useBatch) payload.photo_ids = ids;
   try {
-    await safeFetch('/api/photos/' + selectedPhotoId + '/keywords', {
+    var endpoint = useBatch
+      ? '/api/batch/keyword'
+      : '/api/photos/' + selectedPhotoId + '/keywords';
+    await safeFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -4315,9 +5819,24 @@ async function addKeyword(keyword) {
     state.selectedKeyword = null;
     hideKeywordSuggestions('addKeywordInput');
     if (!selectedKeyword) invalidateKeywordAutocompleteCache();
-    loadDetail(selectedPhotoId);
+    // Same reason as _afterLocationMutation: if a multi-selection is still
+    // active, re-render the batch inspector instead of collapsing to the
+    // anchor photo's single-detail view via loadDetail.
+    var currentSel = getActiveSelection();
+    if (currentSel.length > 1) {
+      // Selection is unchanged after a batch keyword save; keep any in-progress
+      // location input the user may have typed.
+      renderBatchInspector(currentSel, { preserveLocation: true });
+    } else if (selectedPhotoId) {
+      loadDetail(selectedPhotoId);
+    }
+    if (useBatch && selectionIdsKey(getActiveSelection()) === batchSelectionKey) {
+      selectionKeywordKey = '';
+      loadSelectionKeywordSuggestions(ids);
+    }
     loadKeywords();
     scheduleCollectionCountsRefresh();
+    refreshActiveCollectionAfterMembershipChange();
     refreshPendingSyncBanner();
   } catch(e) {}
 }
@@ -4330,6 +5849,7 @@ async function removeKeyword(photoId, keywordId) {
     loadDetail(photoId);
     loadKeywords();
     scheduleCollectionCountsRefresh();
+    refreshActiveCollectionAfterMembershipChange();
     refreshPendingSyncBanner();
   } catch(e) {}
 }
@@ -4366,6 +5886,10 @@ var _locationAutocompleteBound = false;
 // keyboard-selected autocomplete suggestion (where place_changed fires
 // AFTER the keydown event) gets a chance to cancel the text path.
 var _locationPendingTextSubmit = null;
+var _locationKeywordState = {
+  matches: [],
+  activeIndex: -1,
+};
 
 function _showLocationError(msg) {
   var el = document.getElementById('locationError');
@@ -4380,6 +5904,122 @@ function _showLocationError(msg) {
 function _hideLocationError() {
   var el = document.getElementById('locationError');
   if (el) el.hidden = true;
+}
+
+function hideLocationKeywordSuggestions() {
+  var dropdown = document.getElementById('locationKeywordSuggestions');
+  if (dropdown) {
+    dropdown.classList.remove('open');
+    dropdown.innerHTML = '';
+  }
+  _locationKeywordState.matches = [];
+  _locationKeywordState.activeIndex = -1;
+}
+
+function renderLocationKeywordSuggestions() {
+  var input = document.getElementById('locationInput');
+  var dropdown = document.getElementById('locationKeywordSuggestions');
+  if (!input || !dropdown) return;
+  var query = input.value.trim().toLowerCase();
+  if (!query || !keywordAutocompleteCache || !keywordAutocompleteCache.length) {
+    hideLocationKeywordSuggestions();
+    return;
+  }
+
+  _locationKeywordState.matches = keywordAutocompleteCache
+    .filter(function(k) { return k && k.type === 'location'; })
+    .map(function(k) {
+      return { keyword: k, score: keywordMatchScore(k.search, query) };
+    })
+    .filter(function(item) { return item.score < 99; })
+    .sort(function(a, b) {
+      return a.score - b.score || a.keyword.search.localeCompare(b.keyword.search) || a.keyword.id - b.keyword.id;
+    })
+    .slice(0, 6)
+    .map(function(item) { return item.keyword; });
+
+  if (!_locationKeywordState.matches.length) {
+    hideLocationKeywordSuggestions();
+    return;
+  }
+  if (_locationKeywordState.activeIndex < 0 || _locationKeywordState.activeIndex >= _locationKeywordState.matches.length) {
+    _locationKeywordState.activeIndex = 0;
+  }
+
+  dropdown.innerHTML = _locationKeywordState.matches.map(function(k, idx) {
+    var active = idx === _locationKeywordState.activeIndex ? ' active' : '';
+    var count = k.photo_count === 1 ? '1 photo' : k.photo_count + ' photos';
+    var source = k.place_id ? 'Saved Google place' : 'Saved location';
+    return '<div class="keyword-suggestion-option' + active + '" role="option" data-index="' + idx + '">' +
+      '<span class="keyword-suggestion-name">' + escapeHtml(k.name) + '</span>' +
+      '<span class="keyword-suggestion-meta">' + escapeHtml(source + ' · ' + count) + '</span>' +
+      '</div>';
+  }).join('');
+  dropdown.classList.add('open');
+}
+
+function updateLocationKeywordSuggestions() {
+  var input = document.getElementById('locationInput');
+  if (!input || !input.value.trim()) {
+    hideLocationKeywordSuggestions();
+    return;
+  }
+  loadKeywordAutocompleteOptions().then(renderLocationKeywordSuggestions);
+}
+
+function chooseLocationKeywordSuggestion(index) {
+  var keyword = _locationKeywordState.matches[index];
+  if (!keyword) return;
+  var input = document.getElementById('locationInput');
+  if (input) input.value = keyword.name;
+  hideLocationKeywordSuggestions();
+  if (_locationPendingTextSubmit) {
+    clearTimeout(_locationPendingTextSubmit);
+    _locationPendingTextSubmit = null;
+  }
+  _locationLastPickedAt = Date.now();
+  _submitLocationKeyword(keyword);
+}
+
+function _locationApplyPhotoIds() {
+  // Batch flow (Cmd/Ctrl-click without ever opening a single-photo detail)
+  // leaves window._detailPhotoId unset even though getActiveSelection() has
+  // targets, so derive from the selection directly rather than gating on
+  // the focused-detail photo.
+  return getActiveSelection();
+}
+
+async function _afterLocationMutation(photoIds, detailPhotoId) {
+  // Bump the location-mutation epoch so any in-flight reverse-geocode from an
+  // earlier maybeShowExifSuggestion(A) bails out of its post-await paint. Every
+  // save/clear/accept path funnels through here, so this is the single choke
+  // point where the batch-save-during-pending-geocode race can be closed.
+  // Codex P2 on PR #1097 (17:39Z): open A → Cmd-click B → save batch location
+  // for {A,B} → geocode resolves. renderBatchInspector rehides #locationFilled,
+  // so the DOM-only guard in maybeShowExifSuggestion can't tell the batch was
+  // just given a location and repaints A's stale Accept line.
+  window._locationMutationEpoch = (window._locationMutationEpoch || 0) + 1;
+  invalidateKeywordAutocompleteCache();
+  loadKeywords();
+  scheduleCollectionCountsRefresh();
+  refreshPendingSyncBanner();
+  if (activeCollectionId) {
+    await filterByCollection(activeCollectionId);
+    return;
+  }
+  if (photoIds && photoIds.length) refreshGridCards(photoIds);
+  // If a multi-selection is still active, keep the batch inspector rendered.
+  // Falling through to loadDetail(anchor) would strip .batch-mode and rewire
+  // the rating stars to setRating(anchorId, i) — collapsing the panel to the
+  // anchor's single-photo view while the user still has N photos selected.
+  var activeSel = getActiveSelection();
+  if (activeSel.length > 1) {
+    renderBatchInspector(activeSel);
+  } else if (detailPhotoId && selectedPhotoId === detailPhotoId) {
+    loadDetail(detailPhotoId);
+  } else {
+    loadSummary();
+  }
 }
 
 async function bindLocationAutocomplete() {
@@ -4397,7 +6037,14 @@ async function bindLocationAutocomplete() {
     if (!google || !google.maps || !google.maps.places) return;
     _locationAutocomplete = new google.maps.places.Autocomplete(input, {
       types: ['geocode', 'establishment'],
-      fields: ['place_id', 'name', 'formatted_address'],
+      fields: [
+        'place_id',
+        'name',
+        'types',
+        'formatted_address',
+        'geometry',
+        'address_components'
+      ],
     });
     _locationAutocomplete.addListener('place_changed', function() {
       var place = _locationAutocomplete.getPlace();
@@ -4410,7 +6057,7 @@ async function bindLocationAutocomplete() {
         clearTimeout(_locationPendingTextSubmit);
         _locationPendingTextSubmit = null;
       }
-      _submitLocationPlace(place.place_id);
+      _submitLocationPlace(place.place_id, normalizeGooglePlaceForSubmit(place));
     });
   }).catch(function(err) {
     console.warn('Google Maps load failed:', err);
@@ -4418,39 +6065,111 @@ async function bindLocationAutocomplete() {
   });
 }
 
-async function _submitLocationPlace(placeId) {
-  var photoId = window._detailPhotoId;
-  if (!photoId) return;
+function normalizeGooglePlaceForSubmit(place) {
+  if (!place || !place.place_id) return null;
+  var loc = place.geometry && place.geometry.location;
+  var lat = null;
+  var lng = null;
+  if (loc) {
+    lat = (typeof loc.lat === 'function') ? loc.lat() : loc.lat;
+    lng = (typeof loc.lng === 'function') ? loc.lng() : loc.lng;
+  }
+  if (lat == null || lng == null) return null;
+  return {
+    place_id: place.place_id,
+    name: place.name || place.formatted_address || '',
+    types: Array.isArray(place.types) ? place.types : [],
+    lat: lat,
+    lng: lng,
+    address_components: (place.address_components || []).map(function(c) {
+      return {
+        name: c.long_name || c.name || '',
+        short_name: c.short_name || '',
+        types: c.types || [],
+      };
+    }),
+  };
+}
+
+async function _submitLocationPlace(placeId, placeDetails) {
   _hideLocationError();
+  // Derive the target photos from the batch-aware selection so a fresh
+  // multi-select (Cmd/Ctrl-click without ever opening a single-photo detail)
+  // still applies to every selected photo. window._detailPhotoId is unset in
+  // that flow, so gating on it up front would silently apply to none.
+  var ids = _locationApplyPhotoIds();
+  if (!ids.length) return;
+  var useBatch = ids.length > 1;
+  var detailPhotoId = window._detailPhotoId || null;
+  var body = { place_id: placeId };
+  if (placeDetails) body.place = placeDetails;
+  if (useBatch) body.photo_ids = ids;
   try {
-    var resp = await safeFetch('/api/photos/' + photoId + '/location', {
+    var endpoint = useBatch
+      ? '/api/batch/location'
+      : '/api/photos/' + ids[0] + '/location';
+    var resp = await safeFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ place_id: placeId }),
+      body: JSON.stringify(body),
     });
     if (resp && resp.location) {
       renderLocationFilled(resp.location);
-      // The location keyword may also appear in the Keywords list; refresh.
-      loadDetail(photoId);
     }
+    await _afterLocationMutation(ids, detailPhotoId);
+  } catch(e) {
+    _showLocationError('Could not save location.');
+  }
+}
+
+async function _submitLocationKeyword(keyword) {
+  if (!keyword || !keyword.id) return;
+  _hideLocationError();
+  var ids = _locationApplyPhotoIds();
+  if (!ids.length) return;
+  var useBatch = ids.length > 1;
+  var detailPhotoId = window._detailPhotoId || null;
+  var body = { keyword_id: keyword.id };
+  if (useBatch) body.photo_ids = ids;
+  try {
+    var endpoint = useBatch
+      ? '/api/batch/location'
+      : '/api/photos/' + ids[0] + '/location';
+    var resp = await safeFetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (resp && resp.location) {
+      renderLocationFilled(resp.location);
+    }
+    await _afterLocationMutation(ids, detailPhotoId);
   } catch(e) {
     _showLocationError('Could not save location.');
   }
 }
 
 async function _submitLocationText(name) {
-  var photoId = window._detailPhotoId;
-  if (!photoId) return;
   _hideLocationError();
+  var ids = _locationApplyPhotoIds();
+  if (!ids.length) return;
+  var useBatch = ids.length > 1;
+  var detailPhotoId = window._detailPhotoId || null;
   try {
-    var resp = await safeFetch('/api/photos/' + photoId + '/location/text', {
+    var endpoint = useBatch
+      ? '/api/batch/location/text'
+      : '/api/photos/' + ids[0] + '/location/text';
+    var body = useBatch
+      ? { name: name, photo_ids: ids }
+      : { name: name };
+    var resp = await safeFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name }),
+      body: JSON.stringify(body),
     });
     if (resp && resp.location) {
       renderLocationFilled(resp.location);
-      loadDetail(photoId);
+      await _afterLocationMutation(ids, detailPhotoId);
     }
   } catch(e) {
     _showLocationError('Could not save location.');
@@ -4464,10 +6183,22 @@ async function clearPhotoLocation() {
   try {
     await safeFetch('/api/photos/' + photoId + '/location', { method: 'DELETE' });
     renderLocationEmpty();
-    loadDetail(photoId);
+    await _afterLocationMutation([photoId], photoId);
   } catch(e) {
     _showLocationError('Could not clear location.');
   }
+}
+
+// Scrub the inline EXIF suggestion line (hide, empty innerHTML, drop the
+// data-photo-id owner tag). Every scrub site must go through this helper so
+// they can't silently diverge — e.g. if a future scrub also needs to clear a
+// stored placeId. Codex nitpick on PR #1097.
+function clearExifSuggestion() {
+  var sugg = document.getElementById('locationExifSuggestion');
+  if (!sugg) return;
+  sugg.hidden = true;
+  sugg.innerHTML = '';
+  if (sugg.dataset) delete sugg.dataset.photoId;
 }
 
 function renderLocationFilled(loc) {
@@ -4494,9 +6225,16 @@ function renderLocationFilled(loc) {
   // Reset the input value for next time.
   var input = document.getElementById('locationInput');
   if (input) input.value = '';
+  // Once a saved location is on screen any pending EXIF suggestion is moot,
+  // and leaving it (hidden) in #locationEmpty makes it stale state: open A
+  // (suggestion fetched) → open B with a saved location → Cmd-click A would
+  // otherwise resurrect A's Accept line for the {B, A} batch and overwrite
+  // B's location (Codex P2 on PR #1097). Clear it at the source instead.
+  clearExifSuggestion();
 }
 
-function renderLocationEmpty() {
+function renderLocationEmpty(opts) {
+  opts = opts || {};
   var filled = document.getElementById('locationFilled');
   var empty = document.getElementById('locationEmpty');
   if (!filled || !empty) return;
@@ -4505,14 +6243,26 @@ function renderLocationEmpty() {
   empty.hidden = false;
   var input = document.getElementById('locationInput');
   if (input) input.value = '';
+  hideLocationKeywordSuggestions();
   // Reset any prior EXIF suggestion. The caller (renderDetail) re-runs
   // maybeShowExifSuggestion(photo) after this, which decides whether to
-  // populate the line for the new photo.
+  // populate the line for the new photo. Entering batch mode preserves it
+  // instead (preserveExifSuggestion) so the anchor's suggestion stays
+  // acceptable for the whole selection — but only while the photo that
+  // produced it is still in the selection. Otherwise Accept would apply
+  // that anchor's GPS-derived location to unrelated photos (Codex P1 on
+  // PR #1097: open A → Cmd-click B → Cmd-click A to drop → Cmd-click C).
   var sugg = document.getElementById('locationExifSuggestion');
-  if (sugg) {
-    sugg.hidden = true;
-    sugg.innerHTML = '';
+  if (!sugg) return;
+  var keepSugg = false;
+  if (opts.preserveExifSuggestion) {
+    var ownerAttr = sugg.dataset ? sugg.dataset.photoId : '';
+    var owner = ownerAttr ? parseInt(ownerAttr, 10) : NaN;
+    keepSugg = !isNaN(owner)
+      && Array.isArray(opts.selectionIds)
+      && opts.selectionIds.indexOf(owner) !== -1;
   }
+  if (!keepSugg) clearExifSuggestion();
 }
 
 /* When a photo with EXIF GPS but no location keyword is opened, fetch a
@@ -4520,29 +6270,70 @@ function renderLocationEmpty() {
    silently when there's no key or no coords; the proxy returns null when
    Google has no match for the cell. */
 async function maybeShowExifSuggestion(photo) {
+  clearExifSuggestion();
   var sugg = document.getElementById('locationExifSuggestion');
   if (!sugg) return;
-  sugg.hidden = true;
-  sugg.innerHTML = '';
 
   if (!photo) return;
   if (photo.location) return;
   if (photo.latitude == null || photo.longitude == null) return;
 
-  await _cfgPromise;
-  var apiKey = (window.GOOGLE_MAPS_API_KEY || '').trim();
-  if (!apiKey) return;
-
   // Capture the photo id at request time so a slow reverse-geocode for an
   // older photo doesn't paint into the suggestion line for a newer one.
   var requestPhotoId = photo.id;
+  // Capture the location-mutation epoch BEFORE the first await, so any
+  // save/clear/accept during _cfgPromise or the reverse-geocode fetch bumps
+  // the counter past what we captured. The post-await guard bails on any
+  // mismatch. Closes the batch-save-during-pending-geocode race that the
+  // DOM `!filled.hidden` check alone can't catch (see below).
+  var requestEpoch = window._locationMutationEpoch || 0;
+
+  await _cfgPromise;
+  var apiKey = (window.GOOGLE_MAPS_API_KEY || '').trim();
+  if (!apiKey) return;
   try {
     var params = new URLSearchParams({lat: photo.latitude, lng: photo.longitude});
     var r = await fetch('/api/places/reverse-geocode?' + params.toString());
     if (!r.ok) return;
     var data = await r.json();
     if (!data || !data.place_id || !data.summary) return;
+    // Three races the post-await guards must handle.
+    //   1. Stale response for a photo the detail already navigated away
+    //      from (open A → open B): caught by _detailPhotoId, which
+    //      renderDetail overwrites on every open.
+    //   2. Slow response for an anchor the user has since dropped from a
+    //      batch (open A → Cmd-click B → Cmd-click A out → Cmd-click C):
+    //      renderBatchInspector never touches _detailPhotoId, so the anchor
+    //      pointer could still match while getActiveSelection() no longer
+    //      includes A. Accept posts to getActiveSelection(), so the guard
+    //      must recheck selection membership too. Codex P1 on PR #1097.
+    //   3. Slow response for a photo the user has left behind by closing
+    //      the detail panel, clearing the batch, or Cmd-click-dropping the
+    //      anchor, then Select All that brings the departed photo back
+    //      into the batch. The DOM scrub in each of those sites isn't
+    //      enough on its own: without also nulling _detailPhotoId the
+    //      pointer keeps matching after Select All re-includes the photo,
+    //      and Accept would apply the departed anchor's EXIF place to the
+    //      whole batch. Those sites now null _detailPhotoId, so the first
+    //      guard catches this race too. Codex P2 on PR #1097 (17:04Z).
     if (window._detailPhotoId !== requestPhotoId) return;
+    if (_locationApplyPhotoIds().indexOf(requestPhotoId) === -1) return;
+    // Fourth race: while we were awaiting reverse-geocode, the user saved
+    // a location for this photo (via the input, a keyword pick, or a batch
+    // op). Every mutation path funnels through _afterLocationMutation, which
+    // bumps _locationMutationEpoch. If it moved, bail. (Codex P2 on PR #1097
+    // at 17:39Z: save-batch-location-during-pending-geocode overwriting the
+    // just-saved batch location. The DOM `!filled.hidden` check below alone
+    // can't catch that — after a batch save, _afterLocationMutation runs
+    // renderBatchInspector → renderLocationEmpty, which rehides
+    // #locationFilled, so the paint sneaks through.)
+    if ((window._locationMutationEpoch || 0) !== requestEpoch) return;
+    // Defense-in-depth: if a filled row is on screen right now, whoever
+    // painted it wanted the suggestion gone. The epoch check above already
+    // covers the batch race; this catches any future save site that renders
+    // filled without funneling through _afterLocationMutation.
+    var filled = document.getElementById('locationFilled');
+    if (filled && !filled.hidden) return;
 
     sugg.innerHTML = '';
     var text = document.createElement('span');
@@ -4557,6 +6348,7 @@ async function maybeShowExifSuggestion(photo) {
     });
     sugg.appendChild(text);
     sugg.appendChild(btn);
+    sugg.dataset.photoId = String(requestPhotoId);
     sugg.hidden = false;
   } catch (e) {
     console.warn('reverse-geocode suggestion failed:', e);
@@ -4567,21 +6359,25 @@ async function acceptExifSuggestion(placeId) {
   var photoId = window._detailPhotoId;
   if (!photoId || !placeId) return;
   _hideLocationError();
+  var ids = _locationApplyPhotoIds();
+  var useBatch = ids.length > 1;
   try {
-    var resp = await safeFetch('/api/photos/' + photoId + '/location', {
+    var endpoint = useBatch
+      ? '/api/batch/location'
+      : '/api/photos/' + photoId + '/location';
+    var body = useBatch
+      ? { place_id: placeId, photo_ids: ids }
+      : { place_id: placeId };
+    var resp = await safeFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ place_id: placeId }),
+      body: JSON.stringify(body),
     });
     if (resp && resp.location) {
       renderLocationFilled(resp.location);
-      loadDetail(photoId);
     }
-    var sugg = document.getElementById('locationExifSuggestion');
-    if (sugg) {
-      sugg.hidden = true;
-      sugg.innerHTML = '';
-    }
+    clearExifSuggestion();
+    await _afterLocationMutation(useBatch ? ids : [photoId], photoId);
   } catch(e) {
     _showLocationError('Could not save location.');
   }
@@ -4589,10 +6385,40 @@ async function acceptExifSuggestion(placeId) {
 
 function _onLocationInputFocus() {
   bindLocationAutocomplete();
+  updateLocationKeywordSuggestions();
+}
+
+function _onLocationInputInput() {
+  _locationKeywordState.activeIndex = 0;
+  updateLocationKeywordSuggestions();
 }
 
 function _onLocationInputKeydown(e) {
+  var dropdown = document.getElementById('locationKeywordSuggestions');
+  var localOpen = dropdown && dropdown.classList.contains('open') && _locationKeywordState.matches.length > 0;
+  var googlePlacesMayHandleKeyboard = !!(window.GOOGLE_MAPS_API_KEY || '').trim();
+  if (localOpen && !googlePlacesMayHandleKeyboard && e.key === 'ArrowDown') {
+    e.preventDefault();
+    _locationKeywordState.activeIndex = (_locationKeywordState.activeIndex + 1) % _locationKeywordState.matches.length;
+    renderLocationKeywordSuggestions();
+    return;
+  }
+  if (localOpen && !googlePlacesMayHandleKeyboard && e.key === 'ArrowUp') {
+    e.preventDefault();
+    _locationKeywordState.activeIndex = (_locationKeywordState.activeIndex - 1 + _locationKeywordState.matches.length) % _locationKeywordState.matches.length;
+    renderLocationKeywordSuggestions();
+    return;
+  }
+  if (e.key === 'Escape') {
+    hideLocationKeywordSuggestions();
+    return;
+  }
   if (e.key !== 'Enter') return;
+  if (localOpen && !googlePlacesMayHandleKeyboard && _locationKeywordState.activeIndex >= 0) {
+    e.preventDefault();
+    chooseLocationKeywordSuggestion(_locationKeywordState.activeIndex);
+    return;
+  }
   // DO NOT preventDefault — Google's autocomplete listens for Enter to
   // pick the highlighted suggestion. Suppressing the event would block
   // keyboard place selection. The input has no surrounding form, so
@@ -4624,7 +6450,20 @@ document.addEventListener('DOMContentLoaded', function() {
   var input = document.getElementById('locationInput');
   if (input) {
     input.addEventListener('focus', _onLocationInputFocus);
+    input.addEventListener('input', _onLocationInputInput);
     input.addEventListener('keydown', _onLocationInputKeydown);
+    input.addEventListener('blur', function() {
+      setTimeout(hideLocationKeywordSuggestions, 120);
+    });
+  }
+  var locationDropdown = document.getElementById('locationKeywordSuggestions');
+  if (locationDropdown) {
+    locationDropdown.addEventListener('mousedown', function(e) {
+      var option = e.target.closest('.keyword-suggestion-option');
+      if (!option) return;
+      e.preventDefault();
+      chooseLocationKeywordSuggestion(parseInt(option.dataset.index, 10));
+    });
   }
   bindKeywordAutocomplete('addKeywordInput', 'addKeywordSuggestions', addKeyword);
   bindKeywordAutocomplete('batchKeywordInput', 'batchKeywordSuggestions', function() {
@@ -4699,6 +6538,8 @@ document.addEventListener('keydown', function(e) {
     return;
   }
 
+  if (document.getElementById('lightboxOverlay').classList.contains('active')) return;
+
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
 
   if (e.key === 'Escape') {
@@ -4726,20 +6567,26 @@ document.addEventListener('keydown', function(e) {
   // Select all
   if (matchesShortcut(e, _shortcuts.select_all)) {
     e.preventDefault();
-    photos.forEach(function(p) { selectedPhotos.add(p.id); });
-    renderGrid();
-    updateBatchBar();
+    selectAllMatchingPhotos();
     return;
   }
 
   // Arrow keys: navigate grid (not configurable)
-  if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+  if (e.key === 'ArrowRight') {
     e.preventDefault();
     moveBrowseSelection(1, e);
     return;
-  } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+  } else if (e.key === 'ArrowLeft') {
     e.preventDefault();
     moveBrowseSelection(-1, e);
+    return;
+  } else if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    moveBrowseSelection(getBrowseGridColumnCount(), e);
+    return;
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    moveBrowseSelection(-getBrowseGridColumnCount(), e);
     return;
   }
 
@@ -4803,11 +6650,33 @@ document.addEventListener('keydown', function(e) {
   }
 });
 
+function getBrowseGridColumnCount() {
+  var grid = document.getElementById('grid');
+  if (grid) {
+    var template = window.getComputedStyle(grid).gridTemplateColumns || '';
+    var tracks = template.trim().split(/\s+/).filter(Boolean);
+    if (tracks.length && template !== 'none') return tracks.length;
+  }
+
+  var cards = grid ? grid.querySelectorAll('.grid-card') : document.querySelectorAll('.grid-card');
+  if (!cards.length) return 1;
+
+  var firstTop = cards[0].offsetTop;
+  var count = 0;
+  for (var i = 0; i < cards.length; i++) {
+    if (Math.abs(cards[i].offsetTop - firstTop) > 2) break;
+    count++;
+  }
+  return Math.max(1, count);
+}
+
 async function moveBrowseSelection(delta, e) {
-  var nextIndex = selectedIndex + delta;
-  if (delta > 0 && nextIndex >= photos.length && !allLoaded) {
+  var nextIndex = selectedIndex < 0 && delta > 0 ? 0 : selectedIndex + delta;
+  while (delta > 0 && nextIndex >= photos.length && !allLoaded) {
+    var beforeLength = photos.length;
     await loadPhotos();
-    nextIndex = selectedIndex + delta;
+    if (photos.length === beforeLength) break;
+    nextIndex = selectedIndex < 0 ? 0 : selectedIndex + delta;
   }
   if (nextIndex < 0 || nextIndex >= photos.length || !photos[nextIndex]) return;
   var selectionEvent = {
@@ -4830,20 +6699,26 @@ function developSelected() {
   developPhotos(ids);
 }
 
-function openInEditorBatch(event) {
-  var ids = getActiveSelection();
-  if (!ids.length) return;
-  if (ids.length > 20) {
-    if (!confirm('Open ' + ids.length + ' photos in editor?')) return;
-  }
-  openInEditorWithPicker(ids, event);
-}
-
 /* ---------- Right-click context menu on grid cards ---------- */
 // Single-photo wrappers around the existing batch endpoints. The detail-panel
 // helpers (setFlag, setColorLabel) are coupled to selectedPhotoId; the context
 // menu needs to target an arbitrary id without mutating that focus, so we
 // post directly to the batch endpoints with a 1-photo list.
+// Refresh the batch inspector if it's currently rendered, else fall back to
+// the caller-supplied single-photo update. Prevents context-menu edits on a
+// multi-selection anchor from collapsing the panel back to a single-detail
+// view via loadDetail(anchorId) while the user still has N photos selected.
+function _refreshInspectorAfterSinglePhotoEdit(photoId, singleFallback) {
+  var detail = document.getElementById('detailContent');
+  if (detail && detail.classList.contains('batch-mode')) {
+    // Selection is unchanged — this is a state-only refresh after a
+    // context-menu edit. Preserve any in-progress location input.
+    renderBatchInspector(getActiveSelection(), { preserveLocation: true });
+    return;
+  }
+  if (selectedPhotoId === photoId) singleFallback();
+}
+
 async function setRatingFor(photoId, rating) {
   try {
     await safeFetch('/api/batch/rating', {
@@ -4855,7 +6730,7 @@ async function setRatingFor(photoId, rating) {
   if (p) p.rating = rating;
   refreshGridCards([photoId]);
   scheduleCollectionCountsRefresh();
-  if (selectedPhotoId === photoId) loadDetail(photoId);
+  _refreshInspectorAfterSinglePhotoEdit(photoId, function() { loadDetail(photoId); });
   refreshPendingSyncBanner();
 }
 
@@ -4869,7 +6744,7 @@ async function setFlagFor(photoId, flag) {
   var p = photos.find(function(x) { return x.id === photoId; });
   if (p) p.flag = flag;
   refreshGridCards([photoId]);
-  if (selectedPhotoId === photoId) updateDetailFlagButtons(flag);
+  _refreshInspectorAfterSinglePhotoEdit(photoId, function() { updateDetailFlagButtons(flag); });
   scheduleCollectionCountsRefresh();
   return true;
 }
@@ -4884,8 +6759,9 @@ async function setColorLabelFor(photoId, color) {
   } catch(e) { return; }
   if (color) colorLabels[photoId] = color;
   else delete colorLabels[photoId];
+  colorLabelsFetched.add(photoId);
   refreshGridCards([photoId]);
-  if (selectedPhotoId === photoId) updateDetailColors();
+  _refreshInspectorAfterSinglePhotoEdit(photoId, updateDetailColors);
   scheduleCollectionCountsRefresh();
 }
 
@@ -4894,6 +6770,10 @@ function revealPhoto(photoId) {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({photo_id: photoId}),
   }, { toast: false }).catch(function(){});
+}
+
+function viewPhotoOnMap(photoId) {
+  window.location.href = '/map?photo_id=' + encodeURIComponent(photoId);
 }
 
 async function copyPhotoPaths(photoIds) {
@@ -4933,6 +6813,17 @@ function refreshCardSelectionVisuals() {
     var cardId = parseInt(el.dataset.id, 10);
     el.classList.toggle('selected', cardId === selectedPhotoId || selectedPhotos.has(cardId));
   });
+}
+
+// Open a single grid photo straight in the in-app editor, skipping the
+// lightbox. Hand off the current grid's ordered list so the editor can offer
+// Prev/Next, mirroring the lightbox "Edit Photo" handoff.
+function openPhotoEditor(photoId) {
+  if (window.vireoEditNav) {
+    window.vireoEditNav.setList(photos, photoId);
+    window.vireoEditNav.setLastPhoto(photoId);
+  }
+  window.location.href = '/edit/' + photoId;
 }
 
 function buildPhotoContextMenu(photoIds) {
@@ -4983,21 +6874,74 @@ function buildPhotoContextMenu(photoIds) {
     { separator: true },
     { label: 'Find Similar', disabled: !one, disabledHint: hint,
       onClick: function() { if (typeof findSimilar === 'function') findSimilar(photoIds[0]); } },
+    { label: 'View on Map', disabled: !one, disabledHint: hint,
+      onClick: function() { viewPhotoOnMap(photoIds[0]); } },
     { label: 'Compare', disabled: photoIds.length < 2, disabledHint: 'Select at least two photos',
       onClick: function() { openBrowseCompare(); } },
+    { label: 'Best Batch',
+      onClick: function() { openBestBatchForIds(photoIds, photoIds[0]); } },
     { label: 'Review Burst', disabled: photoIds.length < 2, disabledHint: 'Select at least two photos',
       onClick: function() { openSelectedInBurstReview(); } },
+    { separator: true },
+    { label: 'Edit Photo', disabled: !one, disabledHint: hint,
+      onClick: function() { openPhotoEditor(photoIds[0]); } },
   ].concat(buildOpenInEditorMenuItems(photoIds)).concat([
-    { label: 'Reveal in Finder/Folder', disabled: !one, disabledHint: hint,
+    { label: window.VIREO_REVEAL_LABEL, disabled: !one, disabledHint: hint,
       onClick: function() { revealPhoto(photoIds[0]); } },
     { label: 'Copy Path',
       onClick: function() { copyPhotoPaths(photoIds); } },
     { separator: true },
     { label: 'Add Keyword\u2026', onClick: function() { batchAddKeyword(); } },
     { label: 'Add to Collection\u2026', onClick: function() { addToCollection(); } },
+  ]).concat(buildLifeListMenuItems(photoIds)).concat([
+    { label: 'Adjust Capture Time\u2026', onClick: function() { openCaptureTimeModal(); } },
     { separator: true },
     { label: 'Delete', onClick: function() { batchDelete(); } },
   ]);
+}
+
+// "Add to Life List" context-menu items. A photo is a lifelist representative
+// per species keyword, so one item per eligible species (the same species
+// names shown on the card). Fire-and-forget: it sets the representative and
+// toasts; the server (_photo_can_be_life_list_preference) is the backstop for
+// a stale menu. Disabled for a multi-selection because crowning one shot from
+// many is ambiguous; hidden entirely when nothing selected has a species.
+// Rejected photos are excluded here too \u2014 they'd fail the server backstop
+// (`_photo_can_be_life_list_preference` rejects `flag = 'rejected'`) and only
+// produce an error toast, so don't offer the action in the first place.
+function _lifeListEligibleClient(p) {
+  return !!(p && p.species && p.species.length && p.flag !== 'rejected');
+}
+function buildLifeListMenuItems(photoIds) {
+  var anyEligible = photoIds.some(function(id) {
+    return _lifeListEligibleClient(photos.find(function(x) { return x.id === id; }));
+  });
+  if (!anyEligible) return [];
+  if (photoIds.length !== 1) {
+    return [{ label: 'Add to Life List', disabled: true,
+              disabledHint: 'Select a single photo' }];
+  }
+  var photo = photos.find(function(p) { return p.id === photoIds[0]; });
+  if (!_lifeListEligibleClient(photo)) return [];
+  return (photo.species || []).map(function(sp) {
+    return {
+      label: 'Add to Life List \u2014 ' + sp,
+      onClick: function() { addPhotoToLifeList(sp, photoIds[0]); },
+    };
+  });
+}
+
+function addPhotoToLifeList(species, photoId) {
+  if (!species || !photoId) return;
+  safeFetch('/api/photo-preferences', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ purpose: 'life_list', species: species, photo_id: photoId }),
+  }).then(function() {
+    if (typeof showToast === 'function') {
+      showToast('Life List photo set for ' + species, 'success');
+    }
+  });
 }
 
 // Document-level delegation: grids re-render on sort/filter/scroll, so
@@ -5074,7 +7018,7 @@ document.addEventListener('contextmenu', function(e) {
   openContextMenu(e, [
     { label: 'Filter by this folder', onClick: function() { filterByFolder(fid); } },
     { separator: true },
-    { label: 'Reveal in Finder/Folder', onClick: function() { revealFolder(fid); } },
+    { label: window.VIREO_REVEAL_LABEL, onClick: function() { revealFolder(fid); } },
     { label: 'Copy Path', onClick: function() { copyFolderPath(fid); } },
     { separator: true },
     { label: 'Rescan this Folder', onClick: function() { rescanFolder(fid); } },
@@ -5142,11 +7086,19 @@ document.addEventListener('contextmenu', function(e) {
   e.preventDefault();
   var cid = parseInt(ti.dataset.collectionId, 10);
   if (isNaN(cid)) return;
-  var nameEl = ti.querySelector('span');
+  var nameEl = ti.querySelector('.collection-name');
   var name = nameEl ? nameEl.textContent : '';
-  openContextMenu(e, [
+  var items = [
     { label: 'Filter by this Collection',
       onClick: function() { filterByCollection(cid); } },
+  ];
+  if (name === 'GPS Without Location Keyword') {
+    items.push({
+      label: 'Resolve GPS Locations',
+      onClick: function() { openGpsResolveForCollection(cid); },
+    });
+  }
+  items = items.concat([
     { separator: true },
     { label: 'Edit Rules',
       onClick: function() { editCollection(cid); } },
@@ -5158,6 +7110,7 @@ document.addEventListener('contextmenu', function(e) {
     { label: 'Delete Collection',
       onClick: function() { deleteCollectionById(cid, name); } },
   ]);
+  openContextMenu(e, items);
 });
 
 /* ---------- Deep-link: scroll to photo_id if present in URL ---------- */
@@ -5170,6 +7123,7 @@ document.addEventListener('contextmenu', function(e) {
 
   // Prevent the IntersectionObserver from triggering loadPhotos() while deep-link is loading
   loading = true;
+  var deepLinkLoaded = false;
   try {
     applyBrowseConfig(await _cfgPromise);
     var photo = await safeFetch('/api/photos/' + photoId, {}, { toast: false });
@@ -5204,6 +7158,7 @@ document.addEventListener('contextmenu', function(e) {
       if (photos.length >= totalPhotos) allLoaded = true;
       renderGrid();
       document.getElementById('loadingState').style.display = 'none';
+      deepLinkLoaded = true;
     }
 
     // Keep loading pages until we find the photo or run out
@@ -5230,6 +7185,7 @@ document.addEventListener('contextmenu', function(e) {
     }
   } catch(e) { /* ignore deep-link errors silently */ }
   loading = false;
+  if (deepLinkLoaded) rearmInfiniteScrollObserver();
 })();
 
 /* ---------- Export Modal ---------- */
@@ -5238,11 +7194,8 @@ function openExportModal() {
   if (activeIds.length === 0) return;
   document.getElementById('exportSubmitBtn').textContent = 'Export ' + activeIds.length + ' photo' + (activeIds.length === 1 ? '' : 's');
   document.getElementById('exportSubmitBtn').disabled = false;
-  document.getElementById('exportResize').value = '';
-  document.getElementById('exportResizeCustom').style.display = 'none';
-  document.getElementById('exportResizeCustom').value = '';
-  document.getElementById('exportQuality').value = 92;
-  document.getElementById('exportQualityVal').textContent = '92';
+  document.getElementById('exportPreset').value = 'original-jpg';
+  applyExportPreset('original-jpg');
   document.getElementById('exportTemplate').value = '{original}';
   document.getElementById('exportOverlay').classList.add('open');
   updateExportPreview();
@@ -5261,6 +7214,50 @@ function insertTemplateVar(v) {
   input.selectionStart = input.selectionEnd = start + v.length;
   input.focus();
   updateExportPreview();
+}
+
+function exportExtensionForFormat(format) {
+  if (format === 'png') return 'png';
+  if (format === 'tiff') return 'tiff';
+  return 'jpg';
+}
+
+function updateExportFormatControls() {
+  var isJpeg = document.getElementById('exportFormat').value === 'jpg';
+  document.getElementById('exportQualityLabel').style.display = isJpeg ? 'block' : 'none';
+  document.getElementById('exportQualityRow').style.display = isJpeg ? 'flex' : 'none';
+}
+
+function applyExportPreset(preset) {
+  var resize = '';
+  var customResize = '';
+  var format = 'jpg';
+  var quality = 92;
+  if (preset === 'web-jpg') {
+    resize = '2048';
+    quality = 85;
+  } else if (preset === 'small-jpg') {
+    resize = '1080';
+    quality = 82;
+  } else if (preset === 'archive-tiff') {
+    format = 'tiff';
+  } else if (preset === 'png') {
+    format = 'png';
+  } else if (preset === 'custom') {
+    return;
+  }
+  document.getElementById('exportFormat').value = format;
+  document.getElementById('exportResize').value = resize;
+  document.getElementById('exportResizeCustom').value = customResize;
+  document.getElementById('exportResizeCustom').style.display = resize === 'custom' ? 'block' : 'none';
+  document.getElementById('exportQuality').value = quality;
+  document.getElementById('exportQualityVal').textContent = String(quality);
+  updateExportFormatControls();
+  updateExportPreview();
+}
+
+function markExportCustom() {
+  document.getElementById('exportPreset').value = 'custom';
 }
 
 function updateExportPreview() {
@@ -5283,17 +7280,31 @@ function updateExportPreview() {
     .replace('{rating}', String(photo.rating || 0))
     .replace('{seq}', '0001')
     .replace('{folder}', '');
-  document.getElementById('exportPreview').textContent = 'Preview: ' + preview + '.jpg';
+  var ext = exportExtensionForFormat(document.getElementById('exportFormat').value);
+  document.getElementById('exportPreview').textContent = 'Preview: ' + preview + '.' + ext;
 }
 
 document.getElementById('exportTemplate').addEventListener('input', updateExportPreview);
 
+document.getElementById('exportPreset').addEventListener('change', function() {
+  applyExportPreset(this.value);
+});
+
+document.getElementById('exportFormat').addEventListener('change', function() {
+  markExportCustom();
+  updateExportFormatControls();
+  updateExportPreview();
+});
+
 document.getElementById('exportResize').addEventListener('change', function() {
+  markExportCustom();
   document.getElementById('exportResizeCustom').style.display =
     this.value === 'custom' ? 'block' : 'none';
+  updateExportPreview();
 });
 
 document.getElementById('exportQuality').addEventListener('input', function() {
+  markExportCustom();
   document.getElementById('exportQualityVal').textContent = this.value;
 });
 
@@ -5310,6 +7321,7 @@ async function startExport() {
   }
 
   var quality = parseInt(document.getElementById('exportQuality').value) || 92;
+  var format = document.getElementById('exportFormat').value || 'jpg';
   var template = document.getElementById('exportTemplate').value || '{original}';
   var btn = document.getElementById('exportSubmitBtn');
   var activeIds = getActiveSelection();
@@ -5326,6 +7338,7 @@ async function startExport() {
         naming_template: template,
         max_size: maxSize,
         quality: quality,
+        format: format,
       }),
     });
     if (data.error) { alert('Export error: ' + data.error); btn.disabled = false; return; }
@@ -5334,6 +7347,25 @@ async function startExport() {
   } catch(err) {
     alert('Export failed: ' + err.message);
     btn.disabled = false;
+  }
+}
+
+async function makeAvailableOffline() {
+  var activeIds = getActiveSelection();
+  if (activeIds.length === 0) return;
+  try {
+    var data = await safeFetch('/api/jobs/offline-cache', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: activeIds}),
+    });
+    if (data.error) {
+      showToast('Offline cache error: ' + data.error, 'error');
+      return;
+    }
+    showToast('Offline caching started (' + activeIds.length + ' photo' + (activeIds.length === 1 ? '' : 's') + ')');
+  } catch(err) {
+    showToast('Offline cache failed: ' + err.message, 'error');
   }
 }
 

@@ -81,6 +81,91 @@ def test_check_duplicates_marks_known_hashes(app_and_db, tmp_path):
     assert str(source / "unique.jpg") not in all_duplicates
 
 
+def test_check_duplicates_metadata_match_without_hashing(
+    app_and_db, tmp_path, monkeypatch
+):
+    """A cataloged (filename, size, capture time) twin is flagged as a
+    duplicate without any content read — the default heuristic mode."""
+    from datetime import datetime
+
+    from PIL.ExifTags import Base as ExifBase
+
+    app, db, fid = app_and_db
+
+    source = tmp_path / "source"
+    source.mkdir()
+    img = Image.new("RGB", (50, 50), color="red")
+    exif = img.getexif()
+    exif[ExifBase.DateTimeOriginal] = "2026:05:01 10:15:30"
+    img.save(str(source / "IMG_0001.jpg"), exif=exif)
+
+    db.add_photo(
+        folder_id=fid,
+        filename="IMG_0001.jpg",
+        extension=".jpg",
+        file_size=os.path.getsize(str(source / "IMG_0001.jpg")),
+        file_mtime=1.0,
+        timestamp=datetime(2026, 5, 1, 10, 15, 30).isoformat(),
+    )
+
+    import import_dedup
+
+    def _boom(path, *a, **kw):
+        raise AssertionError(f"content hash computed for {path}")
+
+    monkeypatch.setattr(import_dedup, "compute_file_hash", _boom)
+
+    client = app.test_client()
+    resp = client.post("/api/import/check-duplicates", json={
+        "paths": [str(source / "IMG_0001.jpg")],
+    })
+    events = parse_sse_events(resp.data)
+    done = [e for e in events if e.get("done")]
+    assert done[0]["duplicate_count"] == 1
+
+
+def test_check_duplicates_verify_by_hash_flag(app_and_db, tmp_path):
+    """verify_by_hash=true restores exact content matching — a renamed
+    duplicate the heuristic treats as new is flagged."""
+    from datetime import datetime
+
+    from PIL.ExifTags import Base as ExifBase
+
+    app, db, fid = app_and_db
+    from scanner import compute_file_hash
+
+    source = tmp_path / "source"
+    source.mkdir()
+    img = Image.new("RGB", (50, 50), color="red")
+    exif = img.getexif()
+    exif[ExifBase.DateTimeOriginal] = "2026:05:01 10:15:30"
+    img.save(str(source / "renamed.jpg"), exif=exif)
+
+    db.add_photo(
+        folder_id=fid,
+        filename="IMG_0001.jpg",
+        extension=".jpg",
+        file_size=os.path.getsize(str(source / "renamed.jpg")),
+        file_mtime=1.0,
+        timestamp=datetime(2026, 5, 1, 10, 15, 30).isoformat(),
+        file_hash=compute_file_hash(str(source / "renamed.jpg")),
+    )
+
+    client = app.test_client()
+    resp = client.post("/api/import/check-duplicates", json={
+        "paths": [str(source / "renamed.jpg")],
+    })
+    done = [e for e in parse_sse_events(resp.data) if e.get("done")]
+    assert done[0]["duplicate_count"] == 0  # heuristic: filename mismatch
+
+    resp = client.post("/api/import/check-duplicates", json={
+        "paths": [str(source / "renamed.jpg")],
+        "verify_by_hash": True,
+    })
+    done = [e for e in parse_sse_events(resp.data) if e.get("done")]
+    assert done[0]["duplicate_count"] == 1
+
+
 def test_check_duplicates_no_paths(app_and_db):
     """Returns error when no paths provided."""
     app, _, _ = app_and_db
@@ -109,6 +194,37 @@ def test_check_duplicates_all_new(app_and_db, tmp_path):
     assert done[0]["duplicate_count"] == 0
 
 
+def test_check_duplicates_ignores_zero_byte_images(app_and_db, tmp_path):
+    """Empty image placeholders should not be reported as duplicate photos."""
+    app, db, fid = app_and_db
+    from scanner import EMPTY_FILE_SHA256
+
+    # Historical DB state: older scans could store the empty-file hash.
+    db.add_photo(
+        folder_id=fid,
+        filename="empty.NEF",
+        extension=".nef",
+        file_size=0,
+        file_mtime=1.0,
+        file_hash=EMPTY_FILE_SHA256,
+    )
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "DSC_0001.NEF").write_bytes(b"")
+    (source / "DSC_0002.NEF").write_bytes(b"")
+
+    client = app.test_client()
+    resp = client.post("/api/import/check-duplicates", json={
+        "paths": [str(source / "DSC_0001.NEF"), str(source / "DSC_0002.NEF")],
+    })
+
+    events = parse_sse_events(resp.data)
+    done = [e for e in events if e.get("done")]
+    assert len(done) == 1
+    assert done[0]["duplicate_count"] == 0
+
+
 def test_check_duplicates_missing_file_skipped(app_and_db, tmp_path):
     """Missing files are skipped without crashing."""
     app, db, fid = app_and_db
@@ -127,3 +243,50 @@ def test_check_duplicates_missing_file_skipped(app_and_db, tmp_path):
     done = [e for e in events if e.get("done")]
     assert len(done) == 1
     assert done[0]["checked"] == 2  # Both counted as checked
+
+
+def test_check_duplicates_zero_byte_file_does_not_swallow_pending_batch(
+    app_and_db, tmp_path
+):
+    """A zero-byte path at end-of-list (or on a BATCH_SIZE boundary) must
+    not eat already-queued ``batch_duplicates``. The pipeline UI only
+    learns about duplicates from emitted ``data.duplicates`` events; if
+    the end-of-list yield is skipped, ``duplicate_count`` reports the
+    duplicate but the UI never deselects it.
+    """
+    app, db, fid = app_and_db
+
+    library_dir = tmp_path / "library"
+    library_dir.mkdir(exist_ok=True)
+    img = Image.new("RGB", (50, 50), color="red")
+    img.save(str(library_dir / "existing.jpg"))
+
+    from scanner import scan
+    scan(str(library_dir), db)
+
+    source = tmp_path / "source"
+    source.mkdir()
+    img.save(str(source / "duplicate.jpg"))  # Will match the library hash.
+    (source / "empty.NEF").write_bytes(b"")
+
+    client = app.test_client()
+    # Order matters: empty file is LAST, so the only opportunity to emit
+    # the queued duplicate is the ``checked == total`` branch.
+    resp = client.post("/api/import/check-duplicates", json={
+        "paths": [str(source / "duplicate.jpg"), str(source / "empty.NEF")],
+    })
+
+    events = parse_sse_events(resp.data)
+    done = [e for e in events if e.get("done")]
+    assert len(done) == 1
+    assert done[0]["duplicate_count"] == 1
+
+    all_duplicates = []
+    for e in events:
+        if "duplicates" in e:
+            all_duplicates.extend(e["duplicates"])
+    assert str(source / "duplicate.jpg") in all_duplicates, (
+        "Zero-byte trailing path must not skip the final batch emit; "
+        "the duplicate.jpg path needs to surface in a data.duplicates "
+        "event so the import UI can deselect it."
+    )

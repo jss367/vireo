@@ -205,28 +205,59 @@ def test_api_inat_prepare_includes_submission_status(app_and_db):
     assert data['existing_observation_url'] == "https://www.inaturalist.org/observations/999"
 
 
-def test_api_inat_prepare_url_encodes_quick_upload_params(app_and_db):
+def test_api_inat_prepare_uses_assigned_location_coords(app_and_db):
     app, db, pid = app_and_db
-    client = app.test_client()
+    kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, latitude, longitude) "
+        "VALUES (?, 'location', ?, ?)",
+        ("Paris Airbnb", 48.8566, 2.3522),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, kid),
+    )
+    db.conn.commit()
 
+    client = app.test_client()
     resp = client.get(f'/api/inat/prepare/{pid}')
+    assert resp.status_code == 200
     data = resp.get_json()
 
-    assert data["mode"] == "quick"
-    parsed = urlparse(data["upload_url"])
-    assert parsed.scheme == "https"
-    assert parsed.netloc == "www.inaturalist.org"
-    assert parsed.path == "/observations/upload"
-    query = parse_qs(parsed.query)
-    assert query["taxon_name"] == ["Cardinalis cardinalis"]
-    assert query["observed_on"] == ["2024-06-01"]
+    assert data['latitude'] == 48.8566
+    assert data['longitude'] == 2.3522
+    assert "lat=48.8566" in data["upload_url"]
+    assert "lng=2.3522" in data["upload_url"]
+
+
+def test_api_inat_prepare_url_encodes_quick_upload_params(app_and_db):
+    """The prefilled upload URL must be valid: a scientific name with a space
+    (e.g. "Cardinalis cardinalis") has to be percent-encoded, otherwise the
+    desktop opener plugin rejects the malformed URL and nothing opens."""
+    app, _db, pid = app_and_db
+    client = app.test_client()
+    resp = client.get(f'/api/inat/prepare/{pid}')
+    assert resp.status_code == 200
+    data = resp.get_json()
+
+    url = data["upload_url"]
+    # No raw spaces anywhere in the URL.
+    assert " " not in url
+    # The taxon name still round-trips back to the real binomial.
+    qs = parse_qs(urlparse(url).query)
+    assert qs["taxon_name"] == ["Cardinalis cardinalis"]
+    assert qs["observed_on"] == ["2024-06-01"]
 
 
 def test_api_inat_prepare_preserves_zero_coordinates(app_and_db):
     app, db, pid = app_and_db
+    kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, latitude, longitude) "
+        "VALUES (?, 'location', ?, ?)",
+        ("Equator", 0.0, 0.0),
+    ).lastrowid
     db.conn.execute(
-        "UPDATE photos SET latitude = 0, longitude = 0 WHERE id = ?",
-        (pid,),
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, kid),
     )
     db.conn.commit()
 
@@ -236,6 +267,66 @@ def test_api_inat_prepare_preserves_zero_coordinates(app_and_db):
 
     assert query["lat"] == ["0.0"]
     assert query["lng"] == ["0.0"]
+
+
+def test_api_inat_prepare_marks_quick_mode_as_not_photo_upload(app_and_db):
+    app, _db, pid = app_and_db
+    client = app.test_client()
+    resp = client.get(f'/api/inat/prepare/{pid}')
+    assert resp.status_code == 200
+    data = resp.get_json()
+
+    assert data["mode"] == "quick"
+    assert data["direct_upload_enabled"] is False
+    assert data["photo_upload_requires_token"] is True
+
+
+def test_api_inat_prepare_marks_direct_mode_with_token(app_and_db):
+    app, _db, pid = app_and_db
+    import config as cfg
+    cfg.save({"inat_token": "fake-token"})
+
+    client = app.test_client()
+    resp = client.get(f'/api/inat/prepare/{pid}')
+    assert resp.status_code == 200
+    data = resp.get_json()
+
+    assert data["mode"] == "direct"
+    assert data["direct_upload_enabled"] is True
+    assert data["photo_upload_requires_token"] is False
+
+
+def _add_out_of_workspace_photo(db):
+    active_ws = db._active_workspace_id
+    base_dir = db.conn.execute("SELECT path FROM folders LIMIT 1").fetchone()["path"]
+    other_dir = os.path.join(os.path.dirname(base_dir), "other-photos")
+    os.makedirs(other_dir, exist_ok=True)
+    Image.new('RGB', (100, 100)).save(os.path.join(other_dir, 'outside.jpg'))
+
+    other_ws = db.create_workspace("Other")
+    db.set_active_workspace(other_ws)
+    fid = db.add_folder(other_dir, name="other-photos")
+    pid = db.add_photo(
+        folder_id=fid,
+        filename='outside.jpg',
+        extension='.jpg',
+        file_size=1000,
+        file_mtime=1.0,
+        timestamp='2024-06-02T10:00:00',
+    )
+    db.set_active_workspace(active_ws)
+    return pid
+
+
+def test_api_inat_prepare_rejects_out_of_workspace_photo(app_and_db):
+    app, db, _ = app_and_db
+    pid = _add_out_of_workspace_photo(db)
+
+    client = app.test_client()
+    resp = client.get(f'/api/inat/prepare/{pid}')
+
+    assert resp.status_code == 403
+    assert "active workspace" in resp.get_json()["error"]
 
 
 def test_api_inat_submit_no_token(app_and_db):
@@ -286,6 +377,226 @@ def test_api_inat_submit_reports_partial_upload(app_and_db):
     assert pid not in db.get_inat_submissions([pid])
 
 
+def test_api_inat_submit_uses_edited_render(app_and_db):
+    app, db, pid = app_and_db
+    import config as cfg
+    cfg.save({"inat_token": "fake-token"})
+
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id = p.folder_id WHERE p.id = ?",
+        (pid,),
+    ).fetchone()
+    original_path = os.path.join(folder["path"], "bird.jpg")
+    Image.new("RGB", (80, 40), (220, 30, 20)).save(original_path)
+    db.set_photo_edit_recipe(pid, {"rotation": 90})
+
+    client = app.test_client()
+    with patch(
+        "inat.submit_observation",
+        return_value=(12345, "https://www.inaturalist.org/observations/12345"),
+    ) as mock_submit:
+        resp = client.post("/api/inat/submit", json={"photo_id": pid})
+
+    assert resp.status_code == 200
+    upload_path = mock_submit.call_args.kwargs["photo_path"]
+    assert upload_path != original_path
+    assert os.path.basename(os.path.dirname(upload_path)) == "inat-uploads"
+    assert os.path.isfile(upload_path)
+    with Image.open(upload_path) as img:
+        assert img.size == (40, 80)
+
+
+def test_api_inat_submit_uses_working_copy_when_raw_source_missing(app_and_db):
+    app, db, pid = app_and_db
+    import config as cfg
+    cfg.save({"inat_token": "fake-token"})
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_rel = f"working/{pid}.jpg"
+    Image.new("RGB", (80, 40), (220, 30, 20)).save(
+        os.path.join(vireo_dir, wc_rel), "JPEG",
+    )
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='offline.NEF', extension='.nef',
+               working_copy_path=?,
+               width=80, height=40
+           WHERE id=?""",
+        (wc_rel, pid),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(pid, {"rotation": 90})
+
+    client = app.test_client()
+    with patch(
+        "inat.submit_observation",
+        return_value=(12345, "https://www.inaturalist.org/observations/12345"),
+    ) as mock_submit:
+        resp = client.post("/api/inat/submit", json={"photo_id": pid})
+
+    assert resp.status_code == 200
+    upload_path = mock_submit.call_args.kwargs["photo_path"]
+    assert os.path.basename(os.path.dirname(upload_path)) == "inat-uploads"
+    with Image.open(upload_path) as img:
+        assert img.size == (40, 80)
+
+
+def test_api_inat_submit_uses_companion_when_raw_source_missing(app_and_db):
+    app, db, pid = app_and_db
+    import config as cfg
+    cfg.save({"inat_token": "fake-token"})
+
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id = p.folder_id WHERE p.id = ?",
+        (pid,),
+    ).fetchone()
+    companion_path = os.path.join(folder["path"], "bird.jpg")
+    Image.new("RGB", (80, 40), (220, 30, 20)).save(companion_path)
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='offline.NEF', extension='.nef',
+               working_copy_path=NULL,
+               companion_path='bird.jpg',
+               width=80, height=40
+           WHERE id=?""",
+        (pid,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(pid, {"rotation": 90})
+
+    client = app.test_client()
+    with patch(
+        "inat.submit_observation",
+        return_value=(12345, "https://www.inaturalist.org/observations/12345"),
+    ) as mock_submit:
+        resp = client.post("/api/inat/submit", json={"photo_id": pid})
+
+    assert resp.status_code == 200, resp.get_json()
+    upload_path = mock_submit.call_args.kwargs["photo_path"]
+    assert os.path.basename(os.path.dirname(upload_path)) == "inat-uploads"
+    with Image.open(upload_path) as img:
+        assert img.size == (40, 80)
+
+
+def test_api_inat_submit_uses_companion_for_cropped_raw_source_missing(app_and_db):
+    app, db, pid = app_and_db
+    import config as cfg
+    cfg.save({"inat_token": "fake-token"})
+
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id = p.folder_id WHERE p.id = ?",
+        (pid,),
+    ).fetchone()
+    companion_path = os.path.join(folder["path"], "bird.jpg")
+    Image.new("RGB", (80, 40), (220, 30, 20)).save(companion_path)
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='offline.NEF', extension='.nef',
+               working_copy_path=NULL,
+               companion_path='bird.jpg',
+               width=80, height=40
+           WHERE id=?""",
+        (pid,),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(pid, {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}})
+
+    client = app.test_client()
+    with patch(
+        "inat.submit_observation",
+        return_value=(12345, "https://www.inaturalist.org/observations/12345"),
+    ) as mock_submit:
+        resp = client.post("/api/inat/submit", json={"photo_id": pid})
+
+    assert resp.status_code == 200, resp.get_json()
+    upload_path = mock_submit.call_args.kwargs["photo_path"]
+    assert os.path.basename(os.path.dirname(upload_path)) == "inat-uploads"
+    with Image.open(upload_path) as img:
+        assert img.size == (40, 40)
+
+
+def test_inat_upload_handoff_meta_includes_math_version(app_and_db):
+    """The iNat upload render reuses inat-uploads/<id>.jpg only when its
+    cached metadata matches. That metadata must carry EDIT_MATH_VERSION so a
+    math bump (which changes per-pixel output but not recipe/source/mtime)
+    invalidates the stale render — otherwise unchanged recipes would keep
+    submitting the old hard-clipped JPEG to iNaturalist after a deploy."""
+    import json as _json
+
+    from image_edits import EDIT_MATH_VERSION
+
+    app, db, pid = app_and_db
+    import config as cfg
+    cfg.save({"inat_token": "fake-token"})
+
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id = p.folder_id WHERE p.id = ?",
+        (pid,),
+    ).fetchone()
+    Image.new("RGB", (80, 40), (220, 30, 20)).save(
+        os.path.join(folder["path"], "bird.jpg"),
+    )
+    db.set_photo_edit_recipe(pid, {"adjustments": {"exposure": 0.5}})
+
+    client = app.test_client()
+    with patch(
+        "inat.submit_observation",
+        return_value=(12345, "https://www.inaturalist.org/observations/12345"),
+    ):
+        resp = client.post("/api/inat/submit", json={"photo_id": pid})
+    assert resp.status_code == 200
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    meta_path = os.path.join(vireo_dir, "inat-uploads", f"{pid}.json")
+    assert os.path.exists(meta_path)
+    with open(meta_path, encoding="utf-8") as f:
+        meta = _json.load(f)
+    assert meta.get("edit_math_version") == EDIT_MATH_VERSION
+
+
+def test_api_inat_submit_uses_assigned_location_coords(app_and_db):
+    app, db, pid = app_and_db
+    import config as cfg
+    cfg.save({"inat_token": "fake-token"})
+
+    kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, latitude, longitude) "
+        "VALUES (?, 'location', ?, ?)",
+        ("Paris Airbnb", 48.8566, 2.3522),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, kid),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    with patch("inat.submit_observation", return_value=(12345, "https://www.inaturalist.org/observations/12345")) as mock_submit:
+        resp = client.post('/api/inat/submit', json={'photo_id': pid})
+
+    assert resp.status_code == 200
+    kwargs = mock_submit.call_args.kwargs
+    assert kwargs["latitude"] == 48.8566
+    assert kwargs["longitude"] == 2.3522
+
+
+def test_api_inat_submit_rejects_out_of_workspace_photo(app_and_db):
+    app, db, _ = app_and_db
+    import config as cfg
+    cfg.save({"inat_token": "fake-token"})
+    pid = _add_out_of_workspace_photo(db)
+
+    client = app.test_client()
+    with patch("inat.submit_observation") as mock_submit:
+        resp = client.post('/api/inat/submit', json={'photo_id': pid})
+
+    assert resp.status_code == 403
+    assert "active workspace" in resp.get_json()["error"]
+    mock_submit.assert_not_called()
+
+
 def test_api_inat_submit_batch(app_and_db):
     app, db, pid = app_and_db
     import config as cfg
@@ -322,6 +633,27 @@ def test_api_inat_submit_batch_reports_partial_upload(app_and_db):
     assert result["partial"] is True
     assert result["observation_id"] == 22222
     assert result["observation_url"] == "https://www.inaturalist.org/observations/22222"
+
+
+def test_api_inat_submit_batch_rejects_out_of_workspace_photo(app_and_db):
+    app, db, _ = app_and_db
+    import config as cfg
+    cfg.save({"inat_token": "fake-token"})
+    pid = _add_out_of_workspace_photo(db)
+
+    client = app.test_client()
+    with patch("inat.submit_observation") as mock_submit:
+        resp = client.post('/api/inat/submit-batch', json={
+            'submissions': [{'photo_id': pid}]
+        })
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data['results'] == [{
+        'photo_id': pid,
+        'error': f"Photo {pid} does not belong to the active workspace",
+    }]
+    mock_submit.assert_not_called()
 
 
 def test_api_inat_submissions_lookup(app_and_db):

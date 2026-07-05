@@ -5,6 +5,53 @@ function isTauri() {
   return !!(window.__TAURI_INTERNALS__);
 }
 
+/* ---------- Logging bridge ----------
+   Forward webview-side logs and uncaught errors into the native log file
+   (~/Library/Logs/com.vireo.app/Vireo.log on macOS) via tauri-plugin-log's
+   `log` command. Without this, anything that fails inside the desktop webview
+   leaves no trace on disk — which is exactly what made the iNaturalist
+   quick-open bug so hard to diagnose across multiple attempts. In a plain
+   browser these calls just go to the devtools console. */
+var TAURI_LOG_LEVEL = { trace: 1, debug: 2, info: 3, warn: 4, error: 5 };
+
+function tauriLog(level, message) {
+  var msg = String(message);
+  // Mirror to the devtools console regardless of environment.
+  var consoleFn = console[level] || console.log;
+  try { consoleFn.call(console, msg); } catch (e) {}
+  if (!isTauri()) return;
+  try {
+    // Fire-and-forget — logging must never throw into its callers. tauri-plugin-log
+    // expects a numeric level (Trace=1 … Error=5). Swallow a rejected invoke
+    // promise too: an uncaught rejection here would re-enter via the
+    // unhandledrejection handler below and loop.
+    var p = window.__TAURI_INTERNALS__.invoke('plugin:log|log', {
+      level: TAURI_LOG_LEVEL[level] || TAURI_LOG_LEVEL.info,
+      message: msg,
+    });
+    if (p && typeof p.catch === 'function') p.catch(function() {});
+  } catch (e) { /* swallow */ }
+}
+
+function logInfo(message) { tauriLog('info', message); }
+function logWarn(message) { tauriLog('warn', message); }
+function logError(message) { tauriLog('error', message); }
+
+// Capture uncaught errors and unhandled promise rejections so they land in the
+// log file instead of only the (invisible-in-production) webview console.
+window.addEventListener('error', function(event) {
+  var where = event.filename
+    ? ' (' + event.filename + ':' + event.lineno + ':' + event.colno + ')'
+    : '';
+  var msg = event.message || (event.error && event.error.message) || 'unknown error';
+  tauriLog('error', 'Uncaught error: ' + msg + where);
+});
+window.addEventListener('unhandledrejection', function(event) {
+  var reason = event.reason;
+  var msg = (reason && (reason.stack || reason.message)) || String(reason);
+  tauriLog('error', 'Unhandled promise rejection: ' + msg);
+});
+
 /**
  * Open a native directory picker dialog.
  * @param {string} [title] - Dialog title
@@ -41,6 +88,49 @@ async function pickFile(opts) {
     filters: opts.filters || [],
   });
   return result || null;
+}
+
+/**
+ * Open an external URL in the user's default browser.
+ *
+ * Inside the Tauri desktop webview a bare `window.open(url, '_blank')` is
+ * silently dropped — no tab opens and no error fires — so external links must
+ * be routed through the opener plugin instead. In a normal browser we fall
+ * back to window.open (which also lets us detect a popup blocker).
+ *
+ * @param {string} url - The http(s) URL to open
+ * @returns {Promise<boolean>} true if the open was dispatched successfully
+ */
+async function openExternal(url) {
+  if (!url) {
+    logWarn('openExternal called with an empty URL');
+    return false;
+  }
+  if (isTauri()) {
+    try {
+      await window.__TAURI_INTERNALS__.invoke('plugin:opener|open_url', { url: url, with: null });
+      logInfo('openExternal: opened ' + url);
+      return true;
+    } catch (e) {
+      // Surface the *real* opener error (e.g. ForbiddenUrl from a missing
+      // capability scope) to the log file so this stops being a silent no-op.
+      logError('openExternal failed for ' + url + ': ' + (e && e.message ? e.message : e));
+      return false;
+    }
+  }
+  // Browser fallback. We deliberately omit the 'noopener' window feature: with
+  // it, window.open returns null even on a *successful* open (MDN), which would
+  // make us report a false "could not open". Instead open about:blank first so
+  // we can null the opener same-origin, then navigate — this keeps popup-block
+  // detection (a real null return) and still prevents reverse-tabnabbing.
+  var win = window.open('about:blank', '_blank');
+  if (!win) {
+    logWarn('openExternal: window.open was blocked (popup blocker?) for ' + url);
+    return false;
+  }
+  try { win.opener = null; } catch (e) {}
+  win.location = url;
+  return true;
 }
 
 /**

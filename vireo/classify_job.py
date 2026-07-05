@@ -34,9 +34,12 @@ from db import AUTO_MATCH_REVIEW_MARKER, Database, commit_with_retry
 from models import get_active_model, get_models
 
 try:
-    from classifier import Classifier
+    from classifier import ClassificationCancelled, Classifier
 except ImportError:
     Classifier = None
+
+    class ClassificationCancelled(RuntimeError):
+        pass
 
 try:
     from timm_classifier import TimmClassifier
@@ -75,8 +78,17 @@ def _load_taxonomy(taxonomy_path):
         return None
 
 
-def _load_labels(model_type, model_str, labels_file, labels_files, db=None):
+def _load_labels(
+    model_type, model_str, labels_file, labels_files, db=None, model_dir=None,
+):
     """Resolve labels for classification.
+
+    ``model_dir`` — the on-disk directory of the active model. When given,
+    the label-free ToL fallback checks that the model's ToL artifacts are
+    actually installed (see `models.tree_of_life_ready`) before returning
+    `use_tol=True`. Without this, a bioclip-2.5 install whose optional
+    ToL files were skipped at download time would route to
+    `Classifier(labels=None)` and crash with FileNotFoundError.
 
     Returns:
         (labels, use_tol) where labels is a list of species strings or None,
@@ -139,17 +151,29 @@ def _load_labels(model_type, model_str, labels_file, labels_files, db=None):
     else:
         log.info("Classification config: model=%s, no labels selected", model_str)
 
-    tol_supported_models = {
-        "hf-hub:imageomics/bioclip",
-        "hf-hub:imageomics/bioclip-2",
-    }
+    from models import supports_tree_of_life, tree_of_life_ready
+
     use_tol = False
     if not labels:
-        if model_str in tol_supported_models:
+        if tree_of_life_ready(model_str, model_dir):
             log.info(
                 "No regional labels available — using Tree of Life classifier (all species)"
             )
             use_tol = True
+        elif supports_tree_of_life(model_str):
+            # ToL-capable model but its optional artifacts weren't
+            # installed on this host (e.g. bioclip-2.5 whose HF upload
+            # of tol_embeddings.npy hasn't landed, or the optional
+            # download was skipped). Surface the missing files
+            # explicitly instead of letting Classifier(labels=None)
+            # crash later with a FileNotFoundError.
+            raise RuntimeError(
+                f"No labels available and Tree of Life files "
+                f"(tol_embeddings.npy, tol_classes.json) are not installed "
+                f"for {model_str}. Go to Settings → Models and click "
+                f"Repair, or Settings → Labels and download a species "
+                f"list for your region."
+            )
         else:
             raise RuntimeError(
                 f"No labels available and Tree of Life mode is not supported "
@@ -420,19 +444,38 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
             if detections:
                 detected += 1
 
-                # Build detection list with database IDs
+                # Build detection list with database IDs. Content-addressed IDs
+                # can collapse near-duplicate detector outputs into one
+                # persisted row, so fall back to the DB rows if the returned ID
+                # count no longer matches the raw detector output count.
                 det_list = []
-                for det, det_id in zip(detections, det_ids, strict=True):
-                    det_list.append({
-                        "id": det_id,
-                        "box_x": det["box"]["x"],
-                        "box_y": det["box"]["y"],
-                        "box_w": det["box"]["w"],
-                        "box_h": det["box"]["h"],
-                        "confidence": det["confidence"],
-                        "category": det.get("category", "animal"),
-                        "detector_model": "megadetector-v6",
-                    })
+                if len(det_ids) == len(detections):
+                    for det, det_id in zip(detections, det_ids, strict=True):
+                        det_list.append({
+                            "id": det_id,
+                            "box_x": det["box"]["x"],
+                            "box_y": det["box"]["y"],
+                            "box_w": det["box"]["w"],
+                            "box_h": det["box"]["h"],
+                            "confidence": det["confidence"],
+                            "category": det.get("category", "animal"),
+                            "detector_model": "megadetector-v6",
+                        })
+                else:
+                    for det in db.get_detections(
+                        photo["id"], min_conf=0,
+                        detector_model="megadetector-v6",
+                    ):
+                        det_list.append({
+                            "id": det["id"],
+                            "box_x": det["box_x"],
+                            "box_y": det["box_y"],
+                            "box_w": det["box_w"],
+                            "box_h": det["box_h"],
+                            "confidence": det["detector_confidence"],
+                            "category": det["category"],
+                            "detector_model": det["detector_model"],
+                        })
                 detection_map[photo["id"]] = det_list
 
                 # Mark as processed immediately after detection rows are committed
@@ -499,8 +542,12 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
 
             processed_ids.add(photo["id"])
 
-    except (ImportError, RuntimeError):
-        pass
+    except (ImportError, RuntimeError) as e:
+        # Detection unavailable (missing weights/backend) — non-fatal, the
+        # caller degrades to full-image classification. Previously silenced
+        # entirely, which let the detect stage report success while the
+        # batch's remaining photos were silently skipped.
+        log.warning("Detection unavailable for batch (non-fatal): %s", e)
     except Exception:
         log.warning("Detection failed for batch (non-fatal)", exc_info=True)
 
@@ -511,6 +558,15 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
     """Run MegaDetector on photos, storing quality metrics.
 
     Wraps _detect_batch with progress reporting for the standalone classify job.
+
+    When ``reclassify`` is True, each photo's prior detections are cleared
+    *just before* that photo is re-detected — not upfront for the whole
+    scope. Cancelling mid-loop therefore leaves the unprocessed tail with
+    its old state intact instead of an empty cache it can't rebuild. The
+    cascaded predictions purge is handled by ``_classify_photos`` so that a
+    mid-classify cancel (or a detection-setup failure that skips this loop
+    entirely) doesn't strand photos with cleared predictions and no
+    replacement.
 
     Returns:
         (detection_map, detected_count) where detection_map is
@@ -526,7 +582,24 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
         db.get_detector_run_photo_ids("megadetector-v6") if not reclassify else set()
     )
 
-    if detect_animals is not None and get_primary_detection is not None:
+    # Track photos whose state we mutated (clear_detections + write_detection_batch
+    # in reclassify mode). Declared up here so the except handlers and early
+    # returns can stash whatever was accumulated before the failure. The caller
+    # reads ``job["_detect_processed_ids"]`` to decide which photos to classify
+    # on a post-detect cancel — using ``detection_map.keys()`` alone would miss
+    # empty-scene photos whose old predictions were already cascaded away.
+    processed_for_rebuild: set[int] = set()
+
+    try:
+        if detect_animals is None or get_primary_detection is None:
+            raise ImportError(
+                "MegaDetector ONNX model not available — cannot run detection"
+            )
+
+        # Inside the try so a weights-download failure (e.g. network down)
+        # degrades to full-image classification like every other detection
+        # failure, instead of failing the whole job — which on a reclassify
+        # run would strike after predictions/detections were already purged.
         # Require at least one photo — a no-op reclassify over 0 photos should
         # not trigger a ~300 MB MegaDetector download.
         needs_fresh_detection = bool(photos) and (
@@ -549,13 +622,19 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
                     },
                 )
 
-            ensure_megadetector_weights(progress_callback=_dl_progress)
+            # Gate the download. The classifier-init phase (run by the
+            # caller before _detect_subjects) has no internal cancel check,
+            # so a cancel during model load would otherwise land here only
+            # to be ignored: hf_hub_download can't be interrupted once it
+            # starts, so the per-photo cancel check below runs too late.
+            if runner.is_cancelled(job["id"]):
+                log.info(
+                    "Classify job cancelled before MegaDetector weights download"
+                )
+                job["_detect_processed_ids"] = processed_for_rebuild
+                return {}, 0
 
-    try:
-        if detect_animals is None or get_primary_detection is None:
-            raise ImportError(
-                "MegaDetector ONNX model not available — cannot run detection"
-            )
+            ensure_megadetector_weights(progress_callback=_dl_progress)
 
         runner.push_event(
             job["id"],
@@ -582,6 +661,11 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
         start_time = job.get("_start_time", time.time())
 
         for i, photo in enumerate(photos):
+            if runner.is_cancelled(job["id"]):
+                log.info(
+                    "Classify job cancelled during detection (%d/%d)", i, total
+                )
+                break
             runner.update_step(
                 job["id"], "detect",
                 progress={"current": i + 1, "total": total},
@@ -604,6 +688,36 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
                 not reclassify
                 and photo["id"] in already_detected_ids
             )
+
+            # Per-photo reclassify purge: wipe this photo's prior
+            # detections immediately before re-detecting. The old
+            # global-upfront purge wiped the entire scope before detection
+            # started, so a mid-detection cancel stranded the unprocessed
+            # tail with no predictions and no detections. Doing it per-photo
+            # means an early cancel preserves the untouched photos' cached
+            # state.
+            #
+            # The cascaded ``predictions`` clear is deferred to the
+            # classification loop's own per-photo purge: a mid-classify
+            # cancel would otherwise leave the unclassified tail with
+            # fresh detections but zero predictions, and a detection-setup
+            # failure (missing weights, etc.) that skips this loop entirely
+            # would leave stale predictions alongside the fallback
+            # full-image classifier's output. Tying the predictions clear
+            # to the classify loop instead means both cases preserve or
+            # rebuild the predictions in lockstep with the new run.
+            if reclassify:
+                db.clear_detections(photo["id"])
+                # Once the clear has run we own rebuilding this photo on
+                # cancel — including the cases where ``_detect_batch``
+                # doesn't add the id to ``batch_processed`` (e.g.
+                # ``detect_animals`` returns None for a decode failure,
+                # or the batch swallows an exception). Without this the
+                # photo would be left with cleared detections/predictions
+                # and no replacement. The full-image fallback in
+                # ``_classify_photos`` handles photos with no detection
+                # rows, so registering here unconditionally is safe.
+                processed_for_rebuild.add(photo["id"])
 
             batch_map, batch_detected, _batch_processed = _detect_batch(
                 [photo], folders, runner, job, reclassify, db,
@@ -679,6 +793,7 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
         detection_map = {}
         detected = 0
 
+    job["_detect_processed_ids"] = processed_for_rebuild
     return detection_map, detected
 
 
@@ -744,6 +859,11 @@ def _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=1):
     failed = 0
 
     try:
+        # GPU serialisation across concurrent pipelines lives inside the
+        # classifier helpers (around the ``session.run`` calls), so this
+        # path holds no process-wide lock around preprocessing, DB upserts,
+        # or result-building. See ``Classifier._get_image_embedding`` and
+        # ``TimmClassifier.classify[_batch]``.
         try:
             if model_type == "timm":
                 batch_preds = clf.classify_batch(images, threshold=0)
@@ -830,6 +950,7 @@ def _classify_photos(
     photos, folders, detection_map, existing_preds, clf, model_type,
     model_name, runner, job, db, top_k=1, vireo_dir=None,
     labels_fingerprint=None, reclassify=False,
+    finish_cleared_only=False,
 ):
     """Classify detections in batches, cropping to each detection's bounding box.
 
@@ -843,6 +964,15 @@ def _classify_photos(
     A per-detection classifier_runs gate keyed on (detection_id, model_name,
     labels_fingerprint) short-circuits re-work when the same triple already
     ran. reclassify=True bypasses the gate.
+
+    ``finish_cleared_only`` is set by ``run_classify_job`` when a post-detect
+    cancel landed in reclassify mode. The processed subset of ``photos``
+    already had its prior detections + cascaded predictions wiped during
+    detection; we must run classification on them anyway to avoid stranding
+    them with no predictions. In this mode the per-photo predictions clear
+    is skipped (the cascade in ``_detect_subjects`` already did it) and the
+    cancel-break at the top of the loop is suppressed (we're rebuilding the
+    already-cleared work, not starting new work).
 
     Returns:
         (raw_results, failed_count, skipped_existing_count)
@@ -860,10 +990,60 @@ def _classify_photos(
     skipped_existing = 0
     total = len(photos)
     batch = []
+    cancelled = False
 
     start_time = time.time()
 
     for i, photo in enumerate(photos):
+        if not finish_cleared_only and runner.is_cancelled(job["id"]):
+            # Already-classified work is in raw_results (committed via the
+            # in-loop flushes); the pending `batch` is queued items that
+            # haven't run through the model yet. In reclassify mode the
+            # final flush still drains the batch (those photos already had
+            # their old predictions cleared above and would otherwise end
+            # up empty); in non-reclassify mode the batch is dropped to
+            # honor the cancel signal. The per-photo reclassify clear
+            # below only fires for photos we actually reach, so the
+            # unclassified tail keeps its old predictions intact.
+            log.info(
+                "Classify job cancelled during classification (%d/%d)", i, total
+            )
+            cancelled = True
+            break
+
+        # Per-photo reclassify predictions purge. Lives here (rather than
+        # alongside ``clear_detections`` in the detection loop) so that:
+        #   1. A mid-classify cancel leaves the unprocessed tail with its
+        #      old predictions intact — without this gate they'd already
+        #      be cleared and the cancel would strand them with new
+        #      detections and no predictions.
+        #   2. When detection setup fails (missing weights, etc.) and the
+        #      job degrades to full-image classification, the stale
+        #      detector-based predictions still get replaced rather than
+        #      lingering alongside the fallback model's output.
+        # ``clear_predictions`` also wipes the matching ``classifier_runs``
+        # rows so the per-detection skip gate doesn't short-circuit the
+        # fresh inference about to run. Skipped in ``finish_cleared_only``
+        # mode because the cascade in ``_detect_subjects`` already wiped
+        # the prior predictions for these photos.
+        #
+        # No ``labels_fingerprint`` filter: in the normal reclassify path
+        # ``clear_detections`` already cascade-wiped this photo's
+        # predictions (across all fingerprints) before we got here, so a
+        # filtered clear would just be a no-op repeat. In the fallback
+        # path (detection setup failed → empty ``detection_map`` for this
+        # photo, old detector detections still on disk) this clear is the
+        # ONLY purge before the full-image fallback writes new predictions;
+        # scoping it to the current fingerprint would leave predictions
+        # under prior fingerprints intact (e.g. after a workspace
+        # label-set change), and ``get_predictions``' latest-fingerprint
+        # filter would then surface them alongside the new fallback rows.
+        if reclassify and not finish_cleared_only:
+            db.clear_predictions(
+                model=model_name,
+                collection_photo_ids=[photo["id"]],
+            )
+
         job["progress"]["current"] = i + 1
         job["progress"]["current_file"] = photo["filename"]
         runner.update_step(
@@ -976,15 +1156,9 @@ def _classify_photos(
                     batch = []
         else:
             # No detections — use (or create) a full-image synthetic detection
-            # to carry the classifier output.
-            #
-            # save_detections() does clear-and-reinsert per
-            # (photo_id, detector_model), so calling it on every pass would
-            # generate a new id each time and cascade-delete prior predictions
-            # and classifier_runs tied to the old id. Reuse the existing
-            # full-image detection when one is already cached, and only
-            # create a fresh one if none exists (or if the caller asked for
-            # a reclassify).
+            # to carry the classifier output. save_detections is now idempotent
+            # under content-addressed IDs, but reading the existing row first
+            # avoids an UPSERT + stale-cleanup roundtrip on the common path.
             # min_conf=0 because the synthetic full-image detection is
             # written with confidence=0 — the default threshold filter would
             # hide it.
@@ -1071,8 +1245,16 @@ def _classify_photos(
                 _record_batch_classifier_runs(db, batch, model_name, fp, raw_results, pre_len)
                 batch = []
 
-    # Flush remaining images
-    if batch:
+    # Flush remaining images. The pending batch holds photos that haven't
+    # been classified yet — for non-reclassify cancels we drop it (those
+    # photos still have their cached predictions, so honoring the cancel
+    # signal here just skips wasted inference). For reclassify cancels we
+    # must flush instead: each queued photo already had its old predictions
+    # wiped by the per-photo ``clear_predictions`` above, and bailing here
+    # would strand them with no predictions until a manual rerun. Flushing
+    # finishes the rebuild for the queued tail without picking up any new
+    # photos (the cancel check at the top of the loop still blocks those).
+    if batch and (not cancelled or reclassify):
         pre_len = len(raw_results)
         failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=top_k)
         _record_batch_classifier_runs(db, batch, model_name, fp, raw_results, pre_len)
@@ -1396,6 +1578,18 @@ def _store_grouped_predictions(
     }
 
 
+def _finalize_remaining_steps(runner, job_id, step_ids, status, summary):
+    """Flip not-yet-run step rows to a terminal status before an early return.
+
+    _persist_job stores whatever statuses are in the step tree at job end;
+    a row left "pending" with no finished_at renders as an indeterminate
+    spinner forever on the jobs page. Early-return paths must call this for
+    every step they are about to skip.
+    """
+    for step_id in step_ids:
+        runner.update_step(job_id, step_id, status=status, summary=summary)
+
+
 def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None):
     """Execute classification job. Called by JobRunner in a background thread.
 
@@ -1446,7 +1640,7 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
         kept_raw = getattr(
             thread_db, "filter_out_wildlife_excluded", lambda ids: ids
         )(photo_ids)
-        if not isinstance(kept_raw, (list, tuple, set)):
+        if not isinstance(kept_raw, list | tuple | set):
             kept_raw = photo_ids
         kept_ids = set(kept_raw)
         photos = [p for p in photos if p["id"] in kept_ids]
@@ -1527,8 +1721,35 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
                     "phase": "Step 1/5: Loading photos",
                 },
             )
+            _finalize_remaining_steps(
+                runner, job["id"],
+                ["load_taxonomy", "load_model", "detect", "classify",
+                 "finalize"],
+                status="completed", summary="Skipped (no photos to classify)",
+            )
             return {
                 "total": 0,
+                "predictions_stored": 0,
+                "burst_groups": 0,
+                "already_classified": 0,
+                "already_labeled": 0,
+                "detected": 0,
+                "failed": 0,
+            }
+
+        # Cancellation gate before the expensive phases (model resolution,
+        # weight download, inference). The job loops below also check
+        # per-photo; _run_job flips the terminal status to 'cancelled'.
+        if runner.is_cancelled(job["id"]):
+            log.info("Classify job cancelled before model resolution")
+            _finalize_remaining_steps(
+                runner, job["id"],
+                ["load_taxonomy", "load_model", "detect", "classify",
+                 "finalize"],
+                status="cancelled", summary="Cancelled before start",
+            )
+            return {
+                "total": total,
                 "predictions_stored": 0,
                 "burst_groups": 0,
                 "already_classified": 0,
@@ -1584,6 +1805,7 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
             labels_file=params.labels_file,
             labels_files=params.labels_files,
             db=thread_db,
+            model_dir=weights_path,
         )
         # Compute a content-addressable fingerprint for the active label set.
         # Kept in scope so downstream classifier_runs writes can record the
@@ -1634,6 +1856,24 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
         )
 
         if model_type == "timm":
+            if runner.is_cancelled(job["id"]):
+                runner.update_step(
+                    job["id"], "load_model",
+                    status="cancelled", summary="Cancelled",
+                )
+                _finalize_remaining_steps(
+                    runner, job["id"], ["detect", "classify", "finalize"],
+                    status="cancelled", summary="Cancelled before start",
+                )
+                return {
+                    "total": total,
+                    "predictions_stored": 0,
+                    "burst_groups": 0,
+                    "already_classified": 0,
+                    "already_labeled": 0,
+                    "detected": 0,
+                    "failed": 0,
+                }
             clf = TimmClassifier(model_str, taxonomy=tax)
         else:
             def _emb_progress(current, emb_total):
@@ -1649,37 +1889,73 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
                         "total": emb_total,
                         "current_file": f"Computing label embeddings ({current}/{emb_total})...",
                         "rate": 0,
-                        "phase": "Step 3/5: Computing embeddings",
+                    "phase": "Step 3/5: Computing embeddings",
                     },
                 )
 
-            clf = Classifier(
-                labels=None if use_tol else labels,
-                model_str=model_str,
-                pretrained_str=weights_path,
-                embedding_progress_callback=_emb_progress,
-            )
+            try:
+                clf = Classifier(
+                    labels=None if use_tol else labels,
+                    model_str=model_str,
+                    pretrained_str=weights_path,
+                    embedding_progress_callback=_emb_progress,
+                    cancel_check=lambda: runner.is_cancelled(job["id"]),
+                )
+            except ClassificationCancelled:
+                runner.update_step(
+                    job["id"], "load_model",
+                    status="cancelled", summary="Cancelled",
+                )
+                _finalize_remaining_steps(
+                    runner, job["id"], ["detect", "classify", "finalize"],
+                    status="cancelled", summary="Cancelled before start",
+                )
+                return {
+                    "total": total,
+                    "predictions_stored": 0,
+                    "burst_groups": 0,
+                    "already_classified": 0,
+                    "already_labeled": 0,
+                    "detected": 0,
+                    "failed": 0,
+                }
         runner.update_step(
             job["id"], "load_model", status="completed",
             summary=effective_name,
         )
 
-        # Classifier init succeeded — now it's safe to purge existing
-        # cache for reclassify. Any failure before this point leaves the
-        # cache intact (see comment at the top of this function).
-        if params.reclassify:
-            photo_ids = [p["id"] for p in photos]
-            thread_db.clear_predictions(
-                model=effective_name, collection_photo_ids=photo_ids,
+        # Classifier init succeeded — now it's safe to start the
+        # reclassify purge for any failure before this point would leave
+        # the cache intact (see comment at the top of this function).
+        #
+        # The actual destructive clears happen per-photo inside
+        # ``_detect_subjects`` rather than upfront for the whole scope.
+        # An upfront clear over the full collection meant a mid-detection
+        # cancel left the unprocessed tail with both predictions and
+        # detections wiped, since the post-detection return gates
+        # classification off too. Doing the clear immediately before each
+        # photo's re-detection means cancelled photos retain their old
+        # state intact.
+        #
+        # This pre-detection cancel gate still applies: a cancel that
+        # landed during taxonomy/label/model init would otherwise advance
+        # to the detection loop's per-photo clear and start wiping rows
+        # before the user's cancel takes effect.
+        if runner.is_cancelled(job["id"]):
+            log.info("Classify job cancelled before reclassify purge")
+            _finalize_remaining_steps(
+                runner, job["id"], ["detect", "classify", "finalize"],
+                status="cancelled", summary="Cancelled before start",
             )
-            # Also clear existing detections so they get re-detected.
-            for pid in photo_ids:
-                thread_db.clear_detections(pid)
-            log.info(
-                "Cleared existing predictions and detections for %d photos, "
-                "model=%s (re-classify, post-model-load)",
-                len(photo_ids), effective_name,
-            )
+            return {
+                "total": total,
+                "predictions_stored": 0,
+                "burst_groups": 0,
+                "already_classified": 0,
+                "already_labeled": 0,
+                "detected": 0,
+                "failed": 0,
+            }
 
         # Phase 5: Detect subjects
         runner.update_step(job["id"], "detect", status="running")
@@ -1691,10 +1967,75 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
             reclassify=params.reclassify,
             db=thread_db,
         )
-        runner.update_step(
-            job["id"], "detect", status="completed",
-            summary=f"{detected} animals detected in {total} photos",
-        )
+        cancelled_after_detect = runner.is_cancelled(job["id"])
+        # In reclassify mode, ``_detect_subjects`` clears each processed
+        # photo's prior detections before re-running detection — and that
+        # cascade-deletes its old predictions. Bailing out here would leave
+        # the processed subset with fresh detections but zero predictions
+        # until a manual rerun. Fall through to classify just that subset
+        # so cancel preserves the rebuild work already in flight. The
+        # unprocessed tail is dropped — its old state was never touched,
+        # so dropping it keeps the cached predictions intact.
+        #
+        # The processed subset comes from ``job["_detect_processed_ids"]``,
+        # which is the union of (a) photos with at least one detection and
+        # (b) empty-scene photos that recorded a detector_runs row but
+        # added nothing to ``detection_map``. Using ``detection_map``
+        # alone would miss case (b), stranding empty-scene reclassified
+        # photos with cleared predictions and no replacement. Older test
+        # fakes for ``_detect_subjects`` that don't stash this key fall
+        # back to ``detection_map.keys()`` for backwards compatibility.
+        finish_cleared_only = False
+        if cancelled_after_detect:
+            runner.update_step(
+                job["id"], "detect", status="cancelled",
+                summary=f"Cancelled ({detected} animals detected so far)",
+            )
+            processed_ids = job.get("_detect_processed_ids")
+            if processed_ids is None:
+                processed_ids = set(detection_map.keys())
+            else:
+                processed_ids = set(processed_ids) | set(detection_map.keys())
+            if params.reclassify and processed_ids:
+                processed = [p for p in photos if p["id"] in processed_ids]
+                if processed:
+                    finish_cleared_only = True
+                    photos = processed
+                    total = len(photos)
+                    job["progress"]["total"] = total
+                else:
+                    _finalize_remaining_steps(
+                        runner, job["id"], ["classify", "finalize"],
+                        status="cancelled", summary="Cancelled",
+                    )
+                    return {
+                        "total": total,
+                        "predictions_stored": 0,
+                        "burst_groups": 0,
+                        "already_classified": 0,
+                        "already_labeled": 0,
+                        "detected": detected,
+                        "failed": 0,
+                    }
+            else:
+                _finalize_remaining_steps(
+                    runner, job["id"], ["classify", "finalize"],
+                    status="cancelled", summary="Cancelled",
+                )
+                return {
+                    "total": total,
+                    "predictions_stored": 0,
+                    "burst_groups": 0,
+                    "already_classified": 0,
+                    "already_labeled": 0,
+                    "detected": detected,
+                    "failed": 0,
+                }
+        else:
+            runner.update_step(
+                job["id"], "detect", status="completed",
+                summary=f"{detected} animals detected in {total} photos",
+            )
 
         # Phase 6: Classify each photo. The per-detection classifier_runs
         # gate inside _classify_photos skips already-done detections and
@@ -1726,6 +2067,7 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
             vireo_dir=vireo_dir,
             labels_fingerprint=fp,
             reclassify=params.reclassify,
+            finish_cleared_only=finish_cleared_only,
         )
         classified_count = len(raw_results) - skipped_existing
         parts = [f"{classified_count} classified"]
@@ -1733,10 +2075,29 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
             parts.append(f"{skipped_existing} cached")
         if failed:
             parts.append(f"{failed} failed")
-        runner.update_step(
-            job["id"], "classify", status="completed",
-            summary=", ".join(parts),
-        )
+        cancelled_mid_classify = runner.is_cancelled(job["id"])
+        if cancelled_mid_classify:
+            # Fall through to finalize: raw_results holds real classifications
+            # for the photos completed before the cancel — storing them
+            # preserves that work (and matches the per-detection cache, which
+            # is already committed).
+            if finish_cleared_only:
+                summary = (
+                    "Cancelled mid-detect — finished "
+                    + ", ".join(parts)
+                    + " for already-cleared photos"
+                )
+            else:
+                summary = "Cancelled (" + ", ".join(parts) + ")"
+            runner.update_step(
+                job["id"], "classify", status="cancelled",
+                summary=summary,
+            )
+        else:
+            runner.update_step(
+                job["id"], "classify", status="completed",
+                summary=", ".join(parts),
+            )
 
         # Phase 7: Group and store predictions
         runner.update_step(job["id"], "finalize", status="running")

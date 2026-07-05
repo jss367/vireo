@@ -22,7 +22,7 @@ def test_build_static_produces_files():
         for page in expected_pages:
             path = os.path.join(outdir, page)
             assert os.path.isfile(path), f"Missing: {page}"
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 content = f.read()
             # No Jinja2 syntax should remain
             assert "{%" not in content, f"{page} still has Jinja2 block tags"

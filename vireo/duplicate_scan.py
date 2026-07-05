@@ -8,6 +8,8 @@ import os
 from duplicate_buckets import bucket_unresolved_proposals
 from duplicates import DupCandidate, resolve_duplicates
 
+_EMPTY_FILE_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
 # SQLite's legacy ``SQLITE_MAX_VARIABLE_NUMBER`` cap is 999 on older builds.
 # An auto-resolved group can exceed that when many `-2` copies of one
 # file accumulate over repeated scans, so any single-statement IN-clause
@@ -53,13 +55,48 @@ def _row_to_info(row, folder_path):
     }
 
 
+def _attach_edit_recipes(db, proposals):
+    """Attach edit recipes to every candidate in duplicate proposals."""
+    candidates = []
+    for proposal in proposals:
+        winner = proposal.get("winner")
+        if isinstance(winner, dict):
+            candidates.append(winner)
+        candidates.extend(
+            loser for loser in proposal.get("losers", [])
+            if isinstance(loser, dict)
+        )
+    if not candidates:
+        return proposals
+    recipe_map = db.get_photo_edit_recipes(
+        sorted({
+            candidate["id"]
+            for candidate in candidates
+            if isinstance(candidate.get("id"), int)
+            and not isinstance(candidate.get("id"), bool)
+        })
+    )
+    for candidate in candidates:
+        pid = candidate.get("id")
+        candidate["edit_recipe"] = recipe_map.get(pid)
+    return proposals
+
+
+def _is_empty_file_group(file_hash, infos):
+    return (
+        file_hash == _EMPTY_FILE_SHA256
+        and infos
+        and all((info.get("file_size") or 0) == 0 for info in infos)
+    )
+
+
 def _build_unresolved_proposal(db, group):
     """Return a proposal dict for an unresolved group, or None on race."""
     rows = _fetch_photo_rows(
         db, group["photo_ids"],
         columns="p.id, p.filename, p.file_mtime, p.rating, p.file_size, "
                 "f.path AS folder_path",
-        where_extra=" AND p.flag != 'rejected'",
+        where_extra=" AND (p.flag IS NULL OR p.flag != 'rejected')",
     )
 
     info_by_id = {r["id"]: _row_to_info(r, r["folder_path"]) for r in rows}
@@ -80,12 +117,16 @@ def _build_unresolved_proposal(db, group):
         linfo["reason"] = reason
         losers.append(linfo)
     all_missing = not any(info["exists"] for info in info_by_id.values())
+    empty_file_group = _is_empty_file_group(
+        group["file_hash"], info_by_id.values(),
+    )
     return {
         "file_hash": group["file_hash"],
         "status": "unresolved",
         "winner": info_by_id[winner_id],
         "losers": losers,
         "all_missing": all_missing,
+        "empty_file_group": empty_file_group,
     }
 
 
@@ -146,12 +187,19 @@ def _build_resolved_proposal(db, group):
         linfo["rejected"] = True
         losers.append(linfo)
     all_missing = not any(info["exists"] for info in info_by_id.values())
+    empty_file_group = _is_empty_file_group(
+        group["file_hash"], info_by_id.values(),
+    )
+    if empty_file_group:
+        for loser in losers:
+            loser["reason"] = "empty file"
     return {
         "file_hash": group["file_hash"],
         "status": "resolved",
         "winner": info_by_id[kept[0]["id"]],
         "losers": losers,
         "all_missing": all_missing,
+        "empty_file_group": empty_file_group,
     }
 
 
@@ -187,6 +235,7 @@ def run_duplicate_scan(job, db, include_resolved=True):
         # Show the winner's path (human-readable) rather than an opaque hash.
         job["progress"]["current_file"] = proposal["winner"]["path"]
 
+    _attach_edit_recipes(db, proposals)
     return {
         "proposals": proposals,
         "buckets": bucket_unresolved_proposals(proposals),

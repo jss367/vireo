@@ -185,8 +185,8 @@
       <button class="kw-filter-btn" data-type="location">Location</button>
       <button class="kw-filter-btn" data-type="genre">Genre</button>
       <button class="kw-filter-btn" id="kwFilterUnlinked" data-type="unlinked-location"
-              title="Show only location keywords without a Google place link">
-        Unlinked locations <span id="kwUnlinkedCount">0</span>
+              title="Show location keywords that are directly tagged on photos and missing a Google place link">
+        Unlinked tagged locations <span id="kwUnlinkedCount">0</span>
       </button>
       <span class="kw-stats" id="kwStats">Loading...</span>
     </div>
@@ -278,7 +278,7 @@
   function getFiltered() {
     let list = allKeywords;
     if (filterType === 'unlinked-location') {
-      list = list.filter(k => (k.type || 'general') === 'location' && !k.place_id);
+      list = list.filter(k => isActionableUnlinkedLocation(k));
     } else if (filterType !== 'all') {
       list = list.filter(k => (k.type || 'general') === filterType);
     }
@@ -291,8 +291,16 @@
 
   function unlinkedLocationCount() {
     return allKeywords.reduce(function(n, k) {
-      return n + (((k.type || 'general') === 'location' && !k.place_id) ? 1 : 0);
+      return n + (isActionableUnlinkedLocation(k) ? 1 : 0);
     }, 0);
+  }
+
+  function isActionableUnlinkedLocation(k) {
+    return (
+      (k.type || 'general') === 'location' &&
+      !k.place_id &&
+      (k.direct_photo_count || 0) > 0
+    );
   }
 
   function sortList(list) {
@@ -350,14 +358,15 @@
                        ? k.latitude.toFixed(4) + ', ' + k.longitude.toFixed(4) : '';
 
       // Per-row Link cell:
-      //   * type='location' AND no place_id  -> 📍 Link... button
-      //   * type='location' AND has place_id -> 📍 linked badge
-      //   * other types                      -> empty
+      //   * linked location                 -> 📍 linked badge
+      //   * directly tagged unlinked place  -> 📍 Link... button
+      //   * parent-only chain rows          -> empty
+      //   * other types                     -> empty
       let linkCell = '';
       if (t === 'location') {
         if (k.place_id) {
           linkCell = '<span class="kw-linked-badge" title="Linked to Google place">📍 linked</span>';
-        } else {
+        } else if (isActionableUnlinkedLocation(k)) {
           linkCell = '<button class="kw-link-btn" data-link-id="' + k.id + '" type="button">' +
             '📍 Link…</button>';
         }
@@ -741,12 +750,23 @@
       // `input`; binding twice triggers two `place_changed` events).
       _activeLinkAutocomplete = new google.maps.places.Autocomplete(input, {
         types: ['geocode', 'establishment'],
-        fields: ['place_id', 'name', 'formatted_address'],
+        fields: [
+          'place_id',
+          'name',
+          'types',
+          'formatted_address',
+          'geometry',
+          'address_components'
+        ],
       });
       _activeLinkAutocomplete.addListener('place_changed', function() {
         const place = _activeLinkAutocomplete.getPlace();
         if (place && place.place_id && _activeLinkKeywordId) {
-          submitLinkPlace(_activeLinkKeywordId, place.place_id);
+          submitLinkPlace(
+            _activeLinkKeywordId,
+            place.place_id,
+            normalizeGooglePlaceForSubmit(place)
+          );
         }
       });
     } catch(err) {
@@ -762,14 +782,42 @@
     _hideLinkError();
   }
 
-  async function submitLinkPlace(keywordId, placeId) {
+  function normalizeGooglePlaceForSubmit(place) {
+    if (!place || !place.place_id) return null;
+    const loc = place.geometry && place.geometry.location;
+    let lat = null;
+    let lng = null;
+    if (loc) {
+      lat = (typeof loc.lat === 'function') ? loc.lat() : loc.lat;
+      lng = (typeof loc.lng === 'function') ? loc.lng() : loc.lng;
+    }
+    if (lat == null || lng == null) return null;
+    return {
+      place_id: place.place_id,
+      name: place.name || place.formatted_address || '',
+      types: Array.isArray(place.types) ? place.types : [],
+      lat: lat,
+      lng: lng,
+      address_components: (place.address_components || []).map(function(c) {
+        return {
+          name: c.long_name || c.name || '',
+          short_name: c.short_name || '',
+          types: c.types || [],
+        };
+      }),
+    };
+  }
+
+  async function submitLinkPlace(keywordId, placeId, placeDetails) {
     _hideLinkError();
+    const body = {place_id: placeId};
+    if (placeDetails) body.place = placeDetails;
     let resp;
     try {
       resp = await fetch('/api/keywords/' + keywordId + '/link-place', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({place_id: placeId}),
+        body: JSON.stringify(body),
       });
     } catch(err) {
       _showLinkError('Network error: ' + (err && err.message || err));

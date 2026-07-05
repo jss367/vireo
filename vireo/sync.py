@@ -4,7 +4,16 @@ import logging
 import os
 from collections import defaultdict
 
-from xmp import read_keywords, remove_keywords, write_pick_flag, write_rating, write_sidecar
+from xmp import (
+    read_keywords,
+    remove_keywords,
+    remove_vireo_gps_location,
+    write_edit_recipe,
+    write_gps_location,
+    write_pick_flag,
+    write_rating,
+    write_sidecar,
+)
 
 log = logging.getLogger(__name__)
 
@@ -31,17 +40,37 @@ def _sync_flags_to_xmp_enabled(db):
         return False
 
 
-def sync_to_xmp(db, progress_callback=None):
+def _write_assigned_location_to_xmp_enabled(db):
+    """Return whether the active workspace should write assigned GPS to XMP."""
+    try:
+        import config as cfg
+
+        return bool(
+            db.get_effective_config(cfg.load()).get(
+                "write_assigned_location_to_xmp", False
+            )
+        )
+    except Exception:
+        log.warning("Failed to read write_assigned_location_to_xmp config", exc_info=True)
+        return False
+
+
+def sync_to_xmp(db, progress_callback=None, change_ids=None):
     """Write pending changes to XMP sidecars.
 
     Args:
         db: Database instance
         progress_callback: optional callable(current, total)
+        change_ids: optional pending_changes ids to sync. When provided, any
+            other queued changes are left pending.
 
     Returns:
         dict with synced, failed, failures counts
     """
     changes = db.get_pending_changes()
+    if change_ids is not None:
+        selected_ids = {int(cid) for cid in change_ids}
+        changes = [c for c in changes if c["id"] in selected_ids]
     if not changes:
         return {"synced": 0, "failed": 0, "failures": []}
 
@@ -51,6 +80,7 @@ def sync_to_xmp(db, progress_callback=None):
         by_photo[c["photo_id"]].append(c)
 
     sync_flags = _sync_flags_to_xmp_enabled(db)
+    sync_locations = _write_assigned_location_to_xmp_enabled(db)
     synced = 0
     failed = 0
     failures = []
@@ -79,6 +109,9 @@ def sync_to_xmp(db, progress_callback=None):
             keywords_to_remove = set()
             new_rating = None
             new_flag = None
+            edit_recipe_json = None
+            sync_location = False
+            cleanup_location = False
             supported_ids = []
             unsupported_changes = []
 
@@ -98,6 +131,15 @@ def sync_to_xmp(db, progress_callback=None):
                         supported_ids.append(c["id"])
                     else:
                         unsupported_changes.append(c)
+                elif c["change_type"] == "location":
+                    supported_ids.append(c["id"])
+                    if sync_locations:
+                        sync_location = True
+                    else:
+                        cleanup_location = True
+                elif c["change_type"] == "edit_recipe":
+                    edit_recipe_json = c["value"] or ""
+                    supported_ids.append(c["id"])
 
             # Write keywords
             if keywords_to_add:
@@ -118,6 +160,23 @@ def sync_to_xmp(db, progress_callback=None):
             # Write rating
             if new_rating is not None:
                 write_rating(xmp_path, new_rating)
+
+            if sync_location:
+                loc = db.get_assigned_photo_location(photo_id)
+                if loc and loc.get("latitude") is not None and loc.get("longitude") is not None:
+                    write_gps_location(
+                        xmp_path,
+                        loc["latitude"],
+                        loc["longitude"],
+                        source=loc.get("source") or "assigned",
+                    )
+                else:
+                    remove_vireo_gps_location(xmp_path)
+            elif cleanup_location:
+                remove_vireo_gps_location(xmp_path)
+
+            if edit_recipe_json is not None:
+                write_edit_recipe(xmp_path, edit_recipe_json)
 
             if supported_ids:
                 synced += 1

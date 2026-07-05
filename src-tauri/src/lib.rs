@@ -3,10 +3,13 @@ mod menu;
 mod sidecar;
 mod tray;
 mod updater;
-use sidecar::SidecarState;
+use sidecar::{SidecarStartError, SidecarState};
 use tauri::{Manager, RunEvent};
 use tauri::window::{ProgressBarState, ProgressBarStatus};
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
+
+const INDETERMINATE_PROGRESS_FALLBACK: u64 = 10;
 
 /// Open the given URL in the user's default web browser.
 ///
@@ -41,14 +44,27 @@ fn dispatch_menu_command(app: &tauri::AppHandle, command: &str) {
     }
 }
 
+fn reload_main_window(app: &tauri::AppHandle) {
+    if tray::is_browser_mode(app) {
+        log::warn!("Native reload ignored because Vireo is running in browser mode");
+        return;
+    }
+
+    if let Some(window) = app.get_webview_window("main") {
+        if let Err(e) = window.eval("window.location.reload()") {
+            log::error!("Failed to reload main window: {}", e);
+        }
+    }
+}
+
 #[tauri::command]
 fn get_server_port(state: tauri::State<'_, SidecarState>) -> u16 {
     state.port
 }
 
 // Update the OS-level progress indicator on the dock/taskbar icon.
-// `progress` is 0-100 (None = clear). When `indeterminate` is true the bar
-// pulses instead of filling — used for phases without a known total.
+// `progress` is 0-100 (None = clear). Tauri treats indeterminate as a normal
+// bar on macOS/Linux, so use a small visible value for unknown-total phases.
 #[tauri::command]
 fn set_job_progress(
     window: tauri::WebviewWindow,
@@ -56,7 +72,14 @@ fn set_job_progress(
     indeterminate: bool,
 ) -> Result<(), String> {
     let (status, progress) = if indeterminate {
-        (ProgressBarStatus::Indeterminate, Some(0))
+        // On Windows this requests the native indeterminate taskbar state.
+        // On macOS/Linux Tauri treats Indeterminate as Normal, where progress
+        // is a 0-100 percentage. Use 10% so unknown-total work is visible;
+        // ProgressBarStatus::None remains the explicit hidden state.
+        (
+            ProgressBarStatus::Indeterminate,
+            Some(INDETERMINATE_PROGRESS_FALLBACK),
+        )
     } else if let Some(p) = progress {
         (ProgressBarStatus::Normal, Some(p.min(100)))
     } else {
@@ -70,9 +93,37 @@ fn set_job_progress(
         .map_err(|e| e.to_string())
 }
 
+/// Build the logging plugin used in BOTH dev and release builds.
+///
+/// Previously logging was only initialized under `cfg!(debug_assertions)`, so
+/// installed builds wrote nothing to disk — every `log::` call from the sidecar
+/// supervisor, updater, tray, and browser opener silently vanished, which made
+/// field bugs (such as the iNaturalist quick-open failing) impossible to
+/// diagnose. Now it runs everywhere, writing to the OS log directory
+/// (`~/Library/Logs/com.vireo.app/Vireo.log` on macOS) and stdout.
+///
+/// The webview forwards its own logs and uncaught errors here via the plugin's
+/// `log` command (see tauri-bridge.js), so the single file captures both the
+/// Rust side and the JS side.
+fn build_log_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
+    tauri_plugin_log::Builder::default()
+        .level(log::LevelFilter::Info)
+        // The plugin default is only 40 KB; match the Flask sidecar's 5 MB so a
+        // real debugging session's worth of logs survives before rotating.
+        .max_file_size(5 * 1024 * 1024)
+        .rotation_strategy(RotationStrategy::KeepSome(3))
+        .targets([
+            Target::new(TargetKind::Stdout),
+            Target::new(TargetKind::LogDir { file_name: None }),
+        ])
+        .build()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(build_log_plugin())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
@@ -85,17 +136,11 @@ pub fn run() {
             let browser_mode = launch_cfg.open_in_browser();
 
             if cfg!(debug_assertions) {
-                // In dev mode, don't spawn sidecar — developer runs Flask manually
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
+                // In dev mode, don't spawn sidecar — developer runs Flask
+                // manually. Logging is initialized unconditionally in the
+                // builder chain (see build_log_plugin), so it's already active.
                 // Use a placeholder state pointing to the dev server
-                app.manage(SidecarState {
-                    child: std::sync::Mutex::new(None),
-                    port: 8080,
-                });
+                app.manage(SidecarState::unmanaged(8080));
             } else {
                 // Production: spawn the sidecar
                 match sidecar::start_sidecar(app.handle()) {
@@ -112,9 +157,50 @@ pub fn run() {
                             }
                         }
                     }
+                    Err(SidecarStartError::IncompatibleDatabase { db_path, reason }) => {
+                        // The Python sidecar refused to open the DB because
+                        // its schema predates a non-migratable change. Surface
+                        // an actionable dialog before exiting — without this
+                        // the user just sees the WKWebView fail to load and
+                        // has no way to tell whether to delete the DB, file a
+                        // bug, or reinstall.
+                        log::error!(
+                            "Incompatible database at {}: {}. Back up this file and relaunch.",
+                            db_path, reason
+                        );
+                        eprintln!(
+                            "Vireo: Incompatible database at {}: {}",
+                            db_path, reason
+                        );
+                        app.handle()
+                            .dialog()
+                            .message(format!(
+                                "Vireo can't open the database at:\n\n{}\n\nIt's from an incompatible older version of Vireo. To start fresh, move this file aside (for example, rename it with a `.bak` suffix) and relaunch.\n\nDetails: {}",
+                                db_path, reason
+                            ))
+                            .title("Incompatible Vireo Database")
+                            .kind(MessageDialogKind::Error)
+                            .blocking_show();
+                        std::process::exit(3);
+                    }
                     Err(e) => {
-                        log::error!("Failed to start sidecar: {}", e);
-                        eprintln!("Vireo: Failed to start Python backend: {}", e);
+                        // Any other startup failure (corrupt DB, locked file,
+                        // port conflict, health timeout, unexpected crash).
+                        // Always surface a dialog rather than exiting silently
+                        // into a blank window — the user otherwise has no idea
+                        // why Vireo didn't open.
+                        let reason = e.to_string();
+                        log::error!("Failed to start sidecar: {}", reason);
+                        eprintln!("Vireo: Failed to start Python backend: {}", reason);
+                        app.handle()
+                            .dialog()
+                            .message(format!(
+                                "Vireo couldn't start its backend.\n\nDetails: {}\n\nTry relaunching. If the problem persists, check Vireo's log file for more information.",
+                                reason
+                            ))
+                            .title("Vireo Couldn't Start")
+                            .kind(MessageDialogKind::Error)
+                            .blocking_show();
                         std::process::exit(1);
                     }
                 }
@@ -194,6 +280,11 @@ pub fn run() {
             // also route to the browser.
             if id == menu::ids::OPEN_IN_BROWSER {
                 tray::open_ui_in_browser(app);
+                return;
+            }
+
+            if id == menu::ids::VIEW_RELOAD {
+                reload_main_window(app);
                 return;
             }
 
