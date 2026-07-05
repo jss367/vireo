@@ -305,6 +305,124 @@ def test_hash_backed_duplicate_is_safe_to_format(tmp_path):
     assert result["safe_to_format"] is True
 
 
+def test_stale_hash_row_without_on_disk_twin_imports_as_fresh(tmp_path):
+    """A cataloged ``photos.file_hash`` row whose archive file has been
+    deleted since scan must NOT let the card be counted as skipped. The
+    hash token matches (card bytes hash to the cataloged value) but no
+    on-disk twin backs it — safe_to_format would go green while the card
+    is the only remaining copy of the bytes. The card must import as a
+    fresh photo instead."""
+    from import_dedup import compute_file_hash
+    from import_job import ImportParams, run_import_job
+
+    # Card file whose bytes hash to a specific value.
+    card = tmp_path / "card"
+    card.mkdir()
+    card_file = card / "IMG_0500.jpg"
+    Image.new("RGB", (16, 16), "red").save(str(card_file))
+    ts = datetime(2026, 6, 1, 9, 0, 0).timestamp()
+    os.utime(str(card_file), (ts, ts))
+    card_hash = compute_file_hash(str(card_file))
+    card_size = os.path.getsize(str(card_file))
+
+    # Seeded catalog row: a folder that once held a byte-identical twin,
+    # but the archive file is GONE. The folder path exists on disk
+    # (folder_status still 'ok') to isolate the missing-file case.
+    archive = tmp_path / "archive"
+    library = archive / "old-library"
+    library.mkdir(parents=True)
+    ghost_path = library / "IMG_0500.jpg"
+    assert not ghost_path.exists()
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES (?, ?, 'ok')",
+        (str(library), "old-library"),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, extension, file_size,"
+        " file_hash) VALUES (?, ?, '.jpg', ?, ?)",
+        (fid, "IMG_0500.jpg", card_size, card_hash),
+    )
+    db.conn.commit()
+
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(sources=[str(card)], destination=str(archive),
+                     verify_by_hash=True),
+    )
+
+    # Card must NOT be counted as a skipped duplicate — no twin backs it.
+    assert result["skipped_duplicate"] == 0
+    assert result["copied"] == 1
+    # Bytes now live at the fresh archive path.
+    dest = archive / "2026" / "2026-06-01" / "IMG_0500.jpg"
+    assert dest.exists()
+    assert compute_file_hash(str(dest)) == card_hash
+    # safe_to_format is true because the card's bytes verifiably exist
+    # at the fresh archive path — but via copy, not via a stale row.
+    assert result["safe_to_format"] is True
+
+
+def test_stale_hash_row_with_modified_bytes_imports_as_fresh(tmp_path):
+    """The archive file at the cataloged path exists but was modified
+    since scan (bytes no longer match ``photos.file_hash``). The card's
+    hash still matches the stale row; the twin's re-hash does not. The
+    card must import as fresh — the stale hash row is not proof that the
+    bytes verifiably exist on disk."""
+    from import_dedup import compute_file_hash
+    from import_job import ImportParams, run_import_job
+
+    card = tmp_path / "card"
+    card.mkdir()
+    card_file = card / "IMG_0600.jpg"
+    Image.new("RGB", (16, 16), "green").save(str(card_file))
+    ts = datetime(2026, 6, 2, 9, 0, 0).timestamp()
+    os.utime(str(card_file), (ts, ts))
+    card_hash = compute_file_hash(str(card_file))
+
+    # Seed a "twin" archive file whose CURRENT bytes differ from the
+    # cataloged file_hash (a stale row: the file was modified after the
+    # last scan).
+    archive = tmp_path / "archive"
+    library = archive / "old-library"
+    library.mkdir(parents=True)
+    twin_path = library / "IMG_0600.jpg"
+    Image.new("RGB", (16, 16), "blue").save(str(twin_path))
+    twin_current_hash = compute_file_hash(str(twin_path))
+    assert twin_current_hash != card_hash
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES (?, ?, 'ok')",
+        (str(library), "old-library"),
+    ).lastrowid
+    # Stale row: file_hash claims card_hash but on-disk bytes hash to
+    # twin_current_hash.
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, extension, file_size,"
+        " file_hash) VALUES (?, ?, '.jpg', ?, ?)",
+        (fid, "IMG_0600.jpg", os.path.getsize(str(card_file)), card_hash),
+    )
+    db.conn.commit()
+
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(sources=[str(card)], destination=str(archive),
+                     verify_by_hash=True),
+    )
+
+    assert result["skipped_duplicate"] == 0
+    assert result["copied"] == 1
+    dest = archive / "2026" / "2026-06-02" / "IMG_0600.jpg"
+    assert compute_file_hash(str(dest)) == card_hash
+    assert result["safe_to_format"] is True
+
+
 def test_key_match_with_different_bytes_imports_as_distinct(tmp_path):
     """A metadata-only ("key") match against a cataloged twin whose bytes
     differ must NOT be skipped: the card's bytes were never verified

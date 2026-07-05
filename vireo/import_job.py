@@ -335,15 +335,25 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                 if token is not None:
                     accept = False
                     if token[0] == "hash":
-                        # Byte-backed match — safe to skip outright.
-                        accept = True
                         twin_rows = _hash_twin_rows(db, token[1])
+                        src_hash = token[1]
                     else:
-                        # Metadata-only match: never skip on a key alone.
-                        # Hash the card file and the cataloged twin at its
-                        # archive path; only equal bytes make a duplicate.
                         twin_rows = _key_twin_rows(db, token[1])
                         src_hash = checker.content_hash(source_file)
+                    # An intra-run token is byte-proven by this session's
+                    # own copy_and_hash_verify — safe to skip without
+                    # hitting the archive. Any other match (catalog-side
+                    # hash OR metadata-only key) is stale-suspect: the
+                    # photos.file_hash row could describe an archive file
+                    # that was deleted or modified since the last scan, so
+                    # a duplicate skip must be backed by a cataloged twin
+                    # that STILL holds those bytes on disk. Without this,
+                    # a stale hash row would let the card be counted as
+                    # skipped_duplicate and safe_to_format go green while
+                    # the card is the only remaining copy of the bytes.
+                    if token in run_dest_folders:
+                        accept = True
+                    else:
                         for twin in twin_rows:
                             twin_path = os.path.join(
                                 twin["folder_path"], twin["filename"],
@@ -365,8 +375,8 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                         if run_dest is not None:
                             dup_dirs.add(run_dest)
                         continue
-                    # Key matched but no byte-identical twin exists — the
-                    # card file is a distinct photo; import it normally.
+                    # No byte-identical twin remains on disk — the card
+                    # file is a distinct photo; import it normally.
 
             # Destination path + collision handling (mirrors ingest()).
             dest_file = os.path.join(dest_folder, source_file.name)
