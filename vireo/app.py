@@ -16619,6 +16619,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return json_error(
                     "folder_ids must be a non-empty list of integers"
                 )
+            # Range-check each folder id before it ever reaches sqlite3
+            # parameter binding. A JSON payload can carry an integer wider
+            # than SQLite's signed 64-bit column type (e.g. 2**63), which
+            # would raise OverflowError inside the workspace-linked lookup
+            # below and escape as a 500. source_snapshot_id already has the
+            # same guard just below; folder-scoped runs need it too.
+            _SQLITE_INT_MIN = -(1 << 63)
+            _SQLITE_INT_MAX = (1 << 63) - 1
+            if any(
+                fid < _SQLITE_INT_MIN or fid > _SQLITE_INT_MAX
+                for fid in folder_ids
+            ):
+                return json_error(
+                    "folder_ids contains a value outside SQLite's "
+                    "signed 64-bit integer range"
+                )
             # Reject folders the active workspace has no claim on (mirrors
             # the rescan guard): a stale UI or crafted request must not
             # pollute this workspace with another workspace's scan output.
@@ -16626,6 +16642,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # active workspace, so unrelated descendants can never leak in.
             ws_for_folders = db._active_workspace_id
             subtree_ids = set()
+            # Import _chunks so the path-prefix workspace filter below can
+            # split large legacy subtrees across multiple IN(...) statements.
+            from db import _SQLITE_PARAM_CHUNK_SIZE, _chunks  # noqa: PLC0415
             for fid in folder_ids:
                 linked = db.conn.execute(
                     "SELECT 1 FROM workspace_folders "
@@ -16637,13 +16656,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # Union — a workspace can link both a root and a nested
                 # folder, so the same descendant can appear twice.
                 subtree_ids.update(db.get_folder_subtree_ids(fid))
+                # get_folder_subtree_ids walks folders.parent_id only, so
+                # legacy rows whose parent_id is NULL — but whose paths sit
+                # under the requested folder — never appear. Every other
+                # subtree consumer in db.py (folder deletion, rescan,
+                # missing-originals, workspace linking) already reads through
+                # _folder_subtree_ids_by_path for exactly this reason;
+                # without the same fallback here, processing a workspace root
+                # would silently skip legacy descendant photos the rest of
+                # the app still treats as part of that folder. Intersect the
+                # path-based descendants with the workspace's folder set so
+                # nothing leaks in from another workspace that happens to
+                # share a path prefix.
+                for chunk in _chunks(db._folder_subtree_ids_by_path(fid)):
+                    marks = ",".join("?" for _ in chunk)
+                    rows = db.conn.execute(
+                        f"SELECT folder_id FROM workspace_folders "
+                        f"WHERE workspace_id = ? AND folder_id IN ({marks})",
+                        [ws_for_folders] + list(chunk),
+                    )
+                    subtree_ids.update(r["folder_id"] for r in rows)
             # A large workspace root can expand into thousands of descendant
             # folder ids — more than SQLite's per-statement bound-parameter
             # cap on legacy builds (SQLITE_MAX_VARIABLE_NUMBER = 999). Chunk
             # the IN(...) lookup so a wide folder subtree doesn't blow up as
             # an OperationalError before the job is even queued. Same pattern
             # db.py uses for other large id scopes (see _chunks in db.py).
-            from db import _SQLITE_PARAM_CHUNK_SIZE  # noqa: PLC0415
             subtree_id_list = list(subtree_ids)
             photo_ids = []
             for start in range(0, len(subtree_id_list), _SQLITE_PARAM_CHUNK_SIZE):

@@ -2623,6 +2623,66 @@ def test_pipeline_folder_ids_rejects_non_int(app_and_db):
         assert resp.status_code == 400
 
 
+@pytest.mark.parametrize(
+    "bad_fid",
+    [
+        1 << 63,          # one past SQLite's signed 64-bit max
+        -(1 << 63) - 1,   # one below SQLite's signed 64-bit min
+        1 << 128,         # obviously out of range
+    ],
+)
+def test_pipeline_folder_ids_rejects_out_of_range_integer(app_and_db, bad_fid):
+    """A JSON-safe integer outside SQLite's signed 64-bit range must be
+    rejected with 400 before it reaches sqlite3 parameter binding.
+    Without the range guard, the workspace-linked lookup binds ``bad_fid``
+    directly and raises ``OverflowError``, which escapes as an opaque 500."""
+    app, _ = app_and_db
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [bad_fid], "strategy": "quick_look",
+        })
+        assert resp.status_code == 400, resp.get_json()
+        assert "folder_ids" in resp.get_json()["error"]
+
+
+def test_pipeline_folder_ids_includes_legacy_null_parent_descendants(app_and_db):
+    """A workspace root's ad-hoc collection must include descendant folders
+    whose ``parent_id`` is NULL even though their paths sit under the root.
+    Older databases carry such rows; ``get_folder_subtree_ids`` alone walks
+    ``folders.parent_id`` and drops them, so processing a workspace root
+    would silently skip legacy descendant photos the rest of the app still
+    treats as part of that folder subtree. Every other subtree consumer
+    (folder deletion, rescan, missing-originals) already reads through
+    ``_folder_subtree_ids_by_path`` — this route must too."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    # Insert a descendant folder whose path is under the root but whose
+    # parent_id is NULL — simulating a legacy row from a pre-parent_id
+    # backfill build. Link it to the active workspace so the route's
+    # workspace-safety filter can find it.
+    legacy_id = db.add_folder("/photos/2024/Legacy", name="Legacy")
+    db.conn.execute(
+        "UPDATE folders SET parent_id = NULL WHERE id = ?", (legacy_id,),
+    )
+    db.conn.commit()
+    db.add_workspace_folder(db._active_workspace_id, legacy_id, is_root=False)
+    legacy_photo = db.add_photo(
+        folder_id=legacy_id, filename="legacy.jpg", extension=".jpg",
+        file_size=42, file_mtime=42.0,
+    )
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [root_id], "strategy": "quick_look",
+        })
+        assert resp.status_code == 200, resp.get_json()
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        got = _collection_photo_ids(db, cfg["collection_id"])
+        assert legacy_photo in got, (
+            "legacy NULL-parent_id descendant was omitted from the "
+            "ad-hoc collection — path-prefix fallback missing"
+        )
+
+
 def test_pipeline_folder_ids_with_collection_id_400(app_and_db):
     """Two scopes in one request is ambiguous — reject rather than pick."""
     app, db = app_and_db
