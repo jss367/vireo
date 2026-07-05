@@ -215,7 +215,9 @@ def preview_destination(sources, destination, folder_template="%Y/%Y-%m-%d",
     }
 
 
-def discover_source_files(source_dir, file_types="both", recursive=True):
+def discover_source_files(
+    source_dir, file_types="both", recursive=True, onerror=None,
+):
     """Discover image files in source directory.
 
     Args:
@@ -223,6 +225,13 @@ def discover_source_files(source_dir, file_types="both", recursive=True):
         file_types: "raw", "jpeg", "both", or a list of extensions
             (e.g. [".jpg", ".nef"])
         recursive: if True (default), scan subfolders; if False, only scan root
+        onerror: optional callable ``onerror(OSError)`` invoked when the
+            underlying walk cannot enter or list a directory (permission
+            denied, TCC block, unreadable removable-media subtree, etc.).
+            Silently swallowing these hides sources from the enumeration
+            and lets ``safe_to_format`` go green over a card whose files
+            were never seen; the import job passes a collector that flips
+            the ledger unsafe.
 
     Returns:
         Sorted list of Path objects for matching files
@@ -265,7 +274,9 @@ def discover_source_files(source_dir, file_types="both", recursive=True):
         # previous Path.rglob path was likewise consumed lazily by
         # ``sorted()``.
         def _candidate_paths():
-            for dirpath, _dirnames, filenames in safe_scan_walk(str(source_path)):
+            for dirpath, _dirnames, filenames in safe_scan_walk(
+                str(source_path), onerror=onerror,
+            ):
                 for name in filenames:
                     yield Path(dirpath) / name
         candidates = _candidate_paths()
@@ -280,7 +291,7 @@ def discover_source_files(source_dir, file_types="both", recursive=True):
         # would have rejected it afterwards. ``safe_iter_dir`` is itself
         # a generator — pass it straight through to the filter so we
         # don't materialize the directory listing twice.
-        candidates = safe_iter_dir(str(source_path))
+        candidates = safe_iter_dir(str(source_path), onerror=onerror)
     return sorted(
         f
         for f in candidates

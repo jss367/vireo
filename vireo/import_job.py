@@ -99,9 +99,18 @@ def copy_and_hash_verify(src, dst, *, src_hash=None):
     """Copy ``src`` to ``dst`` and verify the landed bytes by content hash.
 
     The copy goes to a hidden sibling temp path first; only a copy whose
-    hash matches the source is promoted into ``dst`` (``os.replace``).
-    On mismatch the temp copy is removed and any pre-existing ``dst`` is
-    left untouched.
+    hash matches the source is promoted into ``dst``. Promotion uses a
+    no-overwrite ``os.link`` (atomic on POSIX same-FS) rather than
+    ``os.replace`` — imports have no pipeline-slot lock, so two concurrent
+    jobs targeting the same destination/date folder with the same
+    filename can both pass their pre-copy collision check before either
+    promotes; ``os.replace`` would silently overwrite the first job's
+    already-verified archive copy, and its ``safe_to_format`` would still
+    report green after the bytes it verified are gone. A raced promote is
+    surfaced as a copy failure instead.
+
+    On mismatch (or race) the temp copy is removed and any pre-existing
+    ``dst`` is left untouched.
 
     Args:
         src: source file path (e.g. on the card)
@@ -129,7 +138,20 @@ def copy_and_hash_verify(src, dst, *, src_hash=None):
                 src, dst, expected, copied_hash,
             )
             return (False, None)
-        os.replace(tmp, dst)
+        # Atomic no-overwrite promote: os.link raises FileExistsError if
+        # ``dst`` was created between the caller's collision check and
+        # this instant. tmp lives in the same directory as dst, so link
+        # stays same-filesystem and portable across the NAS mounts that
+        # are the real archive target.
+        try:
+            os.link(tmp, dst)
+        except FileExistsError:
+            log.warning(
+                "Destination raced during copy (concurrent import?): %s",
+                dst,
+            )
+            return (False, None)
+        os.unlink(tmp)
         tmp = None
         return (True, copied_hash)
     except OSError as e:
@@ -207,7 +229,16 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     db = Database(db_path)
     db.set_active_workspace(workspace_id)
 
-    destination = str(params.destination)
+    # Normalize once — the raw destination string is passed as ``root`` to
+    # both the copy layout (``os.path.normpath(os.path.join(destination,
+    # rel))``) and to ``scan(root, …, restrict_dirs=[dest_folder])``.
+    # ``scanner._ensure_folder`` stops walking the folder chain when the
+    # parent equals the scan root string; a destination like
+    # ``/photos/tmp/../archive`` copies into the normalized
+    # ``/photos/archive/…`` but the restricted scan root would remain the
+    # dot-segment form, so the recursion never reaches root and the scan
+    # loses those files (copied bytes then bucket as catalog failures).
+    destination = os.path.normpath(str(params.destination))
 
     runner.set_steps(job["id"], [
         {"id": "import", "label": "Copy & catalog"},
@@ -231,11 +262,25 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         })
 
     # --- Discover ---------------------------------------------------
+    # Enumeration errors (permission denied, macOS TCC block on a
+    # removable volume, unreadable subtree) get silently swallowed by
+    # os.walk-style callbacks by default. If we ignored them, discovered
+    # would just be smaller than reality and safe_to_format could still
+    # flip green over a card whose contents were never actually visited.
+    # Track them explicitly: each is a bucket-of-its-own failure entry
+    # tied to the source path where it occurred.
     _emit("Discovering files", 0, 0)
     files = []
+    discovery_errors = []
+
+    def _discovery_onerror(exc):
+        discovery_errors.append(exc)
+        log.warning("Import discovery error: %s", exc)
+
     for src in params.sources:
         files.extend(discover_source_files(
             src, params.file_types, recursive=params.recursive,
+            onerror=_discovery_onerror,
         ))
     discovered = len(files)
 
@@ -281,6 +326,23 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     emitted = 0
     cancelled = False
 
+    # Working-copy extraction is DEFERRED to the end of the whole import
+    # run (not per-batch). Rationale: a folder that receives more than
+    # ``IMPORT_BATCH_SIZE`` files splits across multiple batches; a
+    # RAW+JPEG companion pair can then straddle a batch boundary — the
+    # RAW lands in batch N and its JPEG in batch N+1. Per-batch
+    # extraction would run on the RAW before scan()'s
+    # ``_pair_raw_jpeg_companions`` sees the JPEG, so the RAW's row
+    # still has ``companion_path IS NULL``. The extractor then reads the
+    # RAW itself (RAW-decode-first); if that fails or produces a
+    # low-quality fallback, ``working_copy_failed_at`` is set and the
+    # candidate predicate would gate future retries — the JPEG landing
+    # in the next batch never re-triggers extraction while the card-side
+    # JPEG is still available. Deferring to end-of-run means every
+    # companion in the run has landed and been paired before
+    # ``_extract_working_copies`` decides which source to read.
+    wc_source_paths = {}  # dest_path -> card source path
+    wc_dest_folders = set()  # exact-match scope for extraction
     # Intra-run duplicate destinations: token -> dest folder where the
     # identity landed this run (mirrors ingest's batch_dest_folders).
     run_dest_folders = {}
@@ -565,28 +627,18 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                     )
             db.conn.commit()
 
-            # Extract working copies reading the CARD copy (fast local
-            # bytes) instead of the just-written archive copy. Scoped to
-            # this batch's destination folder; scan() ran with
-            # vireo_dir=None precisely so extraction happens here with
-            # the card-side source mapping. Per-row failures mark the
-            # photo for the scanner's later backfill and never fail the
-            # import.
+            # Accumulate the card-source mapping for the deferred
+            # end-of-run ``_extract_working_copies`` call. Extraction
+            # cannot run here per-batch: a RAW+JPEG companion pair that
+            # straddles a batch boundary would still be unpaired at this
+            # point, and the extractor would read the RAW before scan()
+            # in a later batch pairs the JPEG — poisoning the row with a
+            # failure marker or low-quality WC that the candidate
+            # predicate then skips.
             if params.vireo_dir:
-                from scanner import _extract_working_copies
-
-                try:
-                    _extract_working_copies(
-                        db, params.vireo_dir,
-                        scope=[(dest_folder, "exact")],
-                        source_paths={
-                            dest: src for dest, _, src in landed
-                        },
-                    )
-                except Exception:
-                    log.exception(
-                        "Working-copy extraction failed for %s", dest_folder,
-                    )
+                for dest_path, _hash, src_path in landed:
+                    wc_source_paths[dest_path] = src_path
+                wc_dest_folders.add(dest_folder)
 
         # --- Link duplicate-twin folders. Separate scan call WITHOUT
         # restrict_files: scan only creates/links folder rows for files it
@@ -621,6 +673,28 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         if cancelled:
             break
 
+    # --- Deferred working-copy extraction ---------------------------
+    # One extraction pass over every folder this run touched, after all
+    # batches have landed and been paired. Reads card-side bytes for any
+    # dest_path present in ``wc_source_paths``; anything else (crash-
+    # recovery adopted files whose card is gone, later backfill retries)
+    # falls back to the cataloged archive path. Per-row failures mark the
+    # photo for the scanner's later backfill and never fail the import.
+    if params.vireo_dir and wc_dest_folders:
+        from scanner import _extract_working_copies
+
+        try:
+            _extract_working_copies(
+                db, params.vireo_dir,
+                scope=[(d, "exact") for d in sorted(wc_dest_folders)],
+                source_paths=wc_source_paths,
+            )
+        except Exception:
+            log.exception(
+                "Working-copy extraction failed for %s",
+                sorted(wc_dest_folders),
+            )
+
     status = "cancelled" if cancelled else (
         "failed" if failed else "completed"
     )
@@ -633,14 +707,30 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         ),
     )
 
+    # Discovery/enumeration errors must flip safe_to_format off — a
+    # permission-denied subtree yields no files (``discovered`` shrinks),
+    # so a naive check of ``copied + skipped_duplicate == discovered``
+    # would still pass and the UI would tell the user it's safe to format
+    # a card whose contents were never verified. Surface each error into
+    # ``unsafe_files`` (path = the enumeration failure's own filename when
+    # available, otherwise ``<discovery>``) so the caller can show what
+    # went unseen.
+    for exc in discovery_errors:
+        unsafe_files.append({
+            "path": str(getattr(exc, "filename", None) or "<discovery>"),
+            "reason": f"source enumeration failed: {exc}",
+        })
+
     # Safe to format iff every discovered file reached a verified
     # terminal bucket: hash-verified fresh copy, or duplicate whose bytes
     # verifiably exist (hash-backed match, or key match re-hashed against
-    # its cataloged twin). A cancelled run leaves unprocessed files, so it
-    # is never safe. This pill means exactly what it says.
+    # its cataloged twin), AND every source was walked cleanly. A
+    # cancelled run leaves unprocessed files, so it is never safe. This
+    # pill means exactly what it says.
     safe_to_format = (
         not cancelled
         and failed == 0
+        and not discovery_errors
         and (copied + skipped_duplicate) == discovered
     )
     result = {
@@ -653,9 +743,11 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         "unsafe_files": unsafe_files,
         "folders": folder_counts,
         "cancelled": cancelled,
+        "discovery_errors": len(discovery_errors),
         # JobRunner's mixed-outcome convention: a run with any failed file
-        # is recorded "failed" (with per-file reasons), never "completed".
-        "ok": failed == 0,
+        # or unseen source subtree is recorded "failed" (with per-file
+        # reasons), never "completed".
+        "ok": failed == 0 and not discovery_errors,
         "errors": [f"{u['path']}: {u['reason']}" for u in unsafe_files],
     }
     return result

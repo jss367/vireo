@@ -943,3 +943,186 @@ def test_crash_shaped_copies_are_adopted_not_suffixed(tmp_path):
     for r in rows:
         assert r["hash_status"] == "ok"
         assert os.path.isfile(os.path.join(r["folder_path"], r["filename"]))
+
+
+# --- Codex review 2026-07-05 regressions ---------------------------------
+
+
+def test_copy_and_hash_verify_refuses_to_overwrite_existing_destination(
+        tmp_path):
+    """Concurrent imports targeting the same destination/filename cannot
+    both pass the pre-copy collision check and then both promote their
+    temp file; ``copy_and_hash_verify`` must fail the second promote
+    (leaving the first job's verified archive bytes untouched) rather
+    than silently overwriting with ``os.replace``.
+    """
+    from import_job import copy_and_hash_verify
+
+    src = tmp_path / "card" / "DSC_9001.jpg"
+    src.parent.mkdir()
+    src.write_bytes(b"card bytes")
+
+    dst = tmp_path / "archive" / "DSC_9001.jpg"
+    dst.parent.mkdir()
+    dst.write_bytes(b"already-verified archive bytes")
+
+    ok, file_hash = copy_and_hash_verify(str(src), str(dst))
+    assert ok is False
+    assert file_hash is None
+    # The pre-existing verified copy must survive the race.
+    assert dst.read_bytes() == b"already-verified archive bytes"
+    # And the temp file must be cleaned up.
+    assert not list(dst.parent.glob(".DSC_9001.jpg.*.tmp"))
+
+
+def test_import_destination_with_dot_segments_normalizes_scan_root(tmp_path):
+    """Absolute destinations containing ``..`` segments must still catalog
+    successfully. The scanner stops folder-chain recursion when a parent
+    equals the scan root string; if the copy layout normalizes the path
+    but the scan root does not, the recursion never reaches root and the
+    copied files bucket as catalog failures.
+    """
+    from import_job import ImportParams
+
+    card = _make_card(tmp_path, [
+        ("DSC_0090.jpg", datetime(2026, 7, 4, 10, 0, 0), "red"),
+    ])
+
+    real_archive = tmp_path / "archive"
+    real_archive.mkdir()
+    (tmp_path / "junk").mkdir()
+
+    # Absolute path with a dot segment resolving to real_archive.
+    unnormalized = str(tmp_path / "junk" / ".." / "archive")
+
+    db, ws_id, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)], destination=unnormalized,
+    ))
+
+    assert result["copied"] == 1
+    assert result["failed"] == 0
+    assert result["safe_to_format"] is True
+
+    rows = _photo_rows(db)
+    assert len(rows) == 1
+    assert os.path.isfile(
+        os.path.join(rows[0]["folder_path"], rows[0]["filename"])
+    )
+    # And the file actually lives under the normalized archive root, not
+    # a duplicated dot-segment path.
+    assert os.path.realpath(rows[0]["folder_path"]).startswith(
+        os.path.realpath(str(real_archive))
+    )
+
+
+def test_unreadable_source_subtree_flips_safe_to_format_off(
+        tmp_path, monkeypatch):
+    """If ``discover_source_files`` cannot enter a source subtree
+    (permission denied, TCC block, unreadable removable-media dir), the
+    files under that subtree are unseen — ``discovered`` shrinks silently
+    and ``safe_to_format`` used to still flip green. Enumeration errors
+    must now bubble into the ledger.
+    """
+    from import_job import ImportParams
+
+    card = _make_card(tmp_path, [
+        ("DSC_0100.jpg", datetime(2026, 7, 4, 10, 0, 0), "red"),
+    ])
+
+    # Force safe_scan_walk to report an error on the first walk step.
+    import image_loader
+    real_walk = image_loader.safe_scan_walk
+
+    def broken_walk(top, onerror=None):
+        # Simulate a PermissionError bubbling up from os.scandir on the
+        # source root; safe_scan_walk's OSError branch would forward it
+        # via onerror and yield nothing further.
+        if onerror is not None:
+            onerror(PermissionError(13, "Operation not permitted", str(top)))
+        # Still yield everything real_walk would have produced so we can
+        # verify the ledger is unsafe even when copies still landed.
+        yield from real_walk(top, onerror=onerror)
+
+    monkeypatch.setattr("ingest.safe_scan_walk", broken_walk)
+
+    db, ws_id, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)], destination=str(tmp_path / "archive"),
+    ))
+
+    # The one visible file still lands in the catalog...
+    assert result["copied"] == 1
+    # ...but safe_to_format is False because we couldn't prove every
+    # source subtree was walked cleanly.
+    assert result["safe_to_format"] is False
+    assert result["ok"] is False
+    assert result["discovery_errors"] == 1
+    assert any(
+        "source enumeration failed" in e for e in result["errors"]
+    )
+
+
+def test_wc_extraction_deferred_to_after_last_batch(tmp_path, monkeypatch):
+    """A RAW+JPEG companion pair that straddles a batch boundary must not
+    trigger per-batch working-copy extraction while the JPEG's row is
+    still uncataloged (pairing has not run yet). Deferring extraction to
+    end-of-run guarantees ``_pair_raw_jpeg_companions`` has seen every
+    JPEG in every batch before the extractor decides which source to
+    read.
+    """
+    import import_job
+    import scanner
+
+    monkeypatch.setattr(import_job, "IMPORT_BATCH_SIZE", 1)
+
+    # Track extraction call order. ``extract_working_copy`` is invoked
+    # once per candidate row; we care that when the RAW is processed the
+    # JPEG's row has already been merged in (pairing has run).
+    calls = []
+
+    def fake_extract(source_path, output_path, max_size=4096, quality=92):
+        calls.append(str(source_path))
+        # Simulate a RAW decode failure so the companion fallback path
+        # is exercised — the reason deferral matters at all.
+        return not str(source_path).lower().endswith(".nef")
+
+    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+
+    card = tmp_path / "card"
+    card.mkdir()
+    Image.new("RGB", (16, 16), "red").save(str(card / "DSC_0700.jpg"))
+    raw_bytes = (card / "DSC_0700.jpg").read_bytes() + b"RAW-SENSOR-DATA"
+    (card / "DSC_0700.NEF").write_bytes(raw_bytes)
+    # Same mtime so both files plan into the same destination folder.
+    ts = datetime(2026, 7, 4, 10, 0, 0).timestamp()
+    for name in ("DSC_0700.jpg", "DSC_0700.NEF"):
+        os.utime(str(card / name), (ts, ts))
+
+    vireo_dir = tmp_path / "vireo"
+    db, ws_id, result = _run_import(tmp_path, import_job.ImportParams(
+        sources=[str(card)], destination=str(tmp_path / "archive"),
+        vireo_dir=str(vireo_dir),
+    ))
+
+    assert result["copied"] == 2
+    assert result["failed"] == 0
+    assert result["safe_to_format"] is True
+
+    # After deferred extraction, pairing has merged the JPEG row into
+    # the RAW primary and the extractor read the companion (from the
+    # card) after the RAW decode was stubbed as failed.
+    rows = _photo_rows(db)
+    assert len(rows) == 1
+    assert rows[0]["filename"] == "DSC_0700.NEF"
+    wc = db.conn.execute(
+        "SELECT working_copy_path, companion_path FROM photos WHERE id = ?",
+        (rows[0]["id"],),
+    ).fetchone()
+    assert wc["companion_path"] == "DSC_0700.jpg"
+    assert wc["working_copy_path"] == f"working/{rows[0]['id']}.jpg"
+
+    # The JPEG source must have been read from the card, not the archive.
+    jpeg_reads = [c for c in calls if c.lower().endswith(".jpg")]
+    assert jpeg_reads, "companion fallback should have been attempted"
+    assert all(str(card) in c for c in jpeg_reads), (
+        f"companion extraction should read from the card, got {jpeg_reads}"
+    )
