@@ -105,6 +105,28 @@ def test_extract_metadata_empty_list():
     assert extract_metadata([]) == {}
 
 
+def test_extract_metadata_reports_batch_progress(monkeypatch):
+    """Batch progress advances once per ExifTool invocation."""
+    import metadata
+
+    paths = [f"/photos/img{i}.jpg" for i in range(5)]
+    progress = []
+
+    def fake_run(file_paths, extra_args=None):
+        return [{"SourceFile": path, "EXIF:Make": "TestCam"} for path in file_paths]
+
+    monkeypatch.setattr(metadata, "_BATCH_SIZE", 2)
+    monkeypatch.setattr(metadata, "_run_exiftool", fake_run)
+
+    results = metadata.extract_metadata(
+        paths,
+        progress_callback=lambda current, total: progress.append((current, total)),
+    )
+
+    assert set(results) == set(paths)
+    assert progress == [(2, 5), (4, 5), (5, 5)]
+
+
 def test_extract_metadata_retries_failed_batches(monkeypatch):
     """A failed ExifTool batch should be split so good files still get metadata."""
     import metadata

@@ -1361,7 +1361,7 @@ def test_pipeline_with_broken_collection_repairs_metadata(app_and_db, tmp_path, 
 
     # Mock ExifTool so the test doesn't depend on the binary.
     import scanner
-    def fake_extract(paths, restricted_tags=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None):
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {"DateTimeOriginal": "2024:06:15 10:00:00"},
                     "Composite": {}} for p in paths}
@@ -1434,7 +1434,7 @@ def test_pipeline_repair_does_not_ingest_untracked_files(app_and_db, tmp_path, m
     db.conn.commit()
 
     import scanner
-    def fake_extract(paths, restricted_tags=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None):
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {"DateTimeOriginal": "2024:06:15 10:00:00"},
                     "Composite": {}} for p in paths}
@@ -1558,7 +1558,7 @@ def test_pipeline_repair_does_not_double_process_thumbnails(
     db.conn.commit()
 
     import scanner
-    def fake_extract(paths, restricted_tags=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None):
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {"DateTimeOriginal": "2024:06:15 10:00:00"},
                     "Composite": {}} for p in paths}

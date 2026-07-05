@@ -2209,7 +2209,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     },
                 )
 
-            def status_cb(message):
+            def status_cb(message, **_phase):
                 runner.push_event(job["id"], "progress", {
                     "phase": message,
                     "current": job["progress"].get("current", 0),
@@ -2311,7 +2311,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     },
                 )
 
-            def status_cb(message):
+            def status_cb(message, **_phase):
                 runner.push_event(job["id"], "progress", {
                     "phase": message,
                     "current": job["progress"].get("current", 0),
@@ -12449,15 +12449,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             effective_cfg = thread_db.get_effective_config(cfg.load())
             pipeline_cfg = effective_cfg.get("pipeline", {})
 
-            def status_cb(message):
-                runner.update_step(job["id"], "scan", current_file=message)
-                runner.push_event(job["id"], "progress", {
-                    "phase": message,
+            def status_cb(message, phase_current=None, phase_total=None, phase_label=None):
+                progress_payload = {
+                    "phase": phase_label or message,
                     "current": job["progress"].get("current", 0),
                     "total": job["progress"].get("total", 0),
                     "current_file": message,
                     "rate": 0,
-                })
+                    "phase_current": phase_current,
+                    "phase_total": phase_total,
+                    "phase_label": phase_label,
+                }
+                runner.update_step(job["id"], "scan", current_file=message)
+                runner.push_event(job["id"], "progress", progress_payload)
 
             vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
 
