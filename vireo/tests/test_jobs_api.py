@@ -2394,3 +2394,138 @@ def test_pipeline_remote_archive_snapshots_target_at_enqueue(
     assert snap["user"] == "me"
     assert snap["remote_path"] == "/volume1/Photography"
     assert snap["mount_path"] == str(tmp_path / "mount")
+
+
+# ---------------------------------------------------------------------------
+# strategy param on /api/jobs/pipeline (import/process split PR 1)
+# ---------------------------------------------------------------------------
+
+
+def _make_collection(app):
+    import json as json_mod
+
+    from db import Database
+
+    db = Database(app.config["DB_PATH"])
+    db.set_active_workspace(db._active_workspace_id)
+    return db.add_collection("Strategy test", json_mod.dumps([]))
+
+
+def _job_config(client, job_id):
+    resp = client.get(f"/api/jobs/{job_id}")
+    assert resp.status_code == 200
+    return resp.get_json()["config"]
+
+
+def _fake_active_model(monkeypatch):
+    """Keep the route's no-model auto-skip from firing so strategy flags
+    survive to the job config unmangled."""
+    import models
+
+    monkeypatch.setattr(models, "get_active_model", lambda: {"id": "fake"})
+
+
+def test_pipeline_strategy_expands_flags(app_and_db):
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "strategy": "quick_look",
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg["strategy"] == "quick_look"
+        assert cfg["skip_classify"] is True
+        assert cfg["skip_extract_masks"] is True
+        assert cfg["skip_regroup"] is True
+
+
+def test_pipeline_cull_ready_pins_miss_enabled_false(app_and_db, monkeypatch):
+    # quick_look alone can't prove miss_enabled reached PipelineParams:
+    # it also sets skip_classify=True, and the misses stage is downstream
+    # of classify, so an implementation that never wires the strategy's
+    # miss_enabled through to params would still produce a run without
+    # misses (by dint of skip_classify) and this test would go green.
+    # cull_ready has skip_classify=False + miss_enabled=False, so the
+    # only way misses can be suppressed is if the strategy's miss_enabled
+    # actually reaches PipelineParams — that's the property pinned here.
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    _fake_active_model(monkeypatch)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "strategy": "cull_ready",
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg["strategy"] == "cull_ready"
+        assert cfg["miss_enabled"] is False
+        assert cfg["skip_classify"] is False  # cull_ready keeps classify on
+
+
+def test_pipeline_unknown_strategy_400(app_and_db):
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "strategy": "yolo",
+        })
+        assert resp.status_code == 400
+        assert "unknown strategy" in resp.get_json()["error"]
+
+
+def test_pipeline_null_strategy_400(app_and_db):
+    # The "no process" case is expressed by NOT calling /api/jobs/pipeline.
+    # A present-but-null strategy must 400 so the server never silently
+    # falls through to default processing when a caller thought they were
+    # opting out. Distinct from "unknown strategy" — null is a shape error.
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "strategy": None,
+        })
+        assert resp.status_code == 400
+        assert "strategy" in resp.get_json()["error"]
+
+
+def test_pipeline_none_string_strategy_400(app_and_db):
+    # The literal string "none" is not a valid strategy name either
+    # (STRATEGIES only holds full / cull_ready / quick_look).
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "strategy": "none",
+        })
+        assert resp.status_code == 400
+
+
+def test_pipeline_omitted_strategy_uses_body_params(app_and_db):
+    # No `strategy` key at all -> the route builds PipelineParams from the
+    # body as usual. Distinguishing "omitted" from "null" is exactly why the
+    # route must check key presence, not truthiness.
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={"collection_id": col_id})
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg.get("strategy") is None
+
+
+def test_pipeline_explicit_flags_beat_strategy(app_and_db, monkeypatch):
+    # A caller may pin one flag on top of a strategy; explicit wins. The
+    # fake model keeps the no-model auto-skip from flipping the same flags
+    # and masking a broken merge order.
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    _fake_active_model(monkeypatch)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "strategy": "full", "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg["skip_regroup"] is True
+        assert cfg["skip_classify"] is False

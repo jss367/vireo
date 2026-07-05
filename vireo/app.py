@@ -16519,6 +16519,34 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         from pipeline_job import PipelineParams, run_pipeline_job
 
         body = request.get_json(silent=True) or {}
+
+        # Named process strategy: expand server-side into stage flags so the
+        # import page, the process page, and import→process chaining share
+        # one vocabulary (process_strategies.py). Key presence — not
+        # truthiness — decides whether a strategy was requested: a
+        # present-but-null strategy must 400 rather than silently fall
+        # through to default processing for a caller who thought null meant
+        # "no processing" (that case is expressed by not calling this
+        # endpoint at all).
+        strategy_name = None
+        if "strategy" in body:
+            strategy_name = body.get("strategy")
+            if not isinstance(strategy_name, str):
+                kind = (
+                    "null" if strategy_name is None
+                    else type(strategy_name).__name__
+                )
+                return json_error(f"strategy must be a string, got {kind}")
+            from process_strategies import resolve_strategy
+
+            try:
+                expanded = resolve_strategy(strategy_name)
+            except ValueError as e:
+                return json_error(str(e))
+            # Expansion supplies *defaults*; explicitly-present body keys
+            # win, so a caller can pin one flag on top of a preset.
+            body = {**expanded, **body}
+
         db = _get_db()
         source = body.get("source")
         sources = body.get("sources")
@@ -16721,6 +16749,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             skip_extract_masks=body.get("skip_extract_masks", False),
             skip_eye_keypoints=body.get("skip_eye_keypoints", False),
             skip_regroup=body.get("skip_regroup", False),
+            miss_enabled=body.get("miss_enabled"),
             preview_max_size=body.get("preview_max_size"),
             exclude_paths=set(body.get("exclude_paths", [])) or None,
             exclude_photo_ids=set(body.get("exclude_photo_ids", [])) or None,
@@ -16824,9 +16853,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "collection_id": collection_id,
             "destination": destination,
             "local_processing": local_processing,
+            "strategy": strategy_name,
             "skip_classify": params.skip_classify,
             "skip_extract_masks": params.skip_extract_masks,
             "skip_regroup": params.skip_regroup,
+            "miss_enabled": params.miss_enabled,
         }
         if remote_archive_config is not None:
             # Surface that the archive goes over SSH (and to where) so the
