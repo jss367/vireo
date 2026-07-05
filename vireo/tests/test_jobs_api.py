@@ -2,6 +2,7 @@ import json
 import os
 import time
 
+import pytest
 from PIL import Image
 from wait import wait_for_job_via_client, wait_for_job_via_runner
 
@@ -2394,3 +2395,720 @@ def test_pipeline_remote_archive_snapshots_target_at_enqueue(
     assert snap["user"] == "me"
     assert snap["remote_path"] == "/volume1/Photography"
     assert snap["mount_path"] == str(tmp_path / "mount")
+
+
+# ---------------------------------------------------------------------------
+# strategy param on /api/jobs/pipeline (import/process split PR 1)
+# ---------------------------------------------------------------------------
+
+
+def _make_collection(app):
+    import json as json_mod
+
+    from db import Database
+
+    db = Database(app.config["DB_PATH"])
+    db.set_active_workspace(db._active_workspace_id)
+    return db.add_collection("Strategy test", json_mod.dumps([]))
+
+
+def _job_config(client, job_id):
+    resp = client.get(f"/api/jobs/{job_id}")
+    assert resp.status_code == 200
+    return resp.get_json()["config"]
+
+
+def _fake_active_model(monkeypatch):
+    """Keep the route's no-model auto-skip from firing so strategy flags
+    survive to the job config unmangled."""
+    import models
+
+    monkeypatch.setattr(models, "get_active_model", lambda: {"id": "fake"})
+
+
+def test_pipeline_strategy_expands_flags(app_and_db):
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "strategy": "quick_look",
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg["strategy"] == "quick_look"
+        assert cfg["skip_classify"] is True
+        assert cfg["skip_extract_masks"] is True
+        assert cfg["skip_regroup"] is True
+
+
+def test_pipeline_cull_ready_pins_miss_enabled_false(app_and_db, monkeypatch):
+    # quick_look alone can't prove miss_enabled reached PipelineParams:
+    # it also sets skip_classify=True, and the misses stage is downstream
+    # of classify, so an implementation that never wires the strategy's
+    # miss_enabled through to params would still produce a run without
+    # misses (by dint of skip_classify) and this test would go green.
+    # cull_ready has skip_classify=False + miss_enabled=False, so the
+    # only way misses can be suppressed is if the strategy's miss_enabled
+    # actually reaches PipelineParams — that's the property pinned here.
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    _fake_active_model(monkeypatch)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "strategy": "cull_ready",
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg["strategy"] == "cull_ready"
+        assert cfg["miss_enabled"] is False
+        assert cfg["skip_classify"] is False  # cull_ready keeps classify on
+
+
+def test_pipeline_unknown_strategy_400(app_and_db):
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "strategy": "yolo",
+        })
+        assert resp.status_code == 400
+        assert "unknown strategy" in resp.get_json()["error"]
+
+
+def test_pipeline_null_strategy_400(app_and_db):
+    # The "no process" case is expressed by NOT calling /api/jobs/pipeline.
+    # A present-but-null strategy must 400 so the server never silently
+    # falls through to default processing when a caller thought they were
+    # opting out. Distinct from "unknown strategy" — null is a shape error.
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "strategy": None,
+        })
+        assert resp.status_code == 400
+        assert "strategy" in resp.get_json()["error"]
+
+
+def test_pipeline_none_string_strategy_400(app_and_db):
+    # The literal string "none" is not a valid strategy name either
+    # (STRATEGIES only holds full / cull_ready / quick_look).
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "strategy": "none",
+        })
+        assert resp.status_code == 400
+
+
+def test_pipeline_omitted_strategy_uses_body_params(app_and_db):
+    # No `strategy` key at all -> the route builds PipelineParams from the
+    # body as usual. Distinguishing "omitted" from "null" is exactly why the
+    # route must check key presence, not truthiness.
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={"collection_id": col_id})
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg.get("strategy") is None
+
+
+def test_pipeline_explicit_flags_beat_strategy(app_and_db, monkeypatch):
+    # A caller may pin one flag on top of a strategy; explicit wins. The
+    # fake model keeps the no-model auto-skip from flipping the same flags
+    # and masking a broken merge order.
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    _fake_active_model(monkeypatch)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "strategy": "full", "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg["skip_regroup"] is True
+        assert cfg["skip_classify"] is False
+
+
+# ---------------------------------------------------------------------------
+# folder-scoped process runs (import/process split PR 1)
+# ---------------------------------------------------------------------------
+
+
+def _folder_id_by_path(db, path):
+    row = db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", (path,)
+    ).fetchone()
+    assert row is not None, f"fixture folder missing: {path}"
+    return row["id"]
+
+
+def _collection_photo_ids(db, collection_id):
+    return sorted(
+        p["id"] for p in db.get_collection_photos(collection_id, per_page=999999)
+    )
+
+
+def _photo_ids_in_folders(db, folder_ids):
+    marks = ",".join("?" for _ in folder_ids)
+    rows = db.conn.execute(
+        f"SELECT id FROM photos WHERE folder_id IN ({marks})", folder_ids,
+    ).fetchall()
+    return sorted(r["id"] for r in rows)
+
+
+def test_pipeline_folder_ids_creates_adhoc_collection(app_and_db):
+    """A leaf folder scope becomes an ad-hoc collection of exactly that
+    folder's photos, and the run proceeds as a collection run."""
+    app, db = app_and_db
+    child_id = _folder_id_by_path(db, "/photos/2024/January")
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [child_id], "strategy": "quick_look",
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg["collection_id"], cfg
+        assert _collection_photo_ids(db, cfg["collection_id"]) == \
+            _photo_ids_in_folders(db, [child_id])
+
+
+def test_pipeline_folder_ids_includes_descendants(app_and_db):
+    """Scoping to a workspace root must include photos in child folders —
+    the rest of the app treats a folder scope as its subtree (see
+    Database.get_folder_subtree_ids). A flat folder_id IN (...) over the
+    raw request would miss the bulk of a dated archive tree."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    child_id = _folder_id_by_path(db, "/photos/2024/January")
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [root_id], "strategy": "quick_look",
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        got = _collection_photo_ids(db, cfg["collection_id"])
+        assert got == _photo_ids_in_folders(db, [root_id, child_id])
+        # Regression tripwire: the child's photos are the recursive part.
+        assert set(_photo_ids_in_folders(db, [child_id])) <= set(got)
+
+
+def test_pipeline_folder_ids_unlinked_folder_404(app_and_db):
+    """A folder not linked to the active workspace must 404, mirroring the
+    rescan guard — otherwise a stale UI could pollute this workspace with
+    another workspace's scan output."""
+    app, db = app_and_db
+    original_ws = db._active_workspace_id
+    other_ws = db.create_workspace("Other")
+    db.set_active_workspace(other_ws)
+    foreign_id = db.add_folder("/photos/elsewhere", name="elsewhere")
+    db.set_active_workspace(original_ws)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [foreign_id], "strategy": "quick_look",
+        })
+        assert resp.status_code == 404
+
+
+def test_pipeline_folder_ids_rejects_non_int(app_and_db):
+    """Malformed ids must 400 before touching SQLite, mirroring the
+    source_snapshot_id validation."""
+    app, _ = app_and_db
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": ["../etc"], "strategy": "quick_look",
+        })
+        assert resp.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "bad_fid",
+    [
+        1 << 63,          # one past SQLite's signed 64-bit max
+        -(1 << 63) - 1,   # one below SQLite's signed 64-bit min
+        1 << 128,         # obviously out of range
+    ],
+)
+def test_pipeline_folder_ids_rejects_out_of_range_integer(app_and_db, bad_fid):
+    """A JSON-safe integer outside SQLite's signed 64-bit range must be
+    rejected with 400 before it reaches sqlite3 parameter binding.
+    Without the range guard, the workspace-linked lookup binds ``bad_fid``
+    directly and raises ``OverflowError``, which escapes as an opaque 500."""
+    app, _ = app_and_db
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [bad_fid], "strategy": "quick_look",
+        })
+        assert resp.status_code == 400, resp.get_json()
+        assert "folder_ids" in resp.get_json()["error"]
+
+
+def test_pipeline_folder_ids_includes_legacy_null_parent_descendants(app_and_db):
+    """A workspace root's ad-hoc collection must include descendant folders
+    whose ``parent_id`` is NULL even though their paths sit under the root.
+    Older databases carry such rows; ``get_folder_subtree_ids`` alone walks
+    ``folders.parent_id`` and drops them, so processing a workspace root
+    would silently skip legacy descendant photos the rest of the app still
+    treats as part of that folder subtree. Every other subtree consumer
+    (folder deletion, rescan, missing-originals) already reads through
+    ``_folder_subtree_ids_by_path`` — this route must too."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    # Insert a descendant folder whose path is under the root but whose
+    # parent_id is NULL — simulating a legacy row from a pre-parent_id
+    # backfill build. Link it to the active workspace so the route's
+    # workspace-safety filter can find it.
+    legacy_id = db.add_folder("/photos/2024/Legacy", name="Legacy")
+    db.conn.execute(
+        "UPDATE folders SET parent_id = NULL WHERE id = ?", (legacy_id,),
+    )
+    db.conn.commit()
+    db.add_workspace_folder(db._active_workspace_id, legacy_id, is_root=False)
+    legacy_photo = db.add_photo(
+        folder_id=legacy_id, filename="legacy.jpg", extension=".jpg",
+        file_size=42, file_mtime=42.0,
+    )
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [root_id], "strategy": "quick_look",
+        })
+        assert resp.status_code == 200, resp.get_json()
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        got = _collection_photo_ids(db, cfg["collection_id"])
+        assert legacy_photo in got, (
+            "legacy NULL-parent_id descendant was omitted from the "
+            "ad-hoc collection — path-prefix fallback missing"
+        )
+
+
+def test_pipeline_folder_ids_honors_exclude_paths(app_and_db):
+    """A folder-scoped run with ``exclude_paths`` must drop the deselected
+    photos from the ad-hoc collection itself. Once ``params.collection_id``
+    is set, ``run_pipeline_job`` takes the collection path and its
+    ``_filter_excluded`` helper only checks ``exclude_photo_ids``, so an
+    excluded path would otherwise still be thumbnailed, classified, and
+    regrouped. Filter at the materialization boundary so the collection
+    reflects exactly the photos the user asked to process."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    child_id = _folder_id_by_path(db, "/photos/2024/January")
+    # Photos in the fixture are keyed on folder + filename; the effective
+    # "path" for exclude_paths matching is os.path.join(folder.path, filename)
+    # — same shape scanner/ingest use for their skip_paths sets.
+    excluded_root_file = os.path.join("/photos/2024", "bird1.jpg")
+    excluded_child_file = os.path.join(
+        "/photos/2024/January", "bird2.jpg",
+    )
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [root_id], "strategy": "quick_look",
+            "exclude_paths": [excluded_root_file, excluded_child_file],
+        })
+        assert resp.status_code == 200, resp.get_json()
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        got = set(_collection_photo_ids(db, cfg["collection_id"]))
+        subtree = set(_photo_ids_in_folders(db, [root_id, child_id]))
+        # Only the non-excluded photo (bird3 in the root) remains.
+        remaining = {
+            r["id"] for r in db.conn.execute(
+                "SELECT id FROM photos WHERE folder_id = ? AND filename = ?",
+                (root_id, "bird3.jpg"),
+            )
+        }
+        assert got == remaining
+        assert got < subtree, "exclusion produced no reduction — filter no-op"
+
+
+def test_pipeline_folder_ids_honors_exclude_photo_ids(app_and_db):
+    """The ad-hoc collection also drops photos in ``exclude_photo_ids`` so
+    its membership matches what the user selected — even though
+    ``_filter_excluded`` would drop them again downstream."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    child_id = _folder_id_by_path(db, "/photos/2024/January")
+    all_ids = _photo_ids_in_folders(db, [root_id, child_id])
+    excluded = all_ids[0]
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [root_id], "strategy": "quick_look",
+            "exclude_photo_ids": [excluded],
+        })
+        assert resp.status_code == 200, resp.get_json()
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        got = set(_collection_photo_ids(db, cfg["collection_id"]))
+        assert excluded not in got
+        assert got == set(all_ids) - {excluded}
+
+
+def test_pipeline_folder_ids_with_collection_id_400(app_and_db):
+    """Two scopes in one request is ambiguous — reject rather than pick."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [root_id], "collection_id": col_id,
+        })
+        assert resp.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"source": "/tmp/foo"},
+        {"sources": ["/tmp/foo", "/tmp/bar"]},
+        {"source_snapshot_id": 999},
+    ],
+)
+def test_pipeline_folder_ids_with_other_scope_400(app_and_db, extra):
+    """Reject folder_ids combined with *any* other scope — not just
+    collection_id. Otherwise run_pipeline_job silently ignores the source
+    (because collection_id skips scanning) or clears the folder-derived
+    collection_id when a snapshot is present, and the job processes a
+    different scope than the request implied. Also verifies no stray
+    ad-hoc collection was inserted before the rejection: the check must
+    fire before ``add_collection`` runs."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    before = len(db.get_collections())
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/jobs/pipeline",
+            json={"folder_ids": [root_id], **extra},
+        )
+        assert resp.status_code == 400
+        assert "folder_ids cannot be combined with" in resp.get_json()["error"]
+    assert len(db.get_collections()) == before
+
+
+# os.path.abspath keeps the path shape on POSIX ("/abs/dest") but rewrites
+# it to a drive-anchored form on Windows ("C:\abs\dest"), so os.path.isabs
+# passes on both platforms and validation falls through to the later checks
+# each parametrized case is meant to exercise.
+_ABS_DEST = os.path.abspath("/abs/dest")
+
+
+@pytest.mark.parametrize(
+    "extra,fragment",
+    [
+        # Any destination is rejected outright for folder scope — the
+        # scope check fires before the absolute-path guard, because
+        # collection scope skips ingest and a copy destination would never
+        # be written. Both a relative and an absolute path trip this.
+        (
+            {"destination": "relative/path", "local_processing": False},
+            "destination is not allowed with collection_id or folder_ids",
+        ),
+        (
+            {"destination": _ABS_DEST, "local_processing": False},
+            "destination is not allowed with collection_id or folder_ids",
+        ),
+        # local_processing + destination + folder scope: same reject —
+        # destination check runs before the local_processing scope check.
+        (
+            {"local_processing": True, "destination": _ABS_DEST},
+            "destination is not allowed with collection_id or folder_ids",
+        ),
+        # local_processing + folder scope without destination: this
+        # trips the "requires a destination or a remote target" guard
+        # (which fires before the local_processing + scope check).
+        (
+            {"local_processing": True},
+            "local_processing requires a destination or a remote target",
+        ),
+        # Non-boolean miss_enabled — the type-check must fire BEFORE
+        # ``db.add_collection`` runs. Previously the check sat after
+        # materialization, so a rejected request like
+        # ``{"folder_ids": [...], "miss_enabled": "false"}`` left a stray
+        # "Process …" row behind.
+        (
+            {"miss_enabled": "false"},
+            "miss_enabled",
+        ),
+    ],
+)
+def test_pipeline_folder_ids_leaves_no_stray_collection_on_400(
+    app_and_db, extra, fragment,
+):
+    """A rejected folder-scope request must not leave a "Process …"
+    collection sitting in the workspace. The ad-hoc insert has to happen
+    after every other request check has passed, otherwise the workspace
+    accumulates junk every time the caller trips a later validation."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    before = len(db.get_collections())
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/jobs/pipeline",
+            json={"folder_ids": [root_id], **extra},
+        )
+        assert resp.status_code == 400, resp.get_json()
+        assert fragment in resp.get_json()["error"]
+    assert len(db.get_collections()) == before
+
+
+def test_pipeline_folder_ids_rejects_plain_destination(app_and_db):
+    """Regression for the Codex review on commit 459e092: a folder-scoped
+    request with ``destination`` and ``local_processing=False`` was
+    previously accepted, materializing the ad-hoc collection and queuing a
+    job whose ingest step could never run (``collection_id`` sets
+    ``skip_scan``). Reject at request time so the user gets a clean 400
+    instead of a queued-but-broken run."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    before = len(db.get_collections())
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [root_id],
+            "destination": _ABS_DEST,
+            "local_processing": False,
+        })
+        assert resp.status_code == 400, resp.get_json()
+        assert "destination" in resp.get_json()["error"]
+        assert "folder_ids" in resp.get_json()["error"]
+    assert len(db.get_collections()) == before
+
+
+def test_pipeline_collection_id_rejects_plain_destination(app_and_db):
+    """Same reasoning as the folder-scope regression above, applied to
+    the equivalent ``collection_id + destination`` case: any collection
+    scope sets ``skip_scan`` in run_pipeline_job, so the ingest block
+    that would copy to ``destination`` never runs."""
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id,
+            "destination": _ABS_DEST,
+            "local_processing": False,
+        })
+        assert resp.status_code == 400, resp.get_json()
+        assert "destination" in resp.get_json()["error"]
+        assert "collection_id" in resp.get_json()["error"]
+
+
+def test_pipeline_folder_ids_chunks_wide_subtree(app_and_db, monkeypatch):
+    """A folder root that expands into thousands of descendant folder ids
+    must not overflow SQLite's per-statement bound-variable cap
+    (SQLITE_MAX_VARIABLE_NUMBER = 999 on legacy builds). Force the chunk
+    size down and verify a subtree several times its width still resolves
+    correctly — a single unchunked ``folder_id IN (?,...,?)`` would raise
+    OperationalError before the job was queued and surface as a 500."""
+    import db as db_module
+
+    monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 3)
+
+    app, db = app_and_db
+    parent = db.add_folder("/photos/wide", name="wide")
+    photo_ids = []
+    for i in range(10):
+        sub = db.add_folder(
+            f"/photos/wide/sub{i}", name=f"sub{i}", parent_id=parent,
+        )
+        pid = db.add_photo(
+            folder_id=sub, filename=f"p{i}.jpg", extension=".jpg",
+            file_size=100 + i, file_mtime=100.0 + i,
+        )
+        photo_ids.append(pid)
+    db.add_workspace_folder(db._active_workspace_id, parent)
+
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [parent], "strategy": "quick_look",
+        })
+        assert resp.status_code == 200, resp.get_json()
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        got = _collection_photo_ids(db, cfg["collection_id"])
+        assert set(photo_ids) <= set(got)
+
+
+def test_pipeline_folder_ids_persisted_in_job_config(app_and_db):
+    """job_config records the caller's original folder_ids alongside the
+    derived ad-hoc collection_id. Without this the Jobs page can show only
+    the derived collection, not the folder subtree the user selected —
+    reconstructing the selection from the collection is impossible once the
+    ad-hoc collection is renamed or deleted."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [root_id], "strategy": "quick_look",
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg.get("folder_ids") == [root_id]
+        # Sanity: the derived collection_id is still there so consumers can
+        # keep using the collection-scoped code path.
+        assert cfg.get("collection_id")
+
+
+@pytest.mark.parametrize("bad", ["false", "true", 0, 1, "yes", [], {}])
+def test_pipeline_miss_enabled_rejects_non_bool(app_and_db, bad):
+    """miss_enabled is tri-state (None / True / False) — a truthy non-bool
+    like the string ``"false"`` would flow through pipeline_job's
+    ``params.miss_enabled is not None`` guard, then be treated as truthy in
+    ``not miss_enabled``, silently turning misses ON when the caller wanted
+    them OFF. Type-check at enqueue so the caller sees a clean 400."""
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "miss_enabled": bad,
+        })
+        assert resp.status_code == 400, resp.get_json()
+        assert "miss_enabled" in resp.get_json()["error"]
+
+
+def test_pipeline_miss_enabled_accepts_bools(app_and_db, monkeypatch):
+    """The complement of the reject test — real bools survive to job_config
+    so a strategy override or a caller explicit toggle can actually take."""
+    app, _ = app_and_db
+    _fake_active_model(monkeypatch)
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        for value in (True, False):
+            resp = client.post("/api/jobs/pipeline", json={
+                "collection_id": col_id, "miss_enabled": value,
+            })
+            assert resp.status_code == 200, resp.get_json()
+            cfg = _job_config(client, resp.get_json()["job_id"])
+            assert cfg["miss_enabled"] is value
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"exclude_paths": None},
+        {"exclude_paths": "not-a-list"},
+        {"exclude_photo_ids": None},
+        {"exclude_photo_ids": {"id": 3}},
+    ],
+)
+def test_pipeline_folder_ids_bad_list_field_leaves_no_stray_collection(
+    app_and_db, extra,
+):
+    """Regression for the Codex review on commit 5dc5a9f: a folder-scoped
+    request with ``"exclude_paths": null`` (or any non-list value) passed
+    every up-front validation, materialized the ad-hoc collection, then
+    exploded at ``set(body.get("exclude_paths", []))`` inside the
+    PipelineParams constructor. The 500 left a stray "Process …" row
+    behind and never queued a job. Reject at request time and confirm
+    the workspace's collection count is unchanged."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    before = len(db.get_collections())
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/jobs/pipeline",
+            json={"folder_ids": [root_id], **extra},
+        )
+        assert resp.status_code == 400, resp.get_json()
+        # Error message names the offending field so the caller can fix it.
+        offending = next(iter(extra))
+        assert offending in resp.get_json()["error"]
+    assert len(db.get_collections()) == before
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"exclude_paths": [{}]},
+        {"exclude_paths": [["nested"]]},
+        {"exclude_paths": [None]},
+        {"exclude_paths": [42]},
+        {"exclude_photo_ids": [{}]},
+        {"exclude_photo_ids": ["not-int"]},
+        {"exclude_photo_ids": [None]},
+        {"exclude_photo_ids": [True]},
+    ],
+)
+def test_pipeline_folder_ids_bad_list_entry_leaves_no_stray_collection(
+    app_and_db, extra,
+):
+    """Regression for the Codex review on commit bffdabd: the outer
+    list-type check let a payload like ``{"exclude_paths": [{}]}`` slip
+    past, whereupon ``set(body.get(...))`` inside PipelineParams raised
+    ``TypeError: unhashable type`` — a 500 that left a stray "Process …"
+    collection with no queued job. Reject non-string exclude_paths
+    entries and non-int (or bool) exclude_photo_ids entries at the
+    request boundary and confirm no collection was created."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    before = len(db.get_collections())
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/jobs/pipeline",
+            json={"folder_ids": [root_id], **extra},
+        )
+        assert resp.status_code == 400, resp.get_json()
+        offending = next(iter(extra))
+        assert offending in resp.get_json()["error"]
+        # Error message points at "entries" so the caller can distinguish
+        # this from the outer-list-type reject in the sibling regression.
+        assert "entries" in resp.get_json()["error"]
+    assert len(db.get_collections()) == before
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"model_id": []},
+        {"model_id": 5},
+        {"model_id": {"id": "x"}},
+        {"model_ids": 5},
+        {"model_ids": "megadetector-v6"},
+        {"model_ids": [5]},
+        {"model_ids": [None]},
+        {"model_ids": [{"id": "x"}]},
+    ],
+)
+def test_pipeline_folder_ids_bad_model_selection_leaves_no_stray_collection(
+    app_and_db, extra,
+):
+    """Regression for the Codex review on commit f08b72e: a folder-scoped
+    request with a malformed ``model_id``/``model_ids`` (e.g. ``model_ids: 5``)
+    passed every up-front validation, materialized the ad-hoc collection,
+    and then blew up inside the auto-skip-classify block
+    (``list(params.model_ids or [])`` on a non-list). The 500 left a stray
+    "Process …" row behind. Reject at request time and confirm the
+    workspace's collection count is unchanged."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    before = len(db.get_collections())
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/jobs/pipeline",
+            json={"folder_ids": [root_id], "strategy": "full", **extra},
+        )
+        assert resp.status_code == 400, resp.get_json()
+        offending = next(iter(extra))
+        assert offending in resp.get_json()["error"]
+    assert len(db.get_collections()) == before
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"source": ""},
+        {"sources": []},
+        {"source": "", "sources": []},
+    ],
+)
+def test_pipeline_folder_ids_treats_empty_sources_as_omitted(
+    app_and_db, extra,
+):
+    """A generic pipeline form can emit ``source: ""`` / ``sources: []``
+    as its unfilled defaults. The rest of this endpoint treats those as
+    omitted (see the ``if sources:`` / ``elif source:`` dispatch and the
+    required-scope truthiness check), so the folder-scope conflict guard
+    must too — otherwise every folder-scoped request from such a form
+    would falsely 400 without the client having to delete unused keys."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [root_id], "strategy": "quick_look", **extra,
+        })
+        assert resp.status_code == 200, resp.get_json()

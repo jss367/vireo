@@ -3578,6 +3578,15 @@ function renderSettingWidget(key, spec, effective) {
       var sel = (opt === effective) ? ' selected' : '';
       return '<option value="' + escapeAttr(opt) + '"' + sel + '>' + escapeHtml(label) + '</option>';
     }).join('');
+    if (spec.nullable) {
+      // Prepend the null option (value="" — the settings PATCH endpoint
+      // treats "" as null when spec.nullable is true) so users can pick
+      // "unset" as a first-class choice even after a non-null default has
+      // been assigned globally.
+      var nullLabel = spec.null_label || '(unset)';
+      var nullSel = (effective == null) ? ' selected' : '';
+      opts = '<option value=""' + nullSel + '>' + escapeHtml(nullLabel) + '</option>' + opts;
+    }
     return '<select ' + keyAttr + ' onchange="onSchemaInputChange(this, true)" '
          +    'style="' + inputStyle + 'min-width:120px;">'
          +   opts + '</select>';

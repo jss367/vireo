@@ -7114,6 +7114,39 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result["folders"] = [dict(f) for f in db.get_workspace_folder_roots(ws["id"])]
         return jsonify(result)
 
+    def _validate_workspace_config_overrides(overrides):
+        """Validate ``config_overrides`` before persist. Returns an error
+        response (from ``json_error``) on rejection, or None on success.
+
+        Shared by POST /api/workspaces and PUT /api/workspaces/<id> so a
+        workspace created with a bogus ``pipeline.default_strategy`` can't
+        later feed the import/process settings or chaining hook an unknown
+        strategy — the update path already rejects it and the create path
+        must too, otherwise the create endpoint becomes a validation bypass.
+        """
+        # Anything else would be persisted as-is and crash the labels
+        # accessors that expect a JSON object (or NULL) in this column.
+        if overrides is not None and not isinstance(overrides, dict):
+            return json_error("config_overrides must be an object or null")
+        # pipeline.default_strategy: None means "no automatic processing
+        # after import" (the chaining hook short-circuits on it) and is
+        # accepted as-is; a string must name a real strategy. The string
+        # "none" is NOT the null sentinel — one vocabulary with
+        # /api/jobs/pipeline, which also rejects it.
+        pipeline_overrides = (overrides or {}).get("pipeline")
+        if (
+            isinstance(pipeline_overrides, dict)
+            and "default_strategy" in pipeline_overrides
+            and pipeline_overrides["default_strategy"] is not None
+        ):
+            from process_strategies import resolve_strategy
+
+            try:
+                resolve_strategy(pipeline_overrides["default_strategy"])
+            except ValueError as e:
+                return json_error(str(e))
+        return None
+
     @app.route("/api/workspaces", methods=["POST"])
     def api_create_workspace():
         db = _get_db()
@@ -7121,8 +7154,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         name = body.get("name", "").strip()
         if not name:
             return json_error("Name is required")
+        config_overrides = body.get("config_overrides")
+        err = _validate_workspace_config_overrides(config_overrides)
+        if err is not None:
+            return err
         try:
-            ws_id = db.create_workspace(name, config_overrides=body.get("config_overrides"))
+            ws_id = db.create_workspace(name, config_overrides=config_overrides)
             # Seed the standard smart collections (All Photos, Flagged, etc.).
             # Startup only seeds the active workspace, so without this a
             # workspace created via the API never gets defaults until it's
@@ -7151,10 +7188,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             kwargs["name"] = body["name"]
         if "config_overrides" in body:
             overrides = body["config_overrides"]
-            # Anything else would be persisted as-is and crash the labels
-            # accessors that expect a JSON object (or NULL) in this column.
-            if overrides is not None and not isinstance(overrides, dict):
-                return json_error("config_overrides must be an object or null")
+            err = _validate_workspace_config_overrides(overrides)
+            if err is not None:
+                return err
             kwargs["config_overrides"] = overrides
         if "ui_state" in body:
             kwargs["ui_state"] = body["ui_state"]
@@ -16523,14 +16559,272 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         from pipeline_job import PipelineParams, run_pipeline_job
 
         body = request.get_json(silent=True) or {}
+
+        # Named process strategy: expand server-side into stage flags so the
+        # import page, the process page, and import→process chaining share
+        # one vocabulary (process_strategies.py). Key presence — not
+        # truthiness — decides whether a strategy was requested: a
+        # present-but-null strategy must 400 rather than silently fall
+        # through to default processing for a caller who thought null meant
+        # "no processing" (that case is expressed by not calling this
+        # endpoint at all).
+        strategy_name = None
+        if "strategy" in body:
+            strategy_name = body.get("strategy")
+            if not isinstance(strategy_name, str):
+                kind = (
+                    "null" if strategy_name is None
+                    else type(strategy_name).__name__
+                )
+                return json_error(f"strategy must be a string, got {kind}")
+            from process_strategies import resolve_strategy
+
+            try:
+                expanded = resolve_strategy(strategy_name)
+            except ValueError as e:
+                return json_error(str(e))
+            # Expansion supplies *defaults*; explicitly-present body keys
+            # win, so a caller can pin one flag on top of a preset.
+            body = {**expanded, **body}
+
         db = _get_db()
         source = body.get("source")
         sources = body.get("sources")
         collection_id = body.get("collection_id")
         source_snapshot_id = body.get("source_snapshot_id")
 
-        if not source and not sources and not collection_id and not source_snapshot_id:
-            return json_error("source, sources, collection_id, or source_snapshot_id required")
+        # Folder scope: resolve folder_ids to their active-workspace subtrees
+        # and materialize an ad-hoc collection, then proceed as a collection
+        # run — the same pattern import runs use (see pipeline_job's
+        # collection_stage). The rest of the app treats a folder scope as
+        # its subtree, so a workspace root must include every descendant's
+        # photos, not just the ones hanging directly off the root.
+        #
+        # The ad-hoc collection is *not* inserted here: it is deferred
+        # until after every other request check has passed AND after
+        # ``PipelineParams`` has been fully constructed (see the block
+        # just after the ``PipelineParams(...)`` call below). If we
+        # inserted up front, a later 400 (relative destination,
+        # remote_target_id mismatch, local_processing conflict,
+        # folder_template with '..', or a coercion-time exception inside
+        # PipelineParams) would leave a stray "Process …" collection in
+        # the workspace even though no job was queued.
+        # ``exclude_paths`` / ``exclude_photo_ids`` are validated up front —
+        # before the folder-scope subtree is resolved — so a folder-scoped
+        # request that includes preview deselections can honor them at
+        # collection-materialization time. run_pipeline_job's
+        # ``_filter_excluded`` only checks ``exclude_photo_ids``; without
+        # applying ``exclude_paths`` at the ad-hoc collection boundary, a
+        # deselected path is still thumbnailed, classified, and regrouped
+        # once the folder collection materializes. Early validation also
+        # matches the coercion the PipelineParams constructor would
+        # otherwise perform via ``set(body.get(field, []))``, where a JSON
+        # ``null`` or unhashable list entry would raise TypeError and leave
+        # a stray "Process …" collection behind. Key-presence (not
+        # truthiness) matters: missing keys fall through to the default,
+        # but ``{"exclude_paths": null}`` must 400.
+        excluded_paths_set: set[str] = set()
+        if "exclude_paths" in body:
+            _paths_value = body["exclude_paths"]
+            if not isinstance(_paths_value, list):
+                return json_error(
+                    "exclude_paths must be a list, got "
+                    f"{type(_paths_value).__name__}"
+                )
+            for _entry in _paths_value:
+                if not isinstance(_entry, str):
+                    return json_error(
+                        "exclude_paths entries must be strings, got "
+                        f"{type(_entry).__name__}"
+                    )
+            excluded_paths_set = set(_paths_value)
+        excluded_photo_ids_set: set[int] = set()
+        if "exclude_photo_ids" in body:
+            _ids_value = body["exclude_photo_ids"]
+            if not isinstance(_ids_value, list):
+                return json_error(
+                    "exclude_photo_ids must be a list, got "
+                    f"{type(_ids_value).__name__}"
+                )
+            for _entry in _ids_value:
+                # bool is a subclass of int; exclude it explicitly so the
+                # accepted values stay honest integers.
+                if isinstance(_entry, bool) or not isinstance(_entry, int):
+                    return json_error(
+                        "exclude_photo_ids entries must be integers, got "
+                        f"{type(_entry).__name__}"
+                    )
+            excluded_photo_ids_set = set(_ids_value)
+
+        folder_ids = body.get("folder_ids")
+        pending_folder_collection = None
+        if folder_ids is not None:
+            # A folder scope is itself a scope — combining it with any other
+            # scope selector is ambiguous. Reject *all* other scopes, not
+            # just ``collection_id``: with ``source``/``sources``, later
+            # ``skip_scan`` handling would silently ignore them; with
+            # ``source_snapshot_id``, run_pipeline_job would clear the
+            # folder-derived ``collection_id`` and run the snapshot scope
+            # instead — the job would process a different scope than the
+            # request implies.
+            #
+            # ``source``/``sources`` are checked for truthiness (not just
+            # ``is not None``) because the rest of this endpoint treats
+            # empty string / empty list as omitted (see the required-scope
+            # check below and the ``if sources:`` / ``elif source:``
+            # dispatch above). Otherwise a generic pipeline form that
+            # always emits ``source: ""`` / ``sources: []`` would falsely
+            # 400 every folder-scoped run.
+            other_scopes = []
+            if collection_id is not None:
+                other_scopes.append("collection_id")
+            if source:
+                other_scopes.append("source")
+            if sources:
+                other_scopes.append("sources")
+            if source_snapshot_id is not None:
+                other_scopes.append("source_snapshot_id")
+            if other_scopes:
+                return json_error(
+                    "folder_ids cannot be combined with "
+                    + ", ".join(other_scopes)
+                )
+            if (
+                not isinstance(folder_ids, list)
+                or not folder_ids
+                or any(
+                    isinstance(fid, bool) or not isinstance(fid, int)
+                    for fid in folder_ids
+                )
+            ):
+                return json_error(
+                    "folder_ids must be a non-empty list of integers"
+                )
+            # Range-check each folder id before it ever reaches sqlite3
+            # parameter binding. A JSON payload can carry an integer wider
+            # than SQLite's signed 64-bit column type (e.g. 2**63), which
+            # would raise OverflowError inside the workspace-linked lookup
+            # below and escape as a 500. source_snapshot_id already has the
+            # same guard just below; folder-scoped runs need it too.
+            _SQLITE_INT_MIN = -(1 << 63)
+            _SQLITE_INT_MAX = (1 << 63) - 1
+            if any(
+                fid < _SQLITE_INT_MIN or fid > _SQLITE_INT_MAX
+                for fid in folder_ids
+            ):
+                return json_error(
+                    "folder_ids contains a value outside SQLite's "
+                    "signed 64-bit integer range"
+                )
+            # Reject folders the active workspace has no claim on (mirrors
+            # the rescan guard): a stale UI or crafted request must not
+            # pollute this workspace with another workspace's scan output.
+            # get_folder_subtree_ids itself refuses to walk out of the
+            # active workspace, so unrelated descendants can never leak in.
+            ws_for_folders = db._active_workspace_id
+            subtree_ids = set()
+            # Import _chunks so the path-prefix workspace filter below can
+            # split large legacy subtrees across multiple IN(...) statements.
+            from db import _SQLITE_PARAM_CHUNK_SIZE, _chunks  # noqa: PLC0415
+            for fid in folder_ids:
+                linked = db.conn.execute(
+                    "SELECT 1 FROM workspace_folders "
+                    "WHERE workspace_id = ? AND folder_id = ?",
+                    (ws_for_folders, fid),
+                ).fetchone()
+                if not linked:
+                    return json_error("folder not found", 404)
+                # Union — a workspace can link both a root and a nested
+                # folder, so the same descendant can appear twice.
+                subtree_ids.update(db.get_folder_subtree_ids(fid))
+                # get_folder_subtree_ids walks folders.parent_id only, so
+                # legacy rows whose parent_id is NULL — but whose paths sit
+                # under the requested folder — never appear. Every other
+                # subtree consumer in db.py (folder deletion, rescan,
+                # missing-originals, workspace linking) already reads through
+                # _folder_subtree_ids_by_path for exactly this reason;
+                # without the same fallback here, processing a workspace root
+                # would silently skip legacy descendant photos the rest of
+                # the app still treats as part of that folder. Intersect the
+                # path-based descendants with the workspace's folder set so
+                # nothing leaks in from another workspace that happens to
+                # share a path prefix.
+                for chunk in _chunks(db._folder_subtree_ids_by_path(fid)):
+                    marks = ",".join("?" for _ in chunk)
+                    rows = db.conn.execute(
+                        f"SELECT folder_id FROM workspace_folders "
+                        f"WHERE workspace_id = ? AND folder_id IN ({marks})",
+                        [ws_for_folders] + list(chunk),
+                    )
+                    subtree_ids.update(r["folder_id"] for r in rows)
+            # A large workspace root can expand into thousands of descendant
+            # folder ids — more than SQLite's per-statement bound-parameter
+            # cap on legacy builds (SQLITE_MAX_VARIABLE_NUMBER = 999). Chunk
+            # the IN(...) lookup so a wide folder subtree doesn't blow up as
+            # an OperationalError before the job is even queued. Same pattern
+            # db.py uses for other large id scopes (see _chunks in db.py).
+            subtree_id_list = list(subtree_ids)
+            # Fetch the folder paths for the whole subtree so we can compose
+            # per-photo full paths and honor ``exclude_paths`` at the
+            # collection boundary. Skip the lookup entirely when the user
+            # sent no path exclusions — a workspace-root scope can span
+            # thousands of folders and the join is pointless when nothing
+            # would be filtered.
+            folder_path_by_id: dict[int, str] = {}
+            if excluded_paths_set:
+                for start in range(0, len(subtree_id_list), _SQLITE_PARAM_CHUNK_SIZE):
+                    chunk = subtree_id_list[start:start + _SQLITE_PARAM_CHUNK_SIZE]
+                    marks = ",".join("?" for _ in chunk)
+                    for r in db.conn.execute(
+                        f"SELECT id, path FROM folders WHERE id IN ({marks})",
+                        tuple(chunk),
+                    ):
+                        folder_path_by_id[r["id"]] = r["path"] or ""
+            photo_ids = []
+            for start in range(0, len(subtree_id_list), _SQLITE_PARAM_CHUNK_SIZE):
+                chunk = subtree_id_list[start:start + _SQLITE_PARAM_CHUNK_SIZE]
+                marks = ",".join("?" for _ in chunk)
+                # Select (id, folder_id, filename) so we can compose each
+                # photo's full path in-Python to compare against
+                # ``exclude_paths``. Matching the same os.path.join shape
+                # scanner/ingest use for their ``skip_paths`` sets keeps
+                # deselections consistent across import and process runs.
+                # Filter ``exclude_photo_ids`` here too so the ad-hoc
+                # collection reflects exactly what the user asked to
+                # process; ``_filter_excluded`` would drop them again later
+                # but there is no reason to bake them into the collection
+                # membership.
+                for r in db.conn.execute(
+                    f"SELECT id, folder_id, filename FROM photos "
+                    f"WHERE folder_id IN ({marks})",
+                    tuple(chunk),
+                ):
+                    if r["id"] in excluded_photo_ids_set:
+                        continue
+                    if excluded_paths_set:
+                        full = os.path.join(
+                            folder_path_by_id.get(r["folder_id"], ""),
+                            r["filename"] or "",
+                        )
+                        if full in excluded_paths_set:
+                            continue
+                    photo_ids.append(r["id"])
+            first = db.get_folder(folder_ids[0])
+            leaf = os.path.basename(
+                (first["path"] or "").rstrip("/\\")
+            ) or "folders"
+            pending_folder_collection = {
+                "leaf": leaf, "photo_ids": photo_ids,
+            }
+
+        if (
+            not source and not sources and not collection_id
+            and not source_snapshot_id and pending_folder_collection is None
+        ):
+            return json_error(
+                "source, sources, collection_id, source_snapshot_id, "
+                "or folder_ids required"
+            )
 
         # Validate type before touching SQLite. Non-integer bodies (objects,
         # arrays, non-numeric strings, floats, bools) would otherwise reach
@@ -16598,6 +16892,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if destination and source_snapshot_id is not None:
             return json_error(
                 "destination is not allowed when source_snapshot_id is set"
+            )
+        # Same reasoning for collection- and folder-scope runs: any
+        # ``collection_id`` (whether supplied directly or derived from
+        # ``folder_ids`` below) sets ``skip_scan`` in run_pipeline_job, so
+        # ``scanner_stage`` returns before the ingest block that would copy
+        # to ``destination``. The job's step list still includes ingest for
+        # ``params.destination``, so the user would see a queued process run
+        # that ignores the requested copy target and leaves ingest pending.
+        # Local-processing runs with these scopes are rejected below with a
+        # dedicated message; this guards the plain-``destination`` case that
+        # otherwise slips through when ``local_processing`` is false.
+        if destination and (
+            collection_id is not None or folder_ids is not None
+        ):
+            return json_error(
+                "destination is not allowed with collection_id or folder_ids "
+                "— collection and folder scopes skip ingest, so a copy "
+                "destination would never be written"
             )
         if destination and not os.path.isabs(destination):
             return json_error("destination must be an absolute path")
@@ -16668,16 +16980,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # photos and then fail in archive_stage with "local staging folder
         # was not indexed". Snapshot-scoped runs are likewise rejected: they
         # also bypass ingest because the snapshot's existing files drive
-        # scan_roots directly. Reject whenever collection_id or
-        # source_snapshot_id is set — a stale source/sources field in the
-        # same request must not slip past, because run_pipeline_job keys
-        # skip_scan off collection_id alone and would still skip ingest.
+        # scan_roots directly. Folder-scope runs materialize a collection
+        # (below) and share the collection contract, so reject them here
+        # too — otherwise the check would fire on the derived collection_id
+        # after we'd already inserted the collection row. Reject whenever
+        # collection_id, source_snapshot_id, or folder_ids is set — a stale
+        # source/sources field in the same request must not slip past,
+        # because run_pipeline_job keys skip_scan off collection_id alone
+        # and would still skip ingest.
         if local_processing and (
-            collection_id is not None or source_snapshot_id is not None
+            collection_id is not None
+            or source_snapshot_id is not None
+            or pending_folder_collection is not None
         ):
             return json_error(
-                "local_processing cannot be combined with collection_id or "
-                "source_snapshot_id — it requires source or sources"
+                "local_processing cannot be combined with collection_id, "
+                "source_snapshot_id, or folder_ids — it requires source "
+                "or sources"
             )
         if local_processing and not source and not sources:
             return json_error(
@@ -16691,6 +17010,53 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             from ingest import _is_unsafe_path
             if _is_unsafe_path(folder_template):
                 return json_error("folder_template must be a relative path without '..' or backslashes")
+
+        # ``miss_enabled`` is tri-state (None / True / False) so ``body.get``
+        # can't apply a default the way boolean skip_* flags do. Validate it
+        # explicitly instead: pipeline_job.py branches on
+        # ``params.miss_enabled is not None`` and then on truthiness, so a
+        # non-bool value like the string "false" would flow through as
+        # truthy — a caller expecting misses off would get them on.
+        #
+        # Validate BEFORE the folder-scope collection is materialized so a
+        # bad value 400s cleanly; otherwise ``db.add_collection`` commits
+        # first and the rejected request leaves a stray "Process …" row.
+        miss_enabled_body = body.get("miss_enabled")
+        if miss_enabled_body is not None and not isinstance(miss_enabled_body, bool):
+            return json_error(
+                f"miss_enabled must be boolean, got "
+                f"{type(miss_enabled_body).__name__}"
+            )
+
+        # Validate ``model_id`` / ``model_ids`` shape BEFORE the folder-scope
+        # collection is materialized. The auto-skip-classify block further
+        # down calls ``list(params.model_ids or [])`` and ``by_id.get(mid, ...)``
+        # in ways that raise TypeError on non-list / non-hashable payloads
+        # (e.g. ``model_ids: 5`` or an entry that's a list/dict). Without
+        # this guard those escape as opaque 500s, and for folder-scoped
+        # runs ``db.add_collection`` has already committed by then, leaving
+        # a stray "Process …" collection in the workspace after the request
+        # fails. Rejecting up front keeps error responses 4xx and prevents
+        # orphaned rows on every scope shape.
+        model_id_body = body.get("model_id")
+        if model_id_body is not None and not isinstance(model_id_body, str):
+            return json_error(
+                f"model_id must be a string, got "
+                f"{type(model_id_body).__name__}"
+            )
+        model_ids_body = body.get("model_ids")
+        if model_ids_body is not None:
+            if not isinstance(model_ids_body, list):
+                return json_error(
+                    f"model_ids must be a list, got "
+                    f"{type(model_ids_body).__name__}"
+                )
+            for _mid in model_ids_body:
+                if not isinstance(_mid, str):
+                    return json_error(
+                        f"model_ids entries must be strings, got "
+                        f"{type(_mid).__name__}"
+                    )
 
         # Snapshot the resolved target dict so the queued run archives to the
         # host/mount the user saw at click-Start, not whatever the saved target
@@ -16725,11 +17091,33 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             skip_extract_masks=body.get("skip_extract_masks", False),
             skip_eye_keypoints=body.get("skip_eye_keypoints", False),
             skip_regroup=body.get("skip_regroup", False),
+            miss_enabled=body.get("miss_enabled"),
             preview_max_size=body.get("preview_max_size"),
-            exclude_paths=set(body.get("exclude_paths", [])) or None,
-            exclude_photo_ids=set(body.get("exclude_photo_ids", [])) or None,
+            exclude_paths=excluded_paths_set or None,
+            exclude_photo_ids=excluded_photo_ids_set or None,
             recursive=body.get("recursive", True),
         )
+
+        # All request validation and param coercion have passed — safe to
+        # materialize the folder-scope collection row now. Deferring the
+        # insert past PipelineParams construction closes the last window
+        # where a coercion-time exception (e.g. an unhashable exclude
+        # entry that slipped past the guards above) could leave a stray
+        # "Process …" collection behind after the request failed.
+        if pending_folder_collection is not None:
+            from datetime import datetime as _dt
+
+            collection_id = db.add_collection(
+                "Process {} {}".format(
+                    pending_folder_collection["leaf"],
+                    _dt.now().strftime("%Y-%m-%d %H:%M"),
+                ),
+                json.dumps([{
+                    "field": "photo_ids",
+                    "value": pending_folder_collection["photo_ids"],
+                }]),
+            )
+            params.collection_id = collection_id
 
         # Auto-skip classify stages if no model is available
         model_warning = None
@@ -16828,10 +17216,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "collection_id": collection_id,
             "destination": destination,
             "local_processing": local_processing,
+            "strategy": strategy_name,
             "skip_classify": params.skip_classify,
             "skip_extract_masks": params.skip_extract_masks,
             "skip_regroup": params.skip_regroup,
+            "miss_enabled": params.miss_enabled,
         }
+        # Preserve the caller's original folder_ids alongside the derived
+        # ad-hoc collection_id so the Jobs page can show both what the user
+        # selected (folder subtree) and the collection the run was pinned to
+        # without a secondary collection lookup.
+        if folder_ids is not None:
+            job_config["folder_ids"] = list(folder_ids)
         if remote_archive_config is not None:
             # Surface that the archive goes over SSH (and to where) so the
             # jobs panel can show it, per the UI-transparency rule.

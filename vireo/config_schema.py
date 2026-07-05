@@ -363,6 +363,35 @@ SCHEMA = {
     },
 
     # --- Pipeline (scoring weights & rejection thresholds) ---------------
+    "pipeline.default_strategy": {
+        # Workspace-scoped: the stored value the future import→process
+        # chaining hook will read via db.get_effective_config(cfg.load()).
+        # None (import only) is the DEFAULTS value; `nullable` here lets a
+        # workspace override the global default back to null via
+        # /api/settings/workspace, and the settings UI renders the null
+        # option so users can pick it. This PR (the import/process split
+        # phase 1) ships the storage, validation, and UI surfaces only —
+        # the chaining hook that actually enqueues the run at import
+        # completion is added in a follow-up PR, so today the setting is
+        # a stored preference and imports do not auto-chain regardless of
+        # the value.
+        "type": "enum",
+        "enum": ["full", "cull_ready", "quick_look"],
+        "enum_labels": {
+            "full": "Full",
+            "cull_ready": "Cull-ready",
+            "quick_look": "Quick look",
+        },
+        "nullable": True,
+        "null_label": "Import only (no processing)",
+        "category": "Pipeline", "scope": "workspace",
+        "label": "Default process strategy",
+        "desc": (
+            "Default strategy for post-import processing on this workspace. "
+            "Stored preference only in this release — automatic "
+            "import→process chaining is wired in a follow-up update."
+        ),
+    },
     "pipeline.w_focus": {
         "type": "float", "min": 0.0, "max": 1.0, "step": 0.01,
         "category": "Pipeline", "scope": "both",
@@ -794,11 +823,19 @@ def validate_value(key, raw):
 
     Returns the coerced value. Raises :class:`ValidationError` on any failure
     (unknown key, type mismatch, out-of-range, unknown enum value, etc.).
+
+    Fields with ``nullable: True`` accept ``None`` (and the empty string, as
+    the settings UI serializes a null <option> as ``value=""``) and return
+    ``None`` — used for enums where "unset" is a meaningful third state
+    distinct from any listed choice (e.g. ``pipeline.default_strategy`` where
+    null means "import only, no processing").
     """
     if key not in SCHEMA:
         raise ValidationError(f"unknown setting {key!r}")
     spec = SCHEMA[key]
     kind = spec["type"]
+    if spec.get("nullable") and (raw is None or raw == ""):
+        return None
     value = _coerce(raw, kind)
 
     if kind in ("int", "float"):

@@ -10474,3 +10474,351 @@ def test_pipeline_remote_archive_falls_back_to_settings_without_snapshot(
     assert result["archive"]["moved"] == 1
     call = env["captured"]["rsync_calls"][-1]
     assert call["dest_spec"] == "me@nas:/volume1/Photography/2026/trip"
+
+
+# ---------------------------------------------------------------------------
+# miss_enabled per-run override (process strategies, import/process split PR 1)
+# ---------------------------------------------------------------------------
+
+
+def test_pipeline_params_miss_enabled_defaults_none():
+    """None means "defer to workspace config" — today's behavior."""
+    params = PipelineParams()
+    assert params.miss_enabled is None
+
+
+def _run_pipeline_for_miss_tests(tmp_path, monkeypatch, *, pipeline_cfg,
+                                 params_extra, expect_runtime_error=False):
+    """Run a collection pipeline far enough to reach miss_stage.
+
+    classify must complete (model_loader failure sets abort, and the misses
+    gate skips on abort), so install a fake downloaded model, a fake
+    Classifier, and a fake _detect_batch. regroup must succeed (the misses
+    gate skips when regroup failed), so stub run_full_pipeline /
+    save_results / load_photo_features. Returns (runner, result, spy_calls)
+    where spy_calls captures every compute_misses_for_workspace invocation.
+
+    ``expect_runtime_error`` is opt-in: the setup-failure test needs to swallow
+    the RuntimeError so it can inspect ``job["_fatal_error"]``, but the
+    override tests must let unexpected pipeline aborts propagate — otherwise
+    an earlier stage failing would make miss_stage skip for the wrong reason
+    and the test would pass on a false green.
+    """
+    import json as json_mod
+
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    import numpy as np
+    import pipeline as pipeline_mod
+    from db import Database
+
+    try:
+        import misses as misses_mod
+    except ImportError:
+        # The setup-failure test poisons sys.modules["misses"] so the miss
+        # stage's own import raises; the spy is unused on that path.
+        misses_mod = None
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    with open(cfg.CONFIG_PATH, "w") as f:
+        json_mod.dump({"pipeline": pipeline_cfg}, f)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    photo_id = db.add_photo(folder_id, "test.jpg", ".jpg", 12345, 1_000_000.0)
+    _drop_jpeg(folder_path, "test.jpg")
+    col_id = db.add_collection(
+        "Test",
+        json_mod.dumps([{"field": "photo_ids", "value": [photo_id]}]),
+    )
+
+    _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
+        return {}, 0, {p["id"] for p in batch}
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def encode_image(self, *args, **kwargs):
+            return np.zeros(512, dtype=np.float32)
+
+        def classify_with_embedding(self, img, threshold=0):
+            return (
+                [{"species": "Robin", "score": 0.9}],
+                np.zeros(512, dtype=np.float32),
+            )
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            zero = np.zeros(512, dtype=np.float32)
+            return [([{"species": "Robin", "score": 0.9}], zero)
+                    for _ in images]
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    monkeypatch.setattr(
+        pipeline_mod, "run_full_pipeline",
+        lambda photos, config=None, emit_trace=False: {
+            "summary": {"groups": 1}, "photos": photos,
+        },
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "save_results", lambda results, cache_dir, ws: None,
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "load_photo_features",
+        lambda thread_db, collection_id=None, config=None: [{"id": photo_id}],
+    )
+
+    spy_calls = []
+
+    def spy_compute(thread_db, p_cfg, collection_id=None,
+                    exclude_photo_ids=None, now=None):
+        spy_calls.append({"pipeline_cfg": dict(p_cfg)})
+        return 3
+
+    if misses_mod is not None:
+        monkeypatch.setattr(
+            misses_mod, "compute_misses_for_workspace", spy_compute,
+        )
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_extract_masks=True,
+        **params_extra,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+    # Suppression is opt-in — the setup-failure test needs to inspect
+    # job["_fatal_error"] after the recorded RuntimeError, but the
+    # miss_enabled override tests must let unexpected aborts propagate so
+    # the miss_stage.skipped assertion can't pass because an earlier stage
+    # failed for an unrelated reason.
+    result = None
+    if expect_runtime_error:
+        with contextlib.suppress(RuntimeError):
+            result = run_pipeline_job(job, runner, db_path, ws_id, params)
+    else:
+        result = run_pipeline_job(job, runner, db_path, ws_id, params)
+    return runner, result, spy_calls, job
+
+
+def _last_stages(runner):
+    progress_events = [
+        data for (_, evt, data) in runner.events
+        if evt == "progress" and "stages" in data
+    ]
+    assert progress_events, "pipeline emitted no progress events"
+    return progress_events[-1]["stages"]
+
+
+def test_miss_enabled_false_param_short_circuits_before_compute(
+    tmp_path, monkeypatch,
+):
+    """Skip direction: workspace says True, params say False -> the stage
+    records skipped and compute_misses_for_workspace is never invoked. A
+    local-variable-only implementation (gating just the cache marker)
+    would still call compute and fail this test."""
+    runner, result, spy_calls, job = _run_pipeline_for_miss_tests(
+        tmp_path, monkeypatch,
+        pipeline_cfg={"miss_enabled": True},
+        params_extra={"miss_enabled": False},
+    )
+    assert spy_calls == [], "compute_misses_for_workspace ran despite override"
+    assert _last_stages(runner)["misses"]["status"] == "skipped"
+    miss_steps = [
+        kw for (_, step, kw) in runner.step_updates if step == "misses"
+    ]
+    assert {"status": "completed", "summary": "Skipped"} in miss_steps
+
+
+def test_miss_enabled_true_param_overrides_disabled_workspace(
+    tmp_path, monkeypatch,
+):
+    """Enable direction: workspace says False, params say True -> compute IS
+    invoked and sees the injected effective value. Without injection the
+    compute call reads workspace-False and silently evaluates nothing."""
+    runner, result, spy_calls, job = _run_pipeline_for_miss_tests(
+        tmp_path, monkeypatch,
+        pipeline_cfg={"miss_enabled": False},
+        params_extra={"miss_enabled": True},
+    )
+    assert len(spy_calls) == 1, "compute_misses_for_workspace did not run"
+    assert spy_calls[0]["pipeline_cfg"].get("miss_enabled") is True
+    assert _last_stages(runner)["misses"]["status"] == "completed"
+    miss_steps = [
+        kw for (_, step, kw) in runner.step_updates if step == "misses"
+    ]
+    assert {"status": "completed", "summary": "3 photos evaluated"} in miss_steps
+
+
+def test_miss_stage_setup_failure_marks_stage_failed(tmp_path, monkeypatch):
+    """Setup-failure direction: if the miss stage's setup (imports, DB,
+    config load) raises, the stage must record failed — not linger as
+    pending while the job completes "successfully". Pins the contract the
+    hoisted-setup refactor could otherwise regress. Only miss_stage imports
+    the misses module, so poisoning it in sys.modules scopes the failure to
+    exactly this stage."""
+    import sys as sys_mod
+
+    def run(tmp, mk):
+        mk.setitem(sys_mod.modules, "misses", None)
+        return _run_pipeline_for_miss_tests(
+            tmp, mk,
+            pipeline_cfg={"miss_enabled": True},
+            params_extra={},
+            expect_runtime_error=True,
+        )
+
+    runner, result, spy_calls, job = run(tmp_path, monkeypatch)
+    assert spy_calls == []
+    assert _last_stages(runner)["misses"]["status"] == "failed"
+    miss_steps = [
+        kw for (_, step, kw) in runner.step_updates if step == "misses"
+    ]
+    assert any(kw.get("status") == "failed" and kw.get("error")
+               for kw in miss_steps), miss_steps
+    assert str(job.get("_fatal_error", "")).startswith("[misses] Fatal:"), (
+        job.get("_fatal_error"), job.get("errors")
+    )
+
+
+# ---------------------------------------------------------------------------
+# per-photo resume contract (import/process split PR 1)
+# ---------------------------------------------------------------------------
+
+
+def test_collection_rerun_redoes_only_missing_work(tmp_path, monkeypatch):
+    """The process job's core promise: re-running the same strategy over the
+    same photos re-does only what's missing. Second run must report zero
+    generated thumbnails/previews and a fully cache-hit classify. If this
+    fails, the failure is the finding — fix the specific stage's skip
+    check rather than loosening the assertion."""
+    import json as json_mod
+
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    import numpy as np
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    photo_ids = []
+    for i, name in enumerate(("a.jpg", "b.jpg")):
+        pid = db.add_photo(folder_id, name, ".jpg", 1000 + i, 1_000_000.0 + i)
+        _drop_jpeg(folder_path, name)
+        # Pre-seed one detection per photo so the classify loop has a
+        # primary detection to classify (and, on run 2, to find cached
+        # predictions for). Mirrors the reclassify tests' setup.
+        db.save_detections(
+            pid,
+            [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+              "confidence": 0.9, "category": "animal"}],
+            detector_model="MegaDetector",
+        )
+        photo_ids.append(pid)
+    col_id = db.add_collection(
+        "Resume test",
+        json_mod.dumps([{"field": "photo_ids", "value": photo_ids}]),
+    )
+
+    _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
+        det_map = {}
+        for p in batch:
+            # The classify loop expects plain dicts (the real _detect_batch
+            # returns them); sqlite3.Row has no .get.
+            dets = [dict(d) for d in db_.get_detections(p["id"])]
+            if dets:
+                det_map[p["id"]] = dets
+        return det_map, 0, {p["id"] for p in batch}
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    inference_calls = []
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def encode_image(self, *args, **kwargs):
+            inference_calls.append("encode_image")
+            return np.zeros(512, dtype=np.float32)
+
+        def classify_with_embedding(self, img, threshold=0):
+            inference_calls.append("classify_with_embedding")
+            return (
+                [{"species": "Robin", "score": 0.9}],
+                np.zeros(512, dtype=np.float32),
+            )
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            inference_calls.append("classify_batch_with_embedding")
+            zero = np.zeros(512, dtype=np.float32)
+            return [([{"species": "Robin", "score": 0.9}], zero)
+                    for _ in images]
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    def run_once():
+        params = PipelineParams(
+            collection_id=col_id,
+            skip_extract_masks=True,
+            skip_regroup=True,
+        )
+        runner = FakeRunner()
+        job = _make_job()
+        return run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    first = run_once()
+    n = len(photo_ids)
+    assert first["stages"]["thumbnails"]["generated"] == n, first["stages"]
+    assert first["stages"]["previews"]["generated"] == n, first["stages"]
+    assert first["stages"]["classify"]["predictions_stored"] == n, (
+        first["stages"]
+    )
+    assert inference_calls, "first run never invoked the classifier"
+
+    inference_calls.clear()
+    second = run_once()
+    assert second["stages"]["thumbnails"] == {
+        "generated": 0, "skipped": n, "failed": 0,
+    }, second["stages"]
+    assert second["stages"]["previews"]["generated"] == 0, second["stages"]
+    assert second["stages"]["previews"]["skipped"] == n, second["stages"]
+    assert second["stages"]["previews"]["failed"] == 0, second["stages"]
+    assert second["stages"]["classify"]["already_classified"] == n, (
+        second["stages"]
+    )
+    # NOTE: predictions_stored is NOT asserted to be 0 on the rerun — the
+    # cached branch deliberately re-surfaces cached predictions into
+    # raw_results so downstream grouping/storage sees them, and storage
+    # re-upserts the same rows (idempotent, cheap). The expensive contract
+    # is that no model inference happens at all on a fully-cached rerun:
+    assert inference_calls == [], (
+        f"rerun invoked the classifier: {inference_calls}"
+    )
