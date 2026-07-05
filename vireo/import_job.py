@@ -754,6 +754,17 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                     continue
                 if token is not None:
                     accept = False
+                    # For 'hash' tokens, every row in twin_rows shares
+                    # the token's hash by construction (the query is
+                    # WHERE file_hash = ?), so all are byte-verified.
+                    # For 'key' tokens, twin_rows is a filename+size+
+                    # capture-second bucket; individual rows may hold
+                    # unrelated bytes. verified_twin_rows records only
+                    # the twin(s) whose bytes we actually hashed and
+                    # matched, so the folder-link update below can't
+                    # pull unrelated key-collision folders into the
+                    # active workspace. See PR #1107 review.
+                    verified_twin_rows = []
                     if token[0] == "hash":
                         twin_rows = _hash_twin_rows(db, token[1])
                         src_hash = token[1]
@@ -828,12 +839,28 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                                 continue
                             if twin_hash is not None and twin_hash == src_hash:
                                 accept = True
+                                verified_twin_rows = [twin]
                                 break
                     if accept:
                         skipped_duplicate += 1
                         _counts(rel)["skipped_duplicate"] += 1
+                        # 'hash' → every twin_rows entry is byte-identical
+                        # to the source by construction (see _hash_twin_
+                        # rows query above). 'key' → only the twin whose
+                        # bytes we hashed and matched can be linked; the
+                        # other rows share filename+size+capture-second
+                        # but may hold unrelated bytes, so linking their
+                        # folders would pull unrelated archive photos
+                        # into the active workspace on a duplicate-only
+                        # import. verified_twin_rows is empty when the
+                        # intra-run branch accepted (run_dest is added
+                        # separately below). See PR #1107 review.
+                        link_rows = (
+                            twin_rows if token[0] == "hash"
+                            else verified_twin_rows
+                        )
                         dup_dirs.update(
-                            _linkable_twin_dirs(twin_rows, _path_under_destination),
+                            _linkable_twin_dirs(link_rows, _path_under_destination),
                         )
                         run_dest = run_dest_folders.get(token)
                         if run_dest is not None:

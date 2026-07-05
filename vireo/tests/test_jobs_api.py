@@ -3295,3 +3295,50 @@ def test_import_photos_rejects_destination_inside_source(app_and_db, tmp_path):
         "sources": [card], "destination": sibling,
     })
     assert resp.status_code == 200, resp.get_json()
+
+
+def test_import_photos_inconclusive_case_probe_rejects_case_collision(
+    app_and_db, tmp_path,
+):
+    """When the case-sensitivity probe of a source cannot determine the
+    filesystem's semantics (no alpha-containing entry to swap — an SD
+    card whose root holds only numeric ``100``/``200``-style Nikon
+    subdirectories), the containment check must fall back to case-fold.
+
+    Otherwise, on a case-insensitive card mounted at ``/mnt/Card`` a
+    destination like ``/mnt/card/archive`` differs only in case and
+    resolves to the same directory as the source, but a case-sensitive
+    string comparison accepts it — and ``safe_to_format`` later goes
+    green even though formatting the card would erase the archive
+    copy. See PR #1107 review.
+    """
+    import sys as _sys
+
+    if _sys.platform in ("darwin", "win32"):
+        pytest.skip(
+            "Linux-only probe fallback: darwin/win32 skip the probe "
+            "entirely and always case-fold."
+        )
+
+    app, _ = app_and_db
+    client = app.test_client()
+
+    # Source has only numeric-named entries: the probe has no alpha
+    # character to case-swap, so it must return True (assume
+    # case-insensitive) — the stricter fallback.
+    source = tmp_path / "Card-BAR"
+    source.mkdir()
+    (source / "100").mkdir()
+    (source / "200").mkdir()
+
+    # Destination differs from the source parent only in case. On a
+    # real case-insensitive card these resolve to the same directory;
+    # the guard must reject the destination even though the CI
+    # filesystem (ext4) treats them as distinct.
+    dest = str(tmp_path / "card-bar" / "archive")
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [str(source)], "destination": dest,
+    })
+    assert resp.status_code == 400
+    assert "inside a source" in resp.get_json()["error"]

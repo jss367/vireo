@@ -14840,16 +14840,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ``Card`` entry (mount-point dentries are stored in the
             parent FS), so swapping characters in the ``path`` string
             always reports case-sensitive regardless of the card's own
-            semantics. Any error, empty directory, or entry without an
-            alpha character returns False and the caller falls back to
-            case-sensitive comparison — a false negative is a strictly
-            narrower guard than what the platform branch already
-            applies, never a wider one. See PR #1107 review.
+            semantics.
+
+            Any inconclusive result (unlistable, empty, no
+            alpha-containing entry, or a stat error while comparing)
+            returns True so the containment check falls back to
+            case-fold — the stricter direction of this safety guard.
+            A false positive on a case-sensitive filesystem can only
+            reject a legitimate destination (recoverable UX error the
+            user immediately sees and fixes by picking a different
+            path), whereas a false negative on a case-insensitive
+            filesystem accepts a case-collision destination inside the
+            card and lets ``safe_to_format`` later green-light
+            formatting while the archive lives on it. The reviewer's
+            example: an SD card whose root contains only numeric
+            top-level directories (Nikon-style ``100``/``101``/``102``)
+            has no alpha-containing entry to probe with. See PR #1107
+            review.
             """
             try:
                 entries = os.listdir(path)
             except OSError:
-                return False
+                return True
             for name in entries:
                 for i, c in enumerate(name):
                     if c.isalpha():
@@ -14859,12 +14871,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         original_full = os.path.join(path, name)
                         probe_full = os.path.join(path, swapped)
                         if not os.path.exists(probe_full):
+                            # Definitive: case-swap resolves to nothing,
+                            # so the filesystem distinguishes case.
                             return False
                         try:
                             return os.path.samefile(original_full, probe_full)
                         except OSError:
-                            return False
-            return False
+                            return True
+            return True
 
         try:
             dest_real = os.path.realpath(destination)

@@ -3133,3 +3133,133 @@ def test_import_invalidates_raw_caches_when_new_jpeg_pairs(tmp_path):
             "the file is unlinked or overwritten with a fresh WC from "
             "the verified companion JPEG"
         )
+
+
+def test_key_duplicate_links_only_byte_verified_twin_folder(tmp_path):
+    """Metadata-only ('key') duplicate: ``_key_twin_rows`` returns every
+    catalog row sharing filename+size+capture-second, but only ONE of
+    them may hold the card's actual bytes. The others are key-collisions
+    with unrelated content (say, a burst frame with the same DateTime).
+
+    Only the twin whose bytes we hashed and matched is a proven
+    duplicate; linking the other key-collision folders would pull
+    unrelated archive photos into the active workspace on a
+    duplicate-only import. See PR #1107 review.
+    """
+    from import_job import ImportParams, run_import_job
+    from PIL.ExifTags import Base as ExifBase
+
+    dt = datetime(2026, 6, 15, 9, 45, 30)
+
+    # Card file: red bytes, EXIF-timed so the checker generates a
+    # trustworthy metadata key.
+    card = tmp_path / "card"
+    card.mkdir()
+    card_file = card / "IMG_1200.jpg"
+    img = Image.new("RGB", (16, 16), "red")
+    exif = img.getexif()
+    exif[ExifBase.DateTimeOriginal] = dt.strftime("%Y:%m:%d %H:%M:%S")
+    img.save(str(card_file), exif=exif)
+    card_bytes = card_file.read_bytes()
+
+    # Two archive folders both containing IMG_1200.jpg — same filename,
+    # same size, same trusted capture time — so both rows produce the
+    # same metadata key and both appear in ``_key_twin_rows``.
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    verified_dir = archive / "verified-twin"
+    verified_dir.mkdir()
+    verified_file = verified_dir / "IMG_1200.jpg"
+    # Twin A: SAME bytes as card — the real duplicate.
+    verified_file.write_bytes(card_bytes)
+
+    collision_dir = archive / "key-collision"
+    collision_dir.mkdir()
+    collision_file = collision_dir / "IMG_1200.jpg"
+    # Twin B: same size, same key — DIFFERENT bytes.
+    collision_bytes = card_bytes[:-1] + bytes([card_bytes[-1] ^ 0xFF])
+    assert len(collision_bytes) == len(card_bytes)
+    assert collision_bytes != card_bytes
+    collision_file.write_bytes(collision_bytes)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    # Catalog both twins with file_hash=NULL — this forces
+    # DuplicateChecker to return a ('key', …) token (not 'hash') so
+    # we exercise the metadata-only branch. The timestamp is
+    # trustworthy so both rows produce a matching key.
+    for folder_dir, file_path in (
+        (verified_dir, verified_file),
+        (collision_dir, collision_file),
+    ):
+        fid = db.conn.execute(
+            "INSERT INTO folders (path, name, status) VALUES (?, ?, 'ok')",
+            (str(folder_dir), folder_dir.name),
+        ).lastrowid
+        db.conn.execute(
+            "INSERT INTO photos (folder_id, filename, extension, file_size,"
+            " timestamp) VALUES (?, ?, '.jpg', ?, ?)",
+            (
+                fid, "IMG_1200.jpg",
+                os.path.getsize(str(file_path)),
+                dt.strftime("%Y-%m-%dT%H:%M:%S"),
+            ),
+        )
+    db.conn.commit()
+
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id, ImportParams(
+            sources=[str(card)], destination=str(archive),
+        ),
+    )
+
+    # The card was byte-identical to the verified twin, so it's a
+    # legitimate skip.
+    assert result["copied"] == 0
+    assert result["skipped_duplicate"] == 1
+    assert result["failed"] == 0
+    assert result["safe_to_format"] is True
+
+    ws_folder_is_root = {
+        row["path"]: row["is_root"]
+        for row in db.conn.execute(
+            "SELECT f.path, wf.is_root FROM workspace_folders wf "
+            "JOIN folders f ON f.id = wf.folder_id "
+            "WHERE wf.workspace_id = ?",
+            (ws_id,),
+        )
+    }
+    # The byte-verified twin's folder is a user-facing workspace root
+    # (``is_root=1``) — the import proved the archive holds the card's
+    # bytes and links its folder into the workspace UI.
+    assert ws_folder_is_root.get(str(verified_dir)) == 1
+    # The key-collision folder was NEVER byte-verified against the
+    # card. Before the fix, it was passed to the duplicate-link scan
+    # as a restrict_dir and workspace-linked as its own top-level root
+    # (``is_root=1``), pulling an unrelated archive folder into the
+    # workspace UI. It must NOT surface as a workspace root here.
+    # (It may still appear with ``is_root=0`` via the destination
+    # cascade, which is a separate pre-existing behavior of
+    # ``add_workspace_folder``.)
+    assert ws_folder_is_root.get(str(collision_dir), 0) == 0
+
+    # Stronger: the collision folder was never scanned this run, so
+    # its pre-seeded row's ``file_hash`` is still NULL. Before the
+    # fix, the dup-link scan visited the collision folder and would
+    # have populated ``file_hash`` from its on-disk bytes.
+    photo_hashes = {
+        row["folder_path"]: row["file_hash"]
+        for row in db.conn.execute(
+            "SELECT p.file_hash, f.path AS folder_path "
+            "FROM photos p JOIN folders f ON f.id = p.folder_id"
+        )
+    }
+    assert photo_hashes.get(str(verified_dir)) is not None, (
+        "verified twin's folder WAS scanned — its file_hash must "
+        "be populated"
+    )
+    assert photo_hashes.get(str(collision_dir)) is None, (
+        "key-collision folder must NOT be scanned by a duplicate-"
+        "only import: its bytes were never proven to match the card"
+    )
