@@ -3054,6 +3054,43 @@ def test_pipeline_folder_ids_bad_list_entry_leaves_no_stray_collection(
 @pytest.mark.parametrize(
     "extra",
     [
+        {"model_id": []},
+        {"model_id": 5},
+        {"model_id": {"id": "x"}},
+        {"model_ids": 5},
+        {"model_ids": "megadetector-v6"},
+        {"model_ids": [5]},
+        {"model_ids": [None]},
+        {"model_ids": [{"id": "x"}]},
+    ],
+)
+def test_pipeline_folder_ids_bad_model_selection_leaves_no_stray_collection(
+    app_and_db, extra,
+):
+    """Regression for the Codex review on commit f08b72e: a folder-scoped
+    request with a malformed ``model_id``/``model_ids`` (e.g. ``model_ids: 5``)
+    passed every up-front validation, materialized the ad-hoc collection,
+    and then blew up inside the auto-skip-classify block
+    (``list(params.model_ids or [])`` on a non-list). The 500 left a stray
+    "Process …" row behind. Reject at request time and confirm the
+    workspace's collection count is unchanged."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    before = len(db.get_collections())
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/jobs/pipeline",
+            json={"folder_ids": [root_id], "strategy": "full", **extra},
+        )
+        assert resp.status_code == 400, resp.get_json()
+        offending = next(iter(extra))
+        assert offending in resp.get_json()["error"]
+    assert len(db.get_collections()) == before
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
         {"source": ""},
         {"sources": []},
         {"source": "", "sources": []},

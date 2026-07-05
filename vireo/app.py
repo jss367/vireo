@@ -17024,6 +17024,36 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 f"{type(miss_enabled_body).__name__}"
             )
 
+        # Validate ``model_id`` / ``model_ids`` shape BEFORE the folder-scope
+        # collection is materialized. The auto-skip-classify block further
+        # down calls ``list(params.model_ids or [])`` and ``by_id.get(mid, ...)``
+        # in ways that raise TypeError on non-list / non-hashable payloads
+        # (e.g. ``model_ids: 5`` or an entry that's a list/dict). Without
+        # this guard those escape as opaque 500s, and for folder-scoped
+        # runs ``db.add_collection`` has already committed by then, leaving
+        # a stray "Process …" collection in the workspace after the request
+        # fails. Rejecting up front keeps error responses 4xx and prevents
+        # orphaned rows on every scope shape.
+        model_id_body = body.get("model_id")
+        if model_id_body is not None and not isinstance(model_id_body, str):
+            return json_error(
+                f"model_id must be a string, got "
+                f"{type(model_id_body).__name__}"
+            )
+        model_ids_body = body.get("model_ids")
+        if model_ids_body is not None:
+            if not isinstance(model_ids_body, list):
+                return json_error(
+                    f"model_ids must be a list, got "
+                    f"{type(model_ids_body).__name__}"
+                )
+            for _mid in model_ids_body:
+                if not isinstance(_mid, str):
+                    return json_error(
+                        f"model_ids entries must be strings, got "
+                        f"{type(_mid).__name__}"
+                    )
+
         # Snapshot the resolved target dict so the queued run archives to the
         # host/mount the user saw at click-Start, not whatever the saved target
         # gets edited to while another pipeline holds the slot. Mirrors how the
