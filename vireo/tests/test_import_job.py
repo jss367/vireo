@@ -2742,6 +2742,73 @@ def test_duplicate_only_import_promotes_missing_twin_folder(tmp_path):
     assert str(twin_dir) in _ws_linked_folder_paths(db, ws_id)
 
 
+def test_duplicate_only_import_links_twin_folder_when_destination_is_symlink(tmp_path):
+    """A duplicate-only import whose ``destination`` is a symlink to the
+    twin's on-disk archive root must still resolve containment through
+    the link and link the twin folder. A lexical prefix check would drop
+    the twin from ``dup_dirs``, the duplicate-link scan would never run,
+    and the imported duplicate would stay filtered out of the active
+    workspace even though safe_to_format flipped green. See PR #1107
+    review.
+    """
+    import pytest
+    from import_dedup import compute_file_hash
+    from import_job import ImportParams, run_import_job
+
+    real_archive = tmp_path / "real_archive"
+    twin_dir = real_archive / "2026" / "2026-07-03"
+    twin_dir.mkdir(parents=True)
+    twin_file = twin_dir / "IMG_0400.jpg"
+    Image.new("RGB", (16, 16), "red").save(str(twin_file))
+
+    # Destination the user hands to the import is a symlink to the real
+    # archive root. The twin folder was cataloged under its real path.
+    alias_archive = tmp_path / "archive-alias"
+    try:
+        os.symlink(str(real_archive), str(alias_archive), target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not supported on this platform")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES (?, ?, 'ok')",
+        (str(twin_dir), twin_dir.name),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, extension, file_size,"
+        " file_hash) VALUES (?, ?, '.jpg', ?, ?)",
+        (
+            fid,
+            "IMG_0400.jpg",
+            os.path.getsize(str(twin_file)),
+            compute_file_hash(str(twin_file)),
+        ),
+    )
+    db.conn.commit()
+    # Nothing linked before the run: proves the run must do the linking.
+    assert str(twin_dir) not in _ws_linked_folder_paths(db, ws_id)
+
+    card = tmp_path / "card"
+    card.mkdir()
+    import shutil
+    shutil.copy2(str(twin_file), str(card / "IMG_0400.jpg"))
+
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(sources=[str(card)], destination=str(alias_archive)),
+    )
+
+    assert result["copied"] == 0
+    assert result["skipped_duplicate"] == 1
+    assert result["failed"] == 0
+    assert result["safe_to_format"] is True
+    # The twin folder was scanned + linked despite the destination being
+    # a symlink to (not literally equal to) the twin's cataloged root.
+    assert str(twin_dir) in _ws_linked_folder_paths(db, ws_id)
+
+
 def test_import_invalidates_derived_caches_on_content_change(tmp_path):
     """When a landed file replaces bytes at a path whose catalog row already
     has ``working_copy_path`` set (from a prior scan of an older archive

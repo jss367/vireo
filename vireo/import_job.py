@@ -62,7 +62,6 @@ from import_dedup import (
     stored_metadata_key,
 )
 from ingest import (
-    _path_under_root,
     _source_file_timestamps,
     build_destination_path,
     discover_source_files,
@@ -307,7 +306,7 @@ def _hash_twin_rows(db, file_hash):
     ).fetchall()
 
 
-def _linkable_twin_dirs(rows, destination):
+def _linkable_twin_dirs(rows, under_destination):
     """Destination-scoped folders holding a duplicate's cataloged twin.
 
     Only folders under the import destination are scanned/linked after a
@@ -320,15 +319,23 @@ def _linkable_twin_dirs(rows, destination):
     to ``ok`` before the dup-link scan runs — otherwise a duplicate-only
     batch that matches a missing-marked twin folder would drop it from
     ``dup_dirs``, safe_to_format could go green, and the imported
-    duplicates would stay filtered out of workspace queries. See PR
-    #1107 review.
+    duplicates would stay filtered out of workspace queries.
+
+    ``under_destination(path)`` compares resolved/case-normalized paths
+    (built in ``run_import_job`` from the destination's own filesystem
+    semantics). A lexical prefix check would drop a twin folder when the
+    destination is a symlink to the twin's on-disk archive root, or
+    spelled with different case on a case-insensitive mount — dropping
+    the twin means the duplicate-link scan never runs and the imported
+    duplicate stays filtered out of the active workspace while
+    safe_to_format still flips green. See PR #1107 review.
     """
     dirs = set()
     for r in rows:
         folder_path = r["folder_path"]
         if r["folder_status"] not in ("ok", "partial", "missing"):
             continue
-        if not _path_under_root(folder_path, destination):
+        if not under_destination(folder_path):
             continue
         if not os.path.isdir(folder_path):
             continue
@@ -357,7 +364,20 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     # ``/photos/archive/…`` but the restricted scan root would remain the
     # dot-segment form, so the recursion never reaches root and the scan
     # loses those files (copied bytes then bucket as catalog failures).
-    destination = os.path.normpath(str(params.destination))
+    #
+    # Also resolve symlinks (``realpath``) so a destination like ``/photos``
+    # symlinked at ``/Volumes/Photos`` matches cataloged twin folders whose
+    # ``folders.path`` was scanned under the real archive root — otherwise
+    # a duplicate-only import's dup-link scan is called with the symlink
+    # path as root while its ``restrict_dirs`` hold the real path, and
+    # ``_ensure_folder``'s walk never reaches root (dead recurse). Sources
+    # are already ``realpath``-resolved (see ``_norm_source``); doing the
+    # same to destination keeps the two sides symmetric. See PR #1107
+    # review.
+    try:
+        destination = os.path.realpath(os.path.normpath(str(params.destination)))
+    except OSError:
+        destination = os.path.normpath(str(params.destination))
 
     # Normalized realpaths of every import source root, used to reject
     # cataloged twins that live under the card being imported. The
@@ -439,6 +459,41 @@ def run_import_job(job, runner, db_path, workspace_id, params):
             if cmp == root or cmp.startswith(root + os.sep):
                 return True
         return False
+
+    # Destination containment for cataloged twin folders. ``destination``
+    # is already ``realpath``-resolved above so a symlinked destination
+    # like ``/photos`` -> ``/Volumes/Photos`` matches twin folders
+    # cataloged under ``/Volumes/Photos/…``. Case-different spellings on
+    # case-insensitive mounts (HFS+/APFS/exFAT) still need explicit
+    # case-folding: ``realpath`` on APFS preserves the case the user
+    # gave. Probe the destination's own filesystem (walking up to the
+    # closest existing ancestor when the destination itself hasn't been
+    # created yet); default to case-sensitive on failure — a strictly
+    # narrower guard, never wider. See PR #1107 review.
+    def _probe_dir_case_insensitive(path):
+        p = os.path.normpath(path)
+        while True:
+            if os.path.isdir(p):
+                return _fs_is_case_insensitive(p)
+            parent = os.path.dirname(p)
+            if parent == p:
+                return False
+            p = parent
+
+    _dest_ci = _case_insensitive_platform or _probe_dir_case_insensitive(destination)
+    _dest_root_norm = (
+        destination.casefold() if _dest_ci else destination
+    ).rstrip(os.sep)
+
+    def _path_under_destination(path):
+        if not _dest_root_norm:
+            return False
+        try:
+            real = os.path.realpath(path)
+        except OSError:
+            real = str(path)
+        cmp = (real.casefold() if _dest_ci else real).rstrip(os.sep)
+        return cmp == _dest_root_norm or cmp.startswith(_dest_root_norm + os.sep)
 
     runner.set_steps(job["id"], [
         {"id": "import", "label": "Copy & catalog"},
@@ -778,7 +833,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                         skipped_duplicate += 1
                         _counts(rel)["skipped_duplicate"] += 1
                         dup_dirs.update(
-                            _linkable_twin_dirs(twin_rows, destination),
+                            _linkable_twin_dirs(twin_rows, _path_under_destination),
                         )
                         run_dest = run_dest_folders.get(token)
                         if run_dest is not None:
