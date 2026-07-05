@@ -202,9 +202,11 @@ def test_duplicate_only_import_links_matched_folders(tmp_path):
     assert len(_photo_rows(db)) == 1
 
 
-def test_catalog_never_references_missing_files(tmp_path):
+def test_catalog_never_references_missing_files(tmp_path, monkeypatch):
     """Invariant: catalog is a subset of verified on-disk files, even when
     some copies fail."""
+    import shutil as shutil_mod
+
     from import_job import ImportParams
 
     card = _make_card(tmp_path, [
@@ -214,9 +216,6 @@ def test_catalog_never_references_missing_files(tmp_path):
     archive = tmp_path / "archive"
 
     # Sabotage the second copy: corrupt destination bytes for DSC_0011.
-    import shutil as shutil_mod
-
-    import import_job as ij
     real_copy2 = shutil_mod.copy2
 
     def flaky_copy2(s, d):
@@ -225,14 +224,10 @@ def test_catalog_never_references_missing_files(tmp_path):
             with open(d, "r+b") as f:
                 f.write(b"CORRUPT")
 
-    orig = ij.shutil.copy2
-    ij.shutil.copy2 = flaky_copy2
-    try:
-        db, ws_id, result = _run_import(tmp_path, ImportParams(
-            sources=[str(card)], destination=str(archive),
-        ))
-    finally:
-        ij.shutil.copy2 = orig
+    monkeypatch.setattr("import_job.shutil.copy2", flaky_copy2)
+    db, ws_id, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)], destination=str(archive),
+    ))
 
     assert result["copied"] == 1
     assert result["failed"] == 1
@@ -1346,3 +1341,185 @@ def test_wc_extraction_falls_back_to_archive_when_card_vanishes(
         f"extractor should not have read the vanished card path, "
         f"got dead reads={dead_reads}"
     )
+
+
+def test_copy_and_hash_verify_falls_back_when_hardlinks_unsupported(
+        tmp_path, monkeypatch):
+    """Destinations on FAT/exFAT and some SMB/NFS mounts reject os.link
+    with EPERM/ENOTSUP. Without a fallback promotion path every file on
+    those archives buckets as a copy failure; with the fallback the
+    verified temp file lands via an atomic O_EXCL + os.replace and the
+    copy succeeds.
+    """
+    import errno as errno_mod
+
+    from import_dedup import compute_file_hash
+    from import_job import copy_and_hash_verify
+
+    src = tmp_path / "card" / "DSC_9500.jpg"
+    src.parent.mkdir()
+    src.write_bytes(b"card-file-bytes" * 100)
+    dst = tmp_path / "archive" / "DSC_9500.jpg"
+
+    def unsupported_link(a, b):
+        raise OSError(errno_mod.EPERM, "operation not permitted")
+
+    monkeypatch.setattr("import_job.os.link", unsupported_link)
+
+    ok, file_hash = copy_and_hash_verify(str(src), str(dst))
+    assert ok is True
+    assert file_hash == compute_file_hash(str(src))
+    assert dst.read_bytes() == src.read_bytes()
+    # No stray .tmp / empty-placeholder residue.
+    assert not list(dst.parent.glob(".DSC_9500.jpg.*.tmp"))
+
+
+def test_copy_and_hash_verify_fallback_still_refuses_to_overwrite(
+        tmp_path, monkeypatch):
+    """The O_EXCL fallback must preserve no-overwrite race protection: an
+    existing verified archive file must survive when os.link is not
+    available, mirroring the primary os.link path's FileExistsError."""
+    import errno as errno_mod
+
+    from import_job import copy_and_hash_verify
+
+    src = tmp_path / "card" / "DSC_9501.jpg"
+    src.parent.mkdir()
+    src.write_bytes(b"card bytes")
+
+    dst = tmp_path / "archive" / "DSC_9501.jpg"
+    dst.parent.mkdir()
+    dst.write_bytes(b"already-verified archive bytes")
+
+    def unsupported_link(a, b):
+        raise OSError(errno_mod.EPERM, "operation not permitted")
+
+    monkeypatch.setattr("import_job.os.link", unsupported_link)
+
+    ok, file_hash = copy_and_hash_verify(str(src), str(dst))
+    assert ok is False
+    assert file_hash is None
+    # The pre-existing verified copy must survive both the os.link race
+    # AND the fallback path — O_EXCL fails with FileExistsError and we
+    # never touch dst.
+    assert dst.read_bytes() == b"already-verified archive bytes"
+    # And the temp file must be cleaned up.
+    assert not list(dst.parent.glob(".DSC_9501.jpg.*.tmp"))
+
+
+def test_landed_file_failed_after_scan_is_not_double_counted(
+        tmp_path, monkeypatch):
+    """A file that lands (copy verifies), then hits a scan/lookup failure
+    must move out of copied/skipped_duplicate into failed — otherwise
+    ``copied + skipped_duplicate + failed`` exceeds ``discovered`` and the
+    exactly-one-terminal-bucket invariant breaks. Simulate a per-batch
+    scan failure and check the counts sum to ``discovered``.
+    """
+    import scanner as scanner_mod
+    from import_job import ImportParams, run_import_job
+
+    card = _make_card(tmp_path, [
+        ("DSC_1200.jpg", datetime(2026, 7, 6, 10, 0, 0), "red"),
+        ("DSC_1201.jpg", datetime(2026, 7, 6, 11, 0, 0), "green"),
+    ])
+    archive = tmp_path / "archive"
+
+    real_scan = scanner_mod.scan
+
+    def failing_scan(root, db_arg, **kwargs):
+        # Fail the restricted (per-batch) scan — the one with
+        # restrict_files. The dup-link path (no restrict_files) isn't
+        # exercised here; there are no duplicates.
+        if kwargs.get("restrict_files"):
+            raise OSError("simulated per-batch scan failure")
+            # (Not RuntimeError — that's cancellation.)
+        return real_scan(root, db_arg, **kwargs)
+
+    monkeypatch.setattr(scanner_mod, "scan", failing_scan)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(sources=[str(card)], destination=str(archive)),
+    )
+
+    # The invariant: every discovered file ends in exactly one terminal
+    # bucket. Before the fix, copied stayed at 2 and failed also went to
+    # 2, giving a sum of 4 > 2 discovered.
+    assert result["discovered"] == 2
+    assert (
+        result["copied"]
+        + result["skipped_duplicate"]
+        + result["failed"]
+    ) == result["discovered"], (
+        f"exactly-one-terminal-bucket violated: {result!r}"
+    )
+    assert result["failed"] == 2
+    assert result["copied"] == 0
+    assert result["safe_to_format"] is False
+
+    # Folder counts must also be internally consistent.
+    for _rel, counts in result["folders"].items():
+        assert counts["copied"] >= 0
+        assert counts["skipped_duplicate"] >= 0
+        assert counts["failed"] >= 0
+        assert (
+            counts["copied"]
+            + counts["skipped_duplicate"]
+            + counts["failed"]
+        ) == 2, f"folder count sum mismatch: {counts!r}"
+
+
+def test_import_photos_rejects_case_variant_source_nested_destination(
+        tmp_path, monkeypatch):
+    """On case-insensitive filesystems (macOS APFS/HFS+, Windows NTFS)
+    ``/Volumes/Card`` and ``/volumes/card`` refer to the same directory.
+    The API guard against source-contained destinations must compare
+    case-folded on those platforms; a naive prefix check would let a
+    differently cased spelling slip past and hit the safe-to-format
+    data-loss trap.
+    """
+    import sys
+
+    from db import Database
+
+    # Config isolation — same pattern as vireo/tests/test_app.py.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    # Force the case-insensitive code path regardless of the test host.
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    db_path = str(tmp_path / "test.db")
+    thumb_dir = str(tmp_path / "thumbs")
+    os.makedirs(thumb_dir)
+    d = Database(db_path)
+    d.ensure_default_workspace()
+    d.close()
+
+    # Set up a plausibly cased source (real dir) and a differently cased
+    # destination that resolves under it. We use case-preserving names on
+    # the underlying filesystem; ``realpath`` won't rewrite the case on
+    # Linux, so the case-fold comparison is what catches the containment.
+    source = tmp_path / "Card"
+    source.mkdir()
+    dest_inside = str(source).replace("Card", "card") + "/archive"
+
+    from app import create_app
+
+    app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir)
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/jobs/import-photos",
+            json={
+                "sources": [str(source)],
+                "destination": dest_inside,
+            },
+        )
+
+    assert resp.status_code == 400, resp.get_data(as_text=True)
+    payload = resp.get_json()
+    assert "inside a source" in (payload.get("error") or "")

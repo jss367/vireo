@@ -14808,10 +14808,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # format once ``copied + skipped_duplicate == discovered``; if the
         # destination lives inside the card, formatting the card also erases
         # the supposed archive copy, so allowing this is a data-loss trap.
+        #
+        # macOS's default APFS/HFS+ volumes and Windows NTFS are
+        # case-INSENSITIVE, so ``/Volumes/Card`` and ``/volumes/card`` are
+        # the same directory but ``realpath`` doesn't case-normalize on
+        # POSIX (macOS reports as POSIX). Compare case-folded on those
+        # platforms so a differently cased spelling can't bypass the
+        # containment check; on Linux we keep case-sensitive comparison
+        # because ext4/xfs really do distinguish case.
+        _case_insensitive_platform = sys.platform in ("darwin", "win32")
+
+        def _casenorm(p):
+            return p.casefold() if _case_insensitive_platform else p
+
         try:
             dest_real = os.path.realpath(destination)
         except OSError as e:
             return json_error(f"destination cannot be resolved: {e}")
+        dest_cmp = _casenorm(dest_real)
         for s in sources:
             try:
                 source_real = os.path.realpath(s)
@@ -14819,8 +14833,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # Source unresolvable — the os.path.isdir check above
                 # already handled non-existent sources; nothing more to say.
                 continue
-            if dest_real == source_real or dest_real.startswith(
-                source_real.rstrip(os.sep) + os.sep
+            source_cmp = _casenorm(source_real).rstrip(os.sep)
+            if dest_cmp == source_cmp or dest_cmp.startswith(
+                source_cmp + os.sep
             ):
                 return json_error(
                     f"destination cannot be inside a source directory "

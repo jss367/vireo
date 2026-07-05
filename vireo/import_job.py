@@ -46,6 +46,7 @@ Reconnaissance notes (Task 2.0, verified 2026-07-04):
 """
 
 import contextlib
+import errno
 import logging
 import os
 import shutil
@@ -99,15 +100,23 @@ def copy_and_hash_verify(src, dst, *, src_hash=None):
     """Copy ``src`` to ``dst`` and verify the landed bytes by content hash.
 
     The copy goes to a hidden sibling temp path first; only a copy whose
-    hash matches the source is promoted into ``dst``. Promotion uses a
-    no-overwrite ``os.link`` (atomic on POSIX same-FS) rather than
-    ``os.replace`` — imports have no pipeline-slot lock, so two concurrent
-    jobs targeting the same destination/date folder with the same
-    filename can both pass their pre-copy collision check before either
-    promotes; ``os.replace`` would silently overwrite the first job's
-    already-verified archive copy, and its ``safe_to_format`` would still
-    report green after the bytes it verified are gone. A raced promote is
-    surfaced as a copy failure instead.
+    hash matches the source is promoted into ``dst``. Promotion prefers a
+    no-overwrite ``os.link`` (atomic on POSIX same-FS) over ``os.replace``
+    — imports have no pipeline-slot lock, so two concurrent jobs targeting
+    the same destination/date folder with the same filename can both pass
+    their pre-copy collision check before either promotes; ``os.replace``
+    would silently overwrite the first job's already-verified archive
+    copy, and its ``safe_to_format`` would still report green after the
+    bytes it verified are gone. A raced promote is surfaced as a copy
+    failure instead.
+
+    When the destination filesystem does not support hard links (exFAT/FAT,
+    some SMB/NFS mounts — os.link raises OSError with EPERM/ENOTSUP/
+    EOPNOTSUPP), fall back to ``O_CREAT|O_EXCL`` to atomically claim the
+    destination path as an empty placeholder, then ``os.replace`` the
+    verified temp file over it. That preserves no-overwrite race
+    protection without requiring hardlink support, so imports do not fail
+    across every file on FAT-family archives or hardlinkless NAS shares.
 
     On mismatch (or race) the temp copy is removed and any pre-existing
     ``dst`` is left untouched.
@@ -151,6 +160,50 @@ def copy_and_hash_verify(src, dst, *, src_hash=None):
                 dst,
             )
             return (False, None)
+        except OSError as link_err:
+            # Hard links unsupported on this destination filesystem
+            # (FAT/exFAT return EPERM; some SMB/NFS mounts return
+            # ENOTSUP/EOPNOTSUPP; Windows exFAT can return EACCES). Fall
+            # back to an atomic no-overwrite reserve-and-replace: O_EXCL
+            # atomically claims ``dst`` as an empty placeholder (races
+            # with concurrent imports fail here just like os.link would),
+            # then os.replace atomically swaps the verified temp into
+            # place. Without this fallback every file on hardlinkless
+            # archives buckets as a copy failure and imports are
+            # unusable on those destinations. See PR #1107 review.
+            if not _fs_lacks_hardlinks(link_err):
+                raise
+            log.info(
+                "os.link unsupported on %s (%s); using O_EXCL fallback",
+                dst_dir, link_err,
+            )
+            try:
+                fd = os.open(
+                    dst,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o644,
+                )
+            except FileExistsError:
+                log.warning(
+                    "Destination raced during copy "
+                    "(concurrent import?): %s",
+                    dst,
+                )
+                return (False, None)
+            os.close(fd)
+            try:
+                os.replace(tmp, dst)
+            except OSError as rep_err:
+                log.warning(
+                    "Fallback promote failed for %s -> %s: %s",
+                    src, dst, rep_err,
+                )
+                # Best-effort remove the empty placeholder we created.
+                with contextlib.suppress(OSError):
+                    os.unlink(dst)
+                return (False, None)
+            tmp = None
+            return (True, copied_hash)
         os.unlink(tmp)
         tmp = None
         return (True, copied_hash)
@@ -161,6 +214,32 @@ def copy_and_hash_verify(src, dst, *, src_hash=None):
         if tmp is not None:
             with contextlib.suppress(OSError):
                 os.unlink(tmp)
+
+
+# errno values that mean "this filesystem doesn't support hard links",
+# not "the operation was denied for some other reason". Kept narrow so a
+# genuine permission error on a link-supporting FS still surfaces as a
+# copy failure instead of silently falling back to the placeholder path.
+# EPERM is the canonical Linux answer for FAT/exFAT; ENOTSUP/EOPNOTSUPP
+# come from various BSD-family kernels and userspace filesystems; EACCES
+# has been observed on Windows exFAT via WSL. EXDEV (cross-device link)
+# also lands here — same-directory tmp should never trip it, but treating
+# it as "hard link not usable here" and using the O_EXCL fallback is
+# strictly safer than propagating.
+_HARDLINK_UNSUPPORTED_ERRNOS = frozenset(
+    e for e in (
+        getattr(errno, "EPERM", None),
+        getattr(errno, "ENOTSUP", None),
+        getattr(errno, "EOPNOTSUPP", None),
+        getattr(errno, "EACCES", None),
+        getattr(errno, "EXDEV", None),
+    ) if e is not None
+)
+
+
+def _fs_lacks_hardlinks(err):
+    """True when ``err`` from os.link indicates a hardlinkless target FS."""
+    return getattr(err, "errno", None) in _HARDLINK_UNSUPPORTED_ERRNOS
 
 
 def _key_twin_rows(db, key):
@@ -368,6 +447,30 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         unsafe_files.append({"path": str(source_file), "reason": reason})
         log.warning("Import failed for %s: %s", source_file, reason)
 
+    def _reclassify_landed_failed(rel, entry, reason):
+        """Move a landed file's count from copied/skipped_duplicate to failed.
+
+        A landed entry has already been booked into ``copied`` (fresh copy)
+        or ``skipped_duplicate`` (crash-recovery adopt) at the moment its
+        bytes were verified on disk. When a later step in the batch pass
+        (scan itself failing, a missing catalog row after scan, or a
+        hash mismatch against what scan re-hashed) forces this file into
+        the ``failed`` bucket, the origin count must be rolled back —
+        otherwise the exactly-one-terminal-bucket invariant breaks and
+        ``copied + skipped_duplicate + failed`` exceeds ``discovered``.
+        """
+        nonlocal copied, verified, skipped_duplicate
+        dest_path = entry[0]
+        origin = entry[3]
+        if origin == "copied":
+            copied -= 1
+            verified -= 1
+            _counts(rel)["copied"] -= 1
+        elif origin == "skipped_duplicate":
+            skipped_duplicate -= 1
+            _counts(rel)["skipped_duplicate"] -= 1
+        _fail(rel, dest_path, reason)
+
     def _record_checker(source_file, dest_folder, file_hash):
         """Register a landed file's identity with the intra-run checker.
 
@@ -550,7 +653,8 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                             skipped_duplicate += 1
                             _counts(rel)["skipped_duplicate"] += 1
                             landed.append(
-                                (dest_file, src_hash, str(source_file)),
+                                (dest_file, src_hash, str(source_file),
+                                 "skipped_duplicate"),
                             )
                             _record_checker(
                                 source_file, dest_folder, src_hash,
@@ -585,7 +689,9 @@ def run_import_job(job, runner, db_path, workspace_id, params):
             copied += 1
             verified += 1
             _counts(rel)["copied"] += 1
-            landed.append((dest_file, file_hash, str(source_file)))
+            landed.append(
+                (dest_file, file_hash, str(source_file), "copied"),
+            )
             _record_checker(source_file, dest_folder, file_hash)
 
         # --- Catalog this batch (even when cancelled mid-batch: what
@@ -593,7 +699,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         # stopping point is a valid catalog state). Bounded by the batch
         # size, so no cancel_check is passed — it runs to completion.
         if landed:
-            landed_paths = {p for p, _, _ in landed}
+            landed_paths = {entry[0] for entry in landed}
             try:
                 scan(
                     destination, db,
@@ -602,13 +708,19 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                     vireo_dir=None,
                 )
             except Exception as e:  # scan failure fails the whole batch
-                for path, _, _ in landed:
-                    _fail(rel, path, f"catalog scan failed: {e}")
+                # Each entry was already booked into copied or
+                # skipped_duplicate — reclassify (roll back origin, add
+                # to failed) so the ledger never double-counts.
+                for entry in landed:
+                    _reclassify_landed_failed(
+                        rel, entry, f"catalog scan failed: {e}",
+                    )
                 landed = []
 
             # Stamp the verified hashes in the integrity-audit vocabulary,
             # cross-checked against what scan() stored.
-            for dest_path, verified_hash, _src in landed:
+            for entry in landed:
+                dest_path, verified_hash, _src, _origin = entry
                 row = db.conn.execute(
                     """SELECT p.id, p.file_hash FROM photos p
                        JOIN folders f ON f.id = p.folder_id
@@ -631,7 +743,9 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                     ).fetchone()
                     if companion is not None:
                         continue
-                    _fail(rel, dest_path, "not cataloged after scan")
+                    _reclassify_landed_failed(
+                        rel, entry, "not cataloged after scan",
+                    )
                     continue
                 if row["file_hash"] == verified_hash:
                     db.update_photo_hash_check(
@@ -651,8 +765,8 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                             commit=False,
                         )
                 else:
-                    _fail(
-                        rel, dest_path,
+                    _reclassify_landed_failed(
+                        rel, entry,
                         "destination changed between copy verification and "
                         "catalog scan (hash mismatch)",
                     )
@@ -667,7 +781,8 @@ def run_import_job(job, runner, db_path, workspace_id, params):
             # failure marker or low-quality WC that the candidate
             # predicate then skips.
             if params.vireo_dir:
-                for dest_path, _hash, src_path in landed:
+                for entry in landed:
+                    dest_path, _hash, src_path, _origin = entry
                     wc_source_paths[dest_path] = src_path
                 wc_dest_folders.add(dest_folder)
 
