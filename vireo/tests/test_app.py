@@ -6827,14 +6827,14 @@ def test_import_page_returns_200(app_and_db):
     assert "/api/jobs/import-photos" in html
 
 
-def test_import_page_defaults_after_import_from_workspace(app_and_db):
-    """The menu's preselected value must reflect the active workspace's
-    pipeline.default_strategy — not a hardcoded default."""
-    app, db = app_and_db
-    db.update_workspace(
-        db._active_workspace_id,
-        config_overrides={"pipeline": {"default_strategy": "cull_ready"}},
-    )
+def test_import_page_resolves_default_strategy_client_side(app_and_db):
+    """Templates are Jinja-free by convention, so the after-import menu's
+    default resolves in page JS from the workspace's config_overrides
+    merged over /api/config — assert the wiring exists (behavior is
+    covered by the user-first scenario)."""
+    app, _ = app_and_db
     client = app.test_client()
     html = client.get("/import").data.decode()
-    assert 'data-default-strategy="cull_ready"' in html
+    assert "/api/workspaces/active" in html
+    assert "default_strategy" in html
+    assert "config_overrides" in html

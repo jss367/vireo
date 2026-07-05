@@ -76,13 +76,11 @@ body { display: flex; flex-direction: column; height: 100vh; }
         <input type="text" id="destInput" list="recentDestinations"
                placeholder="Archive folder (e.g. /Volumes/Photography/Raw Files/USA)"
                value="">
-        <datalist id="recentDestinations">
-          {% for dest in recent_destinations %}<option value="{{ dest }}">{% endfor %}
-        </datalist>
+        <datalist id="recentDestinations"></datalist>
       </div>
       <div class="row">
         <label>Folder template</label>
-        <input type="text" id="folderTemplate" value="{{ folder_template_default }}" style="max-width:200px;flex:0 1 auto;">
+        <input type="text" id="folderTemplate" value="%Y/%Y-%m-%d" style="max-width:200px;flex:0 1 auto;">
         <span class="hint">strftime of each photo's capture time, e.g. %Y/%Y-%m-%d</span>
       </div>
     </div>
@@ -90,7 +88,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
     <div class="card">
       <h3>After import</h3>
       <div class="row">
-        <select id="afterImportSelect" data-default-strategy="{{ default_strategy or '' }}" style="max-width:280px;">
+        <select id="afterImportSelect" style="max-width:280px;">
           <option value="__none__">None — import only</option>
           <option value="quick_look">Quick look (thumbnails + previews)</option>
           <option value="cull_ready">Cull-ready (+ detect, classify, group)</option>
@@ -392,9 +390,45 @@ async function initImportPage() {
       });
     }
   } catch (e) { /* suggestions only */ }
+  // Effective config = global config with the active workspace's
+  // config_overrides merged over it (templates are Jinja-free by
+  // convention, so the merge happens here, matching
+  // db.get_effective_config's pipeline/ingest sub-dict behavior).
+  let cfg = {};
+  let overrides = {};
+  try {
+    const resp = await fetch('/api/config');
+    if (resp.ok) cfg = await resp.json();
+  } catch (e) { /* defaults below */ }
+  try {
+    const resp = await fetch('/api/workspaces/active');
+    if (resp.ok) {
+      const ws = await resp.json();
+      const raw = ws.config_overrides;
+      overrides = typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
+    }
+  } catch (e) { /* defaults below */ }
+  const ingestCfg = Object.assign(
+    {}, cfg.ingest || {}, (overrides || {}).ingest || {},
+  );
+  const pipelineCfg = Object.assign(
+    {}, cfg.pipeline || {}, (overrides || {}).pipeline || {},
+  );
+
+  const recents = ingestCfg.recent_destinations || [];
+  const dl = document.getElementById('recentDestinations');
+  recents.forEach((d) => {
+    const opt = document.createElement('option');
+    opt.value = d;
+    dl.appendChild(opt);
+  });
+  if (ingestCfg.folder_template) {
+    document.getElementById('folderTemplate').value = ingestCfg.folder_template;
+  }
+
   // Preselect the workspace's default strategy (null -> import only).
   const sel = document.getElementById('afterImportSelect');
-  const def = sel.getAttribute('data-default-strategy');
+  const def = pipelineCfg.default_strategy;
   sel.value = def ? def : '__none__';
   if (sel.selectedIndex === -1) sel.value = '__none__';
 }

@@ -20619,22 +20619,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/import")
     def import_page():
         """Import page (import/process split PR 3): copy card → archive
-        via /api/jobs/import-photos, with the after-import strategy menu
-        defaulted from the active workspace."""
-        import config as cfg
-
-        db = _get_db()
-        effective = db.get_effective_config(cfg.load())
-        pipeline_cfg = effective.get("pipeline") or {}
-        ingest_cfg = effective.get("ingest") or {}
-        return render_template(
-            "import.html",
-            default_strategy=pipeline_cfg.get("default_strategy"),
-            recent_destinations=ingest_cfg.get("recent_destinations") or [],
-            folder_template_default=ingest_cfg.get(
-                "folder_template", "%Y/%Y-%m-%d",
-            ),
-        )
+        via /api/jobs/import-photos. Templates are Jinja-free by
+        convention — defaults (workspace strategy, recents, template)
+        resolve client-side from /api/config + /api/workspaces/active."""
+        return render_template("import.html")
 
     @app.route("/map")
     def map_page():
