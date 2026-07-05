@@ -2577,6 +2577,58 @@ def test_non_empty_null_scan_hash_reclassifies_when_rehash_disagrees(
     assert any("DSC_3000.jpg" in p for p in unsafe_paths), unsafe_paths
 
 
+def test_dest_file_nested_under_source_is_rejected(tmp_path):
+    """When the destination is a legal ancestor of a source but the folder
+    template maps the source right back INTO the source tree, ``dest_file``
+    is a different path than the source file (samefile is False) but still
+    lives under the card. Copying there is counted as ``copied``,
+    ``safe_to_format`` can go green, and formatting the card also erases
+    the "archive" copy. The import job must reject that overlap even
+    though the two paths are not the same file. See PR #1107 review.
+    """
+    from import_job import ImportParams
+
+    # Source is /volumes/Card/DCIM (with photos directly in it); the
+    # destination is /volumes/Card and the folder template ``DCIM/Archive/
+    # %Y`` maps the source back into itself: dest_file lives at
+    # /volumes/Card/DCIM/Archive/2026/<name>, which is under the source
+    # but is not the source file.
+    card = tmp_path / "volumes" / "Card"
+    dcim = card / "DCIM"
+    dcim.mkdir(parents=True)
+    src_file = dcim / "DSC_5000.jpg"
+    Image.new("RGB", (16, 16), "goldenrod").save(str(src_file))
+    ts = datetime(2026, 7, 5, 10, 0, 0).timestamp()
+    os.utime(str(src_file), (ts, ts))
+    original_bytes = src_file.read_bytes()
+
+    db, ws_id, result = _run_import(tmp_path, ImportParams(
+        sources=[str(dcim)],
+        destination=str(card),
+        folder_template="DCIM/Archive/%Y",
+    ))
+
+    # The source bytes MUST still be on disk.
+    assert src_file.exists()
+    assert src_file.read_bytes() == original_bytes
+    # The nested "archive" copy MUST NOT have been created.
+    assert not (dcim / "Archive" / "2026" / "DSC_5000.jpg").exists()
+    # It must NOT be counted as copied/skipped; it must be failed.
+    assert result["copied"] == 0
+    assert result["skipped_duplicate"] == 0
+    assert result["failed"] == 1
+    # Safe-to-format MUST NOT go green when the archive would live on
+    # the card being imported.
+    assert result["safe_to_format"] is False
+    assert (
+        result["copied"]
+        + result["skipped_duplicate"]
+        + result["failed"]
+    ) == result["discovered"]
+    unsafe_paths = [u["path"] for u in result["unsafe_files"]]
+    assert any("DSC_5000.jpg" in p for p in unsafe_paths), unsafe_paths
+
+
 def test_source_equals_dest_file_is_rejected(tmp_path):
     """When a source lives under the destination and the folder template
     maps it back to the same directory, dest_file resolves to the source

@@ -407,16 +407,22 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         ``/mnt`` cannot resolve ``/Mnt`` or a differently-cased
         ``Card`` entry (mount-point dentries live in the parent FS),
         so swapping characters in the ``path`` string always reports
-        case-sensitive regardless of the card's own semantics. On any
-        error, empty directory, or entry without an alpha character,
-        returns False and the caller falls back to case-sensitive
-        comparison (strictly narrower guard, never wider). See PR
-        #1107 review.
+        case-sensitive regardless of the card's own semantics.
+
+        Any inconclusive result (unlistable, empty, no alpha-containing
+        entry — Nikon-style ``100``/``101``/``102`` roots — or a stat
+        error while comparing) returns True so the caller falls back
+        to case-fold, mirroring the ``/api/jobs/import-photos`` route
+        guard. False on inconclusive would let a differently-cased
+        catalog twin under a source pass duplicate acceptance (or a
+        differently-cased twin folder under the destination skip
+        workspace linking), and ``safe_to_format`` could then go green
+        without a visible off-card copy. See PR #1107 review.
         """
         try:
             entries = os.listdir(path)
         except OSError:
-            return False
+            return True
         for name in entries:
             for i, c in enumerate(name):
                 if c.isalpha():
@@ -426,12 +432,14 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                     original_full = os.path.join(path, name)
                     probe_full = os.path.join(path, swapped)
                     if not os.path.exists(probe_full):
+                        # Definitive: the case-swap resolves to nothing,
+                        # so the filesystem distinguishes case.
                         return False
                     try:
                         return os.path.samefile(original_full, probe_full)
                     except OSError:
-                        return False
-        return False
+                        return True
+        return True
 
     def _norm_source(s):
         try:
@@ -468,8 +476,11 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     # case-folding: ``realpath`` on APFS preserves the case the user
     # gave. Probe the destination's own filesystem (walking up to the
     # closest existing ancestor when the destination itself hasn't been
-    # created yet); default to case-sensitive on failure — a strictly
-    # narrower guard, never wider. See PR #1107 review.
+    # created yet); default to case-insensitive on inconclusive results
+    # so a differently-cased twin folder under the destination is still
+    # linked to the workspace — otherwise ``safe_to_format`` can go
+    # green while the imported photo stays invisible in the active
+    # workspace. See PR #1107 review.
     def _probe_dir_case_insensitive(path):
         p = os.path.normpath(path)
         while True:
@@ -477,7 +488,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                 return _fs_is_case_insensitive(p)
             parent = os.path.dirname(p)
             if parent == p:
-                return False
+                return True
             p = parent
 
     _dest_ci = _case_insensitive_platform or _probe_dir_case_insensitive(destination)
@@ -897,12 +908,22 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                     os.path.normpath(str(source_file))
                     == os.path.normpath(dest_file)
                 )
-            if same_file:
+            # Also reject any dest_file (not just an exact self-copy) that
+            # resolves under any source root. Example: source
+            # ``/Volumes/Card/DCIM``, destination ``/Volumes/Card``,
+            # template ``DCIM/Archive/%Y`` — dest_file lands at
+            # ``/Volumes/Card/DCIM/Archive/2026/<name>``, which is NOT the
+            # source file (samefile is False) but is still inside the card.
+            # A copy there is counted as ``copied``, safe_to_format can go
+            # green, and formatting the card erases the "archive" copy too.
+            # See PR #1107 review.
+            dest_under_source = _path_under_any_source(dest_file)
+            if same_file or dest_under_source:
                 _fail(
                     rel, source_file,
-                    "destination folder template resolves back to the "
-                    "source directory (dest_file is the source file itself); "
-                    "no archive copy would be made",
+                    "destination file resolves inside a source directory "
+                    "(dest_file would live under the card being imported); "
+                    "formatting the card would erase the archive copy",
                 )
                 continue
             # Capture card-side (size, mtime_ns) BEFORE the copy so the
