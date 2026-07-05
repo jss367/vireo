@@ -589,6 +589,28 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         )
         os.makedirs(dest_folder, exist_ok=True)
 
+        # Promote any pre-existing folder row for this destination out of
+        # ``'missing'``. Standalone scans run ``check_folder_health()`` as
+        # their preflight, so a reattached archive drive transitions
+        # ``missing`` → ``ok`` before its files become visible in the
+        # workspace again. The import path calls ``scanner.scan()``
+        # directly, and scan's success stamp only clears ``'partial'``
+        # (see ``_update_folder_status(only_from_partial=True)``), so a
+        # folder row still marked ``'missing'`` would keep the archive
+        # drive's photos filtered out of workspace queries even after this
+        # import successfully lands and hash-stamps files into it, and
+        # safe_to_format could go green over folders the UI won't show.
+        # We just makedirs'd ``dest_folder`` so the path definitely exists;
+        # any row still labelled ``'missing'`` is stale. Preserve
+        # ``'partial'`` (a real prior-scan signal that the folder needs a
+        # rescan). See PR #1107 review.
+        db.conn.execute(
+            "UPDATE folders SET status = 'ok' "
+            "WHERE path = ? AND status = 'missing'",
+            (dest_folder,),
+        )
+        db.conn.commit()
+
         # (dest_path, verified_hash, card_source) for this batch's
         # landed files — fresh copies plus byte-identical files already
         # present at the destination (the crash-recovery path). The card

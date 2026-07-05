@@ -2410,3 +2410,95 @@ def test_import_invalidates_new_images_cache(tmp_path):
         "workspace linked to the destination folder after its restricted "
         "scans (mirrors pipeline_job / api_job_scan / api_job_import_full)"
     )
+
+
+def test_import_promotes_missing_destination_folder_to_ok(tmp_path):
+    """A pre-existing ``folders`` row marked ``'missing'`` for the import's
+    destination path must transition back to ``'ok'`` before the batch
+    scan runs — otherwise workspace queries filter the folder out and the
+    just-imported files never appear in the workspace, even though
+    safe_to_format goes green.
+
+    Standalone scans run ``check_folder_health()`` as their preflight,
+    which handles this globally. The import path calls ``scanner.scan()``
+    directly, and scan's success stamp only clears ``'partial'``. So a
+    reattached archive drive whose folder rows still say ``'missing'``
+    stays invisible after a successful import unless the import job
+    itself promotes the row. See PR #1107 review.
+    """
+    from import_job import ImportParams
+
+    card = _make_card(tmp_path, [
+        ("DSC_0500.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+    archive = tmp_path / "archive"
+    dest_dir = archive / "2026" / "2026-07-03"
+    dest_dir.mkdir(parents=True)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    # Pre-existing missing row for the same path that this import will
+    # populate (simulates: archive drive was disconnected during a health
+    # check and got reattached before this import).
+    db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES (?, ?, 'missing')",
+        (str(dest_dir), dest_dir.name),
+    )
+    db.conn.commit()
+
+    from import_job import run_import_job
+    result = run_import_job(_make_job(), FakeRunner(), db_path, ws_id,
+                            ImportParams(sources=[str(card)],
+                                         destination=str(archive)))
+    assert result["copied"] == 1
+    assert result["safe_to_format"] is True
+
+    status = db.conn.execute(
+        "SELECT status FROM folders WHERE path = ?", (str(dest_dir),),
+    ).fetchone()["status"]
+    assert status == "ok", (
+        "import must promote pre-existing missing folder row to 'ok' so "
+        "the imported files are visible in the workspace"
+    )
+
+
+def test_import_missing_promotion_narrow_status_guard(tmp_path):
+    """The missing→ok promotion must be gated on ``status='missing'`` so it
+    can't clobber other statuses. (``'partial'`` gets cleared by
+    scanner's success stamp anyway, but the pre-scan targeted UPDATE
+    must not overreach — that's what the ``AND status = 'missing'``
+    guard is for.)"""
+    from import_job import ImportParams
+
+    card = _make_card(tmp_path, [
+        ("DSC_0600.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+    archive = tmp_path / "archive"
+    dest_dir = archive / "2026" / "2026-07-03"
+    dest_dir.mkdir(parents=True)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # A sibling folder marked 'missing' whose path is NOT this import's
+    # destination must NOT be promoted — the pre-scan UPDATE is targeted
+    # by path, so unrelated rows stay untouched.
+    other_dir = archive / "2025" / "2025-01-01"
+    db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES (?, ?, 'missing')",
+        (str(other_dir), other_dir.name),
+    )
+    db.conn.commit()
+
+    from import_job import run_import_job
+    run_import_job(_make_job(), FakeRunner(), db_path, ws_id,
+                   ImportParams(sources=[str(card)], destination=str(archive)))
+
+    status = db.conn.execute(
+        "SELECT status FROM folders WHERE path = ?", (str(other_dir),),
+    ).fetchone()["status"]
+    assert status == "missing", (
+        "the missing→ok promotion must be scoped to this batch's dest_folder"
+    )
