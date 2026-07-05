@@ -7120,6 +7120,14 @@ async function openInatQuickModal(items, failures) {
     opened = await _inatOpenUrl(items[0].upload_url);
   }
 
+  function _inatAlreadySubmittedWarning(item) {
+    if (!item.already_submitted) return '';
+    var linkOrText = item.existing_url
+      ? '<a href="' + escapeAttr(item.existing_url) + '" target="_blank" rel="noopener" onclick="return openExternalLink(event, this.href)" style="color:var(--warning);">' + escapeHtml(item.existing_url) + '</a>'
+      : 'no observation URL recorded';
+    return '<div class="inat-card-status warning" style="margin-top:6px;">&#9888; Already submitted to iNaturalist: ' + linkOrText + '. Opening a new upload will create a duplicate observation.</div>';
+  }
+
   var html = '';
   if (items.length === 1) {
     html += '<div class="inat-card">' +
@@ -7130,6 +7138,7 @@ async function openInatQuickModal(items, failures) {
           '<div class="inat-card-status ' + (opened ? 'success' : 'warning') + '">' +
             (opened ? 'Opened iNaturalist in your browser.' : 'iNaturalist did not visibly open. Use the link below.') +
           '</div>' +
+          _inatAlreadySubmittedWarning(items[0]) +
         '</div>' +
       '</div>' +
       '<div style="font-size:13px;line-height:1.5;color:var(--text-secondary);">' +
@@ -7145,9 +7154,12 @@ async function openInatQuickModal(items, failures) {
         'Direct uploads need an iNaturalist token in Settings. Open each prepared upload page below.' +
       '</div>';
     items.forEach(function(item) {
-      html += '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0;border-top:1px solid var(--border-primary);">' +
-        '<span style="font-size:13px;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(item.filename) + '</span>' +
-        '<a href="' + escapeAttr(item.upload_url) + '" target="_blank" rel="noopener" onclick="return openExternalLink(event, this.href)" style="color:var(--accent);font-size:12px;white-space:nowrap;">Open Upload</a>' +
+      html += '<div style="display:flex;flex-direction:column;gap:4px;padding:8px 0;border-top:1px solid var(--border-primary);">' +
+        '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">' +
+          '<span style="font-size:13px;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(item.filename) + '</span>' +
+          '<a href="' + escapeAttr(item.upload_url) + '" target="_blank" rel="noopener" onclick="return openExternalLink(event, this.href)" style="color:var(--accent);font-size:12px;white-space:nowrap;">Open Upload</a>' +
+        '</div>' +
+        _inatAlreadySubmittedWarning(item) +
       '</div>';
     });
     html += '</div>';
@@ -7286,7 +7298,7 @@ async function inatDoSubmit() {
       statusEl.className = 'inat-card-status error';
       if (e.body && e.body.partial && e.body.observation_url) {
         statusEl.innerHTML = '&#10007; ' + escapeHtml(e.message) +
-          ' <a href="' + escapeAttr(e.body.observation_url) + '" target="_blank" rel="noopener" style="color:var(--danger);text-decoration:underline;">View created observation</a>';
+          ' <a href="' + escapeAttr(e.body.observation_url) + '" target="_blank" rel="noopener" onclick="return openExternalLink(event, this.href)" style="color:var(--danger);text-decoration:underline;">View created observation</a>';
       } else {
         statusEl.textContent = '✗ ' + e.message;
       }
