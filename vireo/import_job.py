@@ -107,6 +107,96 @@ def _invalidate_new_images(db, root):
 IMPORT_BATCH_SIZE = 200
 
 
+# Case-folded matching is unconditional on darwin/win32 (the OS enforces
+# case-insensitive filesystems). On Linux we probe each source's actual
+# filesystem: a FAT/exFAT/NTFS-mounted SD card is case-insensitive even
+# under a case-sensitive ext4 parent, so a platform-wide check would miss
+# a differently-cased twin path there. See PR #1107 review.
+_CASE_INSENSITIVE_PLATFORM = sys.platform in ("darwin", "win32")
+
+
+def _fs_is_case_insensitive(path):
+    """Probe whether the filesystem at ``path`` treats case as insensitive.
+
+    List an entry inside ``path`` and check whether accessing it under a
+    case-swapped name resolves to the same inode. Probing *inside* the
+    directory (rather than swapping characters in ``path`` itself) is
+    essential when a case-insensitive mount sits under a case-sensitive
+    parent — a FAT/exFAT SD card mounted at ``/mnt/Card`` on Linux under
+    an ext4 root: the ext4 ``/mnt`` cannot resolve ``/Mnt`` or a
+    differently-cased ``Card`` entry (mount-point dentries live in the
+    parent FS), so swapping characters in the ``path`` string always
+    reports case-sensitive regardless of the card's own semantics.
+
+    Any inconclusive result (unlistable, empty, no alpha-containing entry
+    — Nikon-style ``100``/``101``/``102`` roots — or a stat error while
+    comparing) returns True so the caller falls back to case-fold,
+    mirroring the ``/api/jobs/import-photos`` route guard. False on
+    inconclusive would let a differently-cased catalog twin under a
+    source pass duplicate acceptance (or a differently-cased twin folder
+    under the destination skip workspace linking), and
+    ``safe_to_format`` could then go green without a visible off-card
+    copy. See PR #1107 review.
+    """
+    try:
+        entries = os.listdir(path)
+    except OSError:
+        return True
+    for name in entries:
+        for i, c in enumerate(name):
+            if c.isalpha():
+                swapped = name[:i] + c.swapcase() + name[i + 1:]
+                if swapped == name:
+                    continue
+                original_full = os.path.join(path, name)
+                probe_full = os.path.join(path, swapped)
+                if not os.path.exists(probe_full):
+                    return False
+                try:
+                    return os.path.samefile(original_full, probe_full)
+                except OSError:
+                    return True
+    return True
+
+
+def _build_source_root_guard(sources):
+    """Return ``path_under_any_source(path) -> bool`` for the given roots.
+
+    Shared by both the local and remote duplicate gates to reject
+    cataloged twins that live under the card being imported. A stale scan
+    of a mounted card can leave a photos row whose ``folder_path`` IS the
+    card; re-hashing that twin just re-reads the very card file being
+    imported, so accepting it as duplicate proof would flip
+    ``safe_to_format`` green while the card holds the only bytes. Only an
+    off-card twin can back a duplicate skip. See PR #1107 review.
+    """
+    def _norm(s):
+        try:
+            real = os.path.realpath(s)
+        except OSError:
+            real = str(s)
+        ci = _CASE_INSENSITIVE_PLATFORM or _fs_is_case_insensitive(real)
+        return (real.casefold() if ci else real).rstrip(os.sep), ci
+
+    roots = [_norm(s) for s in sources]
+
+    def path_under_any_source(path):
+        try:
+            real = os.path.realpath(path)
+        except OSError:
+            real = str(path)
+        real_folded = real.casefold()
+        for root, ci in roots:
+            if not root:
+                continue
+            cmp = real_folded if ci else real
+            if cmp == root or cmp.startswith(root + os.sep):
+                return True
+        return False
+
+    return path_under_any_source
+
+
 @dataclass
 class ImportParams:
     """Parameters for an import job run."""
@@ -425,6 +515,15 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
     except OSError:
         destination = os.path.normpath(str(params.destination))
 
+    # Reject cataloged twins that live under the card being imported: a stale
+    # scan of the mounted card can leave a photos row whose ``folder_path``
+    # IS the card, and re-hashing it just re-reads the very source we're
+    # supposed to be copying off — which would count the file as
+    # ``skipped_duplicate`` and, when ``verify_by_hash`` is on, still let
+    # ``safe_to_format`` go green over a card whose bytes never crossed the
+    # network. Mirrors the local path's ``_path_under_any_source`` filter.
+    _path_under_any_source = _build_source_root_guard(params.sources)
+
     import move as move_mod
 
     runner.set_steps(job["id"], [
@@ -570,6 +669,16 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                         twin_path = os.path.join(
                             twin["folder_path"], twin["filename"],
                         )
+                        # A twin cataloged under any import source root is
+                        # (or may be) the card file being imported this run
+                        # — re-hashing it just re-reads the source, proving
+                        # nothing about an off-card copy. Accepting it would
+                        # count the file as skipped_duplicate and (with
+                        # verify_by_hash) let safe_to_format go green while
+                        # the card holds the only bytes. Mirrors the local
+                        # path's filter. See PR #1113 review.
+                        if _path_under_any_source(twin_path):
+                            continue
                         try:
                             twin_hash = compute_file_hash(twin_path)
                         except OSError:
@@ -792,38 +901,43 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
             else:
                 _invalidate_new_images(db, dest_folder)
 
-            # Hash stamping: ONLY on the checksum-verification path. Without
+            # Catalog-row presence is required on BOTH paths: the route's
+            # copy-and-catalog contract says every landed byte becomes a
+            # photo row, and a landed file with no row after scan is failed
+            # rather than silently left counted as ``copied`` — otherwise a
+            # remote import into an unmounted/misconfigured mount base would
+            # report copied/ok (or copied/NULL, no-verify) with no catalog
+            # trail. (A RAW+JPEG pair whose JPEG row was merged into the RAW
+            # is the main legitimate "no row" case; the RAW carries the
+            # bytes, so failing the JPEG here is conservative but keeps the
+            # pill honest.) Hash stamping (``hash_status='ok'``) still runs
+            # ONLY on the checksum-verification path — without
             # verify_by_hash the rows keep NULL hash_status/hash_checked_at
             # (scan may set file_hash, but we don't claim an integrity
-            # verdict we didn't independently make). A landed file with no
-            # catalog row after scan is failed rather than silently left
-            # unstamped — otherwise it would stay counted as ``copied`` and
-            # flip ``safe_to_format`` green without a stamped ``ok`` verdict.
-            # (A RAW+JPEG pair whose JPEG row was merged into the RAW is the
-            # main "no row" case; the RAW carries the bytes, so failing the
-            # JPEG here is conservative but keeps the pill honest.)
-            if params.verify_by_hash:
-                for dest_path, _sf, _sz, _mt in list(landed):
-                    row = db.conn.execute(
-                        """SELECT p.id FROM photos p
-                           JOIN folders f ON f.id = p.folder_id
-                           WHERE f.path = ? AND p.filename = ?""",
-                        (os.path.dirname(dest_path),
-                         os.path.basename(dest_path)),
-                    ).fetchone()
-                    if row is not None:
+            # verdict we didn't independently make).
+            for dest_path, _sf, _sz, _mt in list(landed):
+                row = db.conn.execute(
+                    """SELECT p.id FROM photos p
+                       JOIN folders f ON f.id = p.folder_id
+                       WHERE f.path = ? AND p.filename = ?""",
+                    (os.path.dirname(dest_path),
+                     os.path.basename(dest_path)),
+                ).fetchone()
+                if row is not None:
+                    if params.verify_by_hash:
                         db.update_photo_hash_check(
                             row["id"], "ok", commit=False,
                         )
-                    else:
-                        copied -= 1
+                else:
+                    copied -= 1
+                    if params.verify_by_hash:
                         verified -= 1
-                        _counts(rel)["copied"] -= 1
-                        _fail(rel, dest_path,
-                              "not cataloged after scan (no photo row)")
-                        landed = [
-                            e for e in landed if e[0] != dest_path
-                        ]
+                    _counts(rel)["copied"] -= 1
+                    _fail(rel, dest_path,
+                          "not cataloged after scan (no photo row)")
+                    landed = [
+                        e for e in landed if e[0] != dest_path
+                    ]
             db.conn.commit()
 
             if params.vireo_dir:
@@ -971,8 +1085,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     except OSError:
         destination = os.path.normpath(str(params.destination))
 
-    # Normalized realpaths of every import source root, used to reject
-    # cataloged twins that live under the card being imported. The
+    # Reject cataloged twins that live under the card being imported. The
     # /api/jobs/import-photos route already refuses destinations that sit
     # inside a source (formatting the card would erase the archive copy),
     # but the duplicate acceptance loop separately trusts any cataloged
@@ -980,85 +1093,9 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     # previously scanned mounted card. That twin's re-hash just re-reads
     # the very card file being imported, so accepting it as duplicate
     # proof would flip ``safe_to_format`` green over a card whose bytes
-    # never made it to the archive. Case-fold on darwin/win32
-    # unconditionally; on Linux probe each source's actual filesystem
-    # because a FAT/exFAT/NTFS-mounted SD card is case-insensitive even
-    # under a case-sensitive ext4 parent — a platform-wide check would
-    # miss a differently-cased twin path there. See PR #1107 review.
-    _case_insensitive_platform = sys.platform in ("darwin", "win32")
-
-    def _fs_is_case_insensitive(path):
-        """Probe whether the filesystem at ``path`` treats case as insensitive.
-
-        List an entry inside ``path`` and check whether accessing it
-        under a case-swapped name resolves to the same inode. Probing
-        *inside* the directory (rather than swapping characters in
-        ``path`` itself) is essential when a case-insensitive mount
-        sits under a case-sensitive parent — a FAT/exFAT SD card
-        mounted at ``/mnt/Card`` on Linux under an ext4 root: the ext4
-        ``/mnt`` cannot resolve ``/Mnt`` or a differently-cased
-        ``Card`` entry (mount-point dentries live in the parent FS),
-        so swapping characters in the ``path`` string always reports
-        case-sensitive regardless of the card's own semantics.
-
-        Any inconclusive result (unlistable, empty, no alpha-containing
-        entry — Nikon-style ``100``/``101``/``102`` roots — or a stat
-        error while comparing) returns True so the caller falls back
-        to case-fold, mirroring the ``/api/jobs/import-photos`` route
-        guard. False on inconclusive would let a differently-cased
-        catalog twin under a source pass duplicate acceptance (or a
-        differently-cased twin folder under the destination skip
-        workspace linking), and ``safe_to_format`` could then go green
-        without a visible off-card copy. See PR #1107 review.
-        """
-        try:
-            entries = os.listdir(path)
-        except OSError:
-            return True
-        for name in entries:
-            for i, c in enumerate(name):
-                if c.isalpha():
-                    swapped = name[:i] + c.swapcase() + name[i + 1:]
-                    if swapped == name:
-                        continue
-                    original_full = os.path.join(path, name)
-                    probe_full = os.path.join(path, swapped)
-                    if not os.path.exists(probe_full):
-                        # Definitive: the case-swap resolves to nothing,
-                        # so the filesystem distinguishes case.
-                        return False
-                    try:
-                        return os.path.samefile(original_full, probe_full)
-                    except OSError:
-                        return True
-        return True
-
-    def _norm_source(s):
-        try:
-            real = os.path.realpath(s)
-        except OSError:
-            real = str(s)
-        ci = _case_insensitive_platform or _fs_is_case_insensitive(real)
-        return (real.casefold() if ci else real).rstrip(os.sep), ci
-
-    # (normalized_root, is_case_insensitive) per source. Per-source ci is
-    # stored so ``_path_under_any_source`` case-folds the candidate path
-    # exactly when the source lives on a case-insensitive filesystem.
-    source_roots = [_norm_source(s) for s in params.sources]
-
-    def _path_under_any_source(path):
-        try:
-            real = os.path.realpath(path)
-        except OSError:
-            real = str(path)
-        real_folded = real.casefold()
-        for root, ci in source_roots:
-            if not root:
-                continue
-            cmp = real_folded if ci else real
-            if cmp == root or cmp.startswith(root + os.sep):
-                return True
-        return False
+    # never made it to the archive. The guard is shared with the remote
+    # (SSH) path via the module-level factory. See PR #1107 review.
+    _path_under_any_source = _build_source_root_guard(params.sources)
 
     # Destination containment for cataloged twin folders. ``destination``
     # is already ``realpath``-resolved above so a symlinked destination
@@ -1083,7 +1120,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                 return True
             p = parent
 
-    _dest_ci = _case_insensitive_platform or _probe_dir_case_insensitive(destination)
+    _dest_ci = _CASE_INSENSITIVE_PLATFORM or _probe_dir_case_insensitive(destination)
     _dest_root_norm = (
         destination.casefold() if _dest_ci else destination
     ).rstrip(os.sep)

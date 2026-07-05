@@ -4122,3 +4122,167 @@ def test_remote_import_same_basename_collision_parity(tmp_path, monkeypatch):
     b0 = open(os.path.join(mount_dir, "DSC_0001.jpg"), "rb").read()
     b1 = open(os.path.join(mount_dir, "DSC_0001_1.jpg"), "rb").read()
     assert b0 != b1
+
+
+# --------------------------------------------------------------------------
+# PR #1113 review regressions.
+# --------------------------------------------------------------------------
+
+def test_remote_import_source_card_twin_does_not_back_duplicate_skip(
+        tmp_path, monkeypatch):
+    """A stale ``photos`` row whose folder path IS the card being imported
+    must not back a remote duplicate skip. Re-hashing that twin just
+    re-reads the card, proving nothing about an off-card copy; accepting
+    it would count the file as ``skipped_duplicate`` and, with
+    ``verify_by_hash`` on, let ``safe_to_format`` flip green over a card
+    whose bytes never crossed the network. Mirrors the local path's
+    source-root filter."""
+    from import_job import ImportParams, run_import_job
+    from scanner import scan
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+    _install_fake_remote_rsync(monkeypatch, calls, verify=None)
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # Seed the catalog with a row whose folder path IS the card — as if the
+    # mounted card had been scanned into the DB in a previous session.
+    scan(str(card), db)
+    seeded = _photo_rows(db)
+    assert seeded, "expected pre-seeded catalog row for the card file"
+    assert any(r["folder_path"] == str(card) for r in seeded), \
+        [dict(r) for r in seeded]
+
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra, verify_by_hash=True,
+        ),
+    )
+
+    # The card file must have been copied off — not skipped as a duplicate.
+    assert result["copied"] == 1, result
+    assert result["skipped_duplicate"] == 0, result
+    # rsync actually ran with the card file.
+    assert calls["rsync"], "no rsync invocation captured"
+    src_specs = {
+        os.path.basename(s)
+        for c in calls["rsync"] for s in c["src_specs"]
+    }
+    assert "DSC_0001.jpg" in src_specs, src_specs
+    # A row now exists under the mount path (the new archive copy), not
+    # just the card.
+    rows = _photo_rows(db)
+    mount_dir = os.path.join(ra["mount_base"], "2026", "2026-07-03")
+    row_paths = {os.path.join(r["folder_path"], r["filename"]) for r in rows}
+    assert os.path.join(mount_dir, "DSC_0001.jpg") in row_paths, row_paths
+
+
+def test_remote_import_no_verify_fails_uncataloged_landings(
+        tmp_path, monkeypatch):
+    """Without ``verify_by_hash`` the row-presence check still runs — a
+    remote rsync that returns success without actually populating the local
+    mount (unmounted/misconfigured mount base) must not report
+    ``copied``/NULL for a file with no catalog row. It fails and
+    ``safe_to_format`` cannot flip green off a ghost success."""
+    import move as _move
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+
+    # Fake rsync that pretends to succeed but writes nothing to the local
+    # mount — simulates a real rsync succeeding at the NAS while the local
+    # mount base points at an unmounted / wrong path so scan() sees no
+    # landed files.
+    def fake_rsync_no_write(src_path, dest_spec, rsync_flags, total_files,
+                            progress_cb, rsync_bin="rsync", extra_args=None,
+                            src_specs=None, src_specs_dest_is_dir=True, **kw):
+        calls["rsync"].append({
+            "src_specs": list(src_specs or []),
+            "dest_spec": dest_spec,
+        })
+        return (0, "", False)
+
+    monkeypatch.setattr(_move, "_run_rsync_streamed", fake_rsync_no_write)
+    monkeypatch.setattr(_move, "_remote_mkdir_p", lambda r, p: (True, ""))
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra, verify_by_hash=False,
+        ),
+    )
+
+    # The file "landed" per rsync's return but scan() found nothing on the
+    # mount, so it must be failed instead of counted as copied.
+    assert result["copied"] == 0, result
+    assert result["failed"] == 1, result
+    assert any(
+        "not cataloged" in u["reason"]
+        for u in result["unsafe_files"]
+    ), result["unsafe_files"]
+    assert result["safe_to_format"] is False
+
+
+def test_remote_import_verify_fails_uncataloged_landings(
+        tmp_path, monkeypatch):
+    """Parity check: the ``verify_by_hash=True`` path also fails a landed
+    file with no catalog row (it did before this fix; the refactor must
+    preserve that)."""
+    import move as _move
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+
+    def fake_rsync_no_write(src_path, dest_spec, rsync_flags, total_files,
+                            progress_cb, rsync_bin="rsync", extra_args=None,
+                            src_specs=None, src_specs_dest_is_dir=True, **kw):
+        calls["rsync"].append({"src_specs": list(src_specs or [])})
+        return (0, "", False)
+
+    monkeypatch.setattr(_move, "_run_rsync_streamed", fake_rsync_no_write)
+    monkeypatch.setattr(_move, "_remote_mkdir_p", lambda r, p: (True, ""))
+    monkeypatch.setattr(
+        _move, "remote_verify_files",
+        lambda *a, **kw: None,
+    )
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra, verify_by_hash=True,
+        ),
+    )
+
+    assert result["copied"] == 0, result
+    assert result["failed"] == 1, result
+    assert any(
+        "not cataloged" in u["reason"]
+        for u in result["unsafe_files"]
+    ), result["unsafe_files"]
