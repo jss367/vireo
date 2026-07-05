@@ -16553,6 +16553,67 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         collection_id = body.get("collection_id")
         source_snapshot_id = body.get("source_snapshot_id")
 
+        # Folder scope: resolve folder_ids to their active-workspace subtrees
+        # and materialize an ad-hoc collection, then proceed as a collection
+        # run — the same pattern import runs use (see pipeline_job's
+        # collection_stage). The rest of the app treats a folder scope as
+        # its subtree, so a workspace root must include every descendant's
+        # photos, not just the ones hanging directly off the root.
+        folder_ids = body.get("folder_ids")
+        if folder_ids is not None:
+            if collection_id is not None:
+                return json_error(
+                    "folder_ids cannot be combined with collection_id"
+                )
+            if (
+                not isinstance(folder_ids, list)
+                or not folder_ids
+                or any(
+                    isinstance(fid, bool) or not isinstance(fid, int)
+                    for fid in folder_ids
+                )
+            ):
+                return json_error(
+                    "folder_ids must be a non-empty list of integers"
+                )
+            # Reject folders the active workspace has no claim on (mirrors
+            # the rescan guard): a stale UI or crafted request must not
+            # pollute this workspace with another workspace's scan output.
+            # get_folder_subtree_ids itself refuses to walk out of the
+            # active workspace, so unrelated descendants can never leak in.
+            ws_for_folders = db._active_workspace_id
+            subtree_ids = set()
+            for fid in folder_ids:
+                linked = db.conn.execute(
+                    "SELECT 1 FROM workspace_folders "
+                    "WHERE workspace_id = ? AND folder_id = ?",
+                    (ws_for_folders, fid),
+                ).fetchone()
+                if not linked:
+                    return json_error("folder not found", 404)
+                # Union — a workspace can link both a root and a nested
+                # folder, so the same descendant can appear twice.
+                subtree_ids.update(db.get_folder_subtree_ids(fid))
+            marks = ",".join("?" for _ in subtree_ids)
+            photo_ids = [
+                r["id"] for r in db.conn.execute(
+                    f"SELECT id FROM photos WHERE folder_id IN ({marks})",
+                    tuple(subtree_ids),
+                )
+            ]
+            first = db.get_folder(folder_ids[0])
+            leaf = os.path.basename(
+                (first["path"] or "").rstrip("/\\")
+            ) or "folders"
+            from datetime import datetime as _dt
+
+            collection_id = db.add_collection(
+                "Process {} {}".format(
+                    leaf, _dt.now().strftime("%Y-%m-%d %H:%M"),
+                ),
+                json.dumps([{"field": "photo_ids", "value": photo_ids}]),
+            )
+
         if not source and not sources and not collection_id and not source_snapshot_id:
             return json_error("source, sources, collection_id, or source_snapshot_id required")
 

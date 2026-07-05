@@ -2529,3 +2529,106 @@ def test_pipeline_explicit_flags_beat_strategy(app_and_db, monkeypatch):
         cfg = _job_config(client, resp.get_json()["job_id"])
         assert cfg["skip_regroup"] is True
         assert cfg["skip_classify"] is False
+
+
+# ---------------------------------------------------------------------------
+# folder-scoped process runs (import/process split PR 1)
+# ---------------------------------------------------------------------------
+
+
+def _folder_id_by_path(db, path):
+    row = db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", (path,)
+    ).fetchone()
+    assert row is not None, f"fixture folder missing: {path}"
+    return row["id"]
+
+
+def _collection_photo_ids(db, collection_id):
+    return sorted(
+        p["id"] for p in db.get_collection_photos(collection_id, per_page=999999)
+    )
+
+
+def _photo_ids_in_folders(db, folder_ids):
+    marks = ",".join("?" for _ in folder_ids)
+    rows = db.conn.execute(
+        f"SELECT id FROM photos WHERE folder_id IN ({marks})", folder_ids,
+    ).fetchall()
+    return sorted(r["id"] for r in rows)
+
+
+def test_pipeline_folder_ids_creates_adhoc_collection(app_and_db):
+    """A leaf folder scope becomes an ad-hoc collection of exactly that
+    folder's photos, and the run proceeds as a collection run."""
+    app, db = app_and_db
+    child_id = _folder_id_by_path(db, "/photos/2024/January")
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [child_id], "strategy": "quick_look",
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg["collection_id"], cfg
+        assert _collection_photo_ids(db, cfg["collection_id"]) == \
+            _photo_ids_in_folders(db, [child_id])
+
+
+def test_pipeline_folder_ids_includes_descendants(app_and_db):
+    """Scoping to a workspace root must include photos in child folders —
+    the rest of the app treats a folder scope as its subtree (see
+    Database.get_folder_subtree_ids). A flat folder_id IN (...) over the
+    raw request would miss the bulk of a dated archive tree."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    child_id = _folder_id_by_path(db, "/photos/2024/January")
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [root_id], "strategy": "quick_look",
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        got = _collection_photo_ids(db, cfg["collection_id"])
+        assert got == _photo_ids_in_folders(db, [root_id, child_id])
+        # Regression tripwire: the child's photos are the recursive part.
+        assert set(_photo_ids_in_folders(db, [child_id])) <= set(got)
+
+
+def test_pipeline_folder_ids_unlinked_folder_404(app_and_db):
+    """A folder not linked to the active workspace must 404, mirroring the
+    rescan guard — otherwise a stale UI could pollute this workspace with
+    another workspace's scan output."""
+    app, db = app_and_db
+    original_ws = db._active_workspace_id
+    other_ws = db.create_workspace("Other")
+    db.set_active_workspace(other_ws)
+    foreign_id = db.add_folder("/photos/elsewhere", name="elsewhere")
+    db.set_active_workspace(original_ws)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [foreign_id], "strategy": "quick_look",
+        })
+        assert resp.status_code == 404
+
+
+def test_pipeline_folder_ids_rejects_non_int(app_and_db):
+    """Malformed ids must 400 before touching SQLite, mirroring the
+    source_snapshot_id validation."""
+    app, _ = app_and_db
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": ["../etc"], "strategy": "quick_look",
+        })
+        assert resp.status_code == 400
+
+
+def test_pipeline_folder_ids_with_collection_id_400(app_and_db):
+    """Two scopes in one request is ambiguous — reject rather than pick."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [root_id], "collection_id": col_id,
+        })
+        assert resp.status_code == 400
