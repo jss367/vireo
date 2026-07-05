@@ -119,6 +119,13 @@ class PipelineParams:
     skip_regroup: bool = False
     skip_classify: bool = False
     skip_eye_keypoints: bool = False
+    # Per-run override for the config-gated misses stage. None defers to the
+    # workspace-effective ``pipeline.miss_enabled`` (today's behavior); a
+    # bool wins over workspace config in BOTH directions, mirroring how the
+    # skip_* flags override workspace defaults. Process strategies
+    # (process_strategies.py) set this so e.g. cull_ready suppresses misses
+    # on a workspace that has them enabled.
+    miss_enabled: bool | None = None
     download_taxonomy: bool = True
     # None means "use the workspace-effective preview_max_size setting".
     # Explicit values are kept for API/back-compat and tests that need to pin
@@ -4945,10 +4952,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                    summary="Skipped")
                 return
 
-            stages["misses"]["status"] = "running"
-            runner.update_step(job["id"], "misses", status="running")
-            _update_stages(runner, job["id"], stages)
-
+            # Hoisted from the try: block below so the miss_enabled guard can
+            # read effective config before the transient "running" status is
+            # written.
             try:
                 from datetime import UTC, datetime
 
@@ -4961,13 +4967,58 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
                 effective_cfg = thread_db.get_effective_config(cfg.load())
                 pipeline_cfg = effective_cfg.get("pipeline", {})
+            except Exception as e:
+                # Mark the stage failed BEFORE returning. The transient
+                # "running" write is *below* this guard, so without stamping
+                # "failed" here the stage would stay "pending"; the pipeline
+                # finalizer treats absence-of-failed as success and would
+                # wrongly mark the whole job completed despite a fatal setup
+                # error (cfg.load, Database(...), or any import raising).
+                stages["misses"]["status"] = "failed"
+                runner.update_step(job["id"], "misses", status="failed",
+                                   error=str(e))
+                errors.append(f"[misses] Fatal: {e}")
+                log.exception("Pipeline miss-detection setup failed")
+                _update_stages(runner, job["id"], stages)
+                return
 
+            # Effective miss_enabled: per-run PipelineParams override wins
+            # over workspace config, mirroring how other skip_* flags
+            # override workspace defaults. Inject the effective value into
+            # pipeline_cfg *before* the guard so both branches — the
+            # short-circuit skip AND the fall-through to compute — see the
+            # same value: compute_misses_for_workspace reads
+            # pipeline_cfg["miss_enabled"] itself, so a strategy that
+            # enables misses on a workspace where they're disabled would
+            # otherwise get a silent 0 from compute.
+            if params.miss_enabled is not None:
+                pipeline_cfg = {**pipeline_cfg,
+                                "miss_enabled": params.miss_enabled}
+            miss_enabled = pipeline_cfg.get("miss_enabled", True)
+            if not miss_enabled:
+                # Do NOT fall through to compute_misses_for_workspace: it
+                # returns 0 when disabled and the completion path would then
+                # stamp "0 photos evaluated", which reads as "misses ran and
+                # found none" rather than "misses were disabled". Skipping
+                # here also leaves the miss_computed_at cache marker
+                # unstamped, which pipeline_review's "current-run misses"
+                # shortcut depends on.
+                stages["misses"]["status"] = "skipped"
+                runner.update_step(job["id"], "misses", status="completed",
+                                   summary="Skipped")
+                _update_stages(runner, job["id"], stages)
+                return
+
+            stages["misses"]["status"] = "running"
+            runner.update_step(job["id"], "misses", status="running")
+            _update_stages(runner, job["id"], stages)
+
+            try:
                 # Share one timestamp between the DB write and the saved
                 # pipeline-results cache so pipeline_review's "Review misses"
                 # shortcut can gate on actual recomputation in this run and
                 # scope /misses?since=... to exactly what was just written.
                 now_ts = datetime.now(UTC).isoformat(timespec="microseconds")
-                miss_enabled = pipeline_cfg.get("miss_enabled", True)
 
                 n = compute_misses_for_workspace(
                     thread_db,
