@@ -55,7 +55,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
                placeholder="Card or folder path — press Enter to add"
                onkeydown="if(event.key==='Enter'){event.preventDefault();addSource();}">
         <datalist id="volumeDatalist"></datalist>
-        <button class="btn" onclick="addSource()">Add</button>
+        <button class="btn" id="btnAddSource" onclick="addSource()">Add</button>
       </div>
       <div class="source-list" id="sourceList"></div>
       <div class="row" style="margin-top:8px;">

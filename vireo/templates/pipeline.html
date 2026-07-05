@@ -5093,10 +5093,8 @@ function _buildPlanBody() {
   //     counts, which renders "Already done" for an import into a
   //     non-empty workspace — exactly the bug we're fixing.
   if (_sourceMode === 'folders') {
-    // Empty selection deliberately still sends folder_ids: the endpoint
-    // 400s and the pills clear, which is honest — falling back to
-    // whole-workspace counts would render "Already done" for a scope
-    // the user hasn't picked yet.
+    // refreshPipelinePlan early-outs before the fetch when the selection
+    // is empty, so this is always non-empty here.
     body.folder_ids = selectedFolderIds();
   } else if (_sourceMode === 'collection') {
     var picker = document.getElementById('collectionPicker');
@@ -5203,6 +5201,17 @@ async function refreshPipelinePlan() {
   if (_pipelineRunning) return;
   _planRefreshPending = true;
   var seq = ++_planFetchSeq;
+  if (_sourceMode === 'folders' && selectedFolderIds().length === 0) {
+    // No scope picked yet: don't ask the server for a plan (there is no
+    // honest one to give) and don't fall back to whole-workspace counts —
+    // clear the pills until a folder is selected.
+    _pipelinePlan = null;
+    _planRefreshPending = false;
+    updateSamVariantWarning(null);
+    refreshPipelineUI();
+    updateStartButton();
+    return;
+  }
   if (_planIsWaitingForImportPreview()) {
     _pipelinePlan = null;
     updateSamVariantWarning(null);

@@ -238,3 +238,36 @@ def orphan_folder_seed(db_path, thumb_dir, photos_root):
         _make_thumb(thumb_dir, pid)
 
     db.conn.close()
+
+
+def import_card_seed(db_path, thumb_dir, photos_root):
+    """Seed for the import scenario: a fake card with 3 tiny JPEGs (distinct
+    mtimes drive the date-folder template) and an empty archive destination.
+    The catalog starts empty — the import is what populates it."""
+    import os as _os
+    from datetime import datetime as _dt
+
+    from db import Database
+    from PIL import Image as _Image
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    db.close()
+
+    base = photos_root or "/tmp"
+    card = _os.path.join(base, "card")
+    _os.makedirs(card, exist_ok=True)
+    _os.makedirs(_os.path.join(base, "archive"), exist_ok=True)
+    stamps = [
+        (_dt(2026, 7, 3, 10, 0, 0), "red"),
+        (_dt(2026, 7, 3, 11, 0, 0), "green"),
+        (_dt(2026, 7, 4, 9, 0, 0), "blue"),
+    ]
+    # Distinct colors -> distinct bytes: identical files would (correctly)
+    # collapse to one copy + two intra-run duplicates in the import gate.
+    for i, (when, color) in enumerate(stamps):
+        path = _os.path.join(card, f"DSC_{i:04d}.jpg")
+        _Image.new("RGB", (16, 16), color).save(path)
+        ts = when.timestamp()
+        _os.utime(path, (ts, ts))

@@ -38,8 +38,9 @@ def run(session):
     has_start_btn = session.eval("!!document.getElementById('btnStartPipeline')")
     session.assert_that(has_start_btn, "expected Start Pipeline button")
 
-    # The Source card should have the Import radio option
-    has_import_radio = session.eval("!!document.getElementById('radioImport')")
-    session.assert_that(has_import_radio, "expected Import radio button in Source card")
+    # The Source card offers the Folders scope (importing moved to /import
+    # in the import/process split).
+    has_folders_radio = session.eval("!!document.getElementById('radioFolders')")
+    session.assert_that(has_folders_radio, "expected Folders radio button in Source card")
 
     session.screenshot("pipeline-loaded")
