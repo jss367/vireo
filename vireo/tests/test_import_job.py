@@ -2087,3 +2087,181 @@ def test_import_photos_rejects_case_variant_source_nested_destination(
     assert resp.status_code == 400, resp.get_data(as_text=True)
     payload = resp.get_json()
     assert "inside a source" in (payload.get("error") or "")
+
+
+def test_crash_recovered_suffix_is_adopted_not_re_copied(tmp_path):
+    """When a prior run copied a different-content collision to
+    ``DSC_XXX.jpg`` and this source's bytes to the suffixed ``DSC_XXX_1.jpg``
+    then died before scan, a retry must hash-match every existing suffix
+    candidate and adopt on a match — not advance past it and re-copy to
+    ``DSC_XXX_2.jpg``. Without the hash-match, the archive would carry two
+    byte-identical copies of the same source photo.
+    """
+    import shutil
+
+    from import_job import ImportParams
+
+    card = _make_card(tmp_path, [
+        ("DSC_0060.jpg", datetime(2026, 7, 3, 10, 0, 0), "yellow"),
+    ])
+    archive = tmp_path / "archive"
+    dest_dir = archive / "2026" / "2026-07-03"
+    dest_dir.mkdir(parents=True)
+
+    # A different-content name-collision from an earlier run (some other
+    # source photo happened to share the filename+date). Not this card's
+    # bytes.
+    Image.new("RGB", (16, 16), "blue").save(str(dest_dir / "DSC_0060.jpg"))
+    # THIS card's bytes, landed at the suffixed name by a prior run that
+    # died before its restricted scan.
+    shutil.copy2(str(card / "DSC_0060.jpg"), str(dest_dir / "DSC_0060_1.jpg"))
+
+    db, ws_id, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)], destination=str(archive),
+    ))
+
+    # Adopted the crash-recovered suffix — no re-copy, no double.
+    assert result["copied"] == 0
+    assert result["skipped_duplicate"] == 1
+    assert result["failed"] == 0
+    assert result["safe_to_format"] is True
+
+    # Only the two files that existed before + no DSC_0060_2.jpg.
+    files_on_disk = sorted(os.listdir(str(dest_dir)))
+    assert files_on_disk == ["DSC_0060.jpg", "DSC_0060_1.jpg"], files_on_disk
+
+    # The adopted suffix is cataloged with hash_status=ok. (The pre-existing
+    # ``DSC_0060.jpg`` with different bytes is a stray outside this import;
+    # a future full scan would catalog it — out of scope for this run.)
+    rows = _photo_rows(db)
+    adopted = [r for r in rows if r["filename"] == "DSC_0060_1.jpg"]
+    assert len(adopted) == 1
+    assert adopted[0]["hash_status"] == "ok"
+
+
+def test_paired_companion_archive_mutation_after_scan_reclassifies(
+        tmp_path, monkeypatch):
+    """The RAW+JPEG pair-merge in ``scanner.scan()`` deletes the JPEG's own
+    photo row. Before this fix, the import job's hash-stamping loop
+    accepted that as success without re-reading the archive JPEG. If the
+    archive JPEG gets rewritten or corrupted between promote and the
+    stamping check, ``safe_to_format`` could still go green over bytes we
+    never verified. Simulate archive-side mutation of the paired JPEG and
+    require the import to reclassify it to failed.
+    """
+    import scanner as scanner_mod
+    from import_job import ImportParams, run_import_job
+
+    # Card carries a RAW+JPEG pair sharing the base name. Same shape as
+    # ``test_working_copy_companion_fallback_reads_card_jpeg``: the "RAW"
+    # is opaque bytes with a .NEF extension (scanner sniffs by extension,
+    # not content), so scan()'s pair-merge deletes the JPEG's photo row
+    # and sets companion_path on the RAW primary.
+    card = tmp_path / "card"
+    card.mkdir()
+    Image.new("RGB", (16, 16), "red").save(str(card / "DSC_2000.jpg"))
+    raw_bytes = (card / "DSC_2000.jpg").read_bytes() + b"RAW-SENSOR-DATA"
+    (card / "DSC_2000.NEF").write_bytes(raw_bytes)
+    ts = datetime(2026, 7, 3, 10, 0, 0).timestamp()
+    for name in ("DSC_2000.jpg", "DSC_2000.NEF"):
+        os.utime(str(card / name), (ts, ts))
+    archive = tmp_path / "archive"
+
+    real_scan = scanner_mod.scan
+
+    def mutating_scan(root, db_arg, **kwargs):
+        result = real_scan(root, db_arg, **kwargs)
+        # AFTER cataloging + pairing but before import_job's hash-stamping
+        # loop runs, mutate the archive JPEG. If the fix works this
+        # forces the JPEG entry into ``failed``; without it, the JPEG's
+        # deleted-by-pair row makes the check silently pass.
+        for f in kwargs.get("restrict_files") or set():
+            if str(f).lower().endswith("dsc_2000.jpg") and os.path.exists(f):
+                with open(f, "r+b") as fh:
+                    fh.write(b"CORRUPT-MUTATION-POST-COPY")
+        return result
+
+    monkeypatch.setattr(scanner_mod, "scan", mutating_scan)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(sources=[str(card)], destination=str(archive)),
+    )
+
+    # The JPEG bytes on disk no longer match copy_and_hash_verify's
+    # verified hash — the import must NOT report safe.
+    assert result["safe_to_format"] is False
+    assert result["failed"] >= 1
+    # Terminal-bucket invariant still holds.
+    assert (
+        result["copied"]
+        + result["skipped_duplicate"]
+        + result["failed"]
+    ) == result["discovered"]
+    # The specific failure names the JPEG.
+    unsafe_paths = [u["path"] for u in result["unsafe_files"]]
+    assert any("DSC_2000.jpg" in p for p in unsafe_paths), unsafe_paths
+
+
+def test_non_empty_null_scan_hash_reclassifies_when_rehash_disagrees(
+        tmp_path, monkeypatch):
+    """When ``scanner.scan()`` writes a photo row for a non-empty file but
+    leaves ``file_hash`` NULL (its own hash read failed between promote
+    and scan), the import job must NOT stamp the copy-time hash and call
+    it verified. Re-hashing the archive path is the last check — if it
+    also disagrees (file mutated or unreadable), the entry must be
+    reclassified to failed. Simulate that shape and require the ledger
+    to bucket the file as failed rather than reporting safe.
+    """
+    import scanner as scanner_mod
+    from import_job import ImportParams, run_import_job
+
+    card = _make_card(tmp_path, [
+        ("DSC_3000.jpg", datetime(2026, 7, 3, 10, 0, 0), "purple"),
+    ])
+    archive = tmp_path / "archive"
+
+    real_scan = scanner_mod.scan
+
+    def sabotaging_scan(root, db_arg, **kwargs):
+        result = real_scan(root, db_arg, **kwargs)
+        # Wipe file_hash for freshly cataloged photos (simulating a
+        # scan-side hash-read failure that landed a NULL) AND mutate the
+        # archive so a re-hash also disagrees.
+        if kwargs.get("restrict_files"):
+            for f in kwargs["restrict_files"]:
+                if not os.path.exists(f):
+                    continue
+                with open(f, "r+b") as fh:
+                    fh.write(b"POST-SCAN-MUTATION-NULL-HASH")
+                db_arg.conn.execute(
+                    """UPDATE photos SET file_hash = NULL
+                       WHERE filename = ?""",
+                    (os.path.basename(f),),
+                )
+                db_arg.conn.commit()
+        return result
+
+    monkeypatch.setattr(scanner_mod, "scan", sabotaging_scan)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(sources=[str(card)], destination=str(archive)),
+    )
+
+    assert result["safe_to_format"] is False
+    assert result["failed"] == 1
+    assert result["copied"] == 0
+    assert (
+        result["copied"]
+        + result["skipped_duplicate"]
+        + result["failed"]
+    ) == result["discovered"]
+    unsafe_paths = [u["path"] for u in result["unsafe_files"]]
+    assert any("DSC_3000.jpg" in p for p in unsafe_paths), unsafe_paths

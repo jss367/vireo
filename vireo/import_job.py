@@ -706,6 +706,25 @@ def run_import_job(job, runner, db_path, workspace_id, params):
             src_size = src_stat.st_size
             src_mtime_ns = src_stat.st_mtime_ns
             try:
+                # Source hash is potentially needed by three checks below
+                # (primary-name adopt, per-suffix candidate adopt, and the
+                # copy_and_hash_verify src_hash arg). Compute lazily and
+                # cache in a small closure so nothing hashes the card
+                # twice.
+                _sh_cache = [False, None]
+
+                def _src_hash_cached():
+                    if not _sh_cache[0]:
+                        _sh_cache[0] = True
+                        _sh_cache[1] = (
+                            checker.content_hash(source_file)
+                            if checker is not None
+                            else compute_file_hash(str(source_file))
+                        )
+                    return _sh_cache[1]
+
+                adopted_dest = None  # (path, hash) when byte-identical twin found
+
                 if os.path.exists(dest_file):
                     dest_size = os.path.getsize(dest_file)
                     if src_size == 0 and dest_size == 0:
@@ -716,37 +735,65 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                         dup_dirs.add(dest_folder)
                         continue
                     if src_size == dest_size:
-                        src_hash = (
-                            checker.content_hash(source_file)
-                            if checker is not None
-                            else compute_file_hash(str(source_file))
-                        )
                         dest_hash = compute_file_hash(dest_file)
-                        if src_hash is not None and src_hash == dest_hash:
+                        src_h = _src_hash_cached()
+                        if src_h is not None and src_h == dest_hash:
                             # Byte-identical file already at the destination
                             # (e.g. a previous run died between copy and
                             # catalog). Treat as landed: catalog + stamp it
                             # rather than skipping — this is the designed
                             # self-heal for crash-shaped interruptions.
-                            skipped_duplicate += 1
-                            _counts(rel)["skipped_duplicate"] += 1
-                            landed.append(
-                                (dest_file, src_hash, str(source_file),
-                                 "skipped_duplicate",
-                                 src_size, src_mtime_ns),
+                            adopted_dest = (dest_file, src_h)
+                    if adopted_dest is None:
+                        # Different content, same primary name — advance
+                        # through numeric suffixes. But a crash-interrupted
+                        # retry may already have written THIS source's bytes
+                        # under an earlier suffix: an earlier run copied a
+                        # colliding different file to ``name.ext`` and put
+                        # this source's bytes at ``name_1.ext``, then died
+                        # before its scan. Advancing past ``name_1.ext``
+                        # without hashing it would re-copy identical bytes
+                        # to ``name_2.ext`` and leave two archive copies of
+                        # one source photo. Hash-match every existing
+                        # suffix candidate and adopt on a match; on no
+                        # match, land at the next free suffix. See PR #1107
+                        # review.
+                        stem, suffix = os.path.splitext(source_file.name)
+                        counter = 1
+                        while True:
+                            candidate = os.path.join(
+                                dest_folder, f"{stem}_{counter}{suffix}",
                             )
-                            _record_checker(
-                                source_file, dest_folder, src_hash,
-                            )
-                            continue
-                    # Different content, same name — numeric suffix.
-                    stem, suffix = os.path.splitext(source_file.name)
-                    counter = 1
-                    while os.path.exists(dest_file):
-                        dest_file = os.path.join(
-                            dest_folder, f"{stem}_{counter}{suffix}",
-                        )
-                        counter += 1
+                            if not os.path.exists(candidate):
+                                dest_file = candidate
+                                break
+                            try:
+                                cand_size = os.path.getsize(candidate)
+                            except OSError:
+                                cand_size = -1
+                            if cand_size == src_size:
+                                cand_hash = compute_file_hash(candidate)
+                                src_h = _src_hash_cached()
+                                if (
+                                    cand_hash is not None
+                                    and src_h is not None
+                                    and cand_hash == src_h
+                                ):
+                                    adopted_dest = (candidate, src_h)
+                                    break
+                            counter += 1
+
+                if adopted_dest is not None:
+                    dest_file, adopt_hash = adopted_dest
+                    skipped_duplicate += 1
+                    _counts(rel)["skipped_duplicate"] += 1
+                    landed.append(
+                        (dest_file, adopt_hash, str(source_file),
+                         "skipped_duplicate",
+                         src_size, src_mtime_ns),
+                    )
+                    _record_checker(source_file, dest_folder, adopt_hash)
+                    continue
 
                 src_hash = (
                     checker.content_hash(source_file)
@@ -809,6 +856,23 @@ def run_import_job(job, runner, db_path, workspace_id, params):
             # rest of the app sees at the archive path. See PR #1107 review.
             reclassified_landed_paths = set()
 
+            def _rehash_dest_or_none(path):
+                """Re-hash the archive file, returning None on read failure.
+
+                Used as the last-line check that the bytes currently at the
+                archive path still match what ``copy_and_hash_verify()``
+                landed — necessary any time the scan-side hash is missing
+                (paired-JPEG row deletion) or NULL (scanner hashed the empty
+                zero-byte convention aside, a NULL means the archive read
+                failed between promote and scan). Without it, mutation of
+                the archive file between promote and scan would still be
+                accepted as success.
+                """
+                try:
+                    return compute_file_hash(path)
+                except OSError:
+                    return None
+
             # Stamp the verified hashes in the integrity-audit vocabulary,
             # cross-checked against what scan() stored.
             for entry in landed:
@@ -822,9 +886,15 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                 ).fetchone()
                 if row is None:
                     # RAW+JPEG pairing merges the JPEG's photo row into the
-                    # RAW primary (companion_path); the JPEG's bytes are
-                    # verified and represented — that's a success, not a
-                    # missing catalog row.
+                    # RAW primary (companion_path); the JPEG's own row is
+                    # gone by design and the bytes are represented on the
+                    # RAW. But the pair lookup can't tell us the JPEG's
+                    # archive bytes are still the ones we verified — the
+                    # archive file could have been rewritten or corrupted
+                    # between promote and the restricted scan. Re-read the
+                    # archive path and require its hash to still equal
+                    # ``verified_hash`` before counting the JPEG landed;
+                    # otherwise reclassify to failed. See PR #1107 review.
                     companion = db.conn.execute(
                         """SELECT p.id FROM photos p
                            JOIN folders f ON f.id = p.folder_id
@@ -835,6 +905,15 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                         ),
                     ).fetchone()
                     if companion is not None:
+                        actual = _rehash_dest_or_none(dest_path)
+                        if actual is not None and actual == verified_hash:
+                            continue
+                        _reclassify_landed_failed(
+                            rel, entry,
+                            "paired companion archive bytes no longer "
+                            "match the copy-time hash",
+                        )
+                        reclassified_landed_paths.add(dest_path)
                         continue
                     _reclassify_landed_failed(
                         rel, entry, "not cataloged after scan",
@@ -854,10 +933,30 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                             row["id"], "ok", commit=False,
                         )
                     else:
-                        db.update_photo_hash_check(
-                            row["id"], "ok", file_hash=verified_hash,
-                            commit=False,
-                        )
+                        # Non-empty file with NULL file_hash after scan
+                        # means scanner._compute_file_features couldn't
+                        # read the archive file (unreadable between
+                        # promote and scan). Trusting the copy-time hash
+                        # here would flip ``safe_to_format`` green for
+                        # bytes we can't currently verify on disk. Re-
+                        # hash the archive path from here as a last check
+                        # — if that also fails or disagrees with our
+                        # copy-time hash, reclassify to failed instead of
+                        # stamping a stale value. See PR #1107 review.
+                        actual = _rehash_dest_or_none(dest_path)
+                        if actual is not None and actual == verified_hash:
+                            db.update_photo_hash_check(
+                                row["id"], "ok", file_hash=verified_hash,
+                                commit=False,
+                            )
+                        else:
+                            _reclassify_landed_failed(
+                                rel, entry,
+                                "archive file unhashable after copy "
+                                "verification (scan wrote no hash and "
+                                "re-hash disagrees)",
+                            )
+                            reclassified_landed_paths.add(dest_path)
                 else:
                     _reclassify_landed_failed(
                         rel, entry,
