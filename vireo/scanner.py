@@ -900,7 +900,7 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
             break
 
         wc_rel = f"working/{row['id']}.jpg"
-        wc_abs = os.path.join(vireo_dir, wc_rel)
+        wc_abs = os.path.join(vireo_dir, "working", f"{row['id']}.jpg")
 
         # Working copies are the edit-quality source. For non-RAW primaries
         # we still prefer the companion JPEG outright (fast path). For RAW
