@@ -1,6 +1,7 @@
 """Smart ingest: copy and organize photos from external source to destination."""
 
 import contextlib
+import errno
 import logging
 import os
 import posixpath
@@ -246,8 +247,34 @@ def discover_source_files(
     # symlinks and stat's the target, so for a directly selected bundle
     # (or a symlink to one) the existence test alone is enough to trip TCC.
     if is_excluded_scan_path(source_path):
+        # Root is an excluded data-bundle. Legacy ingest() and the
+        # UI-preview callers silently drop these (they picked the wrong
+        # thing; no user contract to enumerate it). But when import_job
+        # passes an ``onerror`` collector it is holding safe_to_format
+        # against every enumeration being provably clean; a source root
+        # we refuse to walk is exactly the case where the pill would
+        # otherwise go green over a card whose files were never seen.
+        # Emit a synthetic OSError so the ledger records it as a
+        # discovery failure. See PR #1107 review (P1 line 927).
+        if onerror is not None:
+            onerror(PermissionError(
+                errno.EACCES,
+                "source is an excluded data bundle",
+                str(source_path),
+            ))
         return []
     if not source_path.is_dir():
+        # Root does not resolve to a directory: nonexistent, unmounted
+        # removable media, permission-denied on the root, or a plain
+        # file. Same reasoning as above — silent [] hides "we saw
+        # nothing" from safe_to_format. Emit a synthetic OSError for
+        # onerror callers so discover'd == 0 is treated as unsafe.
+        if onerror is not None:
+            onerror(FileNotFoundError(
+                errno.ENOENT,
+                "source is not an accessible directory",
+                str(source_path),
+            ))
         return []
 
     if isinstance(file_types, list):

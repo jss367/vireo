@@ -1056,6 +1056,66 @@ def test_unreadable_source_subtree_flips_safe_to_format_off(
     )
 
 
+def test_nonexistent_source_root_flips_safe_to_format_off(tmp_path):
+    """If a requested source root cannot be positively walked at all
+    (unmounted removable media, permission denied on the root itself, or
+    a path that no longer exists between enqueue and worker start),
+    ``discover_source_files`` used to return ``[]`` at its pre-walk
+    ``is_dir()`` guard WITHOUT invoking the ``onerror`` collector. That
+    left ``discovered == 0`` and ``discovery_errors`` empty, so the
+    predicate reported ``safe_to_format: true`` even though no card
+    contents were ever enumerated — the UI would tell the user it's safe
+    to format a card whose contents were never verified. See PR #1107
+    review (P1 line 927).
+    """
+    from import_job import ImportParams
+
+    missing_card = tmp_path / "unmounted-card"
+    # Deliberately do NOT create the directory. This mirrors a card that
+    # was ejected between enqueue and the import worker starting.
+
+    db, ws_id, result = _run_import(tmp_path, ImportParams(
+        sources=[str(missing_card)],
+        destination=str(tmp_path / "archive"),
+    ))
+
+    assert result["discovered"] == 0
+    assert result["safe_to_format"] is False
+    assert result["ok"] is False
+    assert result["discovery_errors"] == 1
+    assert any(
+        "source enumeration failed" in e for e in result["errors"]
+    )
+    assert any(str(missing_card) in e for e in result["errors"])
+
+
+def test_excluded_bundle_source_root_flips_safe_to_format_off(tmp_path):
+    """Same guarantee for the excluded-bundle branch of the pre-walk
+    guard: if the caller pointed the import at a Photos-library-style
+    data bundle directly (or the root is otherwise refused), the run
+    must not silently report zero-files-imported-safe-to-format.
+    """
+    from import_job import ImportParams
+
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    bundle.mkdir()
+    # A single file inside the bundle so a naive walk would find it —
+    # the guard must fire on the ROOT and refuse to enumerate it,
+    # bubbling that refusal as a discovery error.
+    (bundle / "originals").mkdir()
+    (bundle / "originals" / "managed.jpg").write_bytes(b"jpeg")
+
+    db, ws_id, result = _run_import(tmp_path, ImportParams(
+        sources=[str(bundle)],
+        destination=str(tmp_path / "archive"),
+    ))
+
+    assert result["discovered"] == 0
+    assert result["safe_to_format"] is False
+    assert result["ok"] is False
+    assert result["discovery_errors"] == 1
+
+
 def test_wc_extraction_deferred_to_after_last_batch(tmp_path, monkeypatch):
     """A RAW+JPEG companion pair that straddles a batch boundary must not
     trigger per-batch working-copy extraction while the JPEG's row is
