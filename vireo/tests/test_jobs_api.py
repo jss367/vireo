@@ -2955,6 +2955,46 @@ def test_pipeline_folder_ids_bad_list_field_leaves_no_stray_collection(
 @pytest.mark.parametrize(
     "extra",
     [
+        {"exclude_paths": [{}]},
+        {"exclude_paths": [["nested"]]},
+        {"exclude_paths": [None]},
+        {"exclude_paths": [42]},
+        {"exclude_photo_ids": [{}]},
+        {"exclude_photo_ids": ["not-int"]},
+        {"exclude_photo_ids": [None]},
+        {"exclude_photo_ids": [True]},
+    ],
+)
+def test_pipeline_folder_ids_bad_list_entry_leaves_no_stray_collection(
+    app_and_db, extra,
+):
+    """Regression for the Codex review on commit bffdabd: the outer
+    list-type check let a payload like ``{"exclude_paths": [{}]}`` slip
+    past, whereupon ``set(body.get(...))`` inside PipelineParams raised
+    ``TypeError: unhashable type`` — a 500 that left a stray "Process …"
+    collection with no queued job. Reject non-string exclude_paths
+    entries and non-int (or bool) exclude_photo_ids entries at the
+    request boundary and confirm no collection was created."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    before = len(db.get_collections())
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/jobs/pipeline",
+            json={"folder_ids": [root_id], **extra},
+        )
+        assert resp.status_code == 400, resp.get_json()
+        offending = next(iter(extra))
+        assert offending in resp.get_json()["error"]
+        # Error message points at "entries" so the caller can distinguish
+        # this from the outer-list-type reject in the sibling regression.
+        assert "entries" in resp.get_json()["error"]
+    assert len(db.get_collections()) == before
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
         {"source": ""},
         {"sources": []},
         {"source": "", "sources": []},

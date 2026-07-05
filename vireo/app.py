@@ -16577,13 +16577,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # its subtree, so a workspace root must include every descendant's
         # photos, not just the ones hanging directly off the root.
         #
-        # The ad-hoc collection is *not* inserted here: it is deferred to
-        # ``_materialize_folder_scope_collection`` below, which runs only
-        # after every other request check has passed. If we inserted up
-        # front, a later 400 (relative destination, remote_target_id
-        # mismatch, local_processing conflict, folder_template with '..')
-        # would leave a stray "Process …" collection in the workspace even
-        # though no job was queued.
+        # The ad-hoc collection is *not* inserted here: it is deferred
+        # until after every other request check has passed AND after
+        # ``PipelineParams`` has been fully constructed (see the block
+        # just after the ``PipelineParams(...)`` call below). If we
+        # inserted up front, a later 400 (relative destination,
+        # remote_target_id mismatch, local_processing conflict,
+        # folder_template with '..', or a coercion-time exception inside
+        # PipelineParams) would leave a stray "Process …" collection in
+        # the workspace even though no job was queued.
         folder_ids = body.get("folder_ids")
         pending_folder_collection = None
         if folder_ids is not None:
@@ -16924,39 +16926,43 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # ``exclude_paths`` / ``exclude_photo_ids`` are coerced inside the
         # PipelineParams constructor via ``set(body.get(field, []))``. A
         # JSON ``null`` overrides the default, turning that into
-        # ``set(None)`` which raises TypeError. Since the folder-scope
-        # collection row is committed just below, an unvalidated crash in
-        # PipelineParams would leave a stray "Process …" collection with
-        # no queued job. Reject present-but-non-list values (including
-        # explicit ``null``) up front — same reason miss_enabled is
-        # checked here rather than at the constructor site. Key-presence
-        # (not truthiness) is what matters: missing keys fall through to
-        # the ``[]`` default, but ``{"exclude_paths": null}`` must 400.
-        for _list_field in ("exclude_paths", "exclude_photo_ids"):
-            if _list_field in body and not isinstance(body[_list_field], list):
+        # ``set(None)`` which raises TypeError. A list whose *entries*
+        # aren't hashable (e.g. ``{"exclude_paths": [{}]}``) reaches
+        # ``set([...])`` and raises ``TypeError: unhashable type`` for the
+        # same reason. Both cases would otherwise leave a stray "Process
+        # …" collection when a folder scope is materialized before
+        # PipelineParams runs. Reject at the request boundary so the
+        # caller sees a clean 400 and no side effects. Key-presence (not
+        # truthiness) is what matters: missing keys fall through to the
+        # ``[]`` default, but ``{"exclude_paths": null}`` must 400.
+        if "exclude_paths" in body:
+            _paths_value = body["exclude_paths"]
+            if not isinstance(_paths_value, list):
                 return json_error(
-                    f"{_list_field} must be a list, got "
-                    f"{type(body[_list_field]).__name__}"
+                    "exclude_paths must be a list, got "
+                    f"{type(_paths_value).__name__}"
                 )
-
-        # All request validation has passed — safe to materialize the
-        # folder-scope collection row now. Deferring this insert avoids the
-        # stray "Process …" collection that would linger in the workspace
-        # if any earlier check above returned 400 after add_collection had
-        # already committed.
-        if pending_folder_collection is not None:
-            from datetime import datetime as _dt
-
-            collection_id = db.add_collection(
-                "Process {} {}".format(
-                    pending_folder_collection["leaf"],
-                    _dt.now().strftime("%Y-%m-%d %H:%M"),
-                ),
-                json.dumps([{
-                    "field": "photo_ids",
-                    "value": pending_folder_collection["photo_ids"],
-                }]),
-            )
+            for _entry in _paths_value:
+                if not isinstance(_entry, str):
+                    return json_error(
+                        "exclude_paths entries must be strings, got "
+                        f"{type(_entry).__name__}"
+                    )
+        if "exclude_photo_ids" in body:
+            _ids_value = body["exclude_photo_ids"]
+            if not isinstance(_ids_value, list):
+                return json_error(
+                    "exclude_photo_ids must be a list, got "
+                    f"{type(_ids_value).__name__}"
+                )
+            for _entry in _ids_value:
+                # bool is a subclass of int; exclude it explicitly so the
+                # accepted values stay honest integers.
+                if isinstance(_entry, bool) or not isinstance(_entry, int):
+                    return json_error(
+                        "exclude_photo_ids entries must be integers, got "
+                        f"{type(_entry).__name__}"
+                    )
 
         # Snapshot the resolved target dict so the queued run archives to the
         # host/mount the user saw at click-Start, not whatever the saved target
@@ -16997,6 +17003,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             exclude_photo_ids=set(body.get("exclude_photo_ids", [])) or None,
             recursive=body.get("recursive", True),
         )
+
+        # All request validation and param coercion have passed — safe to
+        # materialize the folder-scope collection row now. Deferring the
+        # insert past PipelineParams construction closes the last window
+        # where a coercion-time exception (e.g. an unhashable exclude
+        # entry that slipped past the guards above) could leave a stray
+        # "Process …" collection behind after the request failed.
+        if pending_folder_collection is not None:
+            from datetime import datetime as _dt
+
+            collection_id = db.add_collection(
+                "Process {} {}".format(
+                    pending_folder_collection["leaf"],
+                    _dt.now().strftime("%Y-%m-%d %H:%M"),
+                ),
+                json.dumps([{
+                    "field": "photo_ids",
+                    "value": pending_folder_collection["photo_ids"],
+                }]),
+            )
+            params.collection_id = collection_id
 
         # Auto-skip classify stages if no model is available
         model_warning = None
