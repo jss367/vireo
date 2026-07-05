@@ -7114,6 +7114,39 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result["folders"] = [dict(f) for f in db.get_workspace_folder_roots(ws["id"])]
         return jsonify(result)
 
+    def _validate_workspace_config_overrides(overrides):
+        """Validate ``config_overrides`` before persist. Returns an error
+        response (from ``json_error``) on rejection, or None on success.
+
+        Shared by POST /api/workspaces and PUT /api/workspaces/<id> so a
+        workspace created with a bogus ``pipeline.default_strategy`` can't
+        later feed the import/process settings or chaining hook an unknown
+        strategy — the update path already rejects it and the create path
+        must too, otherwise the create endpoint becomes a validation bypass.
+        """
+        # Anything else would be persisted as-is and crash the labels
+        # accessors that expect a JSON object (or NULL) in this column.
+        if overrides is not None and not isinstance(overrides, dict):
+            return json_error("config_overrides must be an object or null")
+        # pipeline.default_strategy: None means "no automatic processing
+        # after import" (the chaining hook short-circuits on it) and is
+        # accepted as-is; a string must name a real strategy. The string
+        # "none" is NOT the null sentinel — one vocabulary with
+        # /api/jobs/pipeline, which also rejects it.
+        pipeline_overrides = (overrides or {}).get("pipeline")
+        if (
+            isinstance(pipeline_overrides, dict)
+            and "default_strategy" in pipeline_overrides
+            and pipeline_overrides["default_strategy"] is not None
+        ):
+            from process_strategies import resolve_strategy
+
+            try:
+                resolve_strategy(pipeline_overrides["default_strategy"])
+            except ValueError as e:
+                return json_error(str(e))
+        return None
+
     @app.route("/api/workspaces", methods=["POST"])
     def api_create_workspace():
         db = _get_db()
@@ -7121,8 +7154,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         name = body.get("name", "").strip()
         if not name:
             return json_error("Name is required")
+        config_overrides = body.get("config_overrides")
+        err = _validate_workspace_config_overrides(config_overrides)
+        if err is not None:
+            return err
         try:
-            ws_id = db.create_workspace(name, config_overrides=body.get("config_overrides"))
+            ws_id = db.create_workspace(name, config_overrides=config_overrides)
             # Seed the standard smart collections (All Photos, Flagged, etc.).
             # Startup only seeds the active workspace, so without this a
             # workspace created via the API never gets defaults until it's
@@ -7151,27 +7188,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             kwargs["name"] = body["name"]
         if "config_overrides" in body:
             overrides = body["config_overrides"]
-            # Anything else would be persisted as-is and crash the labels
-            # accessors that expect a JSON object (or NULL) in this column.
-            if overrides is not None and not isinstance(overrides, dict):
-                return json_error("config_overrides must be an object or null")
-            # pipeline.default_strategy: None means "no automatic processing
-            # after import" (the chaining hook short-circuits on it) and is
-            # accepted as-is; a string must name a real strategy. The string
-            # "none" is NOT the null sentinel — one vocabulary with
-            # /api/jobs/pipeline, which also rejects it.
-            pipeline_overrides = (overrides or {}).get("pipeline")
-            if (
-                isinstance(pipeline_overrides, dict)
-                and "default_strategy" in pipeline_overrides
-                and pipeline_overrides["default_strategy"] is not None
-            ):
-                from process_strategies import resolve_strategy
-
-                try:
-                    resolve_strategy(pipeline_overrides["default_strategy"])
-                except ValueError as e:
-                    return json_error(str(e))
+            err = _validate_workspace_config_overrides(overrides)
+            if err is not None:
+                return err
             kwargs["config_overrides"] = overrides
         if "ui_state" in body:
             kwargs["ui_state"] = body["ui_state"]

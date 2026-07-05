@@ -2119,3 +2119,106 @@ def test_config_default_strategy_default_is_none():
     from config import DEFAULTS
 
     assert DEFAULTS["pipeline"]["default_strategy"] is None
+
+
+# ---------------------------------------------------------------------------
+# Create-workspace config_overrides validation (mirror of PUT validation)
+#
+# Regression tripwires for a validation gap on POST /api/workspaces: the
+# create path used to pass ``body.get("config_overrides")`` straight into
+# db.create_workspace without checking pipeline.default_strategy, so a
+# client could seed a workspace with an unknown strategy that PUT and
+# /api/jobs/pipeline would both reject — later feeding the chaining hook
+# an invalid strategy that only surfaces as a job failure.
+# ---------------------------------------------------------------------------
+
+
+def test_create_workspace_rejects_unknown_default_strategy(client):
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({
+            "name": "StratBadCreate",
+            "config_overrides": {"pipeline": {"default_strategy": "yolo"}},
+        }),
+        content_type="application/json",
+    )
+    assert resp.status_code == 400
+    assert "unknown strategy" in resp.get_json()["error"]
+
+
+def test_create_workspace_rejects_none_string_default_strategy(client):
+    """POST must match PUT and /api/jobs/pipeline: the "no processing"
+    sentinel is JSON null, not the string ``"none"``."""
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({
+            "name": "StratNoneCreate",
+            "config_overrides": {"pipeline": {"default_strategy": "none"}},
+        }),
+        content_type="application/json",
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.parametrize("bad", [5, True, ["cull_ready"], {"name": "full"}])
+def test_create_workspace_rejects_non_string_default_strategy(client, bad):
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({
+            "name": f"StratBadTypeCreate-{type(bad).__name__}",
+            "config_overrides": {"pipeline": {"default_strategy": bad}},
+        }),
+        content_type="application/json",
+    )
+    assert resp.status_code == 400
+    assert "strategy must be a string" in resp.get_json()["error"]
+
+
+def test_create_workspace_accepts_valid_default_strategy(client):
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({
+            "name": "StratCreateOK",
+            "config_overrides": {"pipeline": {"default_strategy": "cull_ready"}},
+        }),
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    ws_id = resp.get_json()["id"]
+
+    import config as cfg
+    from db import Database
+
+    db = Database(client.application.config["DB_PATH"])
+    db.set_active_workspace(ws_id)
+    effective = db.get_effective_config(cfg.load())
+    assert effective["pipeline"]["default_strategy"] == "cull_ready"
+
+
+def test_create_workspace_accepts_null_default_strategy(client):
+    """Explicit null on create must round-trip — it is the "import only"
+    sentinel and mirrors the PUT path's null acceptance."""
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({
+            "name": "StratCreateNull",
+            "config_overrides": {"pipeline": {"default_strategy": None}},
+        }),
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+
+
+def test_create_workspace_rejects_non_object_config_overrides(client):
+    """``config_overrides`` must be a JSON object or null; anything else
+    would be persisted as-is and break the labels accessors."""
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({
+            "name": "StratBadOverrides",
+            "config_overrides": "not-a-dict",
+        }),
+        content_type="application/json",
+    )
+    assert resp.status_code == 400
+    assert "config_overrides" in resp.get_json()["error"]
