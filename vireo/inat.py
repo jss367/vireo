@@ -18,6 +18,15 @@ class InatApiError(Exception):
     pass
 
 
+class InatPartialUploadError(InatApiError):
+    """Raised when the observation exists but attaching the photo failed."""
+
+    def __init__(self, message, observation_id, observation_url):
+        super().__init__(message)
+        self.observation_id = observation_id
+        self.observation_url = observation_url
+
+
 def _headers(token):
     return {"Authorization": f"Bearer {token}"}
 
@@ -96,5 +105,12 @@ def submit_observation(token, photo_path, taxon_name=None, observed_on=None,
     )
     obs_id = obs["id"]
     obs_url = obs.get("uri", f"{INAT_RAILS}/observations/{obs_id}")
-    upload_photo(token, obs_id, photo_path)
+    try:
+        upload_photo(token, obs_id, photo_path)
+    except InatApiError as e:
+        raise InatPartialUploadError(
+            f"{e} Observation was created without a photo.",
+            observation_id=obs_id,
+            observation_url=obs_url,
+        ) from e
     return obs_id, obs_url

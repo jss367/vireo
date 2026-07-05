@@ -1,5 +1,6 @@
 import os
 import sys
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -127,6 +128,25 @@ def test_submit_observation_success():
             mock_upload.assert_called_once_with("fake-token", 88888, "/path/to/photo.jpg")
 
 
+def test_submit_observation_reports_partial_upload_failure():
+    from inat import InatApiError, InatPartialUploadError, submit_observation
+    with patch(
+        "inat.create_observation",
+        return_value={"id": 88888, "uri": "https://www.inaturalist.org/observations/88888"},
+    ):
+        with patch("inat.upload_photo", side_effect=InatApiError("Photo upload failed (500): boom")):
+            with pytest.raises(InatPartialUploadError) as exc:
+                submit_observation(
+                    token="fake-token",
+                    photo_path="/path/to/photo.jpg",
+                    taxon_name="Cardinalis cardinalis",
+                )
+
+    assert exc.value.observation_id == 88888
+    assert exc.value.observation_url == "https://www.inaturalist.org/observations/88888"
+    assert "without a photo" in str(exc.value)
+
+
 from PIL import Image
 
 
@@ -185,6 +205,39 @@ def test_api_inat_prepare_includes_submission_status(app_and_db):
     assert data['existing_observation_url'] == "https://www.inaturalist.org/observations/999"
 
 
+def test_api_inat_prepare_url_encodes_quick_upload_params(app_and_db):
+    app, db, pid = app_and_db
+    client = app.test_client()
+
+    resp = client.get(f'/api/inat/prepare/{pid}')
+    data = resp.get_json()
+
+    assert data["mode"] == "quick"
+    parsed = urlparse(data["upload_url"])
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "www.inaturalist.org"
+    assert parsed.path == "/observations/upload"
+    query = parse_qs(parsed.query)
+    assert query["taxon_name"] == ["Cardinalis cardinalis"]
+    assert query["observed_on"] == ["2024-06-01"]
+
+
+def test_api_inat_prepare_preserves_zero_coordinates(app_and_db):
+    app, db, pid = app_and_db
+    db.conn.execute(
+        "UPDATE photos SET latitude = 0, longitude = 0 WHERE id = ?",
+        (pid,),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get(f'/api/inat/prepare/{pid}')
+    query = parse_qs(urlparse(resp.get_json()["upload_url"]).query)
+
+    assert query["lat"] == ["0.0"]
+    assert query["lng"] == ["0.0"]
+
+
 def test_api_inat_submit_no_token(app_and_db):
     app, db, pid = app_and_db
     client = app.test_client()
@@ -210,6 +263,29 @@ def test_api_inat_submit_success(app_and_db):
     assert pid in subs
 
 
+def test_api_inat_submit_reports_partial_upload(app_and_db):
+    app, db, pid = app_and_db
+    import config as cfg
+    from inat import InatPartialUploadError
+    cfg.save({"inat_token": "fake-token"})
+
+    client = app.test_client()
+    err = InatPartialUploadError(
+        "Photo upload failed (500): boom. Observation was created without a photo.",
+        observation_id=12345,
+        observation_url="https://www.inaturalist.org/observations/12345",
+    )
+    with patch("inat.submit_observation", side_effect=err):
+        resp = client.post('/api/inat/submit', json={'photo_id': pid})
+
+    data = resp.get_json()
+    assert resp.status_code == 502
+    assert data["partial"] is True
+    assert data["observation_id"] == 12345
+    assert data["observation_url"] == "https://www.inaturalist.org/observations/12345"
+    assert pid not in db.get_inat_submissions([pid])
+
+
 def test_api_inat_submit_batch(app_and_db):
     app, db, pid = app_and_db
     import config as cfg
@@ -223,6 +299,29 @@ def test_api_inat_submit_batch(app_and_db):
     data = resp.get_json()
     assert len(data['results']) == 1
     assert data['results'][0]['observation_id'] == 11111
+
+
+def test_api_inat_submit_batch_reports_partial_upload(app_and_db):
+    app, db, pid = app_and_db
+    import config as cfg
+    from inat import InatPartialUploadError
+    cfg.save({"inat_token": "fake-token"})
+
+    client = app.test_client()
+    err = InatPartialUploadError(
+        "Photo upload failed (500): boom. Observation was created without a photo.",
+        observation_id=22222,
+        observation_url="https://www.inaturalist.org/observations/22222",
+    )
+    with patch("inat.submit_observation", side_effect=err):
+        resp = client.post('/api/inat/submit-batch', json={
+            'submissions': [{'photo_id': pid}]
+        })
+
+    result = resp.get_json()['results'][0]
+    assert result["partial"] is True
+    assert result["observation_id"] == 22222
+    assert result["observation_url"] == "https://www.inaturalist.org/observations/22222"
 
 
 def test_api_inat_submissions_lookup(app_and_db):
