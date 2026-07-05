@@ -12423,6 +12423,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             roots_list = list(roots)
 
         def work(job):
+            from scanner import ScanCancelled
             from scanner import scan as do_scan
 
             thread_db = Database(db_path)
@@ -12548,7 +12549,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         cancel_check=cancel_check,
                     )
                 except Exception as exc:
-                    if str(exc) == "scan cancelled" and cancel_check():
+                    if isinstance(exc, ScanCancelled) and cancel_check():
                         log.info("Scan job %s cancelled during root %s", job["id"], root)
                         cancelled = True
                         break

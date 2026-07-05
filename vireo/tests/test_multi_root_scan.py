@@ -143,6 +143,7 @@ def test_scan_job_cancel_is_forwarded_to_scanner(app_and_db, tmp_path, monkeypat
 
     scan_started = threading.Event()
     scanned_roots = []
+    from scanner import ScanCancelled
 
     def cancellable_scan(root, db, *args, cancel_check=None, **kwargs):
         scanned_roots.append(root)
@@ -151,7 +152,7 @@ def test_scan_job_cancel_is_forwarded_to_scanner(app_and_db, tmp_path, monkeypat
         deadline = time.time() + 5.0
         while time.time() < deadline:
             if cancel_check():
-                raise RuntimeError("scan cancelled")
+                raise ScanCancelled("scan cancelled")
             time.sleep(0.02)
         raise AssertionError("scanner.scan never observed cancellation")
 
