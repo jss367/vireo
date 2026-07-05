@@ -420,7 +420,14 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     # JPEG is still available. Deferring to end-of-run means every
     # companion in the run has landed and been paired before
     # ``_extract_working_copies`` decides which source to read.
-    wc_source_paths = {}  # dest_path -> card source path
+    # dest_path -> (card_src_path, expected_size, expected_mtime_ns).
+    # The identity tuple is captured at land time (before any WC
+    # extraction pass), so the deferred ``_extract_working_copies`` call
+    # can verify the override still holds the exact bytes we copied —
+    # not just any same-sized file that happens to be at the same path.
+    # A rewrite or a reused-mount collision differ in mtime and get
+    # rejected; extraction falls back to the verified archive copy.
+    wc_source_paths = {}
     wc_dest_folders = set()  # exact-match scope for extraction
     # Intra-run duplicate destinations: token -> dest folder where the
     # identity landed this run (mirrors ingest's batch_dest_folders).
@@ -626,9 +633,26 @@ def run_import_job(job, runner, db_path, workspace_id, params):
 
             # Destination path + collision handling (mirrors ingest()).
             dest_file = os.path.join(dest_folder, source_file.name)
+            # Capture card-side (size, mtime_ns) BEFORE the copy so the
+            # deferred working-copy pass can identity-check the card
+            # override at extraction time. Byte-identical files have the
+            # same size AND mtime; a rewrite between now and the end-of-
+            # run extractor bumps mtime, and a remounted different card
+            # at the same path has an unrelated mtime for its coincidence
+            # of same-sized file. Without this the size-only check would
+            # accept a same-size collision and cache a working copy for
+            # the wrong bytes. Stat errors are the same class as
+            # copy_and_hash_verify's OSError handling — fail just this
+            # source rather than escape and kill the whole background job.
+            try:
+                src_stat = source_file.stat()
+            except OSError as e:
+                _fail(rel, source_file, str(e))
+                continue
+            src_size = src_stat.st_size
+            src_mtime_ns = src_stat.st_mtime_ns
             try:
                 if os.path.exists(dest_file):
-                    src_size = source_file.stat().st_size
                     dest_size = os.path.getsize(dest_file)
                     if src_size == 0 and dest_size == 0:
                         # Zero-byte twin: identical by definition, but kept
@@ -654,7 +678,8 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                             _counts(rel)["skipped_duplicate"] += 1
                             landed.append(
                                 (dest_file, src_hash, str(source_file),
-                                 "skipped_duplicate"),
+                                 "skipped_duplicate",
+                                 src_size, src_mtime_ns),
                             )
                             _record_checker(
                                 source_file, dest_folder, src_hash,
@@ -690,7 +715,8 @@ def run_import_job(job, runner, db_path, workspace_id, params):
             verified += 1
             _counts(rel)["copied"] += 1
             landed.append(
-                (dest_file, file_hash, str(source_file), "copied"),
+                (dest_file, file_hash, str(source_file), "copied",
+                 src_size, src_mtime_ns),
             )
             _record_checker(source_file, dest_folder, file_hash)
 
@@ -720,7 +746,8 @@ def run_import_job(job, runner, db_path, workspace_id, params):
             # Stamp the verified hashes in the integrity-audit vocabulary,
             # cross-checked against what scan() stored.
             for entry in landed:
-                dest_path, verified_hash, _src, _origin = entry
+                dest_path = entry[0]
+                verified_hash = entry[1]
                 row = db.conn.execute(
                     """SELECT p.id, p.file_hash FROM photos p
                        JOIN folders f ON f.id = p.folder_id
@@ -782,8 +809,13 @@ def run_import_job(job, runner, db_path, workspace_id, params):
             # predicate then skips.
             if params.vireo_dir:
                 for entry in landed:
-                    dest_path, _hash, src_path, _origin = entry
-                    wc_source_paths[dest_path] = src_path
+                    dest_path = entry[0]
+                    src_path = entry[2]
+                    exp_size = entry[4]
+                    exp_mtime_ns = entry[5]
+                    wc_source_paths[dest_path] = (
+                        src_path, exp_size, exp_mtime_ns,
+                    )
                 wc_dest_folders.add(dest_folder)
 
         # --- Link duplicate-twin folders. Separate scan call WITHOUT

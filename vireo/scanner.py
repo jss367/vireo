@@ -728,23 +728,39 @@ def _subtree_like_pattern(path, sep=None):
 _FAILURE_RETRY_AFTER = "-24 hours"
 
 
-def _override_size_matches(override_path, expected_size):
+def _override_identity_matches(
+        override_path, expected_size, expected_mtime_ns):
     """True when ``source_paths`` override is safe to substitute for the archive.
 
-    The card-side override is trusted iff both a size is known for the
-    catalog row (``expected_size`` non-null) AND the file at
-    ``override_path`` currently has exactly that size. Byte-identical files
-    are the same size — a mismatch (or an OSError from an unmounted card)
-    proves the override no longer holds the copied bytes, so extraction
-    falls back to the verified archive path instead of caching a working
-    copy for the wrong content.
+    The card-side override is trusted iff BOTH size and mtime match the
+    identity captured when the file was copied. Size alone is not enough:
+    a reused card mount or a rewritten source file can present the SAME
+    byte length at the same path but with different content, and the
+    extractor would then cache a working copy for the wrong bytes and set
+    ``working_copy_path`` — normal backfill would never regenerate it
+    from the verified archive copy. mtime narrows the trust window from
+    "any file with the same size" to "the exact file we just copied":
+    a rewrite by the camera or an OS-level file replacement bumps mtime;
+    a remount of a different card presents mtimes from an unrelated
+    session. Callers still need to guard against the (extremely rare)
+    same-size-same-mtime coincidence by preferring the archive copy on
+    any extraction failure — that retry lives in ``_extract_working_copies``.
+
+    Any missing input (unknown expected size, unknown expected mtime,
+    OSError from an unmounted card, or the file itself is gone) makes
+    the override untrusted, so extraction falls back to the verified
+    archive path.
     """
-    if expected_size is None:
+    if expected_size is None or expected_mtime_ns is None:
         return False
     try:
-        return os.stat(override_path).st_size == int(expected_size)
+        st = os.stat(override_path)
     except OSError:
         return False
+    return (
+        st.st_size == int(expected_size)
+        and st.st_mtime_ns == int(expected_mtime_ns)
+    )
 
 
 def _working_copy_candidate_predicate(wc_max_size, alias=""):
@@ -841,10 +857,15 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
     loop cleanly with whatever was already committed.
 
     ``source_paths`` optionally maps a photo's cataloged absolute path to an
-    alternate read location holding identical bytes. The import job passes
-    its card->archive mapping so extraction reads the fast local card
-    instead of re-reading the just-written archive copy (which may live on
-    a slow network volume). Applies to both the primary and the companion
+    ``(alternate_path, expected_size, expected_mtime_ns)`` tuple. The import
+    job passes its card->archive mapping (with size + mtime captured at
+    copy time) so extraction reads the fast local card instead of re-
+    reading the just-written archive copy (which may live on a slow
+    network volume). An override is used only when the file at
+    ``alternate_path`` currently has the exact size AND mtime captured at
+    copy time — anything else (rewritten card, remounted different card,
+    unmounted card, coincidental same-size collision) falls back to the
+    verified archive path. Applies to both the primary and the companion
     lookup; paths absent from the map read from the catalog location as
     usual.
     """
@@ -943,16 +964,19 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
             # Reading them here would cache a working copy for the wrong
             # image and — because ``working_copy_path`` gets set — normal
             # backfill would never regenerate it from the archive. Verify
-            # the override's size against the file_size scan() recorded for
-            # this row (identical bytes must have identical size); anything
-            # else falls back to the verified archive copy. row["file_size"]
-            # is null on legacy rows that never made it through the sizing
-            # scan — those also fall back rather than trust an unverifiable
-            # override.
-            override = source_paths.get(catalog_primary)
-            if override and _override_size_matches(override, row["file_size"]):
-                primary_path = override
-                primary_override_used = True
+            # the override's size AND mtime against the identity captured
+            # by the import job at copy time (a rewritten source bumps
+            # mtime; a same-size collision on a reused card mount has an
+            # unrelated mtime); anything else falls back to the verified
+            # archive copy.
+            override_entry = source_paths.get(catalog_primary)
+            if override_entry:
+                override_path, exp_size, exp_mtime_ns = override_entry
+                if _override_identity_matches(
+                    override_path, exp_size, exp_mtime_ns,
+                ):
+                    primary_path = override_path
+                    primary_override_used = True
         primary_is_raw = (
             os.path.splitext(row["filename"])[1].lower() in RAW_EXTENSIONS
         )
@@ -965,18 +989,24 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
             )
             candidate = catalog_companion
             if source_paths:
-                # Companion size is not carried on the RAW's row (pairing
-                # merged the JPEG's photos row into the RAW's), so we can't
-                # size-verify the companion override the way we do the
-                # primary. Track override use here and retry from the
-                # verified archive companion on extraction failure below;
-                # that keeps a rewritten card from silently poisoning a
-                # working copy while still preferring fast local reads
-                # when the override matches.
-                override = source_paths.get(catalog_companion)
-                if override and os.path.isfile(override):
-                    candidate = override
-                    companion_override_used = True
+                # Companion size is not on the RAW's row (pairing merged
+                # the JPEG's photos row into the RAW's), but the import
+                # ledger recorded the companion's card-side size and
+                # mtime at copy time — use those to identity-check the
+                # override the same way the primary does. Without this,
+                # a rewritten card-side JPEG (or a remounted different
+                # card) would silently poison the RAW's working copy
+                # via the companion-fallback path. On identity mismatch
+                # (or missing entry), read the verified archive
+                # companion instead.
+                override_entry = source_paths.get(catalog_companion)
+                if override_entry:
+                    override_path, exp_size, exp_mtime_ns = override_entry
+                    if _override_identity_matches(
+                        override_path, exp_size, exp_mtime_ns,
+                    ):
+                        candidate = override_path
+                        companion_override_used = True
             if os.path.isfile(candidate):
                 companion_path = candidate
 

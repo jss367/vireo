@@ -1425,6 +1425,189 @@ def test_wc_extraction_ignores_card_override_when_size_no_longer_matches(
     )
 
 
+def test_wc_extraction_ignores_card_override_when_mtime_no_longer_matches(
+        tmp_path, monkeypatch):
+    """Size alone is not enough: a rewritten card file (same byte count,
+    different content) OR a reused card mount holding a coincidentally
+    same-sized file would pass a size-only guard and cache a working
+    copy for the WRONG bytes. mtime narrows trust from "any same-sized
+    file at this path" to "the exact file we just copied" — a rewrite
+    or a remount presents a different mtime. This test rewrites the
+    card RAW between copy and the deferred extraction with EXACTLY the
+    same size (identical original bytes shuffled) but a fresh mtime;
+    the extractor must fall back to the verified archive copy.
+    """
+    import import_job
+    import scanner
+
+    card = tmp_path / "card"
+    card.mkdir()
+    Image.new("RGB", (16, 16), "red").save(str(card / "DSC_4001.jpg"))
+    raw_bytes = (card / "DSC_4001.jpg").read_bytes() + b"RAW-SENSOR-DATA"
+    (card / "DSC_4001.NEF").write_bytes(raw_bytes)
+    (card / "DSC_4001.jpg").unlink()
+    original_mtime = datetime(2026, 7, 5, 12, 0, 0).timestamp()
+    os.utime(str(card / "DSC_4001.NEF"), (original_mtime, original_mtime))
+    original_size = os.path.getsize(str(card / "DSC_4001.NEF"))
+
+    calls = []
+
+    def fake_extract(source_path, output_path, max_size=4096, quality=92):
+        calls.append(str(source_path))
+        if not os.path.isfile(source_path):
+            return False
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "wb") as f:
+            f.write(b"jpeg-bytes")
+        return True
+
+    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+
+    vireo_dir = tmp_path / "vireo"
+    (vireo_dir / "working").mkdir(parents=True)
+    dest = str(tmp_path / "archive")
+
+    # Between copy+catalog and the end-of-run extraction, replace the
+    # card file with DIFFERENT bytes of the SAME size and set a
+    # DIFFERENT mtime. Size-only guards would accept this override; the
+    # tightened identity check rejects it because mtime moved.
+    real_extract_wc = scanner._extract_working_copies
+
+    def rewrite_same_size_diff_mtime(*a, **kw):
+        card_raw = card / "DSC_4001.NEF"
+        different_bytes = bytes(reversed(card_raw.read_bytes()))
+        card_raw.write_bytes(different_bytes)
+        assert os.path.getsize(str(card_raw)) == original_size, (
+            "replacement must keep byte count identical"
+        )
+        new_mtime = datetime(2026, 7, 6, 9, 0, 0).timestamp()
+        os.utime(str(card_raw), (new_mtime, new_mtime))
+        return real_extract_wc(*a, **kw)
+
+    monkeypatch.setattr(
+        "scanner._extract_working_copies", rewrite_same_size_diff_mtime,
+    )
+
+    _db, _ws_id, result = _run_import(tmp_path, import_job.ImportParams(
+        sources=[str(card)], destination=dest,
+        vireo_dir=str(vireo_dir),
+    ))
+
+    assert result["copied"] == 1
+    assert calls, "extractor should have run"
+    archive_reads = [c for c in calls if str(card) not in c]
+    card_reads = [c for c in calls if str(card) in c]
+    assert archive_reads, (
+        f"extractor should have read from the archive (mtime mismatch → "
+        f"fall back to catalog primary); got calls={calls}"
+    )
+    assert not card_reads, (
+        f"extractor should not have read the rewritten card path (mtime "
+        f"no longer matches captured identity); got card reads={card_reads}"
+    )
+
+
+def test_wc_extraction_ignores_companion_override_when_mtime_changes(
+        tmp_path, monkeypatch):
+    """RAW+JPEG pair: after copy the RAW's row carries companion_path
+    pointing at the JPEG's archive path. The extractor's companion
+    fallback used to accept any existing card-side JPEG at the override
+    location without identity verification — a rewritten card-side JPEG
+    (or a remounted card holding a same-sized JPEG) would then poison
+    the RAW's working copy through the RAW-fails-fall-back-to-companion
+    path. Identity-checking the companion override against (size, mtime)
+    captured at import time makes the extractor read the verified
+    archive companion on any mismatch.
+    """
+    import import_job
+    import scanner
+
+    card = tmp_path / "card"
+    card.mkdir()
+    Image.new("RGB", (16, 16), "blue").save(str(card / "DSC_5001.jpg"))
+    raw_bytes = (card / "DSC_5001.jpg").read_bytes() + b"RAW-SENSOR-DATA"
+    (card / "DSC_5001.NEF").write_bytes(raw_bytes)
+    original_jpeg_bytes = (card / "DSC_5001.jpg").read_bytes()
+    original_jpeg_size = len(original_jpeg_bytes)
+    original_mtime = datetime(2026, 7, 5, 13, 0, 0).timestamp()
+    os.utime(str(card / "DSC_5001.jpg"), (original_mtime, original_mtime))
+    os.utime(str(card / "DSC_5001.NEF"), (original_mtime, original_mtime))
+
+    calls = []
+
+    def fake_extract(source_path, output_path, max_size=4096, quality=92):
+        calls.append(str(source_path))
+        # Force the RAW primary to fail so the extractor falls into the
+        # companion-fallback branch — that's the code path where the
+        # companion override identity check lives. .NEF is the RAW
+        # extension used above.
+        if str(source_path).lower().endswith(".nef"):
+            return False
+        if not os.path.isfile(source_path):
+            return False
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "wb") as f:
+            f.write(b"jpeg-bytes")
+        return True
+
+    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+
+    vireo_dir = tmp_path / "vireo"
+    (vireo_dir / "working").mkdir(parents=True)
+    dest = str(tmp_path / "archive")
+
+    # Between copy+catalog and the end-of-run extraction, rewrite the
+    # card-side JPEG companion with DIFFERENT bytes of the SAME size and
+    # a fresh mtime. Without the identity check the companion-fallback
+    # branch would read this poisoned override.
+    real_extract_wc = scanner._extract_working_copies
+
+    def rewrite_companion_same_size(*a, **kw):
+        card_jpeg = card / "DSC_5001.jpg"
+        card_jpeg.write_bytes(bytes(reversed(original_jpeg_bytes)))
+        assert os.path.getsize(str(card_jpeg)) == original_jpeg_size, (
+            "replacement must keep byte count identical"
+        )
+        new_mtime = datetime(2026, 7, 6, 10, 0, 0).timestamp()
+        os.utime(str(card_jpeg), (new_mtime, new_mtime))
+        return real_extract_wc(*a, **kw)
+
+    monkeypatch.setattr(
+        "scanner._extract_working_copies", rewrite_companion_same_size,
+    )
+
+    _db, _ws_id, result = _run_import(tmp_path, import_job.ImportParams(
+        sources=[str(card)], destination=dest,
+        vireo_dir=str(vireo_dir),
+    ))
+
+    # Both the RAW and its JPEG landed in the archive.
+    assert result["copied"] == 2, (
+        f"expected RAW + JPEG both landed, got {result!r}"
+    )
+    assert calls, "extractor should have run"
+
+    # The RAW extraction attempts (both card and archive) fail; the
+    # extractor then falls back to the companion. That companion read
+    # must be against the ARCHIVE JPEG, not the rewritten card JPEG —
+    # the mtime mismatch on the card override forces archive fallback.
+    jpeg_calls = [c for c in calls if c.lower().endswith(".jpg")]
+    assert jpeg_calls, (
+        f"expected companion fallback to run after RAW failure; "
+        f"got calls={calls}"
+    )
+    card_jpeg_reads = [c for c in jpeg_calls if str(card) in c]
+    archive_jpeg_reads = [c for c in jpeg_calls if str(card) not in c]
+    assert archive_jpeg_reads, (
+        f"extractor should have read the archive JPEG (companion mtime "
+        f"mismatch → archive companion); got jpeg_calls={jpeg_calls}"
+    )
+    assert not card_jpeg_reads, (
+        f"extractor should not have read the rewritten card JPEG "
+        f"companion; got card jpeg reads={card_jpeg_reads}"
+    )
+
+
 def test_wc_extraction_retries_from_archive_when_card_read_fails(
         tmp_path, monkeypatch):
     """The size check can pass (card intact when we peek), then reading
