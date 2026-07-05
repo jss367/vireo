@@ -308,9 +308,11 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         )
         os.makedirs(dest_folder, exist_ok=True)
 
-        # (dest_path, verified_hash) for this batch's landed files —
-        # fresh copies plus byte-identical files already present at the
-        # destination (the crash-recovery path).
+        # (dest_path, verified_hash, card_source) for this batch's
+        # landed files — fresh copies plus byte-identical files already
+        # present at the destination (the crash-recovery path). The card
+        # source feeds working-copy extraction so it reads local card
+        # bytes, never the just-written archive copy.
         landed = []
         dup_dirs = set()
 
@@ -394,7 +396,9 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                             # self-heal for crash-shaped interruptions.
                             skipped_duplicate += 1
                             _counts(rel)["skipped_duplicate"] += 1
-                            landed.append((dest_file, src_hash))
+                            landed.append(
+                                (dest_file, src_hash, str(source_file)),
+                            )
                             if checker is not None:
                                 for tok in checker.record(source_file):
                                     run_dest_folders[tok] = dest_folder
@@ -428,7 +432,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
             copied += 1
             verified += 1
             _counts(rel)["copied"] += 1
-            landed.append((dest_file, file_hash))
+            landed.append((dest_file, file_hash, str(source_file)))
             if checker is not None:
                 for tok in checker.record(source_file):
                     run_dest_folders[tok] = dest_folder
@@ -438,7 +442,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         # stopping point is a valid catalog state). Bounded by the batch
         # size, so no cancel_check is passed — it runs to completion.
         if landed:
-            landed_paths = {p for p, _ in landed}
+            landed_paths = {p for p, _, _ in landed}
             try:
                 scan(
                     destination, db,
@@ -447,13 +451,13 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                     vireo_dir=None,
                 )
             except Exception as e:  # scan failure fails the whole batch
-                for path, _ in landed:
+                for path, _, _ in landed:
                     _fail(rel, path, f"catalog scan failed: {e}")
                 landed = []
 
             # Stamp the verified hashes in the integrity-audit vocabulary,
             # cross-checked against what scan() stored.
-            for dest_path, verified_hash in landed:
+            for dest_path, verified_hash, _src in landed:
                 row = db.conn.execute(
                     """SELECT p.id, p.file_hash FROM photos p
                        JOIN folders f ON f.id = p.folder_id
@@ -461,6 +465,21 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                     (os.path.dirname(dest_path), os.path.basename(dest_path)),
                 ).fetchone()
                 if row is None:
+                    # RAW+JPEG pairing merges the JPEG's photo row into the
+                    # RAW primary (companion_path); the JPEG's bytes are
+                    # verified and represented — that's a success, not a
+                    # missing catalog row.
+                    companion = db.conn.execute(
+                        """SELECT p.id FROM photos p
+                           JOIN folders f ON f.id = p.folder_id
+                           WHERE f.path = ? AND p.companion_path = ?""",
+                        (
+                            os.path.dirname(dest_path),
+                            os.path.basename(dest_path),
+                        ),
+                    ).fetchone()
+                    if companion is not None:
+                        continue
                     _fail(rel, dest_path, "not cataloged after scan")
                     continue
                 if row["file_hash"] == verified_hash:
@@ -487,6 +506,29 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                         "catalog scan (hash mismatch)",
                     )
             db.conn.commit()
+
+            # Extract working copies reading the CARD copy (fast local
+            # bytes) instead of the just-written archive copy. Scoped to
+            # this batch's destination folder; scan() ran with
+            # vireo_dir=None precisely so extraction happens here with
+            # the card-side source mapping. Per-row failures mark the
+            # photo for the scanner's later backfill and never fail the
+            # import.
+            if params.vireo_dir:
+                from scanner import _extract_working_copies
+
+                try:
+                    _extract_working_copies(
+                        db, params.vireo_dir,
+                        scope=[(dest_folder, "exact")],
+                        source_paths={
+                            dest: src for dest, _, src in landed
+                        },
+                    )
+                except Exception:
+                    log.exception(
+                        "Working-copy extraction failed for %s", dest_folder,
+                    )
 
         # --- Link duplicate-twin folders. Separate scan call WITHOUT
         # restrict_files: scan only creates/links folder rows for files it

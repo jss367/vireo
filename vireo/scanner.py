@@ -791,7 +791,7 @@ def working_copy_backfill_candidate_count(db):
 
 def _extract_working_copies(db, vireo_dir, progress_callback=None,
                             status_callback=None, scope=None,
-                            cancel_check=None):
+                            cancel_check=None, source_paths=None):
     """Extract working copies for all RAW photos missing one.
 
     For each RAW photo without a working_copy_path, extract a JPEG working
@@ -820,6 +820,14 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
 
     ``cancel_check()`` is polled before each row; returning truthy aborts the
     loop cleanly with whatever was already committed.
+
+    ``source_paths`` optionally maps a photo's cataloged absolute path to an
+    alternate read location holding identical bytes. The import job passes
+    its card->archive mapping so extraction reads the fast local card
+    instead of re-reading the just-written archive copy (which may live on
+    a slow network volume). Applies to both the primary and the companion
+    lookup; paths absent from the map read from the catalog location as
+    usual.
     """
     import config as cfg
 
@@ -902,12 +910,16 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
         # (and the embedded thumb is unusable too) we still fall back to the
         # companion so an extractable JPEG copy isn't refused outright.
         primary_path = os.path.join(row["folder_path"], row["filename"])
+        if source_paths:
+            primary_path = source_paths.get(primary_path, primary_path)
         primary_is_raw = (
             os.path.splitext(row["filename"])[1].lower() in RAW_EXTENSIONS
         )
         companion_path = None
         if row["companion_path"]:
             candidate = os.path.join(row["folder_path"], row["companion_path"])
+            if source_paths:
+                candidate = source_paths.get(candidate, candidate)
             if os.path.isfile(candidate):
                 companion_path = candidate
 

@@ -407,3 +407,134 @@ def test_copy_and_hash_verify_detects_corruption(tmp_path, monkeypatch):
     assert file_hash is None
     assert dst.read_bytes() == b"existing verified archive bytes"
     assert not list(dst.parent.glob(".DSC_0002.jpg.*.tmp"))
+
+
+# --- working copies from the card (Task 2.5) -----------------------------
+
+def _stub_extractor(monkeypatch, outcome):
+    """Replace scanner.extract_working_copy, recording calls.
+
+    ``outcome(source_path)`` decides the stubbed return value.
+    """
+    import scanner
+    calls = []
+
+    def fake_extract(source_path, output_path, max_size=4096, quality=92):
+        calls.append((str(source_path), str(output_path)))
+        return outcome(str(source_path))
+
+    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+    return calls
+
+
+def test_working_copy_extracted_from_card_path(tmp_path, monkeypatch):
+    """The working copy reads the CARD copy of a RAW file, not the archive
+    copy — after import, no processing stage re-reads originals from the
+    (possibly slow) archive volume."""
+    from import_job import ImportParams
+
+    calls = _stub_extractor(monkeypatch, lambda src: True)
+
+    card = tmp_path / "card"
+    card.mkdir()
+    # JPEG bytes under a RAW extension: extraction is stubbed, so only the
+    # extension-based RAW candidacy matters.
+    Image.new("RGB", (16, 16), "red").save(str(card / "DSC_0500.jpg"))
+    os.rename(str(card / "DSC_0500.jpg"), str(card / "DSC_0500.NEF"))
+
+    archive = tmp_path / "archive"
+    vireo_dir = tmp_path / "vireo"
+    db, ws_id, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)], destination=str(archive),
+        vireo_dir=str(vireo_dir),
+    ))
+
+    assert result["copied"] == 1
+    assert result["safe_to_format"] is True
+    assert len(calls) == 1
+    src, out = calls[0]
+    assert src == str(card / "DSC_0500.NEF"), (
+        f"extraction read {src}, expected the card path"
+    )
+    rows = _photo_rows(db)
+    assert len(rows) == 1
+    pid = rows[0]["id"]
+    assert out == os.path.join(str(vireo_dir), "working", f"{pid}.jpg")
+    wc = db.conn.execute(
+        "SELECT working_copy_path FROM photos WHERE id = ?", (pid,),
+    ).fetchone()["working_copy_path"]
+    assert wc == f"working/{pid}.jpg"
+
+
+def test_working_copy_companion_fallback_reads_card_jpeg(
+        tmp_path, monkeypatch):
+    """RAW+JPEG pair: when the RAW decode fails, the companion fallback
+    must read the CARD's JPEG. Also pins that the companion file (whose
+    photo row is deliberately merged away by pairing) is not bucketed as
+    a failure by the hash-stamping pass."""
+    from import_job import ImportParams
+
+    calls = _stub_extractor(
+        monkeypatch, lambda src: not src.lower().endswith(".nef"),
+    )
+
+    card = tmp_path / "card"
+    card.mkdir()
+    Image.new("RGB", (16, 16), "red").save(str(card / "DSC_0501.jpg"))
+    # The RAW must be distinct bytes (a real pair always is) or the
+    # duplicate gate would skip it as an intra-run twin of the JPEG.
+    raw_bytes = (card / "DSC_0501.jpg").read_bytes() + b"RAW-SENSOR-DATA"
+    (card / "DSC_0501.NEF").write_bytes(raw_bytes)
+
+    archive = tmp_path / "archive"
+    vireo_dir = tmp_path / "vireo"
+    db, ws_id, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)], destination=str(archive),
+        vireo_dir=str(vireo_dir),
+    ))
+
+    assert result["copied"] == 2
+    assert result["failed"] == 0
+    assert result["safe_to_format"] is True
+
+    # RAW attempt from the card, then companion fallback from the card.
+    sources_tried = [src for src, _ in calls]
+    assert str(card / "DSC_0501.NEF") in sources_tried
+    assert str(card / "DSC_0501.jpg") in sources_tried
+
+    # Pairing merged the JPEG row into the RAW primary.
+    rows = _photo_rows(db)
+    assert len(rows) == 1
+    assert rows[0]["filename"] == "DSC_0501.NEF"
+    wc = db.conn.execute(
+        "SELECT working_copy_path, companion_path FROM photos WHERE id = ?",
+        (rows[0]["id"],),
+    ).fetchone()
+    assert wc["working_copy_path"] == f"working/{rows[0]['id']}.jpg"
+    assert wc["companion_path"] == "DSC_0501.jpg"
+
+
+def test_failed_extraction_leaves_working_copy_null(tmp_path, monkeypatch):
+    from import_job import ImportParams
+
+    _stub_extractor(monkeypatch, lambda src: False)
+
+    card = tmp_path / "card"
+    card.mkdir()
+    Image.new("RGB", (16, 16), "red").save(str(card / "DSC_0502.jpg"))
+    os.rename(str(card / "DSC_0502.jpg"), str(card / "DSC_0502.NEF"))
+
+    db, ws_id, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)], destination=str(tmp_path / "archive"),
+        vireo_dir=str(tmp_path / "vireo"),
+    ))
+
+    # Import itself still succeeds; the backfill retries extraction later.
+    assert result["copied"] == 1
+    assert result["safe_to_format"] is True
+    rows = _photo_rows(db)
+    wc = db.conn.execute(
+        "SELECT working_copy_path FROM photos WHERE id = ?",
+        (rows[0]["id"],),
+    ).fetchone()["working_copy_path"]
+    assert wc is None
