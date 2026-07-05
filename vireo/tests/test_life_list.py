@@ -315,6 +315,57 @@ def test_life_list_export_photo_csv_all_photos(life_app):
     assert all(r["locations"] == "" for r in rows)
 
 
+def test_life_list_export_all_photos_is_not_limited_to_page_count(life_app):
+    app, db, ids = life_app
+    k_card = db.add_keyword("Northern Cardinal", is_species=True)
+    extra_ids = []
+    for i in range(13):
+        pid = db.add_photo(
+            folder_id=ids["folder"],
+            filename=f"card-extra-{i}.jpg",
+            extension=".jpg",
+            file_size=1000,
+            file_mtime=20.0 + i,
+            timestamp=f"2024-05-{i + 1:02d}T08:00:00",
+        )
+        db.tag_photo(pid, k_card)
+        extra_ids.append(pid)
+
+    page_payload = _get_life_list(app)
+    cardinal = _entry(page_payload, "Northern Cardinal")
+    assert cardinal["photo_count"] == 15
+    assert len(cardinal["photos"]) == 12
+
+    resp = app.test_client().get(
+        "/api/life-list/export?format=csv&detail=photos&photos=all"
+    )
+    rows = list(csv.DictReader(io.StringIO(resp.get_data(as_text=True))))
+    cardinal_rows = [r for r in rows if r["species"] == "Northern Cardinal"]
+    assert len(cardinal_rows) == 15
+    exported_ids = {int(r["photo_id"]) for r in cardinal_rows}
+    assert set(extra_ids).issubset(exported_ids)
+
+
+def test_life_list_file_export_keeps_duplicate_filenames_by_photo_id(life_app):
+    app, db, ids = life_app
+    k_card = db.add_keyword("Northern Cardinal", is_species=True)
+    other_folder = db.add_folder("/photos/2025", name="2025")
+    for folder_id in (ids["folder"], other_folder):
+        pid = db.add_photo(
+            folder_id=folder_id,
+            filename="DSC_0001.JPG",
+            extension=".JPG",
+            file_size=1000,
+            file_mtime=30.0 + folder_id,
+            timestamp=f"2024-06-{folder_id:02d}T08:00:00",
+        )
+        db.tag_photo(pid, k_card)
+
+    resp = app.test_client().get("/api/life-list/export?format=file&photos=all")
+    assert resp.status_code == 200
+    assert resp.get_data(as_text=True).splitlines().count("DSC_0001.JPG") == 2
+
+
 def test_life_list_export_text_and_file_lists(life_app):
     app, _, _ = life_app
     client = app.test_client()

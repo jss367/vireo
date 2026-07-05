@@ -6716,9 +6716,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def _build_life_list_payload(db, photos_per_species=12):
         rows = db.get_life_list_candidates()
         locations_by_species = db.get_life_list_locations()
-        photos_per_species = max(
-            1, min(int(photos_per_species), 100)
-        )
+        if photos_per_species is None:
+            photo_limit = None
+        else:
+            photo_limit = max(
+                1, min(int(photos_per_species), 100)
+            )
 
         buckets = {}
         for row in rows:
@@ -6785,7 +6788,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             preferred_applied = _apply_preferred_photo(
                 photos, preferred_id, "is_life_list_photo"
             )
-            top = photos[:photos_per_species]
+            top = photos if photo_limit is None else photos[:photo_limit]
             species_entries.append({
                 "species": species,
                 "scientific_name": entry["scientific_name"],
@@ -6822,7 +6825,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "meta": {
                 "species_count": len(species_entries),
                 "photo_count": len(distinct_photo_ids),
-                "photos_per_species": photos_per_species,
+                "photos_per_species": photo_limit,
             },
         }
 
@@ -6962,10 +6965,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         lines = []
         for entry in payload.get("species", []):
             for photo in _life_list_export_photos(entry, photo_mode):
-                filename = photo.get("filename")
-                if not filename or filename in seen:
+                photo_id = photo.get("id")
+                if photo_id in seen:
                     continue
-                seen.add(filename)
+                seen.add(photo_id)
+                filename = photo.get("filename")
+                if not filename:
+                    continue
                 lines.append(filename)
         return "\n".join(lines) + ("\n" if lines else "")
 
@@ -6985,9 +6991,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("photos must be best or all")
 
         db = _get_db()
+        payload_photos_per_species = (
+            None if photo_mode == "all"
+            else request.args.get("photos_per_species", 12, type=int)
+        )
         payload = _build_life_list_payload(
             db,
-            photos_per_species=request.args.get("photos_per_species", 12, type=int),
+            photos_per_species=payload_photos_per_species,
         )
         if not _life_list_export_bool_arg("include_locations"):
             _strip_life_list_locations(payload)
