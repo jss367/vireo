@@ -366,8 +366,9 @@ SCHEMA = {
     "pipeline.default_strategy": {
         # Workspace-scoped: consumed by the import→process chaining hook
         # via db.get_effective_config(cfg.load()). None (import only) is the
-        # DEFAULTS value; validation of the workspace override is done in
-        # /api/workspaces/<id> via resolve_strategy so null passes through.
+        # DEFAULTS value; `nullable` here lets the workspace override the
+        # global default back to null via /api/settings/workspace, and the
+        # settings UI renders the null option so users can pick it.
         "type": "enum",
         "enum": ["full", "cull_ready", "quick_look"],
         "enum_labels": {
@@ -375,6 +376,8 @@ SCHEMA = {
             "cull_ready": "Cull-ready",
             "quick_look": "Quick look",
         },
+        "nullable": True,
+        "null_label": "Import only (no processing)",
         "category": "Pipeline", "scope": "workspace",
         "label": "Default process strategy",
         "desc": "Strategy run automatically after an import completes on this workspace.",
@@ -810,11 +813,19 @@ def validate_value(key, raw):
 
     Returns the coerced value. Raises :class:`ValidationError` on any failure
     (unknown key, type mismatch, out-of-range, unknown enum value, etc.).
+
+    Fields with ``nullable: True`` accept ``None`` (and the empty string, as
+    the settings UI serializes a null <option> as ``value=""``) and return
+    ``None`` — used for enums where "unset" is a meaningful third state
+    distinct from any listed choice (e.g. ``pipeline.default_strategy`` where
+    null means "import only, no processing").
     """
     if key not in SCHEMA:
         raise ValidationError(f"unknown setting {key!r}")
     spec = SCHEMA[key]
     kind = spec["type"]
+    if spec.get("nullable") and (raw is None or raw == ""):
+        return None
     value = _coerce(raw, kind)
 
     if kind in ("int", "float"):

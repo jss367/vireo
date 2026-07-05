@@ -2706,3 +2706,91 @@ def test_pipeline_folder_ids_leaves_no_stray_collection_on_400(
         assert resp.status_code == 400, resp.get_json()
         assert fragment in resp.get_json()["error"]
     assert len(db.get_collections()) == before
+
+
+def test_pipeline_folder_ids_chunks_wide_subtree(app_and_db, monkeypatch):
+    """A folder root that expands into thousands of descendant folder ids
+    must not overflow SQLite's per-statement bound-variable cap
+    (SQLITE_MAX_VARIABLE_NUMBER = 999 on legacy builds). Force the chunk
+    size down and verify a subtree several times its width still resolves
+    correctly — a single unchunked ``folder_id IN (?,...,?)`` would raise
+    OperationalError before the job was queued and surface as a 500."""
+    import db as db_module
+
+    monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 3)
+
+    app, db = app_and_db
+    parent = db.add_folder("/photos/wide", name="wide")
+    photo_ids = []
+    for i in range(10):
+        sub = db.add_folder(
+            f"/photos/wide/sub{i}", name=f"sub{i}", parent_id=parent,
+        )
+        pid = db.add_photo(
+            folder_id=sub, filename=f"p{i}.jpg", extension=".jpg",
+            file_size=100 + i, file_mtime=100.0 + i,
+        )
+        photo_ids.append(pid)
+    db.add_workspace_folder(db._active_workspace_id, parent)
+
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [parent], "strategy": "quick_look",
+        })
+        assert resp.status_code == 200, resp.get_json()
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        got = _collection_photo_ids(db, cfg["collection_id"])
+        assert set(photo_ids) <= set(got)
+
+
+def test_pipeline_folder_ids_persisted_in_job_config(app_and_db):
+    """job_config records the caller's original folder_ids alongside the
+    derived ad-hoc collection_id. Without this the Jobs page can show only
+    the derived collection, not the folder subtree the user selected —
+    reconstructing the selection from the collection is impossible once the
+    ad-hoc collection is renamed or deleted."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [root_id], "strategy": "quick_look",
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg.get("folder_ids") == [root_id]
+        # Sanity: the derived collection_id is still there so consumers can
+        # keep using the collection-scoped code path.
+        assert cfg.get("collection_id")
+
+
+@pytest.mark.parametrize("bad", ["false", "true", 0, 1, "yes", [], {}])
+def test_pipeline_miss_enabled_rejects_non_bool(app_and_db, bad):
+    """miss_enabled is tri-state (None / True / False) — a truthy non-bool
+    like the string ``"false"`` would flow through pipeline_job's
+    ``params.miss_enabled is not None`` guard, then be treated as truthy in
+    ``not miss_enabled``, silently turning misses ON when the caller wanted
+    them OFF. Type-check at enqueue so the caller sees a clean 400."""
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "miss_enabled": bad,
+        })
+        assert resp.status_code == 400, resp.get_json()
+        assert "miss_enabled" in resp.get_json()["error"]
+
+
+def test_pipeline_miss_enabled_accepts_bools(app_and_db, monkeypatch):
+    """The complement of the reject test — real bools survive to job_config
+    so a strategy override or a caller explicit toggle can actually take."""
+    app, _ = app_and_db
+    _fake_active_model(monkeypatch)
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        for value in (True, False):
+            resp = client.post("/api/jobs/pipeline", json={
+                "collection_id": col_id, "miss_enabled": value,
+            })
+            assert resp.status_code == 200, resp.get_json()
+            cfg = _job_config(client, resp.get_json()["job_id"])
+            assert cfg["miss_enabled"] is value

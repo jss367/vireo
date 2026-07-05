@@ -16637,13 +16637,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # Union — a workspace can link both a root and a nested
                 # folder, so the same descendant can appear twice.
                 subtree_ids.update(db.get_folder_subtree_ids(fid))
-            marks = ",".join("?" for _ in subtree_ids)
-            photo_ids = [
-                r["id"] for r in db.conn.execute(
-                    f"SELECT id FROM photos WHERE folder_id IN ({marks})",
-                    tuple(subtree_ids),
+            # A large workspace root can expand into thousands of descendant
+            # folder ids — more than SQLite's per-statement bound-parameter
+            # cap on legacy builds (SQLITE_MAX_VARIABLE_NUMBER = 999). Chunk
+            # the IN(...) lookup so a wide folder subtree doesn't blow up as
+            # an OperationalError before the job is even queued. Same pattern
+            # db.py uses for other large id scopes (see _chunks in db.py).
+            from db import _SQLITE_PARAM_CHUNK_SIZE  # noqa: PLC0415
+            subtree_id_list = list(subtree_ids)
+            photo_ids = []
+            for start in range(0, len(subtree_id_list), _SQLITE_PARAM_CHUNK_SIZE):
+                chunk = subtree_id_list[start:start + _SQLITE_PARAM_CHUNK_SIZE]
+                marks = ",".join("?" for _ in chunk)
+                photo_ids.extend(
+                    r["id"] for r in db.conn.execute(
+                        f"SELECT id FROM photos WHERE folder_id IN ({marks})",
+                        tuple(chunk),
+                    )
                 )
-            ]
             first = db.get_folder(folder_ids[0])
             leaf = os.path.basename(
                 (first["path"] or "").rstrip("/\\")
@@ -16856,6 +16867,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             dict(remote_archive_config["target"])
             if remote_archive_config is not None else None
         )
+
+        # ``miss_enabled`` is tri-state (None / True / False) so ``body.get``
+        # can't apply a default the way boolean skip_* flags do. Validate it
+        # explicitly instead: pipeline_job.py branches on
+        # ``params.miss_enabled is not None`` and then on truthiness, so a
+        # non-bool value like the string "false" would flow through as
+        # truthy — a caller expecting misses off would get them on.
+        miss_enabled_body = body.get("miss_enabled")
+        if miss_enabled_body is not None and not isinstance(miss_enabled_body, bool):
+            return json_error(
+                f"miss_enabled must be boolean, got "
+                f"{type(miss_enabled_body).__name__}"
+            )
         params = PipelineParams(
             collection_id=collection_id,
             source=source,
@@ -16990,6 +17014,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "skip_regroup": params.skip_regroup,
             "miss_enabled": params.miss_enabled,
         }
+        # Preserve the caller's original folder_ids alongside the derived
+        # ad-hoc collection_id so the Jobs page can show both what the user
+        # selected (folder subtree) and the collection the run was pinned to
+        # without a secondary collection lookup.
+        if folder_ids is not None:
+            job_config["folder_ids"] = list(folder_ids)
         if remote_archive_config is not None:
             # Surface that the archive goes over SSH (and to where) so the
             # jobs panel can show it, per the UI-transparency rule.

@@ -10402,7 +10402,7 @@ def test_pipeline_params_miss_enabled_defaults_none():
 
 
 def _run_pipeline_for_miss_tests(tmp_path, monkeypatch, *, pipeline_cfg,
-                                 params_extra):
+                                 params_extra, expect_runtime_error=False):
     """Run a collection pipeline far enough to reach miss_stage.
 
     classify must complete (model_loader failure sets abort, and the misses
@@ -10411,6 +10411,12 @@ def _run_pipeline_for_miss_tests(tmp_path, monkeypatch, *, pipeline_cfg,
     gate skips when regroup failed), so stub run_full_pipeline /
     save_results / load_photo_features. Returns (runner, result, spy_calls)
     where spy_calls captures every compute_misses_for_workspace invocation.
+
+    ``expect_runtime_error`` is opt-in: the setup-failure test needs to swallow
+    the RuntimeError so it can inspect ``job["_fatal_error"]``, but the
+    override tests must let unexpected pipeline aborts propagate — otherwise
+    an earlier stage failing would make miss_stage skip for the wrong reason
+    and the test would pass on a false green.
     """
     import json as json_mod
 
@@ -10429,7 +10435,7 @@ def _run_pipeline_for_miss_tests(tmp_path, monkeypatch, *, pipeline_cfg,
         misses_mod = None
 
     monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
     with open(cfg.CONFIG_PATH, "w") as f:
         json_mod.dump({"pipeline": pipeline_cfg}, f)
 
@@ -10509,10 +10515,16 @@ def _run_pipeline_for_miss_tests(tmp_path, monkeypatch, *, pipeline_cfg,
     )
     runner = FakeRunner()
     job = _make_job()
-    # A fatal stage error makes run_pipeline_job raise after recording it on
-    # the job; the setup-failure test inspects job["_fatal_error"] instead.
+    # Suppression is opt-in — the setup-failure test needs to inspect
+    # job["_fatal_error"] after the recorded RuntimeError, but the
+    # miss_enabled override tests must let unexpected aborts propagate so
+    # the miss_stage.skipped assertion can't pass because an earlier stage
+    # failed for an unrelated reason.
     result = None
-    with contextlib.suppress(RuntimeError):
+    if expect_runtime_error:
+        with contextlib.suppress(RuntimeError):
+            result = run_pipeline_job(job, runner, db_path, ws_id, params)
+    else:
         result = run_pipeline_job(job, runner, db_path, ws_id, params)
     return runner, result, spy_calls, job
 
@@ -10581,6 +10593,7 @@ def test_miss_stage_setup_failure_marks_stage_failed(tmp_path, monkeypatch):
             tmp, mk,
             pipeline_cfg={"miss_enabled": True},
             params_extra={},
+            expect_runtime_error=True,
         )
 
     runner, result, spy_calls, job = run(tmp_path, monkeypatch)
@@ -10616,7 +10629,7 @@ def test_collection_rerun_redoes_only_missing_work(tmp_path, monkeypatch):
     from db import Database
 
     monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
 
     db_path = str(tmp_path / "test.db")
     db = Database(db_path)
