@@ -206,7 +206,7 @@ ALL_NAV_IDS = frozenset({
     "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
     "misses", "highlights", "life_list", "browse", "edit", "map", "variants",
     "dashboard", "audit", "move", "compare",
-    "zoom_test", "settings", "workspace", "lightroom", "shortcuts",
+    "settings", "workspace", "lightroom", "shortcuts",
     "keywords", "duplicates", "logs",
 })
 
@@ -1410,15 +1410,24 @@ class Database:
             return None
 
     def get_tabs(self):
-        """Return the active workspace's ordered list of pinned tab nav-ids."""
+        """Return the active workspace's ordered list of pinned tab nav-ids.
+
+        Entries not in ``ALL_NAV_IDS`` are dropped so that pages retired in
+        past releases (e.g. ``zoom_test``) don't leave dead slots in the
+        navbar's ``TABS`` array — a dead id makes cmd+number reserve a slot
+        that renders nothing and makes ``adjacentTabId()`` return an id that
+        ``pageById`` doesn't know, which throws on close-adjacent.
+        """
         ws = self.get_workspace(self._ws_id())
         if not ws or not ws["tabs"]:
             return list(DEFAULT_TABS)
         try:
             value = json.loads(ws["tabs"]) if isinstance(ws["tabs"], str) else ws["tabs"]
-            return value if isinstance(value, list) else list(DEFAULT_TABS)
         except (json.JSONDecodeError, TypeError):
             return list(DEFAULT_TABS)
+        if not isinstance(value, list):
+            return list(DEFAULT_TABS)
+        return [t for t in value if isinstance(t, str) and t in ALL_NAV_IDS]
 
     def set_tabs(self, tabs):
         """Replace the active workspace's tabs with the given ordered list.
