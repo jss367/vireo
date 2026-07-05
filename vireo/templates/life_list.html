@@ -333,9 +333,11 @@ function downloadLifeListExport() {
   var params = new URLSearchParams({
     format: format,
     detail: detail,
-    photos: photos,
     include_locations: includeLocations,
   });
+  if (format === 'files' || (format === 'csv' && detail === 'photos')) {
+    params.set('photos', photos);
+  }
   window.location.href = '/api/life-list/export?' + params.toString();
   closeExportModal();
 }

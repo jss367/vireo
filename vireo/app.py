@@ -6991,8 +6991,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("photos must be best or all")
 
         db = _get_db()
+        uses_photo_scope = fmt == "files" or (fmt == "csv" and detail == "photos")
         payload_photos_per_species = (
-            None if photo_mode == "all"
+            None if uses_photo_scope and photo_mode == "all"
             else request.args.get("photos_per_species", 12, type=int)
         )
         payload = _build_life_list_payload(

@@ -346,6 +346,36 @@ def test_life_list_export_all_photos_is_not_limited_to_page_count(life_app):
     assert set(extra_ids).issubset(exported_ids)
 
 
+def test_life_list_summary_exports_ignore_hidden_all_photo_scope(life_app):
+    app, db, ids = life_app
+    k_card = db.add_keyword("Northern Cardinal", is_species=True)
+    for i in range(13):
+        pid = db.add_photo(
+            folder_id=ids["folder"],
+            filename=f"card-hidden-scope-{i}.jpg",
+            extension=".jpg",
+            file_size=1000,
+            file_mtime=40.0 + i,
+            timestamp=f"2024-07-{i + 1:02d}T08:00:00",
+        )
+        db.tag_photo(pid, k_card)
+
+    resp = app.test_client().get("/api/life-list/export?format=json&photos=all")
+    assert resp.status_code == 200
+    data = json.loads(resp.get_data(as_text=True))
+    cardinal = _entry(data, "Northern Cardinal")
+    assert cardinal["photo_count"] == 15
+    assert len(cardinal["photos"]) == 12
+    assert data["meta"]["photos_per_species"] == 12
+
+    csv_resp = app.test_client().get(
+        "/api/life-list/export?format=csv&detail=species&photos=all"
+    )
+    rows = list(csv.DictReader(io.StringIO(csv_resp.get_data(as_text=True))))
+    cardinal_row = next(r for r in rows if r["species"] == "Northern Cardinal")
+    assert cardinal_row["photo_count"] == "15"
+
+
 def test_life_list_file_export_keeps_duplicate_filenames_by_photo_id(life_app):
     app, db, ids = life_app
     k_card = db.add_keyword("Northern Cardinal", is_species=True)
