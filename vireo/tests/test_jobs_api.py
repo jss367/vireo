@@ -2664,6 +2664,13 @@ def test_pipeline_folder_ids_with_other_scope_400(app_and_db, extra):
     assert len(db.get_collections()) == before
 
 
+# os.path.abspath keeps the path shape on POSIX ("/abs/dest") but rewrites
+# it to a drive-anchored form on Windows ("C:\abs\dest"), so os.path.isabs
+# passes on both platforms and validation falls through to the later checks
+# each parametrized case is meant to exercise.
+_ABS_DEST = os.path.abspath("/abs/dest")
+
+
 @pytest.mark.parametrize(
     "extra,fragment",
     [
@@ -2671,12 +2678,12 @@ def test_pipeline_folder_ids_with_other_scope_400(app_and_db, extra):
         ({"destination": "relative/path", "local_processing": False}, "absolute"),
         # local_processing + folder scope — 400 fires at the scope check.
         (
-            {"local_processing": True, "destination": "/abs/dest"},
+            {"local_processing": True, "destination": _ABS_DEST},
             "local_processing",
         ),
         # folder_template with '..' — 400 fires at the folder_template check.
         (
-            {"destination": "/abs/dest", "folder_template": "../%Y"},
+            {"destination": _ABS_DEST, "folder_template": "../%Y"},
             "folder_template",
         ),
     ],
