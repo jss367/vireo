@@ -733,6 +733,41 @@ def _subtree_like_pattern(path, sep=None):
 _FAILURE_RETRY_AFTER = "-24 hours"
 
 
+def _override_identity_matches(
+        override_path, expected_size, expected_mtime_ns):
+    """True when ``source_paths`` override is safe to substitute for the archive.
+
+    The card-side override is trusted iff BOTH size and mtime match the
+    identity captured when the file was copied. Size alone is not enough:
+    a reused card mount or a rewritten source file can present the SAME
+    byte length at the same path but with different content, and the
+    extractor would then cache a working copy for the wrong bytes and set
+    ``working_copy_path`` — normal backfill would never regenerate it
+    from the verified archive copy. mtime narrows the trust window from
+    "any file with the same size" to "the exact file we just copied":
+    a rewrite by the camera or an OS-level file replacement bumps mtime;
+    a remount of a different card presents mtimes from an unrelated
+    session. Callers still need to guard against the (extremely rare)
+    same-size-same-mtime coincidence by preferring the archive copy on
+    any extraction failure — that retry lives in ``_extract_working_copies``.
+
+    Any missing input (unknown expected size, unknown expected mtime,
+    OSError from an unmounted card, or the file itself is gone) makes
+    the override untrusted, so extraction falls back to the verified
+    archive path.
+    """
+    if expected_size is None or expected_mtime_ns is None:
+        return False
+    try:
+        st = os.stat(override_path)
+    except OSError:
+        return False
+    return (
+        st.st_size == int(expected_size)
+        and st.st_mtime_ns == int(expected_mtime_ns)
+    )
+
+
 def _working_copy_candidate_predicate(wc_max_size, alias=""):
     """Build the WHERE-clause fragment selecting photos eligible for working-copy
     extraction, plus its bind parameters.
@@ -796,7 +831,7 @@ def working_copy_backfill_candidate_count(db):
 
 def _extract_working_copies(db, vireo_dir, progress_callback=None,
                             status_callback=None, scope=None,
-                            cancel_check=None):
+                            cancel_check=None, source_paths=None):
     """Extract working copies for all RAW photos missing one.
 
     For each RAW photo without a working_copy_path, extract a JPEG working
@@ -825,6 +860,19 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
 
     ``cancel_check()`` is polled before each row; returning truthy aborts the
     loop cleanly with whatever was already committed.
+
+    ``source_paths`` optionally maps a photo's cataloged absolute path to an
+    ``(alternate_path, expected_size, expected_mtime_ns)`` tuple. The import
+    job passes its card->archive mapping (with size + mtime captured at
+    copy time) so extraction reads the fast local card instead of re-
+    reading the just-written archive copy (which may live on a slow
+    network volume). An override is used only when the file at
+    ``alternate_path`` currently has the exact size AND mtime captured at
+    copy time — anything else (rewritten card, remounted different card,
+    unmounted card, coincidental same-size collision) falls back to the
+    verified archive path. Applies to both the primary and the companion
+    lookup; paths absent from the map read from the catalog location as
+    usual.
     """
     import config as cfg
 
@@ -869,6 +917,7 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
         f"""
         SELECT p.id, p.filename, p.companion_path, p.working_copy_path,
                p.extension, p.width, p.height, p.exif_data, p.file_mtime,
+               p.file_size,
                f.path AS folder_path
           FROM photos p
           JOIN folders f ON f.id = p.folder_id
@@ -897,7 +946,7 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
             break
 
         wc_rel = f"working/{row['id']}.jpg"
-        wc_abs = os.path.join(vireo_dir, wc_rel)
+        wc_abs = os.path.join(vireo_dir, "working", f"{row['id']}.jpg")
 
         # Working copies are the edit-quality source. For non-RAW primaries
         # we still prefer the companion JPEG outright (fast path). For RAW
@@ -906,13 +955,63 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
         # clipped highlights — but if libraw cannot decode this RAW variant
         # (and the embedded thumb is unusable too) we still fall back to the
         # companion so an extractable JPEG copy isn't refused outright.
-        primary_path = os.path.join(row["folder_path"], row["filename"])
+        catalog_primary = os.path.join(row["folder_path"], row["filename"])
+        primary_path = catalog_primary
+        primary_override_used = False
+        if source_paths:
+            # ``source_paths`` overrides the catalog path with the card-side
+            # source so extraction reads local card bytes instead of the
+            # just-written archive copy over a slow NAS. Existence alone is
+            # not enough: if the card was unmounted, its mount point was
+            # reused for a different card, or the source file itself was
+            # rewritten between copy and this extraction pass, the override
+            # points at bytes that no longer match what the archive holds.
+            # Reading them here would cache a working copy for the wrong
+            # image and — because ``working_copy_path`` gets set — normal
+            # backfill would never regenerate it from the archive. Verify
+            # the override's size AND mtime against the identity captured
+            # by the import job at copy time (a rewritten source bumps
+            # mtime; a same-size collision on a reused card mount has an
+            # unrelated mtime); anything else falls back to the verified
+            # archive copy.
+            override_entry = source_paths.get(catalog_primary)
+            if override_entry:
+                override_path, exp_size, exp_mtime_ns = override_entry
+                if _override_identity_matches(
+                    override_path, exp_size, exp_mtime_ns,
+                ):
+                    primary_path = override_path
+                    primary_override_used = True
         primary_is_raw = (
             os.path.splitext(row["filename"])[1].lower() in RAW_EXTENSIONS
         )
         companion_path = None
+        catalog_companion = None
+        companion_override_used = False
         if row["companion_path"]:
-            candidate = os.path.join(row["folder_path"], row["companion_path"])
+            catalog_companion = os.path.join(
+                row["folder_path"], row["companion_path"],
+            )
+            candidate = catalog_companion
+            if source_paths:
+                # Companion size is not on the RAW's row (pairing merged
+                # the JPEG's photos row into the RAW's), but the import
+                # ledger recorded the companion's card-side size and
+                # mtime at copy time — use those to identity-check the
+                # override the same way the primary does. Without this,
+                # a rewritten card-side JPEG (or a remounted different
+                # card) would silently poison the RAW's working copy
+                # via the companion-fallback path. On identity mismatch
+                # (or missing entry), read the verified archive
+                # companion instead.
+                override_entry = source_paths.get(catalog_companion)
+                if override_entry:
+                    override_path, exp_size, exp_mtime_ns = override_entry
+                    if _override_identity_matches(
+                        override_path, exp_size, exp_mtime_ns,
+                    ):
+                        candidate = override_path
+                        companion_override_used = True
             if os.path.isfile(candidate):
                 companion_path = candidate
 
@@ -926,6 +1025,34 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
         # extract_working_copy is slow (RAW decode + JPEG encode); run it
         # before any DB write so no transaction is open while it runs.
         ok = extract_working_copy(source, wc_abs, max_size=wc_max_size, quality=wc_quality)
+        # Card-side override failed but the verified archive copy exists
+        # — retry from the archive before falling through to the RAW→
+        # companion fallback or recording a failure marker. Without this,
+        # a transient card I/O error (or a card that was unmounted just
+        # after the size check above) would leave the row marked failed
+        # even though the archive copy has the correct bytes.
+        if not ok:
+            retry_source = None
+            if source == primary_path and primary_override_used:
+                retry_source = catalog_primary
+            elif source == companion_path and companion_override_used:
+                retry_source = catalog_companion
+            if retry_source and os.path.isfile(retry_source):
+                log.info(
+                    "Card-side working-copy extraction failed for photo "
+                    "%s (%s); retrying from archive %s",
+                    row["id"], source, retry_source,
+                )
+                source = retry_source
+                if retry_source == catalog_primary:
+                    primary_path = catalog_primary
+                    primary_override_used = False
+                else:
+                    companion_path = catalog_companion
+                    companion_override_used = False
+                ok = extract_working_copy(
+                    source, wc_abs, max_size=wc_max_size, quality=wc_quality,
+                )
         raw_failed_then_companion = False
         # libraw returns an embedded JPEG when it can't demosaic a RAW; that
         # preview is often a fraction of sensor resolution, so ok=True here
@@ -996,6 +1123,29 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None,
             ok = extract_working_copy(
                 source, wc_abs, max_size=wc_max_size, quality=wc_quality,
             )
+            # Companion attempt used a card override and failed — retry
+            # from the verified archive companion before recording failure.
+            # Same rationale as the primary retry above: a transient card
+            # I/O error or an unmounted card must not force this row into
+            # a persistent failure marker when the archive copy is available.
+            if (
+                not ok
+                and companion_override_used
+                and catalog_companion
+                and os.path.isfile(catalog_companion)
+            ):
+                log.info(
+                    "Card-side companion extraction failed for photo %s "
+                    "(%s); retrying from archive companion %s",
+                    row["id"], source, catalog_companion,
+                )
+                source = catalog_companion
+                companion_path = catalog_companion
+                companion_override_used = False
+                ok = extract_working_copy(
+                    source, wc_abs,
+                    max_size=wc_max_size, quality=wc_quality,
+                )
             raw_failed_then_companion = ok
         if ok:
             if raw_failed_then_companion:
@@ -1086,7 +1236,7 @@ def backfill_working_copies(db, vireo_dir, progress_callback=None,
     }
 
 
-def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None, thumb_cache_dir=None, permission_error_callback=None, cancel_check=None):
+def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None, thumb_cache_dir=None, permission_error_callback=None, cancel_check=None, skip_working_copies=False):
     """Walk a folder tree, discover photos, read metadata, populate database.
 
     Args:
@@ -1130,6 +1280,19 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         cancel_check: optional callable returning truthy when the caller
             wants scanning to stop promptly. When set, scan raises
             ScanCancelled at cancellation checkpoints.
+        skip_working_copies: if True, suppress the end-of-scan
+            ``_extract_working_copies`` pass while still running
+            ``_pair_raw_jpeg_companions`` (with cache context) and
+            ``_invalidate_derived_caches`` on content changes. Used by
+            the per-batch import scan: the import job runs one deferred
+            end-of-run extraction pass over all touched folders (a
+            per-batch pass would race RAW+JPEG pairing across batch
+            boundaries), but pairing itself still needs ``vireo_dir`` /
+            ``thumb_cache_dir`` to move local-mask snapshots when a
+            newly imported RAW pairs with an already-cataloged JPEG that
+            has an edit recipe. Passing ``vireo_dir=None`` to suppress
+            extraction would also silently drop those masks. See PR
+            #1107 review.
     """
     root_path = Path(root)
     # Don't open the root at all if the root is, or sits inside, an
@@ -1402,11 +1565,27 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         else:
             is_ws_root = (folder_path == root_path)
 
+        # In restricted mode, the scan root (``root_path``) and every
+        # intermediate ancestor between it and ``restrict_dirs`` exist
+        # only to satisfy the ``folders.parent_id`` chain — they are not
+        # part of what the user asked to import. Linking them to the
+        # workspace would fire ``_add_workspace_folder_no_commit`` and
+        # its path-prefix subtree cascade, pulling every pre-existing
+        # cataloged descendant of ``root_path`` (unrelated archive
+        # subtrees from prior scans / other workspaces) into the active
+        # workspace. Only the ``_restrict_root_paths`` themselves should
+        # link. See PR #1107 review (line 1186).
+        link_to_ws = (
+            _restrict_root_paths is None
+            or os.path.normpath(folder_str) in _restrict_root_paths
+        )
+
         folder_id = db.add_folder(
             path=folder_str,
             name=folder_path.name,
             parent_id=parent_id,
             workspace_root=is_ws_root,
+            link_to_workspace=link_to_ws,
         )
         folder_cache[folder_str] = folder_id
         return folder_id
@@ -1972,7 +2151,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         # (current, total) through the same callback would overwrite the
         # scan total with the working-copy total and visually jump the bar
         # backward. ``status_callback`` still announces the phase.
-        if vireo_dir:
+        if vireo_dir and not skip_working_copies:
             if restrict_dirs is not None:
                 # Use the bundle-filtered list — see ``effective_restrict_dirs``
                 # above. Reusing the raw ``restrict_dirs`` here would let a

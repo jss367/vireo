@@ -300,6 +300,39 @@ body {
 .grid-card-color[data-color="blue"] { background: #3498db; }
 .grid-card-color[data-color="purple"] { background: #9b59b6; }
 
+/* Placeholder cells for photos that exist but haven't loaded yet. The grid
+   reserves the full dataset's scroll height up front so scrolling never
+   hits a hard wall; placeholders fill in as pages arrive. Deliberately NOT
+   .grid-card — selection/keyboard/summary code queries that class and must
+   only ever see real photos. */
+.skel-card {
+  background: var(--bg-secondary);
+  border-radius: 6px;
+  border: 1px solid var(--border-primary);
+  overflow: hidden;
+}
+.skel-thumb {
+  width: 100%;
+  aspect-ratio: 3/2;
+  background: var(--bg-tertiary);
+  animation: skelPulse 1.6s ease-in-out infinite;
+}
+.skel-info {
+  padding: 8px 10px;
+  height: var(--skel-info-h, 35px);
+  box-sizing: border-box;
+  overflow: hidden;
+}
+.skel-line {
+  height: 10px;
+  width: 65%;
+  border-radius: 3px;
+  background: var(--bg-tertiary);
+  margin-top: 2px;
+}
+@keyframes skelPulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
+.grid-tail-spacer { grid-column: 1 / -1; }
+
 /* ---------- Detail Panel ---------- */
 .detail-panel {
   width: 340px;
@@ -2248,7 +2281,65 @@ function appendGridPhotos(newPhotos, startIdx) {
   newPhotos.forEach(function(p, offset) {
     html += renderPhotoCard(p, startIdx + offset);
   });
-  grid.insertAdjacentHTML('beforeend', html);
+  var tail = document.getElementById('gridTail');
+  if (tail) tail.insertAdjacentHTML('beforebegin', html);
+  else grid.insertAdjacentHTML('beforeend', html);
+  updateGridTail();
+}
+
+/* The grid tail reserves scroll space for photos that haven't loaded yet:
+   a pool of skeleton cells at the loading boundary, a spacer sized to the
+   estimated rows in between, and a second pool at the very end so dragging
+   the scrollbar to the bottom lands on placeholder cells rather than a
+   blank region. Rebuilt after every page append. Lives in a
+   display:contents wrapper so its children participate in the grid layout
+   but real cards can be inserted before it as a unit. */
+var SKEL_POOL = 300;
+var SKEL_END_POOL = 100;
+var GRID_GAP_PX = 12; // keep in sync with .grid { gap }
+
+function updateGridTail() {
+  var grid = document.getElementById('grid');
+  var tail = document.getElementById('gridTail');
+  var remaining = (allLoaded || clipSearchActive) ? 0 : totalPhotos - photos.length;
+  var cards = grid.getElementsByClassName('grid-card');
+  var lastCard = cards.length ? cards[cards.length - 1] : null;
+  if (remaining <= 0 || !lastCard) {
+    if (tail) tail.remove();
+    return;
+  }
+
+  // Size skeleton cells to match real cards: the thumb tracks column width
+  // via aspect-ratio, the info block copies its measured height.
+  var infoEl = lastCard.querySelector('.grid-card-info');
+  if (infoEl && infoEl.offsetHeight) {
+    grid.style.setProperty('--skel-info-h', infoEl.offsetHeight + 'px');
+  }
+
+  var front = Math.min(remaining, SKEL_POOL);
+  var end = Math.min(remaining - front, SKEL_END_POOL);
+  var beyond = remaining - front - end;
+
+  var spacerH = 0;
+  if (beyond > 0) {
+    var cols = (getComputedStyle(grid).gridTemplateColumns || '').split(' ').length || 1;
+    var rowH = lastCard.getBoundingClientRect().height + GRID_GAP_PX;
+    spacerH = Math.round(Math.ceil(beyond / cols) * rowH);
+  }
+
+  var skel = '<div class="skel-card"><div class="skel-thumb"></div><div class="skel-info"><div class="skel-line"></div></div></div>';
+  var html = '';
+  for (var i = 0; i < front; i++) html += skel;
+  if (beyond > 0) html += '<div class="grid-tail-spacer" style="height:' + spacerH + 'px"></div>';
+  for (var j = 0; j < end; j++) html += skel;
+
+  if (!tail) {
+    tail = document.createElement('div');
+    tail.id = 'gridTail';
+    tail.style.display = 'contents';
+    grid.appendChild(tail);
+  }
+  tail.innerHTML = html;
 }
 
 function refreshGridCards(photoIds) {
@@ -2369,7 +2460,12 @@ async function bootstrapBrowse() {
     document.getElementById('loadingState').textContent = 'Error loading.';
   }
   loading = false;
-  if (bootstrapSucceeded) rearmInfiniteScrollObserver();
+  if (bootstrapSucceeded) {
+    rearmInfiniteScrollObserver();
+    // The sentinel sits below the full-height tail now, so it may never
+    // intersect — make sure a tall viewport still gets its second page.
+    requestAnimationFrame(ensureViewportHydrated);
+  }
 }
 
 function renderCollectionList(collections) {
@@ -3259,16 +3355,33 @@ async function loadPhotos(options) {
     loadingState.style.display = 'block';
   }
 
+  // When placeholder cells are already visible, the user is actively
+  // waiting on this load — fetch several pages in one request. Chunks must
+  // stay aligned to perPage-sized pages so page/per_page arithmetic holds
+  // (server caps per_page at 500).
+  var chunk = 1;
+  var tailEl = document.getElementById('gridTail');
+  if (tailEl && tailEl.firstElementChild) {
+    var contRect = document.getElementById('gridContainer').getBoundingClientRect();
+    if (tailEl.firstElementChild.getBoundingClientRect().top < contRect.bottom) {
+      var pagesLoaded = currentPage - 1;
+      if (perPage * 4 <= 500 && pagesLoaded % 4 === 0) chunk = 4;
+      else if (perPage * 2 <= 500 && pagesLoaded % 2 === 0) chunk = 2;
+    }
+  }
+  var reqPage = (currentPage - 1) / chunk + 1;
+  var reqPerPage = perPage * chunk;
+
   var url;
   if (activeCollectionId) {
     var cparams = new URLSearchParams();
-    cparams.set('page', currentPage);
-    cparams.set('per_page', perPage);
+    cparams.set('page', reqPage);
+    cparams.set('per_page', reqPerPage);
     url = '/api/collections/' + activeCollectionId + '/photos?' + cparams.toString();
   } else {
     var params = buildCurrentBrowseParams();
-    params.set('page', currentPage);
-    params.set('per_page', perPage);
+    params.set('page', reqPage);
+    params.set('per_page', reqPerPage);
     url = '/api/photos?' + params.toString();
   }
 
@@ -3282,12 +3395,13 @@ async function loadPhotos(options) {
       allLoaded = true;
     } else {
       photos = photos.concat(data.photos);
-      currentPage++;
+      currentPage += chunk;
       if (photos.length >= totalPhotos) allLoaded = true;
     }
 
     if (firstNewIdx === 0) renderGrid();
     else appendGridPhotos(data.photos, firstNewIdx);
+    updateGridTail();
     updateFilterSummary();
 
     // Refresh appended cards once async metadata resolves — appendGridPhotos
@@ -3312,7 +3426,12 @@ async function loadPhotos(options) {
     if (epoch === loadEpoch) {
       loading = false;
       if (showLoading && loadingState) loadingState.style.display = 'none';
-      if (loadSucceeded) rearmInfiniteScrollObserver();
+      if (loadSucceeded) {
+        rearmInfiniteScrollObserver();
+        // Chain: keep loading while the viewport is at or past the loading
+        // boundary (rAF so the freshly appended cards have a layout first).
+        requestAnimationFrame(ensureViewportHydrated);
+      }
     }
   }
 }
@@ -3549,6 +3668,7 @@ function updateFilterSummary() {
 
 function updateThumbSize(val) {
   document.getElementById('grid').style.setProperty('--thumb-size', val + 'px');
+  updateGridTail();
 }
 
 function toggleDetectionBoxes() {
@@ -3693,6 +3813,18 @@ function updateScrollPosition() {
   var container = document.getElementById('gridContainer');
   var scrollTop = container.scrollTop;
   var viewHeight = container.clientHeight;
+
+  // Viewport entirely below every loaded card (placeholder territory):
+  // reporting the loaded range would be a lie, so estimate the position
+  // from the scroll fraction until real cards catch up.
+  var lastCard = cards[cards.length - 1];
+  if (lastCard.offsetTop + lastCard.offsetHeight < scrollTop) {
+    var frac = Math.min(1, (scrollTop + viewHeight / 2) / Math.max(1, container.scrollHeight));
+    var approx = Math.max(1, Math.min(totalPhotos, Math.round(frac * totalPhotos)));
+    el.textContent = '≈' + approx.toLocaleString() + ' of ' + totalPhotos.toLocaleString();
+    return;
+  }
+
   var first = 1;
   var last = cards.length;
   for (var i = 0; i < cards.length; i++) {
@@ -3723,7 +3855,11 @@ async function loadInatStatus(photoIds) {
 
 function batchSubmitInat() {
   var ids = getActiveSelection();
-  if (ids.length === 0) return;
+  if (ids.length === 0) {
+    if (typeof showToast === 'function') showToast('Select one or more photos to send to iNaturalist.', 'error');
+    else alert('Select one or more photos to send to iNaturalist.');
+    return;
+  }
   submitToInatBatch(ids);
 }
 
@@ -3753,6 +3889,7 @@ function renderGrid() {
     html += renderPhotoCard(p, idx);
   });
   grid.innerHTML = html;
+  updateGridTail();
 }
 
 /* ---------- Grid dblclick delegation (XSS-safe) ---------- */
@@ -3834,9 +3971,30 @@ function rearmInfiniteScrollObserver() {
   observer.observe(sentinel);
 }
 
+/* Scroll-driven page loading. The grid now reserves the full dataset's
+   height, so the bottom sentinel only intersects near the absolute end —
+   the primary load trigger is proximity to the loading boundary (the
+   first skeleton cell). Fires on scroll and chains after each successful
+   page load until the viewport is covered by real cards. */
+function ensureViewportHydrated() {
+  if (loading || allLoaded || clipSearchActive) return;
+  if (photos.length === 0) return;
+  var tail = document.getElementById('gridTail');
+  if (!tail || !tail.firstElementChild) return;
+  var contRect = document.getElementById('gridContainer').getBoundingClientRect();
+  var skelRect = tail.firstElementChild.getBoundingClientRect();
+  if (skelRect.top - contRect.bottom <= 3200) loadPhotos({ silent: true });
+}
+
+window.addEventListener('resize', function() {
+  // Column count and card heights change with width — re-estimate the tail
+  requestAnimationFrame(updateGridTail);
+});
+
 /* ---------- Scroll Position Tracking ---------- */
 var scrollTimer = null;
 gridContainer.addEventListener('scroll', function() {
+  ensureViewportHydrated();
   if (scrollTimer) clearTimeout(scrollTimer);
   scrollTimer = setTimeout(updateScrollPosition, 50);
 });
@@ -7181,7 +7339,10 @@ document.addEventListener('contextmenu', function(e) {
     }
   } catch(e) { /* ignore deep-link errors silently */ }
   loading = false;
-  if (deepLinkLoaded) rearmInfiniteScrollObserver();
+  if (deepLinkLoaded) {
+    rearmInfiniteScrollObserver();
+    requestAnimationFrame(ensureViewportHydrated);
+  }
 })();
 
 /* ---------- Export Modal ---------- */

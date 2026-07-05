@@ -7020,48 +7020,47 @@ var inatQueue = [];  // [{photo_id, taxon_name, observed_on, latitude, longitude
 var _inatSubmitting = false;  // true while inatDoSubmit's loop is running
 var _inatCancelled = false;   // set by closeInatModal to stop the loop gracefully
 
+function _inatQueueItem(photoId, data) {
+  return {
+    photo_id: photoId,
+    taxon_name: data.scientific_name || data.species,
+    observed_on: data.timestamp ? data.timestamp.substring(0, 10) : '',
+    latitude: data.latitude != null ? data.latitude : '',
+    longitude: data.longitude != null ? data.longitude : '',
+    description: '',
+    geoprivacy: 'open',
+    filename: data.filename,
+    edit_recipe: data.edit_recipe,
+    already_submitted: data.already_submitted,
+    existing_url: data.existing_observation_url,
+    upload_url: data.upload_url,
+  };
+}
+
+async function _inatOpenUrl(url) {
+  try {
+    if (typeof openExternal === 'function') {
+      return await openExternal(url);
+    }
+    var opened = window.open(url, '_blank', 'noopener');
+    return !!opened;
+  } catch(e) {}
+  return false;
+}
+
 async function submitToInat(photoId) {
   try {
     var data = await safeFetch('/api/inat/prepare/' + photoId, {}, { toast: false });
     if (data.error) { alert(data.error); return; }
 
     if (data.mode === 'quick') {
-      // No API token configured: open the iNaturalist upload page (prefilled
-      // with taxon/date/location) in the user's browser. The local image
-      // cannot be attached this way; direct photo upload requires the iNat API
-      // token configured in Settings. A bare window.open is silently dropped
-      // inside the desktop webview, so route through openExternal and tell the
-      // user if nothing opened instead of failing invisibly.
-      var proceed = confirm(
-        'Vireo cannot upload the photo to iNaturalist unless you add an API token in Settings.\n\n' +
-        'It can still open the iNaturalist web uploader with the taxon, date, and location filled in. You will need to add the photo there.\n\n' +
-        'Open iNaturalist?'
-      );
-      if (!proceed) return;
-      var opened = await openExternal(data.upload_url);
-      if (opened) {
-        showToast('Opening iNaturalist web uploader. Add the photo there, or configure an API token for direct upload.', 'info');
-      } else {
-        showToast('Could not open iNaturalist. Add an API token in Settings to submit directly from Vireo.', 'error');
-      }
+      await openInatQuickModal([_inatQueueItem(photoId, data)], []);
       return;
     }
 
     // Direct mode: open modal
-    inatQueue = [{
-      photo_id: photoId,
-      taxon_name: data.scientific_name || data.species,
-      observed_on: data.timestamp ? data.timestamp.substring(0, 10) : '',
-      latitude: data.latitude != null ? data.latitude : '',
-      longitude: data.longitude != null ? data.longitude : '',
-      description: '',
-      geoprivacy: 'open',
-      filename: data.filename,
-      edit_recipe: data.edit_recipe,
-      already_submitted: data.already_submitted,
-      existing_url: data.existing_observation_url,
-    }];
-    openInatModal();
+    inatQueue = [_inatQueueItem(photoId, data)];
+    openInatModal([]);
   } catch(e) {
     alert('Error: ' + e.message);
   }
@@ -7070,38 +7069,130 @@ async function submitToInat(photoId) {
 async function submitToInatBatch(photoIds) {
   // Prepare all photos
   inatQueue = [];
+  var quickQueue = [];
+  var failures = [];
   for (var i = 0; i < photoIds.length; i++) {
     try {
       var data = await safeFetch('/api/inat/prepare/' + photoIds[i], {}, { toast: false });
-      if (data.error) continue;
-      inatQueue.push({
-        photo_id: photoIds[i],
-        taxon_name: data.scientific_name || data.species,
-        observed_on: data.timestamp ? data.timestamp.substring(0, 10) : '',
-        latitude: data.latitude != null ? data.latitude : '',
-        longitude: data.longitude != null ? data.longitude : '',
-        description: '',
-        geoprivacy: 'open',
-        filename: data.filename,
-        edit_recipe: data.edit_recipe,
-        already_submitted: data.already_submitted,
-        existing_url: data.existing_observation_url,
-      });
-    } catch(e) {}
+      if (data.error) {
+        failures.push({photo_id: photoIds[i], error: data.error});
+        continue;
+      }
+      var item = _inatQueueItem(photoIds[i], data);
+      if (data.mode === 'quick') quickQueue.push(item);
+      else inatQueue.push(item);
+    } catch(e) {
+      failures.push({photo_id: photoIds[i], error: e.message || 'Could not prepare iNaturalist upload'});
+    }
   }
-  if (inatQueue.length === 0) { alert('No photos to submit.'); return; }
-  openInatModal();
+  if (quickQueue.length) {
+    await openInatQuickModal(quickQueue, failures);
+    return;
+  }
+  if (inatQueue.length === 0) {
+    var msg = failures.length
+      ? 'No photos could be prepared for iNaturalist.'
+      : 'No photos to submit.';
+    alert(msg);
+    return;
+  }
+  openInatModal(failures);
 }
 
-function openInatModal() {
+async function openInatQuickModal(items, failures) {
+  if (window._inatEscToken) Keymap.popEsc(window._inatEscToken);
+  window._inatEscToken = Keymap.pushEsc(function() { closeInatModal(); });
+
+  inatQueue = [];
+  var title = items.length === 1 ? 'Open in iNaturalist' : 'Open ' + items.length + ' iNaturalist uploads';
+  document.getElementById('inatModalTitle').textContent = title;
+  document.getElementById('inatProgress').style.display = 'none';
+
+  var submitBtn = document.getElementById('inatSubmitBtn');
+  submitBtn.style.display = 'none';
+  submitBtn.disabled = true;
+
+  var cancelBtn = document.querySelector('#inatActions .modal-btn-cancel');
+  if (cancelBtn) cancelBtn.textContent = 'Close';
+
+  var opened = false;
+  var skipAutoOpenForDuplicate = items.length === 1 && !!items[0].already_submitted;
+  if (items.length === 1 && items[0].upload_url && !skipAutoOpenForDuplicate) {
+    opened = await _inatOpenUrl(items[0].upload_url);
+  }
+
+  function _inatAlreadySubmittedWarning(item) {
+    if (!item.already_submitted) return '';
+    var linkOrText = item.existing_url
+      ? '<a href="' + escapeAttr(item.existing_url) + '" target="_blank" rel="noopener" onclick="return openExternalLink(event, this.href)" style="color:var(--warning);">' + escapeHtml(item.existing_url) + '</a>'
+      : 'no observation URL recorded';
+    return '<div class="inat-card-status warning" style="margin-top:6px;">&#9888; Already submitted to iNaturalist: ' + linkOrText + '. Opening a new upload will create a duplicate observation.</div>';
+  }
+
+  var html = '';
+  if (items.length === 1) {
+    html += '<div class="inat-card">' +
+      '<div class="inat-card-header">' +
+        '<img class="inat-card-thumb" src="/thumbnails/' + items[0].photo_id + '.jpg" alt="">' +
+        '<div style="flex:1;min-width:0;">' +
+          '<div style="font-size:13px;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(items[0].filename) + '</div>' +
+          '<div class="inat-card-status ' + (opened ? 'success' : 'warning') + '">' +
+            (opened
+              ? 'Opened iNaturalist in your browser.'
+              : (skipAutoOpenForDuplicate
+                  ? 'Did not auto-open — this photo appears already submitted. Review the warning below before opening a new upload.'
+                  : 'iNaturalist did not visibly open. Use the link below.')) +
+          '</div>' +
+          _inatAlreadySubmittedWarning(items[0]) +
+        '</div>' +
+      '</div>' +
+      '<div style="font-size:13px;line-height:1.5;color:var(--text-secondary);">' +
+        'Direct uploads need an iNaturalist token in Settings. This link opens iNaturalist with the prepared taxon, date, and location.' +
+      '</div>' +
+      '<div style="margin-top:12px;">' +
+        '<a class="modal-btn modal-btn-primary" href="' + escapeAttr(items[0].upload_url) + '" target="_blank" rel="noopener" onclick="return openExternalLink(event, this.href)" style="display:inline-block;text-decoration:none;">Open Upload Page</a>' +
+      '</div>' +
+    '</div>';
+  } else {
+    html += '<div class="inat-card">' +
+      '<div style="font-size:13px;line-height:1.5;color:var(--text-secondary);margin-bottom:10px;">' +
+        'Direct uploads need an iNaturalist token in Settings. Open each prepared upload page below.' +
+      '</div>';
+    items.forEach(function(item) {
+      html += '<div style="display:flex;flex-direction:column;gap:4px;padding:8px 0;border-top:1px solid var(--border-primary);">' +
+        '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">' +
+          '<span style="font-size:13px;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(item.filename) + '</span>' +
+          '<a href="' + escapeAttr(item.upload_url) + '" target="_blank" rel="noopener" onclick="return openExternalLink(event, this.href)" style="color:var(--accent);font-size:12px;white-space:nowrap;">Open Upload</a>' +
+        '</div>' +
+        _inatAlreadySubmittedWarning(item) +
+      '</div>';
+    });
+    html += '</div>';
+  }
+
+  if (failures && failures.length) {
+    html += '<div class="inat-card-status error" style="margin-top:10px;">' +
+      escapeHtml(failures.length + ' photo' + (failures.length === 1 ? '' : 's') + ' could not be prepared.') +
+      '</div>';
+  }
+
+  document.getElementById('inatCards').innerHTML = html;
+  document.getElementById('inatModal').classList.add('open');
+}
+
+function openInatModal(failures) {
   if (window._inatEscToken) Keymap.popEsc(window._inatEscToken);
   window._inatEscToken = Keymap.pushEsc(function() { closeInatModal(); });
 
   var title = inatQueue.length === 1 ? 'Submit to iNaturalist' : 'Submit ' + inatQueue.length + ' observations to iNaturalist';
   document.getElementById('inatModalTitle').textContent = title;
   document.getElementById('inatProgress').style.display = 'none';
-  document.getElementById('inatSubmitBtn').disabled = false;
-  document.getElementById('inatSubmitBtn').textContent = inatQueue.length === 1 ? 'Submit' : 'Submit All';
+  var submitBtn = document.getElementById('inatSubmitBtn');
+  submitBtn.style.display = '';
+  submitBtn.disabled = false;
+  submitBtn.textContent = inatQueue.length === 1 ? 'Submit' : 'Submit All';
+  var cancelBtn = document.querySelector('#inatActions .modal-btn-cancel');
+  if (cancelBtn) cancelBtn.textContent = 'Cancel';
 
   var html = '';
   inatQueue.forEach(function(item, idx) {
@@ -7130,6 +7221,11 @@ function openInatModal() {
       '<div class="inat-card-status" id="inatStatus' + idx + '"></div>' +
     '</div>';
   });
+  if (failures && failures.length) {
+    html += '<div class="inat-card-status error" style="margin-top:10px;">' +
+      escapeHtml(failures.length + ' photo' + (failures.length === 1 ? '' : 's') + ' could not be prepared.') +
+      '</div>';
+  }
   document.getElementById('inatCards').innerHTML = html;
   document.getElementById('inatModal').classList.add('open');
 }
@@ -7167,14 +7263,16 @@ async function inatDoSubmit() {
     if (_inatCancelled) break;
     var item = inatQueue[i];
     var statusEl = document.getElementById('inatStatus' + i);
+    var latValue = document.getElementById('inatLat' + i).value.trim();
+    var lngValue = document.getElementById('inatLng' + i).value.trim();
 
     // Read possibly-edited fields from the form
     var submission = {
       photo_id: item.photo_id,
       taxon_name: document.getElementById('inatTaxon' + i).value.trim(),
       observed_on: document.getElementById('inatDate' + i).value,
-      latitude: parseFloat(document.getElementById('inatLat' + i).value) || null,
-      longitude: parseFloat(document.getElementById('inatLng' + i).value) || null,
+      latitude: latValue === '' ? null : parseFloat(latValue),
+      longitude: lngValue === '' ? null : parseFloat(lngValue),
       description: document.getElementById('inatDesc' + i).value.trim(),
       geoprivacy: document.getElementById('inatGeo' + i).value,
     };
@@ -7203,7 +7301,12 @@ async function inatDoSubmit() {
       }
     } catch(e) {
       statusEl.className = 'inat-card-status error';
-      statusEl.textContent = '✗ ' + e.message;
+      if (e.body && e.body.partial && e.body.observation_url) {
+        statusEl.innerHTML = '&#10007; ' + escapeHtml(e.message) +
+          ' <a href="' + escapeAttr(e.body.observation_url) + '" target="_blank" rel="noopener" onclick="return openExternalLink(event, this.href)" style="color:var(--danger);text-decoration:underline;">View created observation</a>';
+      } else {
+        statusEl.textContent = '✗ ' + e.message;
+      }
     }
 
     done++;

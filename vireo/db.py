@@ -2023,12 +2023,21 @@ class Database:
 
     # -- Folders --
 
-    def add_folder(self, path, name=None, parent_id=None, *, workspace_root=True):
+    def add_folder(self, path, name=None, parent_id=None, *,
+                   workspace_root=True, link_to_workspace=True):
         """Insert a folder. Automatically links it to the active workspace.
 
         ``workspace_root`` controls whether that automatic link is a
         user-facing workspace root. Scanner-discovered descendants pass
         ``False`` so recursive roots do not expand over time.
+
+        ``link_to_workspace`` controls whether the auto-link happens at
+        all. Restricted scans (a subfolder of an existing archive tree)
+        pass ``False`` for the parent chain leading up to the restrict
+        roots: those parents only need to exist for ``folders.parent_id``
+        integrity, and letting ``add_workspace_folder`` fire would
+        subtree-cascade every pre-existing descendant of the destination
+        into the active workspace. See PR #1107 review.
 
         Returns the folder id.
         """
@@ -2045,7 +2054,7 @@ class Database:
             ).fetchone()
             folder_id = row["id"]
         # Auto-link to active workspace
-        if self._active_workspace_id is not None:
+        if link_to_workspace and self._active_workspace_id is not None:
             self.add_workspace_folder(
                 self._active_workspace_id,
                 folder_id,

@@ -22,7 +22,7 @@ import time
 import webbrowser
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import places
 from db import (
@@ -11581,21 +11581,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # rejects it and nothing opens.
         params = []
         if scientific:
-            params.append("taxon_name=" + quote(scientific))
+            params.append(("taxon_name", scientific))
         elif species:
-            params.append("taxon_name=" + quote(species))
+            params.append(("taxon_name", species))
         if photo["timestamp"]:
-            params.append("observed_on=" + quote(photo["timestamp"][:10]))
+            params.append(("observed_on", photo["timestamp"][:10]))
         loc = db.get_effective_photo_location(photo_id)
         lat = loc["latitude"] if loc else None
         lng = loc["longitude"] if loc else None
         if lat is not None and lng is not None:
-            params.append("lat=" + quote(str(lat)))
-            params.append("lng=" + quote(str(lng)))
+            params.append(("lat", str(lat)))
+            params.append(("lng", str(lng)))
 
         upload_url = "https://www.inaturalist.org/observations/upload"
         if params:
-            upload_url += "?" + "&".join(params)
+            upload_url += "?" + urlencode(params)
 
         # Check submission history
         subs = db.get_inat_submissions([photo_id])
@@ -11924,6 +11924,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         except inat.InatAuthError as e:
             return json_error(str(e), 401)
+        except inat.InatPartialUploadError as e:
+            return jsonify({
+                "error": str(e),
+                "partial": True,
+                "observation_id": e.observation_id,
+                "observation_url": e.observation_url,
+            }), 502
         except inat.InatApiError as e:
             return json_error(str(e), 502)
 
@@ -12012,6 +12019,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 )
                 db.record_inat_submission(photo_id, obs_id, obs_url)
                 results.append({"photo_id": photo_id, "observation_id": obs_id, "observation_url": obs_url})
+            except inat.InatPartialUploadError as e:
+                results.append({
+                    "photo_id": photo_id,
+                    "error": str(e),
+                    "partial": True,
+                    "observation_id": e.observation_id,
+                    "observation_url": e.observation_url,
+                })
             except (inat.InatAuthError, inat.InatApiError) as e:
                 results.append({"photo_id": photo_id, "error": str(e)})
 
@@ -14785,6 +14800,234 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         job_id = runner.start(
             "import", work, config={"catalogs": catalogs, "strategy": strategy},
             workspace_id=active_ws,
+        )
+        return jsonify({"job_id": job_id})
+
+    @app.route("/api/jobs/import-photos", methods=["POST"])
+    def api_job_import_photos():
+        """Photo import job: copy card -> archive, hash-verify, catalog
+        incrementally (import/process split PR 2).
+
+        Distinct from ``POST /api/jobs/import`` (Lightroom catalog import),
+        which keeps its route and shape. No pipeline slot involvement —
+        imports are I/O-bound and must not queue behind a GPU run; that
+        coupling is exactly what the split removes.
+        """
+        from image_loader import is_excluded_scan_path
+        from ingest import _is_unsafe_path
+
+        body = request.get_json(silent=True) or {}
+
+        sources = body.get("sources")
+        if isinstance(sources, str):
+            sources = [sources]
+        if not sources or not isinstance(sources, list) or not all(
+            isinstance(s, str) and s for s in sources
+        ):
+            return json_error("sources must be a non-empty list of paths")
+        for s in sources:
+            # Pre-stat rejection of other-app bundles: os.path.isdir on a
+            # .photoslibrary path itself trips the macOS TCC prompt.
+            if is_excluded_scan_path(s):
+                return json_error(
+                    f"source is inside a macOS app-managed library and "
+                    f"cannot be imported: {s}"
+                )
+            if not os.path.isdir(s):
+                return json_error(f"source directory not found: {s}")
+
+        destination = body.get("destination")
+        if not destination:
+            return json_error("destination required")
+        if not os.path.isabs(destination):
+            return json_error("destination must be an absolute path")
+
+        # Reject destinations that are equal to, or nested under, any source
+        # (after realpath so a symlink can't slip past). The importer copies
+        # every card file into the destination and marks the card safe to
+        # format once ``copied + skipped_duplicate == discovered``; if the
+        # destination lives inside the card, formatting the card also erases
+        # the supposed archive copy, so allowing this is a data-loss trap.
+        #
+        # macOS's default APFS/HFS+ volumes and Windows NTFS are
+        # case-INSENSITIVE, so ``/Volumes/Card`` and ``/volumes/card`` are
+        # the same directory but ``realpath`` doesn't case-normalize on
+        # POSIX (macOS reports as POSIX). On Linux, a platform-wide
+        # case-sensitivity assumption misses FAT/exFAT/NTFS-mounted
+        # removable media (typical SD-card setup) that sit under a
+        # case-sensitive ext4 parent — the user's real card mount point
+        # can be case-insensitive even when the root filesystem isn't.
+        # Compare case-folded on darwin/win32 unconditionally, and on
+        # Linux probe each source's actual filesystem: if the resolved
+        # path with an alpha character case-swapped still stat's to the
+        # same inode, the mount is case-insensitive and both sides of
+        # the containment comparison need case-folding for that source.
+        _case_insensitive_platform = sys.platform in ("darwin", "win32")
+
+        def _casenorm(p):
+            return p.casefold() if _case_insensitive_platform else p
+
+        def _fs_is_case_insensitive(path):
+            """Probe whether the filesystem at ``path`` treats case as insensitive.
+
+            List an entry inside ``path`` and check whether accessing it
+            under a case-swapped name resolves to the same inode. Probing
+            *inside* the directory (rather than swapping characters in
+            ``path`` itself) is essential when a case-insensitive mount
+            sits under a case-sensitive parent — a FAT/exFAT SD card
+            mounted at ``/mnt/Card`` on Linux under an ext4 root: the
+            ext4 ``/mnt`` cannot resolve ``/Mnt`` or a differently-cased
+            ``Card`` entry (mount-point dentries are stored in the
+            parent FS), so swapping characters in the ``path`` string
+            always reports case-sensitive regardless of the card's own
+            semantics.
+
+            Any inconclusive result (unlistable, empty, no
+            alpha-containing entry, or a stat error while comparing)
+            returns True so the containment check falls back to
+            case-fold — the stricter direction of this safety guard.
+            A false positive on a case-sensitive filesystem can only
+            reject a legitimate destination (recoverable UX error the
+            user immediately sees and fixes by picking a different
+            path), whereas a false negative on a case-insensitive
+            filesystem accepts a case-collision destination inside the
+            card and lets ``safe_to_format`` later green-light
+            formatting while the archive lives on it. The reviewer's
+            example: an SD card whose root contains only numeric
+            top-level directories (Nikon-style ``100``/``101``/``102``)
+            has no alpha-containing entry to probe with. See PR #1107
+            review.
+            """
+            try:
+                entries = os.listdir(path)
+            except OSError:
+                return True
+            for name in entries:
+                for i, c in enumerate(name):
+                    if c.isalpha():
+                        swapped = name[:i] + c.swapcase() + name[i + 1:]
+                        if swapped == name:
+                            continue
+                        original_full = os.path.join(path, name)
+                        probe_full = os.path.join(path, swapped)
+                        if not os.path.exists(probe_full):
+                            # Definitive: case-swap resolves to nothing,
+                            # so the filesystem distinguishes case.
+                            return False
+                        try:
+                            return os.path.samefile(original_full, probe_full)
+                        except OSError:
+                            return True
+            return True
+
+        try:
+            dest_real = os.path.realpath(destination)
+        except OSError as e:
+            return json_error(f"destination cannot be resolved: {e}")
+        for s in sources:
+            try:
+                source_real = os.path.realpath(s)
+            except OSError:
+                # Source unresolvable — the os.path.isdir check above
+                # already handled non-existent sources; nothing more to say.
+                continue
+            # Per-source case-fold decision: platform is enough on
+            # darwin/win32; on Linux, probe the actual source mount.
+            per_source_ci = _case_insensitive_platform or (
+                not _case_insensitive_platform
+                and _fs_is_case_insensitive(source_real)
+            )
+            if per_source_ci:
+                source_cmp = source_real.casefold().rstrip(os.sep)
+                dest_cmp = dest_real.casefold()
+            else:
+                source_cmp = source_real.rstrip(os.sep)
+                dest_cmp = dest_real
+            if dest_cmp == source_cmp or dest_cmp.startswith(
+                source_cmp + os.sep
+            ):
+                return json_error(
+                    f"destination cannot be inside a source directory "
+                    f"(destination={destination!r}, source={s!r}); "
+                    f"formatting the card would erase the archive copy"
+                )
+
+        folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
+        if folder_template and _is_unsafe_path(folder_template):
+            return json_error(
+                "folder_template must be a relative path without '..' or "
+                "backslashes"
+            )
+
+        db = _get_db()
+        # After-import strategy: validated at enqueue (failing the chain
+        # hours later is the old pipeline's mistake). Key present -> null
+        # means import-only, a string must name a real strategy. Key
+        # omitted -> default from the workspace's pipeline.default_strategy
+        # (nullable, same vocabulary). Stored in the job config for the
+        # PR 3 chaining hook; the import job itself never reads it.
+        if "after_import" in body:
+            after_import = body.get("after_import")
+        else:
+            import config as cfg
+
+            effective_cfg = db.get_effective_config(cfg.load())
+            after_import = (
+                effective_cfg.get("pipeline", {}).get("default_strategy")
+            )
+        if after_import is not None:
+            if not isinstance(after_import, str):
+                return json_error(
+                    "after_import must be a strategy name or null, got "
+                    f"{type(after_import).__name__}"
+                )
+            from process_strategies import resolve_strategy
+
+            try:
+                resolve_strategy(after_import)
+            except ValueError as e:
+                return json_error(str(e))
+
+        file_types = body.get("file_types", "both")
+        skip_duplicates = bool(body.get("skip_duplicates", True))
+        verify_by_hash = bool(body.get("verify_by_hash", False))
+        recursive = bool(body.get("recursive", True))
+
+        runner = app._job_runner
+        active_ws = db._active_workspace_id
+        thumb_cache_dir = app.config["THUMB_CACHE_DIR"]
+        vireo_dir = os.path.dirname(thumb_cache_dir)
+
+        job_config = {
+            "sources": sources,
+            "destination": destination,
+            "folder_template": folder_template,
+            "file_types": file_types,
+            "skip_duplicates": skip_duplicates,
+            "verify_by_hash": verify_by_hash,
+            "recursive": recursive,
+            "after_import": after_import,
+        }
+
+        def work(job):
+            from import_job import ImportParams, run_import_job
+
+            params = ImportParams(
+                sources=sources,
+                destination=destination,
+                folder_template=folder_template,
+                file_types=file_types,
+                skip_duplicates=skip_duplicates,
+                verify_by_hash=verify_by_hash,
+                recursive=recursive,
+                after_import=after_import,
+                vireo_dir=vireo_dir,
+                thumb_cache_dir=thumb_cache_dir,
+            )
+            return run_import_job(job, runner, db_path, active_ws, params)
+
+        job_id = runner.start(
+            "import", work, config=job_config, workspace_id=active_ws,
         )
         return jsonify({"job_id": job_id})
 

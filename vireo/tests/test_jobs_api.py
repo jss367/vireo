@@ -3112,3 +3112,233 @@ def test_pipeline_folder_ids_treats_empty_sources_as_omitted(
             "folder_ids": [root_id], "strategy": "quick_look", **extra,
         })
         assert resp.status_code == 200, resp.get_json()
+
+
+# --- POST /api/jobs/import-photos (import job) ---------------------------
+
+def _import_card(tmp_path, names=("DSC_0001.jpg",)):
+    card = tmp_path / "import-card"
+    card.mkdir(exist_ok=True)
+    for name in names:
+        Image.new("RGB", (16, 16), "red").save(str(card / name))
+    return str(card)
+
+
+def test_lightroom_import_route_not_shadowed(app_and_db):
+    """POST /api/jobs/import (Lightroom catalogs) keeps its contract —
+    the photo import route is a NEW endpoint, not a rename."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/jobs/import", json={})
+    assert resp.status_code == 400
+    assert "catalogs" in resp.get_json()["error"]
+
+
+def test_import_photos_happy_path(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    dest = str(tmp_path / "archive")
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": dest,
+        "after_import": "cull_ready",
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job_id = resp.get_json()["job_id"]
+    assert job_id.startswith("import-")
+
+    config = _job_config(client, job_id)
+    assert config["sources"] == [card]
+    assert config["destination"] == dest
+    assert config["folder_template"] == "%Y/%Y-%m-%d"
+    assert config["after_import"] == "cull_ready"
+
+    job = wait_for_job_via_client(client, job_id)
+    assert job["status"] == "completed", job
+    result = job["result"]
+    assert result["discovered"] == 1
+    assert result["copied"] == 1
+    assert result["safe_to_format"] is True
+
+
+def test_import_photos_null_after_import_is_import_only(app_and_db, tmp_path):
+    """after_import: null means import-only (PR 3's hook short-circuits) —
+    same nullable vocabulary as pipeline.default_strategy."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    config = _job_config(client, resp.get_json()["job_id"])
+    assert config["after_import"] is None
+
+
+@pytest.mark.parametrize("bad", ["yolo", "none"])
+def test_import_photos_invalid_after_import_400(app_and_db, tmp_path, bad):
+    """Invalid strategy names fail at enqueue, not at completion — failing
+    the chain hours later is the old pipeline's mistake."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": bad,
+    })
+    assert resp.status_code == 400
+    assert "unknown strategy" in resp.get_json()["error"]
+
+
+def test_import_photos_after_import_defaults_from_workspace(
+        app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    ws_id = db._active_workspace_id
+    db.update_workspace(ws_id, config_overrides={
+        "pipeline": {"default_strategy": "cull_ready"},
+    })
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+    })
+    assert resp.status_code == 200, resp.get_json()
+    config = _job_config(client, resp.get_json()["job_id"])
+    assert config["after_import"] == "cull_ready"
+
+
+def test_import_photos_validation_400s(app_and_db, tmp_path):
+    app, _ = app_and_db
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    dest = str(tmp_path / "archive")
+
+    # Missing sources.
+    resp = client.post("/api/jobs/import-photos", json={"destination": dest})
+    assert resp.status_code == 400
+    # Missing destination.
+    resp = client.post("/api/jobs/import-photos", json={"sources": [card]})
+    assert resp.status_code == 400
+    # Relative destination.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": "relative/archive",
+    })
+    assert resp.status_code == 400
+    # Nonexistent source directory.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [str(tmp_path / "nope")], "destination": dest,
+    })
+    assert resp.status_code == 400
+    # macOS app-managed library as source (pre-stat rejection).
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    bundle.mkdir()
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [str(bundle)], "destination": dest,
+    })
+    assert resp.status_code == 400
+    assert "macos" in resp.get_json()["error"].lower()
+    # Unsafe folder template.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": dest,
+        "folder_template": "../escape",
+    })
+    assert resp.status_code == 400
+
+
+def test_import_photos_rejects_destination_inside_source(app_and_db, tmp_path):
+    """Destinations equal to or nested under any source path are rejected
+    at enqueue. Otherwise the importer copies card files into the same
+    tree it's importing, ``safe_to_format`` still flips green once
+    ``copied + skipped_duplicate == discovered``, and formatting the card
+    erases the supposed archive copy — silent data loss.
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+    card = _import_card(tmp_path)
+
+    # Destination equal to source.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": card,
+    })
+    assert resp.status_code == 400
+    assert "inside a source" in resp.get_json()["error"]
+
+    # Destination nested under source.
+    nested = os.path.join(card, "archive")
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": nested,
+    })
+    assert resp.status_code == 400
+    assert "inside a source" in resp.get_json()["error"]
+
+    # A symlink that resolves back inside the source must also be
+    # rejected — otherwise the rule is trivially bypassed.
+    symlinked_dest = tmp_path / "symlinked-archive"
+    try:
+        os.symlink(card, str(symlinked_dest))
+    except (OSError, NotImplementedError):
+        # Windows filesystems without symlink support: skip that leg.
+        pass
+    else:
+        resp = client.post("/api/jobs/import-photos", json={
+            "sources": [card], "destination": str(symlinked_dest),
+        })
+        assert resp.status_code == 400
+        assert "inside a source" in resp.get_json()["error"]
+
+    # A sibling destination NOT nested under the source is fine.
+    sibling = str(tmp_path / "archive")
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": sibling,
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+
+def test_import_photos_inconclusive_case_probe_rejects_case_collision(
+    app_and_db, tmp_path,
+):
+    """When the case-sensitivity probe of a source cannot determine the
+    filesystem's semantics (no alpha-containing entry to swap — an SD
+    card whose root holds only numeric ``100``/``200``-style Nikon
+    subdirectories), the containment check must fall back to case-fold.
+
+    Otherwise, on a case-insensitive card mounted at ``/mnt/Card`` a
+    destination like ``/mnt/card/archive`` differs only in case and
+    resolves to the same directory as the source, but a case-sensitive
+    string comparison accepts it — and ``safe_to_format`` later goes
+    green even though formatting the card would erase the archive
+    copy. See PR #1107 review.
+    """
+    import sys as _sys
+
+    if _sys.platform in ("darwin", "win32"):
+        pytest.skip(
+            "Linux-only probe fallback: darwin/win32 skip the probe "
+            "entirely and always case-fold."
+        )
+
+    app, _ = app_and_db
+    client = app.test_client()
+
+    # Source has only numeric-named entries: the probe has no alpha
+    # character to case-swap, so it must return True (assume
+    # case-insensitive) — the stricter fallback.
+    source = tmp_path / "Card-BAR"
+    source.mkdir()
+    (source / "100").mkdir()
+    (source / "200").mkdir()
+
+    # Destination differs from the source parent only in case. On a
+    # real case-insensitive card these resolve to the same directory;
+    # the guard must reject the destination even though the CI
+    # filesystem (ext4) treats them as distinct.
+    dest = str(tmp_path / "card-bar" / "archive")
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [str(source)], "destination": dest,
+    })
+    assert resp.status_code == 400
+    assert "inside a source" in resp.get_json()["error"]
