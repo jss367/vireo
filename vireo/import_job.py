@@ -625,6 +625,12 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     failed = 0
     unsafe_files = []          # [{path, reason}] — failed copies etc.
     folder_counts = {}         # rel folder -> counts for the PR 3 UI
+    # Photo rows this run created or landed bytes into: hash-stamped fresh
+    # copies plus RAW primaries that adopted a landed companion JPEG.
+    # The after-import chaining hook scopes its process job to exactly
+    # these (duplicates are excluded — a duplicates-only import chains to
+    # "no new photos", not an empty run).
+    imported_photo_ids = set()
     emitted = 0
     cancelled = False
 
@@ -1315,6 +1321,10 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                             raw_companion_invalidations.add(
                                 companion["id"],
                             )
+                            # The landed JPEG's bytes are now represented
+                            # on the RAW primary — that row is what the
+                            # chaining hook should process.
+                            imported_photo_ids.add(companion["id"])
                             continue
                         _reclassify_landed_failed(
                             rel, entry,
@@ -1332,6 +1342,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                     db.update_photo_hash_check(
                         row["id"], "ok", commit=False,
                     )
+                    imported_photo_ids.add(row["id"])
                 elif row["file_hash"] is None:
                     if verified_hash == EMPTY_FILE_SHA256:
                         # Zero-byte convention: EMPTY_FILE_SHA256 never
@@ -1340,6 +1351,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                         db.update_photo_hash_check(
                             row["id"], "ok", commit=False,
                         )
+                        imported_photo_ids.add(row["id"])
                     else:
                         # Non-empty file with NULL file_hash after scan
                         # means scanner._compute_file_features couldn't
@@ -1357,6 +1369,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                                 row["id"], "ok", file_hash=verified_hash,
                                 commit=False,
                             )
+                            imported_photo_ids.add(row["id"])
                         else:
                             _reclassify_landed_failed(
                                 rel, entry,
@@ -1750,6 +1763,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         "discovered": discovered,
         "copied": copied,
         "verified": verified,
+        "photo_ids": sorted(imported_photo_ids),
         "skipped_duplicate": skipped_duplicate,
         "failed": failed,
         "safe_to_format": safe_to_format,

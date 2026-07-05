@@ -3709,3 +3709,39 @@ def test_restricted_scan_does_not_link_unrelated_archive_subtrees(tmp_path):
             f"cascade in ``_add_workspace_folder_no_commit`` fired for "
             f"``destination`` even though it was not the user's target"
         )
+
+
+# ---------------------------------------------------------------------------
+# chaining: result carries imported photo ids (import/process split PR 3)
+# ---------------------------------------------------------------------------
+
+
+def test_result_carries_imported_photo_ids(tmp_path):
+    """The after-import chaining hook builds the process job's collection
+    from the freshly imported rows; the result must name them."""
+    from import_job import ImportParams
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+        ("DSC_0002.jpg", datetime(2026, 7, 4, 9, 0, 0), "green"),
+    ])
+    archive = tmp_path / "archive"
+
+    db, ws_id, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)], destination=str(archive),
+    ))
+
+    all_ids = sorted(r["id"] for r in _photo_rows(db))
+    assert sorted(result["photo_ids"]) == all_ids
+    assert len(all_ids) == 2
+
+    # Duplicates-only rerun: present but empty — the chaining hook skips
+    # with "no new photos" instead of enqueueing an empty process run.
+    from import_job import run_import_job
+
+    rerun_result = run_import_job(
+        _make_job(), FakeRunner(), str(tmp_path / "test.db"), ws_id,
+        ImportParams(sources=[str(card)], destination=str(archive)),
+    )
+    assert rerun_result["photo_ids"] == []
+    assert rerun_result["skipped_duplicate"] == 2
