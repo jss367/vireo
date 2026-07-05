@@ -15209,6 +15209,61 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "after_import": after_import,
         }
 
+        def _chain_after_import(job, result):
+            """Enqueue the after-import process job, or record why not.
+
+            Every skip is written to the result as ``after_import_skipped``
+            so the jobs panel shows exactly what happened and why
+            (transparency rule). Guards, in order: import-only choice,
+            failed import (a green processing run must not hide a failed
+            import — rollup convention), cancelled import, and
+            duplicates-only imports with nothing new to process.
+            """
+            if after_import is None:
+                result["after_import_skipped"] = "import-only"
+                return
+            if not result.get("ok"):
+                result["after_import_skipped"] = "import failed"
+                return
+            if result.get("cancelled"):
+                result["after_import_skipped"] = "import cancelled"
+                return
+            photo_ids = result.get("photo_ids") or []
+            if not photo_ids:
+                result["after_import_skipped"] = "no new photos"
+                return
+            try:
+                from datetime import datetime as _dt
+
+                from db import Database
+
+                thread_db = Database(db_path)
+                thread_db.set_active_workspace(active_ws)
+                col_id = thread_db.add_collection(
+                    "Import " + _dt.now().strftime("%Y-%m-%d %H:%M"),
+                    json.dumps(
+                        [{"field": "photo_ids", "value": photo_ids}]
+                    ),
+                )
+                process_job_id, model_warning = _enqueue_process_job(
+                    thread_db, runner, active_ws,
+                    collection_id=col_id,
+                    strategy_name=after_import,
+                    chained_from=job["id"],
+                )
+                result["process_job_id"] = process_job_id
+                if model_warning:
+                    result["model_warning"] = model_warning
+            except Exception as e:
+                # The import itself succeeded — record the chaining failure
+                # rather than flipping the whole job red, but never
+                # silently: the user asked for processing and must see it
+                # didn't start.
+                log.exception("after-import chaining failed")
+                result["after_import_skipped"] = (
+                    f"failed to enqueue processing: {e}"
+                )
+
         def work(job):
             from import_job import ImportParams, run_import_job
 
@@ -15224,7 +15279,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 vireo_dir=vireo_dir,
                 thumb_cache_dir=thumb_cache_dir,
             )
-            return run_import_job(job, runner, db_path, active_ws, params)
+            result = run_import_job(job, runner, db_path, active_ws, params)
+            _chain_after_import(job, result)
+            return result
 
         job_id = runner.start(
             "import", work, config=job_config, workspace_id=active_ws,
@@ -17017,6 +17074,114 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         job_id = runner.start("regroup", work, config={"pipeline": pipeline_cfg}, workspace_id=active_ws)
         return jsonify({"job_id": job_id})
 
+    def _apply_no_model_auto_skip(params):
+        """Auto-skip classify stages when no model is available.
+
+        Mutates ``params`` (skip_classify/skip_extract_masks/skip_regroup)
+        and returns the user-facing warning string, or None when a model
+        resolved. One implementation shared by ``api_job_pipeline`` and the
+        after-import chaining hook, so chained runs degrade identically to
+        manually-started ones.
+        """
+        if params.skip_classify:
+            return None
+        from models import get_active_model, get_models
+
+        # Resolve the set of requested models. Prefer the explicit list,
+        # fall back to the legacy single id, and finally to whatever is
+        # marked active. Any requested id that isn't downloaded fails the
+        # check, so the user sees the "no model available" warning instead
+        # of a mid-run model_loader crash.
+        requested_ids = list(params.model_ids or [])
+        if not requested_ids and params.model_id:
+            requested_ids = [params.model_id]
+
+        if requested_ids:
+            by_id = {m["id"]: m for m in get_models()}
+            resolved_any = all(
+                by_id.get(mid, {}).get("downloaded") for mid in requested_ids
+            )
+        else:
+            resolved_any = get_active_model() is not None
+
+        if resolved_any:
+            return None
+        params.skip_classify = True
+        params.skip_extract_masks = True
+        params.skip_regroup = True
+        return (
+            "No model available — classification was skipped. "
+            "Download a model in Settings to enable species identification."
+        )
+
+    def _enqueue_process_job(thread_db, runner, workspace_id, *,
+                             collection_id, strategy_name,
+                             chained_from=None):
+        """Enqueue a collection-scoped process run for a named strategy.
+
+        The after-import chaining hook's path into the pipeline. Runs on a
+        job thread — no request context: takes an explicit thread-local
+        ``Database`` and never touches ``request``/``_get_db``. Applies the
+        same strategy expansion and no-model auto-skip as
+        ``api_job_pipeline`` so a chained run degrades identically to a
+        manual one. Returns ``(job_id, model_warning)``.
+        """
+        from pipeline_job import PipelineParams, run_pipeline_job
+        from process_strategies import resolve_strategy
+
+        expanded = resolve_strategy(strategy_name)
+        params = PipelineParams(
+            collection_id=collection_id,
+            skip_classify=expanded["skip_classify"],
+            skip_extract_masks=expanded["skip_extract_masks"],
+            skip_eye_keypoints=expanded["skip_eye_keypoints"],
+            skip_regroup=expanded["skip_regroup"],
+            miss_enabled=expanded["miss_enabled"],
+        )
+        model_warning = _apply_no_model_auto_skip(params)
+
+        work_units = _runtime_warning_work_units(
+            "pipeline collection",
+            lambda: thread_db.count_collection_photos(collection_id),
+        )
+        runtime_warning = None
+        if not (params.skip_classify and params.skip_extract_masks):
+            runtime_warning = _build_cpu_runtime_warning(
+                "pipeline",
+                work_units=work_units,
+                reason="large_pipeline_ml_job_cpu_only",
+            )
+
+        def work(job):
+            return run_pipeline_job(
+                job, runner, db_path, workspace_id, params,
+                thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
+            )
+
+        job_config = {
+            "source": None,
+            "sources": None,
+            "collection_id": collection_id,
+            "destination": None,
+            "local_processing": False,
+            "strategy": strategy_name,
+            "skip_classify": params.skip_classify,
+            "skip_extract_masks": params.skip_extract_masks,
+            "skip_regroup": params.skip_regroup,
+            "miss_enabled": params.miss_enabled,
+        }
+        if chained_from:
+            # Provenance for the jobs panel: this run was started by an
+            # import's after-import choice, not by hand.
+            job_config["chained_from"] = chained_from
+        job_id = runner.enqueue_pipeline(
+            work,
+            config=job_config,
+            workspace_id=workspace_id,
+            runtime_warning=runtime_warning,
+        )
+        return job_id, model_warning
+
     @app.route("/api/jobs/pipeline", methods=["POST"])
     def api_job_pipeline():
         """Streaming pipeline: scan -> thumbnails -> classify -> extract-masks -> regroup.
@@ -17587,36 +17752,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
             params.collection_id = collection_id
 
-        # Auto-skip classify stages if no model is available
-        model_warning = None
-        if not params.skip_classify:
-            from models import get_active_model, get_models
-
-            # Resolve the set of requested models. Prefer the explicit list,
-            # fall back to the legacy single id, and finally to whatever is
-            # marked active. Any requested id that isn't downloaded fails the
-            # check, so the user sees the "no model available" warning instead
-            # of a mid-run model_loader crash.
-            requested_ids = list(params.model_ids or [])
-            if not requested_ids and params.model_id:
-                requested_ids = [params.model_id]
-
-            all_models = None
-            resolved_any = False
-            if requested_ids:
-                all_models = get_models()
-                by_id = {m["id"]: m for m in all_models}
-                resolved_any = all(
-                    by_id.get(mid, {}).get("downloaded") for mid in requested_ids
-                )
-            else:
-                resolved_any = get_active_model() is not None
-
-            if not resolved_any:
-                params.skip_classify = True
-                params.skip_extract_masks = True
-                params.skip_regroup = True
-                model_warning = "No model available \u2014 classification was skipped. Download a model in Settings to enable species identification."
+        # Auto-skip classify stages if no model is available. Shared with
+        # the after-import chaining hook so a chained run and a manually
+        # started one degrade identically.
+        model_warning = _apply_no_model_auto_skip(params)
 
         # Save destination to recent list (best-effort — don't block pipeline)
         if destination:
