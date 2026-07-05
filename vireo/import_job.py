@@ -1163,14 +1163,22 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     # verifiably exist (hash-backed match, or key match re-hashed against
     # its cataloged twin), AND every source was walked cleanly, AND every
     # duplicate-only batch's workspace-link scan succeeded (otherwise the
-    # imported duplicates are on disk but not visible in the workspace).
-    # A cancelled run leaves unprocessed files, so it is never safe.
-    # This pill means exactly what it says.
+    # imported duplicates are on disk but not visible in the workspace),
+    # AND the run enumerated the card's full supported-file set (a
+    # narrowed ``file_types`` — "raw", "jpeg", or a custom extension list
+    # — leaves the un-selected supported photos on the card entirely
+    # unseen; ``discovered`` covers only the requested subset, so the
+    # naive ``copied + skipped_duplicate == discovered`` check would go
+    # green even though the card still holds files the pill is expected
+    # to cover). A cancelled run leaves unprocessed files, so it is
+    # never safe. This pill means exactly what it says.
+    filtered_import = params.file_types != "both"
     safe_to_format = (
         not cancelled
         and failed == 0
         and not discovery_errors
         and not dup_link_failed
+        and not filtered_import
         and (copied + skipped_duplicate) == discovered
     )
     result = {

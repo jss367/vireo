@@ -1173,6 +1173,61 @@ def test_excluded_bundle_source_root_flips_safe_to_format_off(tmp_path):
     assert result["discovery_errors"] == 1
 
 
+def test_filtered_import_is_never_safe_to_format(tmp_path):
+    """A narrowed ``file_types`` (``"raw"``, ``"jpeg"``, or a custom list)
+    only enumerates the requested subset, so ``discovered`` covers less
+    than the card's actual supported-file footprint. The naive
+    ``copied + skipped_duplicate == discovered`` check would still pass
+    even though other supported photos on the card were never imported —
+    and the pill would then tell the user it's safe to format a card that
+    still holds files. See PR #1107 review (P1 line 420).
+    """
+    from import_job import ImportParams
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+        ("DSC_0002.jpg", datetime(2026, 7, 3, 11, 0, 0), "green"),
+    ])
+    archive = tmp_path / "archive"
+
+    # ``file_types="jpeg"`` still copies every file this card actually
+    # holds (they're all JPEGs), so copied == discovered would otherwise
+    # flip safe_to_format green.
+    db, ws_id, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)],
+        destination=str(archive),
+        file_types="jpeg",
+    ))
+
+    assert result["copied"] == 2
+    assert result["failed"] == 0
+    assert result["discovered"] == 2
+    # But the run only asked for JPEGs — a RAW sitting on the same card
+    # would have been silently skipped. The pill has no way to prove
+    # otherwise without re-walking the card, so it stays false.
+    assert result["safe_to_format"] is False
+
+
+def test_custom_file_types_list_is_never_safe_to_format(tmp_path):
+    """Same guarantee for the explicit-extension-list form of
+    ``file_types``: any narrowing counts as filtered."""
+    from import_job import ImportParams
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+    archive = tmp_path / "archive"
+
+    db, ws_id, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)],
+        destination=str(archive),
+        file_types=[".jpg"],
+    ))
+
+    assert result["copied"] == 1
+    assert result["safe_to_format"] is False
+
+
 def test_wc_extraction_deferred_to_after_last_batch(tmp_path, monkeypatch):
     """A RAW+JPEG companion pair that straddles a batch boundary must not
     trigger per-batch working-copy extraction while the JPEG's row is
