@@ -117,10 +117,9 @@ def test_copy_and_hash_verify_detects_corruption(tmp_path, monkeypatch):
 
 ```python
 def _make_card(tmp_path, names):
-    """A fake card with tiny JPEGs carrying distinct EXIF capture dates
-    is overkill — build_destination_path falls back to file mtime when
-    EXIF is absent (verify in ingest.py; the existing test_ingest.py
-    fixtures show the accepted pattern — copy it)."""
+    """A fake card with tiny JPEGs can use distinct mtimes for folder planning:
+    ingest._source_file_timestamps falls back to file mtime when EXIF is absent
+    before build_destination_path formats the destination folder."""
 ```
 
 - Fixture: card with 4 JPEGs (2 destined for one template folder, 2 for another via distinct mtimes), archive destination inside tmp_path, `Database` with active workspace.
@@ -133,7 +132,7 @@ def _make_card(tmp_path, names):
 
 **Step 3:** Implement:
 - `ImportParams` dataclass: `sources`, `destination`, `folder_template="%Y/%Y-%m-%d"`, `file_types="both"`, `skip_duplicates=True`, `verify_by_hash=False`, `recursive=True`, `after_import=None` (stored, unused until PR 3).
-- Discover all files across sources (`discover_source_files`), resolve capture times (`source_capture_timestamps`), group into batches by destination folder (Task 2.0's batch unit), template order.
+- Discover all files across sources (`discover_source_files`), resolve folder-planning timestamps with `ingest._source_file_timestamps` (EXIF first, file mtime fallback; do **not** use `source_capture_timestamps` directly here because it intentionally returns `None` for no-EXIF files), group into batches by destination folder (Task 2.0's batch unit), template order.
 - One shared `DuplicateChecker(CatalogIndex.from_db(db), verify_by_hash=params.verify_by_hash)` across the whole run.
 - Per file in a batch: dedup `match()` → record skip with its token and the matched archive folder path (Task 2.3 consumes the token; this task consumes the folder for workspace linking); else `copy_and_hash_verify` (pass the checker's cached hash when it has one); collision handling mirrors `ingest()` (numeric suffix when same name + different content at destination; skip when the destination file is byte-identical — reuse `ingest()`'s existing check shape).
 - Per batch, after all copies: `scan(root=destination, db, restrict_dirs=[batch dest dir plus any duplicate-match destination dirs], restrict_files=[verified dest paths], vireo_dir=…, thumb_cache_dir=…, cancel_check=…)`, collecting `(photo_id, path)` via `photo_callback`; then `UPDATE photos SET file_hash=?, hash_status='verified', hash_checked_at=? WHERE id=?` for each freshly verified copy. This keeps duplicate-only imports from reporting success while leaving an unlinked workspace empty.
@@ -152,7 +151,7 @@ def _make_card(tmp_path, names):
 
 - Fresh-copy run → result `safe_to_format is True`, `unsafe_files == []`.
 - A card file whose `match()` is `("hash", …)` (byte-identical twin already cataloged) → still safe.
-- A card file that key-matches (same name, size, capture time) a cataloged twin **whose bytes differ** → `safe_to_format is False` and the file is listed in `unsafe_files` with a reason. Build the fixture by cataloging a photo, then crafting a card file with equal size/name/mtime but different bytes (flip trailing bytes, keep length).
+- A card file that key-matches (same name, size, trusted capture time) a cataloged twin **whose bytes differ** → `safe_to_format is False` and the file is listed in `unsafe_files` with a reason. Build the fixture from `test_import_dedup.py`'s `_write_jpeg(..., exif_dt=...)` and `_seed_photo(...)` pattern: seed the catalog row with the same trustworthy `photos.timestamp` (for example `2026-05-01T10:15:30`) and create the card file with matching `DateTimeOriginal`, name, and size but different bytes. Do not rely on mtime alone; `DuplicateChecker` key matches use EXIF/catalog capture timestamps.
 - A failed copy → unsafe.
 
 **Step 2:** Run — FAIL.
