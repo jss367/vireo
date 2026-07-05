@@ -108,6 +108,31 @@ def test_reorder_tabs_rejects_non_string_entries(app_and_db):
         assert r.status_code == 400, f"expected 400 for {bad!r}, got {r.status_code}"
 
 
+def test_get_tabs_drops_retired_nav_ids(app_and_db):
+    """Workspaces upgraded from a version that had a since-retired page
+    (e.g. ``zoom_test``) can still carry that id in ``workspaces.tabs``.
+    ``get_tabs()`` must filter it out so the navbar never gets a nav id
+    that isn't in ``all_pages`` — otherwise cmd+number reserves a dead
+    slot and ``adjacentTabId()`` returns an id ``pageById`` doesn't know,
+    which throws on close-adjacent.
+    """
+    import json
+    app, db = app_and_db
+    ws_id = db._active_workspace_id
+    db.conn.execute(
+        "UPDATE workspaces SET tabs = ? WHERE id = ?",
+        (json.dumps(["browse", "zoom_test", "cull"]), ws_id),
+    )
+    db.conn.commit()
+
+    assert db.get_tabs() == ["browse", "cull"]
+
+    client = app.test_client()
+    body = client.get("/api/workspace/tabs").get_json()
+    assert body["tabs"] == ["browse", "cull"]
+    assert "zoom_test" not in [p["id"] for p in body["all_pages"]]
+
+
 def test_get_tabs_endpoint_new_shape(app_and_db):
     from app import ALL_PAGES
     from db import DEFAULT_TABS
