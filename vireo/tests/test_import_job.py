@@ -202,6 +202,87 @@ def test_duplicate_only_import_links_matched_folders(tmp_path):
     assert len(_photo_rows(db)) == 1
 
 
+def test_duplicate_only_import_links_alias_spelled_twin(tmp_path):
+    """When a twin folder is cataloged through a symlink alias but the
+    import ``destination`` resolves to a different (real) spelling, the
+    duplicate-link pass must still workspace-link the twin. Passing an
+    alias-spelled ``restrict_dir`` to ``scan(root=destination)`` would
+    infinite-recurse in ``_ensure_folder`` (it walks parents lexically
+    without ever matching the realpath'd root); the import job routes
+    the alias case straight to ``workspace_folders`` instead.
+    """
+    import sys as _sys
+
+    if _sys.platform == "win32":
+        # os.symlink usually requires elevation on Windows; skip.
+        import pytest
+        pytest.skip("symlinks not routinely available on Windows")
+
+    from import_dedup import compute_file_hash
+    from import_job import ImportParams, run_import_job
+
+    # Real archive dir + symlink alias to it.
+    real_archive = tmp_path / "real" / "archive"
+    real_archive.mkdir(parents=True)
+    dest_dir_real = real_archive / "2026" / "2026-07-03"
+    dest_dir_real.mkdir(parents=True)
+    dest_file = dest_dir_real / "IMG_9000.jpg"
+    Image.new("RGB", (16, 16), "red").save(str(dest_file))
+
+    alias_archive = tmp_path / "alias"
+    os.symlink(str(real_archive), str(alias_archive))
+    alias_dest_dir = alias_archive / "2026" / "2026-07-03"
+    # Sanity: the alias resolves to the same folder.
+    assert os.path.realpath(str(alias_dest_dir)) == str(dest_dir_real)
+
+    # Catalog the twin under the ALIAS spelling — simulating a prior
+    # scan that used ``/alias/…`` as its root — and don't link its
+    # folder to the workspace.
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES (?, ?, 'ok')",
+        (str(alias_dest_dir), alias_dest_dir.name),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, extension, file_size,"
+        " file_hash) VALUES (?, ?, '.jpg', ?, ?)",
+        (
+            fid,
+            "IMG_9000.jpg",
+            os.path.getsize(str(dest_file)),
+            compute_file_hash(str(dest_file)),
+        ),
+    )
+    db.conn.commit()
+    assert str(alias_dest_dir) not in _ws_linked_folder_paths(db, ws_id)
+
+    # Card has a byte-identical copy. Import to the REAL destination.
+    card = tmp_path / "card"
+    card.mkdir()
+    import shutil
+    shutil.copy2(str(dest_file), str(card / "IMG_9000.jpg"))
+
+    runner = FakeRunner()
+    job = _make_job()
+    result = run_import_job(job, runner, db_path, ws_id, ImportParams(
+        sources=[str(card)], destination=str(real_archive),
+    ))
+
+    assert result["copied"] == 0
+    assert result["skipped_duplicate"] == 1
+    assert result["failed"] == 0
+    # The alias-spelled twin folder is now workspace-linked (via the
+    # direct-link path, bypassing scan which would have infinite-
+    # recursed in _ensure_folder).
+    assert str(alias_dest_dir) in _ws_linked_folder_paths(db, ws_id)
+    # Still exactly one photo row — no double-catalog of the twin.
+    assert len(_photo_rows(db)) == 1
+    # And the run is safe to format the card.
+    assert result["safe_to_format"] is True
+
+
 def test_catalog_never_references_missing_files(tmp_path, monkeypatch):
     """Invariant: catalog is a subset of verified on-disk files, even when
     some copies fail."""

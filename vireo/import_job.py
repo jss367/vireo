@@ -1368,6 +1368,33 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         # self-healed into the catalog.
         new_dup_dirs = dup_dirs - linked_dup_dirs
         if new_dup_dirs:
+            # Twin folders may be cataloged through a symlink alias while
+            # ``destination`` is realpath-normalized above. ``_path_under_
+            # destination`` accepts them via realpath, but scanner's
+            # ``_ensure_folder`` walks parents *lexically* until they equal
+            # the scan root — a restrict_dir ``/alias/2026-07-05`` scanned
+            # under root ``/real/archive`` would recurse to ``/alias`` →
+            # ``/`` → ``/`` … and hit Python's recursion limit before the
+            # workspace_folders link is ever created. Split by whether the
+            # twin's folder path sits lexically under destination: link
+            # the alias-spelled ones directly (their folder row and the
+            # twin's photos already exist — no self-heal scan needed for
+            # workspace visibility), scan only the lexically-under-
+            # destination ones. See PR #1107 review.
+            lex_dup_dirs = set()
+            alias_dup_dirs = set()
+            for d in new_dup_dirs:
+                d_cmp = (
+                    d.casefold() if _dest_ci else d
+                ).rstrip(os.sep)
+                if (
+                    d_cmp == _dest_root_norm
+                    or d_cmp.startswith(_dest_root_norm + os.sep)
+                ):
+                    lex_dup_dirs.add(d)
+                else:
+                    alias_dup_dirs.add(d)
+
             # Mirror the fresh-batch ``dest_folder`` promotion (see the
             # UPDATE at the top of this loop): a twin folder that survived
             # ``_linkable_twin_dirs`` is real on disk (``os.path.isdir``
@@ -1384,47 +1411,86 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                 [(d,) for d in sorted(new_dup_dirs)],
             )
             db.conn.commit()
-            try:
-                # Same rationale as the fresh-batch scan above: pass
-                # ``vireo_dir`` / ``thumb_cache_dir`` so pairing keeps
-                # cache context, and defer per-batch WC extraction to the
-                # end-of-run pass. See PR #1107 review.
-                scan(
-                    destination, db,
-                    restrict_dirs=sorted(new_dup_dirs),
-                    vireo_dir=params.vireo_dir,
-                    thumb_cache_dir=params.thumb_cache_dir,
-                    skip_working_copies=True,
-                    cancel_check=lambda: runner.is_cancelled(job["id"]),
-                )
-                linked_dup_dirs.update(new_dup_dirs)
-                # Duplicate-link scan created/linked workspace_folders
-                # rows for each duplicate twin's folder; the same
-                # cached-diff staleness applies (see the fresh-batch
-                # scan branch above). Invalidate every touched dup dir.
-                for d in sorted(new_dup_dirs):
-                    _invalidate_new_images(db, d)
-            except RuntimeError:
-                cancelled = True
-            except Exception as e:
-                # A duplicate-only batch's ONLY workspace-visibility step
-                # is this scan — swallowing the error would leave
-                # safe_to_format green while the imported duplicates are
-                # invisible in the active workspace. Record it and force
-                # safe_to_format false; the file(s) are on disk (import
-                # succeeded), but the operation as a whole is not safe.
-                log.exception(
-                    "Linking duplicate-matched folders failed: %s",
-                    sorted(new_dup_dirs),
-                )
-                dup_link_failed = True
-                for d in sorted(new_dup_dirs):
+
+            # Link alias-spelled twin folders directly to the active
+            # workspace: the folder row and its photos already exist (they
+            # were cataloged by whatever original scan used the alias
+            # spelling), so we just need the ``workspace_folders`` entry.
+            # Passing them through ``scan(root=destination)`` would blow
+            # the stack in ``_ensure_folder`` as described above.
+            for d in sorted(alias_dup_dirs):
+                folder_row = db.conn.execute(
+                    "SELECT id FROM folders WHERE path = ?", (d,),
+                ).fetchone()
+                if folder_row is None:
+                    # Shouldn't happen — _linkable_twin_dirs pulled this
+                    # from folders in the first place — but if it does,
+                    # count it as a link failure so safe_to_format stays
+                    # honest.
+                    log.warning(
+                        "Alias-spelled dup dir %s vanished from folders "
+                        "between _linkable_twin_dirs and the direct "
+                        "workspace link", d,
+                    )
+                    dup_link_failed = True
                     unsafe_files.append({
                         "path": d,
                         "reason": (
-                            f"duplicate-folder link scan failed: {e}"
+                            "duplicate-folder workspace link failed: "
+                            "folder row not found"
                         ),
                     })
+                    continue
+                db.add_workspace_folder(
+                    workspace_id, folder_row["id"], is_root=True,
+                )
+                linked_dup_dirs.add(d)
+                _invalidate_new_images(db, d)
+            db.conn.commit()
+
+            if lex_dup_dirs:
+                try:
+                    # Same rationale as the fresh-batch scan above: pass
+                    # ``vireo_dir`` / ``thumb_cache_dir`` so pairing keeps
+                    # cache context, and defer per-batch WC extraction to
+                    # the end-of-run pass. See PR #1107 review.
+                    scan(
+                        destination, db,
+                        restrict_dirs=sorted(lex_dup_dirs),
+                        vireo_dir=params.vireo_dir,
+                        thumb_cache_dir=params.thumb_cache_dir,
+                        skip_working_copies=True,
+                        cancel_check=lambda: runner.is_cancelled(job["id"]),
+                    )
+                    linked_dup_dirs.update(lex_dup_dirs)
+                    # Duplicate-link scan created/linked workspace_folders
+                    # rows for each duplicate twin's folder; the same
+                    # cached-diff staleness applies (see the fresh-batch
+                    # scan branch above). Invalidate every touched dup dir.
+                    for d in sorted(lex_dup_dirs):
+                        _invalidate_new_images(db, d)
+                except RuntimeError:
+                    cancelled = True
+                except Exception as e:
+                    # A duplicate-only batch's ONLY workspace-visibility
+                    # step is this scan — swallowing the error would leave
+                    # safe_to_format green while the imported duplicates
+                    # are invisible in the active workspace. Record it and
+                    # force safe_to_format false; the file(s) are on disk
+                    # (import succeeded), but the operation as a whole is
+                    # not safe.
+                    log.exception(
+                        "Linking duplicate-matched folders failed: %s",
+                        sorted(lex_dup_dirs),
+                    )
+                    dup_link_failed = True
+                    for d in sorted(lex_dup_dirs):
+                        unsafe_files.append({
+                            "path": d,
+                            "reason": (
+                                f"duplicate-folder link scan failed: {e}"
+                            ),
+                        })
 
         _emit(
             f"{rel}: {_counts(rel)['copied']} copied · "
