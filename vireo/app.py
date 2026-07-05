@@ -16605,6 +16605,53 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # folder_template with '..', or a coercion-time exception inside
         # PipelineParams) would leave a stray "Process …" collection in
         # the workspace even though no job was queued.
+        # ``exclude_paths`` / ``exclude_photo_ids`` are validated up front —
+        # before the folder-scope subtree is resolved — so a folder-scoped
+        # request that includes preview deselections can honor them at
+        # collection-materialization time. run_pipeline_job's
+        # ``_filter_excluded`` only checks ``exclude_photo_ids``; without
+        # applying ``exclude_paths`` at the ad-hoc collection boundary, a
+        # deselected path is still thumbnailed, classified, and regrouped
+        # once the folder collection materializes. Early validation also
+        # matches the coercion the PipelineParams constructor would
+        # otherwise perform via ``set(body.get(field, []))``, where a JSON
+        # ``null`` or unhashable list entry would raise TypeError and leave
+        # a stray "Process …" collection behind. Key-presence (not
+        # truthiness) matters: missing keys fall through to the default,
+        # but ``{"exclude_paths": null}`` must 400.
+        excluded_paths_set: set[str] = set()
+        if "exclude_paths" in body:
+            _paths_value = body["exclude_paths"]
+            if not isinstance(_paths_value, list):
+                return json_error(
+                    "exclude_paths must be a list, got "
+                    f"{type(_paths_value).__name__}"
+                )
+            for _entry in _paths_value:
+                if not isinstance(_entry, str):
+                    return json_error(
+                        "exclude_paths entries must be strings, got "
+                        f"{type(_entry).__name__}"
+                    )
+            excluded_paths_set = set(_paths_value)
+        excluded_photo_ids_set: set[int] = set()
+        if "exclude_photo_ids" in body:
+            _ids_value = body["exclude_photo_ids"]
+            if not isinstance(_ids_value, list):
+                return json_error(
+                    "exclude_photo_ids must be a list, got "
+                    f"{type(_ids_value).__name__}"
+                )
+            for _entry in _ids_value:
+                # bool is a subclass of int; exclude it explicitly so the
+                # accepted values stay honest integers.
+                if isinstance(_entry, bool) or not isinstance(_entry, int):
+                    return json_error(
+                        "exclude_photo_ids entries must be integers, got "
+                        f"{type(_entry).__name__}"
+                    )
+            excluded_photo_ids_set = set(_ids_value)
+
         folder_ids = body.get("folder_ids")
         pending_folder_collection = None
         if folder_ids is not None:
@@ -16713,16 +16760,51 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # an OperationalError before the job is even queued. Same pattern
             # db.py uses for other large id scopes (see _chunks in db.py).
             subtree_id_list = list(subtree_ids)
+            # Fetch the folder paths for the whole subtree so we can compose
+            # per-photo full paths and honor ``exclude_paths`` at the
+            # collection boundary. Skip the lookup entirely when the user
+            # sent no path exclusions — a workspace-root scope can span
+            # thousands of folders and the join is pointless when nothing
+            # would be filtered.
+            folder_path_by_id: dict[int, str] = {}
+            if excluded_paths_set:
+                for start in range(0, len(subtree_id_list), _SQLITE_PARAM_CHUNK_SIZE):
+                    chunk = subtree_id_list[start:start + _SQLITE_PARAM_CHUNK_SIZE]
+                    marks = ",".join("?" for _ in chunk)
+                    for r in db.conn.execute(
+                        f"SELECT id, path FROM folders WHERE id IN ({marks})",
+                        tuple(chunk),
+                    ):
+                        folder_path_by_id[r["id"]] = r["path"] or ""
             photo_ids = []
             for start in range(0, len(subtree_id_list), _SQLITE_PARAM_CHUNK_SIZE):
                 chunk = subtree_id_list[start:start + _SQLITE_PARAM_CHUNK_SIZE]
                 marks = ",".join("?" for _ in chunk)
-                photo_ids.extend(
-                    r["id"] for r in db.conn.execute(
-                        f"SELECT id FROM photos WHERE folder_id IN ({marks})",
-                        tuple(chunk),
-                    )
-                )
+                # Select (id, folder_id, filename) so we can compose each
+                # photo's full path in-Python to compare against
+                # ``exclude_paths``. Matching the same os.path.join shape
+                # scanner/ingest use for their ``skip_paths`` sets keeps
+                # deselections consistent across import and process runs.
+                # Filter ``exclude_photo_ids`` here too so the ad-hoc
+                # collection reflects exactly what the user asked to
+                # process; ``_filter_excluded`` would drop them again later
+                # but there is no reason to bake them into the collection
+                # membership.
+                for r in db.conn.execute(
+                    f"SELECT id, folder_id, filename FROM photos "
+                    f"WHERE folder_id IN ({marks})",
+                    tuple(chunk),
+                ):
+                    if r["id"] in excluded_photo_ids_set:
+                        continue
+                    if excluded_paths_set:
+                        full = os.path.join(
+                            folder_path_by_id.get(r["folder_id"], ""),
+                            r["filename"] or "",
+                        )
+                        if full in excluded_paths_set:
+                            continue
+                    photo_ids.append(r["id"])
             first = db.get_folder(folder_ids[0])
             leaf = os.path.basename(
                 (first["path"] or "").rstrip("/\\")
@@ -16942,47 +17024,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 f"{type(miss_enabled_body).__name__}"
             )
 
-        # ``exclude_paths`` / ``exclude_photo_ids`` are coerced inside the
-        # PipelineParams constructor via ``set(body.get(field, []))``. A
-        # JSON ``null`` overrides the default, turning that into
-        # ``set(None)`` which raises TypeError. A list whose *entries*
-        # aren't hashable (e.g. ``{"exclude_paths": [{}]}``) reaches
-        # ``set([...])`` and raises ``TypeError: unhashable type`` for the
-        # same reason. Both cases would otherwise leave a stray "Process
-        # …" collection when a folder scope is materialized before
-        # PipelineParams runs. Reject at the request boundary so the
-        # caller sees a clean 400 and no side effects. Key-presence (not
-        # truthiness) is what matters: missing keys fall through to the
-        # ``[]`` default, but ``{"exclude_paths": null}`` must 400.
-        if "exclude_paths" in body:
-            _paths_value = body["exclude_paths"]
-            if not isinstance(_paths_value, list):
-                return json_error(
-                    "exclude_paths must be a list, got "
-                    f"{type(_paths_value).__name__}"
-                )
-            for _entry in _paths_value:
-                if not isinstance(_entry, str):
-                    return json_error(
-                        "exclude_paths entries must be strings, got "
-                        f"{type(_entry).__name__}"
-                    )
-        if "exclude_photo_ids" in body:
-            _ids_value = body["exclude_photo_ids"]
-            if not isinstance(_ids_value, list):
-                return json_error(
-                    "exclude_photo_ids must be a list, got "
-                    f"{type(_ids_value).__name__}"
-                )
-            for _entry in _ids_value:
-                # bool is a subclass of int; exclude it explicitly so the
-                # accepted values stay honest integers.
-                if isinstance(_entry, bool) or not isinstance(_entry, int):
-                    return json_error(
-                        "exclude_photo_ids entries must be integers, got "
-                        f"{type(_entry).__name__}"
-                    )
-
         # Snapshot the resolved target dict so the queued run archives to the
         # host/mount the user saw at click-Start, not whatever the saved target
         # gets edited to while another pipeline holds the slot. Mirrors how the
@@ -17018,8 +17059,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             skip_regroup=body.get("skip_regroup", False),
             miss_enabled=body.get("miss_enabled"),
             preview_max_size=body.get("preview_max_size"),
-            exclude_paths=set(body.get("exclude_paths", [])) or None,
-            exclude_photo_ids=set(body.get("exclude_photo_ids", [])) or None,
+            exclude_paths=excluded_paths_set or None,
+            exclude_photo_ids=excluded_photo_ids_set or None,
             recursive=body.get("recursive", True),
         )
 

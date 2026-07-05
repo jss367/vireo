@@ -2683,6 +2683,65 @@ def test_pipeline_folder_ids_includes_legacy_null_parent_descendants(app_and_db)
         )
 
 
+def test_pipeline_folder_ids_honors_exclude_paths(app_and_db):
+    """A folder-scoped run with ``exclude_paths`` must drop the deselected
+    photos from the ad-hoc collection itself. Once ``params.collection_id``
+    is set, ``run_pipeline_job`` takes the collection path and its
+    ``_filter_excluded`` helper only checks ``exclude_photo_ids``, so an
+    excluded path would otherwise still be thumbnailed, classified, and
+    regrouped. Filter at the materialization boundary so the collection
+    reflects exactly the photos the user asked to process."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    child_id = _folder_id_by_path(db, "/photos/2024/January")
+    # Photos in the fixture are keyed on folder + filename; the effective
+    # "path" for exclude_paths matching is os.path.join(folder.path, filename)
+    # — same shape scanner/ingest use for their skip_paths sets.
+    excluded_root_file = os.path.join("/photos/2024", "bird1.jpg")
+    excluded_child_file = os.path.join(
+        "/photos/2024/January", "bird2.jpg",
+    )
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [root_id], "strategy": "quick_look",
+            "exclude_paths": [excluded_root_file, excluded_child_file],
+        })
+        assert resp.status_code == 200, resp.get_json()
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        got = set(_collection_photo_ids(db, cfg["collection_id"]))
+        subtree = set(_photo_ids_in_folders(db, [root_id, child_id]))
+        # Only the non-excluded photo (bird3 in the root) remains.
+        remaining = {
+            r["id"] for r in db.conn.execute(
+                "SELECT id FROM photos WHERE folder_id = ? AND filename = ?",
+                (root_id, "bird3.jpg"),
+            )
+        }
+        assert got == remaining
+        assert got < subtree, "exclusion produced no reduction — filter no-op"
+
+
+def test_pipeline_folder_ids_honors_exclude_photo_ids(app_and_db):
+    """The ad-hoc collection also drops photos in ``exclude_photo_ids`` so
+    its membership matches what the user selected — even though
+    ``_filter_excluded`` would drop them again downstream."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    child_id = _folder_id_by_path(db, "/photos/2024/January")
+    all_ids = _photo_ids_in_folders(db, [root_id, child_id])
+    excluded = all_ids[0]
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [root_id], "strategy": "quick_look",
+            "exclude_photo_ids": [excluded],
+        })
+        assert resp.status_code == 200, resp.get_json()
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        got = set(_collection_photo_ids(db, cfg["collection_id"]))
+        assert excluded not in got
+        assert got == set(all_ids) - {excluded}
+
+
 def test_pipeline_folder_ids_with_collection_id_400(app_and_db):
     """Two scopes in one request is ambiguous — reject rather than pick."""
     app, db = app_and_db
