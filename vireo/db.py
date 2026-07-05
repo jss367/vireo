@@ -887,6 +887,17 @@ class Database:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_keywords_place_id "
             "ON keywords(place_id) WHERE place_id IS NOT NULL"
         )
+        # Migration: folders.parent_id. Truly legacy databases predate the
+        # column, and CREATE TABLE IF NOT EXISTS above is a no-op for them —
+        # so add the column here so repair_missing_folder_parents() (and
+        # every other query that reads parent_id) can run.
+        try:
+            self.conn.execute("SELECT parent_id FROM folders LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute(
+                "ALTER TABLE folders "
+                "ADD COLUMN parent_id INTEGER REFERENCES folders(id)"
+            )
         # Phase 1 storage-philosophy migration: classifier embeddings move
         # from single-slot photos.(embedding, embedding_model) columns into
         # the per-(photo, model, variant) photo_embeddings table. Rows whose
