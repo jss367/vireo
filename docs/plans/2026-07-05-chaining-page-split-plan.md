@@ -89,12 +89,14 @@ Record answers in the Task 3.1 commit message or code comments:
 ### Task 3.4: Tabs
 
 **Files:**
-- Modify: `vireo/db.py` (`DEFAULT_TABS` + one-time in-place update), `vireo/templates/_navbar.html`
-- Test: `vireo/tests/test_db.py`, `tests/test_workspaces.py`
+- Modify: `vireo/db.py` (`DEFAULT_TABS` + `ALL_NAV_IDS` + one-time in-place update), `vireo/app.py` (`ALL_PAGES`), `vireo/templates/_navbar.html` (label map + the `window.NAV_ALL_PAGES` mirror)
+- Test: `vireo/tests/test_db.py`, `vireo/tests/test_app.py`, `tests/test_workspaces.py`
 
 Deviation from the parent plan's wording ("replace the `pipeline` tab with `import` + `process`"): the tab **id** `pipeline` stays (it is the URL and appears in every workspace's `tabs` JSON); its **label** becomes "Process", and a new `import` tab id + `/import` route is added ahead of it. Renaming the id would touch every deep link and saved tabs row for zero user-visible gain — label + new tab delivers the design's UX. Record this in the commit message.
 
-- *Failing tests:* `DEFAULT_TABS` contains `"import"` immediately before `"pipeline"`; a fresh DB's workspace gets it; existing workspaces get `import` inserted by the same reset-in-place pattern as the 2026-04-30 unified-tabs migration (solo-user, no preservation shim); navbar renders Import and Process labels.
+**Nav registries — add `import` to every one, or the tab is silently dropped.** `Database.get_tabs()` filters saved `tabs` rows against `ALL_NAV_IDS` (unknown ids are dropped, per the "pages retired in past releases" comment) and `set_tabs()` raises on any id not in the set; `/api/workspace/tabs` returns `ALL_PAGES` (label/href/icon), which the client trusts as its registry (`_navbar.html` replaces its in-memory `ALL_PAGES` from `state.all_pages` on load). The `NAV_ALL_PAGES` block inline in `_navbar.html` is the pre-hydration fallback and has a drift-detection test in `vireo/tests/test_app.py` that fails if it doesn't equal `app.ALL_PAGES` verbatim. Miss any of these and the new default tab is either filtered out server-side, rejected on save, or crashes the drift test.
+
+- *Failing tests:* `DEFAULT_TABS` contains `"import"` immediately before `"pipeline"`; `"import"` is in `ALL_NAV_IDS` and `Database.set_tabs(["import", ...])` succeeds; `app.ALL_PAGES` contains an `import` entry (id/label/href) and the `_navbar.html` `NAV_ALL_PAGES` block still matches it (existing drift test); a fresh DB's workspace gets it; existing workspaces get `import` inserted by the same reset-in-place pattern as the 2026-04-30 unified-tabs migration (solo-user, no preservation shim); navbar renders Import and Process labels.
 - *Commit:* `feat: Import tab + Process relabel`
 
 ### Task 3.5: User-first scenario (Playwright)
