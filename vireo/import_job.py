@@ -50,6 +50,7 @@ import errno
 import logging
 import os
 import shutil
+import sys
 import uuid
 from dataclasses import dataclass
 
@@ -318,6 +319,46 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     # dot-segment form, so the recursion never reaches root and the scan
     # loses those files (copied bytes then bucket as catalog failures).
     destination = os.path.normpath(str(params.destination))
+
+    # Normalized realpaths of every import source root, used to reject
+    # cataloged twins that live under the card being imported. The
+    # /api/jobs/import-photos route already refuses destinations that sit
+    # inside a source (formatting the card would erase the archive copy),
+    # but the duplicate acceptance loop separately trusts any cataloged
+    # twin whose bytes hash to ``src_hash`` — including a stale row for a
+    # previously scanned mounted card. That twin's re-hash just re-reads
+    # the very card file being imported, so accepting it as duplicate
+    # proof would flip ``safe_to_format`` green over a card whose bytes
+    # never made it to the archive. Case-fold on darwin/win32 so a
+    # differently-cased spelling of the source path can't slip a twin
+    # through the containment check; ext4/xfs on Linux really do
+    # distinguish case. See PR #1107 review.
+    _case_insensitive_platform = sys.platform in ("darwin", "win32")
+
+    def _casenorm_path(p):
+        return p.casefold() if _case_insensitive_platform else p
+
+    def _norm_source(s):
+        try:
+            real = os.path.realpath(s)
+        except OSError:
+            real = str(s)
+        return _casenorm_path(real).rstrip(os.sep)
+
+    source_roots = [_norm_source(s) for s in params.sources]
+
+    def _path_under_any_source(path):
+        try:
+            real = os.path.realpath(path)
+        except OSError:
+            real = str(path)
+        cmp = _casenorm_path(real)
+        for root in source_roots:
+            if not root:
+                continue
+            if cmp == root or cmp.startswith(root + os.sep):
+                return True
+        return False
 
     runner.set_steps(job["id"], [
         {"id": "import", "label": "Copy & catalog"},
@@ -611,6 +652,19 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                             twin_path = os.path.join(
                                 twin["folder_path"], twin["filename"],
                             )
+                            # A cataloged twin under any import source
+                            # root is (or may be) the card file being
+                            # imported this run — a stale scan of the
+                            # mounted card left a photos row whose path
+                            # IS the card. Hashing it just re-reads the
+                            # source, which proves nothing about an
+                            # archive copy; accepting it as duplicate
+                            # proof would flip safe_to_format green
+                            # while the card holds the only bytes. Only
+                            # an off-card twin can back a duplicate
+                            # skip. See PR #1107 review.
+                            if _path_under_any_source(twin_path):
+                                continue
                             try:
                                 twin_hash = compute_file_hash(twin_path)
                             except OSError:

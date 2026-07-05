@@ -418,6 +418,63 @@ def test_stale_hash_row_with_modified_bytes_imports_as_fresh(tmp_path):
     assert result["safe_to_format"] is True
 
 
+def test_catalog_twin_under_source_root_does_not_prove_duplicate(tmp_path):
+    """A cataloged twin whose folder_path IS (or is under) an import
+    source is the card file being imported — the user previously scanned
+    the mounted card, so ``photos.file_hash`` matches the card's own
+    bytes. Re-hashing that "twin" just re-reads the source and proves
+    nothing about any archive copy; accepting it as duplicate proof would
+    flip ``safe_to_format`` green over a card whose bytes never made it
+    to the archive. The card must import fresh instead."""
+    from import_dedup import compute_file_hash
+    from import_job import ImportParams, run_import_job
+
+    # Card file whose bytes hash to a known value.
+    card = tmp_path / "card"
+    card.mkdir()
+    card_file = card / "IMG_0800.jpg"
+    Image.new("RGB", (16, 16), "purple").save(str(card_file))
+    ts = datetime(2026, 6, 3, 14, 0, 0).timestamp()
+    os.utime(str(card_file), (ts, ts))
+    card_hash = compute_file_hash(str(card_file))
+    card_size = os.path.getsize(str(card_file))
+
+    # Seed a stale catalog row whose folder_path IS the mounted card
+    # (a prior scan of the card left this behind). file_hash matches the
+    # card because it WAS computed by hashing the card file.
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES (?, ?, 'ok')",
+        (str(card), card.name),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, extension, file_size,"
+        " file_hash) VALUES (?, ?, '.jpg', ?, ?)",
+        (fid, "IMG_0800.jpg", card_size, card_hash),
+    )
+    db.conn.commit()
+
+    archive = tmp_path / "archive"
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(sources=[str(card)], destination=str(archive),
+                     verify_by_hash=True),
+    )
+
+    # Not skipped: the only "twin" is the card itself, and the card
+    # can't prove its own bytes safe.
+    assert result["skipped_duplicate"] == 0
+    assert result["copied"] == 1
+    dest = archive / "2026" / "2026-06-03" / "IMG_0800.jpg"
+    assert dest.exists()
+    assert compute_file_hash(str(dest)) == card_hash
+    # safe_to_format is true because the card's bytes verifiably landed
+    # at the archive — via a real copy, not via a stale card-side row.
+    assert result["safe_to_format"] is True
+
+
 def test_key_match_with_different_bytes_imports_as_distinct(tmp_path):
     """A metadata-only ("key") match against a cataloged twin whose bytes
     differ must NOT be skipped: the card's bytes were never verified
