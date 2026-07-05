@@ -224,6 +224,10 @@ def test_pipeline_local_processing_rejects_collection_id(setup, tmp_path):
     # staging folder is never created/indexed. Without this rejection
     # the job would burn through every processing stage and then fail
     # at archive_stage with "local staging folder was not indexed".
+    # The destination+collection_id guard fires first for this shape and
+    # rejects it with a scope-specific message; the older
+    # local_processing+collection_id guard still catches the no-destination
+    # variant (covered separately by test_jobs_api.py).
     app, _db_path = setup
     dest = tmp_path / "archive"
     with app.test_client() as c:
@@ -237,8 +241,7 @@ def test_pipeline_local_processing_rejects_collection_id(setup, tmp_path):
         })
         assert resp.status_code == 400
         err = resp.get_json()["error"].lower()
-        assert "local_processing" in err
-        assert "collection_id" in err
+        assert "destination is not allowed with collection_id" in err
 
 
 def test_pipeline_local_processing_rejects_collection_id_with_stale_sources(
@@ -248,8 +251,9 @@ def test_pipeline_local_processing_rejects_collection_id_with_stale_sources(
     # request that mixes collection_id with a stale source/sources field
     # still skips ingest — the staging folder never gets created or
     # indexed and archive_stage fails with "local staging folder was not
-    # indexed". The API guard must reject collection_id outright when
-    # local_processing is on, not just the no-source case.
+    # indexed". Same shape as above (destination + collection_id +
+    # local_processing) so the destination-scope guard rejects it first;
+    # the stale sources field must not slip past.
     app, _db_path = setup
     src = tmp_path / "card"
     src.mkdir()
@@ -266,8 +270,7 @@ def test_pipeline_local_processing_rejects_collection_id_with_stale_sources(
         })
         assert resp.status_code == 400
         err = resp.get_json()["error"].lower()
-        assert "local_processing" in err
-        assert "collection_id" in err
+        assert "destination is not allowed with collection_id" in err
 
 
 def test_pipeline_local_processing_archives_to_final_destination(
