@@ -2764,6 +2764,88 @@ def test_dest_file_nested_under_source_is_rejected(tmp_path):
     assert any("DSC_5000.jpg" in p for p in unsafe_paths), unsafe_paths
 
 
+def test_batch_destination_under_source_creates_no_directories(tmp_path):
+    """When ``dest_folder`` for a batch resolves under a source root, the
+    per-file loop rejects each ``dest_file`` — but that check only runs
+    AFTER ``os.makedirs(dest_folder)``, which would still materialize the
+    archive directory tree on the card (and raise on read-only removable
+    media, killing the background job with an uncaught OSError instead of
+    returning a controlled unsafe result). The import job must short-circuit
+    at the batch boundary: nothing under any source ever gets created, and
+    the run returns the same controlled ``failed``/``safe_to_format=False``
+    ledger it would for a writable destination inside the card. See PR
+    #1107 review.
+    """
+    from import_job import ImportParams
+
+    # Source ``/volumes/Card/DCIM``; destination ``/volumes/Card`` +
+    # template ``DCIM/Archive/%Y`` puts the batch's dest_folder at
+    # ``/volumes/Card/DCIM/Archive/2026`` — under the source root.
+    card = tmp_path / "volumes" / "Card"
+    dcim = card / "DCIM"
+    dcim.mkdir(parents=True)
+    src_file = dcim / "DSC_6100.jpg"
+    Image.new("RGB", (16, 16), "olive").save(str(src_file))
+    ts = datetime(2026, 7, 5, 10, 0, 0).timestamp()
+    os.utime(str(src_file), (ts, ts))
+
+    db, ws_id, result = _run_import(tmp_path, ImportParams(
+        sources=[str(dcim)],
+        destination=str(card),
+        folder_template="DCIM/Archive/%Y",
+    ))
+
+    # No batch directory was created on the card.
+    assert not (dcim / "Archive").exists()
+    # Same controlled unsafe result as the per-file case.
+    assert result["failed"] == 1
+    assert result["copied"] == 0
+    assert result["skipped_duplicate"] == 0
+    assert result["safe_to_format"] is False
+    assert result["ok"] is False
+    unsafe_paths = [u["path"] for u in result["unsafe_files"]]
+    assert any("DSC_6100.jpg" in p for p in unsafe_paths), unsafe_paths
+
+
+def test_full_coverage_file_types_list_is_treated_as_unfiltered(tmp_path):
+    """The pipeline UI's ``getIngestFileTypes()`` returns a list of every
+    supported extension when the user checks every box. Semantically
+    that is the same as ``file_types="both"``: ``discover_source_files``
+    walks it identically. Flagging any list as ``partial_scope``
+    therefore leaves ``safe_to_format`` permanently false over an
+    unfiltered import even though every card file was verified — the
+    pill would deceive the user, ``COPY_PHILOSOPHY.md``'s "show the
+    user what's happening" contract. Normalize full-coverage lists to
+    the same status as ``"both"``. See PR #1107 review.
+    """
+    from image_loader import SUPPORTED_EXTENSIONS
+    from import_job import ImportParams
+
+    card = _make_card(tmp_path, [
+        ("DSC_0500.jpg", datetime(2026, 7, 3, 10, 0, 0), "coral"),
+    ])
+    archive = tmp_path / "archive"
+
+    # A list covering every supported extension — what the UI sends when
+    # the user checks every filetype box, including some casing variance
+    # to guarantee the normalization path is exercised.
+    full_list = sorted(SUPPORTED_EXTENSIONS)
+    full_list[0] = full_list[0].upper()  # e.g. ".ARW"
+    full_list.append("jpg")              # no-leading-dot alias for coverage
+
+    db, ws_id, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)],
+        destination=str(archive),
+        file_types=full_list,
+    ))
+
+    assert result["copied"] == 1
+    assert result["failed"] == 0
+    # Full-coverage list did NOT actually narrow the walk, so
+    # safe_to_format may go green just like ``"both"``.
+    assert result["safe_to_format"] is True
+
+
 def test_source_equals_dest_file_is_rejected(tmp_path):
     """When a source lives under the destination and the folder template
     maps it back to the same directory, dest_file resolves to the source

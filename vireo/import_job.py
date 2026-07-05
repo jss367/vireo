@@ -65,6 +65,7 @@ except ImportError:  # pragma: no cover - Windows fallback
     fcntl = None
 
 from db import Database
+from image_loader import SUPPORTED_EXTENSIONS
 from import_dedup import (
     CatalogIndex,
     DuplicateChecker,
@@ -750,6 +751,25 @@ def run_import_job(job, runner, db_path, workspace_id, params):
             os.path.normpath(os.path.join(destination, rel))
             if rel != "." else destination
         )
+        # Reject the whole batch before creating any directories on the
+        # card. The per-file loop below already refuses ``dest_file``
+        # under a source, but that check runs AFTER ``os.makedirs``, so
+        # a rejected unsafe import would still create the archive
+        # directory tree on the source (or raise on read-only media,
+        # killing the background job instead of returning a controlled
+        # unsafe result). This mirror at the batch boundary keeps the
+        # failure quiet and preserves the ``ok`` field for the API.
+        # See PR #1107 review.
+        if _path_under_any_source(dest_folder):
+            for source_file in batch:
+                _fail(
+                    rel, source_file,
+                    "destination folder resolves inside a source directory "
+                    "(dest_folder would be created under the card being "
+                    "imported); formatting the card would erase the archive "
+                    "copy",
+                )
+            continue
         os.makedirs(dest_folder, exist_ok=True)
 
         # Promote any pre-existing folder row for this destination out of
@@ -1694,7 +1714,30 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     # files the pill is expected to cover. A cancelled run leaves
     # unprocessed files, so it is never safe. This pill means exactly
     # what it says.
-    partial_scope = params.file_types != "both" or not params.recursive
+    #
+    # A list-form ``file_types`` whose members cover every
+    # ``SUPPORTED_EXTENSIONS`` entry is NOT actually filtered — the
+    # pipeline UI's ``getIngestFileTypes()`` returns exactly this shape
+    # when the user checks every box, and ``discover_source_files``
+    # walks it identically to ``"both"``. Treating it as partial would
+    # leave ``safe_to_format`` permanently false over an unfiltered
+    # import. Normalize to leading-dot lowercase to match how
+    # SUPPORTED_EXTENSIONS is stored; unknown extensions in the list
+    # are ignored (they can't be in SUPPORTED_EXTENSIONS regardless).
+    # See PR #1107 review.
+    partial_scope = not params.recursive
+    if params.file_types != "both":
+        if isinstance(params.file_types, list):
+            normalized_types = {
+                ("." + e.lower().lstrip("."))
+                for e in params.file_types
+                if isinstance(e, str) and e
+            }
+            partial_scope = partial_scope or not SUPPORTED_EXTENSIONS.issubset(
+                normalized_types,
+            )
+        else:
+            partial_scope = True
     safe_to_format = (
         not cancelled
         and failed == 0
