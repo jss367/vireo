@@ -38,20 +38,6 @@ def test_browse_page(app_and_db):
     assert 'function refreshPendingSyncBanner()' in html
 
 
-def test_zoom_test_page(app_and_db):
-    """GET /zoom-test returns the experimental zoom comparison page."""
-    app, _ = app_and_db
-    client = app.test_client()
-    resp = client.get('/zoom-test')
-
-    assert resp.status_code == 200
-    html = resp.get_data(as_text=True)
-    assert 'Current Lightbox: CSS 1:1' in html
-    assert 'Current Lightbox: Device 1:1' in html
-    assert 'Natural Layout: Device 1:1' in html
-    assert 'Direct Image: Device 1:1' in html
-
-
 def test_api_add_keyword_accepts_existing_keyword_id(app_and_db):
     """POST /api/photos/<id>/keywords can attach an existing keyword by id."""
     app, db = app_and_db

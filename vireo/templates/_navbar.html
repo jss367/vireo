@@ -2310,7 +2310,6 @@ window.NAV_ALL_PAGES = [
   {id: 'audit',           label: 'Audit',           href: '/audit'},
   {id: 'move',            label: 'Move',            href: '/move'},
   {id: 'compare',         label: 'Compare',         href: '/compare'},
-  {id: 'zoom_test',       label: 'Zoom Test',       href: '/zoom-test'},
   {id: 'settings',        label: 'Settings',        href: '/settings'},
   {id: 'workspace',       label: 'Workspace',       href: '/workspace'},
   {id: 'lightroom',       label: 'Lightroom',       href: '/lightroom'},
@@ -7560,7 +7559,7 @@ function _lbLayoutDims() {
   if (!img) return null;
   // While /original is available, keep the transform layer in original photo
   // coordinates even if the currently displayed tier is /full. That matches the
-  // sharp zoom-test path and avoids recalibrating pan/zoom when the source swaps.
+  // sharp natural-layout path and avoids recalibrating pan/zoom when the source swaps.
   var originalDims = !_lbOriginalUnavailable ? _lbOrientedPhotoDims(img) : null;
   if (originalDims) {
     return _lbDisplayDimsForRecipe(

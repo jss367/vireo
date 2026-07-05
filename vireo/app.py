@@ -105,7 +105,6 @@ ALL_PAGES = [
     {"id": "audit",           "label": "Audit",           "href": "/audit"},
     {"id": "move",            "label": "Move",            "href": "/move"},
     {"id": "compare",         "label": "Compare",         "href": "/compare"},
-    {"id": "zoom_test",       "label": "Zoom Test",       "href": "/zoom-test"},
     {"id": "settings",        "label": "Settings",        "href": "/settings"},
     {"id": "workspace",       "label": "Workspace",       "href": "/workspace"},
     {"id": "lightroom",       "label": "Lightroom",       "href": "/lightroom"},
@@ -2407,10 +2406,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/best-batch")
     def best_batch_page():
         return render_template("best_batch.html")
-
-    @app.route("/zoom-test")
-    def zoom_test_page():
-        return render_template("zoom_test.html")
 
     @app.route("/review")
     def review():

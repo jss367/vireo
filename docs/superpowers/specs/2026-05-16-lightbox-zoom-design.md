@@ -8,7 +8,7 @@ The target implementation should use the browser-decoded natural image dimension
 
 ## Test Findings
 
-The `/zoom-test` page compared several rendering strategies against Lightroom:
+A temporary diagnostic page compared several rendering strategies against Lightroom:
 
 | Strategy | Result |
 | --- | --- |
@@ -52,7 +52,7 @@ Manual verification should compare Vireo against Lightroom on a Retina display:
 - Open the same original photo in Lightroom and Vireo.
 - Enter 1:1 in Vireo.
 - Confirm apparent magnification matches Lightroom's 100% view.
-- Confirm fine detail is as sharp as the `/zoom-test` Natural Layout: Device 1:1 and Direct Image: Device 1:1 variants.
+- Confirm fine detail is as sharp as the Natural Layout: Device 1:1 and Direct Image: Device 1:1 diagnostic variants.
 - Navigate between photos while staying in 1:1 and confirm the next photo recomputes from its own decoded natural dimensions.
 
 Automated coverage should check the mechanical pieces:
