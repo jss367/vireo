@@ -14732,6 +14732,11 @@ def test_existing_workspaces_gain_import_tab(tmp_path):
         "UPDATE workspaces SET tabs = ? WHERE id = ?",
         (json_mod.dumps(old), ws),
     )
+    # A real pre-split DB was written by a version that never set
+    # PRAGMA user_version, so it reads back as 0. The fresh Database
+    # above already bumped it to 1; reset it so the second init runs
+    # the guarded import-tab migration.
+    db.conn.execute("PRAGMA user_version = 0")
     db.conn.commit()
     db.close()
 
@@ -14740,3 +14745,28 @@ def test_existing_workspaces_gain_import_tab(tmp_path):
     tabs = db2.get_tabs()
     assert "import" in tabs
     assert tabs.index("import") == tabs.index("pipeline") - 1
+
+
+def test_import_tab_migration_not_reapplied_after_unpin(tmp_path):
+    """Once the import-tab migration has run, a subsequent unpin must
+    stay unpinned — the migration is guarded by PRAGMA user_version so
+    every ``Database`` re-open doesn't silently re-add ``import``.
+    """
+    import json as json_mod
+
+    from db import Database
+
+    db_path = str(tmp_path / "m.db")
+    db = Database(db_path)
+    ws = db._active_workspace_id
+    # User unpins ``import`` after the migration has already run.
+    db.conn.execute(
+        "UPDATE workspaces SET tabs = ? WHERE id = ?",
+        (json_mod.dumps(["browse", "pipeline", "review"]), ws),
+    )
+    db.conn.commit()
+    db.close()
+
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws)
+    assert "import" not in db2.get_tabs()
