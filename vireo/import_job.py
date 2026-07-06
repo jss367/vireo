@@ -558,6 +558,18 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
         cmp = (real.casefold() if _dest_ci else real).rstrip(os.sep)
         return cmp == _dest_root_norm or cmp.startswith(_dest_root_norm + os.sep)
 
+    # Case-insensitive destinations (macOS APFS/HFS+, SMB, FAT/exFAT)
+    # collapse basenames that differ only by case onto the same on-disk
+    # file. The intra-batch collision map ``claimed_basenames`` keys by
+    # basename, so keying it case-foldedly there makes a second file whose
+    # basename differs from an earlier queued file's only by case (e.g.
+    # ``IMG_0001.JPG`` then ``img_0001.jpg``) collide and advance through
+    # numeric suffixes, instead of being sent to the same effective
+    # receiver path where ``--ignore-existing`` would silently drop it and
+    # the later catalog/hash validation would fail. See PR #1113 review.
+    def _fold_basename(name):
+        return name.casefold() if _dest_ci else name
+
     import move as move_mod
 
     runner.set_steps(job["id"], [
@@ -1015,7 +1027,8 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                     else f"{stem}_{counter}{suffix}"
                 )
                 cand_mount = os.path.join(dest_folder, candidate)
-                if candidate in claimed_basenames:
+                candidate_key = _fold_basename(candidate)
+                if candidate_key in claimed_basenames:
                     # Claimed earlier in this batch (a same-basename sibling
                     # already queued). If that sibling has our exact bytes,
                     # skip as an intra-batch duplicate; otherwise advance.
@@ -1026,7 +1039,7 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                     # second one being counted as ``skipped_duplicate``.
                     if (
                         checker is not None
-                        and claimed_basenames[candidate] == src_hash
+                        and claimed_basenames[candidate_key] == src_hash
                     ):
                         skipped_duplicate += 1
                         dup_skipped += 1
@@ -1047,7 +1060,7 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                         skipped_duplicate += 1
                         dup_skipped += 1
                         _counts(rel)["skipped_duplicate"] += 1
-                        claimed_basenames[candidate] = src_hash
+                        claimed_basenames[candidate_key] = src_hash
                         # Track the adopted mount path + source-side hash
                         # so the restricted scan below picks it up (mixed
                         # batches with fresh copies otherwise scope the
@@ -1066,7 +1079,7 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                 break
             if adopted:
                 continue
-            claimed_basenames[dest_basename] = src_hash
+            claimed_basenames[_fold_basename(dest_basename)] = src_hash
             # Only track queued source hashes when duplicate skipping is
             # enabled — the intra-batch dedup that consults this map is
             # gated on ``checker`` above, so populating it with

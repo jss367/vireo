@@ -5837,3 +5837,96 @@ def test_remote_import_refuses_when_mount_root_absent(tmp_path, monkeypatch):
         f"shadow directory was created at {fake_mount_base}: "
         "the preflight failed to prevent os.makedirs"
     )
+
+
+def test_remote_import_case_only_basename_collision_on_ci_destination(
+        tmp_path, monkeypatch):
+    """On a case-insensitive destination (macOS APFS/HFS+, SMB, FAT/exFAT),
+    two DIFFERENT card files whose basenames differ only by case (e.g.
+    ``IMG_0001.JPG`` and ``img_0001.jpg``) collapse onto the same effective
+    on-disk file. The intra-batch collision map ``claimed_basenames`` must
+    key case-foldedly on such destinations so the second file is detected
+    as colliding and advanced to a numeric-suffixed name, otherwise both
+    are queued as distinct entries into the same flat rsync — where
+    ``--ignore-existing`` drops the second and the later catalog/hash
+    validation fails instead of the local path's rename-to-suffix
+    behaviour. See PR #1113 review."""
+    import import_job as _ij
+    from import_job import ImportParams, run_import_job
+
+    # Force the case-insensitive destination code path regardless of the
+    # test host filesystem (Linux ext4 is case-sensitive). The module-
+    # level constant _dest_ci consults; sys.platform monkeypatch wouldn't
+    # work because the constant is bound at import time.
+    monkeypatch.setattr(_ij, "_CASE_INSENSITIVE_PLATFORM", True)
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+    _install_fake_remote_rsync(monkeypatch, calls, verify=None)
+
+    # Two DIFFERENT-content files whose basenames differ only by case,
+    # same date (same batch). Distinct colors -> distinct bytes so the
+    # intra-batch same-content dedup shortcut can't hide the collision.
+    card = _make_card(tmp_path, [
+        ("IMG_0001.JPG", datetime(2026, 7, 3, 10, 0, 0), "red"),
+        ("img_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "blue"),
+    ])
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra, verify_by_hash=True,
+        ),
+    )
+
+    # Both must land as ``copied``, neither as ``skipped_duplicate`` (the
+    # bytes are different so intra-batch content dedup doesn't apply).
+    assert result["failed"] == 0, result
+    assert result["copied"] == 2, result
+    assert result["skipped_duplicate"] == 0, result
+
+    # Both card files must actually reach the transport under DISTINCT
+    # dest basenames whose case-folded forms are also distinct (the whole
+    # point of the fix: without it both share the effective receiver path
+    # on a CI destination).
+    all_transferred_dest = []
+    for c in calls["rsync"]:
+        if c["dest_is_dir"]:
+            for s in c["src_specs"]:
+                all_transferred_dest.append(os.path.basename(s))
+        else:
+            # File dest: name is the last path segment of dest_spec.
+            all_transferred_dest.append(
+                c["dest_spec"].rsplit("/", 1)[-1])
+    folded = [n.casefold() for n in all_transferred_dest]
+    assert len(folded) == 2, (all_transferred_dest, calls["rsync"])
+    assert len(set(folded)) == 2, (
+        "case-folded dest basenames must be distinct after the "
+        "collision loop; both files landed under the same effective "
+        "receiver name",
+        all_transferred_dest,
+    )
+
+    # And a collision-renamed rsync call MUST have fired (dest_is_dir=
+    # False) — that's the rename-to-suffix path the local import uses.
+    # Without the case-fold fix both files would go into a single flat
+    # rsync (dest_is_dir=True) and be silently coalesced by the CI
+    # receiver.
+    renamed_calls = [c for c in calls["rsync"] if not c["dest_is_dir"]]
+    assert renamed_calls, (
+        "expected a collision-renamed single-file rsync call for the "
+        "case-only basename collision",
+        calls["rsync"],
+    )
+
+    # Two distinct rows on the mount whose (case-folded) filenames are
+    # also distinct: the catalog reflects two off-card files, not one.
+    rows = _photo_rows(db)
+    assert len(rows) == 2, [dict(r) for r in rows]
+    folded_rows = {r["filename"].casefold() for r in rows}
+    assert len(folded_rows) == 2, [dict(r) for r in rows]
+    assert result["safe_to_format"] is True, result
