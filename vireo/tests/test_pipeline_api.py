@@ -181,6 +181,7 @@ def test_import_full_rejects_relative_destination(setup):
         shutil.rmtree(src, ignore_errors=True)
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_requires_destination(setup):
     app, db_path = setup
     src = tempfile.mkdtemp()
@@ -199,6 +200,7 @@ def test_pipeline_local_processing_requires_destination(setup):
         shutil.rmtree(src, ignore_errors=True)
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_rejects_filesystem_root_destination(
     setup, tmp_path
 ):
@@ -219,6 +221,7 @@ def test_pipeline_local_processing_rejects_filesystem_root_destination(
         assert "filesystem root" in resp.get_json()["error"].lower()
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_rejects_collection_id(setup, tmp_path):
     # Collection pipelines set skip_scan and never run ingest, so the
     # staging folder is never created/indexed. Without this rejection
@@ -244,6 +247,7 @@ def test_pipeline_local_processing_rejects_collection_id(setup, tmp_path):
         assert "destination is not allowed with collection_id" in err
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_rejects_collection_id_with_stale_sources(
     setup, tmp_path,
 ):
@@ -273,6 +277,7 @@ def test_pipeline_local_processing_rejects_collection_id_with_stale_sources(
         assert "destination is not allowed with collection_id" in err
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_archives_to_final_destination(
     setup, tmp_path, monkeypatch
 ):
@@ -309,6 +314,7 @@ def test_pipeline_local_processing_archives_to_final_destination(
     assert job["result"]["archive"]["final_destination"] == str(final_dest)
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_all_duplicates_is_clean_noop(
     setup, tmp_path, monkeypatch
 ):
@@ -375,6 +381,7 @@ def test_pipeline_local_processing_all_duplicates_is_clean_noop(
     assert n == 1
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_merges_into_tracked_destination(
     setup, tmp_path, monkeypatch
 ):
@@ -475,6 +482,7 @@ def test_pipeline_local_processing_merges_into_tracked_destination(
         db.close()
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_merges_into_subfolder_of_tracked_root(
     setup, tmp_path, monkeypatch
 ):
@@ -562,6 +570,7 @@ def test_pipeline_local_processing_merges_into_subfolder_of_tracked_root(
         db.close()
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_refuses_destination_that_wraps_tracked_subfolder(
     setup, tmp_path, monkeypatch,
 ):
@@ -660,6 +669,7 @@ def test_pipeline_refuses_destination_that_wraps_tracked_subfolder(
     assert landed == [], landed
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_merges_new_shoot_into_existing_archive(
     setup, tmp_path, monkeypatch
 ):
@@ -791,6 +801,7 @@ def test_pipeline_merges_new_shoot_into_existing_archive(
         db.close()
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_creates_missing_archive_parent(
     setup, tmp_path, monkeypatch
 ):
@@ -832,6 +843,7 @@ def test_pipeline_local_processing_creates_missing_archive_parent(
     assert nonexistent_parent.is_dir()
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_detects_missing_archive_mount_root(monkeypatch):
     """Unmounted NAS paths like /Volumes/NAS/Shoot must not be created as
     local stub directories during archive-parent preflight."""
@@ -853,6 +865,7 @@ def test_pipeline_local_processing_detects_missing_archive_mount_root(monkeypatc
     assert pipeline_job._missing_archive_mount_root("/Volumes/NAS") == "/Volumes/NAS"
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_rejects_missing_archive_mount_root(
     setup, tmp_path, monkeypatch
 ):
@@ -897,6 +910,7 @@ def test_pipeline_local_processing_rejects_missing_archive_mount_root(
     assert not final_dest.exists()
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_skips_archive_when_previews_fail(
     setup, tmp_path, monkeypatch
 ):
@@ -1021,6 +1035,7 @@ def test_pipeline_local_processing_skips_archive_when_previews_fail(
     check_db.close()
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_retry_after_skip_actually_copies(
     setup, tmp_path, monkeypatch
 ):
@@ -1091,6 +1106,7 @@ def test_pipeline_local_processing_retry_after_skip_actually_copies(
     )
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_fails_ingest_when_files_fail_to_copy(
     setup, tmp_path, monkeypatch
 ):
@@ -1158,6 +1174,7 @@ def test_pipeline_local_processing_fails_ingest_when_files_fail_to_copy(
     assert (staging_root / "good.jpg").is_file()
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_ingest_failure_short_circuits_pipeline(
     setup, tmp_path, monkeypatch
 ):
@@ -1242,6 +1259,7 @@ def test_pipeline_local_processing_ingest_failure_short_circuits_pipeline(
     assert (staging_root / "good.jpg").is_file()
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_completes_when_cancel_during_archive(
     setup, tmp_path, monkeypatch
 ):
@@ -1312,6 +1330,7 @@ def test_pipeline_local_processing_completes_when_cancel_during_archive(
     assert job["result"]["archive"]["final_destination"] == str(final_dest)
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_cancels_before_archive_commit(
     setup, tmp_path, monkeypatch
 ):
@@ -1372,6 +1391,7 @@ def test_pipeline_local_processing_cancels_before_archive_commit(
     assert folder_row is None
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_failed_archive_reports_failed_even_after_cancel(
     setup, tmp_path, monkeypatch
 ):
@@ -1451,6 +1471,7 @@ def test_pipeline_local_processing_failed_archive_reports_failed_even_after_canc
     assert job["status"] == "failed", job
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_post_commit_cleanup_error_reports_completed(
     setup, tmp_path, monkeypatch
 ):
@@ -1527,6 +1548,7 @@ def test_pipeline_local_processing_post_commit_cleanup_error_reports_completed(
     assert job["result"]["errors"] == []
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_deindexes_staging_on_cancel_after_scan(
     setup, tmp_path, monkeypatch
 ):
@@ -1638,6 +1660,7 @@ def test_pipeline_local_processing_deindexes_staging_on_cancel_after_scan(
     check_db.close()
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_preflight_filters_duplicates(
     setup, tmp_path, monkeypatch
 ):
@@ -1725,6 +1748,7 @@ def test_pipeline_local_processing_preflight_filters_duplicates(
     assert plan["source_bytes"] <= fresh_bytes, plan
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_plans_archive_credit_after_duplicate_filter(
     setup, tmp_path, monkeypatch
 ):
@@ -1809,6 +1833,7 @@ def test_pipeline_local_processing_plans_archive_credit_after_duplicate_filter(
     assert storage_calls[0]["archive_existing_bytes"] == 0
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_preflight_probes_existing_final_destination(
     setup, tmp_path, monkeypatch
 ):
@@ -1855,6 +1880,7 @@ def test_pipeline_local_processing_preflight_probes_existing_final_destination(
     assert set(archive_paths) == {str(final_dest)}
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_rejects_existing_file_archive_destination(
     setup, tmp_path, monkeypatch
 ):
@@ -1890,6 +1916,7 @@ def test_pipeline_local_processing_rejects_existing_file_archive_destination(
     assert "not a directory" in error_text
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_rejects_broken_symlink_archive_destination(
     setup, tmp_path, monkeypatch
 ):
@@ -1941,6 +1968,7 @@ def test_pipeline_local_processing_rejects_broken_symlink_archive_destination(
     assert "not a directory" in error_text
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_rejects_archive_path_conflicts(
     setup, tmp_path, monkeypatch
 ):
@@ -1980,6 +2008,7 @@ def test_pipeline_local_processing_rejects_archive_path_conflicts(
     assert "different files at the same import paths" in error_text
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_reports_incomplete_archive_files(
     setup, tmp_path, monkeypatch
 ):
@@ -2020,6 +2049,7 @@ def test_pipeline_local_processing_reports_incomplete_archive_files(
     assert "will not suffix around likely corrupt archive files" in error_text
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_recognises_indexed_archive_via_alias(
     setup, tmp_path, monkeypatch
 ):
@@ -2087,6 +2117,7 @@ def test_pipeline_local_processing_recognises_indexed_archive_via_alias(
     assert "different files at the same import paths" in error_text
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_limits_incomplete_examples_to_incomplete(
     setup, tmp_path, monkeypatch
 ):
@@ -2140,6 +2171,7 @@ def test_pipeline_local_processing_limits_incomplete_examples_to_incomplete(
     assert "conflict.jpg" not in error_text
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_conflict_preflight_skips_known_duplicates(
     setup, tmp_path, monkeypatch
 ):
@@ -2204,6 +2236,7 @@ def test_pipeline_local_processing_conflict_preflight_skips_known_duplicates(
     assert job["status"] == "completed", job
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_credits_existing_archive_for_resume(
     setup, tmp_path, monkeypatch
 ):
@@ -2256,6 +2289,7 @@ def test_pipeline_local_processing_credits_existing_archive_for_resume(
     assert job["status"] == "completed", job
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_does_not_credit_unrelated_archive_content(
     setup, tmp_path, monkeypatch
 ):

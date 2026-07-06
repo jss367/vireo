@@ -10224,6 +10224,7 @@ def _remote_params(env, **overrides):
     return PipelineParams(**kwargs)
 
 
+@pytest.mark.skip(reason="retired pipeline remote archive stage")
 def test_pipeline_remote_archive_end_to_end(tmp_path, monkeypatch):
     """A local-processing run with a remote target stages locally, then
     archives over SSH: rsync is pointed at the NAS-side subpath with
@@ -10279,6 +10280,7 @@ def test_pipeline_remote_archive_end_to_end(tmp_path, monkeypatch):
     assert result["local_processing"]["remote"]["free_space_checked"] is True
 
 
+@pytest.mark.skip(reason="retired pipeline remote archive stage")
 def test_pipeline_remote_archive_preflight_refuses_without_rsync(
     tmp_path, monkeypatch,
 ):
@@ -10304,6 +10306,7 @@ def test_pipeline_remote_archive_preflight_refuses_without_rsync(
     assert env["captured"]["rsync_calls"] == []
 
 
+@pytest.mark.skip(reason="retired pipeline remote archive stage")
 def test_pipeline_remote_archive_preflight_refuses_when_connection_fails(
     tmp_path, monkeypatch,
 ):
@@ -10327,6 +10330,7 @@ def test_pipeline_remote_archive_preflight_refuses_when_connection_fails(
     assert not (tmp_path / "staging").exists()
 
 
+@pytest.mark.skip(reason="retired pipeline remote archive stage")
 def test_pipeline_remote_archive_space_probe_failure_degrades(
     tmp_path, monkeypatch,
 ):
@@ -10353,6 +10357,7 @@ def test_pipeline_remote_archive_space_probe_failure_degrades(
     assert "free-space check skipped" in storage_summaries[-1]
 
 
+@pytest.mark.skip(reason="retired pipeline remote archive stage")
 def test_pipeline_remote_archive_refuses_when_remote_volume_full(
     tmp_path, monkeypatch,
 ):
@@ -10374,6 +10379,7 @@ def test_pipeline_remote_archive_refuses_when_remote_volume_full(
     assert env["captured"]["rsync_calls"] == []
 
 
+@pytest.mark.skip(reason="retired pipeline remote archive stage")
 def test_pipeline_remote_archive_merges_on_retry(tmp_path, monkeypatch):
     """An existing remote destination (an earlier interrupted archive) makes
     the archive move a merge/resume: --ignore-existing so already-present
@@ -10393,6 +10399,7 @@ def test_pipeline_remote_archive_merges_on_retry(tmp_path, monkeypatch):
     assert "--partial-dir=.rsync-partial" in call["extra_args"]
 
 
+@pytest.mark.skip(reason="retired pipeline remote archive stage")
 def test_pipeline_remote_archive_failure_deindexes_staging(
     tmp_path, monkeypatch,
 ):
@@ -10430,6 +10437,7 @@ def test_pipeline_remote_archive_failure_deindexes_staging(
     assert count == 0
 
 
+@pytest.mark.skip(reason="retired pipeline remote archive stage")
 def test_pipeline_remote_archive_snapshot_wins_over_mutated_settings(
     tmp_path, monkeypatch,
 ):
@@ -10479,6 +10487,7 @@ def test_pipeline_remote_archive_snapshot_wins_over_mutated_settings(
     assert result["archive"]["remote"]["target_name"] == "NAS"
 
 
+@pytest.mark.skip(reason="retired pipeline remote archive stage")
 def test_pipeline_remote_archive_falls_back_to_settings_without_snapshot(
     tmp_path, monkeypatch,
 ):

@@ -665,6 +665,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
     job["_start_time"] = time.time()
     abort = threading.Event()
     errors = job["errors"]  # shared list, append is thread-safe
+    if params.destination or params.local_processing or params.remote_target_id:
+        raise RuntimeError(
+            "Pipeline import/archive mode has been removed. Use the Import "
+            "page or /api/jobs/import-photos to copy photos into the archive, "
+            "then run Process on the imported workspace photos."
+        )
 
     # Effective thumbnail cache directory for every internal call below.
     # Falls back to the historical ``<db_dir>/thumbnails`` convention when
@@ -715,7 +721,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         # will point after the archive, which for a remote destination is
         # the target's local mount path, not the NAS-side path.
         final_destination = remote_archive["mount_final"]
-    staging_parent = None
     archive_destination_reserved = False
     if params.local_processing and final_destination:
         from local_processing import staging_root
@@ -735,7 +740,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             )
         archive_destination_reserved = True
 
-        staging_parent = os.path.join(effective_vireo_dir, "staging", job["id"])
         # final_destination (not params.destination, which is None for a
         # remote archive): the staging root's basename is the leaf the
         # archive move lands at, and for remote that's the mount-path leaf —
@@ -5109,326 +5113,21 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             _update_stages(runner, job["id"], stages)
 
         def archive_stage():
-            """Move a local-processing staging folder to the final destination."""
-            if not params.local_processing:
-                return
+            """Retired import/archive path guard.
 
-            def _deindex_staging():
-                # scanner_stage may have already registered the staging folder
-                # and its photos' hashes before we got here. Without removing
-                # those rows a retry of the same source would hit ingest()'s
-                # known-hash skip and copy nothing — the user would then
-                # "successfully" archive an empty destination while the
-                # original files only ever existed in the abandoned staging
-                # tree. Leave the on-disk staging files in place so the user
-                # can still recover them.
-                #
-                # Cached thumbnails/previews/working copies for the staged
-                # photos also have to go: the FK cascade clears preview_cache
-                # rows but leaves the on-disk ``{photo_id}.jpg`` files. SQLite
-                # reuses freed rowids, so a retry that lands on one of the
-                # abandoned staging photo IDs would treat the stale cache file
-                # as a valid thumbnail and skip regenerating it.
-                try:
-                    from pipeline import _results_cache_path
-                    from preview_cache import (
-                        cleanup_cached_files_for_deleted_photos,
-                    )
-
-                    thread_db = Database(db_path)
-                    thread_db.set_active_workspace(workspace_id)
-                    folder = thread_db.conn.execute(
-                        "SELECT id FROM folders WHERE path = ?",
-                        (params.destination,),
-                    ).fetchone()
-                    if folder:
-                        result = thread_db.delete_folder(folder["id"])
-                        cleanup_cached_files_for_deleted_photos(
-                            effective_thumb_cache_dir,
-                            result.get("files", []),
-                        )
-                        thread_db.set_workspace_group_state(
-                            workspace_id=workspace_id,
-                            fingerprint=None,
-                            when_ts=None,
-                        )
-                        with contextlib.suppress(OSError):
-                            os.unlink(
-                                _results_cache_path(
-                                    os.path.dirname(db_path), workspace_id,
-                                )
-                            )
-                except Exception:
-                    log.exception(
-                        "Failed to deindex local staging folder on archive skip",
-                    )
-
-            if abort.is_set() or runner.is_cancelled(job["id"]):
-                # Fatal upstream stages (partial scan, thumbnail setup, model
-                # load, detect, classify) set abort and fall through to here
-                # without populating stages[*]["status"] == "failed", so the
-                # already_failed branch below would miss them. Deindex here too
-                # — otherwise the next retry of the same source would treat
-                # every file as a duplicate and publish an empty archive.
-                _deindex_staging()
-                stages["archive"]["status"] = "skipped"
-                runner.update_step(
-                    job["id"], "archive", status="completed", summary="Skipped",
+            Importing photos now runs through import_job.py and
+            /api/jobs/import-photos. The old local-processing archive stage
+            intentionally has no cleanup/deindex path left here: orphaned
+            staging folders are reconciled by staging_recovery.py before any
+            deletion is offered.
+            """
+            if params.local_processing or params.destination:
+                raise RuntimeError(
+                    "Pipeline import/archive mode has been removed. Use the "
+                    "Import page or /api/jobs/import-photos to copy photos "
+                    "into the archive."
                 )
-                _update_stages(runner, job["id"], stages)
-                return
-            if not final_destination:
-                stages["archive"]["status"] = "skipped"
-                runner.update_step(
-                    job["id"], "archive", status="completed", summary="Skipped",
-                )
-                _update_stages(runner, job["id"], stages)
-                return
-            # Don't publish partial results: previews, extract_masks,
-            # eye_keypoints, regroup, and miss can all fail without setting
-            # abort, and run_pipeline_job marks the whole job failed at the
-            # end whenever any stage status is "failed". If we ran the archive
-            # in between, the staged folder would have already moved to
-            # final_destination by the time that failure was raised — leaving
-            # the user with a published archive whose pipeline never finished.
-            # Skip instead so staging stays intact and the failure is visible.
-            already_failed = [
-                name for name, s in stages.items() if s.get("status") == "failed"
-            ]
-            if already_failed:
-                _deindex_staging()
-                stages["archive"]["status"] = "skipped"
-                runner.update_step(
-                    job["id"], "archive",
-                    status="completed",
-                    summary=f"Skipped ({already_failed[0]} failed)",
-                )
-                _update_stages(runner, job["id"], stages)
-                return
-
-            stages["archive"]["status"] = "running"
-            runner.update_step(job["id"], "archive", status="running")
-            _update_stages(runner, job["id"], stages)
-
-            try:
-                import config as cfg
-                from move import move_folder
-
-                thread_db = Database(db_path)
-                thread_db.set_active_workspace(workspace_id)
-                folder = thread_db.conn.execute(
-                    "SELECT id FROM folders WHERE path = ?", (params.destination,)
-                ).fetchone()
-                if not folder:
-                    raise RuntimeError(
-                        f"local staging folder was not indexed: {params.destination}"
-                    )
-
-                effective_cfg = thread_db.get_effective_config(cfg.load())
-                developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
-                archive_parent = os.path.dirname(os.path.normpath(final_destination))
-                remote_spec = None
-                if remote_archive is not None:
-                    import move as move_mod
-
-                    # Re-resolve rsync at archive time: the storage preflight
-                    # verified it hours ago and the binary/config could have
-                    # changed since. move_folder refuses on a missing
-                    # rsync_bin anyway; resolving here gives the actionable
-                    # message before any SSH probing starts.
-                    rsync_bin = move_mod.resolve_rsync_bin(
-                        effective_cfg.get("rsync_bin", "") or "",
-                    )
-                    if rsync_bin and not move_mod.is_gnu_rsync(rsync_bin):
-                        rsync_bin = ""
-                    if not rsync_bin:
-                        raise RuntimeError(
-                            "No GNU rsync available to transfer the archive "
-                            f"to {remote_archive['display']}. Install GNU "
-                            "rsync (e.g. `brew install rsync`) or set its "
-                            "path under Settings → Paths"
-                        )
-                    # parent_subpath (not the full subpath): move_folder
-                    # lands the staged folder INSIDE the spec's bases keeping
-                    # its name, and the staging root is named after the
-                    # subpath's last segment — so the archive lands at
-                    # exactly remote_path/subpath and the catalog repoints
-                    # at exactly mount_path/subpath (== final_destination).
-                    remote_spec = move_mod.build_remote_move_spec(
-                        remote_archive["target"],
-                        remote_archive["parent_subpath"],
-                        rsync_bin,
-                    )
-                total_files = {"value": 0}
-
-                def archive_cb(current, total, filename, phase=None):
-                    total_files["value"] = max(total_files["value"], total or 0)
-                    stages["archive"]["count"] = current
-                    stages["archive"]["total"] = total
-                    runner.update_step(
-                        job["id"], "archive",
-                        current_file=filename,
-                        progress={"current": current, "total": total},
-                    )
-                    _emit_progress(
-                        runner, job["id"], stages, "archive",
-                        phase or "Archiving photos",
-                        current_file=filename,
-                    )
-
-                # Atomically lock the job uncancellable BEFORE the move begins,
-                # but only if Stop is not already pending. move_folder is an
-                # uninterruptible commit step (copy -> verify -> repoint catalog
-                # -> delete originals); once it starts, a Stop press cannot be
-                # honored without leaving partial state. If Stop landed just
-                # before this transition, skip archive and let the outer runner
-                # record the job as cancelled.
-                if not runner.begin_uncancellable(job["id"]):
-                    _deindex_staging()
-                    stages["archive"]["status"] = "skipped"
-                    runner.update_step(
-                        job["id"], "archive",
-                        status="completed", summary="Skipped",
-                    )
-                    _update_stages(runner, job["id"], stages)
-                    return
-
-                # For a remote archive the destination parent comes from
-                # remote_spec (move_folder ignores the positional
-                # destination); merge/retry and tracked-merge semantics are
-                # identical to the local path — move_folder's remote branch
-                # probes existence over SSH, rsyncs with --ignore-existing +
-                # --partial-dir on a resume, checksum-verifies before
-                # deleting staging, and repoints the catalog at the mount
-                # path (final_destination).
-                move_result = move_folder(
-                    thread_db,
-                    folder["id"],
-                    archive_parent,
-                    progress_cb=archive_cb,
-                    developed_dir=developed_dir,
-                    merge=True,
-                    reject_tracked_ancestor=True,
-                    allow_tracked_merge=True,
-                    remote=remote_spec,
-                )
-                if move_result.get("errors"):
-                    raise RuntimeError("; ".join(move_result["errors"]))
-
-                # Merge-into-existing-archive dropped some staged photo rows
-                # (identical filename already archived, or a phantom target
-                # row was replaced). SQLite reuses freed rowids, so any
-                # thumbnail / preview / working-copy / offline-cache file
-                # keyed off one of those ids would silently become a stale
-                # asset for whichever future photo lands on the same id.
-                # Mirror the archive-skip cleanup path so no orphaned cache
-                # files can survive the merge.
-                dropped_ids = move_result.get("dropped_photo_ids") or []
-                if dropped_ids:
-                    from preview_cache import (
-                        cleanup_cached_files_for_deleted_photos,
-                    )
-                    cleanup_cached_files_for_deleted_photos(
-                        effective_thumb_cache_dir,
-                        [{"photo_id": pid} for pid in dropped_ids],
-                    )
-
-                if staging_parent:
-                    with contextlib.suppress(OSError):
-                        os.rmdir(staging_parent)
-
-                # move_folder repointed the catalog at final_destination
-                # before deleting the source originals, so a
-                # ``cleanup_error`` means the archive IS committed — files
-                # are at the destination, but some leftovers remain in
-                # staging (locked file, permission issue, etc.). Report
-                # success with a warning rather than failure: the
-                # alternative ("failed" + "results remain in staging") tells
-                # the user their data is lost when it's actually safe at
-                # final_destination, and would also leave the freshly
-                # created tracked folder row in the catalog while we tried
-                # to deindex a staging row that move_folder_path already
-                # renamed away.
-                cleanup_error = move_result.get("cleanup_error")
-                stages["archive"]["status"] = "completed"
-                moved = move_result.get("moved", 0)
-                merge = move_result.get("merge")
-                if merge:
-                    base = move_result.get(
-                        "merged_into_existing", final_destination,
-                    )
-                    summary = (
-                        f"{merge['new_photos']} new photos archived into "
-                        f"existing archive {base} "
-                        f"({merge['new_folders']} new folders, "
-                        f"{merge['merged_folders']} merged into existing, "
-                        f"{merge['already_present']} already present)"
-                    )
-                    if remote_archive is not None:
-                        summary += (
-                            " — transferred over SSH to "
-                            f"{remote_archive['display']}"
-                        )
-                elif remote_archive is not None:
-                    summary = (
-                        f"{moved} photos archived over SSH to "
-                        f"{remote_archive['display']}"
-                    )
-                else:
-                    summary = f"{moved} photos archived"
-                if cleanup_error:
-                    summary += f" (staging cleanup failed: {cleanup_error})"
-                runner.update_step(
-                    job["id"], "archive", status="completed", summary=summary,
-                )
-                result["archive"] = {
-                    "final_destination": final_destination,
-                    "moved": moved,
-                }
-                if remote_archive is not None:
-                    target = remote_archive["target"]
-                    result["archive"]["remote"] = {
-                        "target_id": target["id"],
-                        "target_name": target["name"],
-                        "host": target["host"],
-                        "user": target["user"],
-                        "ssh_destination": remote_archive["ssh_final"],
-                    }
-                if merge:
-                    result["archive"]["merge"] = merge
-                if cleanup_error:
-                    result["archive"]["cleanup_error"] = cleanup_error
-            except Exception as e:
-                # Name the remote target + subpath the way the local path
-                # names the directory (move_folder's own error text already
-                # covers the local case).
-                prefix = (
-                    f"Archive to {remote_archive['display']} failed: "
-                    if remote_archive is not None else ""
-                )
-                msg = (
-                    f"{prefix}{e}. Processing results remain in local staging: "
-                    f"{params.destination}"
-                )
-                errors.append(f"[archive] Fatal: {msg}")
-                log.exception("Pipeline archive stage failed")
-                # move_folder doesn't repoint the catalog until it has
-                # verified every copied file, so a raise here means the
-                # folders/photos rows still point at the staging tree. If we
-                # leave them indexed, a retry of the same source sees the
-                # staging hashes via ingest()'s global duplicate check, skips
-                # the copy, and "successfully" publishes an empty archive
-                # while the original files remain only under ~/.vireo/staging.
-                # Deindex to match the archive-skip paths above; the on-disk
-                # staging files are left in place per the error message so
-                # the user can still recover them manually.
-                _deindex_staging()
-                stages["archive"]["status"] = "failed"
-                runner.update_step(
-                    job["id"], "archive", status="failed", error=msg,
-                )
-
-            _update_stages(runner, job["id"], stages)
+            return
 
         # --- Launch threads ---
 

@@ -2815,6 +2815,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return json_error("source_paths entries must be strings", 400)
         else:
             source_paths = None
+        deprecated_plan_fields = [
+            key for key in (
+                "destination", "local_processing",
+                "remote_target_id", "remote_subpath",
+            )
+            if body.get(key) not in (None, "", False)
+        ]
+        if deprecated_plan_fields:
+            return json_error(
+                "import/archive fields are no longer accepted by the "
+                "process planner; use the Import page for photo imports",
+                400,
+            )
         # hash_duplicate_paths is the frontend's pre-computed set of source
         # paths that ingest() will skip via the global duplicate gate (copy
         # mode + skip_duplicates=True; metadata-first matching or content
@@ -2910,13 +2923,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             reclassify=bool(body.get("reclassify")),
             source_paths=source_paths,
             hash_duplicate_paths=hash_duplicate_paths,
-            # Mirrors /api/jobs/pipeline's local_processing flag. The
-            # planner needs it to know what the post-ingest scan walks:
-            # only local-processing imports may claim "0 new photos to
-            # import, nothing to …" for an all-duplicates selection —
-            # plain copy mode re-scans the real destination, which can
-            # surface existing unprocessed rows as downstream work.
-            local_processing=bool(body.get("local_processing")),
             preview_max_size=body.get("preview_max_size"),
         )
         db = _get_db()
@@ -15115,6 +15121,58 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         return jsonify({"job_id": job_id})
 
+    @app.route("/api/import/orphaned-staging", methods=["GET"])
+    def api_import_orphaned_staging():
+        """List old pipeline staging folders that need verified recovery."""
+        from staging_recovery import discover_orphaned_staging
+
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        return jsonify({"items": discover_orphaned_staging(vireo_dir)})
+
+    @app.route("/api/import/orphaned-staging/verify", methods=["POST"])
+    def api_import_orphaned_staging_verify():
+        """Start a verification job for one old pipeline staging folder."""
+        from staging_recovery import verify_orphaned_staging
+
+        body = request.get_json(silent=True) or {}
+        path = body.get("path")
+        if not isinstance(path, str) or not path:
+            return json_error("path required")
+
+        runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+
+        def work(job):
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(active_ws)
+            return verify_orphaned_staging(thread_db, vireo_dir, path)
+
+        job_id = runner.start(
+            "staging-verify",
+            work,
+            config={"path": path},
+            workspace_id=active_ws,
+        )
+        return jsonify({"job_id": job_id})
+
+    @app.route("/api/import/orphaned-staging", methods=["DELETE"])
+    def api_import_orphaned_staging_delete():
+        """Delete old staging only when a fresh verification is fully green."""
+        from staging_recovery import delete_verified_staging
+
+        body = request.get_json(silent=True) or {}
+        path = body.get("path")
+        if not isinstance(path, str) or not path:
+            return json_error("path required")
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        db = _get_db()
+        try:
+            result = delete_verified_staging(db, vireo_dir, path)
+        except ValueError as exc:
+            return json_error(str(exc), status=409)
+        return jsonify(result)
+
     @app.route("/api/jobs/import-photos", methods=["POST"])
     def api_job_import_photos():
         """Photo import job: copy card -> archive, hash-verify, catalog
@@ -17355,7 +17413,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """Streaming pipeline: scan -> thumbnails -> classify -> extract-masks -> regroup.
 
         Overlaps I/O stages and interleaves detection with classification.
-        Provide either 'source' (for import+scan) or 'collection_id' (skip scan).
+        Imports are handled by /api/jobs/import-photos. This route processes
+        existing workspace photos by folder/snapshot/collection scope.
         """
         from pipeline_job import PipelineParams, run_pipeline_job
 
@@ -17679,6 +17738,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     )
                 if not os.path.isdir(source):
                     return json_error(f"source directory not found: {source}")
+
+        deprecated_import_fields = [
+            key for key in (
+                "destination", "local_processing",
+                "remote_target_id", "remote_subpath",
+            )
+            if body.get(key) not in (None, "", False)
+        ]
+        if deprecated_import_fields:
+            return json_error(
+                "import/archive fields are no longer accepted by "
+                "/api/jobs/pipeline; use /api/jobs/import-photos or the "
+                "Import page for photo imports"
+            )
 
         destination = body.get("destination")
         local_processing = bool(body.get("local_processing"))

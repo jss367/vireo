@@ -9,6 +9,8 @@ work — independent of whether *any* prior output exists in the workspace.
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 
@@ -2444,6 +2446,7 @@ def test_import_plan_deduplicates_source_paths(tmp_path, monkeypatch):
     assert plan_mixed["stages"]["Scan"]["detail"]["already_known"] == 1
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import planner mode")
 def test_import_plan_all_duplicates_reports_zero_new_photos(
     tmp_path, monkeypatch
 ):
@@ -2538,6 +2541,7 @@ def test_import_plan_all_duplicates_copy_mode_keeps_forward_summaries(
     assert "upstream stages have new work" in group["summary"], group
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import planner mode")
 def test_import_plan_with_new_files_keeps_forward_looking_summaries(
     tmp_path, monkeypatch
 ):
@@ -2735,34 +2739,15 @@ def test_api_pipeline_plan_rejects_non_string_source_paths_elements(app_and_db):
     assert resp.status_code == 400
 
 
-def test_api_pipeline_plan_parses_local_processing(app_and_db):
-    """The route must thread local_processing through to the planner: an
-    all-duplicates import only gets the "0 new photos to import" wording
-    when the flag is true (staging-root scan), never in plain copy mode
-    (destination re-scan can surface real downstream work)."""
+def test_api_pipeline_plan_rejects_retired_import_fields(app_and_db):
     app, _ = app_and_db
     client = app.test_client()
-    body = {
-        "source_paths": ["/cards/SD/IMG_001.NEF", "/cards/SD/IMG_002.NEF"],
-        "hash_duplicate_paths": [
-            "/cards/SD/IMG_001.NEF", "/cards/SD/IMG_002.NEF",
-        ],
-        "skip_classify": True, "skip_extract_masks": True,
-        "skip_eye_keypoints": True, "skip_regroup": True,
-    }
     resp = client.post(
-        "/api/pipeline/plan", json={**body, "local_processing": True},
+        "/api/pipeline/plan",
+        json={"source_paths": [], "local_processing": True},
     )
-    assert resp.status_code == 200
-    previews = resp.get_json()["stages"]["Previews"]
-    assert previews["detail"]["import_no_new"] is True
-    assert "0 new photos to import" in previews["summary"]
-
-    resp = client.post("/api/pipeline/plan", json=body)  # copy mode
-    assert resp.status_code == 200
-    previews = resp.get_json()["stages"]["Previews"]
-    assert not previews["detail"].get("import_no_new")
-    assert "0 new photos to import" not in previews["summary"]
+    assert resp.status_code == 400
+    assert "import/archive fields" in resp.get_json()["error"]
 
 
 def test_import_plan_empty_source_paths_is_no_op(tmp_path, monkeypatch):
