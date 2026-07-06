@@ -1658,29 +1658,32 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                 [(d,) for d in sorted(new_dup_dirs)],
             )
             db.conn.commit()
-            # Twin folders may be cataloged through a symlink alias while
-            # ``destination`` is realpath-normalized above.
-            # ``_path_under_destination`` accepts them via realpath, but
-            # scanner's ``_ensure_folder`` walks parents *lexically* until
-            # they equal the scan root — a restrict_dir ``/alias/…``
-            # scanned under root ``/real/archive`` would recurse toward
-            # ``/`` before the ``workspace_folders`` link is ever created,
-            # leaving the verified duplicate-only remote import marked
-            # failed/unsafe. Split by whether the twin's folder path sits
-            # lexically under destination: link the alias-spelled ones
-            # directly (their folder row and the twin's photos already
-            # exist — no self-heal scan needed for workspace visibility),
-            # scan only the lexically-under-destination ones. Mirrors the
-            # local path's split; see PR #1113 review.
+            # Twin folders may be cataloged through a symlink alias, or —
+            # on a case-insensitive destination (macOS/SMB/FAT) — spelled
+            # with different case than ``destination``.
+            # ``_path_under_destination`` accepts both via realpath /
+            # case-fold, but scanner's ``_ensure_folder`` walks ``Path``
+            # parents until they *lexically* (case-sensitive string
+            # equality, independent of the filesystem's case sensitivity)
+            # equal the scan root. A restrict_dir ``/alias/…`` under root
+            # ``/real/archive`` — or a case-only alias like
+            # ``/volumes/nas/…`` under root ``/Volumes/NAS/…`` — would
+            # recurse toward ``/`` before the ``workspace_folders`` link
+            # is ever created, leaving the verified duplicate-only remote
+            # import marked failed/unsafe. Split with a LITERAL
+            # (case-sensitive) prefix check: link case- or symlink-alias
+            # twins directly (their folder row and the twin's photos
+            # already exist — no self-heal scan needed for workspace
+            # visibility), scan only the exactly-cased-under-destination
+            # ones. Mirrors the local path's split; see PR #1113 review.
             lex_dup_dirs = set()
             alias_dup_dirs = set()
+            _dest_lit_norm = destination.rstrip(os.sep)
             for d in new_dup_dirs:
-                d_cmp = (
-                    d.casefold() if _dest_ci else d
-                ).rstrip(os.sep)
+                d_lit = d.rstrip(os.sep)
                 if (
-                    d_cmp == _dest_root_norm
-                    or d_cmp.startswith(_dest_root_norm + os.sep)
+                    d_lit == _dest_lit_norm
+                    or d_lit.startswith(_dest_lit_norm + os.sep)
                 ):
                     lex_dup_dirs.add(d)
                 else:
@@ -2918,26 +2921,30 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         if new_dup_dirs:
             # Twin folders may be cataloged through a symlink alias while
             # ``destination`` is realpath-normalized above. ``_path_under_
-            # destination`` accepts them via realpath, but scanner's
-            # ``_ensure_folder`` walks parents *lexically* until they equal
-            # the scan root — a restrict_dir ``/alias/2026-07-05`` scanned
-            # under root ``/real/archive`` would recurse to ``/alias`` →
-            # ``/`` → ``/`` … and hit Python's recursion limit before the
-            # workspace_folders link is ever created. Split by whether the
-            # twin's folder path sits lexically under destination: link
-            # the alias-spelled ones directly (their folder row and the
+            # destination`` accepts symlink aliases via realpath and
+            # case-only aliases via casefold (on a case-insensitive
+            # destination), but scanner's ``_ensure_folder`` walks
+            # ``Path`` parents until they *lexically* (case-sensitive
+            # string equality, independent of the filesystem's case
+            # sensitivity) equal the scan root. A restrict_dir
+            # ``/alias/2026-07-05`` under root ``/real/archive`` — or a
+            # case-only alias like ``/volumes/nas/…`` under root
+            # ``/Volumes/NAS/…`` — would recurse to ``/alias`` → ``/``
+            # → ``/`` … and hit Python's recursion limit before the
+            # workspace_folders link is ever created. Split with a
+            # LITERAL (case-sensitive) prefix check: link case- or
+            # symlink-alias twins directly (their folder row and the
             # twin's photos already exist — no self-heal scan needed for
-            # workspace visibility), scan only the lexically-under-
-            # destination ones. See PR #1107 review.
+            # workspace visibility), scan only the exactly-cased-under-
+            # destination ones. See PR #1107 / #1113 reviews.
             lex_dup_dirs = set()
             alias_dup_dirs = set()
+            _dest_lit_norm = destination.rstrip(os.sep)
             for d in new_dup_dirs:
-                d_cmp = (
-                    d.casefold() if _dest_ci else d
-                ).rstrip(os.sep)
+                d_lit = d.rstrip(os.sep)
                 if (
-                    d_cmp == _dest_root_norm
-                    or d_cmp.startswith(_dest_root_norm + os.sep)
+                    d_lit == _dest_lit_norm
+                    or d_lit.startswith(_dest_lit_norm + os.sep)
                 ):
                     lex_dup_dirs.add(d)
                 else:

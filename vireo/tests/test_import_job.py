@@ -5515,6 +5515,106 @@ def test_remote_import_links_alias_spelled_twin_folder(tmp_path, monkeypatch):
     assert alias_twin_folder in linked_after, sorted(linked_after)
 
 
+def test_remote_import_links_case_only_twin_folder(tmp_path, monkeypatch):
+    """On a case-insensitive destination (macOS APFS/HFS+, SMB, FAT), a
+    cataloged twin folder whose stored path differs from ``destination``
+    only by case is accepted via ``_path_under_destination``'s casefold
+    check. But scanner's ``_ensure_folder`` walks ``Path`` parents until
+    they *lexically* (case-sensitive string equality, independent of the
+    underlying filesystem) equal the scan root — a restrict_dir like
+    ``/volumes/nas/…`` under root ``/Volumes/NAS/…`` recurses toward
+    ``/`` and marks the verified duplicate-only remote import failed/
+    unsafe before the workspace link is created. The dup-link split must
+    route case-only aliases through the direct-link path (the same code
+    path as symlink aliases), not scan them. See PR #1113 review.
+    """
+    import import_job as _ij
+    from import_dedup import compute_file_hash as _hash
+    from import_job import ImportParams, run_import_job
+
+    # Force the case-insensitive destination code path regardless of the
+    # test host filesystem (Linux ext4 is case-sensitive). This is the
+    # module-level constant _dest_ci consults; sys.platform monkeypatch
+    # wouldn't work because the constant is bound at import time.
+    monkeypatch.setattr(_ij, "_CASE_INSENSITIVE_PLATFORM", True)
+
+    # Build the remote archive rooted under a case-neutral parent so we can
+    # spell the destination and the twin's DB path with a differently-cased
+    # ancestor. The bug only triggers when the CASE MISMATCH lies in the
+    # prefix common to destination and the twin (a differently-cased leaf
+    # still matches the literal prefix check inside ``lex_dup_dirs``).
+    lower_root = tmp_path / "archive_root"
+    lower_root.mkdir()
+    upper_root = tmp_path / "ARCHIVE_ROOT"
+    upper_root.mkdir()
+    ra = _remote_archive_for(lower_root)
+    calls = _remote_calls(ra)
+    _install_fake_remote_rsync(monkeypatch, calls, verify=None)
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+    card_file = str(card / "DSC_0001.jpg")
+    src_hash = _hash(card_file)
+
+    real_mount_base = ra["mount_base"]  # lower_root/mount
+    # Twin folder cataloged with an ANCESTOR case-mismatch: the destination
+    # is ``<tmp>/archive_root/mount`` (lowercase), and the twin's DB path
+    # lives under ``<tmp>/ARCHIVE_ROOT/mount/unsorted``. On a real
+    # case-insensitive volume these are the same physical directory; on
+    # the case-sensitive Linux test filesystem we materialize both real
+    # directories so ``os.path.isdir`` succeeds. The bug fires purely in
+    # the string comparison inside the dup-link classification: the twin's
+    # DB path casefold-matches ``destination`` (routing it to ``lex_dup_
+    # dirs``), but its literal prefix doesn't match — passing that path to
+    # ``scan(destination, restrict_dirs=[…])`` would blow scanner's
+    # parent-walk.
+    lex_mount_case = str(upper_root / "mount")
+    os.makedirs(lex_mount_case, exist_ok=True)
+    twin_folder_case = os.path.join(lex_mount_case, "unsorted")
+    os.makedirs(twin_folder_case, exist_ok=True)
+    twin_path_case = os.path.join(twin_folder_case, "DSC_0001.jpg")
+    import shutil as _shutil
+    _shutil.copy2(card_file, twin_path_case)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES (?, ?, 'ok')",
+        (twin_folder_case, os.path.basename(twin_folder_case)),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, extension, file_size,"
+        " file_hash) VALUES (?, ?, '.jpg', ?, ?)",
+        (fid, "DSC_0001.jpg", os.path.getsize(twin_path_case), src_hash),
+    )
+    db.conn.commit()
+    assert twin_folder_case not in _ws_linked_folder_paths(db, ws_id)
+
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=real_mount_base,
+            remote_target=ra, verify_by_hash=True,
+        ),
+    )
+
+    # rsync stayed silent — card accepted as a duplicate.
+    assert calls["rsync"] == [], calls["rsync"]
+    assert result["skipped_duplicate"] == 1, result
+    # The case-only-alias twin folder MUST be linked into the active
+    # workspace via the direct-link path. Without the case-only fix, the
+    # dup-link scan would receive the differently-cased folder path as a
+    # restrict_dir and scanner's parent-walk would blow up before the
+    # workspace_folders row was created — flipping safe_to_format to
+    # False on a legitimately verified duplicate-only run.
+    assert result["failed"] == 0, result
+    assert result["safe_to_format"] is True, result
+    linked_after = _ws_linked_folder_paths(db, ws_id)
+    assert twin_folder_case in linked_after, sorted(linked_after)
+
+
 def test_remote_import_records_landings_in_intra_run_checker(
         tmp_path, monkeypatch):
     """With ``skip_duplicates=True`` (the default) and ``verify_by_hash``
