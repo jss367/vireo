@@ -5867,6 +5867,25 @@ def test_remote_import_case_only_basename_collision_on_ci_destination(
     import import_job as _ij
     from import_job import ImportParams, run_import_job
 
+    # Skip on a case-insensitive host filesystem (macOS APFS/HFS+, Windows
+    # NTFS in the default configuration): the two case-only-different card
+    # files can't both exist on such a filesystem — writing ``img_0001.jpg``
+    # after ``IMG_0001.JPG`` overwrites the first, so discovery only sees
+    # ONE file and the destination-side collision loop we're trying to
+    # exercise has nothing to collide against. The production behaviour
+    # itself is unaffected (the collision loop keys ``claimed_basenames``
+    # case-foldedly whenever ``_dest_ci`` is true regardless of the card
+    # filesystem); this is a test-fixture limitation, not a code bug.
+    _probe_dir = tmp_path / "_case_probe"
+    _probe_dir.mkdir()
+    (_probe_dir / "CaseProbe.txt").write_text("")
+    if (_probe_dir / "caseprobe.txt").exists():
+        import pytest
+        pytest.skip(
+            "case-insensitive host filesystem cannot hold two card files "
+            "whose basenames differ only by case",
+        )
+
     # Force the case-insensitive destination code path regardless of the
     # test host filesystem (Linux ext4 is case-sensitive). The module-
     # level constant _dest_ci consults; sys.platform monkeypatch wouldn't
