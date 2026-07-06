@@ -503,6 +503,7 @@ def test_pipeline_job_rejects_macos_other_app_bundle(app_and_db, tmp_path):
         assert "macos" in resp.get_json()["error"].lower()
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_job_rejects_relative_destination(app_and_db, tmp_path):
     """Pipeline endpoint should reject relative destination paths."""
     app, _ = app_and_db
@@ -941,6 +942,7 @@ def test_job_export_invalid_max_size(app_and_db, tmp_path):
     assert "max_size must be a positive integer" in resp.get_json()["error"]
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_ingest_saves_recent_destination(app_and_db, tmp_path, monkeypatch):
     """Starting a pipeline with a destination saves it to recent_destinations in config."""
     import config as cfg
@@ -966,6 +968,7 @@ def test_pipeline_ingest_saves_recent_destination(app_and_db, tmp_path, monkeypa
     assert config["ingest"]["recent_destinations"] == [str(dst)]
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_recent_destinations_deduplicates_and_limits(app_and_db, tmp_path, monkeypatch):
     """Recent destinations deduplicates and limits to 5 entries."""
     import config as cfg

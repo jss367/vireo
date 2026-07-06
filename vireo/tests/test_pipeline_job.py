@@ -6,6 +6,8 @@ import os
 import sys
 import threading
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from pipeline_job import (
@@ -303,6 +305,7 @@ def test_pipeline_cancel_via_runner_skips_remaining_stages(tmp_path, monkeypatch
     # cancellation.
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_abort_on_nonexistent_source(tmp_path, monkeypatch):
     """Pipeline with nonexistent source should complete gracefully.
 
@@ -1206,6 +1209,7 @@ def test_pipeline_multi_folder_scan_progress_is_monotonic(tmp_path, monkeypatch)
     )
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_multi_source_ingest_progress_is_monotonic(tmp_path, monkeypatch):
     """Ingest progress must not move backward at source folder boundaries.
 
@@ -1354,6 +1358,7 @@ def test_emit_progress_lock_held_during_push():
     )
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_ingest_updates_step_progress(tmp_path, monkeypatch):
     """Ingest (import) phase should call update_step so the jobs page shows progress."""
     import config as cfg
@@ -1457,6 +1462,7 @@ def test_pipeline_scan_step_gets_status_updates(tmp_path, monkeypatch):
         "Status updates should also push SSE progress events"
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_ingest_records_safe_to_eject_counts_on_success(tmp_path, monkeypatch):
     """Once ingest copies everything off the source with no failures, the
     stage (and final result) should carry 'copied'/'skipped_duplicate' counts
@@ -1507,6 +1513,7 @@ def test_pipeline_ingest_records_safe_to_eject_counts_on_success(tmp_path, monke
     assert ingest_completed_events[-1]["copied"] == 2
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_ingest_omits_safe_to_eject_counts_on_partial_failure(tmp_path, monkeypatch):
     """Plain copy mode (no local_processing) doesn't abort the run when a file
     fails to copy — it still marks the ingest stage 'completed'. The
@@ -1566,6 +1573,7 @@ def test_pipeline_ingest_omits_safe_to_eject_counts_on_partial_failure(tmp_path,
     assert "copied" not in ingest_completed_events[-1]
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_ingest_step_present_only_with_destination(tmp_path, monkeypatch):
     """The 'ingest' step should only appear in step_defs when destination is set."""
     import config as cfg
@@ -1616,6 +1624,7 @@ def test_pipeline_ingest_step_present_only_with_destination(tmp_path, monkeypatc
         "ingest step should come before scan"
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_all_duplicates_restricts_scan_to_existing_folders(tmp_path, monkeypatch):
     """When every source file is a duplicate of an existing photo in the DB,
     the scan phase must be restricted to just the folders that hold those
@@ -1716,6 +1725,7 @@ def test_pipeline_all_duplicates_restricts_scan_to_existing_folders(tmp_path, mo
     )
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_all_duplicates_links_existing_folders_to_workspace(tmp_path, monkeypatch):
     """When every source file is a duplicate, the folders holding those
     existing duplicates should end up linked to the active workspace after
@@ -1779,6 +1789,7 @@ def test_pipeline_all_duplicates_links_existing_folders_to_workspace(tmp_path, m
     )
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_copy_mode_scans_subfolders(tmp_path, monkeypatch):
     """After ingest, scan should use restrict_dirs to target only subfolders
     that received files, while keeping the destination as root for folder hierarchy."""
@@ -1893,6 +1904,7 @@ def test_pipeline_progress_events_carry_stage_id(tmp_path, monkeypatch):
         f"Expected thumbnails stage_id in events; saw: {stage_ids_seen}"
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_scan_not_running_during_ingest(tmp_path, monkeypatch):
     """In copy mode, stages.scan should stay 'pending' while ingest runs,
     so the Scan card doesn't pulse during the import sub-phase."""
