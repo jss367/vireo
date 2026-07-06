@@ -19891,6 +19891,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             size = int(request.args.get("size", "1920"))
         except ValueError:
             return "Invalid size", 400
+        # The overlay is stretched over the displayed editor image, which the
+        # client caps at the overlay-preview size, so allocating a native-res
+        # RGBA buffer here would be hundreds of MB to over 1 GB with no
+        # visible benefit. Keep the mask endpoint at the overlay cap; only
+        # /edit-preview needs the raised limit for true 1:1 zoom.
         size = max(256, min(3840, size))
 
         raw_recipe = request.args.get("recipe")
@@ -19979,7 +19984,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             size = int(request.args.get("size", "1920"))
         except ValueError:
             return "Invalid size", 400
-        size = max(256, min(3840, size))
+        # 16384 (not 3840) so the editor's 100% zoom can request a
+        # native-resolution render and be a true 1:1 view.
+        size = max(256, min(16384, size))
 
         raw_recipe = request.args.get("recipe")
         if raw_recipe:
@@ -20027,10 +20034,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # working copy. Pass a sentinel non-empty recipe in that case so
             # the same RAW-primary gating applies and analysis reads the
             # highlight-preserved RAW decode rather than clipped legacy
-            # working-copy bytes.
+            # working-copy bytes. The same sentinel applies when the request
+            # asks for more pixels than the (size-capped) working copy holds —
+            # the editor's 100% zoom requests a native-resolution render, and
+            # short-circuiting to a 4096-capped working copy would silently
+            # serve half-resolution pixels as "1:1".
             source_recipe = recipe
-            if request.args.get("analysis") == "1" and not recipe:
-                source_recipe = {"version": SCHEMA_VERSION}
+            if not recipe:
+                from render_source import working_copy_satisfies_recipe_render
+                undersized_wc = photo["working_copy_path"] and (
+                    not working_copy_satisfies_recipe_render(
+                        photo, recipe, size, vireo_dir,
+                    )
+                )
+                if request.args.get("analysis") == "1" or undersized_wc:
+                    source_recipe = {"version": SCHEMA_VERSION}
             canonical, using_working_copy = _recipe_render_source(
                 photo, source_recipe, size, vireo_dir,
                 {folder_row["id"]: folder_row["path"]},
