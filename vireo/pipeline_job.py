@@ -2002,8 +2002,38 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             f"and Folders (or Removable/Network Volumes) and "
                             f"grant Vireo access."
                         )
+                    # Snapshot-scoped: hand the scanner the exact file set
+                    # captured at snapshot time so a file that landed in the
+                    # folder AFTER the snapshot doesn't get cataloged here.
+                    # Without this, the scan walks the whole folder, commits
+                    # a photos row for the late arrival, then the collection
+                    # stage filters it out of downstream work AND the finally
+                    # block invalidates the new-images cache — orphaning the
+                    # file (cataloged in DB, never classified, never
+                    # re-surfaced by a later banner probe). Skipping it at
+                    # scan time keeps it uncataloged so the next probe
+                    # rediscovers it.
+                    snapshot_files_set = (
+                        set(snapshot_paths) if snapshot_paths is not None else None
+                    )
                     for src_folder in sources:
                         scanned_roots.append(src_folder)
+                        snapshot_restrict_dirs = None
+                        snapshot_restrict_files = None
+                        if snapshot_files_set is not None:
+                            src_norm = os.path.normpath(src_folder)
+                            prefix = (
+                                src_norm if src_norm.endswith(os.sep)
+                                else src_norm + os.sep
+                            )
+                            files_under_src = [
+                                p for p in snapshot_paths
+                                if os.path.normpath(p).startswith(prefix)
+                            ]
+                            snapshot_restrict_files = set(files_under_src)
+                            snapshot_restrict_dirs = sorted(
+                                {os.path.dirname(p) for p in files_under_src}
+                            )
                         try:
                             do_scan(
                                 src_folder, thread_db,
@@ -2014,6 +2044,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 skip_paths=params.exclude_paths,
                                 status_callback=status_cb,
                                 recursive=params.recursive,
+                                restrict_dirs=snapshot_restrict_dirs,
+                                restrict_files=snapshot_restrict_files,
                                 vireo_dir=effective_vireo_dir,
                                 thumb_cache_dir=effective_thumb_cache_dir,
                                 permission_error_callback=_on_denied,
@@ -2091,11 +2123,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
             # Snapshot-scoped runs: resolve the captured file paths to photo IDs
             # now that the scanner has committed rows, and trim the collection
-            # to exactly that set. A late-arriving file (landed in the folder
-            # after the snapshot) was still scanned — we walk the whole folder —
-            # but must not be classified or scored. Any snapshot path that never
-            # resolved (file was moved/deleted between snapshot and pipeline
-            # run) is logged so an unexpectedly small collection is auditable.
+            # to exactly that set. The scan stage already restricted the walk
+            # to the snapshot's file set via ``restrict_dirs`` + ``restrict_files``
+            # so late arrivals aren't cataloged in the first place; this filter
+            # is a belt-and-suspenders trim in case a pre-existing (already
+            # cataloged) photo somehow ends up in ``collected_photo_ids``. Any
+            # snapshot path that never resolved (file was moved/deleted between
+            # snapshot and pipeline run) is logged so an unexpectedly small
+            # collection is auditable.
             if snapshot_paths is not None:
                 resolver_db = Database(db_path)
                 resolver_db.set_active_workspace(workspace_id)

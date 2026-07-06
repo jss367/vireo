@@ -6468,10 +6468,13 @@ def test_pipeline_with_snapshot_scans_only_snapshot_folders(tmp_path, monkeypatc
 
 def test_pipeline_snapshot_excludes_late_arriving_files(tmp_path, monkeypatch):
     """Files that land in a registered folder AFTER a snapshot is captured
-    must still be scanned (we walk the folder), but downstream stages
-    (classify, extract_masks, regroup) must be constrained to the snapshot's
-    photo-id set. Verified via DB state: only the early (snapshot) photo
-    should have a predictions row after the pipeline completes.
+    must NOT be cataloged by the pipeline scan. If they were, downstream
+    filtering would keep them out of classify/extract_masks/regroup, but the
+    finally-block cache invalidation still runs — orphaning the file
+    (cataloged in DB, never processed, never re-surfaced by a later banner
+    probe). Instead, the scan is restricted to the snapshot's file set so
+    late arrivals remain uncataloged and the next new-images probe
+    rediscovers them.
     """
     import classifier as classifier_mod
     import classify_job
@@ -6500,8 +6503,9 @@ def test_pipeline_snapshot_excludes_late_arriving_files(tmp_path, monkeypatch):
     snap_id = db.create_new_images_snapshot([str(folder / "IMG_early.JPG")])
 
     # "Late" file — arrives after the snapshot but before the pipeline runs.
-    # The scanner will ingest it (same folder), but downstream stages must
-    # skip it.
+    # The scanner must NOT catalog it — it lives in the same folder as the
+    # snapshot file, but restrict_files scopes the walk to the exact
+    # snapshot paths so late arrivals stay new.
     Image.new("RGB", (16, 16), (200, 50, 50)).save(
         str(folder / "IMG_late.JPG")
     )
@@ -6576,8 +6580,10 @@ def test_pipeline_snapshot_excludes_late_arriving_files(tmp_path, monkeypatch):
     job = _make_job()
     run_pipeline_job(job, runner, db_path, ws_id, params)
 
-    # Verify via DB: both files were scanned (scan walks the folder), but
-    # only the early one should have a prediction row.
+    # Verify via DB: only the snapshot (early) file should be cataloged. The
+    # late file stays off-catalog so the next new-images probe finds it and
+    # the banner reappears — self-healing freshness the Codex P1 review
+    # called out.
     verify_db = Database(db_path)
     verify_db.set_active_workspace(ws_id)
 
@@ -6586,8 +6592,9 @@ def test_pipeline_snapshot_excludes_late_arriving_files(tmp_path, monkeypatch):
             "SELECT filename FROM photos"
         ).fetchall()
     }
-    assert scanned == {"IMG_early.JPG", "IMG_late.JPG"}, (
-        f"scan should ingest both files in the folder, got {scanned}"
+    assert scanned == {"IMG_early.JPG"}, (
+        f"scan must skip files not in the snapshot so late arrivals stay "
+        f"discoverable by future probes, got {scanned}"
     )
 
     classified_names = {
