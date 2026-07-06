@@ -630,9 +630,76 @@ def _remote_verify_complete(rsync_bin, src_path, rsync_target, remote):
     return None
 
 
+def remote_verify_files(rsync_bin, src_specs, rsync_target, remote,
+                        dest_is_dir=True):
+    """Verify an explicit list of source FILES against a remote path.
+
+    The file-list counterpart to ``_remote_verify_complete`` (which compares
+    whole directories). The import job rsyncs a batch's card files flat by
+    basename into ``rsync_target/``; this runs ``rsync -an --checksum
+    <card files...> rsync_target/`` — a dry run that reports (via
+    ``--out-format=%n``) every listed file whose counterpart at the remote is
+    missing or differs by checksum. Because the sources are the actual CARD
+    files, this genuinely confirms the card's bytes landed intact on the NAS
+    (comparing the local SMB mount view against the NAS would be
+    near-tautological — same physical storage — and would never catch a
+    corrupt transfer). Basename-flat comparison lines up with how the
+    transfer landed the files.
+
+    ``dest_is_dir`` (default True) treats ``rsync_target`` as a directory
+    (``rsync_target/``), so each source lands under its own basename. Set it
+    False to verify a single source file against an explicit remote FILE path
+    (no trailing ``/``): the import job uses this to verify a collision-
+    renamed file (card ``DSC_0001.jpg`` landed at NAS ``DSC_0001_1.jpg``)
+    against its actual NAS name.
+
+    Returns:
+      * ``None`` — every listed source file is present at the remote with
+        matching content.
+      * ``(name, None)`` — first source file (rsync's ``%n`` relative name)
+        still absent/different at the remote.
+      * ``("__ERROR__", detail)`` — the verification rsync itself failed or
+        timed out; treated as a verification failure.
+
+    Bandwidth-cheap: the NAS checksums its own local disk and only hashes
+    cross the wire.
+    """
+    if not src_specs:
+        return None
+    # ``--copy-links`` matches the import-transfer rsync (``_run_remote_import
+    # _job`` passes it): the transfer sends the REFERENCED file bytes for a
+    # symlinked source, so the source-side hash here must be computed on the
+    # same referenced file (not the symlink itself). Without it, ``rsync
+    # -an`` (which includes ``-l``) sees a symlink at the source and a real
+    # file on the NAS, treats them as mismatched, and reports the just-
+    # transferred file as verification-failed. See PR #1113 review.
+    cmd = [rsync_bin, "-an", "--checksum", "--copy-links",
+           "--out-format=%n", "-e", _ssh_rsh_string(remote)]
+    cmd += list(src_specs)
+    cmd += [rsync_target + "/" if dest_is_dir else rsync_target]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=REMOTE_VERIFY_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return ("__ERROR__", f"verification timed out after "
+                f"{REMOTE_VERIFY_TIMEOUT // 60} minutes")
+    except OSError as exc:
+        return ("__ERROR__", str(exc))
+    if proc.returncode != 0:
+        return ("__ERROR__",
+                proc.stderr.strip() or f"rsync exit {proc.returncode}")
+    for line in proc.stdout.splitlines():
+        name = line.rstrip("\n")
+        if not name or name.endswith("/"):
+            continue  # directory entry, not a file needing transfer
+        return (name, None)
+    return None
+
+
 def _run_rsync_streamed(src_path, dest_spec, rsync_flags, total_files,
                         progress_cb, rsync_bin="rsync", extra_args=None,
-                        stall_timeout=RSYNC_STALL_TIMEOUT):
+                        stall_timeout=RSYNC_STALL_TIMEOUT, src_specs=None,
+                        src_specs_dest_is_dir=True):
     """Run rsync, reporting each transferred file through progress_cb.
 
     rsync's ``--out-format=%n`` prints the relative name of every item it
@@ -645,6 +712,18 @@ def _run_rsync_streamed(src_path, dest_spec, rsync_flags, total_files,
     for remote moves) and ``extra_args`` carries the SSH transport flags
     (``-e ssh ...``, ``--partial``, ``--bwlimit``). ``rsync_flags`` is a list;
     empty strings are dropped so a fresh move can pass no extra flag.
+
+    By default the whole ``src_path`` directory is transferred (``src_path
+    + "/"``), the shape ``move_folder`` uses. ``src_specs`` overrides this
+    with an explicit list of source *file* paths — the import job's per-batch
+    remote copy passes the batch's card files (which land flat by basename
+    under ``dest_spec/``), so no local staging tree is materialized. When
+    ``src_specs`` is given, ``dest_spec`` is suffixed with ``/`` (files land
+    inside the destination directory) unless ``src_specs_dest_is_dir`` is
+    False — the import job's collision-rename path passes a single source
+    file and an explicit remote FILE path (e.g.
+    ``user@host:/dir/DSC_0001_1.jpg``) so the renamed file lands under the
+    chosen name rather than its own basename.
 
     Returns ``(returncode, stderr, timed_out)``. ``timed_out`` is True when
     rsync made no forward progress for ``stall_timeout`` seconds and was
@@ -666,7 +745,11 @@ def _run_rsync_streamed(src_path, dest_spec, rsync_flags, total_files,
     cmd = [rsync_bin, "-a", "--out-format=%n"]
     cmd += list(extra_args or [])
     cmd += [f for f in (rsync_flags or []) if f]
-    cmd += [src_path + "/", dest_spec + "/"]
+    if src_specs is not None:
+        cmd += list(src_specs)
+        cmd += [dest_spec + "/" if src_specs_dest_is_dir else dest_spec]
+    else:
+        cmd += [src_path + "/", dest_spec + "/"]
     master_fd = slave_fd = None
     if hasattr(os, "openpty"):
         try:

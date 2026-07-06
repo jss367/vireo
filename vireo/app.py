@@ -1536,6 +1536,52 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """Return a JSON error response. Standard shape: {"error": "msg"}."""
         return jsonify({"error": msg}), status
 
+    def _resolve_remote_archive_target(remote_target_id, remote_subpath):
+        """Shared remote-archive-target resolution for the import-photos
+        and pipeline routes.
+
+        Returns ``(remote_archive_config, rsync_bin, None)`` on success,
+        or ``(None, None, error_response)`` when the request can't be
+        served (unknown target, invalid subpath, GNU rsync unavailable).
+        Callers still own their own mutual-exclusivity /
+        local_processing checks — this helper handles only the shared
+        target-lookup + resolve_remote_archive + rsync-availability
+        block that was duplicated across the two endpoints. See PR
+        #1113 review.
+        """
+        import config as cfg
+        import move as move_mod
+        from pipeline_job import resolve_remote_archive
+
+        target = cfg.get_remote_target(remote_target_id)
+        if not target:
+            return None, None, json_error("Remote target not found", status=404)
+        try:
+            remote_archive_config = resolve_remote_archive(
+                target, remote_subpath,
+            )
+        except ValueError as exc:
+            return None, None, json_error(str(exc))
+        effective_cfg = _get_db().get_effective_config(cfg.load())
+        rsync_bin = move_mod.resolve_rsync_bin(
+            effective_cfg.get("rsync_bin", "") or "")
+        # An explicit rsync_bin path in Settings → Paths bypasses the
+        # macOS auto-select guard in resolve_rsync_bin (it just checks
+        # executability), so Apple's /usr/bin/rsync can still land here
+        # even though it can't drive rsync-over-SSH. Fail fast before
+        # enqueue instead of starting a job that dies mid-transfer, the
+        # same way the remote-target list/test routes do.
+        if rsync_bin and not move_mod.is_gnu_rsync(rsync_bin):
+            rsync_bin = None
+        if not rsync_bin:
+            return None, None, json_error(
+                "No GNU rsync found for remote archiving — macOS's "
+                "built-in rsync can't drive rsync-over-SSH. Install GNU "
+                "rsync (e.g. `brew install rsync`) or set its path under "
+                "Settings → Paths."
+            )
+        return remote_archive_config, rsync_bin, None
+
     def _coerce_collection_id(raw):
         """Parse an optional collection_id from a request body.
 
@@ -15096,7 +15142,40 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if not os.path.isdir(s):
                 return json_error(f"source directory not found: {s}")
 
+        # Remote (SSH) archive destination — mirrors the pipeline route's
+        # remote-target request shape (remote_target_id + subpath). The card
+        # is rsynced to remote_path/subpath and cataloged at
+        # mount_path/subpath; ``destination`` is set to the resolved local
+        # mount path so every downstream guard (destination-inside-source,
+        # scan, catalog) applies to the mount exactly as for a local import.
+        remote_target_id = (body.get("remote_target_id") or "").strip()
+        remote_subpath = body.get("remote_subpath", "")
+        if remote_subpath and not isinstance(remote_subpath, str):
+            return json_error("remote_subpath must be a string")
         destination = body.get("destination")
+        remote_archive_config = None
+        if remote_target_id and destination:
+            return json_error(
+                "destination and remote_target_id are mutually exclusive — "
+                "pick a local archive path or a saved remote target, not both"
+            )
+        if remote_subpath and not remote_target_id:
+            return json_error("remote_subpath requires remote_target_id")
+        if remote_target_id:
+            # Refuse at request time when no GNU rsync exists or the
+            # target is unknown/unsafe — starting a job guaranteed to
+            # fail its transfer helps nobody (mirrors the pipeline and
+            # move-folder endpoints).
+            remote_archive_config, rsync_bin, err = (
+                _resolve_remote_archive_target(
+                    remote_target_id, remote_subpath,
+                )
+            )
+            if err is not None:
+                return err
+            # Catalog at the resolved local mount path.
+            destination = remote_archive_config["mount_final"]
+
         if not destination:
             return json_error("destination required")
         if not os.path.isabs(destination):
@@ -15258,6 +15337,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         thumb_cache_dir = app.config["THUMB_CACHE_DIR"]
         vireo_dir = os.path.dirname(thumb_cache_dir)
 
+        # Snapshot the resolved remote transport at enqueue time so a
+        # settings edit between click-Start and job-run can't redirect the
+        # archive to a different host/mount than the panel is showing
+        # (mirrors the pipeline route's remote_target_snapshot).
+        remote_target = None
+        if remote_archive_config is not None:
+            import move as move_mod
+
+            spec = move_mod.build_remote_move_spec(
+                remote_archive_config["target"],
+                remote_archive_config["subpath"],
+                rsync_bin,
+            )
+            remote_target = {
+                "rsync_bin": rsync_bin,
+                "remote": spec,
+                "ssh_base": remote_archive_config["ssh_final"],
+                "mount_base": remote_archive_config["mount_final"],
+            }
+
         job_config = {
             "sources": sources,
             "destination": destination,
@@ -15267,6 +15366,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "verify_by_hash": verify_by_hash,
             "recursive": recursive,
             "after_import": after_import,
+            "remote_target_id": remote_target_id or None,
+            "remote_subpath": remote_subpath or None,
         }
 
         def _chain_after_import(job, result):
@@ -15336,6 +15437,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 verify_by_hash=verify_by_hash,
                 recursive=recursive,
                 after_import=after_import,
+                remote_target=remote_target,
                 vireo_dir=vireo_dir,
                 thumb_cache_dir=thumb_cache_dir,
             )
@@ -17627,32 +17729,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "target over SSH"
             )
         if remote_target_id:
-            import config as cfg
-            import move as move_mod
-            from pipeline_job import resolve_remote_archive
-
-            target = cfg.get_remote_target(remote_target_id)
-            if not target:
-                return json_error("Remote target not found", status=404)
-            try:
-                remote_archive_config = resolve_remote_archive(
-                    target, remote_subpath,
+            # Refuse at request time when no GNU rsync exists or the
+            # target is unknown/unsafe — starting a job guaranteed to
+            # fail its storage preflight helps nobody (mirrors the
+            # move-folder endpoint).
+            remote_archive_config, _rsync_bin, err = (
+                _resolve_remote_archive_target(
+                    remote_target_id, remote_subpath,
                 )
-            except ValueError as exc:
-                return json_error(str(exc))
-            # Refuse at request time when no GNU rsync exists, matching the
-            # move-folder endpoint — starting a job that is guaranteed to
-            # fail its storage preflight helps nobody.
-            effective_cfg = db.get_effective_config(cfg.load())
-            rsync_bin = move_mod.resolve_rsync_bin(
-                effective_cfg.get("rsync_bin", "") or "")
-            if not rsync_bin:
-                return json_error(
-                    "No GNU rsync found for remote archiving — macOS's "
-                    "built-in rsync can't drive rsync-over-SSH. Install GNU "
-                    "rsync (e.g. `brew install rsync`) or set its path under "
-                    "Settings → Paths."
-                )
+            )
+            if err is not None:
+                return err
         if local_processing and not destination and not remote_target_id:
             return json_error(
                 "local_processing requires a destination or a remote target"
