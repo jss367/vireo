@@ -5570,6 +5570,78 @@ def test_remote_import_records_landings_in_intra_run_checker(
     assert len(all_transferred) == 1, all_transferred
 
 
+def test_remote_import_queues_both_when_skip_duplicates_disabled(
+        tmp_path, monkeypatch):
+    """With ``skip_duplicates=False`` and ``verify_by_hash`` true, a remote
+    batch that contains two byte-identical files with different basenames
+    must rsync/catalog BOTH files instead of counting the second as
+    ``skipped_duplicate``.
+
+    The remote intra-batch content-dedup shortcut hashes ``src_hash``
+    regardless of whether ``DuplicateChecker`` is active, so before the
+    fix the second file was silently skipped and — because
+    ``copied + skipped_duplicate == discovered`` — a verified run could
+    still report ``safe_to_format=True`` without an off-card row for the
+    second file. The local path only dedupes intra-batch same-content
+    twins through ``DuplicateChecker``, so disabling duplicate skipping
+    must queue both files here too. See PR #1113 review."""
+    import shutil as _shutil
+
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+    _install_fake_remote_rsync(monkeypatch, calls, verify=None)
+
+    # Two files, same bytes, same date (same batch), different basenames.
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+    _shutil.copy2(str(card / "DSC_0001.jpg"), str(card / "DSC_0002.jpg"))
+    ts = datetime(2026, 7, 3, 10, 0, 0).timestamp()
+    os.utime(str(card / "DSC_0002.jpg"), (ts, ts))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra, verify_by_hash=True,
+            skip_duplicates=False,
+        ),
+    )
+
+    # Both files must land as ``copied``; nothing may be counted as
+    # ``skipped_duplicate`` because the user opted out of dedup.
+    assert result["failed"] == 0, result
+    assert result["copied"] == 2, result
+    assert result["skipped_duplicate"] == 0, result
+
+    # And both card files must actually reach the rsync transport (not
+    # just the counters), otherwise the off-card row for the second file
+    # is fictional.
+    all_transferred = sorted({
+        os.path.basename(s)
+        for c in calls["rsync"] for s in c["src_specs"]
+    })
+    assert all_transferred == ["DSC_0001.jpg", "DSC_0002.jpg"], (
+        all_transferred, calls["rsync"])
+
+    # Both source paths must end up cataloged as distinct photo rows on
+    # the mount so ``safe_to_format=True`` isn't a lie.
+    rows = db.conn.execute(
+        "SELECT filename FROM photos ORDER BY filename",
+    ).fetchall()
+    filenames = sorted(r["filename"] for r in rows)
+    assert len(filenames) == 2, filenames
+    # Basenames may include a numeric suffix if rsync flat-lands both to
+    # the same mount folder — what matters is that there are two distinct
+    # rows and both card files were transferred.
+    assert result["safe_to_format"] is True, result
+
+
 def test_remote_import_refuses_when_mount_root_absent(tmp_path, monkeypatch):
     """When a saved remote target's local mount root (``/Volumes/NAS``,
     ``/mnt/NAS``, ``/media/user/NAS``) is not currently mounted, the

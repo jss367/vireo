@@ -987,8 +987,20 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
             # bytes). The batch's rsync hasn't happened yet, so the DB
             # twin lookup and ``checker.match()`` above can't see it —
             # skip here to match the local path's post-copy behaviour.
-            # See PR #1113 review.
-            if src_hash is not None and src_hash in queued_src_hashes:
+            # Gated on ``checker`` (``skip_duplicates=True``): the local
+            # path only skips same-content/different-name twins through
+            # ``DuplicateChecker``, so when the user disabled duplicate
+            # skipping both files must be rsynced/cataloged under
+            # distinct names instead of the second one being silently
+            # counted as ``skipped_duplicate`` (which would otherwise let
+            # a verified run report ``safe_to_format=True`` because
+            # ``copied + skipped_duplicate == discovered`` without an
+            # off-card row for the second file). See PR #1113 review.
+            if (
+                checker is not None
+                and src_hash is not None
+                and src_hash in queued_src_hashes
+            ):
                 skipped_duplicate += 1
                 dup_skipped += 1
                 _counts(rel)["skipped_duplicate"] += 1
@@ -1007,7 +1019,15 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                     # Claimed earlier in this batch (a same-basename sibling
                     # already queued). If that sibling has our exact bytes,
                     # skip as an intra-batch duplicate; otherwise advance.
-                    if claimed_basenames[candidate] == src_hash:
+                    # Gated on ``checker`` for the same reason as the
+                    # different-basename intra-batch dedup above: when
+                    # ``skip_duplicates=False``, both files must be
+                    # queued under distinct suffixes instead of the
+                    # second one being counted as ``skipped_duplicate``.
+                    if (
+                        checker is not None
+                        and claimed_basenames[candidate] == src_hash
+                    ):
                         skipped_duplicate += 1
                         dup_skipped += 1
                         _counts(rel)["skipped_duplicate"] += 1
@@ -1047,7 +1067,11 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
             if adopted:
                 continue
             claimed_basenames[dest_basename] = src_hash
-            if src_hash is not None:
+            # Only track queued source hashes when duplicate skipping is
+            # enabled — the intra-batch dedup that consults this map is
+            # gated on ``checker`` above, so populating it with
+            # ``skip_duplicates=False`` would just be dead state.
+            if checker is not None and src_hash is not None:
                 queued_src_hashes[src_hash] = dest_folder
             to_transfer.append((source_file, dest_basename, src_hash))
 
