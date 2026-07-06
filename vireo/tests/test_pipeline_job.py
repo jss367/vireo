@@ -163,6 +163,52 @@ def test_pipeline_params_model_ids_defaults_none():
     assert params.model_ids is None
 
 
+def test_run_pipeline_job_rejects_retired_import_archive_params(tmp_path):
+    import pytest
+
+    cases = [
+        PipelineParams(destination=str(tmp_path / "archive")),
+        PipelineParams(local_processing=True),
+        PipelineParams(remote_target_id="nas1"),
+    ]
+
+    for params in cases:
+        with pytest.raises(RuntimeError, match="Pipeline import/archive mode"):
+            run_pipeline_job(
+                _make_job(), FakeRunner(), str(tmp_path / "test.db"), 1, params
+            )
+
+
+def test_archive_stage_rejects_retired_import_archive_params_late(
+    tmp_path, monkeypatch
+):
+    import pipeline_job
+    import pytest
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Empty", "[]")
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    @contextlib.contextmanager
+    def mutate_after_regroup(_workspace_id):
+        yield
+        params.destination = str(tmp_path / "archive")
+
+    monkeypatch.setattr(pipeline_job, "acquire_workspace_regroup", mutate_after_regroup)
+
+    with pytest.raises(RuntimeError, match="Pipeline import/archive mode"):
+        run_pipeline_job(_make_job(), FakeRunner(), db_path, ws_id, params)
+
+
 def test_pipeline_job_with_collection_skips_scan(tmp_path, monkeypatch):
     """When collection_id is provided, pipeline should skip scan entirely."""
     import config as cfg

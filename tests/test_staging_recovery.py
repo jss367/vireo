@@ -1,6 +1,7 @@
 import os
 
 import pytest
+import staging_recovery
 from staging_recovery import (
     delete_verified_staging,
     discover_orphaned_staging,
@@ -109,6 +110,35 @@ def test_orphaned_staging_ignores_matching_archive_in_other_workspace(db, tmp_pa
     assert result["can_delete"] is False
     assert result["unaccounted"] == 1
     assert result["verified"] == 0
+
+
+def test_orphaned_staging_reuses_archive_folder_listing(db, tmp_path, monkeypatch):
+    vireo_dir = tmp_path / "vireo"
+    staged_a = _write(vireo_dir / "staging" / "pipeline-cache" / "USA" / "a.nef")
+    staged_b = _write(vireo_dir / "staging" / "pipeline-cache" / "USA" / "b.nef")
+    archive_dir = tmp_path / "archive" / "USA"
+    _write(archive_dir / "a.nef", staged_a.read_bytes())
+    _write(archive_dir / "b.nef", staged_b.read_bytes())
+    _catalog_photo(db, archive_dir, "a.nef", staged_a.stat().st_size)
+    _catalog_photo(db, archive_dir, "b.nef", staged_b.stat().st_size)
+
+    real_listdir = os.listdir
+    archive_list_calls = []
+
+    def counting_listdir(path):
+        if os.path.realpath(path) == os.path.realpath(archive_dir):
+            archive_list_calls.append(path)
+        return real_listdir(path)
+
+    monkeypatch.setattr(staging_recovery.os, "listdir", counting_listdir)
+
+    result = verify_orphaned_staging(
+        db, str(vireo_dir), str(vireo_dir / "staging" / "pipeline-cache")
+    )
+
+    assert result["status"] == "safe_to_delete"
+    assert result["verified"] == 2
+    assert len(archive_list_calls) == 1
 
 
 def test_orphaned_staging_unreachable_archive_is_not_called_missing(db, tmp_path):

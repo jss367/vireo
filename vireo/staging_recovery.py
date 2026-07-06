@@ -138,15 +138,26 @@ def _catalog_candidates(db, filename: str, size: int, staging_root: str) -> list
     return out
 
 
-def _archive_file_status(path: str, expected_size: int) -> tuple[str, str | None]:
+def _archive_file_status(
+    path: str,
+    expected_size: int,
+    listing_cache: dict[str, set[str] | OSError] | None = None,
+) -> tuple[str, str | None]:
     mount_root = _missing_mount_root(path) or _missing_mount_root(os.path.dirname(path))
     if mount_root:
         return "unreachable", f"archive mount root is unavailable: {mount_root}"
     folder = os.path.dirname(path)
-    try:
-        names = set(os.listdir(folder))
-    except OSError as exc:
-        return "unreachable", f"archive folder is not enumerable: {folder} ({exc})"
+    cache = listing_cache if listing_cache is not None else {}
+    cached = cache.get(folder)
+    if cached is None:
+        try:
+            cached = set(os.listdir(folder))
+        except OSError as exc:
+            cached = exc
+        cache[folder] = cached
+    if isinstance(cached, OSError):
+        return "unreachable", f"archive folder is not enumerable: {folder} ({cached})"
+    names = cached
     basename = os.path.basename(path)
     if basename not in names:
         return "missing", f"archive folder is reachable but {basename} is not present"
@@ -206,6 +217,7 @@ def verify_orphaned_staging(db, vireo_dir: str, cleanup_root: str) -> dict:
         "inferred_destination": None,
     }
     inferred: dict[str, int] = {}
+    archive_listing_cache: dict[str, set[str] | OSError] = {}
 
     for staged_path, rel_path, size in files:
         candidates = _catalog_candidates(
@@ -230,7 +242,9 @@ def verify_orphaned_staging(db, vireo_dir: str, cleanup_root: str) -> dict:
             archive_path = os.path.join(
                 candidate["folder_path"], candidate["filename"],
             )
-            status, reason = _archive_file_status(archive_path, size)
+            status, reason = _archive_file_status(
+                archive_path, size, archive_listing_cache,
+            )
             if status == "verified":
                 detail.update({
                     "status": "verified",
