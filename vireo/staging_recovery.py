@@ -172,6 +172,31 @@ def _archive_file_status(
     return "verified", None
 
 
+def _path_parts(path: str) -> list[str]:
+    normalized = os.path.normpath(path).replace("\\", "/")
+    return [part for part in normalized.split("/") if part and part != "."]
+
+
+def _expected_archive_suffix(entry: StagingEntry, staged_file: str) -> list[str]:
+    rel_dir = os.path.relpath(os.path.dirname(staged_file), entry.source_root)
+    parts: list[str] = []
+    if os.path.realpath(entry.source_root) != os.path.realpath(entry.cleanup_root):
+        parts.append(os.path.basename(entry.source_root))
+    if rel_dir not in ("", "."):
+        parts.extend(_path_parts(rel_dir))
+    return parts
+
+
+def _folder_matches_staged_path(folder_path: str, expected_suffix: list[str]) -> bool:
+    if not expected_suffix:
+        return True
+    folder_parts = _path_parts(folder_path)
+    return (
+        len(folder_parts) >= len(expected_suffix)
+        and folder_parts[-len(expected_suffix):] == expected_suffix
+    )
+
+
 def _infer_destination(source_root: str, staged_file: str, folder_path: str) -> str:
     rel_dir = os.path.relpath(os.path.dirname(staged_file), source_root)
     if rel_dir in ("", "."):
@@ -238,7 +263,12 @@ def verify_orphaned_staging(db, vireo_dir: str, cleanup_root: str) -> dict:
 
         saw_unreachable = False
         last_reason = None
+        expected_suffix = _expected_archive_suffix(entry, staged_path)
         for candidate in candidates:
+            if not _folder_matches_staged_path(
+                candidate["folder_path"], expected_suffix,
+            ):
+                continue
             archive_path = os.path.join(
                 candidate["folder_path"], candidate["filename"],
             )

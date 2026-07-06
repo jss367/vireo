@@ -112,6 +112,42 @@ def test_orphaned_staging_ignores_matching_archive_in_other_workspace(db, tmp_pa
     assert result["verified"] == 0
 
 
+def test_orphaned_staging_requires_matching_archive_relative_folder(db, tmp_path):
+    vireo_dir = tmp_path / "vireo"
+    staged = _write(
+        vireo_dir / "staging" / "pipeline-path" / "USA" / "2026" / "2026-07-03" / "a.nef"
+    )
+    archive_file = _write(
+        tmp_path / "archive" / "USA" / "2026" / "2026-07-04" / "a.nef"
+    )
+    _catalog_photo(db, archive_file.parent, "a.nef", staged.stat().st_size)
+
+    result = verify_orphaned_staging(
+        db, str(vireo_dir), str(vireo_dir / "staging" / "pipeline-path")
+    )
+
+    assert result["status"] == "needs_import"
+    assert result["can_delete"] is False
+    assert result["unaccounted"] == 1
+    assert result["verified"] == 0
+
+
+def test_orphaned_staging_requires_matching_destination_leaf(db, tmp_path):
+    vireo_dir = tmp_path / "vireo"
+    staged = _write(vireo_dir / "staging" / "pipeline-leaf" / "USA" / "a.nef")
+    archive_file = _write(tmp_path / "archive" / "Brazil" / "a.nef")
+    _catalog_photo(db, archive_file.parent, "a.nef", staged.stat().st_size)
+
+    result = verify_orphaned_staging(
+        db, str(vireo_dir), str(vireo_dir / "staging" / "pipeline-leaf")
+    )
+
+    assert result["status"] == "needs_import"
+    assert result["can_delete"] is False
+    assert result["unaccounted"] == 1
+    assert result["verified"] == 0
+
+
 def test_orphaned_staging_reuses_archive_folder_listing(db, tmp_path, monkeypatch):
     vireo_dir = tmp_path / "vireo"
     staged_a = _write(vireo_dir / "staging" / "pipeline-cache" / "USA" / "a.nef")
