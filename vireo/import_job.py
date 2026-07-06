@@ -661,6 +661,41 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
         unsafe_files.append({"path": str(source_file), "reason": reason})
         log.warning("Remote import failed for %s: %s", source_file, reason)
 
+    # Intra-run bookkeeping so a second byte-identical card file (with a
+    # different basename) in this run is recognized as a duplicate before
+    # ``scan()`` runs — the DB twin lookup can't help until the batch's
+    # ``scan()`` has cataloged the first landing. Mirrors the local path.
+    run_dest_folders = {}
+    run_verified_hashes = {}
+
+    def _record_checker(source_file, dest_folder=None, file_hash=None):
+        """Register a landed/adopted file's identity with the intra-run checker.
+
+        Without this the checker only sees the pre-run catalog, so a later
+        byte-identical card file with a different basename in the same run
+        is rsynced/cataloged again instead of being recognized as an
+        intra-run duplicate. Mirrors the local path's ``_record_checker``.
+        ``DuplicateChecker.record`` re-``os.stat``s the source path — swallow
+        OSError (removable media yanked mid-run) so the run keeps its
+        already-verified landings and only loses the intra-run dedupe
+        optimization. See PR #1113 review.
+        """
+        if checker is None:
+            return
+        try:
+            tokens = checker.record(source_file)
+        except OSError as e:
+            log.warning(
+                "Duplicate-checker record() failed for %s: %s",
+                source_file, e,
+            )
+            return
+        for tok in tokens:
+            if dest_folder is not None:
+                run_dest_folders[tok] = dest_folder
+            if file_hash is not None:
+                run_verified_hashes[tok] = file_hash
+
     for rel, batch in batches:
         if runner.is_cancelled(job["id"]):
             cancelled = True
@@ -749,6 +784,18 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
         # dest basename -> src_hash, for intra-batch same-basename collision
         # resolution (FIX 2). Populated as files are queued/skipped.
         claimed_basenames = {}
+        # src_hash set, for intra-batch same-content different-basename
+        # dedup: the local path calls ``_record_checker`` inside its own
+        # batch loop (right after each copy_and_hash_verify), so a byte-
+        # identical second file in the same loop sees the first landing
+        # via ``run_dest_folders`` and is skipped. The remote path
+        # decouples "decide to copy" (this batch loop) from "actually
+        # copied" (the post-loop rsync), so a byte-identical second file
+        # would otherwise sail past the empty ``_seen_hashes`` and get
+        # queued/rsynced/cataloged again. Track queued src hashes here
+        # to catch that case at enqueue time — the file that was already
+        # queued backs this skip. See PR #1113 review.
+        queued_src_hashes = {}
         for source_file in batch:
             if runner.is_cancelled(job["id"]):
                 cancelled = True
@@ -777,40 +824,67 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                                   f"duplicate check failed: {e}")
                             continue
                     accept = False
+                    # Intra-run fast path: an earlier file in this run
+                    # already landed for this identity, so this file's
+                    # bytes are byte-proven by the earlier landing without
+                    # hitting the archive. ``('hash', …)`` tokens carry
+                    # the bytes as their identity; ``('key', …)`` tokens
+                    # need the source's fresh hash to match the run twin's
+                    # verified hash before accepting (two different files
+                    # with the same filename+size+capture-second must not
+                    # dedupe on metadata alone). Without this, the DB
+                    # twin lookup below sees only the pre-``scan()``
+                    # catalog and a byte-identical second file gets
+                    # rsynced/cataloged again. Mirrors the local path.
+                    # See PR #1113 review.
+                    if token in run_dest_folders:
+                        if token[0] == "hash":
+                            accept = True
+                        else:
+                            run_hash = run_verified_hashes.get(token)
+                            if (
+                                src_hash is not None
+                                and run_hash is not None
+                                and src_hash == run_hash
+                            ):
+                                accept = True
                     # Twins whose bytes we actually hashed this run and
                     # matched against the source. Only these back a
                     # duplicate-folder link (a stale/off-destination twin's
                     # folder must not be pulled into the active workspace).
                     verified_twin_rows = []
-                    for twin in twin_rows:
-                        twin_path = os.path.join(
-                            twin["folder_path"], twin["filename"],
-                        )
-                        # A twin cataloged under any import source root is
-                        # (or may be) the card file being imported this run
-                        # — re-hashing it just re-reads the source, proving
-                        # nothing about an off-card copy. Accepting it would
-                        # count the file as skipped_duplicate and (with
-                        # verify_by_hash) let safe_to_format go green while
-                        # the card holds the only bytes. Mirrors the local
-                        # path's filter. See PR #1113 review.
-                        if _path_under_any_source(twin_path):
-                            continue
-                        try:
-                            twin_hash = compute_file_hash(twin_path)
-                        except OSError:
-                            continue
-                        if twin_hash is not None and twin_hash == src_hash:
-                            accept = True
-                            # Keep scanning to collect every byte-verified
-                            # twin's folder — an older run may have written
-                            # the same identity into a different folder
-                            # layout (e.g. ``unsorted`` or a different date
-                            # template), and only the folder we RE-HASHED
-                            # this run is safe to link. Mirrors the local
-                            # path's collect-then-link pattern. See PR
-                            # #1113 review.
-                            verified_twin_rows.append(twin)
+                    if not accept:
+                        for twin in twin_rows:
+                            twin_path = os.path.join(
+                                twin["folder_path"], twin["filename"],
+                            )
+                            # A twin cataloged under any import source root
+                            # is (or may be) the card file being imported
+                            # this run — re-hashing it just re-reads the
+                            # source, proving nothing about an off-card
+                            # copy. Accepting it would count the file as
+                            # skipped_duplicate and (with verify_by_hash)
+                            # let safe_to_format go green while the card
+                            # holds the only bytes. Mirrors the local
+                            # path's filter. See PR #1113 review.
+                            if _path_under_any_source(twin_path):
+                                continue
+                            try:
+                                twin_hash = compute_file_hash(twin_path)
+                            except OSError:
+                                continue
+                            if twin_hash is not None and twin_hash == src_hash:
+                                accept = True
+                                # Keep scanning to collect every byte-
+                                # verified twin's folder — an older run
+                                # may have written the same identity into a
+                                # different folder layout (e.g.
+                                # ``unsorted`` or a different date
+                                # template), and only the folder we
+                                # RE-HASHED this run is safe to link.
+                                # Mirrors the local path's collect-then-
+                                # link pattern. See PR #1113 review.
+                                verified_twin_rows.append(twin)
                     if accept:
                         skipped_duplicate += 1
                         dup_skipped += 1
@@ -829,6 +903,15 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                                 _path_under_destination,
                             ),
                         )
+                        # An intra-run twin's dest_folder isn't cataloged
+                        # yet (scan runs after the batch loop) but WILL be
+                        # by this run's own batch scan, so add it to
+                        # dup_dirs so a duplicate-only follow-up batch
+                        # still finds it visible. Mirrors the local path.
+                        run_dest = run_dest_folders.get(token)
+                        if run_dest is not None:
+                            dup_dirs.add(run_dest)
+                        _record_checker(source_file)
                         continue
             # Collision parity (FIX 2): rsync lands files flat by basename,
             # so two different card files with the same basename in one batch
@@ -849,6 +932,19 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
             except OSError as e:
                 _fail(rel, source_file, str(e))
                 continue
+            # Intra-batch same-content dedup: an earlier file THIS BATCH
+            # queued a byte-identical source under a different basename
+            # (e.g. ``DSC_0001.jpg`` and ``DSC_0002.jpg`` with the same
+            # bytes). The batch's rsync hasn't happened yet, so the DB
+            # twin lookup and ``checker.match()`` above can't see it —
+            # skip here to match the local path's post-copy behaviour.
+            # See PR #1113 review.
+            if src_hash is not None and src_hash in queued_src_hashes:
+                skipped_duplicate += 1
+                dup_skipped += 1
+                _counts(rel)["skipped_duplicate"] += 1
+                _record_checker(source_file, dest_folder, src_hash)
+                continue
             stem, suffix = os.path.splitext(source_file.name)
             counter = 0
             adopted = False
@@ -866,6 +962,7 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                         skipped_duplicate += 1
                         dup_skipped += 1
                         _counts(rel)["skipped_duplicate"] += 1
+                        _record_checker(source_file, dest_folder, src_hash)
                         adopted = True
                         break
                     counter += 1
@@ -888,6 +985,7 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                         # and skip the adopted-but-uncataloged file). See
                         # PR #1113 review.
                         adopted_paths.add(cand_mount)
+                        _record_checker(source_file, dest_folder, src_hash)
                         adopted = True
                         break
                     counter += 1
@@ -897,6 +995,8 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
             if adopted:
                 continue
             claimed_basenames[dest_basename] = src_hash
+            if src_hash is not None:
+                queued_src_hashes[src_hash] = dest_folder
             to_transfer.append((source_file, dest_basename, src_hash))
 
         # --- Per-batch rsync -------------------------------------------
@@ -1045,6 +1145,7 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                     if params.verify_by_hash:
                         verified += 1
                     landed.append((dest_path, str(sf), src_hash, sz, mt))
+                    _record_checker(sf, dest_folder, src_hash)
 
         # --- Catalog this batch ----------------------------------------
         # Fresh copies AND duplicate skips both need the mount folder
@@ -1358,36 +1459,93 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                 [(d,) for d in sorted(new_dup_dirs)],
             )
             db.conn.commit()
-            try:
-                scan(
-                    destination, db,
-                    restrict_dirs=sorted(new_dup_dirs),
-                    vireo_dir=params.vireo_dir,
-                    thumb_cache_dir=params.thumb_cache_dir,
-                    skip_working_copies=True,
-                    cancel_check=lambda: runner.is_cancelled(job["id"]),
-                )
-                linked_dup_dirs.update(new_dup_dirs)
-            except Exception as e:
+            # Twin folders may be cataloged through a symlink alias while
+            # ``destination`` is realpath-normalized above.
+            # ``_path_under_destination`` accepts them via realpath, but
+            # scanner's ``_ensure_folder`` walks parents *lexically* until
+            # they equal the scan root — a restrict_dir ``/alias/…``
+            # scanned under root ``/real/archive`` would recurse toward
+            # ``/`` before the ``workspace_folders`` link is ever created,
+            # leaving the verified duplicate-only remote import marked
+            # failed/unsafe. Split by whether the twin's folder path sits
+            # lexically under destination: link the alias-spelled ones
+            # directly (their folder row and the twin's photos already
+            # exist — no self-heal scan needed for workspace visibility),
+            # scan only the lexically-under-destination ones. Mirrors the
+            # local path's split; see PR #1113 review.
+            lex_dup_dirs = set()
+            alias_dup_dirs = set()
+            for d in new_dup_dirs:
+                d_cmp = (
+                    d.casefold() if _dest_ci else d
+                ).rstrip(os.sep)
                 if (
-                    isinstance(e, RuntimeError)
-                    and str(e) == "scan cancelled"
-                    and runner.is_cancelled(job["id"])
+                    d_cmp == _dest_root_norm
+                    or d_cmp.startswith(_dest_root_norm + os.sep)
                 ):
-                    cancelled = True
+                    lex_dup_dirs.add(d)
                 else:
-                    log.exception(
-                        "Linking duplicate-matched folders failed: %s",
-                        sorted(new_dup_dirs),
+                    alias_dup_dirs.add(d)
+
+            for d in sorted(alias_dup_dirs):
+                folder_row = db.conn.execute(
+                    "SELECT id FROM folders WHERE path = ?", (d,),
+                ).fetchone()
+                if folder_row is None:
+                    log.warning(
+                        "Alias-spelled dup dir %s vanished from folders "
+                        "between _linkable_twin_dirs and the direct "
+                        "workspace link", d,
                     )
                     dup_link_failed = True
-                    for d in sorted(new_dup_dirs):
-                        unsafe_files.append({
-                            "path": d,
-                            "reason": (
-                                f"duplicate-folder link scan failed: {e}"
-                            ),
-                        })
+                    unsafe_files.append({
+                        "path": d,
+                        "reason": (
+                            "duplicate-folder workspace link failed: "
+                            "folder row not found"
+                        ),
+                    })
+                    continue
+                db.add_workspace_folder(
+                    workspace_id, folder_row["id"], is_root=True,
+                )
+                linked_dup_dirs.add(d)
+                _invalidate_new_images(db, d)
+            db.conn.commit()
+
+            if lex_dup_dirs:
+                try:
+                    scan(
+                        destination, db,
+                        restrict_dirs=sorted(lex_dup_dirs),
+                        vireo_dir=params.vireo_dir,
+                        thumb_cache_dir=params.thumb_cache_dir,
+                        skip_working_copies=True,
+                        cancel_check=lambda: runner.is_cancelled(job["id"]),
+                    )
+                    linked_dup_dirs.update(lex_dup_dirs)
+                    for d in sorted(lex_dup_dirs):
+                        _invalidate_new_images(db, d)
+                except Exception as e:
+                    if (
+                        isinstance(e, RuntimeError)
+                        and str(e) == "scan cancelled"
+                        and runner.is_cancelled(job["id"])
+                    ):
+                        cancelled = True
+                    else:
+                        log.exception(
+                            "Linking duplicate-matched folders failed: %s",
+                            sorted(lex_dup_dirs),
+                        )
+                        dup_link_failed = True
+                        for d in sorted(lex_dup_dirs):
+                            unsafe_files.append({
+                                "path": d,
+                                "reason": (
+                                    f"duplicate-folder link scan failed: {e}"
+                                ),
+                            })
 
         _emit(
             f"{rel}: {_counts(rel)['copied']} copied · "

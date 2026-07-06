@@ -5428,3 +5428,143 @@ def test_progress_events_carry_live_per_folder_counts(tmp_path):
     assert any(0 < t < 4 for t in progress_folder_totals), (
         progress_folder_totals
     )
+
+
+def test_remote_import_links_alias_spelled_twin_folder(tmp_path, monkeypatch):
+    """A verified duplicate skip whose twin was cataloged through a symlink
+    alias of the mount base is accepted via ``_path_under_destination``'s
+    realpath check, but the follow-up dup-link scan cannot pass the alias
+    to ``scan(destination, restrict_dirs=[alias])`` — scanner's
+    ``_ensure_folder`` walks parents lexically and would recurse toward
+    ``/`` before creating the workspace link, marking the import failed/
+    unsafe. The remote path must mirror the local split: link alias-
+    spelled dup dirs directly via ``add_workspace_folder`` rather than
+    scanning them. See PR #1113 review."""
+    if not hasattr(os, "symlink"):
+        return
+    from import_dedup import compute_file_hash as _hash
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+    _install_fake_remote_rsync(monkeypatch, calls, verify=None)
+
+    # Card holds one photo whose bytes ALREADY exist under the real mount
+    # base in an "unsorted" folder.
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+    card_file = str(card / "DSC_0001.jpg")
+    src_hash = _hash(card_file)
+
+    real_mount_base = ra["mount_base"]
+    twin_folder_real = os.path.join(real_mount_base, "unsorted")
+    os.makedirs(twin_folder_real, exist_ok=True)
+    twin_path_real = os.path.join(twin_folder_real, "DSC_0001.jpg")
+    import shutil as _shutil
+    _shutil.copy2(card_file, twin_path_real)
+
+    # Alias root points at the same physical directory via symlink. The
+    # twin's cataloged folder path is spelled through the alias — NOT
+    # lexically under the mount base — so scanner._ensure_folder's parent
+    # walk would recurse toward / rather than stopping at the destination
+    # root; the remote dup-link scan must link this folder directly via
+    # add_workspace_folder without calling scan() on the alias path.
+    try:
+        alias_root = str(tmp_path / "mount_alias")
+        os.symlink(real_mount_base, alias_root)
+    except OSError:
+        # No symlink support / permission — skip: the failure mode this
+        # test proves needs a real alias on disk.
+        return
+    alias_twin_folder = os.path.join(alias_root, "unsorted")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES (?, ?, 'ok')",
+        (alias_twin_folder, os.path.basename(alias_twin_folder)),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, extension, file_size,"
+        " file_hash) VALUES (?, ?, '.jpg', ?, ?)",
+        (fid, "DSC_0001.jpg", os.path.getsize(twin_path_real), src_hash),
+    )
+    db.conn.commit()
+    assert alias_twin_folder not in _ws_linked_folder_paths(db, ws_id)
+
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=real_mount_base,
+            remote_target=ra, verify_by_hash=True,
+        ),
+    )
+
+    # rsync stayed silent — card accepted as a duplicate.
+    assert calls["rsync"] == [], calls["rsync"]
+    assert result["skipped_duplicate"] == 1, result
+    # The alias-spelled twin folder MUST be linked into the active
+    # workspace — without the alias/lex split, the dup-link scan would
+    # blow up on _ensure_folder's parent walk and the job would report
+    # failed/unsafe.
+    assert result["failed"] == 0, result
+    assert result["safe_to_format"] is True, result
+    linked_after = _ws_linked_folder_paths(db, ws_id)
+    assert alias_twin_folder in linked_after, sorted(linked_after)
+
+
+def test_remote_import_records_landings_in_intra_run_checker(
+        tmp_path, monkeypatch):
+    """With ``skip_duplicates=True`` (the default) and ``verify_by_hash``
+    true, a remote batch that contains two byte-identical files with
+    different basenames must record the first landing with the intra-run
+    duplicate checker so the second file is recognized as an intra-run
+    duplicate — otherwise the checker only ever sees the pre-run catalog,
+    and both files get rsynced/cataloged separately.
+
+    Mirrors the local path's ``_record_checker`` after every accepted
+    landing. See PR #1113 review."""
+    import shutil as _shutil
+
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+    _install_fake_remote_rsync(monkeypatch, calls, verify=None)
+
+    # Two files, same bytes (same color -> same PIL-encoded JPEG), same
+    # date (same batch), different basenames.
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+    _shutil.copy2(str(card / "DSC_0001.jpg"), str(card / "DSC_0002.jpg"))
+    ts = datetime(2026, 7, 3, 10, 0, 0).timestamp()
+    os.utime(str(card / "DSC_0002.jpg"), (ts, ts))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra, verify_by_hash=True,
+        ),
+    )
+
+    # Exactly one file lands on the NAS; the second is an intra-run
+    # duplicate — without the record() call, both would be rsynced.
+    assert result["failed"] == 0, result
+    assert result["copied"] == 1, result
+    assert result["skipped_duplicate"] == 1, result
+
+    # The rsync fake records each source it moved. Sum across all calls
+    # must be exactly one card file (the flat batch may or may not
+    # coalesce depending on collision handling, but the DEDUPED count is
+    # what the checker enforces).
+    all_transferred = [
+        s for c in calls["rsync"] for s in c["src_specs"]
+    ]
+    assert len(all_transferred) == 1, all_transferred
