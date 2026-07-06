@@ -141,6 +141,7 @@ def test_rapid_review_decision_keys_advance_through_queue(live_server, page):
     page.goto(f"{live_server['url']}/pipeline/rapid-review")
 
     expect(page.locator("#filename")).to_have_text("a.jpg")
+    expect(page.locator("#applyBtn")).to_be_enabled()
 
     page.keyboard.press("x")
     expect(page.locator("#filename")).to_have_text("b.jpg")
