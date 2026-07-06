@@ -502,6 +502,7 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
     reason ``"enable verify_by_hash for remote verification"`` — the card is
     off-loaded but its landing wasn't independently hash-confirmed.
     """
+    from pipeline_job import _missing_archive_mount_root
     from scanner import scan
 
     rt = params.remote_target
@@ -668,6 +669,23 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
     run_dest_folders = {}
     run_verified_hashes = {}
 
+    # Mount-root preflight (Task 2.7 late follow-up): when a saved remote
+    # target's local mount root is not mounted (for example ``/Volumes/NAS``
+    # or ``/mnt/NAS`` is absent because the share isn't attached), a naive
+    # ``os.makedirs(dest_folder, exist_ok=True)`` in the batch loop below
+    # would create the whole mount tree as an empty local shadow directory
+    # on the internal disk. The SSH rsync still writes to the NAS, but the
+    # subsequent scan reads the fresh local shadow and leaves the import
+    # uncataloged/failed; worse, on macOS/Linux that shadow root can also
+    # prevent the real share from remounting at the configured path. Fail
+    # every batch's files up front with a clear reason instead. Reuses the
+    # pipeline path's ``_missing_archive_mount_root`` helper (only fires
+    # for the ``/Volumes/X``, ``/mnt/X``, and ``/media/user/X`` shapes that
+    # denote removable/network mount roots), computed once here because
+    # every batch's ``dest_folder`` shares ``destination``'s mount root.
+    # See PR #1113 review.
+    _missing_mount_root = _missing_archive_mount_root(destination)
+
     def _record_checker(source_file, dest_folder=None, file_hash=None):
         """Register a landed/adopted file's identity with the intra-run checker.
 
@@ -730,6 +748,30 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                     "(dest_folder would be created under the card being "
                     "imported); formatting the card would erase the archive "
                     "copy",
+                )
+            _emit(
+                f"{rel}: {_counts(rel)['copied']} copied · "
+                f"{_counts(rel)['skipped_duplicate']} already present",
+                emitted, discovered,
+            )
+            continue
+        # Mount-root preflight (see the ``_missing_mount_root`` computation
+        # near the top of this function). Same shape as the dest-under-
+        # source guard: fail every file in the batch with a specific
+        # reason and skip the batch instead of letting ``os.makedirs``
+        # create a local shadow of the unmounted destination. Computed
+        # once outside the loop; the mount-root decision is a property
+        # of ``destination`` and doesn't vary per batch. See PR #1113
+        # review.
+        if _missing_mount_root:
+            for source_file in batch:
+                emitted += 1
+                _fail(
+                    rel, source_file,
+                    f"archive mount root {_missing_mount_root} is not "
+                    "available (destination drive is not mounted; refusing "
+                    "to create a shadow directory tree under it, which "
+                    "would prevent the real share from remounting)",
                 )
             _emit(
                 f"{rel}: {_counts(rel)['copied']} copied · "

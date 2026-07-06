@@ -5568,3 +5568,100 @@ def test_remote_import_records_landings_in_intra_run_checker(
         s for c in calls["rsync"] for s in c["src_specs"]
     ]
     assert len(all_transferred) == 1, all_transferred
+
+
+def test_remote_import_refuses_when_mount_root_absent(tmp_path, monkeypatch):
+    """When a saved remote target's local mount root (``/Volumes/NAS``,
+    ``/mnt/NAS``, ``/media/user/NAS``) is not currently mounted, the
+    remote import must fail before ``os.makedirs(dest_folder)`` creates a
+    local shadow of the mount tree on the internal disk. The SSH rsync
+    could still push to the NAS, but the batch scan then reads the empty
+    shadow and leaves the import uncataloged; on macOS/Linux the shadow
+    root can also prevent the real share from remounting. Mirrors the
+    pipeline path's ``_missing_archive_mount_root`` preflight. See PR
+    #1113 review."""
+    import move as _move
+    import pipeline_job as _pj
+    from import_job import ImportParams, run_import_job
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+        ("DSC_0002.jpg", datetime(2026, 7, 3, 11, 0, 0), "green"),
+    ])
+
+    # Build a resolved-archive dict whose mount base sits under a
+    # (simulated) unmounted volume. The pipeline helper only fires for
+    # the specific ``/Volumes/*`` / ``/mnt/*`` / ``/media/*/*`` shapes,
+    # so monkeypatch it to report our fake mount base as missing —
+    # analogous to how test_pipeline_api's
+    # ``test_pipeline_local_processing_rejects_missing_archive_mount_root``
+    # stubs the helper.
+    fake_mount_base = str(tmp_path / "Volumes_NAS_Photos")
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas", "user": "me",
+        "port": 22, "ssh_key": "", "bwlimit_kbps": 0,
+        "remote_path": "/volume1/Photography",
+        "mount_path": fake_mount_base,
+    }
+    from move import build_remote_move_spec
+    spec = build_remote_move_spec(target, "", "/usr/bin/rsync")
+    ra = {
+        "target": target,
+        "rsync_bin": "/usr/bin/rsync",
+        "remote": spec,
+        "ssh_base": target["remote_path"],
+        "mount_base": fake_mount_base,
+    }
+
+    monkeypatch.setattr(
+        _pj, "_missing_archive_mount_root",
+        lambda path: (
+            "/Volumes/NAS"
+            if path.startswith(fake_mount_base) else None
+        ),
+    )
+
+    # rsync must NEVER run — the batch is rejected before makedirs and
+    # before any transport call.
+    def _refuse_rsync(*a, **kw):
+        raise AssertionError(
+            "rsync should not run when the mount root is absent"
+        )
+
+    monkeypatch.setattr(_move, "_run_rsync_streamed", _refuse_rsync)
+    monkeypatch.setattr(_move, "_remote_mkdir_p", lambda r, p: (True, ""))
+    monkeypatch.setattr(
+        _move, "remote_verify_files",
+        lambda *a, **kw: (
+            (_ for _ in ()).throw(
+                AssertionError("verify should not run either")
+            )
+        ),
+    )
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra, verify_by_hash=True,
+        ),
+    )
+
+    # Every discovered card file lands in ``failed`` with the
+    # mount-root reason; the guarded ``os.makedirs`` never ran, so no
+    # shadow tree exists under the fake mount base.
+    assert result["failed"] == 2, result
+    assert result["copied"] == 0, result
+    assert result["skipped_duplicate"] == 0, result
+    assert result["safe_to_format"] is False, result
+    assert all(
+        "/Volumes/NAS" in u["reason"] and "not available" in u["reason"]
+        for u in result["unsafe_files"] if u["path"] != "<remote>"
+    ), result["unsafe_files"]
+    assert not os.path.exists(fake_mount_base), (
+        f"shadow directory was created at {fake_mount_base}: "
+        "the preflight failed to prevent os.makedirs"
+    )
