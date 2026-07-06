@@ -1236,8 +1236,17 @@ function setCropField(key, raw) {
     var img = document.getElementById('editorImg');
     if (img && img.clientWidth && img.clientHeight) {
       var k = editorState.cropAspect * img.clientHeight / img.clientWidth;
-      if (key === 'w') crop.h = crop.w / k;
-      else crop.w = crop.h * k;
+      // Cap the edited dimension so the paired one still fits in the frame.
+      // Otherwise clampCrop would clamp only the overflowing side (w=100 on
+      // a 1:1 lock over a 2:1 landscape → h clipped to 1, w stays 1) and
+      // silently break the lock while the ratio button remains active.
+      if (key === 'w') {
+        crop.w = Math.min(crop.w, k);
+        crop.h = crop.w / k;
+      } else {
+        crop.h = Math.min(crop.h, 1 / k);
+        crop.w = crop.h * k;
+      }
     }
   }
   editorState.recipe.crop = clampCrop(crop);

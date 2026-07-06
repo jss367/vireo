@@ -19891,7 +19891,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             size = int(request.args.get("size", "1920"))
         except ValueError:
             return "Invalid size", 400
-        size = max(256, min(16384, size))
+        # The overlay is stretched over the displayed editor image, which the
+        # client caps at the overlay-preview size, so allocating a native-res
+        # RGBA buffer here would be hundreds of MB to over 1 GB with no
+        # visible benefit. Keep the mask endpoint at the overlay cap; only
+        # /edit-preview needs the raised limit for true 1:1 zoom.
+        size = max(256, min(3840, size))
 
         raw_recipe = request.args.get("recipe")
         if raw_recipe:
