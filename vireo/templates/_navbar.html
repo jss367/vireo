@@ -9894,42 +9894,30 @@ function dismissNewImagesBanner() {
   }
 }
 
-function _sleepNewImages(ms) {
-  return new Promise(function(resolve) { setTimeout(resolve, ms); });
-}
-
 async function createPipelineFromNewImages(btn) {
   if (btn && btn.disabled) return;
-  const originalText = btn ? btn.textContent : '';
   if (btn) {
     btn.disabled = true;
-    btn.textContent = 'Preparing...';
+    btn.textContent = 'Opening...';
   }
+  // One POST, then navigate. When the walk that produced the banner count is
+  // still cached (the common case), this returns the snapshot instantly and
+  // we deep-link to it. If the server is still walking (202) — or anything
+  // goes wrong — land on the pipeline page in its "preparing" state, which
+  // owns the polling and shows live walk progress. Never poll here holding
+  // the user on a frozen button, and never dump them on a blank wizard with
+  // no explanation.
   try {
-    const maxAttempts = 20;  // About one minute at 3s intervals.
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const r = await fetch('/api/workspaces/active/new-images/snapshot', {method: 'POST'});
-      if (r.status === 202) {
-        if (btn) btn.textContent = 'Still preparing...';
-        await _sleepNewImages(3000);
-        continue;
-      }
-      if (!r.ok) throw new Error('snapshot failed');
+    const r = await fetch('/api/workspaces/active/new-images/snapshot', {method: 'POST'});
+    if (r.ok && r.status !== 202) {
       const data = await r.json();
-      if (!data || data.snapshot_id == null) throw new Error('snapshot missing');
-      window.location.href = `/pipeline?new_images=${data.snapshot_id}`;
-      return;
+      if (data && data.snapshot_id != null) {
+        window.location.href = `/pipeline?new_images=${data.snapshot_id}`;
+        return;
+      }
     }
-    throw new Error('snapshot timed out');
-  } catch (e) {
-    // Fall back to the existing behavior — blank pipeline wizard.
-    window.location.href = '/pipeline';
-  } finally {
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = originalText || 'Create a pipeline';
-    }
-  }
+  } catch (e) { /* fall through to the preparing page */ }
+  window.location.href = '/pipeline?new_images=preparing';
 }
 
 // Run on page load and every 60s. Banner dismissal is per-workspace via
