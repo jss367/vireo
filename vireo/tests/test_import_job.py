@@ -5834,9 +5834,17 @@ def test_remote_import_refuses_when_mount_root_absent(tmp_path, monkeypatch):
     assert result["copied"] == 0, result
     assert result["skipped_duplicate"] == 0, result
     assert result["safe_to_format"] is False, result
+    # Filter out the ``<remote>`` honesty-gate marker so a regression that
+    # drops the per-file mount-root reason (or funnels everything into a
+    # ``<remote>`` entry) does not make the ``all()`` below vacuously true
+    # over an empty generator; assert the filtered subset is non-empty first.
+    non_remote = [
+        u for u in result["unsafe_files"] if u["path"] != "<remote>"
+    ]
+    assert non_remote, result["unsafe_files"]
     assert all(
         "/Volumes/NAS" in u["reason"] and "not available" in u["reason"]
-        for u in result["unsafe_files"] if u["path"] != "<remote>"
+        for u in non_remote
     ), result["unsafe_files"]
     assert not os.path.exists(fake_mount_base), (
         f"shadow directory was created at {fake_mount_base}: "
@@ -5935,3 +5943,77 @@ def test_remote_import_case_only_basename_collision_on_ci_destination(
     folded_rows = {r["filename"].casefold() for r in rows}
     assert len(folded_rows) == 2, [dict(r) for r in rows]
     assert result["safe_to_format"] is True, result
+
+
+def test_remote_import_cancel_mid_batch_does_not_start_rsync(
+        tmp_path, monkeypatch):
+    """When Stop is requested inside the per-file queue-building loop of a
+    remote import — after one or more files have been appended to
+    ``to_transfer`` but before the per-batch rsync fires — the guard on
+    ``if to_transfer:`` must keep the network transfer from starting. The
+    remote path decouples "decide to copy" (the queue-building loop) from
+    "actually copied" (the post-loop rsync), so the mid-batch cancel-break
+    on its own leaves queued files that would still be sent by the block
+    below. Queued files that never rsync stay on the card and get picked
+    up by the next run. See PR #1113 review."""
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+    _install_fake_remote_rsync(monkeypatch, calls, verify=None)
+
+    # Two files in the SAME batch (same date -> same rel folder) so the
+    # per-file queue loop iterates twice within one batch: file 1 gets
+    # queued into ``to_transfer``, then the runner flips ``cancelled`` on
+    # file 1's ``importing`` progress event, and file 2's iteration sees
+    # the cancel and breaks. Without the guard, the rsync block below
+    # would still copy file 1 after Stop was requested.
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+        ("DSC_0002.jpg", datetime(2026, 7, 3, 10, 5, 0), "green"),
+    ])
+
+    # ``CancelAfterFirstBatchRunner`` matches its trigger fragment against
+    # the progress event's ``phase`` and flips cancelled inside
+    # ``push_event`` — so file 1's ``_emit(f"{rel}: importing", …)`` at
+    # the top of its loop body cancels the runner before file 2's
+    # iteration, which is exactly the "queued but not yet sent" race the
+    # guard exists to close.
+    runner = CancelAfterFirstBatchRunner("2026/2026-07-03: importing")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    result = run_import_job(
+        _make_job(), runner, db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra, verify_by_hash=True,
+        ),
+    )
+
+    assert result["cancelled"] is True, result
+    # No rsync call — neither the flat batch transfer nor a collision-
+    # renamed single-file transfer may fire once ``cancelled`` is set.
+    assert calls["rsync"] == [], calls["rsync"]
+    # And no card->NAS verification either (verification only runs for
+    # files that were actually transferred).
+    assert calls["verify"] == 0, calls
+    assert result["copied"] == 0, result
+    assert result["failed"] == 0, result
+    # A cancelled run must not report ``safe_to_format=True`` — the
+    # honesty gate below already covers this, but assert it directly so
+    # a regression that also drops the cancel guard is caught here.
+    assert result["safe_to_format"] is False, result
+
+    # Nothing landed on the mount either. The fake rsync copies each
+    # src file into ``mount_base/rel`` — after cancel there must be no
+    # such file under the batch's dest folder.
+    dest_dir = os.path.join(ra["mount_base"], "2026", "2026-07-03")
+    landed = (
+        os.listdir(dest_dir) if os.path.isdir(dest_dir) else []
+    )
+    assert landed == [], (
+        f"no card files should have landed on the mount after "
+        f"cancellation, but found: {landed}"
+    )

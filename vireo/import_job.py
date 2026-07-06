@@ -1099,7 +1099,17 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
         # flip safe_to_format green over storage we never touched. See PR
         # #1113 review.
         landed = []   # (dest_path, card_source, src_hash, src_size, src_mtime_ns)
-        if to_transfer:
+        # Honor cancellation before any network transfer starts. The break
+        # inside the per-file queue-building loop above sets ``cancelled``
+        # and exits the loop, but ``to_transfer`` still holds files that
+        # were queued (decided but not yet sent). Without this guard the
+        # rsync block below would start copying a partial batch after Stop
+        # was requested. Queued files that never rsync stay on the card
+        # and will be picked up by the next run; ``dup_skipped`` /
+        # ``adopted_paths`` for files already visible on the mount are
+        # still cataloged by the batch-scan block below. See PR #1113
+        # review.
+        if to_transfer and not cancelled:
             # ``--ignore-existing`` protects against basename-race overwrites:
             # two remote import jobs (or a job racing another writer) that
             # both passed the earlier mount-side os.path.exists check for
