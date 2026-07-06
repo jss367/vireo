@@ -1162,11 +1162,46 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                     )
                     # scan() can legitimately leave ``file_hash`` NULL
                     # (large files, prior partial scan, tests that stub
-                    # the hash step). Only fail on a positive mismatch —
-                    # two set hashes that disagree. A missing scan hash
-                    # doesn't prove anything, so don't turn it into a
-                    # spurious failure.
-                    if scan_h is not None and scan_h != src_h_norm:
+                    # the hash step, or a read/permission failure that
+                    # scanner suppresses). A missing scan hash doesn't
+                    # prove anything on its own, but silently accepting
+                    # would let a stale/unreadable mount stamp ``ok``
+                    # under ``verify_by_hash`` — the NAS checksum only
+                    # proves card bytes reached the SSH target, not that
+                    # the cataloged mount path holds those bytes. Rehash
+                    # the mount file directly as the last-line check;
+                    # mirrors the local path's ``_rehash_dest_or_none``
+                    # fallback. See PR #1113 review.
+                    if scan_h is None and src_h_norm is not None:
+                        try:
+                            mount_hash = compute_file_hash(dest_path)
+                        except OSError:
+                            mount_hash = None
+                        mount_norm = (
+                            None if mount_hash == EMPTY_FILE_SHA256
+                            else mount_hash
+                        )
+                        if mount_norm is None or mount_norm != src_h_norm:
+                            copied -= 1
+                            if params.verify_by_hash:
+                                verified -= 1
+                            _counts(rel)["copied"] -= 1
+                            _fail(
+                                rel, dest_path,
+                                "scan wrote no mount row hash and a re-"
+                                "read of the mount file "
+                                + ("disagrees with the source hash"
+                                   if not params.verify_by_hash else
+                                   "disagrees with the hash verified "
+                                   "on the NAS")
+                                + " (mount base is likely stale, "
+                                "unreadable, or misconfigured)",
+                            )
+                            landed = [
+                                e for e in landed if e[0] != dest_path
+                            ]
+                            continue
+                    elif scan_h is not None and scan_h != src_h_norm:
                         copied -= 1
                         if params.verify_by_hash:
                             verified -= 1
@@ -1213,34 +1248,55 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                          os.path.basename(dest_path)),
                     ).fetchone()
                     if companion is not None:
-                        if params.verify_by_hash:
-                            try:
-                                mount_hash = compute_file_hash(dest_path)
-                            except OSError:
-                                mount_hash = None
-                            src_h_norm = (
-                                None if src_hash == EMPTY_FILE_SHA256
-                                else src_hash
-                            )
-                            mount_norm = (
-                                None if mount_hash == EMPTY_FILE_SHA256
-                                else mount_hash
-                            )
-                            if mount_norm != src_h_norm:
-                                copied -= 1
+                        # The paired JPEG's own photo row is gone by
+                        # design (pair-scan merges it into the RAW
+                        # primary), so the non-companion branch above
+                        # can't cross-check its bytes for us. Hash the
+                        # mount JPEG here regardless of
+                        # ``verify_by_hash`` — the non-companion branch
+                        # compares ``scan_h`` vs ``src_h_norm`` even in
+                        # no-verify mode as a stale-mount catalog-
+                        # integrity guard, and paired JPEGs need the
+                        # same protection or a stale/misconfigured
+                        # mount with a same-named but different JPEG
+                        # would enqueue after-import processing against
+                        # the wrong companion. Only the
+                        # ``verified``/``hash_status`` accounting is
+                        # gated behind ``verify_by_hash``. See PR #1113
+                        # review.
+                        try:
+                            mount_hash = compute_file_hash(dest_path)
+                        except OSError:
+                            mount_hash = None
+                        src_h_norm = (
+                            None if src_hash == EMPTY_FILE_SHA256
+                            else src_hash
+                        )
+                        mount_norm = (
+                            None if mount_hash == EMPTY_FILE_SHA256
+                            else mount_hash
+                        )
+                        if mount_norm != src_h_norm:
+                            copied -= 1
+                            if params.verify_by_hash:
                                 verified -= 1
-                                _counts(rel)["copied"] -= 1
-                                _fail(
-                                    rel, dest_path,
-                                    "paired companion mount bytes do "
-                                    "not match the hash verified on "
-                                    "the NAS (mount base is likely "
-                                    "stale or misconfigured)",
-                                )
-                                landed = [
-                                    e for e in landed if e[0] != dest_path
-                                ]
-                                continue
+                            _counts(rel)["copied"] -= 1
+                            _fail(
+                                rel, dest_path,
+                                "paired companion mount bytes do "
+                                "not match the source hash (mount "
+                                "base is likely stale or "
+                                "misconfigured)"
+                                if not params.verify_by_hash else
+                                "paired companion mount bytes do "
+                                "not match the hash verified on "
+                                "the NAS (mount base is likely "
+                                "stale or misconfigured)",
+                            )
+                            landed = [
+                                e for e in landed if e[0] != dest_path
+                            ]
+                            continue
                         # JPEG bytes are represented by the RAW row's
                         # companion_path — accept as landed; leave the
                         # copied/verified counters alone. The RAW row is

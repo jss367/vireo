@@ -5142,6 +5142,228 @@ def test_remote_import_result_carries_imported_photo_ids(
     assert rerun_result["skipped_duplicate"] == 2
 
 
+def test_remote_import_null_scan_hash_but_mount_matches_still_ok(
+        tmp_path, monkeypatch):
+    """When scan() creates the photo row but leaves ``file_hash`` NULL —
+    e.g. scanner's hash step was skipped or the row survives from a prior
+    partial scan — the remote path must fall back to re-hashing the
+    mount file (mirroring the local path's ``_rehash_dest_or_none``)
+    instead of trusting the stamp behind ``verify_by_hash`` on a row
+    whose bytes we haven't confirmed. When the re-hash matches the
+    source, accept the landing and stamp ``ok``. Guards against
+    regression on the fresh path where the mount is fine. See PR #1113
+    review."""
+    import scanner as _scanner
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+    # Fake rsync copies card -> mount with matching bytes.
+    _install_fake_remote_rsync(monkeypatch, calls, verify=None)
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+
+    db_path = str(tmp_path / "test.db")
+
+    # Wrap scan() to null out the file_hash the scanner wrote, simulating
+    # the "row exists but hash unknown" case Codex flagged.
+    orig_scan = _scanner.scan
+
+    def scan_then_null_hash(destination, db_arg, **kw):
+        rv = orig_scan(destination, db_arg, **kw)
+        db_arg.conn.execute(
+            "UPDATE photos SET file_hash = NULL "
+            "WHERE filename = 'DSC_0001.jpg'"
+        )
+        db_arg.conn.commit()
+        return rv
+
+    monkeypatch.setattr(_scanner, "scan", scan_then_null_hash)
+
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra, verify_by_hash=True,
+        ),
+    )
+
+    # Rehash matched the source hash, so the landing is accepted and
+    # stamped ok. copied=1, failed=0.
+    assert result["failed"] == 0, result
+    assert result["copied"] == 1, result
+    assert result["safe_to_format"] is True, result
+    rows = {r["filename"]: r for r in _photo_rows(db)}
+    assert rows["DSC_0001.jpg"]["hash_status"] == "ok", dict(
+        rows["DSC_0001.jpg"])
+
+
+def test_remote_import_null_scan_hash_with_stale_mount_fails(
+        tmp_path, monkeypatch):
+    """The key Codex case: scan() leaves ``file_hash`` NULL AND the
+    mount file the row points at is unreadable/gone/different by the
+    time we try to confirm it. Without a re-hash fallback the code would
+    fall through to stamp ``hash_status='ok'`` under ``verify_by_hash``
+    on a row whose bytes we never confirmed (the NAS checksum only
+    proves the card bytes reached the SSH target, not that the mount
+    path holds those bytes). Must fail the landing and keep
+    safe_to_format False. See PR #1113 review."""
+    import scanner as _scanner
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+    _install_fake_remote_rsync(monkeypatch, calls, verify=None)
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+
+    db_path = str(tmp_path / "test.db")
+
+    # Wrap scan() to null the file_hash AND delete the mount file so the
+    # rehash fallback returns None.
+    orig_scan = _scanner.scan
+    mount_file = os.path.join(
+        ra["mount_base"], "2026", "2026-07-03", "DSC_0001.jpg",
+    )
+
+    def scan_then_null_and_wipe(destination, db_arg, **kw):
+        rv = orig_scan(destination, db_arg, **kw)
+        db_arg.conn.execute(
+            "UPDATE photos SET file_hash = NULL "
+            "WHERE filename = 'DSC_0001.jpg'"
+        )
+        db_arg.conn.commit()
+        if os.path.exists(mount_file):
+            os.unlink(mount_file)
+        return rv
+
+    monkeypatch.setattr(_scanner, "scan", scan_then_null_and_wipe)
+
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra, verify_by_hash=True,
+        ),
+    )
+
+    assert result["copied"] == 0, result
+    assert result["failed"] == 1, result
+    assert result["safe_to_format"] is False, result
+    assert any(
+        "scan wrote no mount row hash" in u["reason"]
+        for u in result["unsafe_files"]
+    ), result["unsafe_files"]
+    # No hash_status='ok' stamp — the guard must have short-circuited
+    # before update_photo_hash_check ran.
+    rows = {r["filename"]: r for r in _photo_rows(db)}
+    if "DSC_0001.jpg" in rows:
+        assert rows["DSC_0001.jpg"]["hash_status"] != "ok", dict(
+            rows["DSC_0001.jpg"])
+
+
+def test_remote_import_paired_jpeg_no_verify_fails_on_mount_mismatch(
+        tmp_path, monkeypatch):
+    """Companion parity with the non-companion branch: without
+    ``verify_by_hash`` the non-companion path still cross-checks the
+    scanned row's ``file_hash`` against ``src_hash`` as a stale-mount
+    catalog-integrity guard. Paired JPEGs (whose own row is deleted by
+    pair-merge) must get the same protection — otherwise a stale/
+    misconfigured mount with same-named but different JPEG bytes would
+    be enqueued for after-import processing against the wrong companion
+    even in no-verify mode. See PR #1113 review."""
+    import move as _move
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+
+    # Seed an existing RAW at the mount + catalog row so scan()'s
+    # pair-merge will fold the just-landed JPEG into the RAW's
+    # companion_path.
+    mount_dir = os.path.join(ra["mount_base"], "2026", "2026-07-03")
+    os.makedirs(mount_dir, exist_ok=True)
+    raw_seed = os.path.join(mount_dir, "_seed.jpg")
+    Image.new("RGB", (16, 16), "red").save(raw_seed)
+    raw_bytes = open(raw_seed, "rb").read() + b"RAW-SENSOR-DATA"
+    os.unlink(raw_seed)
+    raw_path = os.path.join(mount_dir, "DSC_0800.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(raw_bytes)
+
+    # Fake rsync writes WRONG bytes for the JPEG at the mount (the
+    # stale/misconfigured-mount stand-in Codex called out).
+    def fake_rsync_wrong_bytes(
+            src_path, dest_spec, rsync_flags, total_files,
+            progress_cb, rsync_bin="rsync", extra_args=None,
+            src_specs=None, src_specs_dest_is_dir=True, **kw):
+        calls["rsync"].append({
+            "src_specs": list(src_specs or []),
+            "extra_args": list(extra_args or []),
+        })
+        ssh_path = dest_spec.split(":", 1)[1]
+        rel = os.path.relpath(ssh_path, ra["ssh_base"])
+        if src_specs_dest_is_dir:
+            mount_dst = os.path.join(ra["mount_base"], rel)
+            os.makedirs(mount_dst, exist_ok=True)
+            for s in src_specs:
+                Image.new("RGB", (16, 16), "yellow").save(
+                    os.path.join(mount_dst, os.path.basename(s)))
+        else:
+            mount_file = os.path.join(ra["mount_base"], rel)
+            os.makedirs(os.path.dirname(mount_file), exist_ok=True)
+            Image.new("RGB", (16, 16), "yellow").save(mount_file)
+        return (0, "", False)
+
+    monkeypatch.setattr(_move, "_run_rsync_streamed", fake_rsync_wrong_bytes)
+    monkeypatch.setattr(_move, "_remote_mkdir_p", lambda r, p: (True, ""))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES (?, ?, 'ok')",
+        (mount_dir, os.path.basename(mount_dir)),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, extension, file_size,"
+        " file_hash) VALUES (?, ?, '.nef', ?, ?)",
+        (fid, "DSC_0800.NEF", len(raw_bytes), "deadbeef" * 8),
+    )
+    db.conn.commit()
+
+    card = _make_card(tmp_path, [
+        ("DSC_0800.jpg", datetime(2026, 7, 3, 10, 0, 0), "green"),
+    ])
+
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra, verify_by_hash=False,
+        ),
+    )
+
+    # Even without verify_by_hash, the companion-branch mount-hash
+    # cross-check must fire — same guard the non-companion branch runs.
+    assert result["copied"] == 0, result
+    assert result["failed"] == 1, result
+    assert result["safe_to_format"] is False, result
+    assert any(
+        "paired companion mount bytes" in u["reason"]
+        and "source hash" in u["reason"]
+        for u in result["unsafe_files"]
+    ), result["unsafe_files"]
+
+
 def test_result_carries_imported_photo_ids(tmp_path):
     """The after-import chaining hook builds the process job's collection
     from the freshly imported rows; the result must name them."""
