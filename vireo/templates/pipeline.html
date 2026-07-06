@@ -1420,31 +1420,72 @@ document.addEventListener('DOMContentLoaded', refreshPipelineUI);
 
 // -- New images (Stage 1 third option) --
 var newImagesSnapshotId = null;
+// True while a snapshot-creation poll loop is running, so re-clicking the
+// card (or a banner deep-link racing a click) can't start a second loop.
+var _newImagesSnapshotCreating = false;
 
 function sleepNewImagesSnapshot(ms) {
   return new Promise(function(resolve) { setTimeout(resolve, ms); });
 }
 
 async function createNewImagesSnapshotWithRetry(onPending) {
-  var maxAttempts = 20;  // About one minute at 3s intervals.
-  for (var attempt = 0; attempt < maxAttempts; attempt++) {
+  // Poll until the server-side walk reaches a terminal state — snapshot
+  // created (200) or walk failed (500). No attempt cap: the walk over a
+  // large network volume can take minutes, and giving up early is exactly
+  // what used to strand users on a blank wizard with no explanation. Each
+  // 202 carries live walk progress (files_checked / new_count_so_far) which
+  // is passed to onPending so the caller can show real numbers instead of
+  // an opaque spinner. Navigating away naturally stops the loop.
+  for (;;) {
     var resp = await fetch('/api/workspaces/active/new-images/snapshot', {method: 'POST'});
     if (resp.status === 202) {
-      if (typeof onPending === 'function') onPending(attempt);
+      var progress = null;
+      try { progress = await resp.json(); } catch (e) { /* keep polling */ }
+      if (typeof onPending === 'function') onPending(progress || {});
       await sleepNewImagesSnapshot(3000);
       continue;
     }
-    if (!resp.ok) throw new Error('snapshot failed');
+    if (!resp.ok) {
+      var errMsg = 'snapshot failed';
+      try {
+        var errBody = await resp.json();
+        if (errBody && errBody.error) errMsg = errBody.error;
+      } catch (e) { /* keep the generic message */ }
+      throw new Error(errMsg);
+    }
     var data = await resp.json();
     if (!data || data.snapshot_id == null) throw new Error('snapshot missing');
     return data.snapshot_id;
   }
-  throw new Error('snapshot timed out');
 }
 
 async function initNewImagesCard() {
   var params = new URLSearchParams(window.location.search);
   var deepLinkId = params.get('new_images');
+  if (deepLinkId === 'preparing') {
+    // Banner click while the server-side walk was still running. The navbar
+    // navigates here immediately instead of freezing on the banner button;
+    // this page owns the wait. Show the card right away in a visible
+    // preparing state — selectSourceMode runs the unbounded snapshot poll
+    // and streams walk progress into the status line and card subtitle.
+    renderNewImagesCardPreparing();
+    await selectSourceMode('new_images');
+    if (newImagesSnapshotId != null) {
+      history.replaceState(null, '', '/pipeline?new_images=' + newImagesSnapshotId);
+      try {
+        var pr = await fetch('/api/workspaces/active/new-images/snapshot/' + newImagesSnapshotId);
+        if (pr.ok) {
+          var psnap = await pr.json();
+          renderNewImagesCard(psnap.file_count, psnap.folder_paths || []);
+        }
+      } catch (e) { /* counts are cosmetic; the snapshot itself is set */ }
+    } else {
+      // selectSourceMode already put the failure reason in the status line.
+      document.getElementById('newImagesCardSubtitle').textContent =
+        ' — could not build the list, click to retry';
+    }
+    return;
+  }
   if (deepLinkId) {
     try {
       var r = await fetch('/api/workspaces/active/new-images/snapshot/' + encodeURIComponent(deepLinkId));
@@ -1503,6 +1544,17 @@ async function probeNewImagesCard() {
   } finally {
     _newImagesProbeInFlight = false;
   }
+}
+
+function renderNewImagesCardPreparing() {
+  var card = document.getElementById('sourceOptionNewImages');
+  var orSep = document.getElementById('sourceOrNewImages');
+  if (!card || !orSep) return;
+  card.style.display = '';
+  orSep.style.display = '';
+  document.getElementById('newImagesCardSubtitle').textContent =
+    ' — finding new images…';
+  document.getElementById('newImagesFolderList').innerHTML = '';
 }
 
 function renderNewImagesCard(count, folders) {
@@ -2698,8 +2750,11 @@ async function selectSourceMode(mode) {
   // so stale state from the previous mode can't slip through during await.
   updateStartButton();
 
-  if (mode === 'new_images' && newImagesSnapshotId === null) {
-    // User is selecting the card directly (no deep-link) — freeze the list now.
+  if (mode === 'new_images' && newImagesSnapshotId === null
+      && !_newImagesSnapshotCreating) {
+    // Freeze the list now (card click or banner deep-link). The guard stops
+    // a second click from stacking a parallel poll loop on the first one.
+    _newImagesSnapshotCreating = true;
     var actionStatus = document.getElementById('pipelineActionStatus');
     var snapshotError = null;
     try {
@@ -2707,14 +2762,31 @@ async function selectSourceMode(mode) {
         actionStatus.textContent = 'Preparing new-images snapshot...';
         actionStatus.className = 'status-msg';
       }
-      newImagesSnapshotId = await createNewImagesSnapshotWithRetry(function() {
-        if (actionStatus) {
-          actionStatus.textContent = 'Still preparing new-images snapshot...';
+      newImagesSnapshotId = await createNewImagesSnapshotWithRetry(function(progress) {
+        // Show the walk's real totals so a multi-minute scan of a big
+        // library reads as work happening, not a stuck page.
+        var text = 'Scanning your folders for new images…';
+        if (progress && progress.files_checked > 0) {
+          text = 'Scanning for new images — '
+            + progress.files_checked.toLocaleString() + ' files checked, '
+            + (progress.new_count_so_far || 0).toLocaleString() + ' new so far…';
+        }
+        if (actionStatus) actionStatus.textContent = text;
+        var subtitle = document.getElementById('newImagesCardSubtitle');
+        if (subtitle && progress && progress.files_checked > 0) {
+          subtitle.textContent = ' — '
+            + (progress.new_count_so_far || 0).toLocaleString()
+            + ' found so far…';
         }
       });
+      if (actionStatus) actionStatus.textContent = '';
     } catch (e) {
       // Leave snapshot id null; submit will fail validation via updateStartButton.
-      snapshotError = 'New-images snapshot is still being prepared. Try again in a moment.';
+      snapshotError = 'Could not build the new-images list: '
+        + ((e && e.message) ? e.message : 'unknown error')
+        + '. Click the card to retry.';
+    } finally {
+      _newImagesSnapshotCreating = false;
     }
     // Snapshot resolved (or failed) — refresh start-button state.
     updateStartButton();

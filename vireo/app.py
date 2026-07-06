@@ -2142,14 +2142,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     app._log_broadcaster = LogBroadcaster(buffer_size=500)
     app._log_broadcaster.install()
 
-    # Per-workspace monotonic timestamp recording when the current snapshot
-    # POST forced a fresh recompute. Subsequent polls on the same request
-    # compare the cache entry's set_at to this value: if the entry was
-    # written after we invalidated, it's the fresh walk's result and can be
-    # reused; if it predates our invalidation, it's a stale navbar probe and
-    # must be re-walked. Cleared when a snapshot is successfully returned.
-    app._new_images_snapshot_kickoff_at = {}
-    app._new_images_snapshot_kickoff_lock = threading.Lock()
+    # Live progress of the most recent new-images walk, keyed by
+    # (db_path, workspace_id). Written by the walk's progress callback and
+    # read by the GET/POST endpoints so a ``pending`` response can say
+    # "38,000 files checked, 2,100 new so far" instead of a bare spinner —
+    # the transparency the banner-click path needs on multi-minute walks
+    # over large network volumes. Values are per-spawn dicts; a new walk
+    # replaces the key wholesale, so readers never see torn state.
+    app._new_images_walk_progress = {}
 
     # Self-healing background backfill of missing working copies. RAW (and
     # oversized JPEG) imports need a JPEG working copy at
@@ -7741,51 +7741,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             tabs = list(DEFAULT_TABS)
         return jsonify({"tabs": tabs, "all_pages": ALL_PAGES})
 
-    @app.route("/api/workspaces/active/new-images")
-    def api_workspace_new_images():
-        db = _get_db()
-        ws_id = db._active_workspace_id
-        if ws_id is None:
-            return jsonify({"workspace_id": None, "new_count": 0, "per_root": [], "sample": []})
+    def _new_images_walk_fns(db, ws_id):
+        """Return ``(compute, on_spawn)`` for a transparent background
+        new-images walk, shared by the navbar probe and the snapshot POST.
 
-        def response_payload(result):
-            """Return a small client payload while keeping full paths in cache."""
-            payload = dict(result)
-            payload["workspace_id"] = ws_id
-            sample = payload.get("sample") or []
-            payload["sample"] = sample[:5]
-            payload.pop("sample_complete", None)
-            return payload
+        The walk always runs with ``sample_limit=None`` so the cached result
+        carries the complete list of new-file paths. That is what lets a
+        banner click turn straight into a snapshot of exactly the files the
+        banner advertised, instead of forcing a second multi-minute re-walk
+        of the whole library. Memory cost is one path string per *new* file,
+        which is small even for a full re-import.
 
-        cache = db._new_images_cache
-        db_path = db._db_path
-        cached = cache.get(db_path, ws_id)
-        if cached is not None:
-            return jsonify(response_payload(cached))
-
-        # If a recent compute failed and we're still inside the backoff
-        # window, surface the error instead of kicking off another walk.
-        # Without this, the navbar's pending re-poll keeps hammering a
-        # broken volume / DB and the UI is stuck "checking" forever.
-        recent_err = cache.get_recent_error(db_path, ws_id)
-        if recent_err is not None:
-            return jsonify({
-                "workspace_id": ws_id,
-                "new_count": None,
-                "per_root": [],
-                "sample": [],
-                "error": recent_err,
-            })
-
-        # Cache cold: run the filesystem walk in a background thread so the
-        # navbar's poll doesn't tie up a Flask worker for seconds while
-        # os.walk grinds through a large library. Wait briefly so small
-        # libraries (and the test suite's tmp_path filesystems) still
-        # observe a real count synchronously; longer walks return
-        # ``pending: true`` and the front-end re-polls.
+        ``on_spawn`` surfaces the walk as an ephemeral job in the bottom
+        panel and mirrors its progress into ``app._new_images_walk_progress``
+        so pending API responses can report live totals.
+        """
         from db import Database
         from new_images import count_new_images_for_workspace
 
+        db_path = db._db_path
         # Shared holder for the cache worker's exception (if any), read by
         # the ephemeral job's work_fn after the cache event fires. Without
         # this, a walk that raises (e.g. unreadable volume, DB error) would
@@ -7799,7 +7773,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             wdb.set_active_workspace(ws_id)
             try:
                 return count_new_images_for_workspace(
-                    wdb, ws_id, sample_limit=5, progress_callback=progress_callback,
+                    wdb, ws_id, sample_limit=None,
+                    progress_callback=progress_callback,
                 )
             except Exception as e:
                 walk_error["exc"] = e
@@ -7816,6 +7791,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         def on_spawn(spawn_event):
             progress_state = {"checked": 0, "found": 0}
+            app._new_images_walk_progress[(db_path, ws_id)] = progress_state
 
             def job_work_fn(job):
                 # Mirror the cache worker's lifecycle. ``spawn_event`` fires
@@ -7862,6 +7838,59 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
             return progress_callback
 
+        return compute, on_spawn
+
+    def _new_images_walk_progress_fields(db_path, ws_id):
+        """Live totals of the current/most recent walk for pending payloads."""
+        progress = app._new_images_walk_progress.get((db_path, ws_id)) or {}
+        return {
+            "files_checked": progress.get("checked", 0),
+            "new_count_so_far": progress.get("found", 0),
+        }
+
+    @app.route("/api/workspaces/active/new-images")
+    def api_workspace_new_images():
+        db = _get_db()
+        ws_id = db._active_workspace_id
+        if ws_id is None:
+            return jsonify({"workspace_id": None, "new_count": 0, "per_root": [], "sample": []})
+
+        def response_payload(result):
+            """Return a small client payload while keeping full paths in cache."""
+            payload = dict(result)
+            payload["workspace_id"] = ws_id
+            sample = payload.get("sample") or []
+            payload["sample"] = sample[:5]
+            payload.pop("sample_complete", None)
+            return payload
+
+        cache = db._new_images_cache
+        db_path = db._db_path
+        cached = cache.get(db_path, ws_id)
+        if cached is not None:
+            return jsonify(response_payload(cached))
+
+        # If a recent compute failed and we're still inside the backoff
+        # window, surface the error instead of kicking off another walk.
+        # Without this, the navbar's pending re-poll keeps hammering a
+        # broken volume / DB and the UI is stuck "checking" forever.
+        recent_err = cache.get_recent_error(db_path, ws_id)
+        if recent_err is not None:
+            return jsonify({
+                "workspace_id": ws_id,
+                "new_count": None,
+                "per_root": [],
+                "sample": [],
+                "error": recent_err,
+            })
+
+        # Cache cold: run the filesystem walk in a background thread so the
+        # navbar's poll doesn't tie up a Flask worker for seconds while
+        # os.walk grinds through a large library. Wait briefly so small
+        # libraries (and the test suite's tmp_path filesystems) still
+        # observe a real count synchronously; longer walks return
+        # ``pending: true`` and the front-end re-polls.
+        compute, on_spawn = _new_images_walk_fns(db, ws_id)
         event = cache.kickoff_compute(db_path, ws_id, compute, on_spawn=on_spawn)
         if event.wait(timeout=0.5):
             cached = cache.get(db_path, ws_id)
@@ -7885,6 +7914,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "per_root": [],
             "sample": [],
             "pending": True,
+            **_new_images_walk_progress_fields(db_path, ws_id),
         })
 
     @app.route("/api/workspaces/active/new-images/snapshot", methods=["POST"])
@@ -7895,86 +7925,57 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return jsonify({"error": "no active workspace"}), 400
         cache = db._new_images_cache
         db_path = db._db_path
-        kickoff_key = (db_path, ws_id)
-        kickoff_at_dict = app._new_images_snapshot_kickoff_at
-        kickoff_at_lock = app._new_images_snapshot_kickoff_lock
 
         def create_snapshot_from_result(result):
             file_paths = list(result.get("sample") or [])
             snap_id = db.create_new_images_snapshot(file_paths)
             folders = sorted({os.path.dirname(p) for p in file_paths})
-            with kickoff_at_lock:
-                kickoff_at_dict.pop(kickoff_key, None)
             return jsonify({
                 "snapshot_id": snap_id,
                 "file_count": len(file_paths),
                 "folders": folders,
             })
 
-        session_ttl_seconds = 120
-        now = time.monotonic()
-        with kickoff_at_lock:
-            request_kickoff_at = kickoff_at_dict.get(kickoff_key)
-            started_snapshot_session = (
-                request_kickoff_at is None
-                or now - request_kickoff_at > session_ttl_seconds
-            )
-            if started_snapshot_session:
-                request_kickoff_at = now
-                kickoff_at_dict[kickoff_key] = request_kickoff_at
+        # Trust a live cached walk. The banner count the user just clicked
+        # came from exactly this cache entry (walks always run with
+        # ``sample_limit=None``), so snapshotting it means the pipeline
+        # covers precisely the set the banner advertised — and the click
+        # resolves instantly instead of forcing a multi-minute re-walk of
+        # the whole library. Files that land on disk after that walk are
+        # simply picked up by a later probe and the banner reappears:
+        # self-healing, and honest about what was processed. Scans and
+        # imports invalidate this cache, so a stale entry can't survive the
+        # very actions that consume new images.
+        cached = cache.get(db_path, ws_id)
+        if cached is not None and cached.get("sample_complete"):
+            return create_snapshot_from_result(cached)
 
         recent_err = cache.get_recent_error(db_path, ws_id)
         if recent_err is not None:
-            with kickoff_at_lock:
-                kickoff_at_dict.pop(kickoff_key, None)
             return jsonify({"error": recent_err}), 500
 
-        # Force the snapshot generation forward before trusting any cache for
-        # a newly-started session. A navbar probe may have begun before the
-        # click but finish after ``request_kickoff_at``; invalidating first
-        # drops that stale write (or makes the in-flight worker stale) before
-        # the cache reuse check below.
-        if started_snapshot_session:
-            cache.invalidate_workspaces(db_path, [ws_id])
-
-        # A cached "sample_complete" result may be there because the navbar
-        # probe ran recently — but the cache is not invalidated when files
-        # are copied into a mapped folder, so ``sample`` can omit images
-        # that arrived after that probe. Only trust the cached sample if
-        # this request's snapshot session already forced a fresh walk and
-        # the entry was written *after* that invalidation.
-        cached = cache.get(db_path, ws_id)
-        entry_set_at = cache.get_entry_set_at(db_path, ws_id)
-        if (cached is not None
-                and cached.get("sample_complete")
-                and entry_set_at is not None
-                and entry_set_at >= request_kickoff_at):
-            return create_snapshot_from_result(cached)
-
-        from new_images import count_new_images_for_workspace
-
-        def compute():
-            from db import Database
-            wdb = Database(db_path)
-            wdb.set_active_workspace(ws_id)
-            return count_new_images_for_workspace(wdb, ws_id, sample_limit=None)
-
-        event = cache.kickoff_compute(db_path, ws_id, compute)
+        # Cache cold (e.g. a scan just invalidated it): kick off — or
+        # coalesce onto — a background walk. ``kickoff_compute`` reuses an
+        # in-flight walk for the current generation, so repeated clicks and
+        # poll loops can never stack walks or restart one mid-flight.
+        # ``on_spawn`` registers the same ephemeral bottom-panel job the
+        # navbar probe gets, so a click-triggered walk is just as visible.
+        compute, on_spawn = _new_images_walk_fns(db, ws_id)
+        event = cache.kickoff_compute(db_path, ws_id, compute, on_spawn=on_spawn)
         if event.wait(timeout=0.5):
             cached = cache.get(db_path, ws_id)
-            entry_set_at = cache.get_entry_set_at(db_path, ws_id)
-            if (cached is not None
-                    and cached.get("sample_complete")
-                    and entry_set_at is not None
-                    and entry_set_at >= request_kickoff_at):
+            if cached is not None and cached.get("sample_complete"):
                 return create_snapshot_from_result(cached)
             recent_err = cache.get_recent_error(db_path, ws_id)
             if recent_err is not None:
-                with kickoff_at_lock:
-                    kickoff_at_dict.pop(kickoff_key, None)
                 return jsonify({"error": recent_err}), 500
 
-        return jsonify({"pending": True}), 202
+        # Still walking. Report live progress so the client can show
+        # "N files checked, M new so far" instead of an opaque spinner.
+        return jsonify({
+            "pending": True,
+            **_new_images_walk_progress_fields(db_path, ws_id),
+        }), 202
 
     @app.route(
         "/api/workspaces/active/new-images/snapshot/<int:snapshot_id>",
