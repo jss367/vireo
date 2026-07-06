@@ -205,11 +205,11 @@ def companion_image_can_replace_raw_result(
 def working_copy_satisfies_recipe_render(photo, recipe, max_size, vireo_dir):
     """Return True when the working copy is large enough for this recipe render.
 
-    Uncropped renders are always satisfiable by the working copy; cropped ones
-    must keep enough rendered long edge after the crop.
+    The working copy qualifies when its rendered long edge (after the recipe's
+    rotation/crop) covers ``min(max_size, original render long edge)`` — for a
+    typical capped request that's just ``max_size``, but a native-resolution
+    request (the editor's 100% zoom) needs the full original.
     """
-    if not recipe or not recipe.get("crop"):
-        return True
     wc_rel = photo_value(photo, "working_copy_path")
     if not wc_rel:
         return False
@@ -292,13 +292,10 @@ def recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
         os.path.splitext(photo_value(photo, "filename"))[1].lower() in RAW_EXTENSIONS
     )
 
-    if not primary_is_raw:
-        if not recipe.get("crop") and _is_working_copy_path(canonical):
-            return canonical, True
-        if recipe.get("crop") and working_copy_satisfies_recipe_render(
-            photo, recipe, max_size, vireo_dir,
-        ):
-            return canonical, _is_working_copy_path(canonical)
+    if not primary_is_raw and working_copy_satisfies_recipe_render(
+        photo, recipe, max_size, vireo_dir,
+    ):
+        return canonical, _is_working_copy_path(canonical)
 
     folder_path = folders.get(photo_value(photo, "folder_id"))
     wc_rel = photo_value(photo, "working_copy_path")
