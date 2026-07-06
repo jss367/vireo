@@ -88,6 +88,29 @@ def test_orphaned_staging_missing_archive_copy_blocks_delete(db, tmp_path):
     assert (vireo_dir / "staging" / "pipeline-2").exists()
 
 
+def test_orphaned_staging_ignores_matching_archive_in_other_workspace(db, tmp_path):
+    active_ws = db._active_workspace_id
+    other_ws = db.create_workspace("Other")
+    vireo_dir = tmp_path / "vireo"
+    staged = _write(
+        vireo_dir / "staging" / "pipeline-other-ws" / "USA" / "2026" / "a.nef"
+    )
+    archive_file = _write(tmp_path / "archive-other" / "USA" / "2026" / "a.nef")
+
+    db.set_active_workspace(other_ws)
+    _catalog_photo(db, archive_file.parent, "a.nef", staged.stat().st_size)
+    db.set_active_workspace(active_ws)
+
+    result = verify_orphaned_staging(
+        db, str(vireo_dir), str(vireo_dir / "staging" / "pipeline-other-ws")
+    )
+
+    assert result["status"] == "needs_import"
+    assert result["can_delete"] is False
+    assert result["unaccounted"] == 1
+    assert result["verified"] == 0
+
+
 def test_orphaned_staging_unreachable_archive_is_not_called_missing(db, tmp_path):
     vireo_dir = tmp_path / "vireo"
     staged = _write(

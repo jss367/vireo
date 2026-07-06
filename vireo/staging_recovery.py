@@ -118,13 +118,16 @@ def _resolve_entry(vireo_dir: str, cleanup_root: str) -> StagingEntry:
 
 
 def _catalog_candidates(db, filename: str, size: int, staging_root: str) -> list[dict]:
+    ws_id = db._ws_id()
     rows = db.conn.execute(
         """SELECT p.id AS photo_id, p.filename, p.file_size, f.path AS folder_path
              FROM photos p
              JOIN folders f ON f.id = p.folder_id
+             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                                      AND wf.workspace_id = ?
             WHERE p.filename = ? AND p.file_size = ?
             ORDER BY f.path, p.id""",
-        (filename, int(size)),
+        (ws_id, filename, int(size)),
     ).fetchall()
     out = []
     for row in rows:
