@@ -2204,6 +2204,12 @@ def _save_remote_target(monkeypatch, tmp_path, **overrides):
     monkeypatch.setattr(
         move_mod, "resolve_rsync_bin", lambda configured="": "/usr/bin/rsync",
     )
+    # resolve_rsync_bin returns any executable path an operator explicitly
+    # configured, so the import/pipeline route additionally verifies the
+    # candidate is GNU rsync (Apple openrsync can't drive SSH). Stub the
+    # check so happy-path tests don't depend on a real GNU rsync being
+    # installed in the CI environment.
+    monkeypatch.setattr(move_mod, "is_gnu_rsync", lambda _rb: True)
     return entry
 
 
@@ -3468,6 +3474,29 @@ def test_import_photos_remote_requires_gnu_rsync(
     _save_remote_target(monkeypatch, tmp_path)
     monkeypatch.setattr(
         move_mod, "resolve_rsync_bin", lambda configured="": None)
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    resp = client.post(
+        "/api/jobs/import-photos", json=_remote_import_body(card))
+    assert resp.status_code == 400
+    assert "rsync" in resp.get_json()["error"].lower()
+
+
+def test_import_photos_remote_rejects_openrsync_before_enqueue(
+        app_and_db, tmp_path, monkeypatch):
+    """resolve_rsync_bin returns any executable file, so a user who
+    explicitly sets Settings→Paths to macOS's /usr/bin/rsync (Apple
+    openrsync) passes the presence check even though openrsync can't
+    drive rsync-over-SSH. The route must additionally consult
+    is_gnu_rsync and fail fast at enqueue instead of starting a job that
+    dies mid-transfer. See PR #1113 review."""
+    import move as move_mod
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        move_mod, "resolve_rsync_bin",
+        lambda configured="": "/usr/bin/rsync")
+    monkeypatch.setattr(move_mod, "is_gnu_rsync", lambda p: False)
     client = app.test_client()
     card = _import_card(tmp_path)
     resp = client.post(

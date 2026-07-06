@@ -1565,6 +1565,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         effective_cfg = _get_db().get_effective_config(cfg.load())
         rsync_bin = move_mod.resolve_rsync_bin(
             effective_cfg.get("rsync_bin", "") or "")
+        # An explicit rsync_bin path in Settings → Paths bypasses the
+        # macOS auto-select guard in resolve_rsync_bin (it just checks
+        # executability), so Apple's /usr/bin/rsync can still land here
+        # even though it can't drive rsync-over-SSH. Fail fast before
+        # enqueue instead of starting a job that dies mid-transfer, the
+        # same way the remote-target list/test routes do.
+        if rsync_bin and not move_mod.is_gnu_rsync(rsync_bin):
+            rsync_bin = None
         if not rsync_bin:
             return None, None, json_error(
                 "No GNU rsync found for remote archiving — macOS's "
