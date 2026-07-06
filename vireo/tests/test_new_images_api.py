@@ -839,15 +839,40 @@ def test_post_snapshot_second_click_reuses_cache_until_invalidated(app_and_db, m
         new_images_module, "count_new_images_for_workspace", counting,
     )
 
+    import time
+
+    def _post_until_ready(client):
+        # Cold-cache POSTs trigger an async walk; under CI load a single
+        # POST can exceed the endpoint's ~500ms fast-path wait and return
+        # 202. Poll like a real client would — this matches
+        # test_post_snapshot_creates_row_with_current_new_images. Repeat
+        # POSTs coalesce onto the in-flight walk, so polling never inflates
+        # call_count.
+        deadline = time.monotonic() + 5.0
+        resp = None
+        while time.monotonic() < deadline:
+            resp = client.post("/api/workspaces/active/new-images/snapshot")
+            if resp.status_code == 200:
+                return resp
+            assert resp.status_code == 202, (
+                f"unexpected status {resp.status_code}: "
+                f"{resp.get_data(as_text=True)}"
+            )
+            time.sleep(0.05)
+        raise AssertionError(
+            f"snapshot never converged; last status "
+            f"{resp and resp.status_code}"
+        )
+
     with app.test_client() as client:
-        first = client.post("/api/workspaces/active/new-images/snapshot")
-        assert first.status_code == 200
+        first = _post_until_ready(client)
         assert first.get_json()["file_count"] == 1
         calls_after_first = call_count["n"]
         assert calls_after_first >= 1
 
         # User copies another image, then clicks again while the cache is
-        # live: same set as advertised, no walk.
+        # live: same set as advertised, no walk. Cache hits are synchronous,
+        # so a single POST is deterministic here.
         _touch_image(str(folder / "IMG_002.JPG"))
         second = client.post("/api/workspaces/active/new-images/snapshot")
         assert second.status_code == 200
@@ -860,8 +885,7 @@ def test_post_snapshot_second_click_reuses_cache_until_invalidated(app_and_db, m
         # A scan/import invalidates the cache; the next click re-walks and
         # sees the new arrival.
         get_shared_cache().invalidate_workspaces(db._db_path, [ws_id])
-        third = client.post("/api/workspaces/active/new-images/snapshot")
-        assert third.status_code == 200
+        third = _post_until_ready(client)
         assert third.get_json()["file_count"] == 2, (
             "post-invalidation click must recompute and pick up the new file"
         )

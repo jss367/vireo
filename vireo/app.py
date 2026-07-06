@@ -7769,9 +7769,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         walk_error = {"exc": None}
 
         def compute(progress_callback=None):
+            # Close explicitly: this connection lives for the whole walk
+            # (minutes on large volumes), and connections left to __del__
+            # accumulate and exhaust the per-process fd limit.
             wdb = Database(db_path)
-            wdb.set_active_workspace(ws_id)
             try:
+                wdb.set_active_workspace(ws_id)
                 return count_new_images_for_workspace(
                     wdb, ws_id, sample_limit=None,
                     progress_callback=progress_callback,
@@ -7779,6 +7782,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             except Exception as e:
                 walk_error["exc"] = e
                 raise
+            finally:
+                wdb.close()
 
         # Surface the walk as an ephemeral job so the user can see it in the
         # bottom panel rather than wondering why their workspace is silent.

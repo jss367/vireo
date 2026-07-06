@@ -6613,6 +6613,21 @@ def test_pipeline_snapshot_excludes_late_arriving_files(tmp_path, monkeypatch):
         f"{classified_names}"
     )
 
+    # The self-healing contract end-to-end: a fresh new-images walk still
+    # reports the late file as new, so the banner re-raises for it.
+    from new_images import count_new_images_for_workspace
+    post_run = count_new_images_for_workspace(
+        verify_db, ws_id, sample_limit=None,
+    )
+    assert post_run["new_count"] == 1, (
+        f"late file must still be new after a snapshot-scoped run, "
+        f"got {post_run}"
+    )
+    assert post_run["sample"] == [str(folder / "IMG_late.JPG")], (
+        f"expected the late file in the new-images sample, got "
+        f"{post_run['sample']}"
+    )
+
 
 def test_pipeline_snapshot_collapses_overlapping_scan_roots(tmp_path, monkeypatch):
     """When the snapshot contains files at both a folder and a nested subfolder
