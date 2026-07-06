@@ -771,16 +771,23 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
         # local path's ``dup_dirs`` per-batch accumulator. See PR #1113 review.
         dup_dirs = set()
         # Mount paths already on disk (retry / crash-recovery adopt) that
-        # this run treats as ``skipped_duplicate``. The restricted scan
-        # below has ``restrict_files=landed_paths | adopted_paths`` — a
-        # mixed batch (some copies + some adopted-on-disk) whose
-        # ``landed_paths`` set is non-empty would otherwise scope the scan
-        # so tightly that the adopted mount files, if not yet cataloged,
-        # never get a photo row. ``copied + skipped_duplicate == discovered``
-        # could then still make a verified remote run report
-        # ``safe_to_format=True`` while the pre-existing-but-uncataloged
-        # file has no row. See PR #1113 review.
-        adopted_paths = set()
+        # this run treats as ``skipped_duplicate``. Maps ``mount_path ->
+        # (source_file, src_hash)`` so the post-scan pass can (a) attribute
+        # a failure back to the card file if the adopted mount file
+        # vanished or was replaced between the adopt-time hash check and
+        # ``scan()`` (scanner drops missing/unreadable files silently
+        # rather than raising) and (b) re-check the mount bytes still
+        # match the source hash before leaving the skip counted. The
+        # restricted scan below has ``restrict_files=landed_paths |
+        # adopted_paths.keys()`` — a mixed batch (some copies + some
+        # adopted-on-disk) whose ``landed_paths`` set is non-empty would
+        # otherwise scope the scan so tightly that the adopted mount
+        # files, if not yet cataloged, never get a photo row.
+        # ``copied + skipped_duplicate == discovered`` could then still
+        # make a verified remote run report ``safe_to_format=True`` while
+        # the pre-existing-but-uncataloged file has no row. See PR #1113
+        # review.
+        adopted_paths = {}
         # dest basename -> src_hash, for intra-batch same-basename collision
         # resolution (FIX 2). Populated as files are queued/skipped.
         claimed_basenames = {}
@@ -979,12 +986,15 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                         dup_skipped += 1
                         _counts(rel)["skipped_duplicate"] += 1
                         claimed_basenames[candidate] = src_hash
-                        # Track the adopted mount path so the restricted
-                        # scan below picks it up (mixed batches with fresh
-                        # copies otherwise scope the scan to landed_paths
-                        # and skip the adopted-but-uncataloged file). See
-                        # PR #1113 review.
-                        adopted_paths.add(cand_mount)
+                        # Track the adopted mount path + source-side hash
+                        # so the restricted scan below picks it up (mixed
+                        # batches with fresh copies otherwise scope the
+                        # scan to landed_paths and skip the adopted-but-
+                        # uncataloged file) and the post-scan validation
+                        # can re-check that the mount bytes still equal
+                        # ``src_hash`` before leaving the skip counted.
+                        # See PR #1113 review.
+                        adopted_paths[cand_mount] = (source_file, src_hash)
                         _record_checker(source_file, dest_folder, src_hash)
                         adopted = True
                         break
@@ -1163,7 +1173,7 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
             # ``landed_paths``, and passing that alone as ``restrict_files``
             # narrows the scan so tightly that the adopted-but-uncataloged
             # files never become photo rows. See PR #1113 review.
-            scan_files = landed_paths | adopted_paths
+            scan_files = landed_paths | set(adopted_paths.keys())
             try:
                 scan(
                     destination, db,
@@ -1415,22 +1425,145 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                     landed = [
                         e for e in landed if e[0] != dest_path
                     ]
-            # Collect photo_ids for adopted-on-disk duplicates that this
-            # run's restricted scan just cataloged. Analogous to how the
-            # local path's ``adopted_dest`` branch pushes the crash-
-            # recovered file's row id into ``imported_photo_ids`` — the
-            # user asked for this photo to be imported, and it's now a
-            # freshly cataloged row, so the after-import chaining hook
-            # should treat it as a new photo. See PR #1113 review.
-            for ap in adopted_paths:
+            # Validate adopted-on-disk duplicates and collect photo_ids
+            # for the ones the restricted scan just cataloged. The
+            # collision-loop accepted these files as ``skipped_duplicate``
+            # because their mount bytes hashed equal to the card at that
+            # instant, but two windows are still open by the time the
+            # scan runs:
+            #   1) The adopted file may have been deleted or replaced
+            #      between the adopt-time hash check and ``scan()`` —
+            #      scanner drops missing/unreadable files silently rather
+            #      than raising, so a vanished adopted file leaves no
+            #      photo row AND no failure, while
+            #      ``copied + skipped_duplicate == discovered`` still lets
+            #      a verified remote import report ``safe_to_format=True``
+            #      over storage that no longer holds those bytes.
+            #   2) A stale/misconfigured mount where scan() populated a
+            #      row from unrelated same-name bytes would leave the
+            #      catalog pointing at the wrong photo while the skip
+            #      count stays.
+            # Treat adopted paths like landed entries: require a direct
+            # or companion row, and re-hash the mount file (or trust
+            # scan's file_hash when it wrote one) to confirm the bytes
+            # still equal ``src_hash`` before leaving the skip counted.
+            # A failed check rolls back the ``skipped_duplicate`` count
+            # so ``failed > 0`` and ``safe_to_format`` goes False. On
+            # success, add the row id to ``imported_photo_ids`` so the
+            # after-import chaining hook treats this photo as new
+            # (mirrors the local path's ``adopted_dest`` bookkeeping).
+            # See PR #1113 review.
+            for ap, (adopt_source, adopt_src_hash) in list(
+                adopted_paths.items()
+            ):
                 row = db.conn.execute(
-                    """SELECT p.id FROM photos p
+                    """SELECT p.id, p.file_hash FROM photos p
                        JOIN folders f ON f.id = p.folder_id
                        WHERE f.path = ? AND p.filename = ?""",
                     (os.path.dirname(ap), os.path.basename(ap)),
                 ).fetchone()
+                row_id = None
+                scan_h_raw = None
+                is_companion = False
                 if row is not None:
-                    imported_photo_ids.add(row["id"])
+                    row_id = row["id"]
+                    scan_h_raw = row["file_hash"]
+                else:
+                    # RAW+JPEG pairing merges the JPEG's photo row into
+                    # the RAW primary and deletes the JPEG's own row, so
+                    # an adopted JPEG whose sibling RAW was scanned in
+                    # this batch legitimately has no row of its own.
+                    # Accept it as landed only via the companion lookup
+                    # — a JPEG paired with an existing RAW is
+                    # represented on the RAW row. The companion row
+                    # doesn't carry the adopted file's ``file_hash``,
+                    # so force a mount re-read below to still cross-
+                    # check the bytes.
+                    companion = db.conn.execute(
+                        """SELECT p.id FROM photos p
+                           JOIN folders f ON f.id = p.folder_id
+                           WHERE f.path = ? AND p.companion_path = ?""",
+                        (os.path.dirname(ap), os.path.basename(ap)),
+                    ).fetchone()
+                    if companion is not None:
+                        row_id = companion["id"]
+                        is_companion = True
+                if row_id is None:
+                    # No direct row, no companion — the adopted file
+                    # vanished or was replaced with a name scan() did
+                    # not consider a companion of anything (scanner
+                    # skipped it). Roll back the skip and fail the
+                    # source file.
+                    skipped_duplicate -= 1
+                    dup_skipped -= 1
+                    _counts(rel)["skipped_duplicate"] -= 1
+                    _fail(
+                        rel, adopt_source,
+                        f"adopted mount file {ap} vanished or was "
+                        "replaced before catalog scan (no photo row "
+                        "and no companion row)",
+                    )
+                    continue
+                src_h_norm = (
+                    None if adopt_src_hash == EMPTY_FILE_SHA256
+                    else adopt_src_hash
+                )
+                scan_h = (
+                    None if scan_h_raw == EMPTY_FILE_SHA256 else scan_h_raw
+                )
+                if is_companion or scan_h is None:
+                    # Companion row carries no scan hash for this
+                    # adopted path, and scan may legitimately leave
+                    # ``file_hash`` NULL (read/permission failure,
+                    # scanner-stubbed test seams) — either way, re-read
+                    # the mount file directly and compare against the
+                    # adopt-time source hash. Without this a
+                    # replaced-between-adopt-and-scan mount file would
+                    # sit as a photo row with unrelated bytes while the
+                    # skip count kept ``failed = 0``.
+                    #
+                    # ``compute_file_hash`` returns
+                    # ``EMPTY_FILE_SHA256`` for a zero-byte file and
+                    # raises ``OSError`` when the file was deleted or
+                    # is unreadable — treat only the exception as a
+                    # read failure so a legitimate zero-byte adopted
+                    # file (whose adopt-time src_hash was
+                    # ``EMPTY_FILE_SHA256`` too, normalized to None on
+                    # both sides) is still accepted.
+                    read_failed = False
+                    try:
+                        mount_hash = compute_file_hash(ap)
+                    except OSError:
+                        mount_hash = None
+                        read_failed = True
+                    mount_norm = (
+                        None if mount_hash == EMPTY_FILE_SHA256
+                        else mount_hash
+                    )
+                    if read_failed or mount_norm != src_h_norm:
+                        skipped_duplicate -= 1
+                        dup_skipped -= 1
+                        _counts(rel)["skipped_duplicate"] -= 1
+                        _fail(
+                            rel, adopt_source,
+                            f"adopted mount file {ap} bytes no longer "
+                            "match the source hash (mount file was "
+                            "replaced or became unreadable between the "
+                            "adopt-time hash check and catalog scan)",
+                        )
+                        continue
+                elif scan_h != src_h_norm:
+                    skipped_duplicate -= 1
+                    dup_skipped -= 1
+                    _counts(rel)["skipped_duplicate"] -= 1
+                    _fail(
+                        rel, adopt_source,
+                        f"adopted mount file {ap} scan hash disagrees "
+                        "with the source hash (mount base is likely "
+                        "stale or misconfigured)",
+                    )
+                    continue
+                imported_photo_ids.add(row_id)
             db.conn.commit()
 
             if params.vireo_dir:
