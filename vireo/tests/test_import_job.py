@@ -4946,6 +4946,202 @@ def test_remote_import_dup_only_batch_records_failure_when_scan_raises(
     ), result["unsafe_files"]
 
 
+def test_remote_import_links_verified_twin_folder_in_other_layout(
+        tmp_path, monkeypatch):
+    """A verified duplicate skip's twin folder may live under the mount
+    destination in a DIFFERENT sub-folder than this run's template output
+    (e.g. an older ``unsorted`` or ``%Y-%m-%d`` layout). Without carrying
+    the verified twin dir into a follow-up dup-link scan, the card is
+    skipped as a duplicate but the twin folder never becomes visible in
+    the active workspace — safe_to_format could go green over folders
+    the UI won't show. See PR #1113 review."""
+    from import_dedup import compute_file_hash as _hash
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+    _install_fake_remote_rsync(monkeypatch, calls, verify=None)
+
+    # Card holds one photo whose bytes ALREADY exist under the mount base
+    # in an "unsorted" sub-folder — an older layout the run's %Y/%Y-%m-%d
+    # template does not target.
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+    card_file = str(card / "DSC_0001.jpg")
+    src_hash = _hash(card_file)
+
+    twin_folder = os.path.join(ra["mount_base"], "unsorted")
+    os.makedirs(twin_folder, exist_ok=True)
+    twin_path = os.path.join(twin_folder, "DSC_0001.jpg")
+    import shutil as _shutil
+    _shutil.copy2(card_file, twin_path)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    # Catalog the twin via raw SQL so its folder row is NOT linked into
+    # the active workspace (running scanner.scan() here would link it via
+    # the cascade in ``_add_workspace_folder_no_commit``, breaking the
+    # test's "before" state). The duplicate-skip case is exactly "a byte-
+    # identical twin is cataloged somewhere in the archive but the
+    # user's active workspace does not yet see it yet".
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES (?, ?, 'ok')",
+        (twin_folder, os.path.basename(twin_folder)),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, extension, file_size,"
+        " file_hash) VALUES (?, ?, '.jpg', ?, ?)",
+        (fid, "DSC_0001.jpg", os.path.getsize(twin_path), src_hash),
+    )
+    db.conn.commit()
+    linked_before = _ws_linked_folder_paths(db, ws_id)
+    assert twin_folder not in linked_before, linked_before
+
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra, verify_by_hash=True,
+        ),
+    )
+
+    # rsync stayed silent — the card was accepted as a duplicate.
+    assert calls["rsync"] == [], calls["rsync"]
+    assert result["skipped_duplicate"] == 1, result
+    assert result["failed"] == 0, result
+    assert result["safe_to_format"] is True, result
+    # The verified twin folder is now visible in the active workspace,
+    # even though it lives in a different sub-folder than the run's own
+    # dest_folder (%Y/%Y-%m-%d template would have produced
+    # ``2026/2026-07-03``, not ``unsorted``).
+    linked_after = _ws_linked_folder_paths(db, ws_id)
+    assert twin_folder in linked_after, {
+        "before": sorted(linked_before), "after": sorted(linked_after),
+        "twin_folder": twin_folder,
+    }
+
+
+def test_remote_import_scans_adopted_duplicate_in_mixed_batch(
+        tmp_path, monkeypatch):
+    """A retry / crash-recovery batch that (a) copies one fresh file AND
+    (b) finds a byte-identical file already on the mount for a different
+    card file must catalog BOTH: the fresh copy AND the adopted duplicate.
+
+    Without adding adopted mount paths to the restricted scan's
+    ``restrict_files`` set, ``landed_paths`` alone scopes the scan so
+    tightly that the adopted-but-uncataloged mount file is left without
+    a photo row, while ``copied + skipped_duplicate == discovered`` still
+    lets a verified remote run report ``safe_to_format=True`` for an
+    invisible file. See PR #1113 review."""
+    import shutil as _shutil
+
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+    _install_fake_remote_rsync(monkeypatch, calls, verify=None)
+
+    # Both files belong to the same destination batch (same date), so
+    # they share a single fresh scan call.
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+        ("DSC_0002.jpg", datetime(2026, 7, 3, 11, 0, 0), "green"),
+    ])
+
+    # Pre-seed the mount destination with DSC_0001 (crash-recovery: a
+    # prior run wrote it but died before catalog). Duplicates-index
+    # (skip_duplicates=True default) sees no cataloged twin for it, so
+    # the collision loop's on-disk hash-match branch fires and adopts
+    # the mount file. DSC_0002 is a fresh copy this run.
+    dest_folder = os.path.join(
+        ra["mount_base"], "2026", "2026-07-03",
+    )
+    os.makedirs(dest_folder, exist_ok=True)
+    seeded = os.path.join(dest_folder, "DSC_0001.jpg")
+    _shutil.copy2(str(card / "DSC_0001.jpg"), seeded)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra, verify_by_hash=True,
+        ),
+    )
+
+    assert result["failed"] == 0, result
+    assert result["copied"] == 1, result       # DSC_0002 fresh
+    assert result["skipped_duplicate"] == 1, result  # DSC_0001 adopted
+
+    # BOTH files are cataloged at the mount path (the adopted duplicate
+    # is not orphaned).
+    rows = _photo_rows(db)
+    row_paths = {os.path.join(r["folder_path"], r["filename"]) for r in rows}
+    assert seeded in row_paths, row_paths
+    assert os.path.join(dest_folder, "DSC_0002.jpg") in row_paths, row_paths
+
+    # The pre-existing-but-now-adopted file is included in the run's
+    # photo_ids so the after-import chaining hook processes it.
+    adopted_row = next(
+        r for r in rows if os.path.join(r["folder_path"], r["filename"]) == seeded
+    )
+    assert adopted_row["id"] in result["photo_ids"], result["photo_ids"]
+
+
+def test_remote_import_result_carries_imported_photo_ids(
+        tmp_path, monkeypatch):
+    """The after-import chaining hook builds its process-job collection
+    from ``result['photo_ids']``. The remote path must populate this the
+    same way the local path does: freshly cataloged mount rows go in;
+    duplicate-only imports return an empty list so the hook falls into
+    "no new photos" instead of enqueueing an empty process run. See PR
+    #1113 review."""
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+    _install_fake_remote_rsync(monkeypatch, calls, verify=None)
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+        ("DSC_0002.jpg", datetime(2026, 7, 3, 11, 0, 0), "green"),
+    ])
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # First run: two fresh copies -> two photo_ids in the result.
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra, verify_by_hash=True,
+        ),
+    )
+    assert result["failed"] == 0, result
+    assert result["copied"] == 2, result
+    all_ids = sorted(r["id"] for r in _photo_rows(db))
+    assert sorted(result["photo_ids"]) == all_ids
+    assert len(all_ids) == 2
+
+    # Duplicates-only rerun: present but empty — chaining hook must skip
+    # into "no new photos" rather than enqueue an empty process run.
+    rerun_result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)], destination=ra["mount_base"],
+            remote_target=ra, verify_by_hash=True,
+        ),
+    )
+    assert rerun_result["photo_ids"] == []
+    assert rerun_result["skipped_duplicate"] == 2
+
+
 def test_result_carries_imported_photo_ids(tmp_path):
     """The after-import chaining hook builds the process job's collection
     from the freshly imported rows; the result must name them."""

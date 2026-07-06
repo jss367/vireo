@@ -524,6 +524,39 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
     # network. Mirrors the local path's ``_path_under_any_source`` filter.
     _path_under_any_source = _build_source_root_guard(params.sources)
 
+    # Destination containment for cataloged twin folders. Used to scope
+    # ``_linkable_twin_dirs`` to twins under the mount base — an off-
+    # destination twin in some other library root is none of this import's
+    # business. Case-fold on inconclusive/insensitive filesystems (SMB, FAT,
+    # HFS+/APFS) so a differently-cased twin under the mount still matches;
+    # otherwise a duplicate-only remote import could report
+    # ``safe_to_format=True`` while the twin's folder never gets linked
+    # into the active workspace. Mirrors the local path.
+    def _probe_dir_case_insensitive(path):
+        p = os.path.normpath(path)
+        while True:
+            if os.path.isdir(p):
+                return _fs_is_case_insensitive(p)
+            parent = os.path.dirname(p)
+            if parent == p:
+                return True
+            p = parent
+
+    _dest_ci = _CASE_INSENSITIVE_PLATFORM or _probe_dir_case_insensitive(destination)
+    _dest_root_norm = (
+        destination.casefold() if _dest_ci else destination
+    ).rstrip(os.sep)
+
+    def _path_under_destination(path):
+        if not _dest_root_norm:
+            return False
+        try:
+            real = os.path.realpath(path)
+        except OSError:
+            real = str(path)
+        cmp = (real.casefold() if _dest_ci else real).rstrip(os.sep)
+        return cmp == _dest_root_norm or cmp.startswith(_dest_root_norm + os.sep)
+
     import move as move_mod
 
     runner.set_steps(job["id"], [
@@ -600,6 +633,21 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
     cancelled = False
     wc_source_paths = {}
     wc_dest_folders = set()
+    # Photo rows this run created or landed bytes into: fresh copies whose
+    # mount row was cataloged, adopted duplicates whose pre-existing mount
+    # row now belongs to this run, verified cataloged-twin skips, and RAW
+    # primaries that adopted a landed JPEG companion. The after-import
+    # chaining hook scopes its process job to exactly these; without it a
+    # successful remote import falls into the "no new photos" branch and
+    # the requested process job never runs.
+    imported_photo_ids = set()
+    # Dup-twin dirs already scanned/linked across batches (no rescan the
+    # next time the same twin folder appears in a later batch's skip set).
+    linked_dup_dirs = set()
+    # A duplicate-only batch's ONLY workspace-visibility step is the dup-
+    # link scan; if it raises, safe_to_format must go False (imported bytes
+    # exist on disk but the workspace can't see them).
+    dup_link_failed = False
 
     def _counts(rel):
         return folder_counts.setdefault(
@@ -682,6 +730,22 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
         # locally readable, so reuse the same on-disk re-hash contract.
         to_transfer = []           # (source_file, dest_basename, src_hash)
         dup_skipped = 0
+        # Twin folders (under destination) whose bytes we RE-HASHED this run
+        # and confirmed against source hashes — safe to scan/link into the
+        # active workspace after this batch's fresh-scan runs. Mirrors the
+        # local path's ``dup_dirs`` per-batch accumulator. See PR #1113 review.
+        dup_dirs = set()
+        # Mount paths already on disk (retry / crash-recovery adopt) that
+        # this run treats as ``skipped_duplicate``. The restricted scan
+        # below has ``restrict_files=landed_paths | adopted_paths`` — a
+        # mixed batch (some copies + some adopted-on-disk) whose
+        # ``landed_paths`` set is non-empty would otherwise scope the scan
+        # so tightly that the adopted mount files, if not yet cataloged,
+        # never get a photo row. ``copied + skipped_duplicate == discovered``
+        # could then still make a verified remote run report
+        # ``safe_to_format=True`` while the pre-existing-but-uncataloged
+        # file has no row. See PR #1113 review.
+        adopted_paths = set()
         # dest basename -> src_hash, for intra-batch same-basename collision
         # resolution (FIX 2). Populated as files are queued/skipped.
         claimed_basenames = {}
@@ -713,6 +777,11 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                                   f"duplicate check failed: {e}")
                             continue
                     accept = False
+                    # Twins whose bytes we actually hashed this run and
+                    # matched against the source. Only these back a
+                    # duplicate-folder link (a stale/off-destination twin's
+                    # folder must not be pulled into the active workspace).
+                    verified_twin_rows = []
                     for twin in twin_rows:
                         twin_path = os.path.join(
                             twin["folder_path"], twin["filename"],
@@ -733,11 +802,33 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                             continue
                         if twin_hash is not None and twin_hash == src_hash:
                             accept = True
-                            break
+                            # Keep scanning to collect every byte-verified
+                            # twin's folder — an older run may have written
+                            # the same identity into a different folder
+                            # layout (e.g. ``unsorted`` or a different date
+                            # template), and only the folder we RE-HASHED
+                            # this run is safe to link. Mirrors the local
+                            # path's collect-then-link pattern. See PR
+                            # #1113 review.
+                            verified_twin_rows.append(twin)
                     if accept:
                         skipped_duplicate += 1
                         dup_skipped += 1
                         _counts(rel)["skipped_duplicate"] += 1
+                        # Preserve the verified twin folders so the follow-
+                        # up dup-link scan can pull them into the active
+                        # workspace. Without this a verified duplicate-only
+                        # remote import whose twins live in a different
+                        # folder than this run's template output would skip
+                        # rsync AND leave the twin folder unlinked while
+                        # safe_to_format still went green. See PR #1113
+                        # review.
+                        dup_dirs.update(
+                            _linkable_twin_dirs(
+                                verified_twin_rows,
+                                _path_under_destination,
+                            ),
+                        )
                         continue
             # Collision parity (FIX 2): rsync lands files flat by basename,
             # so two different card files with the same basename in one batch
@@ -791,6 +882,12 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                         dup_skipped += 1
                         _counts(rel)["skipped_duplicate"] += 1
                         claimed_basenames[candidate] = src_hash
+                        # Track the adopted mount path so the restricted
+                        # scan below picks it up (mixed batches with fresh
+                        # copies otherwise scope the scan to landed_paths
+                        # and skip the adopted-but-uncataloged file). See
+                        # PR #1113 review.
+                        adopted_paths.add(cand_mount)
                         adopted = True
                         break
                     counter += 1
@@ -956,11 +1053,21 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
         # local path makes; the mount is locally walkable.
         if landed or dup_skipped:
             landed_paths = {entry[0] for entry in landed}
+            # Include collision-loop adopted mount paths so their photo rows
+            # get created by the restricted scan. When ``landed`` is
+            # empty the pre-existing catch-all below (a bare
+            # ``restrict_dirs=[dest_folder]`` scan without ``restrict_files``)
+            # would already discover them via directory walk, but a mixed
+            # batch (some fresh copies + some adopted) has non-empty
+            # ``landed_paths``, and passing that alone as ``restrict_files``
+            # narrows the scan so tightly that the adopted-but-uncataloged
+            # files never become photo rows. See PR #1113 review.
+            scan_files = landed_paths | adopted_paths
             try:
                 scan(
                     destination, db,
                     restrict_dirs=[dest_folder],
-                    restrict_files=(landed_paths or None),
+                    restrict_files=(scan_files or None),
                     vireo_dir=params.vireo_dir,
                     thumb_cache_dir=params.thumb_cache_dir,
                     skip_working_copies=True,
@@ -1082,6 +1189,10 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                         db.update_photo_hash_check(
                             row["id"], "ok", commit=False,
                         )
+                    # Fresh mount row this run stamped as valid — the
+                    # after-import chaining hook builds its process job
+                    # collection from these ids.
+                    imported_photo_ids.add(row["id"])
                 else:
                     # RAW+JPEG pairing merges the JPEG's photo row into
                     # the RAW primary (companion_path) and deletes the
@@ -1132,7 +1243,11 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                                 continue
                         # JPEG bytes are represented by the RAW row's
                         # companion_path — accept as landed; leave the
-                        # copied/verified counters alone.
+                        # copied/verified counters alone. The RAW row is
+                        # what the chaining hook should process, so its
+                        # id joins ``imported_photo_ids``. See PR #1113
+                        # review.
+                        imported_photo_ids.add(companion["id"])
                         continue
                     copied -= 1
                     if params.verify_by_hash:
@@ -1143,12 +1258,80 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                     landed = [
                         e for e in landed if e[0] != dest_path
                     ]
+            # Collect photo_ids for adopted-on-disk duplicates that this
+            # run's restricted scan just cataloged. Analogous to how the
+            # local path's ``adopted_dest`` branch pushes the crash-
+            # recovered file's row id into ``imported_photo_ids`` — the
+            # user asked for this photo to be imported, and it's now a
+            # freshly cataloged row, so the after-import chaining hook
+            # should treat it as a new photo. See PR #1113 review.
+            for ap in adopted_paths:
+                row = db.conn.execute(
+                    """SELECT p.id FROM photos p
+                       JOIN folders f ON f.id = p.folder_id
+                       WHERE f.path = ? AND p.filename = ?""",
+                    (os.path.dirname(ap), os.path.basename(ap)),
+                ).fetchone()
+                if row is not None:
+                    imported_photo_ids.add(row["id"])
             db.conn.commit()
 
             if params.vireo_dir:
                 for dest_path, sf, _sh, sz, mt in landed:
                     wc_source_paths[dest_path] = (sf, sz, mt)
                 wc_dest_folders.add(dest_folder)
+
+        # --- Link verified duplicate-twin folders ----------------------
+        # A verified duplicate skip's twin folder may live elsewhere under
+        # the archive (older date-layout, ``unsorted``, etc.). The batch
+        # scan above only touches ``dest_folder``, so without this
+        # follow-up scan the twin folder never becomes visible in the
+        # active workspace even though its bytes back the safe-to-format
+        # skip. Mirrors the local path's dup-link scan (see PR #1107). Any
+        # failure here forces ``safe_to_format=False`` — the file is on
+        # disk but the workspace can't see it. See PR #1113 review.
+        new_dup_dirs = dup_dirs - linked_dup_dirs
+        if new_dup_dirs:
+            # Promote missing rows for twin folders too (a reattached
+            # archive drive with a stale ``missing`` marker wouldn't be
+            # cleared by ``scanner.scan()``'s success stamp, which only
+            # touches ``partial``). Mirrors the fresh-batch promote above.
+            db.conn.executemany(
+                "UPDATE folders SET status = 'ok' "
+                "WHERE path = ? AND status = 'missing'",
+                [(d,) for d in sorted(new_dup_dirs)],
+            )
+            db.conn.commit()
+            try:
+                scan(
+                    destination, db,
+                    restrict_dirs=sorted(new_dup_dirs),
+                    vireo_dir=params.vireo_dir,
+                    thumb_cache_dir=params.thumb_cache_dir,
+                    skip_working_copies=True,
+                    cancel_check=lambda: runner.is_cancelled(job["id"]),
+                )
+                linked_dup_dirs.update(new_dup_dirs)
+            except Exception as e:
+                if (
+                    isinstance(e, RuntimeError)
+                    and str(e) == "scan cancelled"
+                    and runner.is_cancelled(job["id"])
+                ):
+                    cancelled = True
+                else:
+                    log.exception(
+                        "Linking duplicate-matched folders failed: %s",
+                        sorted(new_dup_dirs),
+                    )
+                    dup_link_failed = True
+                    for d in sorted(new_dup_dirs):
+                        unsafe_files.append({
+                            "path": d,
+                            "reason": (
+                                f"duplicate-folder link scan failed: {e}"
+                            ),
+                        })
 
         _emit(
             f"{rel}: {_counts(rel)['copied']} copied · "
@@ -1226,6 +1409,7 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
         not cancelled
         and failed == 0
         and not discovery_errors
+        and not dup_link_failed
         and not partial_scope
         and not remote_unverified
         and (copied + skipped_duplicate) == discovered
@@ -1234,6 +1418,13 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
         "discovered": discovered,
         "copied": copied,
         "verified": verified,
+        # Photo rows the after-import chaining hook should process.
+        # Duplicate-only imports intentionally return an empty list so
+        # ``_chain_after_import`` skips into its "no new photos" branch
+        # instead of enqueueing an empty process run — same convention as
+        # the local path. Without this the remote import always missed
+        # after-import processing. See PR #1113 review.
+        "photo_ids": sorted(imported_photo_ids),
         "skipped_duplicate": skipped_duplicate,
         "failed": failed,
         "safe_to_format": safe_to_format,
@@ -1241,7 +1432,7 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
         "folders": folder_counts,
         "cancelled": cancelled,
         "discovery_errors": len(discovery_errors),
-        "ok": (failed == 0 and not discovery_errors),
+        "ok": (failed == 0 and not discovery_errors and not dup_link_failed),
         "errors": [f"{u['path']}: {u['reason']}" for u in unsafe_files],
     }
     return result
