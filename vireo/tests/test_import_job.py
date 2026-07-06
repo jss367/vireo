@@ -4328,6 +4328,63 @@ def test_remote_import_rsync_uses_ignore_existing_to_survive_basename_races(
         )
 
 
+def test_remote_import_rsync_dereferences_symlinked_source_files(
+        tmp_path, monkeypatch):
+    """A curated card folder that symlinks to the real image files (or a
+    source root that's itself a symlink into ``/Volumes/Card/DCIM``) must
+    land the referenced BYTES on the NAS, not the symlink itself. The base
+    rsync command is ``rsync -a``, which preserves symlinks: without
+    ``--copy-links`` the NAS would receive a symlink pointing back at the
+    card path, and formatting/unmounting the card would break the archive.
+    With ``verify_by_hash`` the mount-side scan follows the symlink through
+    the mount, so ``safe_to_format`` could still go green over an archive
+    that only contains symlinks. Regression: every import rsync must carry
+    ``--copy-links``."""
+    import pytest
+    from import_job import ImportParams, run_import_job
+
+    ra = _remote_archive_for(tmp_path)
+    calls = _remote_calls(ra)
+    _install_fake_remote_rsync(monkeypatch, calls, verify=None)
+
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks not available on this platform")
+
+    # Real files live under ``real_card``; the ``curated`` folder we hand to
+    # the import contains symlinks to them. Each symlink is what
+    # ``run_import_job`` walks and hands to rsync — a plain ``rsync -a``
+    # would preserve the link.
+    real_card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+        ("DSC_0002.jpg", datetime(2026, 7, 3, 11, 0, 0), "green"),
+    ], card_name="real_card")
+    curated = tmp_path / "curated"
+    curated.mkdir()
+    for name in ("DSC_0001.jpg", "DSC_0002.jpg"):
+        try:
+            os.symlink(str(real_card / name), str(curated / name))
+        except (OSError, NotImplementedError):
+            pytest.skip("symlink creation not supported on this platform")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(curated)], destination=ra["mount_base"],
+            remote_target=ra,
+        ),
+    )
+
+    assert calls["rsync"], "no rsync invocation captured"
+    for c in calls["rsync"]:
+        assert "--copy-links" in c["extra_args"], (
+            "rsync invocation missing --copy-links symlink-dereference "
+            f"guard: {c['extra_args']}"
+        )
+
+
 def test_remote_import_fails_when_mount_row_hash_disagrees_with_verified_card(
         tmp_path, monkeypatch):
     """``remote_verify_files`` runs card -> NAS (``ssh_base``); ``scan()``

@@ -1132,6 +1132,20 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                 "-e", move_mod._ssh_rsh_string(remote),
                 "--partial-dir=.rsync-partial",
                 "--ignore-existing",
+                # ``--copy-links`` dereferences symlinked source files so
+                # the NAS receives their referenced bytes instead of a
+                # symlink. The base command is ``rsync -a``, which preserves
+                # symlinks; without ``-L`` a curated card folder that
+                # symlinks to ``/Volumes/Card/DCIM/IMG_0001.JPG`` would send
+                # the symlink itself to the NAS. With ``verify_by_hash``
+                # the mount-side scan follows the symlink through the local
+                # mount, so ``safe_to_format`` can still go green — and
+                # then formatting/unmounting the card breaks the archived
+                # copy. Card-local symlinks aren't legitimately preserved
+                # by an archive of the card contents, and the local path's
+                # ingest reads the referenced file bytes too. See PR #1113
+                # review.
+                "--copy-links",
             ]
             if remote.get("bwlimit_kbps"):
                 extra_args.append(f"--bwlimit={int(remote['bwlimit_kbps'])}")

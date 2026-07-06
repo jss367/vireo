@@ -666,8 +666,15 @@ def remote_verify_files(rsync_bin, src_specs, rsync_target, remote,
     """
     if not src_specs:
         return None
-    cmd = [rsync_bin, "-an", "--checksum", "--out-format=%n",
-           "-e", _ssh_rsh_string(remote)]
+    # ``--copy-links`` matches the import-transfer rsync (``_run_remote_import
+    # _job`` passes it): the transfer sends the REFERENCED file bytes for a
+    # symlinked source, so the source-side hash here must be computed on the
+    # same referenced file (not the symlink itself). Without it, ``rsync
+    # -an`` (which includes ``-l``) sees a symlink at the source and a real
+    # file on the NAS, treats them as mismatched, and reports the just-
+    # transferred file as verification-failed. See PR #1113 review.
+    cmd = [rsync_bin, "-an", "--checksum", "--copy-links",
+           "--out-format=%n", "-e", _ssh_rsh_string(remote)]
     cmd += list(src_specs)
     cmd += [rsync_target + "/" if dest_is_dir else rsync_target]
     try:
