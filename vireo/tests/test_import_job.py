@@ -5544,9 +5544,14 @@ def test_remote_import_links_case_only_twin_folder(tmp_path, monkeypatch):
     # prefix common to destination and the twin (a differently-cased leaf
     # still matches the literal prefix check inside ``lex_dup_dirs``).
     lower_root = tmp_path / "archive_root"
-    lower_root.mkdir()
+    lower_root.mkdir(exist_ok=True)
     upper_root = tmp_path / "ARCHIVE_ROOT"
-    upper_root.mkdir()
+    # On a case-insensitive host FS (macOS APFS/HFS+, Windows NTFS in the
+    # default configuration) the two spellings resolve to a single physical
+    # directory, so the second mkdir would raise FileExistsError; the
+    # existing dir already serves both cases. On case-sensitive Linux the
+    # dir does not yet exist and this creates the second physical dir.
+    upper_root.mkdir(exist_ok=True)
     ra = _remote_archive_for(lower_root)
     calls = _remote_calls(ra)
     _install_fake_remote_rsync(monkeypatch, calls, verify=None)
