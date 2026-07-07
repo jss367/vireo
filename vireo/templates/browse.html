@@ -1850,6 +1850,7 @@ var allLoaded = false;
 var selectedPhotoId = null;
 var selectedIndex = -1;
 var anchorRestoreEpoch = 0;
+var collectionAnchorScanDepth = 0;
 var selectedPhotos = new Set(); // multi-select
 var selectionKeywordRequestSeq = 0;
 var selectionKeywordKey = '';
@@ -2733,28 +2734,43 @@ async function filterByCollection(id, options) {
   function anchorScanShouldContinue() {
     return collectionRequestIsCurrent() && anchorRestoreEpoch === restoreEpoch;
   }
-  await loadPhotos();
-  if (!collectionRequestIsCurrent()) return;
-  if (!anchor) return;
-
-  var card = await loadUntilPhotoRendered(anchor.photoId, anchorScanShouldContinue);
-  if (!collectionRequestIsCurrent()) return;
-  if (!anchorRestoreIsPending(anchor, restoreEpoch)) return;
-  if (!card) {
-    clearActiveSelectionAndDetail();
-    return;
-  }
-  selectedPhotoId = anchor.photoId;
-  selectedIndex = photos.findIndex(function(p) { return p.id === anchor.photoId; });
-  refreshCardSelectionVisuals();
-  updateBatchBar();
-  if (anchor.detailVisible) loadDetail(anchor.photoId);
-  requestAnimationFrame(function() {
+  if (anchor) collectionAnchorScanDepth++;
+  try {
+    await loadPhotos();
     if (!collectionRequestIsCurrent()) return;
-    if (!anchorSelectionIsCurrent(anchor, restoreEpoch)) return;
-    restorePhotoAnchor(anchor);
-    updateScrollPosition();
-  });
+    if (!anchor) return;
+
+    var card = await loadUntilPhotoRendered(anchor.photoId, anchorScanShouldContinue);
+    if (!collectionRequestIsCurrent()) return;
+    if (!anchorRestoreIsPending(anchor, restoreEpoch)) return;
+    if (!card) {
+      clearActiveSelectionAndDetail();
+      return;
+    }
+    selectedPhotoId = anchor.photoId;
+    selectedIndex = photos.findIndex(function(p) { return p.id === anchor.photoId; });
+    refreshCardSelectionVisuals();
+    updateBatchBar();
+    if (anchor.detailVisible) loadDetail(anchor.photoId);
+    requestAnimationFrame(function() {
+      if (!collectionRequestIsCurrent()) return;
+      if (!anchorSelectionIsCurrent(anchor, restoreEpoch)) return;
+      restorePhotoAnchor(anchor);
+      updateScrollPosition();
+    });
+  } finally {
+    if (anchor) {
+      collectionAnchorScanDepth = Math.max(0, collectionAnchorScanDepth - 1);
+      // Auto-hydration was suppressed for every loadPhotos() call while a scan
+      // was open (including ones from unrelated folder/keyword switches). When
+      // the last scan ends, resume the normal path so the current grid fills
+      // its viewport instead of stalling on skeletons until a manual scroll.
+      if (collectionAnchorScanDepth === 0) {
+        rearmInfiniteScrollObserver();
+        requestAnimationFrame(ensureViewportHydrated);
+      }
+    }
+  }
 }
 
 /* ---------- Collection Modal ---------- */
@@ -3426,7 +3442,11 @@ async function loadPhotos(options) {
     if (epoch === loadEpoch) {
       loading = false;
       if (showLoading && loadingState) loadingState.style.display = 'none';
-      if (loadSucceeded) {
+      // Re-check the scan depth live (not a load-start snapshot): a stale
+      // scan can drain during our fetch, and its own hydration rAF then
+      // bails on loading=true. In that overlap this load is the current
+      // view's only chance to re-arm.
+      if (loadSucceeded && collectionAnchorScanDepth === 0) {
         rearmInfiniteScrollObserver();
         // Chain: keep loading while the viewport is at or past the loading
         // boundary (rAF so the freshly appended cards have a layout first).
@@ -3977,7 +3997,7 @@ function rearmInfiniteScrollObserver() {
    first skeleton cell). Fires on scroll and chains after each successful
    page load until the viewport is covered by real cards. */
 function ensureViewportHydrated() {
-  if (loading || allLoaded || clipSearchActive) return;
+  if (loading || allLoaded || clipSearchActive || collectionAnchorScanDepth > 0) return;
   if (photos.length === 0) return;
   var tail = document.getElementById('gridTail');
   if (!tail || !tail.firstElementChild) return;
