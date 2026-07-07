@@ -60,7 +60,7 @@ def test_folder_tree_filter_by_folder_fires_filter(live_server, page):
 
 
 def test_folder_tree_rescan_fires_endpoint(live_server, page):
-    """Clicking 'Rescan this Folder' POSTs to /api/folders/<id>/rescan."""
+    """Clicking 'Rescan this Folder' POSTs and acknowledges the click."""
     url = live_server["url"]
     page.goto(f"{url}/browse")
 
@@ -78,6 +78,9 @@ def test_folder_tree_rescan_fires_endpoint(live_server, page):
         menu.locator(
             ".vireo-ctx-item", has_text="Rescan this Folder"
         ).click()
+    expect(page.locator("#toastContainer")).to_contain_text(
+        "Starting folder rescan"
+    )
 
 
 def test_folder_tree_reveal_fires_endpoint(live_server, page):
