@@ -6955,3 +6955,26 @@ def test_build_explorer_payload_not_ready(db):
     payload = _build_explorer_payload(db)
     assert payload['taxonomy_ready'] is False
     assert payload['nodes'] == []
+
+
+def test_build_explorer_species_leaf(db):
+    from app import _build_explorer_species
+    ids = _seed_bird_taxonomy(db)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder('/p', name='p')
+    p = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                     file_size=1, file_mtime=1.0)
+    k = db.add_keyword('Song Sparrow')
+    db.tag_photo(p, k)
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
+                    (ids['Melospiza melodia'], k))
+    db.conn.commit()
+    out = _build_explorer_species(db, ids['Melospiza'])
+    by = {s['name']: s for s in out['species']}
+    assert by['Melospiza melodia']['found'] is True
+    assert by['Melospiza melodia']['photo']['filename'] == 'a.jpg'
+    assert by['Melospiza georgiana']['found'] is False
+    assert by['Melospiza georgiana'].get('photo') is None
+    # found first, then missing; each block alphabetical
+    assert [s['found'] for s in out['species']] == [True, False]
