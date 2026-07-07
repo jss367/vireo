@@ -9115,6 +9115,16 @@ class Database:
             (ws,),
         ).fetchall()
 
+    def get_explorer_root(self, name="Aves", rank="class"):
+        """Return {id,name,common_name,rank} for the default explorer root class,
+        or None when the reference taxonomy has not been downloaded."""
+        row = self.conn.execute(
+            "SELECT id, name, common_name, rank FROM taxa"
+            " WHERE name = ? AND rank = ? LIMIT 1",
+            (name, rank),
+        ).fetchone()
+        return dict(row) if row else None
+
     def get_photo_life_list_species(self, photo_id):
         """Return this photo's lifelist-eligible species names in the active
         workspace, ordered by name.

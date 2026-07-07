@@ -14770,3 +14770,47 @@ def test_import_tab_migration_not_reapplied_after_unpin(tmp_path):
     db2 = Database(db_path)
     db2.set_active_workspace(ws)
     assert "import" not in db2.get_tabs()
+
+
+# ---------------------------------------------------------------------------
+# Life list explorer (taxonomic completeness) — shared taxa seeding helper
+# ---------------------------------------------------------------------------
+
+def _seed_bird_taxonomy(db):
+    """Insert a tiny Aves subtree: class Aves > 2 orders > families > genera > species.
+    Returns dict of name -> taxa id."""
+    rows = [
+        # (inat_id, name, common_name, rank, parent_name, kingdom)
+        (3,     "Aves",           "Birds",         "class",   None,             "Animalia"),
+        (7251,  "Passeriformes",  "Perching Birds","order",   "Aves",           "Animalia"),
+        (67566, "Passerellidae",  "New World Sparrows","family","Passeriformes", "Animalia"),
+        (9100,  "Melospiza",      None,            "genus",   "Passerellidae",  "Animalia"),
+        (9101,  "Melospiza melodia","Song Sparrow","species", "Melospiza",      "Animalia"),
+        (9102,  "Melospiza georgiana","Swamp Sparrow","species","Melospiza",    "Animalia"),
+        (9200,  "Zonotrichia",    None,            "genus",   "Passerellidae",  "Animalia"),
+        (9201,  "Zonotrichia albicollis","White-throated Sparrow","species","Zonotrichia","Animalia"),
+        (4000,  "Anseriformes",   "Waterfowl",     "order",   "Aves",           "Animalia"),
+        (4100,  "Anatidae",       "Ducks",         "family",  "Anseriformes",   "Animalia"),
+        (4200,  "Anas",           None,            "genus",   "Anatidae",       "Animalia"),
+        (4201,  "Anas platyrhynchos","Mallard",    "species", "Anas",           "Animalia"),
+    ]
+    ids = {}
+    for inat_id, name, common, rank, parent, kingdom in rows:
+        parent_id = ids.get(parent)
+        cur = db.conn.execute(
+            "INSERT INTO taxa (inat_id, name, common_name, rank, parent_id, kingdom)"
+            " VALUES (?,?,?,?,?,?)",
+            (inat_id, name, common, rank, parent_id, kingdom),
+        )
+        ids[name] = cur.lastrowid
+    db.conn.commit()
+    return ids
+
+
+def test_get_default_explorer_root_finds_aves(db):
+    assert db.get_explorer_root() is None  # no taxonomy yet
+    ids = _seed_bird_taxonomy(db)
+    root = db.get_explorer_root()
+    assert root["id"] == ids["Aves"]
+    assert root["name"] == "Aves"
+    assert root["rank"] == "class"
