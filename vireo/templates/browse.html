@@ -2759,7 +2759,17 @@ async function filterByCollection(id, options) {
       updateScrollPosition();
     });
   } finally {
-    if (anchor) collectionAnchorScanDepth = Math.max(0, collectionAnchorScanDepth - 1);
+    if (anchor) {
+      collectionAnchorScanDepth = Math.max(0, collectionAnchorScanDepth - 1);
+      // Auto-hydration was suppressed for every loadPhotos() call while a scan
+      // was open (including ones from unrelated folder/keyword switches). When
+      // the last scan ends, resume the normal path so the current grid fills
+      // its viewport instead of stalling on skeletons until a manual scroll.
+      if (collectionAnchorScanDepth === 0) {
+        rearmInfiniteScrollObserver();
+        requestAnimationFrame(ensureViewportHydrated);
+      }
+    }
   }
 }
 
