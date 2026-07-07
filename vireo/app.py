@@ -1437,6 +1437,114 @@ def _scan_metadata_warning():
     return scan_metadata_warning()
 
 
+_EXPLORER_RANKS = ["order", "family", "genus", "species"]
+_EXPLORER_CHILD_RANK = {"class": "order", "order": "family",
+                        "family": "genus", "genus": "species"}
+
+
+def _build_explorer_payload(db, root_id=None):
+    """Completeness tree (down to genus) for one class. Species leaves load
+    separately via _build_explorer_species. Honest about the two failure
+    states: taxonomy-not-downloaded and unmatched species."""
+    root = (db.get_explorer_root() if root_id is None
+            else db.get_taxon_by_id(root_id))
+    if root is None:
+        return {"taxonomy_ready": False, "root": None, "summary": {},
+                "nodes": [], "unmatched_species": {"count": 0, "names": []},
+                "classes": []}
+
+    rows = db.get_taxon_subtree(root["id"])
+    found = db.get_life_list_taxon_ids()
+
+    # Build node index + children lists.
+    nodes = {r["id"]: {**r, "children": [], "found_species": 0,
+                       "total_species": 0} for r in rows}
+    for n in nodes.values():
+        pid = n["parent_id"]
+        if pid in nodes and pid != n["id"]:
+            nodes[pid]["children"].append(n)
+
+    # Post-order rollup of species totals/found.
+    def rollup(node):
+        if node["rank"] == "species":
+            node["total_species"] = 1
+            node["found_species"] = 1 if node["id"] in found else 0
+        else:
+            for c in node["children"]:
+                rollup(c)
+                node["total_species"] += c["total_species"]
+                node["found_species"] += c["found_species"]
+    rollup(nodes[root["id"]])
+
+    # Per-rank summary across the whole class.
+    summary = {r: {"found": 0, "total": 0} for r in _EXPLORER_RANKS}
+    for n in nodes.values():
+        if n["rank"] in summary:
+            summary[n["rank"]]["total"] += 1
+            if n["found_species"] > 0:
+                summary[n["rank"]]["found"] += 1
+
+    def to_out(node):
+        child_rank = _EXPLORER_CHILD_RANK.get(node["rank"])
+        kids = list(node["children"])
+        found_children = sum(1 for c in kids if c["found_species"] > 0)
+        out = {
+            "id": node["id"], "name": node["name"],
+            "common_name": node["common_name"], "rank": node["rank"],
+            "found_species": node["found_species"],
+            "total_species": node["total_species"],
+            "child_rank": child_rank,
+            "found_children": found_children,
+            "total_children": len(kids),
+        }
+        # Materialize tree down to genus; species leaves load on demand.
+        if node["rank"] != "genus":
+            out["children"] = [to_out(c) for c in sorted(
+                kids, key=lambda c: (c["found_species"] == 0,
+                                     (c["common_name"] or c["name"]).lower()))]
+        else:
+            out["children"] = []  # species fetched via leaf endpoint
+        return out
+
+    top = [to_out(c) for c in sorted(
+        nodes[root["id"]]["children"],
+        key=lambda c: (c["found_species"] == 0,
+                       (c["common_name"] or c["name"]).lower()))]
+
+    unmatched = db.get_life_list_unmatched_species()
+    classes = db.get_classes_for_taxa(found)
+    return {
+        "taxonomy_ready": True,
+        "root": {"id": root["id"], "name": root["name"],
+                 "common_name": root.get("common_name"), "rank": root["rank"]},
+        "summary": summary,
+        "nodes": top,
+        "unmatched_species": {"count": len(unmatched), "names": unmatched[:200]},
+        "classes": classes,
+    }
+
+
+def _build_explorer_species(db, genus_id):
+    """Found+missing species directly under a genus, found ones with a
+    representative photo. Found sorted first, then missing; each alphabetical."""
+    rows = [r for r in db.get_taxon_subtree(genus_id, max_depth=1)
+            if r["rank"] == "species"]
+    found = db.get_life_list_taxon_ids()
+    found_ids = [r["id"] for r in rows if r["id"] in found]
+    photos = db.get_life_list_best_photo_by_taxon(found_ids)
+    species = []
+    for r in rows:
+        is_found = r["id"] in found
+        species.append({
+            "id": r["id"], "name": r["name"], "common_name": r["common_name"],
+            "found": is_found,
+            "photo": photos.get(r["id"]) if is_found else None,
+        })
+    species.sort(key=lambda s: (not s["found"],
+                                (s["common_name"] or s["name"]).lower()))
+    return {"genus_id": genus_id, "species": species}
+
+
 def create_app(db_path, thumb_cache_dir=None, api_token=None):
     """Create the Flask app for the Vireo photo browser.
 
