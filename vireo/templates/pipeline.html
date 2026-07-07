@@ -3273,12 +3273,24 @@ async function startPipeline() {
     body.file_types = getIngestFileTypes();
     body.recursive = includeSubfoldersEnabled();
     if (_copyMode) {
-      body.destination = document.getElementById('cfgDestination').value.trim();
       body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
       body.verify_by_hash = document.getElementById('chkVerifyByHash').checked;
       body.folder_template = getSelectedFolderTemplate();
       var lpCb = document.getElementById('chkLocalProcessing');
       if (lpCb) body.local_processing = !!lpCb.checked;
+      // Remote SSH archive vs. local archive path. remote_target_id and
+      // destination are mutually exclusive server-side, so send exactly
+      // one — a saved SSH target (plus subpath) when the destination
+      // mode is remote:*, or the local cfgDestination path otherwise.
+      var remoteId = pipelineRemoteTargetId();
+      if (remoteId) {
+        body.remote_target_id = remoteId;
+        var subResult = normalizeRemoteSubpath(
+          document.getElementById('cfgRemoteSubpath').value);
+        body.remote_subpath = subResult.value;
+      } else {
+        body.destination = document.getElementById('cfgDestination').value.trim();
+      }
     }
     // Deselections apply by path — import previews have no photo_id
     // yet, so exclude_photo_ids would drop them silently.
