@@ -2307,7 +2307,13 @@ function addSourceFolder() {
   var input = document.getElementById('cfgSourceInput');
   var val = input.value.trim();
   if (!val || _sourceFolders.indexOf(val) !== -1) return;
-  _sourceMode = 'import';
+  // Route through selectSourceMode so a prior 'collection' / 'new_images'
+  // / 'folders' selection lifts its copy-section dim and destination
+  // workspace lock. Without this, adding a typed path from those modes
+  // scans correctly but leaves #destCopySection with .dimmed +
+  // pointer-events:none, so the user can't enable Copy photos or pick
+  // a destination.
+  if (_sourceMode !== 'import') selectSourceMode('import');
   _sourceFolders.push(val);
   markFolderPreviewStale();
   input.value = '';
@@ -2694,7 +2700,11 @@ async function selectSourceMode(mode) {
   // Cancel any in-flight duplicate scan before switching context
   if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
   _sourceMode = mode;
-  document.getElementById('radioFolders').checked = (mode === 'folders');
+  // 'import' (typed paths) shares the Workspace Folders card with
+  // 'folders' (workspace subtree scan), so it drives the same radio
+  // and body-dim state as folders.
+  var isFoldersLike = (mode === 'folders' || mode === 'import');
+  document.getElementById('radioFolders').checked = isFoldersLike;
   document.getElementById('radioCollection').checked = (mode === 'collection');
   var newImgRadio = document.getElementById('radioNewImages');
   if (newImgRadio) newImgRadio.checked = (mode === 'new_images');
@@ -2703,7 +2713,7 @@ async function selectSourceMode(mode) {
   var collBody = document.getElementById('sourceCollectionBody');
   var newImgBody = document.getElementById('sourceNewImagesBody');
 
-  if (mode === 'folders') {
+  if (isFoldersLike) {
     importBody.classList.remove('dimmed');
     collBody.classList.add('dimmed');
     if (newImgBody) newImgBody.classList.add('dimmed');
@@ -2883,7 +2893,14 @@ function getIngestFileTypes() {
   var standardInputs = document.querySelectorAll('input[data-group="standard"]');
   var rawInputs = document.querySelectorAll('input[data-group="raw"]');
   if (!standardInputs.length && !rawInputs.length) {
-    return ['.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp', '.webp'];
+    // Match the backend default (discover_source_files file_types="both"
+    // = SUPPORTED_EXTENSIONS in image_loader). Returning only the
+    // raster set here would silently drop RAW-only sources during
+    // preview and start.
+    return [
+      '.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp', '.webp',
+      '.nef', '.cr2', '.cr3', '.arw', '.raf', '.dng', '.rw2', '.orf',
+    ];
   }
   document.querySelectorAll('input[data-group="standard"]:checked').forEach(function(cb) {
     var ext = cb.getAttribute('data-ext');
