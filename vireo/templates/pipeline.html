@@ -724,15 +724,23 @@ body { padding-bottom: 36px; }
     <div class="stage-body">
       <div class="source-choice">
         <div class="source-option" id="sourceOptionFolders">
-          <div class="source-option-header" onclick="selectSourceMode('folders')">
+          <div class="source-option-header" onclick="selectSourceMode('folders')" data-testid="source-import">
             <input type="radio" name="sourceMode" value="folders" id="radioFolders" checked data-testid="source-folders">
             <label for="radioFolders" style="cursor:pointer;font-weight:600;font-size:13px;">Workspace Folders</label>
           </div>
-          <div class="source-option-body" id="sourceFoldersBody">
+          <div class="source-option-body" id="sourceImportBody">
             <div class="setting-row">
               <div class="setting-item">
                 <div class="setting-label">Folders <span style="font-weight:400;color:var(--text-dim);">(each includes its subfolders; importing lives on the Import page)</span></div>
                 <div id="folderScopeList" style="display:flex;flex-direction:column;gap:2px;max-height:220px;overflow-y:auto;font-size:12px;"></div>
+                <div style="display:flex;gap:6px;margin-top:8px;">
+                  <input type="text" class="setting-input" id="cfgSourceInput"
+                         placeholder="/path/to/source folder"
+                         onkeydown="if(event.key==='Enter')addSourceFolder()">
+                  <button class="btn btn-secondary" type="button" onclick="addSourceFolder()"
+                          style="font-size:12px;padding:4px 10px;">Add</button>
+                </div>
+                <div id="sourceFolderList" style="margin-top:6px;"></div>
               </div>
             </div>
           </div>
@@ -1743,6 +1751,11 @@ var _duplicateCheckAbort = null;  // AbortController for in-flight check
 var _managedArchive = null;
 var _thumbSchedulerCancel = null; // cancels the current thumbnail pump on re-render
 
+function includeSubfoldersEnabled() {
+  var cb = document.getElementById('chkIncludeSubfolders');
+  return cb ? cb.checked : true;
+}
+
 function fetchFolderPreview() {
   if (_previewAbort) _previewAbort.abort();
 
@@ -1836,7 +1849,7 @@ function fetchFolderPreview() {
   fetch('/api/import/folder-preview', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ folders: folders, file_types: fileTypes, recursive: document.getElementById('chkIncludeSubfolders').checked }),
+    body: JSON.stringify({ folders: folders, file_types: fileTypes, recursive: includeSubfoldersEnabled() }),
     signal: _previewAbort.signal,
   })
     .then(function(r) { return r.json(); })
@@ -2294,6 +2307,7 @@ function addSourceFolder() {
   var input = document.getElementById('cfgSourceInput');
   var val = input.value.trim();
   if (!val || _sourceFolders.indexOf(val) !== -1) return;
+  _sourceMode = 'import';
   _sourceFolders.push(val);
   markFolderPreviewStale();
   input.value = '';
@@ -2564,7 +2578,7 @@ async function previewDestinationFolders() {
           destination: destination,
           folder_template: getSelectedFolderTemplate(),
           file_types: getIngestFileTypes(),
-          recursive: document.getElementById('chkIncludeSubfolders').checked,
+          recursive: includeSubfoldersEnabled(),
         };
         if (_previewData && _previewSelected) {
           var excluded = [];
@@ -2685,7 +2699,7 @@ async function selectSourceMode(mode) {
   var newImgRadio = document.getElementById('radioNewImages');
   if (newImgRadio) newImgRadio.checked = (mode === 'new_images');
 
-  var importBody = document.getElementById('sourceFoldersBody');
+  var importBody = document.getElementById('sourceImportBody');
   var collBody = document.getElementById('sourceCollectionBody');
   var newImgBody = document.getElementById('sourceNewImagesBody');
 
@@ -2866,6 +2880,11 @@ function onExtToggle(group) {
 function getIngestFileTypes() {
   var exts = [];
   var stdMap = {'.jpg': ['.jpg', '.jpeg'], '.png': ['.png'], '.tiff': ['.tiff', '.tif'], '.bmp': ['.bmp'], '.webp': ['.webp']};
+  var standardInputs = document.querySelectorAll('input[data-group="standard"]');
+  var rawInputs = document.querySelectorAll('input[data-group="raw"]');
+  if (!standardInputs.length && !rawInputs.length) {
+    return ['.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp', '.webp'];
+  }
   document.querySelectorAll('input[data-group="standard"]:checked').forEach(function(cb) {
     var ext = cb.getAttribute('data-ext');
     (stdMap[ext] || [ext]).forEach(function(e) { exts.push(e); });
@@ -2909,6 +2928,8 @@ function updateStartButton() {
     btn.disabled = selectedFolderIds().length === 0;
   } else if (_sourceMode === 'new_images') {
     btn.disabled = !newImagesSnapshotId;
+  } else if (_sourceMode === 'import') {
+    btn.disabled = _sourceFolders.length === 0;
   } else {
     var collId = document.getElementById('collectionPicker').value;
     btn.disabled = !collId;
@@ -5217,9 +5238,8 @@ function _buildPlanBody() {
   //     counts, which renders "Already done" for an import into a
   //     non-empty workspace — exactly the bug we're fixing.
   if (_sourceMode === 'folders') {
-    // refreshPipelinePlan early-outs before the fetch when the selection
-    // is empty, so this is always non-empty here.
-    body.folder_ids = selectedFolderIds();
+    var folderIds = selectedFolderIds();
+    if (folderIds.length) body.folder_ids = folderIds;
   } else if (_sourceMode === 'collection') {
     var picker = document.getElementById('collectionPicker');
     var cid = picker && picker.value ? parseInt(picker.value, 10) : NaN;
@@ -5325,17 +5345,6 @@ async function refreshPipelinePlan() {
   if (_pipelineRunning) return;
   _planRefreshPending = true;
   var seq = ++_planFetchSeq;
-  if (_sourceMode === 'folders' && selectedFolderIds().length === 0) {
-    // No scope picked yet: don't ask the server for a plan (there is no
-    // honest one to give) and don't fall back to whole-workspace counts —
-    // clear the pills until a folder is selected.
-    _pipelinePlan = null;
-    _planRefreshPending = false;
-    updateSamVariantWarning(null);
-    refreshPipelineUI();
-    updateStartButton();
-    return;
-  }
   if (_planIsWaitingForImportPreview()) {
     _pipelinePlan = null;
     updateSamVariantWarning(null);
