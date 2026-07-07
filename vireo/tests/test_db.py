@@ -14903,6 +14903,21 @@ def test_get_classes_for_taxa(db):
     assert db.get_classes_for_taxa(set()) == []
 
 
+def test_get_classes_for_taxa_chunks_large_id_lists(db):
+    """`/api/life-list/explorer` passes the whole life-list `found` set, which can
+    exceed SQLite's bound-parameter limit — the query must chunk and merge."""
+    from vireo.db import _SQLITE_PARAM_CHUNK_SIZE
+    ids = _seed_bird_taxonomy(db)
+    # A pile of non-existent taxon ids (well above the chunk size) plus one real
+    # species id. A single un-chunked IN () would exceed SQLite's parameter cap;
+    # the chunked implementation must still find Aves via the real id.
+    n_fillers = _SQLITE_PARAM_CHUNK_SIZE * 3 + 25
+    seed = {10_000_000 + i for i in range(n_fillers)}
+    seed.add(ids['Melospiza melodia'])
+    classes = db.get_classes_for_taxa(seed)
+    assert [c['name'] for c in classes] == ['Aves']
+
+
 def test_best_photo_by_taxon(db):
     ids = _seed_bird_taxonomy(db)
     ws = db.ensure_default_workspace()

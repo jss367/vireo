@@ -9195,25 +9195,35 @@ class Database:
 
     def get_classes_for_taxa(self, taxon_ids):
         """Distinct class-rank ancestors of the given taxa, for the explorer's
-        class selector. Returns [{id,name,common_name}] ordered by name."""
+        class selector. Returns [{id,name,common_name}] ordered by name.
+
+        Callers pass the full life-list `found` set, which can exceed SQLite's
+        bound-parameter limit on large life lists — chunk the seed IDs and
+        merge the distinct classes across chunks so the endpoint doesn't 500.
+        """
         ids = [t for t in taxon_ids if t is not None]
         if not ids:
             return []
-        placeholders = ",".join("?" for _ in ids)
-        rows = self.conn.execute(
-            f"""WITH RECURSIVE up(id) AS (
-                    SELECT id FROM taxa WHERE id IN ({placeholders})
-                    UNION
-                    SELECT t.parent_id FROM taxa t JOIN up u ON t.id = u.id
-                    WHERE t.parent_id IS NOT NULL
-                )
-                SELECT DISTINCT t.id, t.name, t.common_name
-                FROM up u JOIN taxa t ON t.id = u.id
-                WHERE t.rank = 'class'
-                ORDER BY COALESCE(t.common_name, t.name)""",
-            ids,
-        ).fetchall()
-        return [dict(r) for r in rows]
+        seen = {}
+        for chunk in _chunks(ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"""WITH RECURSIVE up(id) AS (
+                        SELECT id FROM taxa WHERE id IN ({placeholders})
+                        UNION
+                        SELECT t.parent_id FROM taxa t JOIN up u ON t.id = u.id
+                        WHERE t.parent_id IS NOT NULL
+                    )
+                    SELECT DISTINCT t.id, t.name, t.common_name
+                    FROM up u JOIN taxa t ON t.id = u.id
+                    WHERE t.rank = 'class'""",
+                chunk,
+            ).fetchall()
+            for r in rows:
+                if r["id"] not in seen:
+                    seen[r["id"]] = dict(r)
+        return sorted(seen.values(),
+                      key=lambda r: r["common_name"] or r["name"])
 
     def get_life_list_best_photo_by_taxon(self, taxon_ids):
         """Map taxon_id -> {id, filename} of a representative (highest quality_score,
