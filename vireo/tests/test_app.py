@@ -6957,6 +6957,66 @@ def test_build_explorer_payload_not_ready(db):
     assert payload['nodes'] == []
 
 
+def test_build_explorer_payload_rejects_non_class_root(db):
+    from app import _build_explorer_payload
+    ids = _seed_bird_taxonomy(db)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    # An order-rank taxon is NOT a valid explorer root: reject it.
+    payload = _build_explorer_payload(db, root_id=ids['Passeriformes'])
+    assert payload['taxonomy_ready'] is True
+    assert payload['valid_root'] is False
+    assert payload['root'] is None
+    assert payload['nodes'] == []
+    assert payload['summary'] == {}
+    # The default (Aves, a class) is a valid root.
+    default_payload = _build_explorer_payload(db)
+    assert default_payload['taxonomy_ready'] is True
+    assert default_payload['valid_root'] is not False
+    assert default_payload['root']['name'] == 'Aves'
+
+
+def test_build_explorer_payload_multi_found_species_rollup(db):
+    from app import _build_explorer_payload
+    ids = _seed_bird_taxonomy(db)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder('/p', name='p')
+    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                      file_size=1, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
+                      file_size=1, file_mtime=2.0)
+    # Tag BOTH Melospiza species as found (two keywords, one per taxon).
+    k1 = db.add_keyword('Song Sparrow')
+    db.tag_photo(p1, k1)
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
+                    (ids['Melospiza melodia'], k1))
+    k2 = db.add_keyword('Swamp Sparrow')
+    db.tag_photo(p2, k2)
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
+                    (ids['Melospiza georgiana'], k2))
+    db.conn.commit()
+
+    payload = _build_explorer_payload(db)
+    nodes = {n['name']: n for n in payload['nodes']}
+    # Passeriformes order -> Passerellidae family -> Melospiza + Zonotrichia genera.
+    passeri = nodes['Passeriformes']
+    passerellidae = {c['name']: c for c in passeri['children']}['Passerellidae']
+    melospiza = {c['name']: c for c in passerellidae['children']}['Melospiza']
+    # Both Melospiza species found.
+    assert melospiza['found_species'] == 2
+    assert melospiza['total_species'] == 2
+    # Family: both found species roll up, but only ONE genus (Melospiza) has any.
+    assert passerellidae['found_species'] == 2
+    assert passerellidae['found_children'] == 1
+    # Zonotrichia albicollis is NOT tagged -> Zonotrichia genus has none.
+    zonotrichia = {c['name']: c for c in passerellidae['children']}['Zonotrichia']
+    assert zonotrichia['found_species'] == 0
+    # Summary: 2 species found, but only 1 genus counts as found.
+    assert payload['summary']['species']['found'] == 2
+    assert payload['summary']['genus']['found'] == 1
+
+
 def test_build_explorer_species_leaf(db):
     from app import _build_explorer_species
     ids = _seed_bird_taxonomy(db)

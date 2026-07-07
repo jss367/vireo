@@ -9169,6 +9169,10 @@ class Database:
     def get_taxon_subtree(self, root_id, max_depth=12):
         """All taxa in the subtree rooted at root_id (inclusive), as dict rows
         with id, name, common_name, rank, parent_id. Uses the parent_id index."""
+        # The depth cap is safe because the taxonomy loader keeps only major
+        # ranks (see vireo/taxonomy.py MAJOR_RANK_LEVELS), giving a real
+        # class->species depth of ~4. Raise the cap if intermediate ranks are
+        # ever kept.
         return [dict(r) for r in self.conn.execute(
             """WITH RECURSIVE subtree(id, name, common_name, rank, parent_id, depth) AS (
                    SELECT id, name, common_name, rank, parent_id, 0

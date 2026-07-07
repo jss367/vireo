@@ -1449,9 +1449,17 @@ def _build_explorer_payload(db, root_id=None):
     root = (db.get_explorer_root() if root_id is None
             else db.get_taxon_by_id(root_id))
     if root is None:
-        return {"taxonomy_ready": False, "root": None, "summary": {},
-                "nodes": [], "unmatched_species": {"count": 0, "names": []},
-                "classes": []}
+        # Taxonomy absent (default lookup found no Aves class) -> not ready.
+        return {"taxonomy_ready": False, "valid_root": False, "root": None,
+                "summary": {}, "nodes": [],
+                "unmatched_species": {"count": 0, "names": []}, "classes": []}
+    if root["rank"] != "class":
+        # Explorer roots must be class-rank; an order/family/etc. root produces a
+        # semantically confusing summary (e.g. an order counting itself). The
+        # taxonomy exists, but this root is not valid.
+        return {"taxonomy_ready": True, "valid_root": False, "root": None,
+                "summary": {}, "nodes": [],
+                "unmatched_species": {"count": 0, "names": []}, "classes": []}
 
     rows = db.get_taxon_subtree(root["id"])
     found = db.get_life_list_taxon_ids()
@@ -1515,6 +1523,7 @@ def _build_explorer_payload(db, root_id=None):
     classes = db.get_classes_for_taxa(found)
     return {
         "taxonomy_ready": True,
+        "valid_root": True,
         "root": {"id": root["id"], "name": root["name"],
                  "common_name": root.get("common_name"), "rank": root["rank"]},
         "summary": summary,
