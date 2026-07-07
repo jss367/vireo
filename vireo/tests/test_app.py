@@ -6978,3 +6978,31 @@ def test_build_explorer_species_leaf(db):
     assert by['Melospiza georgiana'].get('photo') is None
     # found first, then missing; each block alphabetical
     assert [s['found'] for s in out['species']] == [True, False]
+
+
+def test_api_explorer_endpoint(app_and_db):
+    app, db = app_and_db
+    ids = _seed_bird_taxonomy(db)
+    # Link the fixture's existing 'Cardinal' keyword to a bird taxon so it counts.
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE name='Cardinal'",
+                    (ids['Melospiza melodia'],))
+    db.conn.commit()
+    client = app.test_client()
+    r = client.get('/api/life-list/explorer')
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data['taxonomy_ready'] is True
+    assert data['root']['name'] == 'Aves'
+    assert data['summary']['order']['total'] == 2
+    # species leaf
+    r2 = client.get(f"/api/life-list/explorer/species?genus={ids['Melospiza']}")
+    assert r2.status_code == 200
+    assert {s['name'] for s in r2.get_json()['species']} == \
+        {'Melospiza melodia', 'Melospiza georgiana'}
+
+
+def test_api_explorer_not_ready(app_and_db):
+    app, db = app_and_db  # fixture has no taxa
+    r = app.test_client().get('/api/life-list/explorer')
+    assert r.status_code == 200
+    assert r.get_json()['taxonomy_ready'] is False

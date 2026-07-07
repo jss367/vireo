@@ -7047,6 +7047,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         return jsonify(payload)
 
+    @app.route("/api/life-list/explorer")
+    def api_life_list_explorer():
+        db = _get_db()
+        root_id = request.args.get("root", type=int)  # None -> default Aves
+        return jsonify(_build_explorer_payload(db, root_id=root_id))
+
+    @app.route("/api/life-list/explorer/species")
+    def api_life_list_explorer_species():
+        db = _get_db()
+        genus_id = request.args.get("genus", type=int)
+        if not genus_id:
+            return jsonify({"genus_id": None, "species": []})
+        return jsonify(_build_explorer_species(db, genus_id))
+
     _LIFE_LIST_EXPORT_FORMATS = {
         "json": "json",
         "csv": "csv",
