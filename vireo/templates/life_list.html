@@ -53,6 +53,21 @@
   .ll-tab.active { color:var(--text-primary); border-bottom-color:var(--accent); }
   .ll-tabpanel { display:none; }
   .ll-tabpanel.active { display:block; }
+
+  /* --- Explorer --- */
+  .ll-exp { padding:16px 24px; }
+  .ll-exp-cta { max-width:520px; margin:60px auto; text-align:center; color:var(--text-secondary); }
+  .ll-exp-cta h2 { font-size:18px; color:var(--text-primary); margin-bottom:10px; }
+  .ll-exp-cta p { font-size:13px; line-height:1.5; margin-bottom:18px; }
+  .ll-exp-empty { text-align:center; padding:60px 24px; color:var(--text-secondary); font-size:14px; }
+  .ll-exp-controls { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:14px; }
+  .ll-exp-controls label { font-size:13px; color:var(--text-secondary); }
+  .ll-exp-controls select { font-size:13px; padding:4px 8px; background:var(--bg-input); color:var(--text-primary); border:1px solid var(--border-secondary); border-radius:4px; }
+
+  .ll-unmatched { font-size:12px; color:var(--text-muted); margin-bottom:14px; }
+  .ll-unmatched details { margin-top:4px; }
+  .ll-unmatched summary { cursor:pointer; color:var(--text-secondary); }
+  .ll-unmatched ul { margin:6px 0 0 16px; padding:0; columns:2; font-size:12px; }
 </style>
 </head>
 <body>
@@ -421,8 +436,120 @@ document.addEventListener('lifelist:changed', function() {
   loadLifeList();
 });
 
+// ---------------- Explorer: data load + honesty states (Task 10) ----------------
+
+// Load the explorer tree for a class (rootId = class taxon id, or omit for
+// the default Aves root). Stores the payload and re-renders.
+async function loadExplorer(rootId) {
+  var panel = document.getElementById('tab-explorer');
+  panel.innerHTML = '<div class="ll-exp"><div class="ll-exp-empty">Loading…</div></div>';
+  try {
+    explorerData = await safeFetch('/api/life-list/explorer' + (rootId ? ('?root=' + encodeURIComponent(rootId)) : ''));
+  } catch (e) {
+    panel.innerHTML = '<div class="ll-exp"><div class="ll-exp-empty">Failed to load explorer.</div></div>';
+    return;
+  }
+  explorerPath = [];   // reset drill path whenever a new class is loaded
+  renderExplorer();
+}
+
+// Trigger the taxonomy download job, then poll it and reload the explorer on
+// completion. Mirrors settings.html's downloadTaxonomy() pattern.
+async function explorerDownloadTaxonomy(btn) {
+  btn.disabled = true;
+  btn.textContent = 'Downloading… (see Jobs panel)';
+  try {
+    var data = await safeFetch('/api/jobs/download-taxonomy', { method: 'POST' }, { toast: false });
+    if (typeof safeEventSource === 'function' && data && data.job_id) {
+      safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+        onComplete: function() { loadExplorer(); }
+      });
+    }
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = 'Download the taxonomy';
+  }
+}
+
+function renderExplorer() {
+  var panel = document.getElementById('tab-explorer');
+  var d = explorerData || {};
+
+  // Honesty state 1: reference taxonomy not downloaded — no fake 0/0.
+  if (!d.taxonomy_ready) {
+    panel.innerHTML =
+      '<div class="ll-exp"><div class="ll-exp-cta">'
+      + '<h2>Download the taxonomy to see completeness</h2>'
+      + '<p>The explorer compares your tagged species against the full iNaturalist '
+      + 'reference taxonomy (orders, families, genera, species). That reference '
+      + "hasn't been downloaded yet, so there are no totals to measure against.</p>"
+      + '<button class="publish-btn" onclick="explorerDownloadTaxonomy(this)">Download the taxonomy</button>'
+      + '</div></div>';
+    return;
+  }
+
+  var html = '<div class="ll-exp">';
+
+  // Class selector — always includes the current root so Birds stays selectable
+  // even before the user has tagged any birds.
+  html += '<div class="ll-exp-controls">';
+  html += '<label for="explorerClass">Class</label>';
+  html += '<select id="explorerClass" onchange="loadExplorer(this.value)">';
+  var classes = (d.classes || []).slice();
+  var root = d.root || {};
+  var seenRoot = classes.some(function(c) { return c.id === root.id; });
+  if (root.id != null && !seenRoot) {
+    classes.unshift({ id: root.id, name: root.name, common_name: root.common_name });
+  }
+  classes.forEach(function(c) {
+    var label = c.common_name || c.name;
+    var sel = (root.id != null && c.id === root.id) ? ' selected' : '';
+    html += '<option value="' + escapeAttr(c.id) + '"' + sel + '>' + escapeAttr(label) + '</option>';
+  });
+  html += '</select>';
+  html += '</div>';
+
+  var summary = d.summary || {};
+  var speciesTotal = summary.species ? summary.species.total : 0;
+
+  // Honesty state 2: taxonomy ready but this class has no reference taxa.
+  if (!speciesTotal) {
+    html += '<div class="ll-exp-empty">No reference taxa for this class.</div>';
+    html += renderUnmatched(d);
+    html += '</div>';
+    panel.innerHTML = html;
+    return;
+  }
+
+  html += renderUnmatched(d);
+  html += '<div id="explorerBody"></div>';
+  html += '</div>';
+  panel.innerHTML = html;
+}
+
+// Muted footnote for tagged species that aren't matched to the taxonomy and so
+// aren't counted here. If the name list is truncated, say so plainly.
+function renderUnmatched(d) {
+  var u = d.unmatched_species || { count: 0, names: [] };
+  if (!u.count) return '';
+  var names = u.names || [];
+  var truncated = u.count > names.length;
+  var html = '<div class="ll-unmatched">';
+  html += u.count + " tagged species aren't matched to the taxonomy and aren't counted here.";
+  html += '<details><summary>'
+    + (truncated ? ('Show the first ' + names.length + ' of ' + u.count) : 'Show them')
+    + '</summary><ul>';
+  names.forEach(function(n) { html += '<li>' + escapeHtml(n) + '</li>'; });
+  html += '</ul>';
+  if (truncated) html += '<div style="margin-top:4px;">…and ' + (u.count - names.length) + ' more not shown.</div>';
+  html += '</details></div>';
+  return html;
+}
+
 // ---------------- Explorer tab ----------------
 var explorerLoaded = false;   // lazy-load guard: fetch explorer once on first open
+var explorerData = null;      // last payload from /api/life-list/explorer
+var explorerPath = [];        // [{id,name,rank}] drill path from class root down
 
 function llSwitchTab(name) {
   document.querySelectorAll('.ll-tab').forEach(function(t) {
@@ -441,9 +568,6 @@ function llSwitchTab(name) {
     loadExplorer();
   }
 }
-
-// Placeholder — filled in by Task 10.
-async function loadExplorer(rootId) {}
 
 loadLifeList();
 
