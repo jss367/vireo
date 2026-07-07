@@ -3364,7 +3364,6 @@ async function loadPhotos(options) {
   loading = true;
   var epoch = loadEpoch;
   var loadSucceeded = false;
-  var suppressAutoHydration = collectionAnchorScanDepth > 0;
   var showLoading = !(options && options.silent) && photos.length === 0;
   var loadingState = document.getElementById('loadingState');
   if (showLoading && loadingState) {
@@ -3443,7 +3442,11 @@ async function loadPhotos(options) {
     if (epoch === loadEpoch) {
       loading = false;
       if (showLoading && loadingState) loadingState.style.display = 'none';
-      if (loadSucceeded && !suppressAutoHydration) {
+      // Re-check the scan depth live (not a load-start snapshot): a stale
+      // scan can drain during our fetch, and its own hydration rAF then
+      // bails on loading=true. In that overlap this load is the current
+      // view's only chance to re-arm.
+      if (loadSucceeded && collectionAnchorScanDepth === 0) {
         rearmInfiniteScrollObserver();
         // Chain: keep loading while the viewport is at or past the loading
         // boundary (rAF so the freshly appended cards have a layout first).
