@@ -10142,6 +10142,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not cache_dir:
             return json_error("Unknown cache type")
 
+        raw_limit = request.args.get("limit", type=int)
+        limit = raw_limit if raw_limit and raw_limit > 0 else None
+
         # Load embedding manifest for display names
         manifest = {}
         if cache_type == "embeddings":
@@ -10149,15 +10152,39 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             manifest = _load_manifest()
 
         files = []
+        truncated = False
         if os.path.isdir(cache_dir):
-            for f in sorted(os.listdir(cache_dir)):
-                fp = os.path.join(cache_dir, f)
-                if os.path.isfile(fp) and f != "manifest.json":
-                    entry = {"name": f, "size": os.path.getsize(fp)}
-                    if f in manifest:
-                        entry["meta"] = manifest[f]
-                    files.append(entry)
-        return jsonify({"type": cache_type, "path": cache_dir, "files": files})
+            if limit is None:
+                names = sorted(os.listdir(cache_dir))
+                for f in names:
+                    fp = os.path.join(cache_dir, f)
+                    if os.path.isfile(fp) and f != "manifest.json":
+                        entry = {"name": f, "size": os.path.getsize(fp)}
+                        if f in manifest:
+                            entry["meta"] = manifest[f]
+                        files.append(entry)
+            else:
+                with os.scandir(cache_dir) as entries:
+                    for entry_info in entries:
+                        if entry_info.name == "manifest.json":
+                            continue
+                        if not entry_info.is_file():
+                            continue
+                        if len(files) >= limit:
+                            truncated = True
+                            break
+                        stat = entry_info.stat()
+                        entry = {"name": entry_info.name, "size": stat.st_size}
+                        if entry_info.name in manifest:
+                            entry["meta"] = manifest[entry_info.name]
+                        files.append(entry)
+        return jsonify({
+            "type": cache_type,
+            "path": cache_dir,
+            "files": files,
+            "truncated": truncated,
+            "limit": limit,
+        })
 
     @app.route("/api/storage/clear", methods=["POST"])
     def api_storage_clear():
