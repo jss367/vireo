@@ -3264,6 +3264,31 @@ async function startPipeline() {
       });
       if (excluded.length > 0) body.exclude_paths = excluded;
     }
+  } else if (_sourceMode === 'import') {
+    // Import scope: send the added source folders so /api/jobs/pipeline
+    // can scan (and optionally copy) them. Without this branch the
+    // request falls through to the collection path and posts
+    // collection_id: null, which the endpoint rejects as missing scope.
+    body.sources = _sourceFolders.slice();
+    body.file_types = getIngestFileTypes();
+    body.recursive = includeSubfoldersEnabled();
+    if (_copyMode) {
+      body.destination = document.getElementById('cfgDestination').value.trim();
+      body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
+      body.verify_by_hash = document.getElementById('chkVerifyByHash').checked;
+      body.folder_template = getSelectedFolderTemplate();
+      var lpCb = document.getElementById('chkLocalProcessing');
+      if (lpCb) body.local_processing = !!lpCb.checked;
+    }
+    // Deselections apply by path — import previews have no photo_id
+    // yet, so exclude_photo_ids would drop them silently.
+    if (_previewData && _previewSelected) {
+      var excludedImport = [];
+      _previewData.files.forEach(function(f) {
+        if (!_previewSelected[f.path]) excludedImport.push(f.path);
+      });
+      if (excludedImport.length > 0) body.exclude_paths = excludedImport;
+    }
   } else {
     body.collection_id = parseInt(document.getElementById('collectionPicker').value);
     // Add excluded photo IDs from preview selection
