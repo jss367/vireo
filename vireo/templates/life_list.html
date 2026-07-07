@@ -90,6 +90,20 @@
   .ll-card-sub { font-size:12px; color:var(--text-secondary); margin-top:6px; font-variant-numeric:tabular-nums; }
   .ll-ring { flex:0 0 auto; }
   .ll-ring text { font-size:13px; font-weight:600; fill:var(--text-primary); font-variant-numeric:tabular-nums; }
+
+  .ll-leaf-head { display:flex; align-items:center; gap:16px; flex-wrap:wrap; margin-bottom:14px; }
+  .ll-leaf-head h3 { font-size:16px; color:var(--text-primary); margin:0; font-variant-numeric:tabular-nums; }
+  .ll-leaf-head label { font-size:13px; color:var(--text-secondary); display:flex; align-items:center; gap:6px; }
+  .ll-leaf-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(180px, 1fr)); gap:14px; }
+  .ll-sp { border-radius:8px; overflow:hidden; background:var(--bg-secondary); border:1px solid var(--border-primary); }
+  .ll-sp.missing { opacity:.6; }
+  .ll-sp img, .ll-sp .ll-sp-ph { width:100%; aspect-ratio:3/2; object-fit:cover; display:block; background:var(--bg-tertiary); }
+  .ll-sp-info { padding:8px 10px 10px; }
+  .ll-sp-name { font-size:14px; font-weight:600; color:var(--text-primary); }
+  .ll-sp-common { font-size:12px; color:var(--text-secondary); margin-top:1px; }
+  .ll-sp-chip { display:inline-block; margin-top:6px; padding:1px 8px; border-radius:999px; font-size:11px; }
+  .ll-sp-chip.seen { background:var(--accent); color:var(--accent-text); }
+  .ll-sp-chip.notyet { background:var(--bg-tertiary); color:var(--text-muted); }
 </style>
 </head>
 <body>
@@ -689,8 +703,72 @@ function renderExplorerCard(n) {
     + '</div></div>';
 }
 
-// Genus species leaf — implemented in Task 12.
-function loadExplorerSpecies(node) {}
+// ---------------- Explorer: species leaf (Task 12) ----------------
+
+var explorerLeafData = null;   // last species-leaf payload
+var explorerLeafGenus = null;  // {id,name,rank} of the genus being shown
+
+async function loadExplorerSpecies(node) {
+  explorerLeafGenus = { id: node.id, name: node.common_name || node.name, rank: node.rank };
+  explorerPath.push(explorerLeafGenus);
+  var body = document.getElementById('explorerBody');
+  if (body) body.innerHTML = renderBreadcrumb() + '<div class="ll-exp-empty">Loading species…</div>';
+  try {
+    explorerLeafData = await safeFetch('/api/life-list/explorer/species?genus=' + encodeURIComponent(node.id));
+  } catch (e) {
+    if (body) body.innerHTML = renderBreadcrumb() + '<div class="ll-exp-empty">Failed to load species.</div>';
+    return;
+  }
+  renderExplorerLeaf(false);
+}
+
+function renderExplorerLeaf(missingOnly) {
+  var body = document.getElementById('explorerBody');
+  if (!body) return;
+  var species = (explorerLeafData && explorerLeafData.species) || [];
+  var found = species.filter(function(s) { return s.found; }).length;
+  var genusName = explorerLeafGenus ? explorerLeafGenus.name : '';
+
+  var html = renderBreadcrumb();
+  html += '<div class="ll-leaf-head">';
+  html += '<h3>' + found + '/' + species.length + ' species in ' + escapeHtml(genusName) + '</h3>';
+  html += '<label><input type="checkbox" id="explorerMissingOnly"' + (missingOnly ? ' checked' : '') + '> Show missing only</label>';
+  html += '</div>';
+
+  var shown = missingOnly ? species.filter(function(s) { return !s.found; }) : species;
+  html += '<div class="ll-leaf-grid">';
+  shown.forEach(function(s) { html += renderSpeciesTile(s); });
+  html += '</div>';
+  if (!shown.length) html += '<div class="ll-exp-empty">Nothing to show.</div>';
+  body.innerHTML = html;
+
+  // renderBreadcrumb defers its own handlers; wire the checkbox here.
+  var chk = document.getElementById('explorerMissingOnly');
+  if (chk) chk.addEventListener('change', function() { renderExplorerLeaf(chk.checked); });
+}
+
+function renderSpeciesTile(s) {
+  var common = (s.common_name && s.common_name !== s.name)
+    ? '<div class="ll-sp-common">' + escapeHtml(s.common_name) + '</div>' : '';
+  if (s.found) {
+    var thumb = s.photo ? photoThumbnailUrl(s.photo) : '';
+    var img = thumb
+      ? '<img src="' + escapeAttr(thumb) + '" alt="' + escapeAttr(s.photo ? s.photo.filename : s.name) + '" loading="lazy">'
+      : '<div class="ll-sp-ph"></div>';
+    return '<div class="ll-sp">' + img
+      + '<div class="ll-sp-info">'
+      + '<div class="ll-sp-name">' + escapeHtml(s.name) + '</div>'
+      + common
+      + '<span class="ll-sp-chip seen">✓ seen</span>'
+      + '</div></div>';
+  }
+  return '<div class="ll-sp missing"><div class="ll-sp-ph"></div>'
+    + '<div class="ll-sp-info">'
+    + '<div class="ll-sp-name">' + escapeHtml(s.name) + '</div>'
+    + common
+    + '<span class="ll-sp-chip notyet">not yet</span>'
+    + '</div></div>';
+}
 
 // ---------------- Explorer tab ----------------
 var explorerLoaded = false;   // lazy-load guard: fetch explorer once on first open
