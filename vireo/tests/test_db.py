@@ -14857,3 +14857,17 @@ def test_life_list_taxon_ids_excludes_rejected(db):
     db.conn.commit()
     db.update_photo_flag(p, 'rejected')
     assert db.get_life_list_taxon_ids() == set()
+
+
+def test_get_taxon_subtree(db):
+    ids = _seed_bird_taxonomy(db)
+    rows = db.get_taxon_subtree(ids['Aves'])
+    by_name = {r['name']: r for r in rows}
+    assert by_name['Aves']['rank'] == 'class'
+    assert by_name['Melospiza melodia']['rank'] == 'species'
+    # parent linkage preserved
+    assert by_name['Passeriformes']['parent_id'] == ids['Aves']
+    assert by_name['Melospiza']['parent_id'] == ids['Passerellidae']
+    # subtree of a genus is just its species + itself
+    sub = {r['name'] for r in db.get_taxon_subtree(ids['Melospiza'])}
+    assert sub == {'Melospiza', 'Melospiza melodia', 'Melospiza georgiana'}
