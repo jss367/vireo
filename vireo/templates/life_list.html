@@ -563,7 +563,23 @@ function renderExplorer() {
   html += '</div>';
   panel.innerHTML = html;
 
+  wireBreadcrumb(document.getElementById('explorerBody'));
   renderExplorerBody();
+}
+
+// Single delegated click listener for breadcrumb crumbs. Attached once to the
+// persistent #explorerBody container, so re-rendering its innerHTML (cards,
+// species leaf, loading states) never accumulates duplicate handlers.
+function wireBreadcrumb(container) {
+  if (!container) return;
+  container.addEventListener('click', function(event) {
+    var crumb = event.target.closest('.ll-crumb');
+    if (!crumb || !container.contains(crumb)) return;
+    var depth = parseInt(crumb.getAttribute('data-depth'), 10);
+    if (isNaN(depth) || depth === explorerPath.length) return;   // current crumb: no-op
+    explorerPath = explorerPath.slice(0, depth);
+    renderExplorerBody();
+  });
 }
 
 // Muted footnote for tagged species that aren't matched to the taxonomy and so
@@ -655,19 +671,8 @@ function renderBreadcrumb() {
       + escapeHtml(step.name) + '</span>';
   });
   html += '</div>';
-  // Attach handlers after render (deferred so innerHTML exists).
-  setTimeout(function() {
-    var body = document.getElementById('explorerBody');
-    if (!body) return;
-    body.querySelectorAll('.ll-crumb').forEach(function(c) {
-      c.addEventListener('click', function() {
-        var depth = parseInt(c.getAttribute('data-depth'), 10);
-        if (depth === explorerPath.length) return;   // current crumb: no-op
-        explorerPath = explorerPath.slice(0, depth);
-        renderExplorerBody();
-      });
-    });
-  }, 0);
+  // Crumb click handling is delegated once via wireBreadcrumb() on #explorerBody;
+  // no per-render handler attachment here.
   return html;
 }
 
@@ -686,12 +691,18 @@ function renderRing(found, total) {
     + '</svg>';
 }
 
+function rankPlural(rank, n) {
+  var map = { order: 'orders', family: 'families', genus: 'genera',
+              species: 'species', class: 'classes' };
+  return map[rank] || (rank + 's');
+}
+
 function renderExplorerCard(n) {
   var name = n.common_name || n.name;
   var sci = (n.common_name && n.common_name !== n.name)
     ? '<div class="ll-card-sci">' + escapeHtml(n.name) + '</div>' : '';
-  var childRank = n.child_rank || 'children';
-  var sub = n.found_children + '/' + n.total_children + ' ' + childRank + 's · '
+  var childRank = n.child_rank ? rankPlural(n.child_rank) : 'children';
+  var sub = n.found_children + '/' + n.total_children + ' ' + childRank + ' · '
     + n.found_species + '/' + n.total_species + ' species';
   var emptyCls = (n.found_species === 0) ? ' empty' : '';
   return '<div class="ll-card' + emptyCls + '" data-id="' + escapeAttr(n.id) + '">'
@@ -742,7 +753,7 @@ function renderExplorerLeaf(missingOnly) {
   if (!shown.length) html += '<div class="ll-exp-empty">Nothing to show.</div>';
   body.innerHTML = html;
 
-  // renderBreadcrumb defers its own handlers; wire the checkbox here.
+  // Breadcrumb clicks are handled by the delegated wireBreadcrumb listener; wire the checkbox here.
   var chk = document.getElementById('explorerMissingOnly');
   if (chk) chk.addEventListener('change', function() { renderExplorerLeaf(chk.checked); });
 }
