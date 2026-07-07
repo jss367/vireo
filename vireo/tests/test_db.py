@@ -14871,3 +14871,10 @@ def test_get_taxon_subtree(db):
     # subtree of a genus is just its species + itself
     sub = {r['name'] for r in db.get_taxon_subtree(ids['Melospiza'])}
     assert sub == {'Melospiza', 'Melospiza melodia', 'Melospiza georgiana'}
+
+
+def test_get_classes_for_taxa(db):
+    ids = _seed_bird_taxonomy(db)
+    classes = db.get_classes_for_taxa({ids['Melospiza melodia']})
+    assert [c['name'] for c in classes] == ['Aves']
+    assert db.get_classes_for_taxa(set()) == []
