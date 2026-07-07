@@ -9126,41 +9126,48 @@ class Database:
         return dict(row) if row else None
 
     def get_life_list_taxon_ids(self):
-        """Distinct taxa ids of workspace-scoped tagged species (same eligibility
-        as get_life_list_candidates), excluding species keywords with no taxon_id."""
+        """Distinct species-rank taxa ids of workspace-scoped tagged species (same
+        eligibility as get_life_list_candidates). Excludes species keywords with no
+        taxon_id AND taxonomy tags that resolve to a taxon above species rank
+        (genus, family, etc.). Higher-rank matches are surfaced via
+        get_life_list_unmatched_species so the explorer's found/total math stays
+        at species rank and non-species tags aren't silently undercounted."""
         ws = self._ws_id()
         rows = self.conn.execute(
             """SELECT DISTINCT k.taxon_id AS tid
                FROM photo_keywords pk
                JOIN keywords k ON k.id = pk.keyword_id
                 AND (k.is_species = 1 OR k.type = 'taxonomy')
+               JOIN taxa t ON t.id = k.taxon_id AND t.rank = 'species'
                JOIN photos p ON p.id = pk.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                 AND wf.workspace_id = ?
                JOIN folders f ON f.id = p.folder_id
                 AND f.status IN ('ok', 'partial')
-               WHERE COALESCE(p.flag, 'none') != 'rejected'
-                 AND k.taxon_id IS NOT NULL""",
+               WHERE COALESCE(p.flag, 'none') != 'rejected'""",
             (ws,),
         ).fetchall()
         return {r["tid"] for r in rows}
 
     def get_life_list_unmatched_species(self):
-        """Names of workspace-scoped tagged species keywords with no taxon_id —
-        surfaced honestly in the explorer as 'not counted'."""
+        """Names of workspace-scoped tagged species keywords that can't be counted
+        at species rank — either no linked taxon at all, or a link that lands on
+        a taxon above species (genus/family/etc.). Surfaced honestly in the
+        explorer as 'not counted' so higher-rank matches aren't silently dropped."""
         ws = self._ws_id()
         rows = self.conn.execute(
             """SELECT DISTINCT k.name AS name
                FROM photo_keywords pk
                JOIN keywords k ON k.id = pk.keyword_id
                 AND (k.is_species = 1 OR k.type = 'taxonomy')
+               LEFT JOIN taxa t ON t.id = k.taxon_id
                JOIN photos p ON p.id = pk.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                 AND wf.workspace_id = ?
                JOIN folders f ON f.id = p.folder_id
                 AND f.status IN ('ok', 'partial')
                WHERE COALESCE(p.flag, 'none') != 'rejected'
-                 AND k.taxon_id IS NULL
+                 AND (k.taxon_id IS NULL OR t.rank IS NULL OR t.rank != 'species')
                ORDER BY k.name""",
             (ws,),
         ).fetchall()

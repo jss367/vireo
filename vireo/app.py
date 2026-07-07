@@ -1521,6 +1521,18 @@ def _build_explorer_payload(db, root_id=None):
 
     unmatched = db.get_life_list_unmatched_species()
     classes = db.get_classes_for_taxa(found)
+    # Always include the default Aves class in the selector, regardless of the
+    # currently selected root. `get_classes_for_taxa(found)` only returns classes
+    # the user has actually tagged in, so a user who tags only non-bird species
+    # and then picks that class would otherwise lose Birds from the selector with
+    # no in-page way back to the default view.
+    default_root = root if root_id is None else db.get_explorer_root()
+    if default_root is not None and not any(
+        c["id"] == default_root["id"] for c in classes
+    ):
+        classes.insert(0, {"id": default_root["id"],
+                           "name": default_root["name"],
+                           "common_name": default_root.get("common_name")})
     return {
         "taxonomy_ready": True,
         "valid_root": True,

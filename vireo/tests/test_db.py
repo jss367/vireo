@@ -14843,6 +14843,29 @@ def test_life_list_taxon_ids_scope(db):
     assert 'Mystery Warbler' in unmatched
 
 
+def test_life_list_taxon_ids_excludes_non_species_matches(db):
+    # A taxonomy tag that resolves to a genus (or any rank above species) must
+    # NOT show up as a "found" taxon — the explorer only counts at species rank
+    # and would otherwise silently drop the match. It should surface in the
+    # unmatched list instead so the "not counted" honesty footnote is accurate.
+    ids = _seed_bird_taxonomy(db)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder('/p', name='p')
+    p = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                     file_size=1, file_mtime=1.0)
+    # Tag with a keyword that links to the Melospiza *genus*, not a species.
+    k = db.add_keyword('Melospiza sp.')
+    db.tag_photo(p, k)
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
+                    (ids['Melospiza'], k))
+    db.conn.commit()
+
+    assert db.get_life_list_taxon_ids() == set()
+    unmatched = db.get_life_list_unmatched_species()
+    assert 'Melospiza sp.' in unmatched
+
+
 def test_life_list_taxon_ids_excludes_rejected(db):
     ids = _seed_bird_taxonomy(db)
     ws = db.ensure_default_workspace()

@@ -609,7 +609,7 @@ function renderUnmatched(d) {
   var names = u.names || [];
   var truncated = u.count > names.length;
   var html = '<div class="ll-unmatched">';
-  html += u.count + " tagged species aren't matched to the taxonomy and aren't counted here.";
+  html += u.count + " tagged species aren't counted here (unmatched, or matched above species rank).";
   html += '<details><summary>'
     + (truncated ? ('Show the first ' + names.length + ' of ' + u.count) : 'Show them')
     + '</summary><ul>';

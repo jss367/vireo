@@ -7066,3 +7066,47 @@ def test_api_explorer_not_ready(app_and_db):
     r = app.test_client().get('/api/life-list/explorer')
     assert r.status_code == 200
     assert r.get_json()['taxonomy_ready'] is False
+
+
+def _seed_mammal_taxon(db):
+    """Add a second class-rank taxon (Mammalia) so multi-class selector tests
+    have somewhere to switch to. Returns the class row id."""
+    cur = db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, parent_id, kingdom)"
+        " VALUES (?,?,?,?,?,?)",
+        (40151, 'Mammalia', 'Mammals', 'class', None, 'Animalia'),
+    )
+    db.conn.commit()
+    return cur.lastrowid
+
+
+def test_build_explorer_payload_always_includes_default_aves_class(db):
+    # Codex P2: after switching away from Aves, the default Birds class must
+    # stay in the selector so the user has an in-page way back to it. Recomputing
+    # `classes` only from *found* taxa would otherwise drop Birds when the user's
+    # only tagged species are outside Aves.
+    from app import _build_explorer_payload
+    ids = _seed_bird_taxonomy(db)
+    mammalia_id = _seed_mammal_taxon(db)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    # User has tagged species — but NONE of them are birds.
+    fid = db.add_folder('/p', name='p')
+    # No mammal species seeded; leave the mammal tag unmatched so `found` is
+    # empty but the class ancestor list would still not include Aves without
+    # the fix. That still isolates the "default Aves always present" behavior.
+
+    # No found taxa at all -> Aves must still be in the returned classes when
+    # the root is the default (Aves).
+    payload_default = _build_explorer_payload(db)
+    assert any(c['name'] == 'Aves' for c in payload_default['classes'])
+
+    # Switching to Mammalia (a class the user has no *matched* species in):
+    # the returned classes list must STILL include Aves as a fallback, so the
+    # client can rebuild the selector without losing Birds.
+    payload_mammal = _build_explorer_payload(db, root_id=mammalia_id)
+    class_names = [c['name'] for c in payload_mammal['classes']]
+    assert 'Aves' in class_names, (
+        "Default Aves class must remain in the selector after switching to a "
+        "non-Aves class, otherwise the user has no in-page way back to Birds"
+    )
