@@ -14878,3 +14878,26 @@ def test_get_classes_for_taxa(db):
     classes = db.get_classes_for_taxa({ids['Melospiza melodia']})
     assert [c['name'] for c in classes] == ['Aves']
     assert db.get_classes_for_taxa(set()) == []
+
+
+def test_best_photo_by_taxon(db):
+    ids = _seed_bird_taxonomy(db)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder('/p', name='p')
+    p1 = db.add_photo(folder_id=fid, filename='low.jpg', extension='.jpg',
+                      file_size=1, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='high.jpg', extension='.jpg',
+                      file_size=1, file_mtime=2.0)
+    # No update_photo_quality_score helper in db.py; set the column directly.
+    db.conn.execute("UPDATE photos SET quality_score=? WHERE id=?", (0.2, p1))
+    db.conn.execute("UPDATE photos SET quality_score=? WHERE id=?", (0.9, p2))
+    db.conn.commit()
+    k = db.add_keyword('Song Sparrow')
+    db.tag_photo(p1, k)
+    db.tag_photo(p2, k)
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
+                    (ids['Melospiza melodia'], k))
+    db.conn.commit()
+    best = db.get_life_list_best_photo_by_taxon([ids['Melospiza melodia']])
+    assert best[ids['Melospiza melodia']]['filename'] == 'high.jpg'
