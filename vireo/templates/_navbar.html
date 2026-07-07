@@ -8223,6 +8223,21 @@ function nativeMenuError(msg) {
   else console.error(msg);
 }
 
+function revealFeedbackMessage(data) {
+  if (data && data.ok === false) {
+    return 'Reveal failed: ' + (data.reason || 'unknown error');
+  }
+  return 'Revealed in ' + (window.VIREO_FILE_MANAGER_NAME || 'file manager');
+}
+
+function showRevealFeedback(data) {
+  var isError = data && data.ok === false;
+  var msg = revealFeedbackMessage(data);
+  if (typeof showToast === 'function') showToast(msg, isError ? 'error' : 'success');
+  else if (isError) console.error(msg);
+  else console.info(msg);
+}
+
 function nativeMenuRoute(path) {
   window.location.href = path;
 }

@@ -1409,7 +1409,13 @@ function revealReviewPhoto(photoId) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ photo_id: photoId }),
-  }, { toast: false }).catch(function() {});
+  }, { toast: false }).then(function(data) {
+    if (typeof showRevealFeedback === 'function') showRevealFeedback(data);
+  }).catch(function(err) {
+    if (typeof showToast === 'function') {
+      showToast('Reveal failed: ' + (err.message || 'request failed'), 'error');
+    }
+  });
 }
 
 async function copyReviewPhotoPath(photoId) {

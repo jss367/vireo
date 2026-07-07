@@ -2541,6 +2541,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             + json.dumps(sys.platform)
             + ";\nwindow.VIREO_REVEAL_LABEL = "
             + json.dumps(labels["reveal"])
+            + ";\nwindow.VIREO_FILE_MANAGER_NAME = "
+            + json.dumps(labels["name"])
             + ";\nwindow.VIREO_EDITOR_PATH_PLACEHOLDER = "
             + json.dumps(labels["editor_placeholder"])
             + ";\n",
@@ -4613,14 +4615,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # "open -R <dir>" reveals the folder inside its parent; that's
                 # the right behavior for folder reveals too, consistent with
                 # how Finder treats folder-targeted reveal.
-                subprocess.run(["open", "-R", "--", path], timeout=5, check=False)
+                proc = subprocess.run(
+                    ["open", "-R", "--", path],
+                    timeout=5,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
             elif sys.platform.startswith("win"):
                 if is_folder:
                     # Open the folder itself so the user sees its contents.
-                    subprocess.run(["explorer", path], timeout=5, check=False)
+                    proc = subprocess.run(
+                        ["explorer", path],
+                        timeout=5,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
                 else:
-                    subprocess.run(
-                        ["explorer", f"/select,{path}"], timeout=5, check=False
+                    proc = subprocess.run(
+                        ["explorer", f"/select,{path}"],
+                        timeout=5,
+                        check=False,
+                        capture_output=True,
+                        text=True,
                     )
             else:
                 # xdg-open on a file has inconsistent behavior across desktops
@@ -4632,7 +4650,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # xdg-open doesn't honor `--`; abspath guarantees a leading `/`
                 # so a crafted leading-dash path can't be parsed as a flag.
                 target = os.path.abspath(target)
-                subprocess.run(["xdg-open", target], timeout=5, check=False)
+                proc = subprocess.run(
+                    ["xdg-open", target],
+                    timeout=5,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+            if proc.returncode != 0:
+                reason = (proc.stderr or proc.stdout or "").strip()
+                if not reason:
+                    reason = f"reveal command exited {proc.returncode}"
+                return jsonify({"ok": False, "reason": reason})
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
             return jsonify({"ok": False, "reason": str(exc)})
         return jsonify({"ok": True})

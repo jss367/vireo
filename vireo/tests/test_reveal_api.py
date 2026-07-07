@@ -85,6 +85,24 @@ def test_reveal_shell_failure_reports_reason(app_and_db):
         assert "reason" in body
 
 
+def test_reveal_nonzero_exit_reports_reason(app_and_db):
+    app, db = app_and_db
+    pid = db.get_photos()[0]["id"]
+    with app.test_client() as c, \
+         patch("vireo.app.sys.platform", "darwin"), \
+         patch("vireo.app.subprocess.run") as run:
+        run.return_value = MagicMock(
+            returncode=1,
+            stdout="",
+            stderr="The file does not exist.",
+        )
+        resp = c.post("/api/files/reveal", json={"photo_id": pid})
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body["ok"] is False
+        assert body["reason"] == "The file does not exist."
+
+
 def test_reveal_invalid_photo_id_returns_400(app_and_db):
     app, _ = app_and_db
     with app.test_client() as c:
