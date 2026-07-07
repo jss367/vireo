@@ -46,6 +46,7 @@ pub mod ids {
     pub const PHOTO_COMPARE: &str = "photo_compare";
     pub const PHOTO_ADD_KEYWORD: &str = "photo_add_keyword";
     pub const PHOTO_ADD_COLLECTION: &str = "photo_add_collection";
+    pub const PHOTO_ADJUST_CAPTURE_TIME: &str = "photo_adjust_capture_time";
     pub const PHOTO_DELETE: &str = "photo_delete";
     pub const PHOTO_RATE_0: &str = "photo_rate_0";
     pub const PHOTO_RATE_1: &str = "photo_rate_1";
@@ -128,6 +129,7 @@ pub fn command_for_id(id: &str) -> Option<&'static str> {
         ids::PHOTO_COMPARE => Some("photo_compare"),
         ids::PHOTO_ADD_KEYWORD => Some("photo_add_keyword"),
         ids::PHOTO_ADD_COLLECTION => Some("photo_add_collection"),
+        ids::PHOTO_ADJUST_CAPTURE_TIME => Some("photo_adjust_capture_time"),
         ids::PHOTO_DELETE => Some("photo_delete"),
         ids::PHOTO_RATE_0 => Some("photo_rate_0"),
         ids::PHOTO_RATE_1 => Some("photo_rate_1"),
@@ -411,6 +413,10 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
         )
         .item(
             &MenuItemBuilder::with_id(ids::PHOTO_ADD_COLLECTION, "Add to Collection...")
+                .build(app)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id(ids::PHOTO_ADJUST_CAPTURE_TIME, "Adjust Capture Time...")
                 .build(app)?,
         )
         .separator()
