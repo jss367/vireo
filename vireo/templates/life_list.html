@@ -45,10 +45,25 @@
   .lifelist-empty a { color:var(--accent); }
   /* .lifelist-lb-panel styles now live in _navbar.html — the "Add to Life
      List" lightbox panel is shared across every page's lightbox. */
+
+  /* --- List / Explorer tabs (pattern adapted from audit.html, renamed ll-*) --- */
+  .ll-tabs { display:flex; gap:0; padding:0 24px; background:var(--bg-secondary); border-bottom:1px solid var(--border-primary); }
+  .ll-tab { padding:12px 20px; cursor:pointer; font-size:13px; color:var(--text-muted); border-bottom:2px solid transparent; transition:color 0.15s, border-color 0.15s; user-select:none; }
+  .ll-tab:hover { color:var(--text-primary); }
+  .ll-tab.active { color:var(--text-primary); border-bottom-color:var(--accent); }
+  .ll-tabpanel { display:none; }
+  .ll-tabpanel.active { display:block; }
 </style>
 </head>
 <body>
 {% include '_navbar.html' %}
+
+<div class="ll-tabs">
+  <div class="ll-tab active" data-tab="list" onclick="llSwitchTab('list')">List</div>
+  <div class="ll-tab" data-tab="explorer" onclick="llSwitchTab('explorer')">Explorer</div>
+</div>
+
+<div class="ll-tabpanel active" id="tab-list">
 
 <div class="lifelist-controls" id="controlsBar">
   <div class="control-group">
@@ -153,6 +168,10 @@
      predictions on the <a href="/highlights">Highlights</a> page or tag
      photos while browsing.</p>
 </div>
+
+</div><!-- /#tab-list -->
+
+<div class="ll-tabpanel" id="tab-explorer"></div>
 
 <script>
 var currentData = null;
@@ -402,7 +421,38 @@ document.addEventListener('lifelist:changed', function() {
   loadLifeList();
 });
 
+// ---------------- Explorer tab ----------------
+var explorerLoaded = false;   // lazy-load guard: fetch explorer once on first open
+
+function llSwitchTab(name) {
+  document.querySelectorAll('.ll-tab').forEach(function(t) {
+    t.classList.toggle('active', t.dataset.tab === name);
+  });
+  document.querySelectorAll('.ll-tabpanel').forEach(function(p) {
+    p.classList.toggle('active', p.id === 'tab-' + name);
+  });
+  try {
+    var url = new URL(window.location.href);
+    url.searchParams.set('view', name);
+    history.replaceState(null, '', url.toString());
+  } catch (e) {}
+  if (name === 'explorer' && !explorerLoaded) {
+    explorerLoaded = true;
+    loadExplorer();
+  }
+}
+
+// Placeholder — filled in by Task 10.
+async function loadExplorer(rootId) {}
+
 loadLifeList();
+
+// Initial tab from ?view= (defaults to list).
+(function() {
+  var view = 'list';
+  try { view = new URLSearchParams(window.location.search).get('view') || 'list'; } catch (e) {}
+  if (view === 'explorer') llSwitchTab('explorer');
+})();
 </script>
 </body>
 </html>
