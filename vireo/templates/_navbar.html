@@ -8556,6 +8556,17 @@ window.handleNativeMenuCommand = async function(command) {
           nativeMenuError('Add to Collection is available from Browse after selecting photos.');
         }
         break;
+      case 'photo_adjust_capture_time':
+        if (typeof openCaptureTimeModal === 'function') {
+          var captureTimeIds = nativeMenuRequirePhotos('Adjust Capture Time');
+          if (!captureTimeIds) break;
+          nativeMenuSetPhotoIdsOverride(captureTimeIds);
+          nativeMenuCloseLightboxForModal();
+          openCaptureTimeModal();
+        } else {
+          nativeMenuError('Adjust Capture Time is available from Browse after selecting photos.');
+        }
+        break;
       case 'photo_delete':
         if (nativeMenuLightboxOpen() && typeof lightboxDelete === 'function') {
           lightboxDelete();

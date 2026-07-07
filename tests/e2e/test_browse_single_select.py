@@ -37,6 +37,28 @@ def test_single_click_reveals_batch_bar(live_server, page):
     expect(page.locator("#developBtn")).to_be_visible()
 
 
+def test_adjust_capture_time_lives_in_native_menu_not_batch_bar(live_server, page):
+    """Capture-time adjustment is useful, but too infrequent for the Browse
+    batch bar; it remains available through the native Photo menu command.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.locator(".grid-card").first.click()
+
+    expect(page.locator("#batchBar")).to_be_visible()
+    assert page.locator("#batchBar button", has_text="Adjust Time").count() == 0
+
+    page.evaluate("window.handleNativeMenuCommand('photo_adjust_capture_time')")
+
+    modal = page.locator("#captureTimeModal.open")
+    expect(modal).to_be_visible()
+    expect(page.locator("#captureTimeTitle")).to_have_text(
+        "Adjust Capture Time for 1 photo"
+    )
+
+
 def test_closing_detail_hides_batch_bar(live_server, page):
     """Closing the detail panel clears single-focus selection and hides the bar."""
     url = live_server["url"]
