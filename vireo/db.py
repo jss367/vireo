@@ -9115,6 +9115,152 @@ class Database:
             (ws,),
         ).fetchall()
 
+    def get_explorer_root(self, name="Aves", rank="class"):
+        """Return {id,name,common_name,rank} for the default explorer root class,
+        or None when the reference taxonomy has not been downloaded."""
+        row = self.conn.execute(
+            "SELECT id, name, common_name, rank FROM taxa"
+            " WHERE name = ? AND rank = ? LIMIT 1",
+            (name, rank),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_life_list_taxon_ids(self):
+        """Distinct species-rank taxa ids of workspace-scoped tagged species (same
+        eligibility as get_life_list_candidates). Excludes species keywords with no
+        taxon_id AND taxonomy tags that resolve to a taxon above species rank
+        (genus, family, etc.). Higher-rank matches are surfaced via
+        get_life_list_unmatched_species so the explorer's found/total math stays
+        at species rank and non-species tags aren't silently undercounted."""
+        ws = self._ws_id()
+        rows = self.conn.execute(
+            """SELECT DISTINCT k.taxon_id AS tid
+               FROM photo_keywords pk
+               JOIN keywords k ON k.id = pk.keyword_id
+                AND (k.is_species = 1 OR k.type = 'taxonomy')
+               JOIN taxa t ON t.id = k.taxon_id AND t.rank = 'species'
+               JOIN photos p ON p.id = pk.photo_id
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                AND wf.workspace_id = ?
+               JOIN folders f ON f.id = p.folder_id
+                AND f.status IN ('ok', 'partial')
+               WHERE COALESCE(p.flag, 'none') != 'rejected'""",
+            (ws,),
+        ).fetchall()
+        return {r["tid"] for r in rows}
+
+    def get_life_list_unmatched_species(self):
+        """Names of workspace-scoped tagged species keywords that can't be counted
+        at species rank — either no linked taxon at all, or a link that lands on
+        a taxon above species (genus/family/etc.). Surfaced honestly in the
+        explorer as 'not counted' so higher-rank matches aren't silently dropped."""
+        ws = self._ws_id()
+        rows = self.conn.execute(
+            """SELECT DISTINCT k.name AS name
+               FROM photo_keywords pk
+               JOIN keywords k ON k.id = pk.keyword_id
+                AND (k.is_species = 1 OR k.type = 'taxonomy')
+               LEFT JOIN taxa t ON t.id = k.taxon_id
+               JOIN photos p ON p.id = pk.photo_id
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                AND wf.workspace_id = ?
+               JOIN folders f ON f.id = p.folder_id
+                AND f.status IN ('ok', 'partial')
+               WHERE COALESCE(p.flag, 'none') != 'rejected'
+                 AND (k.taxon_id IS NULL OR t.rank IS NULL OR t.rank != 'species')
+               ORDER BY k.name""",
+            (ws,),
+        ).fetchall()
+        return [r["name"] for r in rows]
+
+    def get_taxon_subtree(self, root_id, max_depth=12):
+        """All taxa in the subtree rooted at root_id (inclusive), as dict rows
+        with id, name, common_name, rank, parent_id. Uses the parent_id index."""
+        # The depth cap is safe because the taxonomy loader keeps only major
+        # ranks (see vireo/taxonomy.py MAJOR_RANK_LEVELS), giving a real
+        # class->species depth of ~4. Raise the cap if intermediate ranks are
+        # ever kept.
+        return [dict(r) for r in self.conn.execute(
+            """WITH RECURSIVE subtree(id, name, common_name, rank, parent_id, depth) AS (
+                   SELECT id, name, common_name, rank, parent_id, 0
+                   FROM taxa WHERE id = ?
+                   UNION ALL
+                   SELECT t.id, t.name, t.common_name, t.rank, t.parent_id, s.depth + 1
+                   FROM taxa t JOIN subtree s ON t.parent_id = s.id
+                   WHERE s.depth < ?
+               )
+               SELECT id, name, common_name, rank, parent_id FROM subtree""",
+            (root_id, max_depth),
+        ).fetchall()]
+
+    def get_classes_for_taxa(self, taxon_ids):
+        """Distinct class-rank ancestors of the given taxa, for the explorer's
+        class selector. Returns [{id,name,common_name}] ordered by name.
+
+        Callers pass the full life-list `found` set, which can exceed SQLite's
+        bound-parameter limit on large life lists — chunk the seed IDs and
+        merge the distinct classes across chunks so the endpoint doesn't 500.
+        """
+        ids = [t for t in taxon_ids if t is not None]
+        if not ids:
+            return []
+        seen = {}
+        for chunk in _chunks(ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"""WITH RECURSIVE up(id) AS (
+                        SELECT id FROM taxa WHERE id IN ({placeholders})
+                        UNION
+                        SELECT t.parent_id FROM taxa t JOIN up u ON t.id = u.id
+                        WHERE t.parent_id IS NOT NULL
+                    )
+                    SELECT DISTINCT t.id, t.name, t.common_name
+                    FROM up u JOIN taxa t ON t.id = u.id
+                    WHERE t.rank = 'class'""",
+                chunk,
+            ).fetchall()
+            for r in rows:
+                if r["id"] not in seen:
+                    seen[r["id"]] = dict(r)
+        return sorted(seen.values(),
+                      key=lambda r: r["common_name"] or r["name"])
+
+    def get_life_list_best_photo_by_taxon(self, taxon_ids):
+        """Map taxon_id -> {id, filename} of a representative (highest quality_score,
+        newest) workspace-scoped photo for that species. Missing taxa are absent."""
+        ids = [t for t in taxon_ids if t is not None]
+        if not ids:
+            return {}
+        ws = self._ws_id()
+        placeholders = ",".join("?" for _ in ids)
+        rows = self.conn.execute(
+            f"""SELECT k.taxon_id AS tid, p.id, p.filename, p.quality_score, p.timestamp
+                FROM photo_keywords pk
+                JOIN keywords k ON k.id = pk.keyword_id AND k.taxon_id IN ({placeholders})
+                JOIN photos p ON p.id = pk.photo_id
+                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                 AND wf.workspace_id = ?
+                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok','partial')
+                WHERE COALESCE(p.flag, 'none') != 'rejected'
+                ORDER BY k.taxon_id,
+                         COALESCE(p.quality_score, -1) DESC,
+                         COALESCE(p.timestamp, '') DESC""",
+            ids + [ws],
+        ).fetchall()
+        best = {}
+        for r in rows:
+            if r["tid"] not in best:  # first row per taxon is the best by ORDER BY
+                best[r["tid"]] = {"id": r["id"], "filename": r["filename"]}
+        return best
+
+    def get_taxon_by_id(self, taxon_id):
+        """Thin getter for a single taxon row (for non-default explorer roots)."""
+        row = self.conn.execute(
+            "SELECT id, name, common_name, rank, parent_id FROM taxa WHERE id = ?",
+            (taxon_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
     def get_photo_life_list_species(self, photo_id):
         """Return this photo's lifelist-eligible species names in the active
         workspace, ordered by name.

@@ -6882,3 +6882,231 @@ def test_pipeline_plan_folder_scope_unlinked_404(app_and_db):
     client = app.test_client()
     resp = client.post("/api/pipeline/plan", json={"folder_ids": [foreign]})
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Life list explorer (taxonomic completeness)
+# ---------------------------------------------------------------------------
+
+def _seed_bird_taxonomy(db):
+    """Insert a tiny Aves subtree: class Aves > 2 orders > families > genera > species.
+    Returns dict of name -> taxa id. (Mirror of the helper in test_db.py.)"""
+    rows = [
+        (3,     "Aves",           "Birds",         "class",   None,             "Animalia"),
+        (7251,  "Passeriformes",  "Perching Birds", "order",  "Aves",           "Animalia"),
+        (67566, "Passerellidae",  "New World Sparrows", "family", "Passeriformes", "Animalia"),
+        (9100,  "Melospiza",      None,            "genus",   "Passerellidae",  "Animalia"),
+        (9101,  "Melospiza melodia", "Song Sparrow", "species", "Melospiza",    "Animalia"),
+        (9102,  "Melospiza georgiana", "Swamp Sparrow", "species", "Melospiza",  "Animalia"),
+        (9200,  "Zonotrichia",    None,            "genus",   "Passerellidae",  "Animalia"),
+        (9201,  "Zonotrichia albicollis", "White-throated Sparrow", "species", "Zonotrichia", "Animalia"),
+        (4000,  "Anseriformes",   "Waterfowl",     "order",   "Aves",           "Animalia"),
+        (4100,  "Anatidae",       "Ducks",         "family",  "Anseriformes",   "Animalia"),
+        (4200,  "Anas",           None,            "genus",   "Anatidae",       "Animalia"),
+        (4201,  "Anas platyrhynchos", "Mallard",   "species", "Anas",           "Animalia"),
+    ]
+    ids = {}
+    for inat_id, name, common, rank, parent, kingdom in rows:
+        parent_id = ids.get(parent)
+        cur = db.conn.execute(
+            "INSERT INTO taxa (inat_id, name, common_name, rank, parent_id, kingdom)"
+            " VALUES (?,?,?,?,?,?)",
+            (inat_id, name, common, rank, parent_id, kingdom),
+        )
+        ids[name] = cur.lastrowid
+    db.conn.commit()
+    return ids
+
+
+def test_build_explorer_payload_rollup(db):
+    from app import _build_explorer_payload
+    ids = _seed_bird_taxonomy(db)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder('/p', name='p')
+    p = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                     file_size=1, file_mtime=1.0)
+    k = db.add_keyword('Song Sparrow')
+    db.tag_photo(p, k)
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
+                    (ids['Melospiza melodia'], k))
+    db.conn.commit()
+
+    payload = _build_explorer_payload(db)
+    assert payload['taxonomy_ready'] is True
+    assert payload['root']['name'] == 'Aves'
+    s = payload['summary']
+    assert s['species'] == {'found': 1, 'total': 4}     # 4 species seeded
+    assert s['genus'] == {'found': 1, 'total': 3}
+    assert s['family'] == {'found': 1, 'total': 2}
+    assert s['order'] == {'found': 1, 'total': 2}
+    # Passeriformes order node carries family child counts + species rollup
+    orders = {n['name']: n for n in payload['nodes']}
+    passeri = orders['Passeriformes']
+    assert passeri['found_species'] == 1 and passeri['total_species'] == 3
+    assert passeri['child_rank'] == 'family'
+    assert passeri['found_children'] == 1 and passeri['total_children'] == 1
+
+
+def test_build_explorer_payload_not_ready(db):
+    from app import _build_explorer_payload
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    payload = _build_explorer_payload(db)
+    assert payload['taxonomy_ready'] is False
+    assert payload['nodes'] == []
+
+
+def test_build_explorer_payload_rejects_non_class_root(db):
+    from app import _build_explorer_payload
+    ids = _seed_bird_taxonomy(db)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    # An order-rank taxon is NOT a valid explorer root: reject it.
+    payload = _build_explorer_payload(db, root_id=ids['Passeriformes'])
+    assert payload['taxonomy_ready'] is True
+    assert payload['valid_root'] is False
+    assert payload['root'] is None
+    assert payload['nodes'] == []
+    assert payload['summary'] == {}
+    # The default (Aves, a class) is a valid root.
+    default_payload = _build_explorer_payload(db)
+    assert default_payload['taxonomy_ready'] is True
+    assert default_payload['valid_root'] is not False
+    assert default_payload['root']['name'] == 'Aves'
+
+
+def test_build_explorer_payload_multi_found_species_rollup(db):
+    from app import _build_explorer_payload
+    ids = _seed_bird_taxonomy(db)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder('/p', name='p')
+    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                      file_size=1, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
+                      file_size=1, file_mtime=2.0)
+    # Tag BOTH Melospiza species as found (two keywords, one per taxon).
+    k1 = db.add_keyword('Song Sparrow')
+    db.tag_photo(p1, k1)
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
+                    (ids['Melospiza melodia'], k1))
+    k2 = db.add_keyword('Swamp Sparrow')
+    db.tag_photo(p2, k2)
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
+                    (ids['Melospiza georgiana'], k2))
+    db.conn.commit()
+
+    payload = _build_explorer_payload(db)
+    nodes = {n['name']: n for n in payload['nodes']}
+    # Passeriformes order -> Passerellidae family -> Melospiza + Zonotrichia genera.
+    passeri = nodes['Passeriformes']
+    passerellidae = {c['name']: c for c in passeri['children']}['Passerellidae']
+    melospiza = {c['name']: c for c in passerellidae['children']}['Melospiza']
+    # Both Melospiza species found.
+    assert melospiza['found_species'] == 2
+    assert melospiza['total_species'] == 2
+    # Family: both found species roll up, but only ONE genus (Melospiza) has any.
+    assert passerellidae['found_species'] == 2
+    assert passerellidae['found_children'] == 1
+    # Zonotrichia albicollis is NOT tagged -> Zonotrichia genus has none.
+    zonotrichia = {c['name']: c for c in passerellidae['children']}['Zonotrichia']
+    assert zonotrichia['found_species'] == 0
+    # Summary: 2 species found, but only 1 genus counts as found.
+    assert payload['summary']['species']['found'] == 2
+    assert payload['summary']['genus']['found'] == 1
+
+
+def test_build_explorer_species_leaf(db):
+    from app import _build_explorer_species
+    ids = _seed_bird_taxonomy(db)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder('/p', name='p')
+    p = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                     file_size=1, file_mtime=1.0)
+    k = db.add_keyword('Song Sparrow')
+    db.tag_photo(p, k)
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
+                    (ids['Melospiza melodia'], k))
+    db.conn.commit()
+    out = _build_explorer_species(db, ids['Melospiza'])
+    by = {s['name']: s for s in out['species']}
+    assert by['Melospiza melodia']['found'] is True
+    assert by['Melospiza melodia']['photo']['filename'] == 'a.jpg'
+    assert by['Melospiza georgiana']['found'] is False
+    assert by['Melospiza georgiana'].get('photo') is None
+    # found first, then missing; each block alphabetical
+    assert [s['found'] for s in out['species']] == [True, False]
+
+
+def test_api_explorer_endpoint(app_and_db):
+    app, db = app_and_db
+    ids = _seed_bird_taxonomy(db)
+    # Link the fixture's existing 'Cardinal' keyword to a bird taxon so it counts.
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE name='Cardinal'",
+                    (ids['Melospiza melodia'],))
+    db.conn.commit()
+    client = app.test_client()
+    r = client.get('/api/life-list/explorer')
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data['taxonomy_ready'] is True
+    assert data['root']['name'] == 'Aves'
+    assert data['summary']['order']['total'] == 2
+    # species leaf
+    r2 = client.get(f"/api/life-list/explorer/species?genus={ids['Melospiza']}")
+    assert r2.status_code == 200
+    assert {s['name'] for s in r2.get_json()['species']} == \
+        {'Melospiza melodia', 'Melospiza georgiana'}
+
+
+def test_api_explorer_not_ready(app_and_db):
+    app, db = app_and_db  # fixture has no taxa
+    r = app.test_client().get('/api/life-list/explorer')
+    assert r.status_code == 200
+    assert r.get_json()['taxonomy_ready'] is False
+
+
+def _seed_mammal_taxon(db):
+    """Add a second class-rank taxon (Mammalia) so multi-class selector tests
+    have somewhere to switch to. Returns the class row id."""
+    cur = db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, parent_id, kingdom)"
+        " VALUES (?,?,?,?,?,?)",
+        (40151, 'Mammalia', 'Mammals', 'class', None, 'Animalia'),
+    )
+    db.conn.commit()
+    return cur.lastrowid
+
+
+def test_build_explorer_payload_always_includes_default_aves_class(db):
+    # Codex P2: after switching away from Aves, the default Birds class must
+    # stay in the selector so the user has an in-page way back to it. Recomputing
+    # `classes` only from *found* taxa would otherwise drop Birds when the user's
+    # only tagged species are outside Aves.
+    from app import _build_explorer_payload
+    ids = _seed_bird_taxonomy(db)
+    mammalia_id = _seed_mammal_taxon(db)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    # User has tagged species — but NONE of them are birds.
+    fid = db.add_folder('/p', name='p')
+    # No mammal species seeded; leave the mammal tag unmatched so `found` is
+    # empty but the class ancestor list would still not include Aves without
+    # the fix. That still isolates the "default Aves always present" behavior.
+
+    # No found taxa at all -> Aves must still be in the returned classes when
+    # the root is the default (Aves).
+    payload_default = _build_explorer_payload(db)
+    assert any(c['name'] == 'Aves' for c in payload_default['classes'])
+
+    # Switching to Mammalia (a class the user has no *matched* species in):
+    # the returned classes list must STILL include Aves as a fallback, so the
+    # client can rebuild the selector without losing Birds.
+    payload_mammal = _build_explorer_payload(db, root_id=mammalia_id)
+    class_names = [c['name'] for c in payload_mammal['classes']]
+    assert 'Aves' in class_names, (
+        "Default Aves class must remain in the selector after switching to a "
+        "non-Aves class, otherwise the user has no in-page way back to Birds"
+    )

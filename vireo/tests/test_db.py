@@ -14770,3 +14770,172 @@ def test_import_tab_migration_not_reapplied_after_unpin(tmp_path):
     db2 = Database(db_path)
     db2.set_active_workspace(ws)
     assert "import" not in db2.get_tabs()
+
+
+# ---------------------------------------------------------------------------
+# Life list explorer (taxonomic completeness) — shared taxa seeding helper
+# ---------------------------------------------------------------------------
+
+def _seed_bird_taxonomy(db):
+    """Insert a tiny Aves subtree: class Aves > 2 orders > families > genera > species.
+    Returns dict of name -> taxa id."""
+    rows = [
+        # (inat_id, name, common_name, rank, parent_name, kingdom)
+        (3,     "Aves",           "Birds",         "class",   None,             "Animalia"),
+        (7251,  "Passeriformes",  "Perching Birds","order",   "Aves",           "Animalia"),
+        (67566, "Passerellidae",  "New World Sparrows","family","Passeriformes", "Animalia"),
+        (9100,  "Melospiza",      None,            "genus",   "Passerellidae",  "Animalia"),
+        (9101,  "Melospiza melodia","Song Sparrow","species", "Melospiza",      "Animalia"),
+        (9102,  "Melospiza georgiana","Swamp Sparrow","species","Melospiza",    "Animalia"),
+        (9200,  "Zonotrichia",    None,            "genus",   "Passerellidae",  "Animalia"),
+        (9201,  "Zonotrichia albicollis","White-throated Sparrow","species","Zonotrichia","Animalia"),
+        (4000,  "Anseriformes",   "Waterfowl",     "order",   "Aves",           "Animalia"),
+        (4100,  "Anatidae",       "Ducks",         "family",  "Anseriformes",   "Animalia"),
+        (4200,  "Anas",           None,            "genus",   "Anatidae",       "Animalia"),
+        (4201,  "Anas platyrhynchos","Mallard",    "species", "Anas",           "Animalia"),
+    ]
+    ids = {}
+    for inat_id, name, common, rank, parent, kingdom in rows:
+        parent_id = ids.get(parent)
+        cur = db.conn.execute(
+            "INSERT INTO taxa (inat_id, name, common_name, rank, parent_id, kingdom)"
+            " VALUES (?,?,?,?,?,?)",
+            (inat_id, name, common, rank, parent_id, kingdom),
+        )
+        ids[name] = cur.lastrowid
+    db.conn.commit()
+    return ids
+
+
+def test_get_default_explorer_root_finds_aves(db):
+    assert db.get_explorer_root() is None  # no taxonomy yet
+    ids = _seed_bird_taxonomy(db)
+    root = db.get_explorer_root()
+    assert root["id"] == ids["Aves"]
+    assert root["name"] == "Aves"
+    assert root["rank"] == "class"
+
+
+def test_life_list_taxon_ids_scope(db):
+    ids = _seed_bird_taxonomy(db)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder('/p', name='p')
+    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                      file_size=1, file_mtime=1.0, timestamp='2024-01-01T00:00:00')
+    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
+                      file_size=1, file_mtime=2.0, timestamp='2024-01-02T00:00:00')
+    # Matched species keyword (linked to Song Sparrow taxon)
+    k1 = db.add_keyword('Song Sparrow')
+    db.tag_photo(p1, k1)
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
+                    (ids['Melospiza melodia'], k1))
+    db.conn.commit()
+    # Unmatched species keyword (is_species but no taxon_id)
+    k2 = db.add_keyword('Mystery Warbler')
+    db.tag_photo(p2, k2)
+    db.conn.execute("UPDATE keywords SET is_species=1 WHERE id=?", (k2,))
+    db.conn.commit()
+
+    found = db.get_life_list_taxon_ids()
+    assert found == {ids['Melospiza melodia']}
+    unmatched = db.get_life_list_unmatched_species()
+    assert 'Mystery Warbler' in unmatched
+
+
+def test_life_list_taxon_ids_excludes_non_species_matches(db):
+    # A taxonomy tag that resolves to a genus (or any rank above species) must
+    # NOT show up as a "found" taxon — the explorer only counts at species rank
+    # and would otherwise silently drop the match. It should surface in the
+    # unmatched list instead so the "not counted" honesty footnote is accurate.
+    ids = _seed_bird_taxonomy(db)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder('/p', name='p')
+    p = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                     file_size=1, file_mtime=1.0)
+    # Tag with a keyword that links to the Melospiza *genus*, not a species.
+    k = db.add_keyword('Melospiza sp.')
+    db.tag_photo(p, k)
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
+                    (ids['Melospiza'], k))
+    db.conn.commit()
+
+    assert db.get_life_list_taxon_ids() == set()
+    unmatched = db.get_life_list_unmatched_species()
+    assert 'Melospiza sp.' in unmatched
+
+
+def test_life_list_taxon_ids_excludes_rejected(db):
+    ids = _seed_bird_taxonomy(db)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder('/p', name='p')
+    p = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                     file_size=1, file_mtime=1.0)
+    k = db.add_keyword('Song Sparrow')
+    db.tag_photo(p, k)
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
+                    (ids['Melospiza melodia'], k))
+    db.conn.commit()
+    db.update_photo_flag(p, 'rejected')
+    assert db.get_life_list_taxon_ids() == set()
+
+
+def test_get_taxon_subtree(db):
+    ids = _seed_bird_taxonomy(db)
+    rows = db.get_taxon_subtree(ids['Aves'])
+    by_name = {r['name']: r for r in rows}
+    assert by_name['Aves']['rank'] == 'class'
+    assert by_name['Melospiza melodia']['rank'] == 'species'
+    # parent linkage preserved
+    assert by_name['Passeriformes']['parent_id'] == ids['Aves']
+    assert by_name['Melospiza']['parent_id'] == ids['Passerellidae']
+    # subtree of a genus is just its species + itself
+    sub = {r['name'] for r in db.get_taxon_subtree(ids['Melospiza'])}
+    assert sub == {'Melospiza', 'Melospiza melodia', 'Melospiza georgiana'}
+
+
+def test_get_classes_for_taxa(db):
+    ids = _seed_bird_taxonomy(db)
+    classes = db.get_classes_for_taxa({ids['Melospiza melodia']})
+    assert [c['name'] for c in classes] == ['Aves']
+    assert db.get_classes_for_taxa(set()) == []
+
+
+def test_get_classes_for_taxa_chunks_large_id_lists(db):
+    """`/api/life-list/explorer` passes the whole life-list `found` set, which can
+    exceed SQLite's bound-parameter limit — the query must chunk and merge."""
+    from vireo.db import _SQLITE_PARAM_CHUNK_SIZE
+    ids = _seed_bird_taxonomy(db)
+    # A pile of non-existent taxon ids (well above the chunk size) plus one real
+    # species id. A single un-chunked IN () would exceed SQLite's parameter cap;
+    # the chunked implementation must still find Aves via the real id.
+    n_fillers = _SQLITE_PARAM_CHUNK_SIZE * 3 + 25
+    seed = {10_000_000 + i for i in range(n_fillers)}
+    seed.add(ids['Melospiza melodia'])
+    classes = db.get_classes_for_taxa(seed)
+    assert [c['name'] for c in classes] == ['Aves']
+
+
+def test_best_photo_by_taxon(db):
+    ids = _seed_bird_taxonomy(db)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder('/p', name='p')
+    p1 = db.add_photo(folder_id=fid, filename='low.jpg', extension='.jpg',
+                      file_size=1, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='high.jpg', extension='.jpg',
+                      file_size=1, file_mtime=2.0)
+    # No update_photo_quality_score helper in db.py; set the column directly.
+    db.conn.execute("UPDATE photos SET quality_score=? WHERE id=?", (0.2, p1))
+    db.conn.execute("UPDATE photos SET quality_score=? WHERE id=?", (0.9, p2))
+    db.conn.commit()
+    k = db.add_keyword('Song Sparrow')
+    db.tag_photo(p1, k)
+    db.tag_photo(p2, k)
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
+                    (ids['Melospiza melodia'], k))
+    db.conn.commit()
+    best = db.get_life_list_best_photo_by_taxon([ids['Melospiza melodia']])
+    assert best[ids['Melospiza melodia']]['filename'] == 'high.jpg'
