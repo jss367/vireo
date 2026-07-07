@@ -68,6 +68,28 @@
   .ll-unmatched details { margin-top:4px; }
   .ll-unmatched summary { cursor:pointer; color:var(--text-secondary); }
   .ll-unmatched ul { margin:6px 0 0 16px; padding:0; columns:2; font-size:12px; }
+
+  .ll-summary { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px; }
+  .ll-sumchip { padding:6px 12px; border-radius:8px; background:var(--bg-secondary); border:1px solid var(--border-primary); font-size:13px; color:var(--text-secondary); font-variant-numeric:tabular-nums; }
+  .ll-sumchip b { color:var(--text-primary); font-weight:600; }
+
+  .ll-crumbs { display:flex; flex-wrap:wrap; align-items:center; gap:4px; margin-bottom:16px; font-size:13px; }
+  .ll-crumb { color:var(--accent); cursor:pointer; }
+  .ll-crumb:hover { text-decoration:underline; }
+  .ll-crumb.current { color:var(--text-primary); cursor:default; }
+  .ll-crumb.current:hover { text-decoration:none; }
+  .ll-crumb-sep { color:var(--text-dim); }
+
+  .ll-cards { display:grid; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); gap:16px; }
+  .ll-card { display:flex; gap:12px; align-items:center; padding:12px 14px; border-radius:8px; background:var(--bg-secondary); border:1px solid var(--border-primary); cursor:pointer; }
+  .ll-card:hover { border-color:var(--accent); }
+  .ll-card.empty { opacity:.55; }
+  .ll-card-body { min-width:0; }
+  .ll-card-name { font-size:15px; font-weight:600; color:var(--text-primary); }
+  .ll-card-sci { font-size:12px; font-style:italic; color:var(--text-secondary); margin-top:1px; }
+  .ll-card-sub { font-size:12px; color:var(--text-secondary); margin-top:6px; font-variant-numeric:tabular-nums; }
+  .ll-ring { flex:0 0 auto; }
+  .ll-ring text { font-size:13px; font-weight:600; fill:var(--text-primary); font-variant-numeric:tabular-nums; }
 </style>
 </head>
 <body>
@@ -521,10 +543,13 @@ function renderExplorer() {
     return;
   }
 
+  html += renderSummaryBar(summary);
   html += renderUnmatched(d);
   html += '<div id="explorerBody"></div>';
   html += '</div>';
   panel.innerHTML = html;
+
+  renderExplorerBody();
 }
 
 // Muted footnote for tagged species that aren't matched to the taxonomy and so
@@ -545,6 +570,127 @@ function renderUnmatched(d) {
   html += '</details></div>';
   return html;
 }
+
+// ---------------- Explorer: summary + breadcrumb + cards (Task 11) ----------------
+
+function renderSummaryBar(summary) {
+  var order = summary.order || { found: 0, total: 0 };
+  var family = summary.family || { found: 0, total: 0 };
+  var genus = summary.genus || { found: 0, total: 0 };
+  var species = summary.species || { found: 0, total: 0 };
+  function chip(v, label) {
+    return '<span class="ll-sumchip"><b>' + v.found + '/' + v.total + '</b> ' + label + '</span>';
+  }
+  return '<div class="ll-summary">'
+    + chip(order, 'orders')
+    + chip(family, 'families')
+    + chip(genus, 'genera')
+    + chip(species, 'species')
+    + '</div>';
+}
+
+// Return the list of nodes at the current drill level, honoring explorerPath.
+function currentExplorerNodes() {
+  var nodes = explorerData.nodes || [];
+  for (var i = 0; i < explorerPath.length; i++) {
+    var step = explorerPath[i];
+    var match = nodes.find(function(n) { return n.id === step.id; });
+    if (!match) return [];
+    nodes = match.children || [];
+  }
+  return nodes;
+}
+
+function renderExplorerBody() {
+  var body = document.getElementById('explorerBody');
+  if (!body) return;
+  var html = renderBreadcrumb();
+
+  var nodes = currentExplorerNodes();
+  html += '<div class="ll-cards">';
+  nodes.forEach(function(n) { html += renderExplorerCard(n); });
+  html += '</div>';
+  body.innerHTML = html;
+
+  body.querySelectorAll('.ll-card').forEach(function(card) {
+    card.addEventListener('click', function() {
+      var id = parseInt(card.getAttribute('data-id'), 10);
+      var node = currentExplorerNodes().find(function(n) { return n.id === id; });
+      if (!node) return;
+      if (node.rank === 'genus') {
+        loadExplorerSpecies(node);
+      } else {
+        explorerPath.push({ id: node.id, name: node.common_name || node.name, rank: node.rank });
+        renderExplorerBody();
+      }
+    });
+  });
+}
+
+function renderBreadcrumb() {
+  var root = explorerData.root || {};
+  var rootLabel = root.common_name || root.name || 'Class';
+  var html = '<div class="ll-crumbs">';
+  var isRootCurrent = explorerPath.length === 0;
+  html += '<span class="ll-crumb' + (isRootCurrent ? ' current' : '') + '" data-depth="0">'
+    + escapeHtml(rootLabel) + '</span>';
+  explorerPath.forEach(function(step, i) {
+    var current = (i === explorerPath.length - 1);
+    html += '<span class="ll-crumb-sep">›</span>';
+    html += '<span class="ll-crumb' + (current ? ' current' : '') + '" data-depth="' + (i + 1) + '">'
+      + escapeHtml(step.name) + '</span>';
+  });
+  html += '</div>';
+  // Attach handlers after render (deferred so innerHTML exists).
+  setTimeout(function() {
+    var body = document.getElementById('explorerBody');
+    if (!body) return;
+    body.querySelectorAll('.ll-crumb').forEach(function(c) {
+      c.addEventListener('click', function() {
+        var depth = parseInt(c.getAttribute('data-depth'), 10);
+        if (depth === explorerPath.length) return;   // current crumb: no-op
+        explorerPath = explorerPath.slice(0, depth);
+        renderExplorerBody();
+      });
+    });
+  }, 0);
+  return html;
+}
+
+// Inline SVG progress ring: accent arc over a --bg-tertiary track, pct% center.
+function renderRing(found, total) {
+  var pct = total > 0 ? Math.round((found / total) * 100) : 0;
+  var r = 20, cx = 24, cy = 24;
+  var circ = 2 * Math.PI * r;
+  var dash = circ * (total > 0 ? found / total : 0);
+  return '<svg class="ll-ring" width="48" height="48" viewBox="0 0 48 48">'
+    + '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="var(--bg-tertiary)" stroke-width="4"/>'
+    + '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="var(--accent)" stroke-width="4"'
+    + ' stroke-dasharray="' + dash.toFixed(2) + ' ' + circ.toFixed(2) + '"'
+    + ' stroke-linecap="round" transform="rotate(-90 ' + cx + ' ' + cy + ')"/>'
+    + '<text x="' + cx + '" y="' + cy + '" text-anchor="middle" dominant-baseline="central">' + pct + '%</text>'
+    + '</svg>';
+}
+
+function renderExplorerCard(n) {
+  var name = n.common_name || n.name;
+  var sci = (n.common_name && n.common_name !== n.name)
+    ? '<div class="ll-card-sci">' + escapeHtml(n.name) + '</div>' : '';
+  var childRank = n.child_rank || 'children';
+  var sub = n.found_children + '/' + n.total_children + ' ' + childRank + 's · '
+    + n.found_species + '/' + n.total_species + ' species';
+  var emptyCls = (n.found_species === 0) ? ' empty' : '';
+  return '<div class="ll-card' + emptyCls + '" data-id="' + escapeAttr(n.id) + '">'
+    + renderRing(n.found_species, n.total_species)
+    + '<div class="ll-card-body">'
+    + '<div class="ll-card-name">' + escapeHtml(name) + '</div>'
+    + sci
+    + '<div class="ll-card-sub">' + sub + '</div>'
+    + '</div></div>';
+}
+
+// Genus species leaf — implemented in Task 12.
+function loadExplorerSpecies(node) {}
 
 // ---------------- Explorer tab ----------------
 var explorerLoaded = false;   // lazy-load guard: fetch explorer once on first open
