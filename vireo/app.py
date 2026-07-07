@@ -4646,6 +4646,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # photo reveals we open the parent directory instead. Passing
                 # a directory to xdg-open opens the folder in the file manager,
                 # which is exactly what we want for folder reveals.
+                #
+                # Because photo reveals target the parent directory rather than
+                # the file itself, xdg-open will happily succeed for a stale
+                # catalog entry whose folder still exists but whose photo has
+                # been deleted or moved — the user gets a "revealed" toast even
+                # though nothing is selected. Verify the photo file exists first
+                # so those cases surface as failures instead of false successes.
+                if not is_folder and not os.path.isfile(path):
+                    return jsonify({"ok": False, "reason": "photo file not found"})
                 target = path if is_folder else (os.path.dirname(path) or path)
                 # xdg-open doesn't honor `--`; abspath guarantees a leading `/`
                 # so a crafted leading-dash path can't be parsed as a flag.
@@ -4657,7 +4666,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     capture_output=True,
                     text=True,
                 )
-            if proc.returncode != 0:
+            # explorer.exe's exit status is not a reliable success signal:
+            # `explorer /select,<path>` (and `explorer <folder>`) routinely
+            # return 1 even when File Explorer opens correctly, with nothing
+            # useful on stdout/stderr. Skipping the returncode check on Windows
+            # avoids reporting "reveal failed" for reveals that actually worked.
+            if not sys.platform.startswith("win") and proc.returncode != 0:
                 reason = (proc.stderr or proc.stdout or "").strip()
                 if not reason:
                     reason = f"reveal command exited {proc.returncode}"

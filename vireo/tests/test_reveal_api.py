@@ -36,8 +36,12 @@ def test_reveal_linux_opens_parent(app_and_db):
     app, db = app_and_db
     pid = db.get_photos()[0]["id"]
     expected_parent = os.path.dirname(_expected_full_path(db, pid))
+    # The Linux photo-reveal path verifies the photo file exists before
+    # opening its parent — the sample DB uses synthetic paths, so pretend
+    # the file is on disk so subprocess still gets called.
     with app.test_client() as c, \
          patch("vireo.app.sys.platform", "linux"), \
+         patch("vireo.app.os.path.isfile", return_value=True), \
          patch("vireo.app.subprocess.run") as run:
         run.return_value = MagicMock(returncode=0)
         resp = c.post("/api/files/reveal", json={"photo_id": pid})
@@ -48,6 +52,44 @@ def test_reveal_linux_opens_parent(app_and_db):
         assert args[0] == "xdg-open"
         assert args[1] == os.path.abspath(expected_parent)
         assert len(args) == 2
+
+
+def test_reveal_linux_missing_photo_reports_error(app_and_db):
+    """On Linux, photo reveals target the parent directory, so a stale
+    catalog entry whose parent still exists would silently succeed. The
+    endpoint should check the photo path first and report a real failure.
+    """
+    app, db = app_and_db
+    pid = db.get_photos()[0]["id"]
+    with app.test_client() as c, \
+         patch("vireo.app.sys.platform", "linux"), \
+         patch("vireo.app.os.path.isfile", return_value=False), \
+         patch("vireo.app.subprocess.run") as run:
+        resp = c.post("/api/files/reveal", json={"photo_id": pid})
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body["ok"] is False
+        assert body.get("reason")
+        # No xdg-open call — we bail out before invoking the file manager
+        # so the user doesn't get a "revealed" toast for a missing file.
+        run.assert_not_called()
+
+
+def test_reveal_windows_ignores_nonzero_exit(app_and_db):
+    """explorer.exe /select can return exit 1 even when it opens File
+    Explorer successfully. Reporting that as a failure produces bogus
+    "reveal failed" toasts for reveals that actually worked, so the
+    endpoint deliberately ignores explorer.exe's returncode on Windows.
+    """
+    app, db = app_and_db
+    pid = db.get_photos()[0]["id"]
+    with app.test_client() as c, \
+         patch("vireo.app.sys.platform", "win32"), \
+         patch("vireo.app.subprocess.run") as run:
+        run.return_value = MagicMock(returncode=1, stdout="", stderr="")
+        resp = c.post("/api/files/reveal", json={"photo_id": pid})
+        assert resp.status_code == 200
+        assert resp.get_json()["ok"] is True
 
 
 def test_reveal_windows_select(app_and_db):
