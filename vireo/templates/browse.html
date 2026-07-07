@@ -7173,12 +7173,20 @@ async function copyFolderPath(fid) {
   }
 }
 
-function rescanFolder(fid) {
-  fetch('/api/folders/' + fid + '/rescan', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({incremental: true}),
-  }).catch(function(err) { console.error('rescanFolder failed', err); });
+async function rescanFolder(fid) {
+  showToast('Starting folder rescan...', 'info');
+  try {
+    var data = await safeFetch('/api/folders/' + fid + '/rescan', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({incremental: true}),
+    }, { toast: false });
+    var suffix = data && data.job_id ? ' (' + data.job_id + ')' : '';
+    showToast('Folder rescan queued' + suffix + '.', 'success');
+  } catch (err) {
+    console.error('rescanFolder failed', err);
+    showToast((err && err.message) || 'Could not start folder rescan.', 'error');
+  }
 }
 
 document.addEventListener('contextmenu', function(e) {
