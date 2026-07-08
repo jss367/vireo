@@ -8224,6 +8224,21 @@ function nativeMenuError(msg) {
   else console.error(msg);
 }
 
+function revealFeedbackMessage(data) {
+  if (data && data.ok === false) {
+    return 'Reveal failed: ' + (data.reason || 'unknown error');
+  }
+  return 'Revealed in ' + (window.VIREO_FILE_MANAGER_NAME || 'file manager');
+}
+
+function showRevealFeedback(data) {
+  var isError = data && data.ok === false;
+  var msg = revealFeedbackMessage(data);
+  if (typeof showToast === 'function') showToast(msg, isError ? 'error' : 'success');
+  else if (isError) console.error(msg);
+  else console.info(msg);
+}
+
 function nativeMenuRoute(path) {
   window.location.href = path;
 }
@@ -8555,6 +8570,17 @@ window.handleNativeMenuCommand = async function(command) {
           addToCollection();
         } else {
           nativeMenuError('Add to Collection is available from Browse after selecting photos.');
+        }
+        break;
+      case 'photo_adjust_capture_time':
+        if (typeof openCaptureTimeModal === 'function') {
+          var captureTimeIds = nativeMenuRequirePhotos('Adjust Capture Time');
+          if (!captureTimeIds) break;
+          nativeMenuSetPhotoIdsOverride(captureTimeIds);
+          nativeMenuCloseLightboxForModal();
+          openCaptureTimeModal();
+        } else {
+          nativeMenuError('Adjust Capture Time is available from Browse after selecting photos.');
         }
         break;
       case 'photo_delete':
