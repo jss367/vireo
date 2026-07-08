@@ -5456,11 +5456,12 @@ function updateCardStates() {
 })();
 
 async function browseForFolder() {
-  if (_sourceMode !== 'import') selectSourceMode('import');
   if (typeof pickDirectory === 'function') {
     var result = await pickDirectory('Select photo folders', { multiple: true });
     if (result) {
       var paths = Array.isArray(result) ? result : [result];
+      var hasPath = paths.some(function(p) { return !!p; });
+      if (hasPath && _sourceMode !== 'import') selectSourceMode('import');
       var added = false;
       for (var i = 0; i < paths.length; i++) {
         if (paths[i] && _sourceFolders.indexOf(paths[i]) === -1) {
@@ -5789,9 +5790,9 @@ function fetchFolderCounts(paths) {
 
 function selectFolder() {
   if (_fbMode === 'source') {
-    if (_sourceMode !== 'import') selectSourceMode('import');
     var picks = _fbSelectedDirs.length ? _fbSelectedDirs : (_fbSelectedDir ? [_fbSelectedDir] : []);
     if (!picks.length) return;
+    if (_sourceMode !== 'import') selectSourceMode('import');
     var added = false;
     for (var i = 0; i < picks.length; i++) {
       if (_sourceFolders.indexOf(picks[i]) === -1) {

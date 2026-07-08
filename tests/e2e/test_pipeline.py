@@ -81,6 +81,18 @@ def test_pipeline_source_browse_button_adds_source_folder(live_server, page):
     assert page.evaluate("_sourceMode") == "import"
 
 
+def test_pipeline_source_browse_cancel_keeps_workspace_folder_mode(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    assert page.evaluate("_sourceMode") == "folders"
+    page.evaluate("window.pickDirectory = async () => null")
+
+    page.locator("[data-testid='source-browse-btn']").click()
+
+    assert page.evaluate("_sourceMode") == "folders"
+    expect(page.locator("#sourceFolderList")).to_be_empty()
+
+
 def test_pipeline_source_card_expanded_by_default(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
