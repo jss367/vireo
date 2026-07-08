@@ -14772,6 +14772,52 @@ def test_import_tab_migration_not_reapplied_after_unpin(tmp_path):
     assert "import" not in db2.get_tabs()
 
 
+def test_existing_workspaces_gain_storage_tab(tmp_path):
+    """Existing saved tabs get Storage once so moved cache controls stay visible."""
+    import json as json_mod
+
+    from db import Database
+
+    db_path = str(tmp_path / "m.db")
+    db = Database(db_path)
+    ws = db._active_workspace_id
+    old = ["browse", "pipeline", "review", "settings"]
+    db.conn.execute(
+        "UPDATE workspaces SET tabs = ? WHERE id = ?",
+        (json_mod.dumps(old), ws),
+    )
+    db.conn.execute("PRAGMA user_version = 1")
+    db.conn.commit()
+    db.close()
+
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws)
+    tabs = db2.get_tabs()
+    assert "storage" in tabs
+    assert tabs.index("storage") == tabs.index("settings") - 1
+
+
+def test_storage_tab_migration_not_reapplied_after_unpin(tmp_path):
+    """Once the storage-tab migration has run, a later unpin stays unpinned."""
+    import json as json_mod
+
+    from db import Database
+
+    db_path = str(tmp_path / "m.db")
+    db = Database(db_path)
+    ws = db._active_workspace_id
+    db.conn.execute(
+        "UPDATE workspaces SET tabs = ? WHERE id = ?",
+        (json_mod.dumps(["browse", "pipeline", "review", "settings"]), ws),
+    )
+    db.conn.commit()
+    db.close()
+
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws)
+    assert "storage" not in db2.get_tabs()
+
+
 # ---------------------------------------------------------------------------
 # Life list explorer (taxonomic completeness) — shared taxa seeding helper
 # ---------------------------------------------------------------------------

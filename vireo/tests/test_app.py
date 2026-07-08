@@ -515,6 +515,18 @@ def test_storage_page_has_preview_cache_field(app_and_db):
     assert b'clearPreviewCache' in resp.data
 
 
+def test_storage_page_bounds_large_cache_file_listings(app_and_db):
+    """Thumbnail and preview modals request a bounded first page."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/storage')
+    assert resp.status_code == 200
+    assert b'STORAGE_MODAL_FILE_LIMIT = 500' in resp.data
+    assert b'&limit=' in resp.data
+    assert b'Select all shown' in resp.data
+    assert b'Delete Entire Cache' in resp.data
+
+
 def test_api_storage_includes_offline_originals(app_and_db):
     """Storage totals include Vireo-managed offline originals."""
     app, _ = app_and_db
