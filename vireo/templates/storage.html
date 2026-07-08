@@ -187,7 +187,7 @@ body { padding-bottom: 36px; }
       <div id="modalLoading" style="color:var(--text-ghost);font-size:13px;">Loading files...</div>
       <div id="modalFileList" style="display:none;">
         <div class="file-select-bar">
-          <a onclick="selectAllFiles(true)">Select all</a>
+          <a id="modalSelectAllLink" onclick="selectAllFiles(true)">Select all shown</a>
           <a onclick="selectAllFiles(false)">Select none</a>
           <span id="modalSelectedInfo" style="color:var(--text-dim);margin-left:auto;"></span>
         </div>
@@ -198,7 +198,7 @@ body { padding-bottom: 36px; }
       <button class="btn-secondary" onclick="closeStorageModal()">Cancel</button>
       <div>
         <button class="btn-danger" id="modalDeleteSelected" onclick="deleteSelectedFiles()" disabled>Delete Selected</button>
-        <button class="btn-danger" id="modalDeleteAll" onclick="deleteAllFiles()" style="margin-left:8px;">Delete All</button>
+        <button class="btn-danger" id="modalDeleteAll" onclick="deleteAllFiles()" style="margin-left:8px;">Delete Entire Cache</button>
       </div>
     </div>
   </div>
@@ -285,10 +285,12 @@ async function loadStoragePanel() {
       {name: 'HF Cache', size: s.hf_cache.size, type: null},
       {name: 'Offline Originals', size: s.offline_originals.size, count: s.offline_originals.count, type: null},
     ];
+    _storageSummary = {};
 
     var html = '';
     categories.forEach(function(c) {
       if (c.size === 0 && !c.type) return;
+      if (c.type) _storageSummary[c.type] = {count: c.count || 0, size: c.size || 0};
       html += '<div class="stat-card">' +
         '<div class="stat-number">' + storageFormatBytes(c.size) + '</div>' +
         '<div class="stat-label">' + c.name +
@@ -476,6 +478,8 @@ async function deleteStaleMasks() {
 
 var _modalType = '';
 var _modalFiles = [];
+var _storageSummary = {};
+var STORAGE_MODAL_FILE_LIMIT = 500;
 var STORAGE_INFO = {
   thumbnails: {
     title: 'Thumbnails',
@@ -504,7 +508,12 @@ async function openStorageModal(type) {
   document.getElementById('storageModal').classList.add('open');
 
   try {
-    var data = await safeFetch('/api/storage/files?type=' + type, {}, { toast: false });
+    var url = '/api/storage/files?type=' + encodeURIComponent(type);
+    if (type === 'previews' || type === 'thumbnails') {
+      url += '&limit=' + STORAGE_MODAL_FILE_LIMIT;
+      document.getElementById('modalLoading').textContent = 'Loading first ' + STORAGE_MODAL_FILE_LIMIT.toLocaleString() + ' files...';
+    }
+    var data = await safeFetch(url, {}, { toast: false });
     _modalFiles = data.files || [];
     document.getElementById('modalLoading').style.display = 'none';
     document.getElementById('modalFileList').style.display = 'block';
@@ -518,6 +527,15 @@ async function openStorageModal(type) {
     document.getElementById('modalDeleteAll').disabled = false;
 
     var html = '';
+    if (data.truncated) {
+      var summary = _storageSummary[type] || {};
+      var totalCount = summary.count || 0;
+      html += '<li style="color:var(--text-ghost);font-size:12px;padding:8px 0;">Showing the first ' +
+        _modalFiles.length.toLocaleString() +
+        (totalCount ? ' of ' + totalCount.toLocaleString() : '') +
+        ' files. Select all shown and Delete Selected affect only this visible list; Delete Entire Cache removes all ' +
+        info.title.toLowerCase() + '.</li>';
+    }
     _modalFiles.forEach(function(f, i) {
       var displayName = storageEscapeHtml(f.name);
       if (f.meta) {
@@ -585,7 +603,9 @@ async function deleteSelectedFiles() {
 
 async function deleteAllFiles() {
   var info = STORAGE_INFO[_modalType] || {title: _modalType};
-  if (!confirm('Delete all ' + _modalFiles.length + ' ' + info.title.toLowerCase() + '? They will regenerate as needed.')) return;
+  var summary = _storageSummary[_modalType] || {};
+  var count = summary.count || _modalFiles.length;
+  if (!confirm('Delete all ' + count.toLocaleString() + ' ' + info.title.toLowerCase() + '? They will regenerate as needed.')) return;
   try {
     await safeFetch('/api/storage/clear', {
       method: 'POST',

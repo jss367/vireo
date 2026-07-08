@@ -964,6 +964,31 @@ class Database:
                 )
             self.conn.execute("PRAGMA user_version = 1")
 
+        # Migration (storage page): insert the Storage tab before Settings in
+        # every saved tabs row that predates the Storage page. Same one-shot
+        # pattern as the Import migration above so a later unpin isn't
+        # silently undone on the next Database.__init__ call.
+        if current_user_version < 2:
+            rows = self.conn.execute(
+                "SELECT id, tabs FROM workspaces WHERE tabs IS NOT NULL"
+            ).fetchall()
+            for row in rows:
+                try:
+                    tabs = json.loads(row["tabs"])
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(tabs, list) or "storage" in tabs:
+                    continue
+                if "settings" in tabs:
+                    tabs.insert(tabs.index("settings"), "storage")
+                else:
+                    tabs.append("storage")
+                self.conn.execute(
+                    "UPDATE workspaces SET tabs = ? WHERE id = ?",
+                    (json.dumps(tabs), row["id"]),
+                )
+            self.conn.execute("PRAGMA user_version = 2")
+
         # Migration: drop legacy open_tabs column (replaced by `tabs`).
         try:
             self.conn.execute("SELECT open_tabs FROM workspaces LIMIT 0")
