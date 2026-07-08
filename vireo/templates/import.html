@@ -184,7 +184,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
 </div>
 
 <div class="folder-browser-overlay" id="importFolderBrowser" data-testid="import-folder-browser">
-  <div class="folder-browser-panel">
+  <div class="folder-browser-panel" role="dialog" aria-modal="true" aria-labelledby="folderBrowserTitle">
     <div class="folder-browser-header">
       <h3 id="folderBrowserTitle">Select Folder</h3>
       <button class="folder-browser-close" type="button" onclick="closeImportFolderBrowser()">&times;</button>
@@ -217,6 +217,7 @@ let browserMode = 'source';
 let browserPath = '';
 let browserHomePath = '';
 let browserSeq = 0;
+let browserEscHandler = null;
 
 function importEscapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (ch) => ({
@@ -303,7 +304,14 @@ function openImportFolderBrowser(mode) {
   overlay.onclick = (e) => {
     if (e.target === overlay) closeImportFolderBrowser();
   };
+  if (browserEscHandler) document.removeEventListener('keydown', browserEscHandler);
+  browserEscHandler = (e) => {
+    if (e.key === 'Escape') closeImportFolderBrowser();
+  };
+  document.addEventListener('keydown', browserEscHandler);
   document.body.style.overflow = 'hidden';
+  const firstAction = overlay.querySelector('button');
+  if (firstAction) firstAction.focus();
   const startPath = browserMode === 'destination'
     ? (document.getElementById('destInput').value || '').trim()
     : '';
@@ -312,6 +320,10 @@ function openImportFolderBrowser(mode) {
 
 function closeImportFolderBrowser() {
   document.getElementById('importFolderBrowser').classList.remove('open');
+  if (browserEscHandler) {
+    document.removeEventListener('keydown', browserEscHandler);
+    browserEscHandler = null;
+  }
   document.body.style.overflow = '';
 }
 
