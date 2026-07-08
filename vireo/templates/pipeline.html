@@ -2257,13 +2257,21 @@ function addSourceFolder() {
   var input = document.getElementById('cfgSourceInput');
   if (!input) return;
   var val = input.value.trim();
-  if (!val || _sourceFolders.indexOf(val) !== -1) return;
-  _sourceFolders.push(val);
+  if (!val) return;
+  // Adding a path the user has already typed once is still an unambiguous
+  // "use this import source" signal. If we early-returned on the duplicate
+  // the mode/render/preview refresh below would be skipped, leaving Start
+  // gated by folder_ids after the user switched back to workspace-folder
+  // scope. Fall through so the mode always re-syncs to 'import'.
+  var alreadyPresent = _sourceFolders.indexOf(val) !== -1;
+  if (!alreadyPresent) _sourceFolders.push(val);
   input.value = '';
   var switched = _sourceMode !== 'import';
   if (switched) selectSourceMode('import');
-  renderSourceFolders();
-  if (!switched) fetchFolderPreview();
+  if (!alreadyPresent) {
+    renderSourceFolders();
+    if (!switched) fetchFolderPreview();
+  }
   updateStartButton();
 }
 
@@ -5256,20 +5264,27 @@ async function browseForFolder() {
     var result = await pickDirectory('Select photo folders', { multiple: true });
     if (result) {
       var paths = Array.isArray(result) ? result : [result];
+      var validPicks = paths.filter(function(p) { return !!p; });
+      if (!validPicks.length) return;
       var added = false;
-      paths.forEach(function(path) {
-        if (path && _sourceFolders.indexOf(path) === -1) {
+      validPicks.forEach(function(path) {
+        if (_sourceFolders.indexOf(path) === -1) {
           _sourceFolders.push(path);
           added = true;
         }
       });
+      // Picking a source path with Browse is a clear "use this import
+      // source" action, so the mode/render/preview refresh must run even
+      // when every picked path was already in _sourceFolders — otherwise
+      // the mode stays 'folders' and Start posts folder_ids instead of
+      // the previewed sources list.
+      var switched = _sourceMode !== 'import';
+      if (switched) selectSourceMode('import');
       if (added) {
-        var switched = _sourceMode !== 'import';
-        if (switched) selectSourceMode('import');
         renderSourceFolders();
         if (!switched) fetchFolderPreview();
-        updateStartButton();
       }
+      updateStartButton();
       return;
     }
   }
@@ -5595,14 +5610,18 @@ function selectFolder() {
         added = true;
       }
     });
-    if (added) {
-      var switched = _sourceMode !== 'import';
-      if (switched) {
-        selectSourceMode('import');
-        previewScheduledByModeSwitch = true;
-      }
-      renderSourceFolders();
+    // Selecting source paths in the folder browser is an unambiguous
+    // "use these import sources" action, so the mode switch has to run
+    // even when every pick was already in _sourceFolders — otherwise a
+    // user who reverted to workspace-folder scope and then re-picked the
+    // same imported path would stay stuck in 'folders' mode with Start
+    // POSTing folder_ids instead of sources.
+    var switched = _sourceMode !== 'import';
+    if (switched) {
+      selectSourceMode('import');
+      previewScheduledByModeSwitch = true;
     }
+    if (added) renderSourceFolders();
   } else {
     if (!_fbSelectedDir) return;
     document.getElementById('cfgDestination').value = _fbSelectedDir;

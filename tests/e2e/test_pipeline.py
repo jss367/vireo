@@ -275,6 +275,64 @@ def test_pipeline_removing_last_import_source_restores_folder_mode(live_server, 
     expect(page.locator("#sourceFolderList")).to_be_empty()
 
 
+def test_pipeline_source_browse_reselect_restores_import_mode(live_server, page):
+    """P2 regression: after adding a source path, reverting to
+    workspace-folder scope, then using Browse to pick that same source
+    path again must switch `_sourceMode` back to `'import'`. Otherwise
+    Start posts `folder_ids` instead of the previewed `sources`, and
+    the UI still shows the source path row but Start would execute a
+    different scope than the plan describes.
+    """
+    url = live_server["url"]
+    page.route(
+        re.compile(r"/api/workspaces/\d+/folders$"),
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps([
+                {
+                    "id": 42,
+                    "path": "/library",
+                    "parent_id": None,
+                    "photo_count": 5,
+                    "workspace_photo_count": 5,
+                },
+            ]),
+        ),
+    )
+    page.route(
+        "**/api/import/folder-preview",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "total_count": 0,
+                "total_size": 0,
+                "type_breakdown": {},
+                "duplicate_count": 0,
+                "files": [],
+            }),
+        ),
+    )
+    page.goto(f"{url}/pipeline")
+    page.evaluate("window.pickDirectory = async () => ['/tmp/vireo-source']")
+
+    page.locator("[data-testid='source-browse-btn']").click()
+    expect(page.locator("#sourceFolderList")).to_contain_text("/tmp/vireo-source")
+    assert page.evaluate("_sourceMode") == "import"
+
+    folder_cb = page.locator("#folderScopeList input[type='checkbox']").first
+    expect(folder_cb).to_be_visible()
+    folder_cb.check()
+    assert page.evaluate("_sourceMode") == "folders"
+
+    # Re-pick the already-added path via Browse. Without the fix
+    # `added` stays false so the mode/render/refresh block is skipped
+    # and mode stays 'folders'.
+    page.locator("[data-testid='source-browse-btn']").click()
+    assert page.evaluate("_sourceMode") == "import"
+
+
 def test_pipeline_source_browse_cancel_keeps_workspace_folder_mode(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
