@@ -310,6 +310,14 @@ function openImportFolderBrowser(mode) {
   };
   document.addEventListener('keydown', browserEscHandler);
   document.body.style.overflow = 'hidden';
+  // Reset stale state from a prior open. Without this, the initial
+  // browse below is async, and if it stalls or fails (e.g. a prefilled
+  // destination points at a removed drive), clicking "Select This Folder"
+  // would submit the previous session's browserPath and folder list.
+  browserPath = '';
+  document.getElementById('folderBrowserPath').textContent = 'Loading…';
+  document.getElementById('folderBrowserList').innerHTML =
+    '<div class="folder-browser-empty">Loading…</div>';
   const firstAction = overlay.querySelector('button');
   if (firstAction) firstAction.focus();
   const startPath = browserMode === 'destination'
