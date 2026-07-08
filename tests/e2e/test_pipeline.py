@@ -54,6 +54,45 @@ def test_pipeline_import_source_dims_collection(live_server, page):
     expect(collection_body).to_have_class(re.compile("dimmed"))
 
 
+def test_pipeline_source_browse_button_adds_source_folder(live_server, page):
+    url = live_server["url"]
+    page.route(
+        "**/api/import/folder-preview",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "total_count": 0,
+                "total_size": 0,
+                "type_breakdown": {},
+                "duplicate_count": 0,
+                "files": [],
+            }),
+        ),
+    )
+    page.goto(f"{url}/pipeline")
+    page.evaluate("window.pickDirectory = async () => ['/tmp/vireo-source']")
+
+    browse_btn = page.locator("[data-testid='source-browse-btn']")
+    expect(browse_btn).to_be_visible()
+    browse_btn.click()
+
+    expect(page.locator("#sourceFolderList")).to_contain_text("/tmp/vireo-source")
+    assert page.evaluate("_sourceMode") == "import"
+
+
+def test_pipeline_source_browse_cancel_keeps_workspace_folder_mode(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    assert page.evaluate("_sourceMode") == "folders"
+    page.evaluate("window.pickDirectory = async () => null")
+
+    page.locator("[data-testid='source-browse-btn']").click()
+
+    assert page.evaluate("_sourceMode") == "folders"
+    expect(page.locator("#sourceFolderList")).to_be_empty()
+
+
 def test_pipeline_source_card_expanded_by_default(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")

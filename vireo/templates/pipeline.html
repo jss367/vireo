@@ -733,12 +733,13 @@ body { padding-bottom: 36px; }
               <div class="setting-item">
                 <div class="setting-label">Folders <span style="font-weight:400;color:var(--text-dim);">(each includes its subfolders; importing lives on the Import page)</span></div>
                 <div id="folderScopeList" style="display:flex;flex-direction:column;gap:2px;max-height:220px;overflow-y:auto;font-size:12px;"></div>
-                <div style="display:flex;gap:6px;margin-top:8px;">
+                <div style="display:flex;flex-direction:column;gap:6px;margin-top:8px;">
+                  <button class="btn btn-primary" type="button" onclick="browseForFolder()"
+                          style="white-space:nowrap;align-self:flex-start;"
+                          data-testid="source-browse-btn">Browse&hellip;</button>
                   <input type="text" class="setting-input" id="cfgSourceInput"
-                         placeholder="/path/to/source folder"
-                         onkeydown="if(event.key==='Enter')addSourceFolder()">
-                  <button class="btn btn-secondary" type="button" onclick="addSourceFolder()"
-                          style="font-size:12px;padding:4px 10px;">Add</button>
+                         placeholder="or type a path and press Enter"
+                         onkeydown="if(event.key==='Enter'){event.preventDefault();addSourceFolder();}">
                 </div>
                 <div id="sourceFolderList" style="margin-top:6px;"></div>
               </div>
@@ -5459,6 +5460,8 @@ async function browseForFolder() {
     var result = await pickDirectory('Select photo folders', { multiple: true });
     if (result) {
       var paths = Array.isArray(result) ? result : [result];
+      var hasPath = paths.some(function(p) { return !!p; });
+      if (hasPath && _sourceMode !== 'import') selectSourceMode('import');
       var added = false;
       for (var i = 0; i < paths.length; i++) {
         if (paths[i] && _sourceFolders.indexOf(paths[i]) === -1) {
@@ -5789,6 +5792,7 @@ function selectFolder() {
   if (_fbMode === 'source') {
     var picks = _fbSelectedDirs.length ? _fbSelectedDirs : (_fbSelectedDir ? [_fbSelectedDir] : []);
     if (!picks.length) return;
+    if (_sourceMode !== 'import') selectSourceMode('import');
     var added = false;
     for (var i = 0; i < picks.length; i++) {
       if (_sourceFolders.indexOf(picks[i]) === -1) {
