@@ -6,6 +6,8 @@ import os
 import sys
 import threading
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from pipeline_job import (
@@ -163,6 +165,52 @@ def test_pipeline_params_model_ids_defaults_none():
     assert params.model_ids is None
 
 
+def test_run_pipeline_job_rejects_retired_import_archive_params(tmp_path):
+    import pytest
+
+    cases = [
+        PipelineParams(destination=str(tmp_path / "archive")),
+        PipelineParams(local_processing=True),
+        PipelineParams(remote_target_id="nas1"),
+    ]
+
+    for params in cases:
+        with pytest.raises(RuntimeError, match="Pipeline import/archive mode"):
+            run_pipeline_job(
+                _make_job(), FakeRunner(), str(tmp_path / "test.db"), 1, params
+            )
+
+
+def test_archive_stage_rejects_retired_import_archive_params_late(
+    tmp_path, monkeypatch
+):
+    import pipeline_job
+    import pytest
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Empty", "[]")
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    @contextlib.contextmanager
+    def mutate_after_regroup(_workspace_id):
+        yield
+        params.destination = str(tmp_path / "archive")
+
+    monkeypatch.setattr(pipeline_job, "acquire_workspace_regroup", mutate_after_regroup)
+
+    with pytest.raises(RuntimeError, match="Pipeline import/archive mode"):
+        run_pipeline_job(_make_job(), FakeRunner(), db_path, ws_id, params)
+
+
 def test_pipeline_job_with_collection_skips_scan(tmp_path, monkeypatch):
     """When collection_id is provided, pipeline should skip scan entirely."""
     import config as cfg
@@ -257,6 +305,7 @@ def test_pipeline_cancel_via_runner_skips_remaining_stages(tmp_path, monkeypatch
     # cancellation.
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_abort_on_nonexistent_source(tmp_path, monkeypatch):
     """Pipeline with nonexistent source should complete gracefully.
 
@@ -1160,6 +1209,7 @@ def test_pipeline_multi_folder_scan_progress_is_monotonic(tmp_path, monkeypatch)
     )
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_multi_source_ingest_progress_is_monotonic(tmp_path, monkeypatch):
     """Ingest progress must not move backward at source folder boundaries.
 
@@ -1308,6 +1358,7 @@ def test_emit_progress_lock_held_during_push():
     )
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_ingest_updates_step_progress(tmp_path, monkeypatch):
     """Ingest (import) phase should call update_step so the jobs page shows progress."""
     import config as cfg
@@ -1411,6 +1462,7 @@ def test_pipeline_scan_step_gets_status_updates(tmp_path, monkeypatch):
         "Status updates should also push SSE progress events"
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_ingest_records_safe_to_eject_counts_on_success(tmp_path, monkeypatch):
     """Once ingest copies everything off the source with no failures, the
     stage (and final result) should carry 'copied'/'skipped_duplicate' counts
@@ -1461,6 +1513,7 @@ def test_pipeline_ingest_records_safe_to_eject_counts_on_success(tmp_path, monke
     assert ingest_completed_events[-1]["copied"] == 2
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_ingest_omits_safe_to_eject_counts_on_partial_failure(tmp_path, monkeypatch):
     """Plain copy mode (no local_processing) doesn't abort the run when a file
     fails to copy — it still marks the ingest stage 'completed'. The
@@ -1520,6 +1573,7 @@ def test_pipeline_ingest_omits_safe_to_eject_counts_on_partial_failure(tmp_path,
     assert "copied" not in ingest_completed_events[-1]
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_ingest_step_present_only_with_destination(tmp_path, monkeypatch):
     """The 'ingest' step should only appear in step_defs when destination is set."""
     import config as cfg
@@ -1570,6 +1624,7 @@ def test_pipeline_ingest_step_present_only_with_destination(tmp_path, monkeypatc
         "ingest step should come before scan"
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_all_duplicates_restricts_scan_to_existing_folders(tmp_path, monkeypatch):
     """When every source file is a duplicate of an existing photo in the DB,
     the scan phase must be restricted to just the folders that hold those
@@ -1670,6 +1725,7 @@ def test_pipeline_all_duplicates_restricts_scan_to_existing_folders(tmp_path, mo
     )
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_all_duplicates_links_existing_folders_to_workspace(tmp_path, monkeypatch):
     """When every source file is a duplicate, the folders holding those
     existing duplicates should end up linked to the active workspace after
@@ -1733,6 +1789,7 @@ def test_pipeline_all_duplicates_links_existing_folders_to_workspace(tmp_path, m
     )
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_copy_mode_scans_subfolders(tmp_path, monkeypatch):
     """After ingest, scan should use restrict_dirs to target only subfolders
     that received files, while keeping the destination as root for folder hierarchy."""
@@ -1847,6 +1904,7 @@ def test_pipeline_progress_events_carry_stage_id(tmp_path, monkeypatch):
         f"Expected thumbnails stage_id in events; saw: {stage_ids_seen}"
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_scan_not_running_during_ingest(tmp_path, monkeypatch):
     """In copy mode, stages.scan should stay 'pending' while ingest runs,
     so the Scan card doesn't pulse during the import sub-phase."""
@@ -10224,6 +10282,7 @@ def _remote_params(env, **overrides):
     return PipelineParams(**kwargs)
 
 
+@pytest.mark.skip(reason="retired pipeline remote archive stage")
 def test_pipeline_remote_archive_end_to_end(tmp_path, monkeypatch):
     """A local-processing run with a remote target stages locally, then
     archives over SSH: rsync is pointed at the NAS-side subpath with
@@ -10279,6 +10338,7 @@ def test_pipeline_remote_archive_end_to_end(tmp_path, monkeypatch):
     assert result["local_processing"]["remote"]["free_space_checked"] is True
 
 
+@pytest.mark.skip(reason="retired pipeline remote archive stage")
 def test_pipeline_remote_archive_preflight_refuses_without_rsync(
     tmp_path, monkeypatch,
 ):
@@ -10304,6 +10364,7 @@ def test_pipeline_remote_archive_preflight_refuses_without_rsync(
     assert env["captured"]["rsync_calls"] == []
 
 
+@pytest.mark.skip(reason="retired pipeline remote archive stage")
 def test_pipeline_remote_archive_preflight_refuses_when_connection_fails(
     tmp_path, monkeypatch,
 ):
@@ -10327,6 +10388,7 @@ def test_pipeline_remote_archive_preflight_refuses_when_connection_fails(
     assert not (tmp_path / "staging").exists()
 
 
+@pytest.mark.skip(reason="retired pipeline remote archive stage")
 def test_pipeline_remote_archive_space_probe_failure_degrades(
     tmp_path, monkeypatch,
 ):
@@ -10353,6 +10415,7 @@ def test_pipeline_remote_archive_space_probe_failure_degrades(
     assert "free-space check skipped" in storage_summaries[-1]
 
 
+@pytest.mark.skip(reason="retired pipeline remote archive stage")
 def test_pipeline_remote_archive_refuses_when_remote_volume_full(
     tmp_path, monkeypatch,
 ):
@@ -10374,6 +10437,7 @@ def test_pipeline_remote_archive_refuses_when_remote_volume_full(
     assert env["captured"]["rsync_calls"] == []
 
 
+@pytest.mark.skip(reason="retired pipeline remote archive stage")
 def test_pipeline_remote_archive_merges_on_retry(tmp_path, monkeypatch):
     """An existing remote destination (an earlier interrupted archive) makes
     the archive move a merge/resume: --ignore-existing so already-present
@@ -10393,6 +10457,7 @@ def test_pipeline_remote_archive_merges_on_retry(tmp_path, monkeypatch):
     assert "--partial-dir=.rsync-partial" in call["extra_args"]
 
 
+@pytest.mark.skip(reason="retired pipeline remote archive stage")
 def test_pipeline_remote_archive_failure_deindexes_staging(
     tmp_path, monkeypatch,
 ):
@@ -10430,6 +10495,7 @@ def test_pipeline_remote_archive_failure_deindexes_staging(
     assert count == 0
 
 
+@pytest.mark.skip(reason="retired pipeline remote archive stage")
 def test_pipeline_remote_archive_snapshot_wins_over_mutated_settings(
     tmp_path, monkeypatch,
 ):
@@ -10479,6 +10545,7 @@ def test_pipeline_remote_archive_snapshot_wins_over_mutated_settings(
     assert result["archive"]["remote"]["target_name"] == "NAS"
 
 
+@pytest.mark.skip(reason="retired pipeline remote archive stage")
 def test_pipeline_remote_archive_falls_back_to_settings_without_snapshot(
     tmp_path, monkeypatch,
 ):

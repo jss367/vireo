@@ -503,6 +503,7 @@ def test_pipeline_job_rejects_macos_other_app_bundle(app_and_db, tmp_path):
         assert "macos" in resp.get_json()["error"].lower()
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_job_rejects_relative_destination(app_and_db, tmp_path):
     """Pipeline endpoint should reject relative destination paths."""
     app, _ = app_and_db
@@ -941,6 +942,7 @@ def test_job_export_invalid_max_size(app_and_db, tmp_path):
     assert "max_size must be a positive integer" in resp.get_json()["error"]
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_ingest_saves_recent_destination(app_and_db, tmp_path, monkeypatch):
     """Starting a pipeline with a destination saves it to recent_destinations in config."""
     import config as cfg
@@ -966,6 +968,7 @@ def test_pipeline_ingest_saves_recent_destination(app_and_db, tmp_path, monkeypa
     assert config["ingest"]["recent_destinations"] == [str(dst)]
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_recent_destinations_deduplicates_and_limits(app_and_db, tmp_path, monkeypatch):
     """Recent destinations deduplicates and limits to 5 entries."""
     import config as cfg
@@ -2227,6 +2230,7 @@ def _remote_pipeline_body(src, **overrides):
     return body
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_remote_archive_rejects_both_destinations(
     app_and_db, tmp_path, monkeypatch,
 ):
@@ -2242,6 +2246,7 @@ def test_pipeline_remote_archive_rejects_both_destinations(
     assert "mutually exclusive" in resp.get_json()["error"]
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_remote_archive_unknown_target_404(
     app_and_db, tmp_path, monkeypatch,
 ):
@@ -2257,6 +2262,7 @@ def test_pipeline_remote_archive_unknown_target_404(
     assert "not found" in resp.get_json()["error"].lower()
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_remote_archive_requires_local_processing(
     app_and_db, tmp_path, monkeypatch,
 ):
@@ -2272,6 +2278,7 @@ def test_pipeline_remote_archive_requires_local_processing(
     assert "local_processing" in resp.get_json()["error"]
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_remote_archive_requires_subpath(
     app_and_db, tmp_path, monkeypatch,
 ):
@@ -2291,6 +2298,7 @@ def test_pipeline_remote_archive_requires_subpath(
     assert "remote_subpath" in resp.get_json()["error"]
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_remote_archive_rejects_traversal_subpath(
     app_and_db, tmp_path, monkeypatch,
 ):
@@ -2306,6 +2314,7 @@ def test_pipeline_remote_archive_rejects_traversal_subpath(
         assert resp.status_code == 400, bad
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_remote_archive_requires_mount_path(
     app_and_db, tmp_path, monkeypatch,
 ):
@@ -2322,6 +2331,7 @@ def test_pipeline_remote_archive_requires_mount_path(
     assert "mount path" in resp.get_json()["error"]
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_remote_archive_requires_gnu_rsync(
     app_and_db, tmp_path, monkeypatch,
 ):
@@ -2339,6 +2349,7 @@ def test_pipeline_remote_archive_requires_gnu_rsync(
     assert "rsync" in resp.get_json()["error"].lower()
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_local_processing_requires_destination_or_remote(
     app_and_db, tmp_path,
 ):
@@ -2358,6 +2369,7 @@ def test_pipeline_local_processing_requires_destination_or_remote(
     assert "destination" in err and "remote target" in err
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_remote_archive_snapshots_target_at_enqueue(
     app_and_db, tmp_path, monkeypatch,
 ):
@@ -2805,24 +2817,24 @@ _ABS_DEST = os.path.abspath("/abs/dest")
         # be written. Both a relative and an absolute path trip this.
         (
             {"destination": "relative/path", "local_processing": False},
-            "destination is not allowed with collection_id or folder_ids",
+            "import/archive fields are no longer accepted",
         ),
         (
             {"destination": _ABS_DEST, "local_processing": False},
-            "destination is not allowed with collection_id or folder_ids",
+            "import/archive fields are no longer accepted",
         ),
         # local_processing + destination + folder scope: same reject —
         # destination check runs before the local_processing scope check.
         (
             {"local_processing": True, "destination": _ABS_DEST},
-            "destination is not allowed with collection_id or folder_ids",
+            "import/archive fields are no longer accepted",
         ),
         # local_processing + folder scope without destination: this
         # trips the "requires a destination or a remote target" guard
         # (which fires before the local_processing + scope check).
         (
             {"local_processing": True},
-            "local_processing requires a destination or a remote target",
+            "import/archive fields are no longer accepted",
         ),
         # Non-boolean miss_enabled — the type-check must fire BEFORE
         # ``db.add_collection`` runs. Previously the check sat after
@@ -2872,8 +2884,7 @@ def test_pipeline_folder_ids_rejects_plain_destination(app_and_db):
             "local_processing": False,
         })
         assert resp.status_code == 400, resp.get_json()
-        assert "destination" in resp.get_json()["error"]
-        assert "folder_ids" in resp.get_json()["error"]
+        assert "import/archive fields" in resp.get_json()["error"]
     assert len(db.get_collections()) == before
 
 
@@ -2891,8 +2902,7 @@ def test_pipeline_collection_id_rejects_plain_destination(app_and_db):
             "local_processing": False,
         })
         assert resp.status_code == 400, resp.get_json()
-        assert "destination" in resp.get_json()["error"]
-        assert "collection_id" in resp.get_json()["error"]
+        assert "import/archive fields" in resp.get_json()["error"]
 
 
 def test_pipeline_folder_ids_chunks_wide_subtree(app_and_db, monkeypatch):

@@ -41,12 +41,27 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .result-links a { color: var(--accent); font-size: 12px; }
 #importError { color: var(--danger); font-size: 12px; margin-top: 6px; display: none; }
 .warn { font-size: 12px; color: var(--warning, #bf8700); margin-top: 6px; }
+.staging-items { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.staging-item { border: 1px solid var(--border-primary); border-radius: 6px; padding: 10px; background: var(--bg-tertiary); }
+.staging-title { font-size: 12px; color: var(--text-primary); font-weight: 600; overflow-wrap: anywhere; }
+.staging-meta { font-size: 11px; color: var(--text-secondary); margin-top: 3px; }
+.staging-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.staging-details { margin: 8px 0 0 0; padding-left: 18px; font-size: 11px; color: var(--text-secondary); max-height: 120px; overflow: auto; }
 </style>
 </head>
 <body>
 {% include '_navbar.html' %}
 <div class="content">
   <div class="import-wrap">
+
+    <div class="card" id="orphanedStagingCard" style="display:none;">
+      <h3>Recover old staging folders</h3>
+      <div class="hint">
+        Vireo found local staging folders from the retired import-through-process flow.
+        Cleanup is only enabled after every staged file is verified in the archive.
+      </div>
+      <div class="staging-items" id="orphanedStagingItems"></div>
+    </div>
 
     <div class="card" id="sourceCard">
       <h3>Source</h3>
@@ -139,6 +154,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
 let sources = [];
 let activeJobId = null;
 let es = null;
+let stagingResultsByPath = {};
 
 function renderSources() {
   const list = document.getElementById('sourceList');
@@ -188,6 +204,185 @@ function showError(msg) {
   const el = document.getElementById('importError');
   el.textContent = msg;
   el.style.display = msg ? 'block' : 'none';
+}
+
+function formatBytes(n) {
+  n = Number(n || 0);
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i += 1; }
+  return (i === 0 ? String(n) : n.toFixed(n >= 10 ? 1 : 2)) + ' ' + units[i];
+}
+
+async function pollJobResult(jobId) {
+  for (let i = 0; i < 180; i++) {
+    const resp = await fetch('/api/jobs/' + jobId);
+    if (resp.ok) {
+      const job = await resp.json();
+      if (job.status && job.status !== 'running' && job.status !== 'queued') {
+        if (job.status === 'failed') {
+          const msg = (job.errors && job.errors[0]) || 'job failed';
+          throw new Error(msg);
+        }
+        return job.result || {};
+      }
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  throw new Error('job did not finish in time');
+}
+
+async function loadOrphanedStaging() {
+  try {
+    const resp = await fetch('/api/import/orphaned-staging');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    renderOrphanedStaging(data.items || []);
+  } catch (e) {
+    // Recovery card is best-effort; import itself should remain usable.
+  }
+}
+
+function renderOrphanedStaging(items) {
+  const card = document.getElementById('orphanedStagingCard');
+  const box = document.getElementById('orphanedStagingItems');
+  box.innerHTML = '';
+  if (!items.length) {
+    card.style.display = 'none';
+    return;
+  }
+  card.style.display = '';
+  items.forEach((item) => {
+    const row = document.createElement('div');
+    row.className = 'staging-item';
+    row.dataset.path = item.path;
+
+    const title = document.createElement('div');
+    title.className = 'staging-title';
+    title.textContent = item.name + ' · ' + item.source_root;
+    const meta = document.createElement('div');
+    meta.className = 'staging-meta';
+    meta.textContent = item.file_count + ' files · ' + formatBytes(item.bytes);
+
+    const actions = document.createElement('div');
+    actions.className = 'staging-actions';
+    const verify = document.createElement('button');
+    verify.className = 'btn';
+    verify.textContent = 'Verify before cleanup';
+    verify.onclick = () => verifyStaging(item.path, verify);
+    actions.appendChild(verify);
+
+    row.append(title, meta, actions);
+    box.appendChild(row);
+  });
+}
+
+function appendStagingDetail(row, result) {
+  const old = row.querySelector('.staging-details');
+  if (old) old.remove();
+  const bad = (result.details || []).filter(d => d.status !== 'verified');
+  if (!bad.length) return;
+  const list = document.createElement('ul');
+  list.className = 'staging-details';
+  bad.slice(0, 20).forEach((d) => {
+    const li = document.createElement('li');
+    li.textContent = d.rel_path + ' — ' + d.reason;
+    list.appendChild(li);
+  });
+  if (bad.length > 20) {
+    const li = document.createElement('li');
+    li.textContent = (bad.length - 20) + ' more files not shown';
+    list.appendChild(li);
+  }
+  row.appendChild(list);
+}
+
+function renderStagingVerification(result) {
+  stagingResultsByPath[result.path] = result;
+  const row = Array.from(document.querySelectorAll('.staging-item'))
+    .find(el => el.dataset.path === result.path);
+  if (!row) return;
+  const meta = row.querySelector('.staging-meta');
+  const parts = [
+    result.file_count + ' files',
+    formatBytes(result.bytes),
+    result.verified + ' verified',
+  ];
+  if (result.unaccounted) parts.push(result.unaccounted + ' not in archive');
+  if (result.unreachable) parts.push(result.unreachable + ' unreachable');
+  if (result.inferred_destination) parts.push('archive: ' + result.inferred_destination);
+  meta.textContent = parts.join(' · ');
+
+  const actions = row.querySelector('.staging-actions');
+  actions.innerHTML = '';
+  if (result.can_delete) {
+    const del = document.createElement('button');
+    del.className = 'btn btn-primary';
+    del.textContent = 'Delete verified staging copy';
+    del.onclick = () => deleteStaging(result.path, del);
+    actions.appendChild(del);
+  } else {
+    const use = document.createElement('button');
+    use.className = 'btn';
+    use.textContent = 'Use as import source';
+    use.onclick = () => useStagingAsImportSource(result);
+    actions.appendChild(use);
+    const again = document.createElement('button');
+    again.className = 'btn';
+    again.textContent = 'Verify again';
+    again.onclick = () => verifyStaging(result.path, again);
+    actions.appendChild(again);
+  }
+  appendStagingDetail(row, result);
+}
+
+async function verifyStaging(path, btn) {
+  const oldText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Verifying...';
+  try {
+    const resp = await fetch('/api/import/orphaned-staging/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || 'verification failed');
+    const result = await pollJobResult(data.job_id);
+    renderStagingVerification(result);
+  } catch (e) {
+    showError(String(e.message || e));
+    btn.disabled = false;
+    btn.textContent = oldText;
+  }
+}
+
+async function deleteStaging(path, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Re-verifying...';
+  try {
+    const resp = await fetch('/api/import/orphaned-staging', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || 'cleanup failed');
+    await loadOrphanedStaging();
+  } catch (e) {
+    showError(String(e.message || e));
+    btn.disabled = false;
+    btn.textContent = 'Delete verified staging copy';
+  }
+}
+
+function useStagingAsImportSource(result) {
+  sources = [result.source_root];
+  renderSources();
+  if (result.inferred_destination) {
+    document.getElementById('destInput').value = result.inferred_destination;
+  }
+  document.getElementById('sourceCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 async function previewImport() {
@@ -452,6 +647,7 @@ async function initImportPage() {
   // HTML placeholder rather than the workspace default, and startImport
   // should omit the key so the server applies pipeline.default_strategy.
   _afterImportConfigLoaded = cfgOk && overridesOk;
+  loadOrphanedStaging();
 }
 initImportPage();
 </script>

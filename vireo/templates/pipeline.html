@@ -830,9 +830,14 @@ body { padding-bottom: 36px; }
       <!-- Divider -->
       <div style="border-top:1px solid var(--border-primary,#14374E);margin:16px 0;"></div>
 
-      <!-- Section 2: File Copying -->
-      <div class="setting-label">File Copying</div>
-      <div id="destCopySection" data-testid="file-copying-section">
+      <!-- Section 2: Import handoff -->
+      <div class="setting-label">Importing photos</div>
+      <div class="hint" style="font-size:12px;color:var(--text-secondary);line-height:1.4;">
+        Copying cards or folders into the archive now happens on the
+        <a href="/import" style="color:var(--accent);">Import</a> page.
+        Process only works on photos already in the active workspace.
+      </div>
+      <div id="destCopySection" data-testid="file-copying-section" style="display:none;">
         <div class="setting-row">
           <div class="setting-item">
             <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
@@ -2957,14 +2962,6 @@ function updateStartButton() {
     if (_destWorkspaceMode === 'new') {
       var wsName = document.getElementById('destNewWsName').value.trim();
       if (!wsName) btn.disabled = true;
-    }
-    if (_sourceMode === 'import' && _copyMode) {
-      if (pipelineRemoteTargetId()) {
-        if (!remoteArchiveSelectionReady()) btn.disabled = true;
-      } else {
-        var dest = document.getElementById('cfgDestination').value.trim();
-        if (!dest) btn.disabled = true;
-      }
     }
   }
 
@@ -5342,17 +5339,6 @@ function _buildPlanBody() {
       if (hashDupPaths.length) body.hash_duplicate_paths = hashDupPaths;
     }
 
-    // The planner's "0 new photos to import, nothing to …" claim for an
-    // all-duplicates selection is only true in local-processing mode:
-    // the post-ingest scan then walks the local staging root (empty when
-    // everything deduplicated), while plain copy mode re-scans the real
-    // destination and can surface existing unprocessed rows as downstream
-    // work. Send the toggle state so the backend can tell the modes
-    // apart — mirrors how /api/jobs/pipeline carries local_processing.
-    if (_sourceMode === 'import' && _copyMode) {
-      var lp = document.getElementById('chkLocalProcessing');
-      body.local_processing = !!(lp && lp.checked);
-    }
   }
 
   body.skip_classify       = !document.getElementById('enableClassify').checked;
