@@ -187,7 +187,7 @@ body { padding-bottom: 36px; }
       <div id="modalLoading" style="color:var(--text-ghost);font-size:13px;">Loading files...</div>
       <div id="modalFileList" style="display:none;">
         <div class="file-select-bar">
-          <a onclick="selectAllFiles(true)">Select all shown</a>
+          <a id="modalSelectAllLink" onclick="selectAllFiles(true)">Select all shown</a>
           <a onclick="selectAllFiles(false)">Select none</a>
           <span id="modalSelectedInfo" style="color:var(--text-dim);margin-left:auto;"></span>
         </div>
@@ -285,8 +285,8 @@ async function loadStoragePanel() {
       {name: 'HF Cache', size: s.hf_cache.size, type: null},
       {name: 'Offline Originals', size: s.offline_originals.size, count: s.offline_originals.count, type: null},
     ];
-
     _storageSummary = {};
+
     var html = '';
     categories.forEach(function(c) {
       if (c.size === 0 && !c.type) return;
