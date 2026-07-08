@@ -47,6 +47,40 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .staging-meta { font-size: 11px; color: var(--text-secondary); margin-top: 3px; }
 .staging-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
 .staging-details { margin: 8px 0 0 0; padding-left: 18px; font-size: 11px; color: var(--text-secondary); max-height: 120px; overflow: auto; }
+.folder-browser-overlay {
+  display: none; position: fixed; inset: 0; z-index: 1001;
+  background: rgba(0, 0, 0, 0.45); align-items: center; justify-content: center;
+}
+.folder-browser-overlay.open { display: flex; }
+.folder-browser-panel {
+  width: min(720px, calc(100vw - 32px)); max-height: calc(100vh - 64px);
+  background: var(--bg-secondary); border: 1px solid var(--border-primary);
+  border-radius: 8px; box-shadow: 0 18px 60px rgba(0,0,0,0.35);
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.folder-browser-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 16px; border-bottom: 1px solid var(--border-primary);
+}
+.folder-browser-header h3 { margin: 0; }
+.folder-browser-close { background: none; border: none; color: var(--text-secondary); font-size: 22px; cursor: pointer; }
+.folder-browser-body { padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.folder-browser-shortcuts { display: flex; gap: 8px; flex-wrap: wrap; }
+.folder-browser-path { font-size: 12px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.folder-browser-list {
+  height: 320px; overflow: auto; border: 1px solid var(--border-primary);
+  border-radius: 6px; background: var(--bg-tertiary);
+}
+.folder-browser-item {
+  padding: 8px 10px; font-size: 12px; color: var(--text-primary);
+  cursor: pointer; border-bottom: 1px solid color-mix(in srgb, var(--border-primary) 60%, transparent);
+}
+.folder-browser-item:hover { background: var(--bg-hover, rgba(255,255,255,0.05)); }
+.folder-browser-empty { padding: 14px; font-size: 12px; color: var(--text-secondary); }
+.folder-browser-actions {
+  display: flex; gap: 8px; justify-content: flex-end;
+  padding: 12px 16px; border-top: 1px solid var(--border-primary);
+}
 </style>
 </head>
 <body>
@@ -66,8 +100,9 @@ body { display: flex; flex-direction: column; height: 100vh; }
     <div class="card" id="sourceCard">
       <h3>Source</h3>
       <div class="row">
+        <button class="btn btn-primary" id="btnBrowseSource" data-testid="import-source-browse-btn" onclick="browseForSource()">Browse...</button>
         <input type="text" id="sourceInput" list="volumeDatalist"
-               placeholder="Card or folder path — press Enter to add"
+               placeholder="or type a card/folder path and press Enter"
                onkeydown="if(event.key==='Enter'){event.preventDefault();addSource();}">
         <datalist id="volumeDatalist"></datalist>
         <button class="btn" id="btnAddSource" onclick="addSource()">Add</button>
@@ -88,8 +123,9 @@ body { display: flex; flex-direction: column; height: 100vh; }
     <div class="card" id="destCard">
       <h3>Destination</h3>
       <div class="row">
+        <button class="btn btn-primary" id="btnBrowseDestination" data-testid="import-destination-browse-btn" onclick="browseForDestination()">Browse...</button>
         <input type="text" id="destInput" list="recentDestinations"
-               placeholder="Archive folder (e.g. /Volumes/Photography/Raw Files/USA)"
+               placeholder="Archive folder"
                value="">
         <datalist id="recentDestinations"></datalist>
       </div>
@@ -147,6 +183,28 @@ body { display: flex; flex-direction: column; height: 100vh; }
   </div>
 </div>
 
+<div class="folder-browser-overlay" id="importFolderBrowser" data-testid="import-folder-browser">
+  <div class="folder-browser-panel" role="dialog" aria-modal="true" aria-labelledby="folderBrowserTitle">
+    <div class="folder-browser-header">
+      <h3 id="folderBrowserTitle">Select Folder</h3>
+      <button class="folder-browser-close" type="button" onclick="closeImportFolderBrowser()">&times;</button>
+    </div>
+    <div class="folder-browser-body">
+      <div class="folder-browser-shortcuts">
+        <button class="btn" type="button" onclick="browseImportFolderTo(null)">Home</button>
+        <button class="btn" type="button" onclick="browseImportFolderTo('__pictures__')">Pictures</button>
+        <button class="btn" type="button" onclick="browseImportFolderTo('__volumes__')">Volumes</button>
+      </div>
+      <div class="folder-browser-path" id="folderBrowserPath"></div>
+      <div class="folder-browser-list" id="folderBrowserList"></div>
+    </div>
+    <div class="folder-browser-actions">
+      <button class="btn" type="button" onclick="closeImportFolderBrowser()">Cancel</button>
+      <button class="btn btn-primary" type="button" id="folderBrowserSelectBtn" onclick="selectImportBrowserFolder()">Select This Folder</button>
+    </div>
+  </div>
+</div>
+
 <script>
 /* Import page: posts to /api/jobs/import-photos, renders live per-folder
    progress from the job's SSE stream, and shows the safe-to-format pill
@@ -155,6 +213,21 @@ let sources = [];
 let activeJobId = null;
 let es = null;
 let stagingResultsByPath = {};
+let browserMode = 'source';
+let browserPath = '';
+let browserHomePath = '';
+let browserSeq = 0;
+let browserEscHandler = null;
+
+function importEscapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[ch]));
+}
+
+function importEscapeAttr(s) {
+  return importEscapeHtml(s);
+}
 
 function renderSources() {
   const list = document.getElementById('sourceList');
@@ -175,13 +248,184 @@ function renderSources() {
   });
 }
 
+function addSourcePath(path) {
+  const v = (path || '').trim();
+  if (!v) return false;
+  if (!sources.includes(v)) {
+    sources.push(v);
+    renderSources();
+    return true;
+  }
+  return false;
+}
+
 function addSource() {
   const input = document.getElementById('sourceInput');
   const v = (input.value || '').trim();
   if (!v) return;
-  if (!sources.includes(v)) sources.push(v);
+  addSourcePath(v);
   input.value = '';
-  renderSources();
+}
+
+async function browseForSource() {
+  if (typeof pickDirectory === 'function') {
+    const result = await pickDirectory('Select source folders', { multiple: true });
+    if (result) {
+      const paths = Array.isArray(result) ? result : [result];
+      paths.forEach(addSourcePath);
+      return;
+    }
+    if (typeof isTauri === 'function' && isTauri()) return;
+  }
+  openImportFolderBrowser('source');
+}
+
+async function browseForDestination() {
+  if (typeof pickDirectory === 'function') {
+    const result = await pickDirectory('Select archive folder');
+    if (result) {
+      const path = Array.isArray(result) ? result[0] : result;
+      if (path) document.getElementById('destInput').value = path;
+      return;
+    }
+    if (typeof isTauri === 'function' && isTauri()) return;
+  }
+  openImportFolderBrowser('destination');
+}
+
+function openImportFolderBrowser(mode) {
+  browserMode = mode === 'destination' ? 'destination' : 'source';
+  const overlay = document.getElementById('importFolderBrowser');
+  document.getElementById('folderBrowserTitle').textContent =
+    browserMode === 'source' ? 'Select Source Folder' : 'Select Destination Folder';
+  document.getElementById('folderBrowserSelectBtn').textContent =
+    browserMode === 'source' ? 'Add This Folder' : 'Select This Folder';
+  overlay.classList.add('open');
+  overlay.onclick = (e) => {
+    if (e.target === overlay) closeImportFolderBrowser();
+  };
+  if (browserEscHandler) document.removeEventListener('keydown', browserEscHandler);
+  browserEscHandler = (e) => {
+    if (e.key === 'Escape') closeImportFolderBrowser();
+  };
+  document.addEventListener('keydown', browserEscHandler);
+  document.body.style.overflow = 'hidden';
+  const firstAction = overlay.querySelector('button');
+  if (firstAction) firstAction.focus();
+  const startPath = browserMode === 'destination'
+    ? (document.getElementById('destInput').value || '').trim()
+    : '';
+  browseImportFolderTo(startPath || null);
+}
+
+function closeImportFolderBrowser() {
+  document.getElementById('importFolderBrowser').classList.remove('open');
+  if (browserEscHandler) {
+    document.removeEventListener('keydown', browserEscHandler);
+    browserEscHandler = null;
+  }
+  document.body.style.overflow = '';
+}
+
+async function browseImportFolderTo(path) {
+  const seq = ++browserSeq;
+  // Clear stale selection while this async navigation is pending. Without
+  // this, clicking "Select This Folder" during a slow or failing fetch
+  // submits the previous folder instead of the one the user requested —
+  // both on modal open and mid-session navigation.
+  browserPath = '';
+  const selectBtn = document.getElementById('folderBrowserSelectBtn');
+  if (selectBtn) selectBtn.disabled = true;
+  document.getElementById('folderBrowserPath').textContent = 'Loading…';
+  document.getElementById('folderBrowserList').innerHTML =
+    '<div class="folder-browser-empty">Loading…</div>';
+  let url = '/api/browse';
+  if (path === '__pictures__') {
+    if (!browserHomePath) {
+      try {
+        const homeResp = await fetch('/api/browse');
+        if (seq !== browserSeq || !homeResp.ok) return;
+        const home = await homeResp.json();
+        browserHomePath = home.path || '';
+      } catch (e) {
+        return;
+      }
+    }
+    url = '/api/browse?path=' + encodeURIComponent(browserHomePath + '/Pictures');
+  } else if (path === '__volumes__') {
+    if (navigator.userAgent.indexOf('Mac') < 0) {
+      try {
+        const resp = await fetch('/api/volumes');
+        if (seq !== browserSeq || !resp.ok) return;
+        const volumes = await resp.json();
+        browserPath = '';
+        renderImportFolderBrowser({ path: '', dirs: volumes || [] }, { syntheticRoot: true });
+      } catch (e) { /* ignore */ }
+      return;
+    }
+    url = '/api/browse?path=' + encodeURIComponent('/Volumes');
+  } else if (path) {
+    url = '/api/browse?path=' + encodeURIComponent(path);
+  }
+
+  try {
+    const resp = await fetch(url);
+    if (seq !== browserSeq) return;
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      showError(data.error || 'Could not open folder.');
+      return;
+    }
+    const data = await resp.json();
+    browserPath = data.path || '';
+    if (!path) browserHomePath = browserPath;
+    renderImportFolderBrowser(data);
+  } catch (e) {
+    showError(String(e.message || e));
+  }
+}
+
+function renderImportFolderBrowser(data, opts) {
+  document.getElementById('folderBrowserPath').textContent = data.path || 'Volumes';
+  const list = document.getElementById('folderBrowserList');
+  const dirs = data.dirs || [];
+  let html = '';
+  const syntheticRoot = opts && opts.syntheticRoot;
+  let parent = '';
+  if (data.path && data.path.indexOf('\\') !== -1) {
+    parent = data.path.replace(/[\\\/]?[^\\\/]+[\\\/]?$/, '') || data.path;
+    if (/^[A-Za-z]:$/.test(parent)) parent += '\\';
+  } else if (data.path) {
+    parent = data.path.substring(0, data.path.lastIndexOf('/')) || '/';
+  }
+  if (data.path && data.path !== '/' && parent && parent !== data.path) {
+    html += '<div class="folder-browser-item" data-browse-path="' + importEscapeAttr(parent) + '">&#128193; ..</div>';
+  }
+  dirs.forEach((d) => {
+    html += '<div class="folder-browser-item" data-browse-path="' + importEscapeAttr(d.path) + '">&#128193; ' +
+      importEscapeHtml(d.name || d.path) + '</div>';
+  });
+  if (!html) {
+    html = '<div class="folder-browser-empty">' +
+      (syntheticRoot ? 'No volumes found.' : 'No subfolders.') + '</div>';
+  }
+  list.innerHTML = html;
+  list.onclick = (e) => {
+    const item = e.target.closest('.folder-browser-item[data-browse-path]');
+    if (item) browseImportFolderTo(item.getAttribute('data-browse-path'));
+  };
+  const selectBtn = document.getElementById('folderBrowserSelectBtn');
+  if (selectBtn) selectBtn.disabled = !browserPath;
+}
+
+function selectImportBrowserFolder() {
+  if (!browserPath) return;
+  if (browserMode === 'destination') {
+    document.getElementById('destInput').value = browserPath;
+  } else {
+    addSourcePath(browserPath);
+  }
+  closeImportFolderBrowser();
 }
 
 function selectedAfterImport() {
