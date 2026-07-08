@@ -16,6 +16,7 @@ PAGES = [
     "/variants",
     "/workspace",
     "/compare",
+    "/storage",
     "/settings",
     "/shortcuts",
     "/keywords",

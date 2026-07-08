@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/png" href="/favicon.ico">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/vireo-base.css">
+<title>Vireo - Storage</title>
+<style>
+body { padding-bottom: 36px; }
+.content { max-width: 1000px; }
+.grid-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+@media (max-width: 820px) { .grid-2col { grid-template-columns: 1fr; } }
+.stats-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 12px;
+}
+.stat-card {
+  background: var(--bg-tertiary); border-radius: 6px; padding: 14px 16px; text-align: center;
+}
+.stat-number {
+  font-size: 24px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums;
+}
+.stat-label { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+.setting-row {
+  display: flex; justify-content: space-between; align-items: center; gap: 16px;
+  padding: 10px 0; border-bottom: 1px solid var(--border-primary);
+}
+.setting-row:last-child { border-bottom: none; }
+.setting-label { font-size: 13px; color: var(--text-primary); }
+.setting-label small { display: block; color: var(--text-dim); font-size: 11px; margin-top: 2px; }
+.setting-control { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.btn-danger {
+  background: var(--danger); color: var(--text-primary); border: none; border-radius: 4px;
+  padding: 6px 16px; font-size: 12px; cursor: pointer; font-weight: 500;
+}
+.btn-danger:hover { background: color-mix(in srgb, var(--danger) 80%, black); }
+.btn-danger:disabled { opacity: 0.4; cursor: default; }
+.btn-secondary, .btn-manage {
+  background: none; color: var(--text-dim); border: 1px solid var(--border-primary);
+  border-radius: 4px; padding: 6px 16px; font-size: 12px; cursor: pointer;
+}
+.btn-secondary:hover, .btn-manage:hover { color: var(--text-secondary); border-color: var(--border-secondary); }
+.btn-manage {
+  color: var(--accent); border-color: var(--accent); padding: 2px 8px;
+  font-size: 10px; margin-top: 8px;
+}
+.modal-overlay {
+  display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  background: color-mix(in srgb, var(--bg-primary) 60%, transparent);
+  z-index: 1000; justify-content: center; align-items: center;
+}
+.modal-overlay.open { display: flex; }
+.modal {
+  background: var(--bg-secondary); border: 1px solid var(--border-primary); border-radius: 8px;
+  width: 90%; max-width: 560px; max-height: 80vh; display: flex; flex-direction: column;
+}
+.modal-header {
+  padding: 16px 20px; border-bottom: 1px solid var(--border-primary);
+  display: flex; justify-content: space-between; align-items: center;
+}
+.modal-header h3 { font-size: 15px; font-weight: 600; color: var(--text-primary); margin: 0; }
+.modal-close {
+  background: none; border: none; color: var(--text-dim); font-size: 20px; cursor: pointer; padding: 0 4px;
+}
+.modal-close:hover { color: var(--text-primary); }
+.modal-body { padding: 16px 20px; overflow-y: auto; flex: 1; }
+.modal-footer {
+  padding: 12px 20px; border-top: 1px solid var(--border-primary);
+  display: flex; justify-content: space-between; align-items: center;
+}
+.modal-desc { font-size: 12px; color: var(--text-dim); margin-bottom: 14px; line-height: 1.5; }
+.file-list { margin: 0; padding: 0; list-style: none; }
+.file-item {
+  display: flex; align-items: center; gap: 8px; padding: 5px 0;
+  border-bottom: 1px solid var(--border-primary); font-size: 12px;
+}
+.file-item label { flex: 1; color: var(--text-secondary); cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-item .file-size { color: var(--text-ghost); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.file-select-bar { display: flex; gap: 12px; margin-bottom: 8px; font-size: 11px; }
+.file-select-bar a { color: var(--accent); cursor: pointer; text-decoration: none; }
+.file-select-bar a:hover { text-decoration: underline; }
+.storage-note {
+  font-size: 12px; color: var(--text-dim); background: var(--bg-tertiary);
+  border-left: 3px solid var(--accent); border-radius: 4px; padding: 8px 12px;
+}
+</style>
+</head>
+<body>
+
+{% include '_navbar.html' %}
+
+<div class="content">
+  <div class="section">
+    <div class="section-title">Storage <span id="storageTotalSize" style="font-size:12px;font-weight:400;color:var(--text-dim);margin-left:8px;">-</span></div>
+    <div id="storageGrid" class="stats-grid"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
+    <div id="masksCard" style="margin-top:16px;"></div>
+  </div>
+
+  <div class="grid-2col">
+    <div class="section">
+      <div class="section-title">Preview Cache</div>
+      <div class="setting-row">
+        <div class="setting-label">Thumbnail size<small>Maximum generated thumbnail dimension.</small></div>
+        <div class="setting-control">
+          <input type="range" id="cfgThumbSize" min="200" max="800" step="50" value="400"
+                 style="width:130px;accent-color:var(--accent);"
+                 oninput="document.getElementById('cfgThumbSizeVal').textContent = this.value + 'px'; saveStorageConfig()">
+          <span style="font-size:13px;color:var(--text-primary);min-width:42px;" id="cfgThumbSizeVal">400px</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">Thumbnail quality<small>JPEG quality for generated thumbnails.</small></div>
+        <div class="setting-control">
+          <input type="range" id="cfgThumbQuality" min="50" max="100" step="5" value="85"
+                 style="width:130px;accent-color:var(--accent);"
+                 oninput="document.getElementById('cfgThumbQualityVal').textContent = this.value; saveStorageConfig()">
+          <span style="font-size:13px;color:var(--text-primary);min-width:30px;" id="cfgThumbQualityVal">85</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">Preview quality<small>JPEG quality for generated previews.</small></div>
+        <div class="setting-control">
+          <input type="range" id="cfgPreviewQuality" min="50" max="100" step="5" value="90"
+                 style="width:130px;accent-color:var(--accent);"
+                 oninput="document.getElementById('cfgPreviewQualityVal').textContent = this.value; saveStorageConfig()">
+          <span style="font-size:13px;color:var(--text-primary);min-width:30px;" id="cfgPreviewQualityVal">90</span>
+        </div>
+      </div>
+      <div class="setting-row" style="align-items:flex-start;">
+        <div class="setting-label">Preview cache quota<small>Maximum disk space for generated previews.</small></div>
+        <div class="setting-control">
+          <input type="number" id="cfgPreviewCacheMaxMb" min="0" step="128" value="20480"
+                 style="width:96px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+                 onchange="saveStorageConfig()">
+          <span style="font-size:13px;color:var(--text-dim);">MB</span>
+          <button id="clearPreviewCacheBtn" class="btn-secondary" onclick="clearPreviewCache()">Clear cache</button>
+        </div>
+      </div>
+      <div id="previewCacheStatus" style="font-size:12px;color:var(--text-dim);margin-top:10px;">Loading...</div>
+      <div id="previewCacheWarning" class="storage-note" style="display:none;margin-top:10px;"></div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Detection Cache</div>
+      <div id="detectionCacheStats" style="font-size:13px;color:var(--text-secondary);">Loading...</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title" style="display:flex;align-items:center;gap:10px;">
+      <span>Embedding Cache</span>
+      <span id="embeddingCacheSize" style="font-size:12px;font-weight:400;color:var(--text-dim);"></span>
+      <span id="embeddingCacheCount" style="font-size:12px;font-weight:400;color:var(--text-dim);"></span>
+      <button id="clearCacheBtn" class="btn-secondary" onclick="clearEmbeddingCache()" style="display:none;margin-left:auto;">Clear cache</button>
+    </div>
+    <div id="matrixContent"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="masksModal" onclick="if(event.target===this)closeMasksModal()">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>Manage Mask Variants</h3>
+      <button class="modal-close" onclick="closeMasksModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-desc">SAM mask files saved per photo per variant. Inactive variants are safe to delete.</div>
+      <div id="masksModalError" style="color:var(--danger);font-size:12px;margin-bottom:10px;display:none;"></div>
+      <ul class="file-list" id="masksModalRows"></ul>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeMasksModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="storageModal" onclick="if(event.target===this)closeStorageModal()">
+  <div class="modal">
+    <div class="modal-header">
+      <h3 id="modalTitle">Manage Cache</h3>
+      <button class="modal-close" onclick="closeStorageModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-desc" id="modalDesc"></div>
+      <div id="modalLoading" style="color:var(--text-ghost);font-size:13px;">Loading files...</div>
+      <div id="modalFileList" style="display:none;">
+        <div class="file-select-bar">
+          <a id="modalSelectAllLink" onclick="selectAllFiles(true)">Select all shown</a>
+          <a onclick="selectAllFiles(false)">Select none</a>
+          <span id="modalSelectedInfo" style="color:var(--text-dim);margin-left:auto;"></span>
+        </div>
+        <ul class="file-list" id="modalFiles"></ul>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeStorageModal()">Cancel</button>
+      <div>
+        <button class="btn-danger" id="modalDeleteSelected" onclick="deleteSelectedFiles()" disabled>Delete Selected</button>
+        <button class="btn-danger" id="modalDeleteAll" onclick="deleteAllFiles()" style="margin-left:8px;">Delete Entire Cache</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function storageEscapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function storageEscapeAttr(s) {
+  return storageEscapeHtml(s).replace(/`/g, '&#96;');
+}
+
+function storageFormatBytes(b) {
+  if (b == null || b === 0) return '0';
+  if (b < 1024) return b + ' B';
+  if (b < 1024 * 1024) return Math.round(b / 1024) + ' KB';
+  if (b < 1024 * 1024 * 1024) return (b / (1024 * 1024)).toFixed(1) + ' MB';
+  return (b / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+}
+
+loadStoragePanel();
+loadStorageConfig();
+loadPreviewCacheStatus();
+loadDetectionCacheStats();
+loadEmbeddingMatrix();
+loadEmbeddingCache();
+
+var _storageSaveTimer = null;
+
+async function loadStorageConfig() {
+  try {
+    var cfg = await safeFetch('/api/config', {}, { toast: false });
+    var ts = cfg.thumbnail_size != null ? cfg.thumbnail_size : 400;
+    document.getElementById('cfgThumbSize').value = ts;
+    document.getElementById('cfgThumbSizeVal').textContent = ts + 'px';
+    var tq = cfg.thumbnail_quality != null ? cfg.thumbnail_quality : 85;
+    document.getElementById('cfgThumbQuality').value = tq;
+    document.getElementById('cfgThumbQualityVal').textContent = tq;
+    var pq = cfg.preview_quality != null ? cfg.preview_quality : 90;
+    document.getElementById('cfgPreviewQuality').value = pq;
+    document.getElementById('cfgPreviewQualityVal').textContent = pq;
+    document.getElementById('cfgPreviewCacheMaxMb').value =
+      cfg.preview_cache_max_mb != null ? cfg.preview_cache_max_mb : 20480;
+  } catch(e) {}
+}
+
+function saveStorageConfig() {
+  clearTimeout(_storageSaveTimer);
+  _storageSaveTimer = setTimeout(async function() {
+    try {
+      await safeFetch('/api/config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          thumbnail_size: parseInt(document.getElementById('cfgThumbSize').value, 10) || 400,
+          thumbnail_quality: parseInt(document.getElementById('cfgThumbQuality').value, 10) || 85,
+          preview_quality: parseInt(document.getElementById('cfgPreviewQuality').value, 10) || 90,
+          preview_cache_max_mb: Math.max(0, parseInt(document.getElementById('cfgPreviewCacheMaxMb').value, 10) || 0),
+        }),
+      });
+      loadPreviewCacheStatus();
+    } catch(e) {}
+  }, 250);
+}
+
+async function loadStoragePanel() {
+  try {
+    var s = await safeFetch('/api/storage', {}, { toast: false });
+    document.getElementById('storageTotalSize').textContent = 'Total: ' + storageFormatBytes(s.total);
+
+    var categories = [
+      {name: 'Database', size: s.database.size, type: null},
+      {name: 'Thumbnails', size: s.thumbnails.size, count: s.thumbnails.count, type: 'thumbnails'},
+      {name: 'Previews', size: s.previews.size, count: s.previews.count, type: 'previews'},
+      {name: 'Embeddings', size: s.embeddings.size, count: s.embeddings.count, type: 'embeddings'},
+      {name: 'Models', size: s.models.size, type: null},
+      {name: 'HF Cache', size: s.hf_cache.size, type: null},
+      {name: 'Offline Originals', size: s.offline_originals.size, count: s.offline_originals.count, type: null},
+    ];
+    _storageSummary = {};
+
+    var html = '';
+    categories.forEach(function(c) {
+      if (c.size === 0 && !c.type) return;
+      if (c.type) _storageSummary[c.type] = {count: c.count || 0, size: c.size || 0};
+      html += '<div class="stat-card">' +
+        '<div class="stat-number">' + storageFormatBytes(c.size) + '</div>' +
+        '<div class="stat-label">' + c.name +
+          (c.count != null ? ' (' + c.count.toLocaleString() + ')' : '') +
+        '</div>';
+      if (c.type) {
+        html += '<button class="btn-manage" onclick="openStorageModal(\'' + c.type + '\')">Manage</button>';
+      }
+      html += '</div>';
+    });
+    document.getElementById('storageGrid').innerHTML = html || '<span style="color:var(--text-ghost);font-size:13px;">No generated storage yet.</span>';
+  } catch(e) {
+    document.getElementById('storageGrid').innerHTML = '<span style="color:var(--danger);font-size:12px;">Failed to load storage info</span>';
+  }
+  loadMasksCard();
+}
+
+var _masksData = null;
+
+async function loadMasksCard() {
+  var card = document.getElementById('masksCard');
+  try {
+    var data = await safeFetch('/api/storage/masks', {}, { toast: false });
+    _masksData = data;
+    var variants = data.variants || [];
+    var totalBytes = data.total_bytes || 0;
+    var stale = data.stale_count || 0;
+
+    var inner = '<div style="background:var(--bg-tertiary);border-radius:6px;padding:14px 16px;">';
+    inner += '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px;">';
+    inner += '<div style="font-size:13px;font-weight:600;color:var(--text-primary);">Masks ' +
+      '<span style="font-size:11px;font-weight:400;color:var(--text-dim);margin-left:6px;">' +
+      storageFormatBytes(totalBytes) + '</span></div>';
+    inner += '<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">';
+    inner += '<button class="btn-manage" onclick="openMasksModal()"' +
+      (variants.length === 0 ? ' disabled style="opacity:0.5;cursor:default;"' : '') +
+      '>Manage</button>';
+    inner += '<button class="btn-secondary" onclick="deleteInactiveMasks()"' +
+      (variants.length === 0 ? ' disabled style="opacity:0.5;cursor:default;"' : '') +
+      '>Delete inactive</button>';
+    if (stale > 0) {
+      inner += '<button class="btn-secondary" onclick="deleteStaleMasks()" style="color:var(--warning);border-color:var(--warning);">Delete stale (' + stale + ')</button>';
+    }
+    inner += '</div></div>';
+
+    if (variants.length === 0) {
+      inner += '<div style="font-size:12px;color:var(--text-ghost);">No SAM masks yet.</div>';
+    } else {
+      inner += '<div style="display:flex;flex-direction:column;gap:4px;">';
+      variants.forEach(function(v) {
+        var isActive = (v.active_count || 0) > 0;
+        inner += '<div style="display:flex;align-items:center;gap:10px;font-size:12px;font-variant-numeric:tabular-nums;">';
+        inner += '<span style="min-width:120px;color:var(--text-secondary);">' + storageEscapeHtml(v.variant) + '</span>';
+        inner += '<span style="min-width:80px;color:var(--text-dim);">' + (v.count || 0).toLocaleString() + ' photo' + (v.count === 1 ? '' : 's') + '</span>';
+        inner += '<span style="min-width:80px;color:var(--text-faint);">' + storageFormatBytes(v.bytes || 0) + '</span>';
+        if (isActive) {
+          inner += '<span style="font-size:10px;color:var(--accent);background:color-mix(in srgb, var(--accent) 18%, transparent);border-radius:3px;padding:1px 6px;">active - ' +
+            (v.active_count || 0).toLocaleString() + '</span>';
+        }
+        inner += '</div>';
+      });
+      inner += '</div>';
+    }
+    inner += '</div>';
+    card.innerHTML = inner;
+  } catch(e) {
+    card.innerHTML = '<div style="background:var(--bg-tertiary);border-radius:6px;padding:14px 16px;">' +
+      '<span style="color:var(--danger);font-size:12px;">Failed to load mask info</span></div>';
+  }
+}
+
+function openMasksModal() {
+  if (!_masksData) return;
+  document.getElementById('masksModalError').style.display = 'none';
+  renderMasksModalRows();
+  document.getElementById('masksModal').classList.add('open');
+}
+
+function closeMasksModal() {
+  document.getElementById('masksModal').classList.remove('open');
+}
+
+function renderMasksModalRows() {
+  var rows = document.getElementById('masksModalRows');
+  rows.textContent = '';
+  if (!_masksData || (_masksData.variants || []).length === 0) {
+    var empty = document.createElement('li');
+    empty.style.color = 'var(--text-ghost)';
+    empty.style.fontSize = '13px';
+    empty.style.padding = '12px 0';
+    empty.textContent = 'No mask variants present.';
+    rows.appendChild(empty);
+    return;
+  }
+  _masksData.variants.forEach(function(v) {
+    var isActive = (v.active_count || 0) > 0;
+    var li = document.createElement('li');
+    li.className = 'file-item';
+    var label = document.createElement('label');
+    label.style.flex = '1';
+    var strong = document.createElement('strong');
+    strong.style.color = 'var(--text-primary)';
+    strong.textContent = v.variant;
+    label.appendChild(strong);
+    var meta = document.createElement('span');
+    meta.style.color = 'var(--text-dim)';
+    meta.textContent = ' - ' + (v.count || 0).toLocaleString() +
+      ' photos - ' + storageFormatBytes(v.bytes || 0);
+    label.appendChild(meta);
+    if (isActive) {
+      var activeTag = document.createElement('span');
+      activeTag.style.fontSize = '10px';
+      activeTag.style.color = 'var(--accent)';
+      activeTag.style.marginLeft = '6px';
+      activeTag.textContent = '[active - ' + (v.active_count || 0).toLocaleString() + ']';
+      label.appendChild(activeTag);
+    }
+    li.appendChild(label);
+    var btn = document.createElement('button');
+    btn.className = 'btn-danger';
+    btn.textContent = 'Delete';
+    if (isActive) {
+      btn.disabled = true;
+      btn.title = 'set another variant active first';
+    } else {
+      btn.addEventListener('click', function() { deleteMaskVariant(v.variant); });
+    }
+    li.appendChild(btn);
+    rows.appendChild(li);
+  });
+}
+
+function _showMasksModalError(msg) {
+  var el = document.getElementById('masksModalError');
+  el.textContent = msg;
+  el.style.display = '';
+}
+
+async function deleteMaskVariant(variant) {
+  if (!confirm('Delete all "' + variant + '" masks? Files and DB rows will be removed.')) return;
+  try {
+    var resp = await fetch('/api/storage/masks/delete-variant', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({variant: variant}),
+    });
+    var body = await resp.json();
+    if (!resp.ok) {
+      _showMasksModalError(body.error || ('HTTP ' + resp.status));
+      return;
+    }
+    document.getElementById('masksModalError').style.display = 'none';
+  } catch(e) {
+    _showMasksModalError(String(e));
+    return;
+  }
+  await loadMasksCard();
+  if (_masksData && (_masksData.variants || []).length > 0) renderMasksModalRows();
+  else closeMasksModal();
+}
+
+async function deleteInactiveMasks() {
+  if (!confirm('Delete all non-active mask variants across photos? The active variant per photo is kept.')) return;
+  try {
+    await safeFetch('/api/storage/masks/delete-inactive', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+    });
+  } catch(e) {}
+  loadMasksCard();
+  loadStoragePanel();
+}
+
+async function deleteStaleMasks() {
+  if (!confirm('Delete masks whose detection prompt no longer matches the photo primary detection?')) return;
+  try {
+    await safeFetch('/api/storage/masks/delete-stale', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+    });
+  } catch(e) {}
+  loadMasksCard();
+  loadStoragePanel();
+}
+
+var _modalType = '';
+var _modalFiles = [];
+var _storageSummary = {};
+var STORAGE_MODAL_FILE_LIMIT = 500;
+var STORAGE_INFO = {
+  thumbnails: {
+    title: 'Thumbnails',
+    desc: 'Small preview images generated for fast browsing. Deleting these is safe; they regenerate automatically.',
+  },
+  previews: {
+    title: 'Previews',
+    desc: 'Larger preview images used for detail views. Deleting these is safe; they regenerate on demand.',
+  },
+  embeddings: {
+    title: 'Label Embeddings',
+    desc: 'Cached text embeddings for species labels used during classification.',
+  },
+};
+
+async function openStorageModal(type) {
+  _modalType = type;
+  _modalFiles = [];
+  var info = STORAGE_INFO[type] || {title: type, desc: ''};
+  document.getElementById('modalTitle').textContent = 'Manage ' + info.title;
+  document.getElementById('modalDesc').textContent = info.desc;
+  document.getElementById('modalLoading').style.display = 'block';
+  document.getElementById('modalLoading').textContent = 'Loading files...';
+  document.getElementById('modalFileList').style.display = 'none';
+  document.getElementById('modalDeleteSelected').disabled = true;
+  document.getElementById('storageModal').classList.add('open');
+
+  try {
+    var url = '/api/storage/files?type=' + encodeURIComponent(type);
+    if (type === 'previews' || type === 'thumbnails') {
+      url += '&limit=' + STORAGE_MODAL_FILE_LIMIT;
+      document.getElementById('modalLoading').textContent =
+        'Loading first ' + STORAGE_MODAL_FILE_LIMIT.toLocaleString() + ' files...';
+    }
+    var data = await safeFetch(url, {}, { toast: false });
+    _modalFiles = data.files || [];
+    document.getElementById('modalLoading').style.display = 'none';
+    document.getElementById('modalFileList').style.display = 'block';
+
+    if (_modalFiles.length === 0) {
+      document.getElementById('modalFiles').innerHTML = '<li style="color:var(--text-ghost);font-size:13px;padding:12px 0;">Cache is empty.</li>';
+      document.getElementById('modalDeleteAll').disabled = true;
+      updateSelectedInfo();
+      return;
+    }
+    document.getElementById('modalDeleteAll').disabled = false;
+
+    var html = '';
+    if (data.truncated) {
+      var summary = _storageSummary[type] || {};
+      var totalCount = summary.count || 0;
+      html += '<li style="color:var(--text-ghost);font-size:12px;padding:8px 0;">Showing the first ' +
+        _modalFiles.length.toLocaleString() +
+        (totalCount ? ' of ' + totalCount.toLocaleString() : '') +
+        ' files. Select all shown and Delete Selected affect only this visible list; Delete Entire Cache removes all ' +
+        info.title.toLowerCase() + '.</li>';
+    }
+    _modalFiles.forEach(function(f, i) {
+      var displayName = storageEscapeHtml(f.name);
+      if (f.meta) {
+        displayName = storageEscapeHtml(f.meta.model || 'Unknown model') +
+          ' <span style="color:var(--text-faint);">- ' + (f.meta.label_count || '?') + ' labels</span>';
+        if (f.meta.created) {
+          displayName += ' <span style="color:var(--text-ghost);">- ' + storageEscapeHtml(f.meta.created.split('T')[0]) + '</span>';
+        }
+      }
+      html += '<li class="file-item">' +
+        '<input type="checkbox" id="fc' + i + '" onchange="updateSelectedInfo()">' +
+        '<label for="fc' + i + '">' + displayName + '</label>' +
+        '<span class="file-size">' + storageFormatBytes(f.size) + '</span>' +
+      '</li>';
+    });
+    document.getElementById('modalFiles').innerHTML = html;
+    updateSelectedInfo();
+  } catch(e) {
+    document.getElementById('modalLoading').innerHTML = '<span style="color:var(--danger);">Failed to load files.</span>';
+  }
+}
+
+function closeStorageModal() {
+  document.getElementById('storageModal').classList.remove('open');
+}
+
+function selectAllFiles(checked) {
+  var boxes = document.querySelectorAll('#modalFiles input[type=checkbox]');
+  boxes.forEach(function(cb) { cb.checked = checked; });
+  updateSelectedInfo();
+}
+
+function updateSelectedInfo() {
+  var boxes = document.querySelectorAll('#modalFiles input[type=checkbox]');
+  var count = 0, size = 0;
+  boxes.forEach(function(cb, i) {
+    if (cb.checked) { count++; size += _modalFiles[i].size; }
+  });
+  document.getElementById('modalSelectedInfo').textContent = count > 0
+    ? count + ' selected (' + storageFormatBytes(size) + ')'
+    : '';
+  document.getElementById('modalDeleteSelected').disabled = count === 0;
+}
+
+async function deleteSelectedFiles() {
+  var boxes = document.querySelectorAll('#modalFiles input[type=checkbox]');
+  var names = [];
+  boxes.forEach(function(cb, i) {
+    if (cb.checked) names.push(_modalFiles[i].name);
+  });
+  if (names.length === 0) return;
+  if (!confirm('Delete ' + names.length + ' file(s)?')) return;
+  try {
+    await safeFetch('/api/storage/delete-files', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({type: _modalType, files: names}),
+    });
+  } catch(e) {}
+  loadStoragePanel();
+  loadPreviewCacheStatus();
+  loadEmbeddingCache();
+  openStorageModal(_modalType);
+}
+
+async function deleteAllFiles() {
+  var info = STORAGE_INFO[_modalType] || {title: _modalType};
+  var summary = _storageSummary[_modalType] || {};
+  var count = summary.count || _modalFiles.length;
+  if (!confirm('Delete all ' + count.toLocaleString() + ' ' + info.title.toLowerCase() + '? They will regenerate as needed.')) return;
+  try {
+    await safeFetch('/api/storage/clear', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({type: _modalType}),
+    });
+  } catch(e) {}
+  loadStoragePanel();
+  loadPreviewCacheStatus();
+  loadEmbeddingCache();
+  openStorageModal(_modalType);
+}
+
+async function loadPreviewCacheStatus() {
+  var statusEl = document.getElementById('previewCacheStatus');
+  var warnEl = document.getElementById('previewCacheWarning');
+  try {
+    var d = await safeFetch('/api/preview-cache', {}, { toast: false });
+    var usedMb = (d.total_size / 1024 / 1024).toFixed(1);
+    var quotaMb = Math.round(d.quota_bytes / 1024 / 1024);
+    var fileWord = d.count === 1 ? 'file' : 'files';
+    statusEl.textContent = 'Current: ' + usedMb + ' / ' + quotaMb + ' MB (' + d.count + ' ' + fileWord + ')';
+    var rec = d.recommended_mb || 0;
+    if (rec > 0 && quotaMb > 0 && quotaMb < rec) {
+      warnEl.textContent = 'Recommended: ' + rec.toLocaleString() + ' MB for one preview per photo.';
+      warnEl.style.display = 'block';
+    } else {
+      warnEl.style.display = 'none';
+    }
+  } catch(e) {
+    statusEl.textContent = 'Failed to load';
+    warnEl.style.display = 'none';
+  }
+}
+
+async function clearPreviewCache() {
+  if (!confirm('Clear all cached preview images? They will regenerate on demand from the originals.')) return;
+  var btn = document.getElementById('clearPreviewCacheBtn');
+  if (btn) btn.disabled = true;
+  try {
+    await safeFetch('/api/preview-cache/clear', { method: 'POST' });
+  } catch(e) {}
+  if (btn) btn.disabled = false;
+  loadStoragePanel();
+  loadPreviewCacheStatus();
+}
+
+async function loadDetectionCacheStats() {
+  var el = document.getElementById('detectionCacheStats');
+  try {
+    var d = await safeFetch('/api/detection-cache/stats', {}, { toast: false });
+    var pc = d.photo_count || 0;
+    var mc = d.model_count || 0;
+    el.textContent = pc + ' ' + (pc === 1 ? 'photo' : 'photos') +
+      ' x ' + mc + ' ' + (mc === 1 ? 'model' : 'models') + ' cached';
+  } catch(e) {
+    el.textContent = 'Failed to load';
+  }
+}
+
+async function loadEmbeddingCache() {
+  try {
+    var d = await safeFetch('/api/embedding-cache', {}, { toast: false });
+    document.getElementById('embeddingCacheSize').textContent = storageFormatBytes(d.total_size);
+    var count = (d.entries || []).length;
+    document.getElementById('embeddingCacheCount').textContent =
+      count > 0 ? count + ' cached label ' + (count === 1 ? 'set' : 'sets') : 'empty';
+    document.getElementById('clearCacheBtn').style.display = count > 0 ? '' : 'none';
+  } catch(e) {}
+}
+
+async function clearEmbeddingCache() {
+  if (!confirm('Clear all cached label embeddings? The next classification run will recompute them.')) return;
+  try {
+    await safeFetch('/api/embedding-cache', { method: 'DELETE' });
+  } catch(e) {}
+  loadStoragePanel();
+  loadEmbeddingCache();
+  loadEmbeddingMatrix();
+}
+
+async function loadEmbeddingMatrix() {
+  try {
+    var data = await safeFetch('/api/embedding-matrix', {}, { toast: false });
+    var models = data.models || [];
+    var matrix = data.matrix || [];
+
+    if (models.length === 0 || matrix.length === 0) {
+      document.getElementById('matrixContent').innerHTML =
+        '<span style="color:var(--text-faint);font-size:13px;">Download a model and a species list to see the embedding matrix.</span>';
+      return;
+    }
+
+    var html = '<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:8px;">';
+    html += '<thead><tr><th style="text-align:left;padding:6px 10px;color:var(--text-faint);font-weight:500;border-bottom:1px solid var(--border-primary);">Labels</th>';
+    models.forEach(function(m) {
+      html += '<th style="text-align:center;padding:6px 10px;color:var(--text-faint);font-weight:500;border-bottom:1px solid var(--border-primary);">' + storageEscapeHtml(m.name) + '</th>';
+    });
+    html += '</tr></thead><tbody>';
+
+    matrix.forEach(function(row) {
+      html += '<tr>';
+      html += '<td style="padding:6px 10px;border-bottom:1px solid var(--border-subtle);color:var(--text-secondary);">';
+      html += storageEscapeHtml(row.labels_name) + ' <span style="color:var(--text-ghost);">(' + row.species_count + ')</span>';
+      html += '</td>';
+      models.forEach(function(m) {
+        var cell = row.models[m.id];
+        html += '<td style="text-align:center;padding:6px 10px;border-bottom:1px solid var(--border-subtle);">';
+        if (cell && cell.cached) {
+          html += '<span style="color:var(--accent);">cached</span>';
+        } else {
+          html += '<button class="embedding-compute-btn" data-model-id="' + storageEscapeAttr(m.id) +
+            '" data-label-file="' + storageEscapeAttr(row.labels_file) + '" ' +
+            'style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:3px 10px;font-size:11px;cursor:pointer;">Compute</button>';
+        }
+        html += '</td>';
+      });
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+    document.getElementById('matrixContent').innerHTML = html;
+    document.querySelectorAll('.embedding-compute-btn').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        precomputeEmbeddings(btn.dataset.modelId, btn.dataset.labelFile);
+      });
+    });
+  } catch(e) {
+    document.getElementById('matrixContent').innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load</span>';
+  }
+}
+
+async function precomputeEmbeddings(modelId, labelsFile) {
+  try {
+    var data = await safeFetch('/api/jobs/precompute-embeddings', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({model_id: modelId, labels_file: labelsFile}),
+    });
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onComplete: function() {
+        loadEmbeddingMatrix();
+        loadEmbeddingCache();
+        loadStoragePanel();
+      },
+    });
+  } catch(e) {}
+}
+</script>
+</body>
+</html>

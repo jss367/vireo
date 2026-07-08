@@ -2289,7 +2289,7 @@ function sendReport() {
 window.NAV_DEFAULT_TABS = [
   'browse', 'import', 'pipeline', 'pipeline_review',
   'review', 'cull', 'jobs',
-  'highlights', 'misses', 'settings'
+  'highlights', 'misses', 'storage', 'settings'
 ];
 window.NAV_ALL_PAGES = [
   {id: 'import',          label: 'Import',          href: '/import',
@@ -2309,6 +2309,7 @@ window.NAV_ALL_PAGES = [
   {id: 'map',             label: 'Map',             href: '/map'},
   {id: 'variants',        label: 'Variants',        href: '/variants'},
   {id: 'dashboard',       label: 'Dashboard',       href: '/dashboard'},
+  {id: 'storage',         label: 'Storage',         href: '/storage'},
   {id: 'audit',           label: 'Audit',           href: '/audit'},
   {id: 'move',            label: 'Move',            href: '/move'},
   {id: 'compare',         label: 'Compare',         href: '/compare'},
@@ -2740,7 +2741,7 @@ window.NAV_ALL_PAGES = [
   var NAV_ROUTES = {
     pipeline: '/pipeline', lightroom: '/lightroom', pipeline_review: '/pipeline/review',
     review: '/review', cull: '/cull', browse: '/browse', map: '/map',
-    variants: '/variants', dashboard: '/dashboard', audit: '/audit',
+    variants: '/variants', dashboard: '/dashboard', storage: '/storage', audit: '/audit',
     compare: '/compare', workspace: '/workspace', shortcuts: '/shortcuts',
     settings: '/settings', keywords: '/keywords'
   };
@@ -2748,7 +2749,7 @@ window.NAV_ALL_PAGES = [
   var NAV_DEFAULTS = {
     pipeline: '', lightroom: '', pipeline_review: '', review: '',
     cull: '', browse: '', map: '', variants: '',
-    dashboard: '', audit: '', compare: '', workspace: '',
+    dashboard: '', storage: '', audit: '', compare: '', workspace: '',
     shortcuts: '', settings: '', keywords: ''
   };
 
@@ -2956,7 +2957,7 @@ window.NAV_ALL_PAGES = [
       _title: 'Navigation',
       import: 'Import', pipeline: 'Process', pipeline_review: 'Process Review',
       review: 'Review', cull: 'Cull', browse: 'Browse', map: 'Map',
-      variants: 'Variants', dashboard: 'Dashboard', audit: 'Audit',
+      variants: 'Variants', dashboard: 'Dashboard', storage: 'Storage', audit: 'Audit',
       compare: 'Compare', workspace: 'Workspace', keywords: 'Keywords',
       shortcuts: 'Shortcuts', settings: 'Settings',
     },
@@ -3020,7 +3021,7 @@ window.NAV_ALL_PAGES = [
     navigation: {
       import: '', pipeline: '', pipeline_review: '', review: '',
       cull: '', browse: '', map: '', variants: '',
-      dashboard: '', audit: '', compare: '', workspace: '',
+      dashboard: '', storage: '', audit: '', compare: '', workspace: '',
       shortcuts: '', settings: '', keywords: '',
     },
     review: { accept: 'a', skip: 's' },

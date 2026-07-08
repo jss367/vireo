@@ -220,7 +220,7 @@ ALL_NAV_IDS = frozenset({
     "import",
     "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
     "misses", "highlights", "life_list", "browse", "edit", "map", "variants",
-    "dashboard", "audit", "move", "compare",
+    "dashboard", "storage", "audit", "move", "compare",
     "settings", "workspace", "lightroom", "shortcuts",
     "keywords", "duplicates", "logs",
 })
@@ -228,7 +228,7 @@ ALL_NAV_IDS = frozenset({
 DEFAULT_TABS = [
     "browse", "import", "pipeline", "pipeline_review",
     "review", "cull", "jobs",
-    "highlights", "misses", "settings",
+    "highlights", "misses", "storage", "settings",
 ]
 
 
@@ -963,6 +963,33 @@ class Database:
                     (json.dumps(tabs), row["id"]),
                 )
             self.conn.execute("PRAGMA user_version = 1")
+
+        # Migration (storage page): cache/storage controls moved out of
+        # Settings and Dashboard, so existing workspaces need a visible
+        # Storage tab once. Guard with user_version so a later user unpin
+        # stays respected across fresh Database handles.
+        if current_user_version < 2:
+            rows = self.conn.execute(
+                "SELECT id, tabs FROM workspaces WHERE tabs IS NOT NULL"
+            ).fetchall()
+            for row in rows:
+                try:
+                    tabs = json.loads(row["tabs"])
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(tabs, list) or "storage" in tabs:
+                    continue
+                if "settings" in tabs:
+                    tabs.insert(tabs.index("settings"), "storage")
+                elif "misses" in tabs:
+                    tabs.insert(tabs.index("misses") + 1, "storage")
+                else:
+                    tabs.append("storage")
+                self.conn.execute(
+                    "UPDATE workspaces SET tabs = ? WHERE id = ?",
+                    (json.dumps(tabs), row["id"]),
+                )
+            self.conn.execute("PRAGMA user_version = 2")
 
         # Migration: drop legacy open_tabs column (replaced by `tabs`).
         try:

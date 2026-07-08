@@ -163,6 +163,7 @@ DEFAULTS = {
             "map": "",
             "variants": "",
             "dashboard": "",
+            "storage": "",
             "audit": "",
             "compare": "",
             "workspace": "",

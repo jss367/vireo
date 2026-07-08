@@ -505,15 +505,38 @@ def test_logs_page(app_and_db):
     assert resp.status_code == 200
 
 
-def test_settings_page_has_preview_cache_field(app_and_db):
-    """Settings page renders the preview_cache_max_mb input and cache controls."""
+def test_storage_page_has_preview_cache_field(app_and_db):
+    """Storage page renders the preview_cache_max_mb input and cache controls."""
     app, _ = app_and_db
     client = app.test_client()
-    resp = client.get('/settings')
+    resp = client.get('/storage')
     assert resp.status_code == 200
-    assert b'preview_cache_max_mb' in resp.data
     assert b'cfgPreviewCacheMaxMb' in resp.data
     assert b'clearPreviewCache' in resp.data
+
+
+def test_storage_page_bounds_large_cache_file_listings(app_and_db):
+    """Thumbnail and preview modals request a bounded first page."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/storage')
+    assert resp.status_code == 200
+    assert b'STORAGE_MODAL_FILE_LIMIT = 500' in resp.data
+    assert b'&limit=' in resp.data
+    assert b'Select all shown' in resp.data
+    assert b'Delete Entire Cache' in resp.data
+
+
+def test_api_storage_includes_offline_originals(app_and_db):
+    """Storage totals include Vireo-managed offline originals."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/api/storage')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["offline_originals"]["count"] == 0
+    assert data["offline_originals"]["size"] == 0
+    assert data["offline_originals"]["path"].endswith("offline")
 
 
 def test_detection_cache_stats_endpoint(app_and_db):
@@ -531,8 +554,8 @@ def test_detection_cache_stats_endpoint(app_and_db):
     data = resp.get_json()
     assert data == {"photo_count": 0, "model_count": 0}
 
-    # Settings page advertises the stat with the right DOM hooks.
-    page = client.get('/settings')
+    # Storage page advertises the stat with the right DOM hooks.
+    page = client.get('/storage')
     assert page.status_code == 200
     assert b'detectionCacheStats' in page.data
     assert b'photos' in page.data
@@ -1378,7 +1401,7 @@ def test_pages_link_base_css(app_and_db):
     app, _ = app_and_db
     client = app.test_client()
     pages = ['/browse', '/lightroom', '/audit', '/logs',
-             '/settings', '/workspace', '/pipeline', '/dashboard',
+             '/settings', '/storage', '/workspace', '/pipeline', '/dashboard',
              '/review', '/cull', '/pipeline/review', '/map', '/shortcuts']
     for page in pages:
         resp = client.get(page)
@@ -1941,7 +1964,7 @@ def test_pages_include_vireo_utils(app_and_db):
     app, _ = app_and_db
     client = app.test_client()
     pages = ['/browse', '/lightroom', '/audit', '/logs',
-             '/settings', '/workspace', '/pipeline', '/dashboard',
+             '/settings', '/storage', '/workspace', '/pipeline', '/dashboard',
              '/review', '/cull', '/variants', '/compare', '/map']
     for page in pages:
         resp = client.get(page)
@@ -1963,7 +1986,7 @@ def test_pages_no_inline_escapeHtml(app_and_db):
     app, _ = app_and_db
     client = app.test_client()
     pages = ['/browse', '/lightroom', '/audit', '/logs',
-             '/settings', '/workspace', '/pipeline', '/dashboard',
+             '/settings', '/storage', '/workspace', '/pipeline', '/dashboard',
              '/review', '/cull', '/variants', '/compare', '/map']
     for page in pages:
         resp = client.get(page)

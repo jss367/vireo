@@ -318,58 +318,6 @@
     </div>
     <div class="setting-row">
       <div class="setting-label">
-        Thumbnail size
-        <small>Maximum dimension in pixels for cached thumbnails.</small>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;">
-        <input type="range" id="cfgThumbSize" min="200" max="800" step="50" value="400"
-               style="width:120px;accent-color:var(--accent);"
-               oninput="document.getElementById('cfgThumbSizeVal').textContent = this.value + 'px'; saveConfig()">
-        <span style="font-size:13px;color:var(--text-primary);min-width:42px;" id="cfgThumbSizeVal">400px</span>
-      </div>
-    </div>
-    <div class="setting-row">
-      <div class="setting-label">
-        Thumbnail quality
-        <small>JPEG quality for cached thumbnails (higher = larger files).</small>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;">
-        <input type="range" id="cfgThumbQuality" min="50" max="100" step="5" value="85"
-               style="width:120px;accent-color:var(--accent);"
-               oninput="document.getElementById('cfgThumbQualityVal').textContent = this.value; saveConfig()">
-        <span style="font-size:13px;color:var(--text-primary);min-width:30px;" id="cfgThumbQualityVal">85</span>
-      </div>
-    </div>
-    <div class="setting-row">
-      <div class="setting-label">
-        Preview quality
-        <small>JPEG quality for full-size preview images.</small>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;">
-        <input type="range" id="cfgPreviewQuality" min="50" max="100" step="5" value="90"
-               style="width:120px;accent-color:var(--accent);"
-               oninput="document.getElementById('cfgPreviewQualityVal').textContent = this.value; saveConfig()">
-        <span style="font-size:13px;color:var(--text-primary);min-width:30px;" id="cfgPreviewQualityVal">90</span>
-      </div>
-    </div>
-    <div class="setting-row" style="flex-direction:column;align-items:flex-start;gap:8px;">
-      <div class="setting-label" style="width:100%;">
-        Preview cache quota
-        <small>Maximum disk space for cached previews (MB). Oldest entries are evicted first. Set to 0 to disable caching.</small>
-      </div>
-      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;width:100%;">
-        <input type="number" id="cfgPreviewCacheMaxMb" min="0" step="128" value="20480"
-               style="width:90px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
-               onchange="saveConfig()">
-        <span style="font-size:13px;color:var(--text-dim);">MB</span>
-        <span id="previewCacheStatus" style="font-size:12px;color:var(--text-dim);margin-left:auto;">Loading...</span>
-        <button id="clearPreviewCacheBtn" onclick="clearPreviewCache()"
-                style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">Clear cache</button>
-      </div>
-      <div id="previewCacheWarning" style="display:none;width:100%;font-size:12px;color:var(--accent);background:var(--bg-tertiary);border-left:3px solid var(--accent);padding:8px 12px;border-radius:4px;"></div>
-    </div>
-    <div class="setting-row">
-      <div class="setting-label">
         Default browse thumbnail
         <small>Default thumbnail size in Browse grid (pixels).</small>
       </div>
@@ -1045,27 +993,6 @@
     <div id="pipelineModelsContainer" style="font-size:12px;color:var(--text-dim);">Loading...</div>
   </div>
 
-
-  <!-- Detection Cache -->
-  <div class="section">
-    <div class="section-title">Detection Cache</div>
-    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
-      MegaDetector results are cached globally per photo &amp; model. Switching workspaces or changing
-      the detector confidence threshold never re-runs detection on a photo that has already been scanned.
-    </p>
-    <div id="detectionCacheStats" style="font-size:13px;color:var(--text-secondary);">Loading&hellip;</div>
-  </div>
-
-  <!-- Embedding Matrix -->
-  <div class="section">
-    <div class="section-title">Embedding Cache</div>
-    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
-      Each model+labels combination needs pre-computed text embeddings. Cached combinations classify instantly.
-      Uncached ones will compute on first use (~30s on CPU).
-    </p>
-    <div id="matrixContent"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
-  </div>
-
   <!-- Scan Roots -->
   <div class="section">
     <div class="section-title">Saved Scan Roots</div>
@@ -1163,12 +1090,9 @@ loadTaxonomy();
 loadSystemInfo();
 loadConfig();
 loadWsOverrides();
-loadEmbeddingMatrix();
 loadScanRoots();
 loadVersion();
 loadThemePicker();
-loadPreviewCacheStatus();
-loadDetectionCacheStats();
 loadAllSettings();
 
 var SETTINGS_FIND_STATE = {
@@ -1826,16 +1750,6 @@ async function loadConfig() {
     loadDarktableStatus();
     // Load display settings
     document.getElementById('cfgPhotosPerPage').value = cfg.photos_per_page != null ? cfg.photos_per_page : 50;
-    var ts = cfg.thumbnail_size != null ? cfg.thumbnail_size : 400;
-    document.getElementById('cfgThumbSize').value = ts;
-    document.getElementById('cfgThumbSizeVal').textContent = ts + 'px';
-    var tq = cfg.thumbnail_quality != null ? cfg.thumbnail_quality : 85;
-    document.getElementById('cfgThumbQuality').value = tq;
-    document.getElementById('cfgThumbQualityVal').textContent = tq;
-    var pq = cfg.preview_quality != null ? cfg.preview_quality : 90;
-    document.getElementById('cfgPreviewQuality').value = pq;
-    document.getElementById('cfgPreviewQualityVal').textContent = pq;
-    document.getElementById('cfgPreviewCacheMaxMb').value = cfg.preview_cache_max_mb != null ? cfg.preview_cache_max_mb : 20480;
     var bt = cfg.browse_thumb_default != null ? cfg.browse_thumb_default : 220;
     document.getElementById('cfgBrowseThumbDefault').value = bt;
     document.getElementById('cfgBrowseThumbVal').textContent = bt + 'px';
@@ -2031,10 +1945,6 @@ function saveConfig() {
           darktable_auto_convert_dng: document.getElementById('cfgDarktableAutoConvertDng').checked,
           dng_converter_bin: document.getElementById('cfgDngConverterBin').value.trim(),
           photos_per_page: parseInt(document.getElementById('cfgPhotosPerPage').value, 10) || 50,
-          thumbnail_size: parseInt(document.getElementById('cfgThumbSize').value, 10) || 400,
-          thumbnail_quality: parseInt(document.getElementById('cfgThumbQuality').value, 10) || 85,
-          preview_quality: parseInt(document.getElementById('cfgPreviewQuality').value, 10) || 90,
-          preview_cache_max_mb: Math.max(0, parseInt(document.getElementById('cfgPreviewCacheMaxMb').value, 10) || 0),
           browse_thumb_default: parseInt(document.getElementById('cfgBrowseThumbDefault').value, 10) || 220,
           open_in_browser: document.getElementById('cfgOpenInBrowser').checked,
           browse_card_fields: getSelectedCardFields(),
@@ -3066,13 +2976,15 @@ function formatBytes(b) {
 
 /* ---------- Embedding Matrix ---------- */
 async function loadEmbeddingMatrix() {
+  var matrixEl = document.getElementById('matrixContent');
+  if (!matrixEl) return;
   try {
     var data = await safeFetch('/api/embedding-matrix', {}, { toast: false });
     var models = data.models || [];
     var matrix = data.matrix || [];
 
     if (models.length === 0 || matrix.length === 0) {
-      document.getElementById('matrixContent').innerHTML =
+      matrixEl.innerHTML =
         '<span style="color:var(--text-faint);font-size:13px;">Download a model and a species list to see the embedding matrix.</span>';
       return;
     }
@@ -3103,9 +3015,9 @@ async function loadEmbeddingMatrix() {
       html += '</tr>';
     });
     html += '</tbody></table>';
-    document.getElementById('matrixContent').innerHTML = html;
+    matrixEl.innerHTML = html;
   } catch(e) {
-    document.getElementById('matrixContent').innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load</span>';
+    matrixEl.innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load</span>';
   }
 }
 
