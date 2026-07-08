@@ -2842,6 +2842,13 @@ function updateStartButton() {
 
   if (_sourceMode === 'folders') {
     btn.disabled = selectedFolderIds().length === 0;
+  } else if (_sourceMode === 'import') {
+    // Import-source mode: at least one source folder is required. The
+    // per-file preview may still be resolving; we don't block Start on
+    // that (matches new_images), but startPipeline() will pass the
+    // deselected paths through as exclude_paths so the run scope
+    // matches the plan the user saw.
+    btn.disabled = _sourceFolders.length === 0;
   } else if (_sourceMode === 'new_images') {
     btn.disabled = !newImagesSnapshotId;
   } else {
@@ -3141,6 +3148,29 @@ async function startPipeline() {
     // its active-workspace subtree and pins the run to an ad-hoc
     // collection (import/process split PR 1).
     body.folder_ids = selectedFolderIds();
+  } else if (_sourceMode === 'import') {
+    // Import-source mode on the Process page: scope = the user-typed
+    // source directory list. Mirrors the shape _buildPlanBody() uses
+    // (deselected preview files land in exclude_paths) so the run
+    // matches the plan the user saw. Without this branch startPipeline
+    // fell through to collection scope and POSTed collection_id from
+    // whatever was in the picker, which could execute a completely
+    // different scope than the one the plan described.
+    body.sources = _sourceFolders.slice();
+    body.recursive = includeSubfoldersEnabled();
+    var importFileTypes = getIngestFileTypes();
+    if (importFileTypes && importFileTypes.length) {
+      body.file_types = importFileTypes;
+    }
+    if (_previewData && _previewSelected) {
+      var excludedImportPaths = [];
+      _previewData.files.forEach(function(f) {
+        if (!_previewSelected[f.path]) excludedImportPaths.push(f.path);
+      });
+      if (excludedImportPaths.length > 0) {
+        body.exclude_paths = excludedImportPaths;
+      }
+    }
   } else if (_sourceMode === 'new_images') {
     body.source_snapshot_id = newImagesSnapshotId;
     delete body.source;

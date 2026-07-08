@@ -81,6 +81,83 @@ def test_pipeline_source_browse_button_adds_source_folder(live_server, page):
     assert page.evaluate("_sourceMode") == "import"
 
 
+def test_pipeline_import_source_start_posts_source_folders(live_server, page):
+    """Import mode (source folders added via Browse/type) must enable Start
+    and POST /api/jobs/pipeline with `sources` = the folder list — not
+    fall through to collection scope and send `collection_id`.
+
+    Regression test for a bug where startPipeline() only special-cased
+    'folders' and 'new_images', so 'import' mode was treated as a
+    collection: Start stayed disabled unless a collection was selected,
+    and if one was, the request POSTed that collection_id instead of the
+    previewed source paths.
+    """
+    url = live_server["url"]
+    page.route(
+        "**/api/import/folder-preview",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "total_count": 1,
+                "total_size": 1000,
+                "type_breakdown": {".jpg": 1},
+                "duplicate_count": 0,
+                "files": [{
+                    "path": "/tmp/vireo-source/hawk.jpg",
+                    "size": 1000,
+                    "mtime": 1.0,
+                    "duplicate": False,
+                }],
+            }),
+        ),
+    )
+    pipeline_payloads = []
+
+    def capture_pipeline(route):
+        pipeline_payloads.append(route.request.post_data_json)
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"job_id": "job-abc"}),
+        )
+
+    page.route("**/api/jobs/pipeline", capture_pipeline)
+
+    page.goto(f"{url}/pipeline")
+    page.evaluate("window.pickDirectory = async () => ['/tmp/vireo-source']")
+
+    page.locator("[data-testid='source-browse-btn']").click()
+    expect(page.locator("#sourceFolderList")).to_contain_text("/tmp/vireo-source")
+    assert page.evaluate("_sourceMode") == "import"
+
+    start_btn = page.locator("[data-testid='start-pipeline-btn']")
+    expect(start_btn).to_be_enabled()
+
+    # Turn Classify off so Start doesn't wait on the plan-refresh gate —
+    # the wiring under test is source scope, not classify gating.
+    page.uncheck("#enableClassify")
+    expect(start_btn).to_be_enabled()
+
+    start_btn.click()
+
+    for _ in range(50):
+        if pipeline_payloads:
+            break
+        page.wait_for_timeout(100)
+    assert pipeline_payloads, "expected /api/jobs/pipeline to be POSTed"
+    body = pipeline_payloads[0]
+    assert body.get("sources") == ["/tmp/vireo-source"], (
+        f"expected sources=['/tmp/vireo-source'], got body={body!r}"
+    )
+    assert "collection_id" not in body, (
+        f"import mode must not POST collection_id, got body={body!r}"
+    )
+    assert "folder_ids" not in body, (
+        f"import mode must not POST folder_ids, got body={body!r}"
+    )
+
+
 def test_pipeline_source_browse_cancel_keeps_workspace_folder_mode(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
