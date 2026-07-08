@@ -6871,12 +6871,42 @@ def test_process_page_has_no_import_source(app_and_db):
     client = app.test_client()
     html = client.get("/pipeline").data.decode()
     assert 'id="radioImport"' not in html
+    assert 'id="cfgSourceInput"' not in html
+    assert 'id="destCopySection"' not in html
+    assert "/api/jobs/import-full" not in html
     assert 'id="radioFolders"' in html
     assert 'id="radioCollection"' in html
     assert 'id="radioNewImages"' in html
     assert 'id="strategySelect"' in html
     assert "folder_ids" in html
     assert "<title>Vireo - Process</title>" in html
+
+
+def test_browse_empty_state_import_link_targets_import_page(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    html = client.get("/browse").data.decode()
+    assert 'href="/import"' in html
+    assert 'href="/pipeline" style="display:inline-block' not in html
+
+
+def test_native_import_commands_route_to_import_page():
+    import os
+
+    repo_root = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "..")
+    )
+    navbar_path = os.path.join(repo_root, "vireo", "templates", "_navbar.html")
+    menu_path = os.path.join(repo_root, "src-tauri", "src", "menu.rs")
+
+    with open(navbar_path, encoding="utf-8") as f:
+        navbar = f.read()
+    with open(menu_path, encoding="utf-8") as f:
+        menu = f.read()
+
+    assert "ids::NAV_IMPORT => Some(\"/import\")" in menu
+    assert "case 'import_photos':\n        nativeMenuRoute('/import');" in navbar
+    assert "case 'import_folder':\n        nativeMenuRoute('/import');" in navbar
 
 
 def test_pipeline_plan_accepts_folder_scope(app_and_db):

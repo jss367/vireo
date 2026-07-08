@@ -422,11 +422,6 @@ body { padding-bottom: 36px; }
 .dest-option {
   padding: 4px 0;
 }
-#destCopySection.dimmed {
-  opacity: 0.35;
-  pointer-events: none;
-}
-
 /* Pipeline action bar */
 .pipeline-action-bar {
   margin-top: 8px;
@@ -731,17 +726,8 @@ body { padding-bottom: 36px; }
           <div class="source-option-body" id="sourceImportBody">
             <div class="setting-row">
               <div class="setting-item">
-                <div class="setting-label">Folders <span style="font-weight:400;color:var(--text-dim);">(each includes its subfolders; importing lives on the Import page)</span></div>
+                <div class="setting-label">Folders <span style="font-weight:400;color:var(--text-dim);">(each includes its subfolders)</span></div>
                 <div id="folderScopeList" style="display:flex;flex-direction:column;gap:2px;max-height:220px;overflow-y:auto;font-size:12px;"></div>
-                <div style="display:flex;flex-direction:column;gap:6px;margin-top:8px;">
-                  <button class="btn btn-primary" type="button" onclick="browseForFolder()"
-                          style="white-space:nowrap;align-self:flex-start;"
-                          data-testid="source-browse-btn">Browse&hellip;</button>
-                  <input type="text" class="setting-input" id="cfgSourceInput"
-                         placeholder="or type a path and press Enter"
-                         onkeydown="if(event.key==='Enter'){event.preventDefault();addSourceFolder();}">
-                </div>
-                <div id="sourceFolderList" style="margin-top:6px;"></div>
               </div>
             </div>
           </div>
@@ -828,132 +814,6 @@ body { padding-bottom: 36px; }
         </div>
       </div>
 
-      <!-- Divider -->
-      <div style="border-top:1px solid var(--border-primary,#14374E);margin:16px 0;"></div>
-
-      <!-- Section 2: Import handoff -->
-      <div class="setting-label">Importing photos</div>
-      <div class="hint" style="font-size:12px;color:var(--text-secondary);line-height:1.4;">
-        Copying cards or folders into the archive now happens on the
-        <a href="/import" style="color:var(--accent);">Import</a> page.
-        Process only works on photos already in the active workspace.
-      </div>
-      <div id="destCopySection" data-testid="file-copying-section" style="display:none;">
-        <div class="setting-row">
-          <div class="setting-item">
-            <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
-              <input type="checkbox" id="chkCopyPhotos" style="accent-color:var(--accent);" onchange="onCopyModeChange()" data-testid="copy-photos-toggle"> Copy photos to another location
-            </label>
-          </div>
-        </div>
-        <div id="copyOnlyFields" style="display:none;" data-testid="destination-section">
-          <div class="setting-row">
-            <div class="setting-item">
-              <div class="setting-label">Destination</div>
-              <div style="margin-bottom:6px;">
-                <select id="cfgDestMode" class="setting-select" style="font-family:inherit;max-width:340px;"
-                        onchange="onDestModeChange()" data-testid="dest-mode-select">
-                  <option value="local">Local path</option>
-                </select>
-              </div>
-              <div id="destLocalRows">
-                <div style="display:flex;gap:6px;">
-                  <input type="text" class="setting-select" id="cfgDestination" list="volumeDatalist"
-                         placeholder="/path/to/photo/library" style="font-family:inherit;flex:1;"
-                         oninput="updateStartButton();markFolderPreviewStale()">
-                  <button onclick="openFolderBrowser('destination')" class="btn btn-secondary" style="white-space:nowrap;">Browse&hellip;</button>
-                </div>
-                <div id="recentDestinations" style="display:none;margin-top:6px;" data-testid="recent-destinations">
-                  <div style="font-size:11px;color:var(--text-dim);margin-bottom:4px;">Recent</div>
-                  <div id="recentDestList" style="display:flex;flex-wrap:wrap;gap:4px;"></div>
-                </div>
-              </div>
-              <div id="destRemoteRows" style="display:none;">
-                <input type="text" class="setting-select" id="cfgRemoteSubpath"
-                       placeholder="Archive folder under the target (e.g. 2026/kenya-trip)"
-                       style="font-family:inherit;width:100%;"
-                       oninput="updateRemoteDestPreview();updateStartButton()" data-testid="remote-subpath-input">
-                <div id="remoteDestPreview" style="font-size:11px;margin-top:4px;line-height:1.5;color:var(--text-dim);" data-testid="remote-dest-preview"></div>
-              </div>
-            </div>
-          </div>
-          <div class="setting-row">
-            <div class="setting-item">
-              <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
-                <input type="checkbox" id="chkSkipDuplicates" checked style="accent-color:var(--accent);" onchange="onSkipDuplicatesToggle()"> Skip duplicates
-              </label>
-              <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;display:block;margin:4px 0 0 20px;">
-                <input type="checkbox" id="chkVerifyByHash" style="accent-color:var(--accent);" onchange="onVerifyByHashToggle()"> Verify by full content hash
-              </label>
-              <div style="font-size:11px;color:var(--text-dim);margin:4px 0 0 20px;line-height:1.4;">
-                Off: duplicates are matched by filename, size, and capture time (fast — only files without reliable metadata are read in full). On: every byte of every source file is read and compared — exact, but slow on SD cards.
-              </div>
-            </div>
-          </div>
-          <div class="setting-row">
-            <div class="setting-item">
-              <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
-                <input type="checkbox" id="chkLocalProcessing" style="accent-color:var(--accent);" onchange="updateStartButton(); schedulePlanRefresh()" data-testid="local-processing-toggle"> Use local disk while processing
-              </label>
-              <div style="font-size:11px;color:var(--text-dim);margin-top:4px;line-height:1.4;">
-                Files are staged locally for faster processing, then archived to the destination after verification.
-              </div>
-              <div id="remoteLocalProcessingNote" style="display:none;font-size:11px;color:var(--text-dim);margin-top:4px;line-height:1.4;" data-testid="remote-local-processing-note">
-                Required for SSH targets &mdash; files are staged and processed locally, then transferred over SSH.
-              </div>
-            </div>
-          </div>
-          <!-- Folder Organization -->
-          <div style="border-top:1px solid var(--border-primary,#14374E);margin:12px 0;"></div>
-          <div class="setting-row">
-            <div class="setting-item">
-              <div class="setting-label">Folder structure</div>
-              <div style="display:flex;gap:6px;align-items:center;">
-                <select id="cfgFolderTemplate" class="setting-select" style="font-family:inherit;max-width:240px;" onchange="onFolderTemplateChange()">
-                  <option value="%Y/%Y-%m-%d">Year / Date &mdash; 2026/2026-04-08</option>
-                  <option value="%Y-%m-%d">Date only &mdash; 2026-04-08</option>
-                  <option value="%Y/%m">Year / Month &mdash; 2026/04</option>
-                  <option value="%Y">Year only &mdash; 2026</option>
-                  <option value="">Flat &mdash; no subfolders</option>
-                  <option value="__custom__">Custom&hellip;</option>
-                </select>
-              </div>
-              <div id="customTemplateRow" style="display:none;margin-top:6px;">
-                <input type="text" class="setting-select" id="cfgCustomTemplate"
-                       placeholder="%Y/%B" style="font-family:inherit;max-width:240px;"
-                       onblur="if(_folderPreviewShown)previewDestinationFolders()"
-                       onkeydown="if(event.key==='Enter'&&_folderPreviewShown)previewDestinationFolders()"
-                       data-testid="custom-template-input">
-                <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">
-                  Uses strftime format &mdash; e.g. %Y/%B for Year/Month Name
-                </div>
-              </div>
-            </div>
-          </div>
-          <div class="setting-row">
-            <div class="setting-item">
-              <button id="btnPreviewFolders" class="btn btn-secondary" onclick="previewDestinationFolders()" disabled
-                      style="font-size:12px;padding:4px 12px;" data-testid="preview-folders-btn">
-                Preview folder structure
-              </button>
-              <span id="previewFoldersHint" style="font-size:11px;color:var(--text-dim);margin-left:8px;">
-                Select source and destination to preview
-              </span>
-            </div>
-          </div>
-          <div id="folderPreviewResults" style="display:none;margin-top:8px;" data-testid="folder-preview-results">
-            <div id="folderPreviewManagedArchive" style="display:none;font-size:12px;line-height:1.4;margin-bottom:8px;padding:6px 8px;border-radius:4px;background:var(--bg-tertiary,#0d2436);border:1px solid var(--accent,#24E5CA);" data-testid="managed-archive-callout"></div>
-            <div id="folderPreviewSummary" style="font-size:12px;font-weight:600;margin-bottom:6px;"></div>
-            <div id="folderPreviewList" style="font-size:12px;max-height:200px;overflow-y:auto;"></div>
-            <div id="folderPreviewStale" style="display:none;font-size:11px;color:var(--warning,#f0ad4e);margin-top:4px;">
-              Source or destination changed &mdash; click Refresh to update
-            </div>
-          </div>
-        </div>
-        <div id="destCopyDisabledNote" style="display:none;font-size:12px;color:var(--text-dim);font-style:italic;margin-top:4px;">
-          Not applicable for existing collections
-        </div>
-      </div>
     </div>
   </div>
 
@@ -1836,43 +1696,7 @@ function fetchFolderPreview() {
     return;
   }
 
-  // Import mode: existing behavior
-  var folders = _sourceFolders;
-  if (!folders.length) {
-    showPreviewPlaceholder();
-    return;
-  }
-
-  var fileTypes = getIngestFileTypes();
-  if (!fileTypes.length) {
-    showPreviewPlaceholder();
-    return;
-  }
-
-  showPreviewLoading();
-  _previewAbort = new AbortController();
-
-  fetch('/api/import/folder-preview', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ folders: folders, file_types: fileTypes, recursive: includeSubfoldersEnabled() }),
-    signal: _previewAbort.signal,
-  })
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-      _previewData = data;
-      _previewSelected = {};
-      _duplicateResults = {};
-      data.files.forEach(function(f) {
-        _previewSelected[f.path] = !f.duplicate;
-      });
-      renderPreview();
-      if (_copyMode) checkForDuplicates();
-    })
-    .catch(function(err) {
-      if (err.name === 'AbortError') return;
-      showPreviewError('Failed to load preview: ' + err.message);
-    });
+  showPreviewPlaceholder();
 }
 
 function showPreviewPlaceholder() {
@@ -2309,53 +2133,6 @@ function formatBytes(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
-function addSourceFolder() {
-  var input = document.getElementById('cfgSourceInput');
-  var val = input.value.trim();
-  if (!val || _sourceFolders.indexOf(val) !== -1) return;
-  // Route through selectSourceMode so a prior 'collection' / 'new_images'
-  // / 'folders' selection lifts its copy-section dim and destination
-  // workspace lock. Without this, adding a typed path from those modes
-  // scans correctly but leaves #destCopySection with .dimmed +
-  // pointer-events:none, so the user can't enable Copy photos or pick
-  // a destination.
-  if (_sourceMode !== 'import') selectSourceMode('import');
-  _sourceFolders.push(val);
-  markFolderPreviewStale();
-  input.value = '';
-  renderSourceFolders();
-  updateStartButton();
-  fetchFolderPreview();
-}
-
-function removeSourceFolder(idx) {
-  _sourceFolders.splice(idx, 1);
-  markFolderPreviewStale();
-  renderSourceFolders();
-  updateStartButton();
-  fetchFolderPreview();
-}
-
-function renderSourceFolders() {
-  var el = document.getElementById('sourceFolderList');
-  if (!_sourceFolders.length) { el.innerHTML = ''; return; }
-  el.innerHTML = _sourceFolders.map(function(f, i) {
-    return '<div class="folder-tag"><span>' + escapeHtml(f) +
-      '</span> <span class="folder-tag-remove" onclick="removeSourceFolder(' + i + ')">&times;</span></div>';
-  }).join('');
-}
-
-function selectRecentDestination(path) {
-  document.getElementById('chkCopyPhotos').checked = true;
-  onCopyModeChange();
-  // Recents are local paths — switch back out of any remote mode.
-  document.getElementById('cfgDestMode').value = 'local';
-  onDestModeChange();
-  document.getElementById('cfgDestination').value = path;
-  updateStartButton();
-  markFolderPreviewStale();
-}
-
 /* ---------- Remote (SSH) archive targets ----------
    Mirrors the Move page's saved-remote-target picker: the archive
    destination becomes a saved SSH target plus a required subpath naming
@@ -2691,8 +2468,11 @@ function markFolderPreviewStale() {
   // banner below still prompts the user; the callout is recomputed on refresh.
   _managedArchive = null;
   renderManagedArchiveCallout();
-  document.getElementById('folderPreviewStale').style.display = '';
+  var stale = document.getElementById('folderPreviewStale');
+  if (!stale) return;
+  stale.style.display = '';
   var btn = document.getElementById('btnPreviewFolders');
+  if (!btn) return;
   btn.textContent = 'Refresh preview';
   // Only enable if prerequisites are still met (sources + a LOCAL
   // destination — the preview can't walk an SSH target).
@@ -2706,11 +2486,8 @@ async function selectSourceMode(mode) {
   // Cancel any in-flight duplicate scan before switching context
   if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
   _sourceMode = mode;
-  // 'import' (typed paths) shares the Workspace Folders card with
-  // 'folders' (workspace subtree scan), so it drives the same radio
-  // and body-dim state as folders.
-  var isFoldersLike = (mode === 'folders' || mode === 'import');
-  document.getElementById('radioFolders').checked = isFoldersLike;
+  var isFolders = (mode === 'folders');
+  document.getElementById('radioFolders').checked = isFolders;
   document.getElementById('radioCollection').checked = (mode === 'collection');
   var newImgRadio = document.getElementById('radioNewImages');
   if (newImgRadio) newImgRadio.checked = (mode === 'new_images');
@@ -2719,7 +2496,7 @@ async function selectSourceMode(mode) {
   var collBody = document.getElementById('sourceCollectionBody');
   var newImgBody = document.getElementById('sourceNewImagesBody');
 
-  if (isFoldersLike) {
+  if (isFolders) {
     importBody.classList.remove('dimmed');
     collBody.classList.add('dimmed');
     if (newImgBody) newImgBody.classList.add('dimmed');
@@ -2731,22 +2508,6 @@ async function selectSourceMode(mode) {
     importBody.classList.add('dimmed');
     collBody.classList.add('dimmed');
     if (newImgBody) newImgBody.classList.remove('dimmed');
-  }
-
-  var copySection = document.getElementById('destCopySection');
-  var copyNote = document.getElementById('destCopyDisabledNote');
-  // Folder scope re-processes existing workspace photos in place, so the
-  // copy-to-another-location controls have nothing to act on — startPipeline
-  // only serializes body.folder_ids in this mode, and any copy settings the
-  // user checked would be silently discarded. Dim the copy section (same
-  // treatment as collection / new_images) so the UI can't lie about what
-  // will happen.
-  if (mode === 'collection' || mode === 'new_images' || mode === 'folders') {
-    copySection.classList.add('dimmed');
-    copyNote.style.display = '';
-  } else {
-    copySection.classList.remove('dimmed');
-    copyNote.style.display = 'none';
   }
 
   // Snapshot IDs are scoped to the workspace they were captured in, so the
@@ -2951,8 +2712,6 @@ function updateStartButton() {
     btn.disabled = selectedFolderIds().length === 0;
   } else if (_sourceMode === 'new_images') {
     btn.disabled = !newImagesSnapshotId;
-  } else if (_sourceMode === 'import') {
-    btn.disabled = _sourceFolders.length === 0;
   } else {
     var collId = document.getElementById('collectionPicker').value;
     btn.disabled = !collId;
@@ -3011,23 +2770,8 @@ function updateStartButton() {
   var previewBtn = document.getElementById('btnPreviewFolders');
   var previewHint = document.getElementById('previewFoldersHint');
   if (previewBtn) {
-    var hasSources = _sourceFolders.length > 0;
-    var remoteMode = _copyMode && !!pipelineRemoteTargetId();
-    var hasDest = _copyMode && !remoteMode
-      && document.getElementById('cfgDestination').value.trim();
-    if (hasSources && hasDest) {
-      if (!_folderPreviewShown) previewBtn.disabled = false;
-      previewHint.textContent = '';
-    } else {
-      previewBtn.disabled = true;
-      // The preview walks the destination on the local filesystem; an SSH
-      // target isn't locally walkable, so say the check doesn't run rather
-      // than pretending it did (existing remote files are still handled —
-      // the archive stage merges and refuses on content conflicts).
-      previewHint.textContent = remoteMode && hasSources
-        ? 'Folder preview isn’t available for SSH targets — existing remote files are checked at archive time'
-        : 'Select source and destination to preview';
-    }
+    previewBtn.disabled = true;
+    if (previewHint) previewHint.textContent = '';
   }
 
   // Update stage 1 indicator and auto-expand stage 2 when source is ready
@@ -3278,43 +3022,6 @@ async function startPipeline() {
         if (!_previewSelected[f.path]) excluded.push(f.path);
       });
       if (excluded.length > 0) body.exclude_paths = excluded;
-    }
-  } else if (_sourceMode === 'import') {
-    // Import scope: send the added source folders so /api/jobs/pipeline
-    // can scan (and optionally copy) them. Without this branch the
-    // request falls through to the collection path and posts
-    // collection_id: null, which the endpoint rejects as missing scope.
-    body.sources = _sourceFolders.slice();
-    body.file_types = getIngestFileTypes();
-    body.recursive = includeSubfoldersEnabled();
-    if (_copyMode) {
-      body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
-      body.verify_by_hash = document.getElementById('chkVerifyByHash').checked;
-      body.folder_template = getSelectedFolderTemplate();
-      var lpCb = document.getElementById('chkLocalProcessing');
-      if (lpCb) body.local_processing = !!lpCb.checked;
-      // Remote SSH archive vs. local archive path. remote_target_id and
-      // destination are mutually exclusive server-side, so send exactly
-      // one — a saved SSH target (plus subpath) when the destination
-      // mode is remote:*, or the local cfgDestination path otherwise.
-      var remoteId = pipelineRemoteTargetId();
-      if (remoteId) {
-        body.remote_target_id = remoteId;
-        var subResult = normalizeRemoteSubpath(
-          document.getElementById('cfgRemoteSubpath').value);
-        body.remote_subpath = subResult.value;
-      } else {
-        body.destination = document.getElementById('cfgDestination').value.trim();
-      }
-    }
-    // Deselections apply by path — import previews have no photo_id
-    // yet, so exclude_photo_ids would drop them silently.
-    if (_previewData && _previewSelected) {
-      var excludedImport = [];
-      _previewData.files.forEach(function(f) {
-        if (!_previewSelected[f.path]) excludedImport.push(f.path);
-      });
-      if (excludedImport.length > 0) body.exclude_paths = excludedImport;
     }
   } else {
     body.collection_id = parseInt(document.getElementById('collectionPicker').value);
@@ -3971,100 +3678,6 @@ async function stopPipeline() {
       actionStatus.textContent = e.message || 'Unable to cancel pipeline';
       actionStatus.className = 'status-msg error';
     }
-  }
-}
-
-async function runImportStep() {
-  var source = _sourceFolders.length > 0 ? _sourceFolders[0] : '';
-  var destination = _copyMode
-    ? document.getElementById('cfgDestination').value.trim()
-    : '';
-
-  var num = document.getElementById('numSource');
-  var status = document.getElementById('statusSource');
-  var progressWrap = document.getElementById('progressSource');
-  var fill = document.getElementById('fillSource');
-  var text = document.getElementById('textSource');
-
-  num.className = 'stage-num running';
-  status.textContent = _copyMode ? 'Starting import...' : 'Scanning folder...';
-  progressWrap.style.display = '';
-  fill.style.width = '0%';
-
-  // Expand the source card
-  document.getElementById('card-source').classList.add('expanded');
-
-  try {
-    var body = {
-      source: source,
-      copy: _copyMode,
-      file_types: getIngestFileTypes(),
-    };
-    if (_copyMode) {
-      body.destination = destination;
-      body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
-      body.verify_by_hash = document.getElementById('chkVerifyByHash').checked;
-      body.folder_template = getSelectedFolderTemplate();
-    }
-
-    var data = await safeFetch('/api/jobs/import-full', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body),
-    }, { toast: false });
-
-    if (!data.job_id) {
-      status.textContent = data.error || 'Failed to start';
-      num.className = 'stage-num';
-      progressWrap.style.display = 'none';
-      return null;
-    }
-
-    return await new Promise(function(resolve) {
-      safeEventSource('/api/jobs/' + data.job_id + '/stream', {
-        onProgress: function(p) {
-          var pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
-          fill.style.width = pct + '%';
-          var parts = [];
-          if (p.phase) parts.push(p.phase);
-          if (p.total > 0 && p.current > 0) parts.push(p.current + '/' + p.total);
-          if (p.current_file) parts.push(p.current_file);
-          text.textContent = parts.join(' \u2014 ');
-          status.textContent = parts.join(' \u2014 ');
-        },
-        onComplete: function(result) {
-          window.dispatchEvent(new CustomEvent('vireo-job-done', {detail: {job_id: data.job_id}}));
-          if (result.status === 'completed' && result.result) {
-            fill.style.width = '100%';
-            text.textContent = 'Complete';
-            num.className = 'stage-num complete';
-            var r = result.result;
-            var summary = [];
-            if (_copyMode && r.copied != null) summary.push(r.copied + ' imported');
-            if (_copyMode && r.skipped_duplicate > 0) summary.push(r.skipped_duplicate + ' duplicates skipped');
-            if (r.photos_indexed) summary.push(r.photos_indexed + ' indexed');
-            document.getElementById('txtSource').textContent = summary.join(', ');
-            status.textContent = 'Done!';
-            status.className = 'status-msg ok';
-            resolve(r.collection_id);
-          } else {
-            status.textContent = _copyMode ? 'Import failed' : 'Scan failed';
-            num.className = 'stage-num';
-            resolve(null);
-          }
-        },
-        onError: function() {
-          status.textContent = 'Connection lost';
-          num.className = 'stage-num';
-          resolve(null);
-        }
-      });
-    });
-  } catch(e) {
-    status.textContent = 'Error: ' + e.message;
-    num.className = 'stage-num';
-    progressWrap.style.display = 'none';
-    return null;
   }
 }
 
@@ -5283,12 +4896,10 @@ function refreshPipelineUI() {
 function _buildPlanBody() {
   var body = {};
   // Source mode determines how the backend scopes the plan:
+  //   - 'folders': scope = selected workspace folder subtrees.
   //   - 'collection': scope = collection's photo ids (real per-photo status).
-  //   - 'import' / 'new_images': send the SELECTED preview file paths so
-  //     the backend can split them into already-known-vs-new and report
-  //     truthful counts. Without this the plan falls back to whole-workspace
-  //     counts, which renders "Already done" for an import into a
-  //     non-empty workspace — exactly the bug we're fixing.
+  //   - 'new_images': send selected snapshot paths so the backend can split
+  //     them into already-known-vs-new and report truthful counts.
   if (_sourceMode === 'folders') {
     var folderIds = selectedFolderIds();
     if (folderIds.length) body.folder_ids = folderIds;
@@ -5303,7 +4914,7 @@ function _buildPlanBody() {
       });
       if (excludedIds.length) body.exclude_photo_ids = excludedIds;
     }
-  } else if ((_sourceMode === 'import' || _sourceMode === 'new_images')
+  } else if (_sourceMode === 'new_images'
              && _previewData && _previewData.files && _previewSelected) {
     // Send only the selected paths — the user can deselect duplicates
     // or specific files in the preview, and the plan should reflect
@@ -5312,7 +4923,7 @@ function _buildPlanBody() {
     _previewData.files.forEach(function(f) {
       if (_previewSelected[f.path]) selectedPaths.push(f.path);
     });
-    // Always send source_paths in import / new-images mode — even when
+    // Always send source_paths in new-images mode — even when
     // the list is empty (every preview file deselected) or exceeds the
     // backend cap (50k). Dropping the field would make the server fall
     // back to whole-workspace scope, which is the misleading plan this
@@ -5320,25 +4931,6 @@ function _buildPlanBody() {
     // plan. For oversized: the server returns 400 and the plan UI
     // clears — both accurate states.
     body.source_paths = selectedPaths;
-
-    // Copy-mode imports with skip_duplicates=true dedupe by duplicate
-    // identity (metadata key or content hash — same DuplicateChecker as
-    // ingest), not by source path. The /api/import/check-duplicates SSE
-    // feed has already populated _duplicateResults with the matched
-    // preview paths; pass that subset along so the plan counts those as
-    // already known instead of new (otherwise pills overstate work for
-    // files ingest() will silently skip). Only send when the duplicate
-    // gate is actually on; toggling it off must drop the field so the
-    // backend doesn't keep treating the cache as live.
-    var skipDup = document.getElementById('chkSkipDuplicates');
-    if (_copyMode && skipDup && skipDup.checked
-        && Object.keys(_duplicateResults).length > 0) {
-      var hashDupPaths = [];
-      selectedPaths.forEach(function(p) {
-        if (_duplicateResults[p]) hashDupPaths.push(p);
-      });
-      if (hashDupPaths.length) body.hash_duplicate_paths = hashDupPaths;
-    }
 
   }
 
@@ -5370,10 +4962,6 @@ function _buildPlanBody() {
 }
 
 function _planIsWaitingForImportPreview() {
-  if (_sourceMode === 'import') {
-    return _sourceFolders.length > 0 && getIngestFileTypes().length > 0
-      && (_previewLoading || !_previewData);
-  }
   if (_sourceMode === 'new_images') {
     return newImagesSnapshotId !== null && (_previewLoading || !_previewData);
   }
@@ -5456,29 +5044,7 @@ function updateCardStates() {
 })();
 
 async function browseForFolder() {
-  if (typeof pickDirectory === 'function') {
-    var result = await pickDirectory('Select photo folders', { multiple: true });
-    if (result) {
-      var paths = Array.isArray(result) ? result : [result];
-      var hasPath = paths.some(function(p) { return !!p; });
-      if (hasPath && _sourceMode !== 'import') selectSourceMode('import');
-      var added = false;
-      for (var i = 0; i < paths.length; i++) {
-        if (paths[i] && _sourceFolders.indexOf(paths[i]) === -1) {
-          _sourceFolders.push(paths[i]);
-          added = true;
-        }
-      }
-      if (added) {
-        markFolderPreviewStale();
-        renderSourceFolders();
-        updateStartButton();
-        fetchFolderPreview();
-      }
-      return;
-    }
-  }
-  openFolderBrowser('source');
+  window.location.href = '/import';
 }
 
 async function browseForDestination() {
@@ -5790,20 +5356,8 @@ function fetchFolderCounts(paths) {
 
 function selectFolder() {
   if (_fbMode === 'source') {
-    var picks = _fbSelectedDirs.length ? _fbSelectedDirs : (_fbSelectedDir ? [_fbSelectedDir] : []);
-    if (!picks.length) return;
-    if (_sourceMode !== 'import') selectSourceMode('import');
-    var added = false;
-    for (var i = 0; i < picks.length; i++) {
-      if (_sourceFolders.indexOf(picks[i]) === -1) {
-        _sourceFolders.push(picks[i]);
-        added = true;
-      }
-    }
-    if (added) {
-      markFolderPreviewStale();
-      renderSourceFolders();
-    }
+    window.location.href = '/import';
+    return;
   } else {
     if (!_fbSelectedDir) return;
     document.getElementById('cfgDestination').value = _fbSelectedDir;

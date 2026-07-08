@@ -13152,7 +13152,7 @@ def test_all_nav_ids_covers_every_page():
 def test_default_tabs_is_the_curated_ten():
     from db import DEFAULT_TABS
     assert DEFAULT_TABS == [
-        "browse", "import", "pipeline", "pipeline_review",
+        "import", "browse", "pipeline", "pipeline_review",
         "review", "cull", "jobs",
         "highlights", "misses", "storage", "settings",
     ]
@@ -14709,8 +14709,7 @@ def test_import_tab_in_nav_registries(tmp_path):
     from db import ALL_NAV_IDS, DEFAULT_TABS, Database
 
     assert "import" in ALL_NAV_IDS
-    idx = DEFAULT_TABS.index("import")
-    assert DEFAULT_TABS[idx + 1] == "pipeline", DEFAULT_TABS
+    assert DEFAULT_TABS[0] == "import", DEFAULT_TABS
 
     db = Database(str(tmp_path / "t.db"))
     db.set_tabs(["import", "browse"])
@@ -14718,8 +14717,7 @@ def test_import_tab_in_nav_registries(tmp_path):
 
 
 def test_existing_workspaces_gain_import_tab(tmp_path):
-    """A pre-split workspace tabs row (no 'import') gets it inserted
-    before 'pipeline' on init — reset-in-place, solo-user app."""
+    """A pre-split workspace tabs row gets Import inserted leftmost on init."""
     import json as json_mod
 
     from db import Database
@@ -14744,7 +14742,7 @@ def test_existing_workspaces_gain_import_tab(tmp_path):
     db2.set_active_workspace(ws)
     tabs = db2.get_tabs()
     assert "import" in tabs
-    assert tabs.index("import") == tabs.index("pipeline") - 1
+    assert tabs[0] == "import"
 
 
 def test_import_tab_migration_not_reapplied_after_unpin(tmp_path):

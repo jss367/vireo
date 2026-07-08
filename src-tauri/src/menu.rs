@@ -85,7 +85,7 @@ pub mod ids {
 pub fn route_for_id(id: &str) -> Option<&'static str> {
     match id {
         ids::NAV_BROWSE => Some("/browse"),
-        ids::NAV_IMPORT => Some("/lightroom"),
+        ids::NAV_IMPORT => Some("/import"),
         ids::NAV_PIPELINE => Some("/pipeline"),
         ids::NAV_PIPELINE_REVIEW => Some("/pipeline/review"),
         ids::NAV_PIPELINE_RAPID_REVIEW => Some("/pipeline/rapid-review"),

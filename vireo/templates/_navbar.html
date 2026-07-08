@@ -2287,7 +2287,7 @@ function sendReport() {
 //   - vireo/app.py:ALL_PAGES        (page registry)
 //   - vireo/db.py:DEFAULT_TABS      (default pinned-tabs list)
 window.NAV_DEFAULT_TABS = [
-  'browse', 'import', 'pipeline', 'pipeline_review',
+  'import', 'browse', 'pipeline', 'pipeline_review',
   'review', 'cull', 'jobs',
   'highlights', 'misses', 'storage', 'settings'
 ];
@@ -8504,10 +8504,10 @@ window.handleNativeMenuCommand = async function(command) {
         else nativeMenuRoute('/workspace');
         break;
       case 'import_photos':
-        nativeMenuRoute('/lightroom');
+        nativeMenuRoute('/import');
         break;
       case 'import_folder':
-        nativeMenuRoute('/pipeline');
+        nativeMenuRoute('/import');
         break;
       case 'export_selected':
         if (typeof openExportModal === 'function') openExportModal();

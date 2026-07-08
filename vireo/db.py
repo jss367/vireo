@@ -226,7 +226,7 @@ ALL_NAV_IDS = frozenset({
 })
 
 DEFAULT_TABS = [
-    "browse", "import", "pipeline", "pipeline_review",
+    "import", "browse", "pipeline", "pipeline_review",
     "review", "cull", "jobs",
     "highlights", "misses", "storage", "settings",
 ]
@@ -963,6 +963,7 @@ class Database:
                     (json.dumps(tabs), row["id"]),
                 )
             self.conn.execute("PRAGMA user_version = 1")
+            current_user_version = 1
 
         # Migration (storage page): cache/storage controls moved out of
         # Settings and Dashboard, so existing workspaces need a visible
@@ -990,6 +991,56 @@ class Database:
                     (json.dumps(tabs), row["id"]),
                 )
             self.conn.execute("PRAGMA user_version = 2")
+            current_user_version = 2
+
+        # Migration (import/process split catch-up): some databases may have
+        # reached user_version 2 before the import-tab migration above existed,
+        # which skipped adding Import to saved tab rows. Add it once here too.
+        if current_user_version < 3:
+            rows = self.conn.execute(
+                "SELECT id, tabs FROM workspaces WHERE tabs IS NOT NULL"
+            ).fetchall()
+            for row in rows:
+                try:
+                    tabs = json.loads(row["tabs"])
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(tabs, list) or "import" in tabs:
+                    continue
+                if "pipeline" in tabs:
+                    tabs.insert(tabs.index("pipeline"), "import")
+                else:
+                    tabs.insert(0, "import")
+                self.conn.execute(
+                    "UPDATE workspaces SET tabs = ? WHERE id = ?",
+                    (json.dumps(tabs), row["id"]),
+                )
+            self.conn.execute("PRAGMA user_version = 3")
+            current_user_version = 3
+
+        # Migration (import page prominence): Import is now the first pinned
+        # page, because adding photos is the natural starting workflow. Move an
+        # existing Import tab to the front once; if an old row still lacks it,
+        # add it at the front.
+        if current_user_version < 4:
+            rows = self.conn.execute(
+                "SELECT id, tabs FROM workspaces WHERE tabs IS NOT NULL"
+            ).fetchall()
+            for row in rows:
+                try:
+                    tabs = json.loads(row["tabs"])
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(tabs, list):
+                    continue
+                tabs = [t for t in tabs if t != "import"]
+                tabs.insert(0, "import")
+                self.conn.execute(
+                    "UPDATE workspaces SET tabs = ? WHERE id = ?",
+                    (json.dumps(tabs), row["id"]),
+                )
+            self.conn.execute("PRAGMA user_version = 4")
+            current_user_version = 4
 
         # Migration: drop legacy open_tabs column (replaced by `tabs`).
         try:

@@ -151,3 +151,53 @@ def test_get_tabs_endpoint_new_shape(app_and_db):
     assert ids == expected_ids
     sample = next(p for p in body["all_pages"] if p["id"] == "duplicates")
     assert sample == {"id": "duplicates", "label": "Duplicates", "href": "/duplicates"}
+
+
+def test_tabs_migration_adds_import_for_version_2_database(tmp_path):
+    import json
+
+    from db import Database
+
+    db_path = str(tmp_path / "tabs-v2.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    db.conn.execute(
+        "UPDATE workspaces SET tabs = ? WHERE id = ?",
+        (json.dumps(["browse", "pipeline", "review"]), ws_id),
+    )
+    db.conn.execute("PRAGMA user_version = 2")
+    db.conn.commit()
+    db.close()
+
+    migrated = Database(db_path)
+    try:
+        assert migrated.get_tabs() == ["import", "browse", "pipeline", "review"]
+        version = migrated.conn.execute("PRAGMA user_version").fetchone()[0]
+        assert version == 4
+    finally:
+        migrated.close()
+
+
+def test_tabs_migration_moves_existing_import_to_front(tmp_path):
+    import json
+
+    from db import Database
+
+    db_path = str(tmp_path / "tabs-v3.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    db.conn.execute(
+        "UPDATE workspaces SET tabs = ? WHERE id = ?",
+        (json.dumps(["browse", "pipeline", "import", "review"]), ws_id),
+    )
+    db.conn.execute("PRAGMA user_version = 3")
+    db.conn.commit()
+    db.close()
+
+    migrated = Database(db_path)
+    try:
+        assert migrated.get_tabs() == ["import", "browse", "pipeline", "review"]
+        version = migrated.conn.execute("PRAGMA user_version").fetchone()[0]
+        assert version == 4
+    finally:
+        migrated.close()
