@@ -153,12 +153,19 @@ def test_get_tabs_endpoint_new_shape(app_and_db):
     assert sample == {"id": "duplicates", "label": "Duplicates", "href": "/duplicates"}
 
 
-def test_tabs_migration_adds_import_for_version_2_database(tmp_path):
-    """Databases that reached user_version 2 without the v1 import-tab
-    migration having run get Import back — but only when the tabs shape
-    matches the exact pre-v1 v2-era default. Any other shape is treated
-    as intentional customization and left alone (see
-    test_tabs_migration_preserves_unpinned_import_on_v2_database)."""
+def test_tabs_migration_leaves_pre_v1_v2_era_shape_alone(tmp_path):
+    """A v2 database whose tabs match the pre-v1 v2-era default shape
+    (10 tabs, no Import) is left untouched by the migration.
+
+    The shape is genuinely ambiguous — it's identical to what a user
+    ends up with after unpinning Import from the *current* v2 default —
+    and chronologically the ambiguity has no cost: v1 (dae1653,
+    2026-07-05) shipped before v2 (e988f21, 2026-07-08), and both live
+    in the same `_create_tables` block, so no real database can be at
+    user_version 2 without having also run v1. A v2 row missing Import
+    is therefore always a user unpin, and Codex flagged (#1134) that
+    silently re-inserting it would clobber that preference. The migration
+    respects the row as-is and advances user_version to 4."""
     import json
 
     from db import Database
@@ -181,12 +188,7 @@ def test_tabs_migration_adds_import_for_version_2_database(tmp_path):
 
     migrated = Database(db_path)
     try:
-        # v3 inserts Import before Process, then v4 moves it to the front.
-        assert migrated.get_tabs() == [
-            "import", "browse", "pipeline", "pipeline_review",
-            "review", "cull", "jobs",
-            "highlights", "misses", "storage", "settings",
-        ]
+        assert migrated.get_tabs() == pre_v1_default
         version = migrated.conn.execute("PRAGMA user_version").fetchone()[0]
         assert version == 4
     finally:
@@ -196,10 +198,10 @@ def test_tabs_migration_adds_import_for_version_2_database(tmp_path):
 def test_tabs_migration_preserves_unpinned_import_on_v2_database(tmp_path):
     """A v2 database whose tabs have been customized (e.g. the user
     unpinned Import from an already-modified list) must not have Import
-    silently re-inserted by the v3 catch-up. Codex flagged this on
-    #1134: `set_tabs()` doesn't advance user_version, so "Import
-    missing at v2" can mean either a skipped v1 or an intentional unpin,
-    and the catch-up must not clobber the latter."""
+    silently re-inserted. Codex flagged this on #1134: `set_tabs()`
+    doesn't advance user_version, so "Import missing at v2" can mean
+    either a skipped v1 or an intentional unpin, and the migration must
+    not clobber the latter."""
     import json
 
     from db import Database
@@ -207,9 +209,9 @@ def test_tabs_migration_preserves_unpinned_import_on_v2_database(tmp_path):
     db_path = str(tmp_path / "tabs-v2-unpinned.db")
     db = Database(db_path)
     ws_id = db._active_workspace_id
-    # Non-default shape (no "storage", no "pipeline_review", etc.). This
-    # cannot be the pre-v1 v2-era default, so the v3 catch-up must
-    # respect it — even though "import" is absent.
+    # Non-default shape (no "storage", no "pipeline_review", etc.).
+    # "import" is absent because the user removed it; the migration must
+    # respect that.
     customized = ["browse", "pipeline", "review"]
     db.conn.execute(
         "UPDATE workspaces SET tabs = ? WHERE id = ?",
