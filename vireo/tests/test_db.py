@@ -13142,7 +13142,7 @@ def test_all_nav_ids_covers_every_page():
         "import",
         "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
         "misses", "highlights", "life_list", "browse", "edit", "map", "variants",
-        "dashboard", "audit", "move", "compare",
+        "dashboard", "storage", "audit", "move", "compare",
         "settings", "workspace", "lightroom", "shortcuts",
         "keywords", "duplicates", "logs",
     }
@@ -13154,7 +13154,7 @@ def test_default_tabs_is_the_curated_ten():
     assert DEFAULT_TABS == [
         "browse", "import", "pipeline", "pipeline_review",
         "review", "cull", "jobs",
-        "highlights", "misses", "settings",
+        "highlights", "misses", "storage", "settings",
     ]
 
 

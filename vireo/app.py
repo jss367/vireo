@@ -106,6 +106,7 @@ ALL_PAGES = [
     {"id": "map",             "label": "Map",             "href": "/map"},
     {"id": "variants",        "label": "Variants",        "href": "/variants"},
     {"id": "dashboard",       "label": "Dashboard",       "href": "/dashboard"},
+    {"id": "storage",         "label": "Storage",         "href": "/storage"},
     {"id": "audit",           "label": "Audit",           "href": "/audit"},
     {"id": "move",            "label": "Move",            "href": "/move"},
     {"id": "compare",         "label": "Compare",         "href": "/compare"},
@@ -2640,6 +2641,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/settings")
     def settings():
         return render_template("settings.html")
+
+    @app.route("/storage")
+    def storage_page():
+        return render_template("storage.html")
 
     @app.route("/shortcuts")
     def shortcuts_page():
@@ -10138,6 +10143,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         preview = _dir_stats(preview_dir)
         emb = _dir_stats(EMB_CACHE_DIR)
         models_size = _dir_size_recursive(DEFAULT_MODELS_DIR)
+        db = _get_db()
+        offline_size = db.offline_original_total_bytes()
+        offline_count_row = db.conn.execute(
+            "SELECT COUNT(*) AS c FROM offline_originals WHERE status='cached'"
+        ).fetchone()
 
         # HuggingFace cache — only count Vireo-relevant models
         hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
@@ -10165,6 +10175,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             + emb["size"]
             + models_size
             + hf_size
+            + offline_size
         )
 
         return jsonify(
@@ -10176,6 +10187,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "embeddings": emb,
                 "models": {"size": models_size, "path": DEFAULT_MODELS_DIR},
                 "hf_cache": {"size": hf_size, "path": hf_cache, "models": hf_models},
+                "offline_originals": {
+                    "count": offline_count_row["c"],
+                    "size": offline_size,
+                    "path": os.path.join(os.path.dirname(app.config["THUMB_CACHE_DIR"]), "offline"),
+                },
             }
         )
 

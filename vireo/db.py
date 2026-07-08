@@ -220,7 +220,7 @@ ALL_NAV_IDS = frozenset({
     "import",
     "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
     "misses", "highlights", "life_list", "browse", "edit", "map", "variants",
-    "dashboard", "audit", "move", "compare",
+    "dashboard", "storage", "audit", "move", "compare",
     "settings", "workspace", "lightroom", "shortcuts",
     "keywords", "duplicates", "logs",
 })
@@ -228,7 +228,7 @@ ALL_NAV_IDS = frozenset({
 DEFAULT_TABS = [
     "browse", "import", "pipeline", "pipeline_review",
     "review", "cull", "jobs",
-    "highlights", "misses", "settings",
+    "highlights", "misses", "storage", "settings",
 ]
 
 
