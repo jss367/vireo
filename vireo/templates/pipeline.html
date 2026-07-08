@@ -1567,7 +1567,17 @@ async function loadFolderScopeList() {
       cb.dataset.path = f.path;
       cb.style.accentColor = 'var(--accent)';
       cb.checked = prefillRootIds.has(f.id);
-      cb.onchange = function() { updateSourceSummary(); updateStartButton(); schedulePlanRefresh(); };
+      cb.onchange = function() {
+        // Checking a workspace-folder box is a switch to workspace-folder
+        // scope: if we're still in 'import' mode from a previously typed/
+        // browsed source path, updateStartButton() and startPipeline()
+        // would keep gating on _sourceFolders and POST the stale sources
+        // list instead of the folder_ids the user just picked.
+        if (cb.checked && _sourceMode !== 'folders') selectSourceMode('folders');
+        updateSourceSummary();
+        updateStartButton();
+        schedulePlanRefresh();
+      };
       var span = document.createElement('span');
       var count = f.workspace_photo_count != null
         ? f.workspace_photo_count : f.photo_count;
@@ -2275,6 +2285,13 @@ function renderSourceFolders() {
     remove.onclick = function() {
       _sourceFolders.splice(idx, 1);
       renderSourceFolders();
+      // Removing the last import source leaves _sourceMode stuck at
+      // 'import' with an empty list, so Start stays disabled even if
+      // workspace folder checkboxes are still ticked. Fall back to
+      // 'folders' scope so the previously-checked folders take over.
+      if (_sourceFolders.length === 0 && _sourceMode === 'import') {
+        selectSourceMode('folders');
+      }
       fetchFolderPreview();
       updateStartButton();
     };

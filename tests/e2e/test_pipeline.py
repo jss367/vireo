@@ -158,6 +158,123 @@ def test_pipeline_import_source_start_posts_source_folders(live_server, page):
     )
 
 
+def test_pipeline_import_mode_switches_to_folders_on_checkbox(live_server, page):
+    """P2 regression: with a workspace folder checkbox available, checking
+    it while in `_sourceMode === 'import'` must switch mode back to
+    `'folders'`. Otherwise `updateStartButton()` keeps gating on
+    `_sourceFolders` and `startPipeline()` POSTs the stale `sources` list
+    instead of the `folder_ids` the user just picked.
+    """
+    url = live_server["url"]
+    page.route(
+        re.compile(r"/api/workspaces/\d+/folders$"),
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps([
+                {
+                    "id": 42,
+                    "path": "/library",
+                    "parent_id": None,
+                    "photo_count": 5,
+                    "workspace_photo_count": 5,
+                },
+            ]),
+        ),
+    )
+    page.route(
+        "**/api/import/folder-preview",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "total_count": 0,
+                "total_size": 0,
+                "type_breakdown": {},
+                "duplicate_count": 0,
+                "files": [],
+            }),
+        ),
+    )
+    pipeline_payloads = []
+
+    def capture_pipeline(route):
+        pipeline_payloads.append(route.request.post_data_json)
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"job_id": "job-p2"}),
+        )
+
+    page.route("**/api/jobs/pipeline", capture_pipeline)
+
+    page.goto(f"{url}/pipeline")
+    page.evaluate("window.pickDirectory = async () => ['/tmp/vireo-source']")
+
+    page.locator("[data-testid='source-browse-btn']").click()
+    assert page.evaluate("_sourceMode") == "import"
+
+    # Wait for the workspace folder list to render, then check the folder.
+    folder_cb = page.locator("#folderScopeList input[type='checkbox']").first
+    expect(folder_cb).to_be_visible()
+    folder_cb.check()
+
+    assert page.evaluate("_sourceMode") == "folders"
+
+    # Start now uses folder_ids, not sources.
+    page.uncheck("#enableClassify")
+    start_btn = page.locator("[data-testid='start-pipeline-btn']")
+    expect(start_btn).to_be_enabled()
+    start_btn.click()
+
+    for _ in range(50):
+        if pipeline_payloads:
+            break
+        page.wait_for_timeout(100)
+    assert pipeline_payloads, "expected /api/jobs/pipeline to be POSTed"
+    body = pipeline_payloads[0]
+    assert body.get("folder_ids") == [42], (
+        f"expected folder_ids=[42], got body={body!r}"
+    )
+    assert "sources" not in body, (
+        f"folders mode must not POST sources, got body={body!r}"
+    )
+
+
+def test_pipeline_removing_last_import_source_restores_folder_mode(live_server, page):
+    """P2 regression: removing the last import source folder must switch
+    `_sourceMode` back to `'folders'`. Otherwise Start stays stuck
+    disabled with `_sourceMode === 'import'` and an empty source list,
+    even if workspace-folder checkboxes are still ticked.
+    """
+    url = live_server["url"]
+    page.route(
+        "**/api/import/folder-preview",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "total_count": 0,
+                "total_size": 0,
+                "type_breakdown": {},
+                "duplicate_count": 0,
+                "files": [],
+            }),
+        ),
+    )
+    page.goto(f"{url}/pipeline")
+    page.evaluate("window.pickDirectory = async () => ['/tmp/vireo-source']")
+
+    page.locator("[data-testid='source-browse-btn']").click()
+    expect(page.locator("#sourceFolderList")).to_contain_text("/tmp/vireo-source")
+    assert page.evaluate("_sourceMode") == "import"
+
+    page.locator("#sourceFolderList button:has-text('Remove')").first.click()
+
+    assert page.evaluate("_sourceMode") == "folders"
+    expect(page.locator("#sourceFolderList")).to_be_empty()
+
+
 def test_pipeline_source_browse_cancel_keeps_workspace_folder_mode(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
