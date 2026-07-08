@@ -4623,7 +4623,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     text=True,
                 )
             elif sys.platform.startswith("win"):
+                # explorer.exe's exit status is not a reliable success signal
+                # (see the returncode-check gate below), so a stale catalog
+                # entry whose path no longer exists would otherwise silently
+                # return ok=True and produce a bogus "Revealed in File
+                # Explorer" toast. Preflight the target path so those cases
+                # surface as failures instead.
                 if is_folder:
+                    if not os.path.isdir(path):
+                        return jsonify({"ok": False, "reason": "folder not found"})
                     # Open the folder itself so the user sees its contents.
                     proc = subprocess.run(
                         ["explorer", path],
@@ -4633,6 +4641,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         text=True,
                     )
                 else:
+                    if not os.path.isfile(path):
+                        return jsonify({"ok": False, "reason": "photo file not found"})
                     proc = subprocess.run(
                         ["explorer", f"/select,{path}"],
                         timeout=5,

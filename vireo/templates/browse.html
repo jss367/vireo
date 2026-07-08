@@ -6948,6 +6948,8 @@ function revealPhoto(photoId) {
   }).catch(function(err) {
     if (typeof showToast === 'function') {
       showToast('Reveal failed: ' + (err.message || 'request failed'), 'error');
+    } else {
+      console.error('revealPhoto failed', err);
     }
   });
 }
