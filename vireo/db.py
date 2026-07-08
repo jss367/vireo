@@ -226,7 +226,7 @@ ALL_NAV_IDS = frozenset({
 })
 
 DEFAULT_TABS = [
-    "browse", "import", "pipeline", "pipeline_review",
+    "import", "browse", "pipeline", "pipeline_review",
     "review", "cull", "jobs",
     "highlights", "misses", "storage", "settings",
 ]
@@ -963,6 +963,7 @@ class Database:
                     (json.dumps(tabs), row["id"]),
                 )
             self.conn.execute("PRAGMA user_version = 1")
+            current_user_version = 1
 
         # Migration (storage page): cache/storage controls moved out of
         # Settings and Dashboard, so existing workspaces need a visible
@@ -990,6 +991,47 @@ class Database:
                     (json.dumps(tabs), row["id"]),
                 )
             self.conn.execute("PRAGMA user_version = 2")
+            current_user_version = 2
+
+        # (Version 3 was briefly used on the fix-import-page-routing branch
+        # for an "import catch-up" that tried to backfill Import for
+        # databases suspected of having skipped the v1 migration. It was
+        # dropped before shipping: chronologically v1 (dae1653, 2026-07-05)
+        # landed before v2 (e988f21, 2026-07-08) and both live in this same
+        # method, so no real database can be at user_version 2 without
+        # having run v1. The catch-up therefore only fired on rows whose
+        # shape matched a user who unpinned Import from the current
+        # default — clobbering a legitimate preference to fix a scenario
+        # that cannot occur. The number is skipped rather than reused so
+        # any dev DB that briefly reached user_version 3 keeps monotonic
+        # ordering into v4.)
+
+        # Migration (import page prominence): Import is now the first pinned
+        # page, because adding photos is the natural starting workflow. Move
+        # an existing Import tab to the front once. Rows that lack Import
+        # are left alone — a one-shot migration must not silently re-add a
+        # tab a user removed.
+        if current_user_version < 4:
+            rows = self.conn.execute(
+                "SELECT id, tabs FROM workspaces WHERE tabs IS NOT NULL"
+            ).fetchall()
+            for row in rows:
+                try:
+                    tabs = json.loads(row["tabs"])
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(tabs, list) or "import" not in tabs:
+                    continue
+                if tabs[0] == "import":
+                    continue
+                tabs = [t for t in tabs if t != "import"]
+                tabs.insert(0, "import")
+                self.conn.execute(
+                    "UPDATE workspaces SET tabs = ? WHERE id = ?",
+                    (json.dumps(tabs), row["id"]),
+                )
+            self.conn.execute("PRAGMA user_version = 4")
+            current_user_version = 4
 
         # Migration: drop legacy open_tabs column (replaced by `tabs`).
         try:

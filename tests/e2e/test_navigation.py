@@ -9,6 +9,14 @@ def test_navbar_links_navigate_to_pipeline(live_server, page):
     expect(page).to_have_url(f"{url}/pipeline")
 
 
+def test_navbar_links_navigate_to_import(live_server, page):
+    """Clicking Import in navbar navigates to the import page."""
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    page.click("[data-testid='nav-import']")
+    expect(page).to_have_url(f"{url}/import")
+
+
 def test_navbar_links_navigate_to_jobs(live_server, page):
     """Clicking Jobs in navbar navigates to the jobs page."""
     url = live_server["url"]
