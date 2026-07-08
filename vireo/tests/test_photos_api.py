@@ -5297,6 +5297,35 @@ def test_storage_delete_files_syncs_preview_cache(client_with_photo):
     assert db.preview_cache_get(photo_id, 1920) is None
 
 
+def test_storage_files_limit_returns_bounded_preview_listing(client_with_photo):
+    """The storage modal can request a bounded first page instead of
+    statting and rendering every preview cache file before opening."""
+    import os
+
+    app, _db, photo_id = client_with_photo
+    client = app.test_client()
+    preview_dir = os.path.join(
+        os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews"
+    )
+    os.makedirs(preview_dir, exist_ok=True)
+    for size in (640, 1280, 1920):
+        with open(os.path.join(preview_dir, f"{photo_id}_{size}.jpg"), "wb") as f:
+            f.write(b"x" * size)
+
+    resp = client.get("/api/storage/files?type=previews&limit=2")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["limit"] == 2
+    assert data["truncated"] is True
+    assert len(data["files"]) == 2
+
+    resp = client.get("/api/storage/files?type=previews")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["truncated"] is False
+    assert len(data["files"]) == 3
+
+
 def test_storage_clear_thumbnails_resets_thumb_path(client_with_photo):
     """/api/storage/clear type=thumbnails NULLs photos.thumb_path so the
     pipeline plan's count_photos_missing_thumb doesn't report phantoms.
