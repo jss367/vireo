@@ -310,14 +310,6 @@ function openImportFolderBrowser(mode) {
   };
   document.addEventListener('keydown', browserEscHandler);
   document.body.style.overflow = 'hidden';
-  // Reset stale state from a prior open. Without this, the initial
-  // browse below is async, and if it stalls or fails (e.g. a prefilled
-  // destination points at a removed drive), clicking "Select This Folder"
-  // would submit the previous session's browserPath and folder list.
-  browserPath = '';
-  document.getElementById('folderBrowserPath').textContent = 'Loading…';
-  document.getElementById('folderBrowserList').innerHTML =
-    '<div class="folder-browser-empty">Loading…</div>';
   const firstAction = overlay.querySelector('button');
   if (firstAction) firstAction.focus();
   const startPath = browserMode === 'destination'
@@ -337,6 +329,16 @@ function closeImportFolderBrowser() {
 
 async function browseImportFolderTo(path) {
   const seq = ++browserSeq;
+  // Clear stale selection while this async navigation is pending. Without
+  // this, clicking "Select This Folder" during a slow or failing fetch
+  // submits the previous folder instead of the one the user requested —
+  // both on modal open and mid-session navigation.
+  browserPath = '';
+  const selectBtn = document.getElementById('folderBrowserSelectBtn');
+  if (selectBtn) selectBtn.disabled = true;
+  document.getElementById('folderBrowserPath').textContent = 'Loading…';
+  document.getElementById('folderBrowserList').innerHTML =
+    '<div class="folder-browser-empty">Loading…</div>';
   let url = '/api/browse';
   if (path === '__pictures__') {
     if (!browserHomePath) {
@@ -412,6 +414,8 @@ function renderImportFolderBrowser(data, opts) {
     const item = e.target.closest('.folder-browser-item[data-browse-path]');
     if (item) browseImportFolderTo(item.getAttribute('data-browse-path'));
   };
+  const selectBtn = document.getElementById('folderBrowserSelectBtn');
+  if (selectBtn) selectBtn.disabled = !browserPath;
 }
 
 function selectImportBrowserFolder() {
