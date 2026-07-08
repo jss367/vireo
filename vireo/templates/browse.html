@@ -3961,6 +3961,10 @@ function browseKeyMatchesConfiguredShortcut(e) {
 /* ---------- Infinite Scroll ---------- */
 var gridContainer = document.getElementById('gridContainer');
 var infiniteScrollObserverDisconnected = false;
+var infiniteScrollObserverIsNative = (
+  typeof window.IntersectionObserver === 'function' &&
+  String(window.IntersectionObserver).indexOf('[native code]') !== -1
+);
 var observer = new IntersectionObserver(function(entries) {
   if (entries[0].isIntersecting) loadPhotos({ silent: photos.length > 0 });
 }, { root: gridContainer, rootMargin: '3200px 0px' });
@@ -3996,6 +4000,7 @@ function rearmInfiniteScrollObserver() {
    first skeleton cell). Fires on scroll and chains after each successful
    page load until the viewport is covered by real cards. */
 function ensureViewportHydrated() {
+  if (infiniteScrollObserverDisconnected || !infiniteScrollObserverIsNative) return;
   if (loading || allLoaded || clipSearchActive || collectionAnchorScanDepth > 0) return;
   if (photos.length === 0) return;
   var tail = document.getElementById('gridTail');
