@@ -1597,7 +1597,22 @@ function updateSourceSummary() {
     var n = selectedFolderIds().length;
     el.textContent = n ? (n + ' folder(s) selected') : '';
   } else if (_sourceMode === 'import') {
-    el.textContent = _sourceFolders.length ? (_sourceFolders.length + ' folder(s)') : '';
+    if (!_sourceFolders.length) {
+      el.textContent = '';
+    } else if (_previewLoading) {
+      el.textContent = 'Loading preview...';
+    } else if (_previewData && Array.isArray(_previewData.files)) {
+      var total = _previewData.files.length;
+      var selected = 0;
+      _previewData.files.forEach(function(f) {
+        if (_previewSelected[f.path]) selected++;
+      });
+      el.textContent = selected === total
+        ? (total + ' photo' + (total === 1 ? '' : 's') + ' ready')
+        : (selected + ' of ' + total + ' photos selected');
+    } else {
+      el.textContent = 'Preview pending';
+    }
   }
 }
 
@@ -1792,6 +1807,7 @@ function showPreviewPlaceholder() {
   _previewData = null;
   _previewSelected = {};
   if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
+  updateSourceSummary();
 }
 
 function showPreviewLoading() {
@@ -1806,6 +1822,7 @@ function showPreviewLoading() {
   _pipelinePlan = null;
   updateSamVariantWarning(null);
   refreshPipelineUI();
+  updateSourceSummary();
   // Cancel any in-flight duplicate check when preview context changes
   if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
   if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
@@ -1822,6 +1839,7 @@ function showPreviewError(msg) {
   _previewData = null;
   _previewSelected = {};
   if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
+  updateSourceSummary();
 }
 
 function renderPreview() {
@@ -1914,6 +1932,7 @@ function renderPreview() {
   // Set up IntersectionObserver for lazy thumbnail loading
   setupThumbnailObserver();
   updatePreviewCounts();
+  updateSourceSummary();
   // Reapply cached duplicate markers after DOM rebuild
   if (Object.keys(_duplicateResults).length > 0) applyDuplicateVisuals();
   // Preview content drives the import-mode plan (which paths are selected).
