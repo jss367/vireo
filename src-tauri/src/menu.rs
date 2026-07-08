@@ -245,12 +245,12 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
     let mut view_builder = SubmenuBuilder::new(app, "View");
     view_builder = view_builder
         .item(
-            &MenuItemBuilder::with_id(ids::NAV_BROWSE, "Browse")
+            &MenuItemBuilder::with_id(ids::NAV_IMPORT, "Import")
                 .accelerator("CmdOrCtrl+1")
                 .build(app)?,
         )
         .item(
-            &MenuItemBuilder::with_id(ids::NAV_IMPORT, "Import")
+            &MenuItemBuilder::with_id(ids::NAV_BROWSE, "Browse")
                 .accelerator("CmdOrCtrl+2")
                 .build(app)?,
         )
