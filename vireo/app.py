@@ -2541,6 +2541,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             + json.dumps(sys.platform)
             + ";\nwindow.VIREO_REVEAL_LABEL = "
             + json.dumps(labels["reveal"])
+            + ";\nwindow.VIREO_FILE_MANAGER_NAME = "
+            + json.dumps(labels["name"])
             + ";\nwindow.VIREO_EDITOR_PATH_PLACEHOLDER = "
             + json.dumps(labels["editor_placeholder"])
             + ";\n",
@@ -4613,14 +4615,40 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # "open -R <dir>" reveals the folder inside its parent; that's
                 # the right behavior for folder reveals too, consistent with
                 # how Finder treats folder-targeted reveal.
-                subprocess.run(["open", "-R", "--", path], timeout=5, check=False)
+                proc = subprocess.run(
+                    ["open", "-R", "--", path],
+                    timeout=5,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
             elif sys.platform.startswith("win"):
+                # explorer.exe's exit status is not a reliable success signal
+                # (see the returncode-check gate below), so a stale catalog
+                # entry whose path no longer exists would otherwise silently
+                # return ok=True and produce a bogus "Revealed in File
+                # Explorer" toast. Preflight the target path so those cases
+                # surface as failures instead.
                 if is_folder:
+                    if not os.path.isdir(path):
+                        return jsonify({"ok": False, "reason": "folder not found"})
                     # Open the folder itself so the user sees its contents.
-                    subprocess.run(["explorer", path], timeout=5, check=False)
+                    proc = subprocess.run(
+                        ["explorer", path],
+                        timeout=5,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
                 else:
-                    subprocess.run(
-                        ["explorer", f"/select,{path}"], timeout=5, check=False
+                    if not os.path.isfile(path):
+                        return jsonify({"ok": False, "reason": "photo file not found"})
+                    proc = subprocess.run(
+                        ["explorer", f"/select,{path}"],
+                        timeout=5,
+                        check=False,
+                        capture_output=True,
+                        text=True,
                     )
             else:
                 # xdg-open on a file has inconsistent behavior across desktops
@@ -4628,11 +4656,36 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # photo reveals we open the parent directory instead. Passing
                 # a directory to xdg-open opens the folder in the file manager,
                 # which is exactly what we want for folder reveals.
+                #
+                # Because photo reveals target the parent directory rather than
+                # the file itself, xdg-open will happily succeed for a stale
+                # catalog entry whose folder still exists but whose photo has
+                # been deleted or moved — the user gets a "revealed" toast even
+                # though nothing is selected. Verify the photo file exists first
+                # so those cases surface as failures instead of false successes.
+                if not is_folder and not os.path.isfile(path):
+                    return jsonify({"ok": False, "reason": "photo file not found"})
                 target = path if is_folder else (os.path.dirname(path) or path)
                 # xdg-open doesn't honor `--`; abspath guarantees a leading `/`
                 # so a crafted leading-dash path can't be parsed as a flag.
                 target = os.path.abspath(target)
-                subprocess.run(["xdg-open", target], timeout=5, check=False)
+                proc = subprocess.run(
+                    ["xdg-open", target],
+                    timeout=5,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+            # explorer.exe's exit status is not a reliable success signal:
+            # `explorer /select,<path>` (and `explorer <folder>`) routinely
+            # return 1 even when File Explorer opens correctly, with nothing
+            # useful on stdout/stderr. Skipping the returncode check on Windows
+            # avoids reporting "reveal failed" for reveals that actually worked.
+            if not sys.platform.startswith("win") and proc.returncode != 0:
+                reason = (proc.stderr or proc.stdout or "").strip()
+                if not reason:
+                    reason = f"reveal command exited {proc.returncode}"
+                return jsonify({"ok": False, "reason": reason})
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
             return jsonify({"ok": False, "reason": str(exc)})
         return jsonify({"ok": True})

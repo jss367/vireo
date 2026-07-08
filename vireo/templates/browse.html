@@ -6942,7 +6942,15 @@ function revealPhoto(photoId) {
   safeFetch('/api/files/reveal', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({photo_id: photoId}),
-  }, { toast: false }).catch(function(){});
+  }, { toast: false }).then(function(data) {
+    if (typeof showRevealFeedback === 'function') showRevealFeedback(data);
+  }).catch(function(err) {
+    if (typeof showToast === 'function') {
+      showToast('Reveal failed: ' + (err.message || 'request failed'), 'error');
+    } else {
+      console.error('revealPhoto failed', err);
+    }
+  });
 }
 
 function viewPhotoOnMap(photoId) {
@@ -7150,13 +7158,19 @@ document.addEventListener('contextmenu', function(e) {
 
 /* ---------- Folder tree context menu ---------- */
 function revealFolder(fid) {
-  // Fire-and-forget: user-visible feedback is the OS file manager opening.
-  // Server logs any failure via the reason field on the response body.
-  fetch('/api/files/reveal', {
+  safeFetch('/api/files/reveal', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({folder_id: fid}),
-  }).catch(function(err) { console.error('revealFolder failed', err); });
+  }, { toast: false }).then(function(data) {
+    if (typeof showRevealFeedback === 'function') showRevealFeedback(data);
+  }).catch(function(err) {
+    if (typeof showToast === 'function') {
+      showToast('Reveal failed: ' + (err.message || 'request failed'), 'error');
+    } else {
+      console.error('revealFolder failed', err);
+    }
+  });
 }
 
 async function copyFolderPath(fid) {
