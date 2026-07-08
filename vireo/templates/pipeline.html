@@ -728,6 +728,15 @@ body { padding-bottom: 36px; }
               <div class="setting-item">
                 <div class="setting-label">Folders <span style="font-weight:400;color:var(--text-dim);">(each includes its subfolders)</span></div>
                 <div id="folderScopeList" style="display:flex;flex-direction:column;gap:2px;max-height:220px;overflow-y:auto;font-size:12px;"></div>
+                <div style="display:flex;flex-direction:column;gap:6px;margin-top:8px;">
+                  <button class="btn btn-primary" type="button" onclick="browseForFolder()"
+                          style="white-space:nowrap;align-self:flex-start;"
+                          data-testid="source-browse-btn">Browse&hellip;</button>
+                  <input type="text" class="setting-input" id="cfgSourceInput"
+                         placeholder="or type a path and press Enter"
+                         onkeydown="if(event.key==='Enter'){event.preventDefault();addSourceFolder();}">
+                </div>
+                <div id="sourceFolderList" style="margin-top:6px;"></div>
               </div>
             </div>
           </div>
@@ -811,6 +820,34 @@ body { padding-bottom: 36px; }
         </div>
         <div id="destWsNewImagesNote" style="display:none;margin-top:6px;font-size:12px;color:var(--text-dim);" data-testid="workspace-new-images-note">
           Processing new images uses the current workspace — the snapshot is scoped to it.
+        </div>
+      </div>
+
+      <div style="border-top:1px solid var(--border-primary,#14374E);margin:16px 0;"></div>
+      <div class="setting-label">Importing photos</div>
+      <div class="hint" style="font-size:12px;color:var(--text-secondary);line-height:1.4;">
+        Copying cards or folders into the archive now happens on the
+        <a href="/import" style="color:var(--accent);">Import</a> page.
+        Process only works on photos already in the active workspace.
+      </div>
+      <div id="destCopySection" data-testid="file-copying-section" style="display:none;">
+        <input type="checkbox" id="chkCopyPhotos" data-testid="copy-photos-toggle">
+        <div id="copyOnlyFields" data-testid="destination-section" style="display:none;">
+          <input type="text" id="cfgDestination">
+          <select id="cfgDestMode"><option value="local">Local path</option></select>
+          <input type="checkbox" id="chkSkipDuplicates" checked>
+          <input type="checkbox" id="chkVerifyByHash">
+          <input type="checkbox" id="chkLocalProcessing" data-testid="local-processing-toggle">
+          <select id="cfgFolderTemplate"><option value="%Y/%Y-%m-%d">Year / Date</option></select>
+          <input type="text" id="cfgCustomTemplate" data-testid="custom-template-input">
+          <button id="btnPreviewFolders" data-testid="preview-folders-btn">Preview folder structure</button>
+          <span id="previewFoldersHint"></span>
+          <div id="folderPreviewResults" data-testid="folder-preview-results" style="display:none;">
+            <div id="folderPreviewManagedArchive" data-testid="managed-archive-callout" style="display:none;"></div>
+            <div id="folderPreviewSummary"></div>
+            <div id="folderPreviewList"></div>
+            <div id="folderPreviewStale" style="display:none;"></div>
+          </div>
         </div>
       </div>
 
@@ -1530,7 +1567,17 @@ async function loadFolderScopeList() {
       cb.dataset.path = f.path;
       cb.style.accentColor = 'var(--accent)';
       cb.checked = prefillRootIds.has(f.id);
-      cb.onchange = function() { updateSourceSummary(); updateStartButton(); schedulePlanRefresh(); };
+      cb.onchange = function() {
+        // Checking a workspace-folder box is a switch to workspace-folder
+        // scope: if we're still in 'import' mode from a previously typed/
+        // browsed source path, updateStartButton() and startPipeline()
+        // would keep gating on _sourceFolders and POST the stale sources
+        // list instead of the folder_ids the user just picked.
+        if (cb.checked && _sourceMode !== 'folders') selectSourceMode('folders');
+        updateSourceSummary();
+        updateStartButton();
+        schedulePlanRefresh();
+      };
       var span = document.createElement('span');
       var count = f.workspace_photo_count != null
         ? f.workspace_photo_count : f.photo_count;
@@ -1559,6 +1606,23 @@ function updateSourceSummary() {
   if (_sourceMode === 'folders') {
     var n = selectedFolderIds().length;
     el.textContent = n ? (n + ' folder(s) selected') : '';
+  } else if (_sourceMode === 'import') {
+    if (!_sourceFolders.length) {
+      el.textContent = '';
+    } else if (_previewLoading) {
+      el.textContent = 'Loading preview...';
+    } else if (_previewData && Array.isArray(_previewData.files)) {
+      var total = _previewData.files.length;
+      var selected = 0;
+      _previewData.files.forEach(function(f) {
+        if (_previewSelected[f.path]) selected++;
+      });
+      el.textContent = selected === total
+        ? (total + ' photo' + (total === 1 ? '' : 's') + ' ready')
+        : (selected + ' of ' + total + ' photos selected');
+    } else {
+      el.textContent = 'Preview pending';
+    }
   }
 }
 
@@ -1597,7 +1661,7 @@ function applyStrategyPreset() {
   refreshPipelineUI();
 }
 
-var _sourceMode = 'folders'; // 'folders', 'collection', or 'new_images'
+var _sourceMode = 'folders'; // 'folders', 'import', 'collection', or 'new_images'
 var _copyMode = false;
 var _folderPreviewShown = false;
 var _sourceWasReady = false;
@@ -1665,6 +1729,51 @@ function fetchFolderPreview() {
     return;
   }
 
+  // Import preview mode is a compatibility path for source folders chosen
+  // directly from Process. Importing/archive copies still live on /import.
+  if (_sourceMode === 'import') {
+    var folders = _sourceFolders;
+    if (!folders.length) {
+      showPreviewPlaceholder();
+      return;
+    }
+    var fileTypes = getIngestFileTypes();
+    if (!fileTypes.length) {
+      showPreviewPlaceholder();
+      return;
+    }
+    showPreviewLoading();
+    _previewAbort = new AbortController();
+    fetch('/api/import/folder-preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        folders: folders,
+        file_types: fileTypes,
+        recursive: includeSubfoldersEnabled(),
+      }),
+      signal: _previewAbort.signal,
+    })
+      .then(function(r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function(data) {
+        _previewData = data;
+        _previewSelected = {};
+        _duplicateResults = {};
+        (data.files || []).forEach(function(f) {
+          _previewSelected[f.path] = !f.duplicate;
+        });
+        renderPreview();
+      })
+      .catch(function(err) {
+        if (err.name === 'AbortError') return;
+        showPreviewError('Failed to load preview: ' + err.message);
+      });
+    return;
+  }
+
   // Collection mode: fetch from collection-preview endpoint
   if (_sourceMode === 'collection') {
     var collId = document.getElementById('collectionPicker').value;
@@ -1708,6 +1817,7 @@ function showPreviewPlaceholder() {
   _previewData = null;
   _previewSelected = {};
   if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
+  updateSourceSummary();
 }
 
 function showPreviewLoading() {
@@ -1722,6 +1832,7 @@ function showPreviewLoading() {
   _pipelinePlan = null;
   updateSamVariantWarning(null);
   refreshPipelineUI();
+  updateSourceSummary();
   // Cancel any in-flight duplicate check when preview context changes
   if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
   if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
@@ -1738,6 +1849,7 @@ function showPreviewError(msg) {
   _previewData = null;
   _previewSelected = {};
   if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
+  updateSourceSummary();
 }
 
 function renderPreview() {
@@ -1830,6 +1942,7 @@ function renderPreview() {
   // Set up IntersectionObserver for lazy thumbnail loading
   setupThumbnailObserver();
   updatePreviewCounts();
+  updateSourceSummary();
   // Reapply cached duplicate markers after DOM rebuild
   if (Object.keys(_duplicateResults).length > 0) applyDuplicateVisuals();
   // Preview content drives the import-mode plan (which paths are selected).
@@ -1843,8 +1956,9 @@ function checkForDuplicates() {
   if (_duplicateCheckAbort) _duplicateCheckAbort.abort();
 
   if (!_previewData || !_previewData.files.length) return;
+  var skipDuplicates = document.getElementById('chkSkipDuplicates');
   if (!_copyMode) return;
-  if (!document.getElementById('chkSkipDuplicates').checked) return;
+  if (skipDuplicates && !skipDuplicates.checked) return;
 
   _duplicateResults = {};
   _duplicateCheckAbort = new AbortController();
@@ -1870,7 +1984,7 @@ function checkForDuplicates() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       paths: paths,
-      verify_by_hash: document.getElementById('chkVerifyByHash').checked,
+      verify_by_hash: !!((document.getElementById('chkVerifyByHash') || {}).checked),
     }),
     signal: _duplicateCheckAbort.signal,
   }).then(function(response) {
@@ -1895,7 +2009,8 @@ function checkForDuplicates() {
             });
           }
           // Only update UI if the user still wants to skip duplicates
-          if (document.getElementById('chkSkipDuplicates').checked) {
+          var stillSkip = document.getElementById('chkSkipDuplicates');
+          if (!stillSkip || stillSkip.checked) {
             if (data.duplicates) applyDuplicateVisuals();
             updateDuplicateSummary(data);
             // Newly-discovered hash duplicates change the import scope —
@@ -1916,7 +2031,8 @@ function checkForDuplicates() {
 }
 
 function applyDuplicateVisuals() {
-  var skipChecked = document.getElementById('chkSkipDuplicates').checked;
+  var skipCb = document.getElementById('chkSkipDuplicates');
+  var skipChecked = !skipCb || skipCb.checked;
   var grid = document.getElementById('previewGrid');
   var thumbs = grid.querySelectorAll('.preview-thumb');
   thumbs.forEach(function(el) {
@@ -1940,6 +2056,7 @@ function applyDuplicateVisuals() {
 
 function updateDuplicateSummary(data) {
   var summary = document.getElementById('previewSummary');
+  if (!summary) return;
   // Remove any existing duplicate status
   var existing = summary.querySelector('.dup-status');
   if (existing) existing.remove();
@@ -1978,7 +2095,8 @@ function updateDuplicateSummary(data) {
 function duplicateMethodNote() {
   // Keep the summary honest about HOW duplicates were identified — the
   // two modes can disagree on edge cases (e.g. renamed copies).
-  return document.getElementById('chkVerifyByHash').checked
+  var verify = document.getElementById('chkVerifyByHash');
+  return verify && verify.checked
     ? 'matched by content hash'
     : 'matched by filename, size & capture time';
 }
@@ -1992,14 +2110,16 @@ function onVerifyByHashToggle() {
   var summary = document.getElementById('previewSummary');
   var existing = summary ? summary.querySelector('.dup-status') : null;
   if (existing) existing.remove();
-  if (document.getElementById('chkSkipDuplicates').checked) {
+  var skipDuplicates = document.getElementById('chkSkipDuplicates');
+  if (!skipDuplicates || skipDuplicates.checked) {
     checkForDuplicates();
   }
   schedulePlanRefresh();
 }
 
 function onSkipDuplicatesToggle() {
-  var checked = document.getElementById('chkSkipDuplicates').checked;
+  var skipDuplicates = document.getElementById('chkSkipDuplicates');
+  var checked = !skipDuplicates || skipDuplicates.checked;
   if (!checked) {
     // Abort any in-flight check so SSE callbacks stop updating the UI
     if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
@@ -2131,6 +2251,62 @@ function formatBytes(bytes) {
   var sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
   var i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+function addSourceFolder() {
+  var input = document.getElementById('cfgSourceInput');
+  if (!input) return;
+  var val = input.value.trim();
+  if (!val) return;
+  // Adding a path the user has already typed once is still an unambiguous
+  // "use this import source" signal. If we early-returned on the duplicate
+  // the mode/render/preview refresh below would be skipped, leaving Start
+  // gated by folder_ids after the user switched back to workspace-folder
+  // scope. Fall through so the mode always re-syncs to 'import'.
+  var alreadyPresent = _sourceFolders.indexOf(val) !== -1;
+  if (!alreadyPresent) _sourceFolders.push(val);
+  input.value = '';
+  var switched = _sourceMode !== 'import';
+  if (switched) selectSourceMode('import');
+  if (!alreadyPresent) {
+    renderSourceFolders();
+    if (!switched) fetchFolderPreview();
+  }
+  updateStartButton();
+}
+
+function renderSourceFolders() {
+  var list = document.getElementById('sourceFolderList');
+  if (!list) return;
+  list.innerHTML = '';
+  _sourceFolders.forEach(function(path, idx) {
+    var row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:6px;color:var(--text-secondary);font-size:12px;';
+    var text = document.createElement('span');
+    text.style.cssText = 'font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+    text.textContent = path;
+    var remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'btn btn-secondary';
+    remove.style.cssText = 'font-size:11px;padding:2px 6px;';
+    remove.textContent = 'Remove';
+    remove.onclick = function() {
+      _sourceFolders.splice(idx, 1);
+      renderSourceFolders();
+      // Removing the last import source leaves _sourceMode stuck at
+      // 'import' with an empty list, so Start stays disabled even if
+      // workspace folder checkboxes are still ticked. Fall back to
+      // 'folders' scope so the previously-checked folders take over.
+      if (_sourceFolders.length === 0 && _sourceMode === 'import') {
+        selectSourceMode('folders');
+      }
+      fetchFolderPreview();
+      updateStartButton();
+    };
+    row.appendChild(text);
+    row.appendChild(remove);
+    list.appendChild(row);
+  });
 }
 
 /* ---------- Remote (SSH) archive targets ----------
@@ -2487,7 +2663,7 @@ async function selectSourceMode(mode) {
   if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
   _sourceMode = mode;
   var isFolders = (mode === 'folders');
-  document.getElementById('radioFolders').checked = isFolders;
+  document.getElementById('radioFolders').checked = isFolders || mode === 'import';
   document.getElementById('radioCollection').checked = (mode === 'collection');
   var newImgRadio = document.getElementById('radioNewImages');
   if (newImgRadio) newImgRadio.checked = (mode === 'new_images');
@@ -2496,7 +2672,7 @@ async function selectSourceMode(mode) {
   var collBody = document.getElementById('sourceCollectionBody');
   var newImgBody = document.getElementById('sourceNewImagesBody');
 
-  if (isFolders) {
+  if (isFolders || mode === 'import') {
     importBody.classList.remove('dimmed');
     collBody.classList.add('dimmed');
     if (newImgBody) newImgBody.classList.add('dimmed');
@@ -2710,6 +2886,13 @@ function updateStartButton() {
 
   if (_sourceMode === 'folders') {
     btn.disabled = selectedFolderIds().length === 0;
+  } else if (_sourceMode === 'import') {
+    // Import-source mode: at least one source folder is required. The
+    // per-file preview may still be resolving; we don't block Start on
+    // that (matches new_images), but startPipeline() will pass the
+    // deselected paths through as exclude_paths so the run scope
+    // matches the plan the user saw.
+    btn.disabled = _sourceFolders.length === 0;
   } else if (_sourceMode === 'new_images') {
     btn.disabled = !newImagesSnapshotId;
   } else {
@@ -3009,6 +3192,29 @@ async function startPipeline() {
     // its active-workspace subtree and pins the run to an ad-hoc
     // collection (import/process split PR 1).
     body.folder_ids = selectedFolderIds();
+  } else if (_sourceMode === 'import') {
+    // Import-source mode on the Process page: scope = the user-typed
+    // source directory list. Mirrors the shape _buildPlanBody() uses
+    // (deselected preview files land in exclude_paths) so the run
+    // matches the plan the user saw. Without this branch startPipeline
+    // fell through to collection scope and POSTed collection_id from
+    // whatever was in the picker, which could execute a completely
+    // different scope than the one the plan described.
+    body.sources = _sourceFolders.slice();
+    body.recursive = includeSubfoldersEnabled();
+    var importFileTypes = getIngestFileTypes();
+    if (importFileTypes && importFileTypes.length) {
+      body.file_types = importFileTypes;
+    }
+    if (_previewData && _previewSelected) {
+      var excludedImportPaths = [];
+      _previewData.files.forEach(function(f) {
+        if (!_previewSelected[f.path]) excludedImportPaths.push(f.path);
+      });
+      if (excludedImportPaths.length > 0) {
+        body.exclude_paths = excludedImportPaths;
+      }
+    }
   } else if (_sourceMode === 'new_images') {
     body.source_snapshot_id = newImagesSnapshotId;
     delete body.source;
@@ -4903,6 +5109,13 @@ function _buildPlanBody() {
   if (_sourceMode === 'folders') {
     var folderIds = selectedFolderIds();
     if (folderIds.length) body.folder_ids = folderIds;
+  } else if (_sourceMode === 'import'
+             && _previewData && _previewData.files && _previewSelected) {
+    var importPaths = [];
+    _previewData.files.forEach(function(f) {
+      if (_previewSelected[f.path]) importPaths.push(f.path);
+    });
+    body.source_paths = importPaths;
   } else if (_sourceMode === 'collection') {
     var picker = document.getElementById('collectionPicker');
     var cid = picker && picker.value ? parseInt(picker.value, 10) : NaN;
@@ -4962,6 +5175,9 @@ function _buildPlanBody() {
 }
 
 function _planIsWaitingForImportPreview() {
+  if (_sourceMode === 'import') {
+    return _sourceFolders.length > 0 && (_previewLoading || !_previewData);
+  }
   if (_sourceMode === 'new_images') {
     return newImagesSnapshotId !== null && (_previewLoading || !_previewData);
   }
@@ -5044,7 +5260,35 @@ function updateCardStates() {
 })();
 
 async function browseForFolder() {
-  window.location.href = '/import';
+  if (typeof pickDirectory === 'function') {
+    var result = await pickDirectory('Select photo folders', { multiple: true });
+    if (result) {
+      var paths = Array.isArray(result) ? result : [result];
+      var validPicks = paths.filter(function(p) { return !!p; });
+      if (!validPicks.length) return;
+      var added = false;
+      validPicks.forEach(function(path) {
+        if (_sourceFolders.indexOf(path) === -1) {
+          _sourceFolders.push(path);
+          added = true;
+        }
+      });
+      // Picking a source path with Browse is a clear "use this import
+      // source" action, so the mode/render/preview refresh must run even
+      // when every picked path was already in _sourceFolders — otherwise
+      // the mode stays 'folders' and Start posts folder_ids instead of
+      // the previewed sources list.
+      var switched = _sourceMode !== 'import';
+      if (switched) selectSourceMode('import');
+      if (added) {
+        renderSourceFolders();
+        if (!switched) fetchFolderPreview();
+      }
+      updateStartButton();
+      return;
+    }
+  }
+  openFolderBrowser('source');
 }
 
 async function browseForDestination() {
@@ -5355,16 +5599,36 @@ function fetchFolderCounts(paths) {
 }
 
 function selectFolder() {
+  var previewScheduledByModeSwitch = false;
   if (_fbMode === 'source') {
-    window.location.href = '/import';
-    return;
+    var picks = _fbSelectedDirs.length ? _fbSelectedDirs : (_fbSelectedDir ? [_fbSelectedDir] : []);
+    if (!picks.length) return;
+    var added = false;
+    picks.forEach(function(path) {
+      if (path && _sourceFolders.indexOf(path) === -1) {
+        _sourceFolders.push(path);
+        added = true;
+      }
+    });
+    // Selecting source paths in the folder browser is an unambiguous
+    // "use these import sources" action, so the mode switch has to run
+    // even when every pick was already in _sourceFolders — otherwise a
+    // user who reverted to workspace-folder scope and then re-picked the
+    // same imported path would stay stuck in 'folders' mode with Start
+    // POSTing folder_ids instead of sources.
+    var switched = _sourceMode !== 'import';
+    if (switched) {
+      selectSourceMode('import');
+      previewScheduledByModeSwitch = true;
+    }
+    if (added) renderSourceFolders();
   } else {
     if (!_fbSelectedDir) return;
     document.getElementById('cfgDestination').value = _fbSelectedDir;
     markFolderPreviewStale();
   }
   updateStartButton();
-  fetchFolderPreview();
+  if (!previewScheduledByModeSwitch) fetchFolderPreview();
   closeFolderBrowser();
 }
 

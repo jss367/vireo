@@ -214,9 +214,9 @@ def test_cmd1_jumps_to_first_pinned_tab(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/jobs")  # start somewhere not first
     # Wait for the dynamic tab strip to render so window._navTabs is populated.
-    page.wait_for_selector(".nav-tab[data-nav-id='browse']", timeout=3000)
+    page.wait_for_selector(".nav-tab[data-nav-id='import']", timeout=3000)
     page.keyboard.press("Meta+1")
-    page.wait_for_url(f"{url}/browse", timeout=3000)
+    page.wait_for_url(f"{url}/import", timeout=3000)
 
 
 def test_cmdw_closes_ephemeral_tab(live_server, page):
