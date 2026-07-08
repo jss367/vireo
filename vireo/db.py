@@ -231,6 +231,16 @@ DEFAULT_TABS = [
     "highlights", "misses", "storage", "settings",
 ]
 
+# Shape of DEFAULT_TABS from the v2-era code that shipped the Storage tab
+# migration (July 2026) but not the v1 import-tab migration. Used by the
+# v3 catch-up to distinguish a genuinely-skipped v1 migration from a user
+# who explicitly unpinned Import from an otherwise-modified tab list.
+_TABS_PRE_V1_V2_ERA = frozenset({
+    "browse", "pipeline", "pipeline_review",
+    "review", "cull", "jobs",
+    "highlights", "misses", "storage", "settings",
+})
+
 
 def commit_with_retry(conn, max_retries=5, base_delay=0.1):
     """Commit ``conn`` with retry on transient "locked"/"busy" errors.
@@ -994,8 +1004,15 @@ class Database:
             current_user_version = 2
 
         # Migration (import/process split catch-up): some databases may have
-        # reached user_version 2 before the import-tab migration above existed,
-        # which skipped adding Import to saved tab rows. Add it once here too.
+        # reached user_version 2 before the v1 import-tab migration above
+        # existed, which skipped adding Import to saved tab rows. "Import
+        # missing" alone is not a safe signal: `set_tabs()` deliberately does
+        # not advance user_version, so a v2 database whose user unpinned
+        # Import also lacks the tab. Only apply the catch-up when the tabs
+        # shape matches the exact pre-v1 v2-era default set — that is the
+        # one shape v1 would have transformed, and any customization (added
+        # tabs, removed anything besides Import) is respected as user
+        # intent rather than a missed migration.
         if current_user_version < 3:
             rows = self.conn.execute(
                 "SELECT id, tabs FROM workspaces WHERE tabs IS NOT NULL"
@@ -1007,10 +1024,9 @@ class Database:
                     continue
                 if not isinstance(tabs, list) or "import" in tabs:
                     continue
-                if "pipeline" in tabs:
-                    tabs.insert(tabs.index("pipeline"), "import")
-                else:
-                    tabs.insert(0, "import")
+                if set(tabs) != _TABS_PRE_V1_V2_ERA:
+                    continue
+                tabs.insert(tabs.index("pipeline"), "import")
                 self.conn.execute(
                     "UPDATE workspaces SET tabs = ? WHERE id = ?",
                     (json.dumps(tabs), row["id"]),
@@ -1019,9 +1035,10 @@ class Database:
             current_user_version = 3
 
         # Migration (import page prominence): Import is now the first pinned
-        # page, because adding photos is the natural starting workflow. Move an
-        # existing Import tab to the front once; if an old row still lacks it,
-        # add it at the front.
+        # page, because adding photos is the natural starting workflow. Move
+        # an existing Import tab to the front once. Rows that lack Import
+        # are left alone — same reasoning as the v3 catch-up above: a
+        # one-shot migration must not silently re-add a tab a user removed.
         if current_user_version < 4:
             rows = self.conn.execute(
                 "SELECT id, tabs FROM workspaces WHERE tabs IS NOT NULL"
@@ -1031,7 +1048,9 @@ class Database:
                     tabs = json.loads(row["tabs"])
                 except (TypeError, ValueError):
                     continue
-                if not isinstance(tabs, list):
+                if not isinstance(tabs, list) or "import" not in tabs:
+                    continue
+                if tabs[0] == "import":
                     continue
                 tabs = [t for t in tabs if t != "import"]
                 tabs.insert(0, "import")

@@ -14704,8 +14704,10 @@ def test_delete_edit_preset(tmp_path):
 
 
 def test_import_tab_in_nav_registries(tmp_path):
-    """import/process split PR 3: the Import tab must be in every server
-    registry or get_tabs silently drops it / set_tabs rejects it."""
+    """import/process split PR 3 + import-page-routing PR: the Import
+    tab must be in every server registry, and must be the leftmost/
+    first pinned page in DEFAULT_TABS since Import is now the natural
+    starting workflow for new workspaces."""
     from db import ALL_NAV_IDS, DEFAULT_TABS, Database
 
     assert "import" in ALL_NAV_IDS
@@ -14732,8 +14734,8 @@ def test_existing_workspaces_gain_import_tab(tmp_path):
     )
     # A real pre-split DB was written by a version that never set
     # PRAGMA user_version, so it reads back as 0. The fresh Database
-    # above already bumped it to 1; reset it so the second init runs
-    # the guarded import-tab migration.
+    # above already bumped it to 4; reset it so the second init runs
+    # every guarded tabs migration from scratch.
     db.conn.execute("PRAGMA user_version = 0")
     db.conn.commit()
     db.close()

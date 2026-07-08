@@ -154,6 +154,11 @@ def test_get_tabs_endpoint_new_shape(app_and_db):
 
 
 def test_tabs_migration_adds_import_for_version_2_database(tmp_path):
+    """Databases that reached user_version 2 without the v1 import-tab
+    migration having run get Import back — but only when the tabs shape
+    matches the exact pre-v1 v2-era default. Any other shape is treated
+    as intentional customization and left alone (see
+    test_tabs_migration_preserves_unpinned_import_on_v2_database)."""
     import json
 
     from db import Database
@@ -161,9 +166,14 @@ def test_tabs_migration_adds_import_for_version_2_database(tmp_path):
     db_path = str(tmp_path / "tabs-v2.db")
     db = Database(db_path)
     ws_id = db._active_workspace_id
+    pre_v1_default = [
+        "browse", "pipeline", "pipeline_review",
+        "review", "cull", "jobs",
+        "highlights", "misses", "storage", "settings",
+    ]
     db.conn.execute(
         "UPDATE workspaces SET tabs = ? WHERE id = ?",
-        (json.dumps(["browse", "pipeline", "review"]), ws_id),
+        (json.dumps(pre_v1_default), ws_id),
     )
     db.conn.execute("PRAGMA user_version = 2")
     db.conn.commit()
@@ -171,7 +181,76 @@ def test_tabs_migration_adds_import_for_version_2_database(tmp_path):
 
     migrated = Database(db_path)
     try:
-        assert migrated.get_tabs() == ["import", "browse", "pipeline", "review"]
+        # v3 inserts Import before Process, then v4 moves it to the front.
+        assert migrated.get_tabs() == [
+            "import", "browse", "pipeline", "pipeline_review",
+            "review", "cull", "jobs",
+            "highlights", "misses", "storage", "settings",
+        ]
+        version = migrated.conn.execute("PRAGMA user_version").fetchone()[0]
+        assert version == 4
+    finally:
+        migrated.close()
+
+
+def test_tabs_migration_preserves_unpinned_import_on_v2_database(tmp_path):
+    """A v2 database whose tabs have been customized (e.g. the user
+    unpinned Import from an already-modified list) must not have Import
+    silently re-inserted by the v3 catch-up. Codex flagged this on
+    #1134: `set_tabs()` doesn't advance user_version, so "Import
+    missing at v2" can mean either a skipped v1 or an intentional unpin,
+    and the catch-up must not clobber the latter."""
+    import json
+
+    from db import Database
+
+    db_path = str(tmp_path / "tabs-v2-unpinned.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    # Non-default shape (no "storage", no "pipeline_review", etc.). This
+    # cannot be the pre-v1 v2-era default, so the v3 catch-up must
+    # respect it — even though "import" is absent.
+    customized = ["browse", "pipeline", "review"]
+    db.conn.execute(
+        "UPDATE workspaces SET tabs = ? WHERE id = ?",
+        (json.dumps(customized), ws_id),
+    )
+    db.conn.execute("PRAGMA user_version = 2")
+    db.conn.commit()
+    db.close()
+
+    migrated = Database(db_path)
+    try:
+        assert migrated.get_tabs() == customized
+        version = migrated.conn.execute("PRAGMA user_version").fetchone()[0]
+        assert version == 4
+    finally:
+        migrated.close()
+
+
+def test_tabs_migration_preserves_unpinned_import_on_v3_database(tmp_path):
+    """A user who unpinned Import after v3 shipped (user_version = 3)
+    must not have Import silently re-added by the v4 prominence
+    migration. v4 must only reorder existing rows, never re-insert."""
+    import json
+
+    from db import Database
+
+    db_path = str(tmp_path / "tabs-v3-unpinned.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    without_import = ["browse", "pipeline", "review"]
+    db.conn.execute(
+        "UPDATE workspaces SET tabs = ? WHERE id = ?",
+        (json.dumps(without_import), ws_id),
+    )
+    db.conn.execute("PRAGMA user_version = 3")
+    db.conn.commit()
+    db.close()
+
+    migrated = Database(db_path)
+    try:
+        assert migrated.get_tabs() == without_import
         version = migrated.conn.execute("PRAGMA user_version").fetchone()[0]
         assert version == 4
     finally:
