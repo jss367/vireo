@@ -18,26 +18,22 @@ def test_pipeline_start_button_disabled_without_folders(live_server, page):
     expect(btn).to_be_disabled()
 
 
-def test_pipeline_copy_toggle_shows_destination(live_server, page):
-    url = live_server["url"]
-    page.goto(f"{url}/pipeline")
-    # Expand the Destination card first (collapsed by default)
-    page.click("#card-destination .stage-header")
-    dest = page.locator("[data-testid='destination-section']")
-    expect(dest).to_be_hidden()
-    page.check("[data-testid='copy-photos-toggle']")
-    expect(dest).to_be_visible()
-
-
-def test_pipeline_copy_toggle_hides_destination(live_server, page):
+def test_pipeline_destination_points_imports_to_import_page(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
     page.click("#card-destination .stage-header")
-    page.check("[data-testid='copy-photos-toggle']")
-    dest = page.locator("[data-testid='destination-section']")
-    expect(dest).to_be_visible()
-    page.uncheck("[data-testid='copy-photos-toggle']")
-    expect(dest).to_be_hidden()
+    dest_card = page.locator("#card-destination")
+    expect(dest_card).to_contain_text("Copying cards or folders into the archive now happens on the")
+    expect(dest_card.locator("a[href='/import']")).to_contain_text("Import")
+
+
+def test_pipeline_legacy_copy_controls_stay_hidden(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    page.click("#card-destination .stage-header")
+    expect(page.locator("[data-testid='file-copying-section']")).to_be_hidden()
+    expect(page.locator("[data-testid='copy-photos-toggle']")).to_be_hidden()
+    expect(page.locator("[data-testid='destination-section']")).to_be_hidden()
 
 
 def test_pipeline_collection_source_dims_import(live_server, page):
@@ -75,110 +71,28 @@ def test_pipeline_stage_cards_collapse_expand(live_server, page):
     expect(source_card).to_have_class(re.compile("expanded"))
 
 
-def test_pipeline_folder_template_visible_when_copy_enabled(live_server, page):
+def test_pipeline_folder_template_hidden_on_process_page(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
     page.click("#card-destination .stage-header")
-    page.check("[data-testid='copy-photos-toggle']")
-    template = page.locator("#cfgFolderTemplate")
-    expect(template).to_be_visible()
-
-
-def test_pipeline_folder_template_hidden_when_copy_disabled(live_server, page):
-    url = live_server["url"]
-    page.goto(f"{url}/pipeline")
-    page.click("#card-destination .stage-header")
-    # Don't check the copy toggle
     template = page.locator("#cfgFolderTemplate")
     expect(template).to_be_hidden()
 
 
-def test_pipeline_custom_template_shown_on_select(live_server, page):
+def test_pipeline_custom_template_hidden_on_process_page(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
     page.click("#card-destination .stage-header")
-    page.check("[data-testid='copy-photos-toggle']")
     custom_input = page.locator("[data-testid='custom-template-input']")
     expect(custom_input).to_be_hidden()
-    page.select_option("#cfgFolderTemplate", "__custom__")
-    expect(custom_input).to_be_visible()
 
 
-def test_pipeline_preview_button_disabled_without_source_dest(live_server, page):
+def test_pipeline_destination_preview_button_hidden_on_process_page(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
     page.click("#card-destination .stage-header")
-    page.check("[data-testid='copy-photos-toggle']")
     btn = page.locator("[data-testid='preview-folders-btn']")
-    expect(btn).to_be_disabled()
-
-
-def _destination_preview_body(managed_archive):
-    """Minimal destination-preview payload the render path needs, with an
-    optional managed_archive block."""
-    return json.dumps({
-        "total_photos": 3,
-        "total_folders": 1,
-        "new_folders": 0,
-        "existing_folders": 1,
-        "folders": [
-            {"path": "2026/2026-06-30", "count": 3, "exists": True,
-             "full_path": "/arch/USA/2026/2026-06-30"},
-        ],
-        "managed_archive": managed_archive,
-    })
-
-
-def test_pipeline_managed_archive_callout_shown_for_existing_archive(live_server, page):
-    """When destination-preview flags a managed archive, the merge callout
-    renders with the archive path and photo count."""
-    url = live_server["url"]
-    page.goto(f"{url}/pipeline")
-    page.click("#card-destination .stage-header")
-    page.check("[data-testid='copy-photos-toggle']")
-
-    page.route(
-        "**/api/import/destination-preview",
-        lambda route: route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=_destination_preview_body(
-                {"path": "/arch/USA", "photo_count": 1234}
-            ),
-        ),
-    )
-    # Drive the preview directly (no on-disk sources needed — the render path
-    # only consumes the stubbed destination-preview response).
-    page.evaluate("previewDestinationFolders()")
-
-    callout = page.locator("[data-testid='managed-archive-callout']")
-    expect(callout).to_be_visible()
-    expect(callout).to_contain_text("existing Vireo archive")
-    expect(callout).to_contain_text("/arch/USA")
-    expect(callout).to_contain_text("1,234 photos")
-    expect(callout).to_contain_text("merged in")
-
-
-def test_pipeline_no_managed_archive_callout_for_fresh_destination(live_server, page):
-    """A fresh (untracked) destination shows no merge callout."""
-    url = live_server["url"]
-    page.goto(f"{url}/pipeline")
-    page.click("#card-destination .stage-header")
-    page.check("[data-testid='copy-photos-toggle']")
-
-    page.route(
-        "**/api/import/destination-preview",
-        lambda route: route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=_destination_preview_body(None),
-        ),
-    )
-    page.evaluate("previewDestinationFolders()")
-
-    # Results render, but the callout stays hidden.
-    expect(page.locator("[data-testid='folder-preview-results']")).to_be_visible()
-    expect(page.locator("[data-testid='managed-archive-callout']")).to_be_hidden()
+    expect(btn).to_be_hidden()
 
 
 def test_pipeline_duplicate_summary_reframed_when_merging(live_server, page):
