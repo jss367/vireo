@@ -2443,6 +2443,9 @@ window.NAV_ALL_PAGES = [
     overBtn.hidden = false;
     const cur = currentNavId();
     const protectedIds = new Set([cur, ephemeralId].filter(Boolean));
+    // A newly pinned tab is appended to the end of TABS; keep it visible
+    // instead of immediately moving it into overflow on narrower navbars.
+    if (TABS.length) protectedIds.add(TABS[TABS.length - 1]);
     // Walk right-to-left, hiding pinned tabs that aren't protected.
     for (let i = tabs.length - 1; i >= 0; i--) {
       if (strip.scrollWidth <= strip.clientWidth) break;
