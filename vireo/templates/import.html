@@ -645,6 +645,14 @@ async function deleteStaging(path, btn) {
 function useStagingAsImportSource(result) {
   sources = [result.source_root];
   renderSources();
+  // Staging recovery must copy the temporary staging tree into the archive.
+  // In-place would catalog paths that disappear once staging is cleaned,
+  // leaving missing-folder rows, so force Copy to archive here.
+  const copyRadio = document.getElementById('modeCopy');
+  if (copyRadio) {
+    copyRadio.checked = true;
+    updateImportMode();
+  }
   if (result.inferred_destination) {
     document.getElementById('destInput').value = result.inferred_destination;
   }

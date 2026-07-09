@@ -85,6 +85,34 @@ def test_import_folder_browser_disables_select_while_pending(live_server, page):
     expect(select_btn).to_be_enabled()
 
 
+def test_use_staging_as_import_source_forces_copy_mode(live_server, page):
+    # Orphaned-staging recovery must copy the staging tree into the archive.
+    # In-place would catalog paths that vanish when staging is cleaned up,
+    # so useStagingAsImportSource() has to flip the mode to Copy regardless
+    # of the page default.
+    url = live_server["url"]
+    page.goto(f"{url}/import")
+
+    # Default is in_place — sanity check before invoking the recovery helper.
+    expect(page.locator("#modeInPlace")).to_be_checked()
+
+    page.evaluate(
+        """
+        () => useStagingAsImportSource({
+          source_root: '/tmp/staging-src',
+          inferred_destination: '/tmp/archive-dest',
+        })
+        """
+    )
+
+    expect(page.locator("#modeCopy")).to_be_checked()
+    expect(page.locator("#modeInPlace")).not_to_be_checked()
+    expect(page.locator("#destInput")).to_have_value("/tmp/archive-dest")
+    expect(page.locator("#sourceList")).to_contain_text("/tmp/staging-src")
+    # updateImportMode() must have run so the destination card is visible again.
+    expect(page.locator("#destCard")).to_be_visible()
+
+
 def test_import_folder_browser_escape_closes_modal(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/import")
