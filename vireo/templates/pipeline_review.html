@@ -2713,16 +2713,24 @@ function doReflow() {
     if (noBodyIndicator) noBodyIndicator.style.display = 'none';
     return;
   }
+  // Tag this request with the scope request sequence so a scope switch (or
+  // a newer slider request) invalidates its response. Without this, a tune
+  // fired in Workspace/Collection scope that resolves after the user
+  // switches back to Latest review would replace the cached view with
+  // stale scoped data (and scopedCacheInfoFor would recompute against the
+  // now-current scope).
+  var seq = ++reviewScopeRequestSeq;
   safeFetch('/api/pipeline/reflow', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(body),
   }, { toast: false })
   .then(function(data) {
-    if (data.error) return;
-    applyReviewResults(data, scopedCacheInfoFor(data));
     var indicator = document.getElementById('reflowIndicator');
     if (indicator) indicator.style.display = 'none';
+    if (seq !== reviewScopeRequestSeq) return;
+    if (!data || data.error) return;
+    applyReviewResults(data, scopedCacheInfoFor(data));
   })
   .catch(function() {
     var indicator = document.getElementById('reflowIndicator');
@@ -2738,16 +2746,18 @@ function doRegroupLive() {
     if (noBodyIndicator) noBodyIndicator.style.display = 'none';
     return;
   }
+  var seq = ++reviewScopeRequestSeq;
   safeFetch('/api/pipeline/regroup-live', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(body),
   }, { toast: false })
   .then(function(data) {
-    if (data.error) return;
-    applyReviewResults(data, scopedCacheInfoFor(data));
     var indicator = document.getElementById('reflowIndicator');
     if (indicator) indicator.style.display = 'none';
+    if (seq !== reviewScopeRequestSeq) return;
+    if (!data || data.error) return;
+    applyReviewResults(data, scopedCacheInfoFor(data));
   })
   .catch(function() {
     var indicator = document.getElementById('reflowIndicator');
@@ -3284,6 +3294,20 @@ function scopedCacheInfoFor(data) {
   };
 }
 
+// Sync cachedPipelineResults with the current view when we're in Latest
+// review scope. cachedPipelineResults was originally only written at page
+// init / computeReviewNow; without this, slider tunes, GRM apply, species
+// confirmation, and detach — all of which mutate pipelineResults and save
+// the cache while in Latest scope — would be lost the next time the user
+// switched to Workspace/Collection and back, and a later save-cache from
+// that stale view would overwrite the newer saved review on disk.
+function refreshLatestScopeSnapshotIfCurrent() {
+  if (reviewScopeMode !== 'cache') return;
+  if (!pipelineResults) return;
+  cachedPipelineResults = cloneReviewData(pipelineResults);
+  cachedResultsCacheInfo = cloneReviewData(resultsCacheInfo);
+}
+
 function loadReviewScopeResults() {
   updateReviewScopeControls();
   // Bump the request sequence up front so that any scope fetch still in
@@ -3325,6 +3349,11 @@ function loadReviewScopeResults() {
 
 function onReviewScopeModeChange(mode) {
   if (['cache', 'workspace', 'collection'].indexOf(mode) === -1) return;
+  // Capture the current Latest-review state before switching away so a later
+  // return to Latest restores the post-mutation view. Must run before
+  // reviewScopeMode changes so refreshLatestScopeSnapshotIfCurrent still
+  // matches on the outgoing (cache) mode.
+  refreshLatestScopeSnapshotIfCurrent();
   reviewScopeMode = mode;
   updateReviewScopeControls();
   loadReviewScopeResults();
