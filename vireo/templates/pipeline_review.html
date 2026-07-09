@@ -3230,7 +3230,7 @@ function renderSpeciesWidget(enc, encIdx, level, burstIdx, pos) {
   var widgetCls = level === 'burst' ? 'burst-species-widget' : 'species-widget';
 
   var idKey = (burstIdx != null ? burstIdx : 'enc') + '_' + pos;
-  var html = '<span class="' + widgetCls + '" data-enc="' + encIdx + '" data-burst="' + (burstIdx != null ? burstIdx : '') + '">';
+  var html = '<span class="' + widgetCls + '" data-species-widget="1" data-level="' + level + '" data-enc="' + encIdx + '" data-burst="' + (burstIdx != null ? burstIdx : '') + '" data-pos="' + pos + '">';
   html += '<span class="species-name ' + cls + '" title="' + (hasCandidate ? 'Change species' : 'Add species') + '" onclick="toggleSpeciesDropdown(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',\'' + pos + '\')">' + escapeHtml(displayName) + '</span>';
   html += '<span class="species-badge ' + cls + '">' + badge + '</span>';
   if (!isConfirmed && hasCandidate) {
@@ -3358,6 +3358,49 @@ function speciesInputKey(event, encIdx, burstIdx) {
   confirmSpecies(event, encIdx, burstIdx, typed);
 }
 
+function encounterStructureSignature(encounters) {
+  return JSON.stringify((encounters || []).map(function(enc) {
+    return {
+      photo_ids: enc.photo_ids || [],
+      bursts: (enc.bursts || []).map(function(burst) {
+        return (burst && burst.photo_ids) || burst || [];
+      }),
+    };
+  }));
+}
+
+function replaceSpeciesWidgetNode(node, encIdx, burstIdx) {
+  if (!node || !pipelineResults || !pipelineResults.encounters) return;
+  var enc = pipelineResults.encounters[encIdx];
+  if (!enc) return;
+  var level = node.getAttribute('data-level') || (burstIdx != null ? 'burst' : 'encounter');
+  var pos = node.getAttribute('data-pos') || 'top';
+  var nodeBurst = node.getAttribute('data-burst');
+  var targetBurstIdx = nodeBurst === '' || nodeBurst == null ? null : parseInt(nodeBurst, 10);
+  node.outerHTML = renderSpeciesWidget(enc, encIdx, level, targetBurstIdx, pos);
+}
+
+function rerenderSpeciesWidgets(encIdx, burstIdx) {
+  var selector = '[data-species-widget="1"][data-enc="' + encIdx + '"]';
+  if (burstIdx != null) selector += '[data-burst="' + burstIdx + '"]';
+  document.querySelectorAll(selector).forEach(function(node) {
+    replaceSpeciesWidgetNode(node, encIdx, burstIdx);
+  });
+}
+
+function speciesConfirmNeedsFullRender() {
+  return hideConfirmed || !!speciesFilter;
+}
+
+function refreshAfterSpeciesConfirm(encIdx, burstIdx, forceFullRender) {
+  updateSummaryBar(refreshLocalSummaryCounts());
+  if (forceFullRender || speciesConfirmNeedsFullRender()) {
+    renderResults();
+  } else {
+    rerenderSpeciesWidgets(encIdx, burstIdx);
+  }
+}
+
 async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
   event.stopPropagation();
   closeAllDropdowns();
@@ -3387,18 +3430,49 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
   var body = { species: speciesName, photo_ids: photoIds };
   if (burstIdx != null) body.burst_index = burstIdx;
 
-  var resp = await safeFetch('/api/encounters/species', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+  var rollback;
+  var optimisticStructure = null;
+  if (burstIdx != null && enc.bursts && enc.bursts[burstIdx]) {
+    var burst = enc.bursts[burstIdx];
+    var previousOverride = burst.species_override
+      ? Object.assign({}, burst.species_override)
+      : burst.species_override;
+    rollback = function() { burst.species_override = previousOverride; };
+    burst.species_override = { species: speciesName, confirmed: true };
+  } else {
+    var previousConfirmed = enc.species_confirmed;
+    var previousSpecies = enc.confirmed_species;
+    rollback = function() {
+      enc.species_confirmed = previousConfirmed;
+      enc.confirmed_species = previousSpecies;
+    };
+    enc.species_confirmed = true;
+    enc.confirmed_species = speciesName;
+  }
+  refreshAfterSpeciesConfirm(encIdx, burstIdx, false);
+  optimisticStructure = encounterStructureSignature(pipelineResults.encounters);
+
+  var resp;
+  try {
+    resp = await safeFetch('/api/encounters/species', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    if (rollback) rollback();
+    refreshAfterSpeciesConfirm(encIdx, burstIdx, false);
+    return;
+  }
   if (!resp || !resp.ok) return;
 
   // Prefer the server's encounter list — the endpoint may auto-detach a burst
   // into a new or adjacent encounter when its confirmed species differs from
   // the encounter's, and a stale local list would lose that change on the
   // next save-cache POST.
+  var forceFullRender = false;
   if (resp.encounters) {
+    forceFullRender = encounterStructureSignature(resp.encounters) !== optimisticStructure;
     pipelineResults.encounters = resp.encounters;
     if (resp.summary) {
       pipelineResults.summary = resp.summary;
@@ -3419,7 +3493,7 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
       'info'
     );
   }
-  renderResults();
+  refreshAfterSpeciesConfirm(encIdx, burstIdx, forceFullRender);
   checkPendingSync();
 }
 
