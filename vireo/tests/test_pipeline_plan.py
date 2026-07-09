@@ -1987,8 +1987,8 @@ def test_regroup_plan_will_run_species_review_for_identify_preset(
     branch can't run then. The plan mirrors that no-model degradation —
     see ``test_regroup_plan_species_review_skipped_when_no_active_model``.
     """
-    from pipeline_plan import compute_plan
     import models as models_mod
+    from pipeline_plan import compute_plan
     monkeypatch.setattr(models_mod, "get_active_model", lambda: {
         "id": "m1", "name": "BioCLIP-2", "downloaded": True,
     })
@@ -2031,8 +2031,8 @@ def test_regroup_plan_species_review_skipped_when_no_active_model(
     degradation instead of promising "Will prepare species review" for
     a run that will only show the no-model warning.
     """
-    from pipeline_plan import compute_plan
     import models as models_mod
+    from pipeline_plan import compute_plan
     # No downloaded model, no active model — the plan-side auto-skip
     # gate should trip. The `_make_db` fixture already ships no models,
     # but the dev's real ~/.vireo/models.json could bleed in without
@@ -2057,8 +2057,8 @@ def test_regroup_plan_species_review_skipped_when_selected_model_not_downloaded(
     requested ``model_ids`` entry is missing its download. The plan
     must not advertise species review in that case either.
     """
-    from pipeline_plan import compute_plan
     import models as models_mod
+    from pipeline_plan import compute_plan
     monkeypatch.setattr(models_mod, "get_models", lambda: [
         {"id": "m1", "name": "BioCLIP-2", "downloaded": False},
     ])
