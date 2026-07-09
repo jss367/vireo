@@ -250,6 +250,7 @@ def test_pipeline_review_scope_control_loads_workspace_and_collection(live_serve
     _write_predictionless_pipeline_cache(live_server, cached_ids)
 
     payloads = []
+    flag_payloads = []
 
     page.route(
         "**/api/collections",
@@ -265,6 +266,13 @@ def test_pipeline_review_scope_control_loads_workspace_and_collection(live_serve
         route.fulfill(json=_review_result_for_ids(live_server, ids))
 
     page.route("**/api/pipeline/regroup-live", regroup_live)
+    page.route(
+        "**/api/photos/*/flag",
+        lambda route: (
+            flag_payloads.append(route.request.post_data_json),
+            route.fulfill(json={"ok": True}),
+        ),
+    )
 
     page.goto(f"{live_server['url']}/pipeline/review")
 
@@ -278,6 +286,13 @@ def test_pipeline_review_scope_control_loads_workspace_and_collection(live_serve
     expect(page.locator("#statTotalPhotos")).to_have_text("1")
     assert payloads[-1]["collection_id"] == 123
     assert payloads[-1]["save_cache"] is False
+
+    page.evaluate(
+        "(photoId) => window.setFlagFor(photoId, 'flagged')",
+        collection_ids[0],
+    )
+    page.wait_for_timeout(100)
+    assert flag_payloads == []
 
 
 def test_pipeline_review_sidebar_collapses_and_persists(live_server, page):

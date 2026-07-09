@@ -2959,6 +2959,10 @@ function setPipelineReviewFlag(photoId, flag) {
   if (flag !== 'flagged' && flag !== 'rejected' && flag !== 'none') return Promise.resolve();
   photoId = parseInt(photoId, 10);
   if (!photoId) return Promise.resolve();
+  if (isScopedReviewView()) {
+    notifyReadOnlyScopedView();
+    return Promise.resolve();
+  }
 
   return safeFetch('/api/photos/' + photoId + '/flag', {
     method: 'POST',
@@ -2973,6 +2977,7 @@ function setPipelineReviewFlag(photoId, flag) {
     }
     var msg = flag === 'flagged' ? 'Marked as pick' : (flag === 'rejected' ? 'Marked as reject' : 'Flag cleared');
     showToast(msg, 'success');
+    refreshLatestScopeSnapshotIfCurrent();
   });
 }
 
@@ -3277,6 +3282,7 @@ function applyReviewResults(data, info) {
   renderDegradedBanner(reviewReadiness && reviewReadiness.enhancing_missing);
   renderCacheScopeBanner(resultsCacheInfo);
   updateReviewScopeStatusFromResults(data);
+  refreshLatestScopeSnapshotIfCurrent();
 }
 
 function scopedCacheInfoFor(data) {
@@ -3887,6 +3893,7 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
   }
   refreshAfterSpeciesConfirm(encIdx, burstIdx, forceFullRender);
   checkPendingSync();
+  refreshLatestScopeSnapshotIfCurrent();
 }
 
 async function clearBurstOverride(event, encIdx, burstIdx) {
@@ -3907,6 +3914,7 @@ async function clearBurstOverride(event, encIdx, burstIdx) {
   });
   renderResults();
   updateSummaryBar(refreshLocalSummaryCounts());
+  refreshLatestScopeSnapshotIfCurrent();
 }
 
 // -- Detach & Undo --
@@ -3960,6 +3968,7 @@ async function detachBurst(encIdx, burstIdx) {
   if (resp.summary) pipelineResults.summary = resp.summary;
   renderResults();
   updateSummaryBar(pipelineResults.summary);
+  refreshLatestScopeSnapshotIfCurrent();
 
   showUndo('Burst detached from encounter', function() {
     // Restore from snapshot
@@ -3972,6 +3981,7 @@ async function detachBurst(encIdx, burstIdx) {
     });
     renderResults();
     updateSummaryBar(pipelineResults.summary);
+    refreshLatestScopeSnapshotIfCurrent();
   });
 }
 
@@ -3993,6 +4003,7 @@ async function detachPhoto(encIdx, burstIdx, photoId) {
   if (resp.summary) pipelineResults.summary = resp.summary;
   renderResults();
   updateSummaryBar(pipelineResults.summary);
+  refreshLatestScopeSnapshotIfCurrent();
 
   showUndo('Photo detached from burst', function() {
     pipelineResults = snapshot;
@@ -4003,6 +4014,7 @@ async function detachPhoto(encIdx, burstIdx, photoId) {
     });
     renderResults();
     updateSummaryBar(pipelineResults.summary);
+    refreshLatestScopeSnapshotIfCurrent();
   });
 }
 
@@ -6060,6 +6072,7 @@ async function grmApply() {
       clearBrowseBurstHandoff();
     }
 
+    refreshLatestScopeSnapshotIfCurrent();
     closeGroupReview();
     // Clear the species input for next use
     document.getElementById('grmSpecies').value = '';
