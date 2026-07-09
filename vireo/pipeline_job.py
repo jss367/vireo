@@ -4914,7 +4914,20 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             emit_trace=True,
                         )
                         cache_dir = os.path.dirname(db_path)
-                        save_results(results, cache_dir, workspace_id)
+                        # Don't preserve miss_computed_at from any prior
+                        # full run. The identify strategy skips the miss
+                        # stage entirely, so the cache we're writing has
+                        # no misses of its own; carrying the old marker
+                        # forward would make Pipeline Review call
+                        # /api/misses?since=<old marker> and render miss
+                        # rows from the previous full run as if they were
+                        # produced by this identify pass.
+                        save_results(
+                            results,
+                            cache_dir,
+                            workspace_id,
+                            preserve_miss_marker=False,
+                        )
                         # The species-only pipeline overwrites
                         # pipeline_results_ws*.json with review-only output
                         # (no burst/keep/reject scoring). If a prior full

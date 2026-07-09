@@ -10673,7 +10673,7 @@ def _run_pipeline_for_miss_tests(tmp_path, monkeypatch, *, pipeline_cfg,
         },
     )
     monkeypatch.setattr(
-        pipeline_mod, "save_results", lambda results, cache_dir, ws: None,
+        pipeline_mod, "save_results", lambda *a, **kw: None,
     )
     monkeypatch.setattr(
         pipeline_mod, "load_photo_features",

@@ -465,6 +465,14 @@ function updateAdvancedImportOptions() {
     opt.disabled = !advanced;
   });
   if (!advanced && sel.selectedOptions.length && sel.selectedOptions[0].disabled) {
+    // The workspace's default is an advanced-only strategy (e.g. full,
+    // cull_ready) but advanced mode is off, so we have to hide it in the
+    // dropdown. Fall the visual selection back to __none__ but remember
+    // that this fallback isn't a user choice — otherwise startImport
+    // would post after_import: null and silently downgrade the workspace
+    // default to import-only. The flag is cleared as soon as the user
+    // actively interacts with the select.
+    _afterImportHidingDefault = true;
     sel.value = '__none__';
   }
 }
@@ -482,6 +490,16 @@ window.addEventListener('devmodechange', updateAdvancedImportOptions);
 // fall back to the endpoint's "key omitted → apply workspace default"
 // branch, which is what the user actually expects.
 let _afterImportConfigLoaded = false;
+
+// True when updateAdvancedImportOptions() has visually reset the select
+// to __none__ solely because the workspace's stored default is an
+// advanced-only strategy (full / cull_ready) and advanced mode is off.
+// In that state the __none__ display is a UI artifact, not a user
+// choice, so startImport() must omit the after_import key and let the
+// server apply the workspace default rather than posting an explicit
+// null (which would run import-only). Cleared as soon as the user
+// actively changes the select.
+let _afterImportHidingDefault = false;
 
 function showError(msg) {
   const el = document.getElementById('importError');
@@ -773,7 +791,7 @@ async function startImport() {
     body.folder_template = (document.getElementById('folderTemplate').value || '').trim();
     body.file_types = document.getElementById('fileTypes').value;
   }
-  if (_afterImportConfigLoaded) {
+  if (_afterImportConfigLoaded && !_afterImportHidingDefault) {
     body.after_import = selectedAfterImport();
   }
   document.getElementById('btnStart').disabled = true;
@@ -974,6 +992,15 @@ async function initImportPage() {
   const def = pipelineCfg.default_strategy;
   sel.value = def ? def : '__none__';
   if (sel.selectedIndex === -1) sel.value = '__none__';
+  // updateAdvancedImportOptions() may flip _afterImportHidingDefault
+  // when the resolved default is an advanced-only strategy the current
+  // mode hides. Wire the change listener first so a user-driven change
+  // afterwards (advanced toggle keeps it, explicit dropdown pick clears
+  // it) is always tracked.
+  sel.addEventListener('change', () => {
+    _afterImportHidingDefault = false;
+  });
+  _afterImportHidingDefault = false;
   updateAdvancedImportOptions();
   // Only mark the resolved default as trustworthy when BOTH config
   // fetches actually succeeded. Otherwise the select value reflects the

@@ -1326,6 +1326,39 @@ def test_save_results_preserves_miss_computed_at_across_reflow(tmp_path):
     assert loaded["miss_computed_at"] == "2026-04-22T12:00:00.000000+00:00"
 
 
+def test_save_results_preserve_miss_marker_false_drops_existing(tmp_path):
+    """When called with preserve_miss_marker=False, save_results must
+    drop any prior miss_computed_at marker instead of carrying it
+    forward. The identify/species-only pipeline uses this so Pipeline
+    Review doesn't render misses from an earlier full run as if this
+    pass produced them."""
+    from pipeline import (
+        load_photo_features,
+        load_results,
+        run_full_pipeline,
+        save_results,
+        save_results_raw,
+    )
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    photos = load_photo_features(db)
+    results = run_full_pipeline(photos)
+
+    cache_dir = str(tmp_path)
+    save_results(results, cache_dir, workspace_id=1)
+
+    raw = load_results(cache_dir, workspace_id=1)
+    raw["miss_computed_at"] = "2026-04-22T12:00:00.000000+00:00"
+    save_results_raw(raw, cache_dir, workspace_id=1)
+
+    fresh = run_full_pipeline(photos)
+    assert "miss_computed_at" not in fresh
+    save_results(fresh, cache_dir, workspace_id=1, preserve_miss_marker=False)
+
+    loaded = load_results(cache_dir, workspace_id=1)
+    assert "miss_computed_at" not in loaded
+
+
 def test_save_results_new_marker_overrides_existing(tmp_path):
     """When the caller's results dict does carry miss_computed_at (e.g.
     a fresh full pipeline run restamping the marker), it must win over

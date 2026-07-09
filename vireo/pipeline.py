@@ -930,13 +930,19 @@ def serialize_results(results):
     return out
 
 
-def save_results(results, cache_dir, workspace_id):
+def save_results(results, cache_dir, workspace_id, preserve_miss_marker=True):
     """Save serialized pipeline results to a JSON cache file.
 
     Args:
         results: dict from run_full_pipeline()
         cache_dir: directory containing the database (e.g. ~/.vireo/)
         workspace_id: active workspace ID
+        preserve_miss_marker: when True (default) and the new results
+            lack ``miss_computed_at``, carry the previous cache's marker
+            forward. Set False for pipelines that produce a
+            semantically-fresh cache the prior miss stage cannot describe
+            (e.g. the identify/species-only path), so Pipeline Review
+            doesn't surface stale misses from an earlier full run.
 
     Returns:
         path to the saved JSON file
@@ -949,7 +955,11 @@ def save_results(results, cache_dir, workspace_id):
     # this pipeline run. reflow/regroup-live don't touch miss flags,
     # so overwriting this marker with a fresh save would make the
     # shortcut hide itself after every threshold tweak.
-    if "miss_computed_at" not in serialized and os.path.exists(path):
+    if (
+        preserve_miss_marker
+        and "miss_computed_at" not in serialized
+        and os.path.exists(path)
+    ):
         existing = _load_results_json(path)
         if existing and existing.get("miss_computed_at"):
             serialized["miss_computed_at"] = existing["miss_computed_at"]
