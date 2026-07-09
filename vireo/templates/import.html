@@ -76,6 +76,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
   cursor: pointer; border-bottom: 1px solid color-mix(in srgb, var(--border-primary) 60%, transparent);
 }
 .folder-browser-item:hover { background: var(--bg-hover, rgba(255,255,255,0.05)); }
+.folder-browser-item.selected { background: color-mix(in srgb, var(--accent) 15%, transparent); }
 .folder-browser-empty { padding: 14px; font-size: 12px; color: var(--text-secondary); }
 .folder-browser-actions {
   display: flex; gap: 8px; justify-content: flex-end;
@@ -202,6 +203,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
       </div>
       <div class="folder-browser-path" id="folderBrowserPath"></div>
       <div class="folder-browser-list" id="folderBrowserList"></div>
+      <div class="folder-browser-path" id="folderBrowserSelection"></div>
     </div>
     <div class="folder-browser-actions">
       <button class="btn" type="button" onclick="closeImportFolderBrowser()">Cancel</button>
@@ -223,6 +225,8 @@ let browserPath = '';
 let browserHomePath = '';
 let browserSeq = 0;
 let browserEscHandler = null;
+let browserSelectedPaths = [];
+let browserSelectAnchorPath = '';
 let activeImportMode = 'in_place';
 
 function selectedImportMode() {
@@ -319,9 +323,10 @@ function openImportFolderBrowser(mode) {
   browserMode = mode === 'destination' ? 'destination' : 'source';
   const overlay = document.getElementById('importFolderBrowser');
   document.getElementById('folderBrowserTitle').textContent =
-    browserMode === 'source' ? 'Select Source Folder' : 'Select Destination Folder';
-  document.getElementById('folderBrowserSelectBtn').textContent =
-    browserMode === 'source' ? 'Add This Folder' : 'Select This Folder';
+    browserMode === 'source' ? 'Select Source Folders' : 'Select Destination Folder';
+  browserSelectedPaths = [];
+  browserSelectAnchorPath = '';
+  updateImportBrowserSelection();
   overlay.classList.add('open');
   overlay.onclick = (e) => {
     if (e.target === overlay) closeImportFolderBrowser();
@@ -356,6 +361,9 @@ async function browseImportFolderTo(path) {
   // submits the previous folder instead of the one the user requested —
   // both on modal open and mid-session navigation.
   browserPath = '';
+  browserSelectedPaths = [];
+  browserSelectAnchorPath = '';
+  updateImportBrowserSelection();
   const selectBtn = document.getElementById('folderBrowserSelectBtn');
   if (selectBtn) selectBtn.disabled = true;
   document.getElementById('folderBrowserPath').textContent = 'Loading…';
@@ -400,6 +408,8 @@ async function browseImportFolderTo(path) {
     }
     const data = await resp.json();
     browserPath = data.path || '';
+    browserSelectedPaths = [];
+    browserSelectAnchorPath = '';
     if (!path) browserHomePath = browserPath;
     renderImportFolderBrowser(data);
   } catch (e) {
@@ -421,10 +431,10 @@ function renderImportFolderBrowser(data, opts) {
     parent = data.path.substring(0, data.path.lastIndexOf('/')) || '/';
   }
   if (data.path && data.path !== '/' && parent && parent !== data.path) {
-    html += '<div class="folder-browser-item" data-browse-path="' + importEscapeAttr(parent) + '">&#128193; ..</div>';
+    html += '<div class="folder-browser-item" data-browse-path="' + importEscapeAttr(parent) + '" data-parent-link="1">&#128193; ..</div>';
   }
   dirs.forEach((d) => {
-    html += '<div class="folder-browser-item" data-browse-path="' + importEscapeAttr(d.path) + '">&#128193; ' +
+    html += '<div class="folder-browser-item" data-browse-path="' + importEscapeAttr(d.path) + '" data-folder-path="' + importEscapeAttr(d.path) + '">&#128193; ' +
       importEscapeHtml(d.name || d.path) + '</div>';
   });
   if (!html) {
@@ -434,10 +444,79 @@ function renderImportFolderBrowser(data, opts) {
   list.innerHTML = html;
   list.onclick = (e) => {
     const item = e.target.closest('.folder-browser-item[data-browse-path]');
-    if (item) browseImportFolderTo(item.getAttribute('data-browse-path'));
+    if (!item) return;
+    if (item.getAttribute('data-parent-link') === '1' || browserMode === 'destination') {
+      browseImportFolderTo(item.getAttribute('data-browse-path'));
+      return;
+    }
+    selectImportBrowserListItem(item, e);
+  };
+  list.ondblclick = (e) => {
+    const item = e.target.closest('.folder-browser-item[data-browse-path]');
+    if (item && item.getAttribute('data-parent-link') !== '1') {
+      browseImportFolderTo(item.getAttribute('data-browse-path'));
+    }
   };
   const selectBtn = document.getElementById('folderBrowserSelectBtn');
   if (selectBtn) selectBtn.disabled = !browserPath;
+  updateImportBrowserSelection();
+}
+
+function selectImportBrowserListItem(item, event) {
+  const path = item.getAttribute('data-folder-path') || item.getAttribute('data-browse-path');
+  if (!path) return;
+  const items = Array.from(document.querySelectorAll('#folderBrowserList .folder-browser-item[data-folder-path]'));
+  const shift = event && event.shiftKey;
+  const toggle = event && (event.metaKey || event.ctrlKey);
+
+  if (shift && browserSelectAnchorPath) {
+    let anchorIdx = items.findIndex((el) => el.getAttribute('data-folder-path') === browserSelectAnchorPath);
+    const clickIdx = items.findIndex((el) => el.getAttribute('data-folder-path') === path);
+    if (clickIdx === -1) return;
+    if (anchorIdx === -1) anchorIdx = clickIdx;
+    const lo = Math.min(anchorIdx, clickIdx);
+    const hi = Math.max(anchorIdx, clickIdx);
+    browserSelectedPaths = items.slice(lo, hi + 1).map((el) => el.getAttribute('data-folder-path'));
+  } else if (toggle) {
+    const idx = browserSelectedPaths.indexOf(path);
+    if (idx === -1) browserSelectedPaths.push(path);
+    else browserSelectedPaths.splice(idx, 1);
+    browserSelectAnchorPath = path;
+  } else {
+    browserSelectedPaths = [path];
+    browserSelectAnchorPath = path;
+  }
+  updateImportBrowserSelection();
+}
+
+function updateImportBrowserSelection() {
+  const selected = {};
+  browserSelectedPaths.forEach((path) => { selected[path] = true; });
+  document.querySelectorAll('#folderBrowserList .folder-browser-item[data-folder-path]').forEach((item) => {
+    item.classList.toggle('selected', !!selected[item.getAttribute('data-folder-path')]);
+  });
+
+  const selection = document.getElementById('folderBrowserSelection');
+  if (selection) {
+    if (browserMode === 'source' && browserSelectedPaths.length > 1) {
+      selection.textContent = browserSelectedPaths.length + ' folders selected';
+    } else if (browserMode === 'source' && browserSelectedPaths.length === 1) {
+      selection.textContent = browserSelectedPaths[0];
+    } else {
+      selection.textContent = '';
+    }
+  }
+
+  const selectBtn = document.getElementById('folderBrowserSelectBtn');
+  if (selectBtn) {
+    if (browserMode === 'source') {
+      selectBtn.textContent = browserSelectedPaths.length > 1
+        ? 'Add ' + browserSelectedPaths.length + ' Folders'
+        : 'Add This Folder';
+    } else {
+      selectBtn.textContent = 'Select This Folder';
+    }
+  }
 }
 
 function selectImportBrowserFolder() {
@@ -445,7 +524,8 @@ function selectImportBrowserFolder() {
   if (browserMode === 'destination') {
     document.getElementById('destInput').value = browserPath;
   } else {
-    addSourcePath(browserPath);
+    const paths = browserSelectedPaths.length ? browserSelectedPaths : [browserPath];
+    paths.forEach(addSourcePath);
   }
   closeImportFolderBrowser();
 }

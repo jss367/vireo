@@ -39,11 +39,100 @@ def test_import_browse_button_opens_folder_browser_fallback(live_server, page):
 
     browser = page.locator("[data-testid='import-folder-browser']")
     expect(browser).to_have_class(re.compile(r"\bopen\b"))
-    expect(page.locator("#folderBrowserTitle")).to_have_text("Select Source Folder")
+    expect(page.locator("#folderBrowserTitle")).to_have_text("Select Source Folders")
     expect(page.locator(".folder-browser-panel")).to_have_attribute("role", "dialog")
     expect(page.locator(".folder-browser-panel")).to_have_attribute("aria-modal", "true")
     expect(page.locator(".folder-browser-panel")).to_have_attribute(
         "aria-labelledby", "folderBrowserTitle")
+
+
+def test_import_folder_browser_selects_multiple_source_folders(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/import")
+    page.evaluate("window.pickDirectory = async () => null")
+    page.evaluate(
+        """
+        () => {
+          const originalFetch = window.fetch.bind(window);
+          window.fetch = (input, init) => {
+            const target = typeof input === 'string' ? input : input.url;
+            if (target && target.indexOf('/api/browse') === 0) {
+              return Promise.resolve(new Response(JSON.stringify({
+                path: '/tmp',
+                dirs: [
+                  {name: 'card-a', path: '/tmp/card-a'},
+                  {name: 'card-b', path: '/tmp/card-b'},
+                  {name: 'card-c', path: '/tmp/card-c'},
+                ],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            return originalFetch(input, init);
+          };
+        }
+        """
+    )
+
+    page.locator("[data-testid='import-source-browse-btn']").click()
+    items = page.locator("#folderBrowserList .folder-browser-item[data-folder-path]")
+    expect(items).to_have_count(3)
+
+    items.nth(0).click()
+    items.nth(2).click(modifiers=["Shift"])
+
+    expect(page.locator("#folderBrowserSelectBtn")).to_have_text("Add 3 Folders")
+    page.locator("#folderBrowserSelectBtn").click()
+
+    source_list = page.locator("#sourceList")
+    expect(source_list).to_contain_text("/tmp/card-a")
+    expect(source_list).to_contain_text("/tmp/card-b")
+    expect(source_list).to_contain_text("/tmp/card-c")
+
+
+def test_import_folder_browser_toggles_discontiguous_source_folders(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/import")
+    page.evaluate("window.pickDirectory = async () => null")
+    page.evaluate(
+        """
+        () => {
+          const originalFetch = window.fetch.bind(window);
+          window.fetch = (input, init) => {
+            const target = typeof input === 'string' ? input : input.url;
+            if (target && target.indexOf('/api/browse') === 0) {
+              return Promise.resolve(new Response(JSON.stringify({
+                path: '/tmp',
+                dirs: [
+                  {name: 'card-a', path: '/tmp/card-a'},
+                  {name: 'card-b', path: '/tmp/card-b'},
+                  {name: 'card-c', path: '/tmp/card-c'},
+                ],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            return originalFetch(input, init);
+          };
+        }
+        """
+    )
+
+    page.locator("[data-testid='import-source-browse-btn']").click()
+    items = page.locator("#folderBrowserList .folder-browser-item[data-folder-path]")
+    expect(items).to_have_count(3)
+
+    items.nth(0).click()
+    items.nth(2).evaluate(
+        """el => el.dispatchEvent(new MouseEvent('click', {
+          bubbles: true,
+          ctrlKey: true,
+        }))"""
+    )
+
+    expect(page.locator("#folderBrowserSelectBtn")).to_have_text("Add 2 Folders")
+    page.locator("#folderBrowserSelectBtn").click()
+
+    source_list = page.locator("#sourceList")
+    expect(source_list).to_contain_text("/tmp/card-a")
+    expect(source_list).not_to_contain_text("/tmp/card-b")
+    expect(source_list).to_contain_text("/tmp/card-c")
 
 
 def test_import_folder_browser_disables_select_while_pending(live_server, page):
