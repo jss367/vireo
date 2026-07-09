@@ -117,6 +117,13 @@ class PipelineParams:
     reclassify: bool = False
     skip_extract_masks: bool = False
     skip_regroup: bool = False
+    # Distinguishes the identify preset's species-only review from a
+    # generic ``skip_regroup=True`` run. Only set to ``"species"`` by
+    # ``process_strategies.identify`` — Advanced/Custom on the Process
+    # page and API clients sending ``skip_regroup: true`` without a
+    # strategy leave this ``None`` so regroup_stage skips cleanly instead
+    # of overwriting the workspace cache with all-REVIEW output.
+    review_mode: str | None = None
     skip_classify: bool = False
     skip_eye_keypoints: bool = False
     # Per-run override for the config-gated misses stage. None defers to the
@@ -4874,10 +4881,34 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         def regroup_stage():
             """Run pipeline grouping + scoring + triage from cached features."""
             if params.skip_regroup:
-                if abort.is_set() or not collection_id or params.skip_classify:
+                # Only take the species-review save path when the caller
+                # explicitly asked for it (the identify preset sets
+                # ``review_mode="species"`` via process_strategies). A
+                # classify-only run without that opt-in — Advanced/Custom
+                # on the Process page, or an API client sending
+                # ``skip_regroup: true`` — must NOT overwrite
+                # ``pipeline_results_ws*.json`` with all-REVIEW species
+                # output, since that would silently reintroduce the
+                # culling-pipeline downgrade the reviewer flagged (the
+                # user just wanted to refresh classifications, not turn
+                # the workspace cache into a species-review cache).
+                do_species = (
+                    params.review_mode == "species"
+                    and not abort.is_set()
+                    and collection_id
+                    and not params.skip_classify
+                )
+                if not do_species:
                     stages["regroup"]["status"] = "skipped"
                     runner.update_step(job["id"], "regroup", status="completed",
                                        summary="Skipped")
+                    # Emit a progress event so the SSE stream (and tests
+                    # asserting on the last progress payload) can see the
+                    # stage's terminal "skipped" state. Without this, a
+                    # downstream miss_stage that also short-circuits
+                    # leaves the last stages dict stuck at whatever the
+                    # detect/classify stage emitted last.
+                    _update_stages(runner, job["id"], stages)
                     return
                 try:
                     import config as cfg

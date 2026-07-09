@@ -45,6 +45,14 @@ _BASE = {
     "skip_eye_keypoints": False,
     "skip_regroup": False,
     "miss_enabled": True,
+    # Distinguishes the identify preset's species-only review path from
+    # a generic ``skip_regroup=True`` run (Advanced/Custom on the Process
+    # page, or an API caller that just wants to refresh classifications
+    # without touching grouping). Without this, ``pipeline_job``'s
+    # regroup_stage would treat every classify-only run as species-review
+    # and overwrite ``pipeline_results_ws*.json`` with all-REVIEW output,
+    # silently downgrading the cache for callers who never asked for it.
+    "review_mode": None,
 }
 
 STRATEGIES = {
@@ -53,6 +61,7 @@ STRATEGIES = {
         "skip_eye_keypoints": True,
         "skip_regroup": True,
         "miss_enabled": False,
+        "review_mode": "species",
     },
     "full": {},
     "cull_ready": {

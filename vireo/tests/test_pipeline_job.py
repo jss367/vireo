@@ -10743,11 +10743,16 @@ def test_miss_enabled_false_param_short_circuits_before_compute(
 
 
 def test_identify_run_prepares_species_review_cache(tmp_path, monkeypatch):
-    """skip_regroup + classify still writes species review results."""
+    """Identify preset (skip_regroup + classify + review_mode=species)
+    writes species review results."""
     runner, result, spy_calls, job = _run_pipeline_for_miss_tests(
         tmp_path, monkeypatch,
         pipeline_cfg={"miss_enabled": True},
-        params_extra={"skip_regroup": True, "miss_enabled": False},
+        params_extra={
+            "skip_regroup": True,
+            "miss_enabled": False,
+            "review_mode": "species",
+        },
     )
     assert result["stages"]["review"] == {"review_count": 1}
     assert spy_calls == []
@@ -10759,6 +10764,35 @@ def test_identify_run_prepares_species_review_cache(tmp_path, monkeypatch):
         "status": "completed",
         "summary": "Review results ready",
     } in regroup_steps
+
+
+def test_classify_only_skip_regroup_does_not_write_species_cache(
+    tmp_path, monkeypatch,
+):
+    """Advanced/Custom classify-only path: skip_regroup=True with classify
+    on but no ``review_mode`` opt-in must SKIP regroup entirely rather than
+    fall through to the identify preset's species-review save. Otherwise a
+    user who just disabled Group & Score to refresh classifications would
+    silently see the workspace cache overwritten with all-REVIEW output —
+    the culling-pipeline downgrade the reviewer flagged."""
+    runner, result, spy_calls, job = _run_pipeline_for_miss_tests(
+        tmp_path, monkeypatch,
+        pipeline_cfg={"miss_enabled": True},
+        params_extra={
+            "skip_regroup": True,
+            "miss_enabled": False,
+            # review_mode intentionally left at its default (None) — this
+            # is the shape /api/jobs/pipeline gets from a Custom-strategy
+            # body that ticks off Group without setting a strategy name.
+        },
+    )
+    # No "review" summary got written — species-review pipeline never ran.
+    assert "review" not in result["stages"]
+    assert _last_stages(runner)["regroup"]["status"] == "skipped"
+    regroup_steps = [
+        kw for (_, step, kw) in runner.step_updates if step == "regroup"
+    ]
+    assert {"status": "completed", "summary": "Skipped"} in regroup_steps
 
 
 def test_miss_enabled_true_param_overrides_disabled_workspace(

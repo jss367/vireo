@@ -17,6 +17,12 @@ def test_full_skips_nothing():
     flags = resolve_strategy("full")
     assert not any(v for k, v in flags.items() if k.startswith("skip_"))
     assert flags["miss_enabled"] is True
+    # ``review_mode`` distinguishes the identify preset's species-only
+    # save path from a generic classify-only run. Full processing must
+    # never trigger it, otherwise a caller who pinned ``skip_regroup=True``
+    # onto a full-strategy run would silently downgrade the workspace
+    # cache to all-REVIEW output.
+    assert flags["review_mode"] is None
 
 
 def test_cull_ready_skips_expensive_extras():
@@ -27,6 +33,7 @@ def test_cull_ready_skips_expensive_extras():
     # classify and regroup stay on: review pages need predictions + encounters
     assert flags["skip_classify"] is False
     assert flags["skip_regroup"] is False
+    assert flags["review_mode"] is None
 
 
 def test_identify_keeps_classify_but_skips_quality_stack():
@@ -36,6 +43,11 @@ def test_identify_keeps_classify_but_skips_quality_stack():
     assert flags["skip_eye_keypoints"] is True
     assert flags["skip_regroup"] is True
     assert flags["miss_enabled"] is False
+    # Only the identify preset flips this on; regroup_stage keys the
+    # species-only cache write off exactly this value so generic
+    # ``skip_regroup=True`` requests skip the stage instead of writing
+    # all-REVIEW output over the workspace cache.
+    assert flags["review_mode"] == "species"
 
 
 def test_quick_look_is_thumbs_and_previews_only():
@@ -45,6 +57,7 @@ def test_quick_look_is_thumbs_and_previews_only():
     assert flags["skip_eye_keypoints"] is True
     assert flags["skip_regroup"] is True
     assert flags["miss_enabled"] is False
+    assert flags["review_mode"] is None
 
 
 def test_unknown_strategy_raises():

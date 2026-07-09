@@ -17874,6 +17874,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             skip_eye_keypoints=expanded["skip_eye_keypoints"],
             skip_regroup=expanded["skip_regroup"],
             miss_enabled=expanded["miss_enabled"],
+            review_mode=expanded["review_mode"],
         )
         model_warning = _apply_no_model_auto_skip(params)
 
@@ -17905,6 +17906,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "skip_classify": params.skip_classify,
             "skip_extract_masks": params.skip_extract_masks,
             "skip_regroup": params.skip_regroup,
+            "review_mode": params.review_mode,
             "miss_enabled": params.miss_enabled,
         }
         if chained_from:
@@ -18461,6 +18463,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             skip_extract_masks=body.get("skip_extract_masks", False),
             skip_eye_keypoints=body.get("skip_eye_keypoints", False),
             skip_regroup=body.get("skip_regroup", False),
+            # ``review_mode`` reaches ``body`` only through the strategy
+            # expansion at the top of this handler (identify sets it to
+            # ``"species"``). Callers who send skip_regroup without a
+            # strategy — Advanced/Custom on the Process page, or API
+            # clients refreshing classifications only — leave it None so
+            # regroup_stage skips instead of overwriting the workspace
+            # cache with all-REVIEW output.
+            review_mode=body.get("review_mode"),
             miss_enabled=body.get("miss_enabled"),
             preview_max_size=body.get("preview_max_size"),
             exclude_paths=excluded_paths_set or None,
@@ -18564,6 +18574,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "skip_classify": params.skip_classify,
             "skip_extract_masks": params.skip_extract_masks,
             "skip_regroup": params.skip_regroup,
+            "review_mode": params.review_mode,
             "miss_enabled": params.miss_enabled,
         }
         # Preserve the caller's original folder_ids alongside the derived

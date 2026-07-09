@@ -2474,6 +2474,11 @@ def test_pipeline_identify_strategy_keeps_classify_only(app_and_db, monkeypatch)
         assert cfg["skip_extract_masks"] is True
         assert cfg["skip_regroup"] is True
         assert cfg["miss_enabled"] is False
+        # Only identify opts into the species-only save path — the flag
+        # that gates regroup_stage's ``run_species_review_pipeline`` call.
+        # Without it, a Custom body posting ``skip_regroup: true`` would
+        # incorrectly land there too.
+        assert cfg["review_mode"] == "species"
 
 
 def test_pipeline_cull_ready_pins_miss_enabled_false(app_and_db, monkeypatch):
@@ -2564,6 +2569,31 @@ def test_pipeline_explicit_flags_beat_strategy(app_and_db, monkeypatch):
         cfg = _job_config(client, resp.get_json()["job_id"])
         assert cfg["skip_regroup"] is True
         assert cfg["skip_classify"] is False
+        # Full's ``review_mode`` is None. Pinning ``skip_regroup=True`` on
+        # top of it must NOT bleed the identify preset's species-only
+        # save path in — the regroup stage should skip cleanly instead of
+        # overwriting the workspace cache with all-REVIEW output.
+        assert cfg.get("review_mode") is None
+
+
+def test_pipeline_skip_regroup_without_strategy_has_no_review_mode(
+    app_and_db, monkeypatch,
+):
+    # No strategy at all + ``skip_regroup: true`` — the exact shape the
+    # reviewer flagged: an API client refreshing classifications without
+    # touching grouping. The species-only cache write must not fire, so
+    # ``review_mode`` must be None in the resulting job config.
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    _fake_active_model(monkeypatch)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg["skip_regroup"] is True
+        assert cfg.get("review_mode") is None
 
 
 # ---------------------------------------------------------------------------
