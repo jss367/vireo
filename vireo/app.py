@@ -8437,12 +8437,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         taxonomy = load_local_taxonomy()
 
         def summarize_photo(row):
+            row_keys = row.keys()
+            def row_bool(key):
+                return bool(row[key]) if key in row_keys else False
+
             return {
                 "photo_id": row["id"],
                 "filename": row["filename"],
                 "timestamp": row["timestamp"],
                 "rating": row["rating"],
                 "flag": row["flag"],
+                "wildlife_excluded": row_bool("wildlife_excluded"),
+                "miss_no_subject": row_bool("miss_no_subject"),
+                "miss_clipped": row_bool("miss_clipped"),
+                "miss_oof": row_bool("miss_oof"),
                 "width": row["width"],
                 "height": row["height"],
                 "edit_recipe": edit_recipes_by_photo.get(row["id"]),
