@@ -141,6 +141,57 @@ def _write_confirmation_pipeline_cache(live_server, photo_ids):
         json.dump(cache, f)
 
 
+def _review_result_for_ids(live_server, photo_ids):
+    db = live_server["db"]
+    placeholders = ",".join("?" for _ in photo_ids)
+    rows = db.conn.execute(
+        f"SELECT id, filename, timestamp FROM photos WHERE id IN ({placeholders}) ORDER BY id",
+        photo_ids,
+    ).fetchall()
+    photos = [
+        {
+            "id": row["id"],
+            "filename": row["filename"],
+            "timestamp": row["timestamp"],
+            "label": "REVIEW",
+            "quality_composite": 0.5,
+            "flag": "none",
+            "rating": 0,
+        }
+        for row in rows
+    ]
+    ids = [p["id"] for p in photos]
+    return {
+        "photos": photos,
+        "encounters": [
+            {
+                "photo_ids": ids,
+                "photo_count": len(ids),
+                "burst_count": 1 if ids else 0,
+                "time_range": [
+                    photos[0]["timestamp"] if photos else None,
+                    photos[-1]["timestamp"] if photos else None,
+                ],
+                "species": [],
+                "species_predictions": [],
+                "species_confirmed": False,
+                "confirmed_species": None,
+                "bursts": [{"photo_ids": ids, "species_predictions": []}]
+                if ids else [],
+            }
+        ] if ids else [],
+        "summary": {
+            "total_photos": len(ids),
+            "encounter_count": 1 if ids else 0,
+            "burst_count": 1 if ids else 0,
+            "keep_count": 0,
+            "review_count": len(ids),
+            "reject_count": 0,
+            "rarity_protected": 0,
+        },
+    }
+
+
 def test_predictionless_pipeline_encounter_can_add_species(live_server, page):
     photo_ids = live_server["data"]["photos"][1:3]
     _write_predictionless_pipeline_cache(live_server, photo_ids)
@@ -176,6 +227,72 @@ def test_species_name_arg_keeps_nullish_values_empty(live_server, page):
 
     assert page.evaluate("speciesNameArg(null)") == "''"
     assert page.evaluate("speciesNameArg(undefined)") == "''"
+
+
+def test_pipeline_review_explains_partial_cache(live_server, page):
+    photo_ids = live_server["data"]["photos"][1:3]
+    _write_predictionless_pipeline_cache(live_server, photo_ids)
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+
+    banner = page.locator("[data-testid='pipeline-review-cache-scope']")
+    expect(banner).to_be_visible()
+    expect(banner).to_contain_text(
+        f"Showing {len(photo_ids)} of {len(live_server['data']['photos'])}"
+    )
+    expect(banner).to_contain_text("selected folders")
+
+
+def test_pipeline_review_scope_control_loads_workspace_and_collection(live_server, page):
+    all_ids = live_server["data"]["photos"]
+    cached_ids = all_ids[1:3]
+    collection_ids = [all_ids[0]]
+    _write_predictionless_pipeline_cache(live_server, cached_ids)
+
+    payloads = []
+    flag_payloads = []
+
+    page.route(
+        "**/api/collections",
+        lambda route: route.fulfill(
+            json=[{"id": 123, "name": "Selected Birds", "photo_count": 1}]
+        ),
+    )
+
+    def regroup_live(route):
+        body = route.request.post_data_json
+        payloads.append(body)
+        ids = collection_ids if body.get("collection_id") == 123 else all_ids
+        route.fulfill(json=_review_result_for_ids(live_server, ids))
+
+    page.route("**/api/pipeline/regroup-live", regroup_live)
+    page.route(
+        "**/api/photos/*/flag",
+        lambda route: (
+            flag_payloads.append(route.request.post_data_json),
+            route.fulfill(json={"ok": True}),
+        ),
+    )
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+
+    page.locator("[data-testid='pipeline-review-scope']").select_option("workspace")
+    expect(page.locator("#statTotalPhotos")).to_have_text(str(len(all_ids)))
+    assert payloads[-1]["save_cache"] is False
+    assert "collection_id" not in payloads[-1]
+
+    page.locator("[data-testid='pipeline-review-scope']").select_option("collection")
+    page.locator("[data-testid='pipeline-review-collection']").select_option("123")
+    expect(page.locator("#statTotalPhotos")).to_have_text("1")
+    assert payloads[-1]["collection_id"] == 123
+    assert payloads[-1]["save_cache"] is False
+
+    page.evaluate(
+        "(photoId) => window.setFlagFor(photoId, 'flagged')",
+        collection_ids[0],
+    )
+    page.wait_for_timeout(100)
+    assert flag_payloads == []
 
 
 def test_pipeline_review_sidebar_collapses_and_persists(live_server, page):

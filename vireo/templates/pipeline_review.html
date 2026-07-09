@@ -166,6 +166,28 @@
   cursor: pointer;
   padding: 0 4px;
 }
+.cache-scope-banner {
+  display: none;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 10px 14px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--warning);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.cache-scope-banner strong {
+  color: var(--text-primary);
+  font-weight: 700;
+}
+.cache-scope-banner a {
+  margin-left: auto;
+  color: var(--accent);
+  white-space: nowrap;
+}
 
 /* Filter bar */
 .filter-bar {
@@ -222,6 +244,34 @@
 .species-filter-clear:hover { color: var(--text-primary); }
 .species-filter-wrap .search-control { width: 224px; }
 .species-filter-wrap .search-control input { width: auto; }
+.scope-filter-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.scope-filter-wrap select {
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-primary);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12px;
+  outline: none;
+  cursor: pointer;
+}
+.scope-filter-wrap select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.scope-filter-wrap select:focus { border-color: var(--accent); }
+.scope-status {
+  min-width: 70px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
 .confidence-slider-wrap {
   display: flex;
   align-items: center;
@@ -1408,6 +1458,10 @@ input[type="range"]::-moz-range-thumb {
       <a href="/pipeline" class="degraded-banner-link">Open Pipeline</a>
       <button class="degraded-banner-close" onclick="dismissDegradedBanner()" aria-label="Dismiss">&times;</button>
     </div>
+    <div class="cache-scope-banner" id="cacheScopeBanner" data-testid="pipeline-review-cache-scope">
+      <span id="cacheScopeBannerText"></span>
+      <a href="/pipeline">Open Process</a>
+    </div>
 
     <!-- Summary bar (hidden until data loads) -->
     <div class="summary-bar" id="summaryBar" style="display:none">
@@ -1487,6 +1541,18 @@ input[type="range"]::-moz-range-thumb {
           <button id="speciesFilterWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="toggleSpeciesFilterSearchOption('whole_word')" title="Match whole word">ab</button>
         </div>
         <button class="species-filter-clear" id="speciesFilterClear" onclick="clearSpeciesFilter()" title="Clear filter">&times;</button>
+      </div>
+      <div class="scope-filter-wrap" title="Choose which photos are included in this review view">
+        <label for="reviewScopeSelect">Scope:</label>
+        <select id="reviewScopeSelect" onchange="onReviewScopeModeChange(this.value)" data-testid="pipeline-review-scope">
+          <option value="cache">Latest review</option>
+          <option value="workspace">Workspace</option>
+          <option value="collection">Collection</option>
+        </select>
+        <select id="reviewScopeCollectionSelect" onchange="onReviewScopeCollectionChange(this.value)" style="display:none;max-width:180px;" data-testid="pipeline-review-collection">
+          <option value="">Select collection...</option>
+        </select>
+        <span class="scope-status" id="reviewScopeStatus"></span>
       </div>
       <div class="encounter-sort-wrap" title="Order encounters are listed in">
         <label for="encounterSortSelect">Sort:</label>
@@ -1642,6 +1708,13 @@ var workspaceOverrides = null;
 // (regroup-live doesn't return readiness, but the missing-features set is
 // unchanged by computing the cache).
 var reviewReadiness = null;
+var resultsCacheInfo = null;
+var cachedPipelineResults = null;
+var cachedResultsCacheInfo = null;
+var reviewScopeMode = 'cache';
+var reviewScopeCollectionId = null;
+var reviewScopeCollections = [];
+var reviewScopeRequestSeq = 0;
 // Survives re-renders so confirming/filtering doesn't re-expand collapsed
 // encounters. Keyed by the encounter's full sorted photo_id set so that
 // detach/regroup (which change composition) naturally invalidate the key
@@ -2634,18 +2707,30 @@ function onGroupingChange(slider) {
 
 function doReflow() {
   var config = getScoringConfig();
+  var body = reviewScopePayload(config);
+  if (!body) {
+    var noBodyIndicator = document.getElementById('reflowIndicator');
+    if (noBodyIndicator) noBodyIndicator.style.display = 'none';
+    return;
+  }
+  // Tag this request with the scope request sequence so a scope switch (or
+  // a newer slider request) invalidates its response. Without this, a tune
+  // fired in Workspace/Collection scope that resolves after the user
+  // switches back to Latest review would replace the cached view with
+  // stale scoped data (and scopedCacheInfoFor would recompute against the
+  // now-current scope).
+  var seq = ++reviewScopeRequestSeq;
   safeFetch('/api/pipeline/reflow', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({config: config}),
+    body: JSON.stringify(body),
   }, { toast: false })
   .then(function(data) {
-    if (data.error) return;
-    pipelineResults = data;
-    renderResults();
-    updateSummaryBar(data.summary);
     var indicator = document.getElementById('reflowIndicator');
     if (indicator) indicator.style.display = 'none';
+    if (seq !== reviewScopeRequestSeq) return;
+    if (!data || data.error) return;
+    applyReviewResults(data, scopedCacheInfoFor(data));
   })
   .catch(function() {
     var indicator = document.getElementById('reflowIndicator');
@@ -2655,18 +2740,24 @@ function doReflow() {
 
 function doRegroupLive() {
   var config = Object.assign({}, getGroupingConfig(), getScoringConfig());
+  var body = reviewScopePayload(config);
+  if (!body) {
+    var noBodyIndicator = document.getElementById('reflowIndicator');
+    if (noBodyIndicator) noBodyIndicator.style.display = 'none';
+    return;
+  }
+  var seq = ++reviewScopeRequestSeq;
   safeFetch('/api/pipeline/regroup-live', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({config: config}),
+    body: JSON.stringify(body),
   }, { toast: false })
   .then(function(data) {
-    if (data.error) return;
-    pipelineResults = data;
-    renderResults();
-    updateSummaryBar(data.summary);
     var indicator = document.getElementById('reflowIndicator');
     if (indicator) indicator.style.display = 'none';
+    if (seq !== reviewScopeRequestSeq) return;
+    if (!data || data.error) return;
+    applyReviewResults(data, scopedCacheInfoFor(data));
   })
   .catch(function() {
     var indicator = document.getElementById('reflowIndicator');
@@ -2868,6 +2959,10 @@ function setPipelineReviewFlag(photoId, flag) {
   if (flag !== 'flagged' && flag !== 'rejected' && flag !== 'none') return Promise.resolve();
   photoId = parseInt(photoId, 10);
   if (!photoId) return Promise.resolve();
+  if (isScopedReviewView()) {
+    notifyReadOnlyScopedView();
+    return Promise.resolve();
+  }
 
   return safeFetch('/api/photos/' + photoId + '/flag', {
     method: 'POST',
@@ -2882,6 +2977,7 @@ function setPipelineReviewFlag(photoId, flag) {
     }
     var msg = flag === 'flagged' ? 'Marked as pick' : (flag === 'rejected' ? 'Marked as reject' : 'Flag cleared');
     showToast(msg, 'success');
+    refreshLatestScopeSnapshotIfCurrent();
   });
 }
 
@@ -3058,6 +3154,223 @@ function dismissDegradedBanner() {
   document.getElementById('degradedBanner').style.display = 'none';
 }
 
+function renderCacheScopeBanner(info) {
+  var banner = document.getElementById('cacheScopeBanner');
+  var text = document.getElementById('cacheScopeBannerText');
+  if (!banner || !text) return;
+  banner.style.display = 'none';
+  if (!info || !info.is_partial) return;
+
+  var shown = info.cached_photo_count || 0;
+  var total = info.workspace_photo_count || 0;
+  var missing = info.missing_photo_count || Math.max(total - shown, 0);
+  text.innerHTML = '<strong>Showing ' + shown + ' of ' + total
+    + ' active workspace photo' + (total === 1 ? '' : 's') + '.</strong> '
+    + missing + ' photo' + (missing === 1 ? '' : 's')
+    + ' are not in this review cache. This usually means the last Process run '
+    + 'was scoped to selected folders, a collection, new images, or deselected photos.';
+  banner.style.display = 'flex';
+}
+
+function cloneReviewData(data) {
+  return data ? JSON.parse(JSON.stringify(data)) : null;
+}
+
+// Workspace/Collection scope shows a *view* of the pipeline for a different
+// photo set — the result lives in `pipelineResults` alongside the persisted
+// cache, but writing it back to /api/pipeline/save-cache (or triggering any
+// server endpoint that rewrites the cache: detach-burst, detach-photo,
+// /api/encounters/species) would clobber the workspace's saved review with
+// this scoped subset. Callers use this to short-circuit those flows so
+// editing is confined to the Latest review scope.
+function isScopedReviewView() {
+  return reviewScopeMode && reviewScopeMode !== 'cache';
+}
+
+function notifyReadOnlyScopedView() {
+  var label = reviewScopeMode === 'collection' ? 'Collection' : 'Workspace';
+  showToast(
+    label + ' scope is view-only. Switch to Latest review to make changes.',
+    'warning'
+  );
+}
+
+function setReviewScopeStatus(text, isError) {
+  var el = document.getElementById('reviewScopeStatus');
+  if (!el) return;
+  el.textContent = text || '';
+  el.style.color = isError ? 'var(--danger)' : 'var(--text-dim)';
+}
+
+function updateReviewScopeControls() {
+  var scopeSel = document.getElementById('reviewScopeSelect');
+  var collectionSel = document.getElementById('reviewScopeCollectionSelect');
+  if (scopeSel) scopeSel.value = reviewScopeMode;
+  if (collectionSel) {
+    collectionSel.style.display = reviewScopeMode === 'collection' ? '' : 'none';
+    collectionSel.value = reviewScopeCollectionId || '';
+  }
+}
+
+function updateReviewScopeStatusFromResults(data) {
+  var n = data && data.summary ? data.summary.total_photos : null;
+  if (n == null) {
+    setReviewScopeStatus('');
+    return;
+  }
+  setReviewScopeStatus(n + ' photo' + (n === 1 ? '' : 's'));
+}
+
+function populateReviewScopeCollections(collections) {
+  reviewScopeCollections = Array.isArray(collections) ? collections : [];
+  var sel = document.getElementById('reviewScopeCollectionSelect');
+  if (!sel) return;
+  sel.innerHTML = '<option value="">Select collection...</option>';
+  reviewScopeCollections.forEach(function(c) {
+    var opt = document.createElement('option');
+    opt.value = String(c.id);
+    var count = c.photo_count != null ? ' (' + c.photo_count + ')' : '';
+    opt.textContent = c.name + count;
+    sel.appendChild(opt);
+  });
+  updateReviewScopeControls();
+}
+
+function loadReviewScopeCollections() {
+  safeFetch('/api/collections', {}, { toast: false })
+    .then(populateReviewScopeCollections)
+    .catch(function() { populateReviewScopeCollections([]); });
+}
+
+function reviewScopePayload(config) {
+  // Latest review scope: send the pre-scope request shape (config only) so
+  // the backend defaults save_cache=true with no photo_ids filter and
+  // slider tuning persists to the saved cache. Adding photo_ids here (as
+  // an earlier revision did) blocks the save branch in
+  // api_pipeline_reflow/regroup_live and drops slider changes on reload.
+  if (reviewScopeMode === 'cache') {
+    return { config: config || {} };
+  }
+  var body = {
+    config: config || {},
+    save_cache: false,
+  };
+  if (reviewScopeMode === 'collection') {
+    if (!reviewScopeCollectionId) return null;
+    body.collection_id = parseInt(reviewScopeCollectionId, 10);
+  }
+  return body;
+}
+
+function applyReviewResults(data, info) {
+  if (!data || !data.encounters) return;
+  var empty = document.getElementById('emptyState');
+  if (empty) empty.style.display = 'none';
+  pipelineResults = data;
+  resultsCacheInfo = info || null;
+  collapsedEncounters = new Set();
+  updatePipelineReviewSidebarVisibility();
+  var sb = document.getElementById('summaryBar');
+  if (sb) sb.style.display = '';
+  updateSummaryBar(data.summary);
+  var fb = document.getElementById('filterBar');
+  if (fb) fb.style.display = '';
+  applyPipelineReviewToolbarState();
+  renderResults();
+  checkPendingSync();
+  refreshMissesReviewBtn();
+  renderDegradedBanner(reviewReadiness && reviewReadiness.enhancing_missing);
+  renderCacheScopeBanner(resultsCacheInfo);
+  updateReviewScopeStatusFromResults(data);
+  refreshLatestScopeSnapshotIfCurrent();
+}
+
+function scopedCacheInfoFor(data) {
+  var workspaceTotal = reviewReadiness ? reviewReadiness.total_photos : (
+    data && data.summary ? data.summary.total_photos : 0
+  );
+  var shown = data && data.summary ? data.summary.total_photos : 0;
+  return {
+    workspace_photo_count: workspaceTotal,
+    cached_photo_count: shown,
+    missing_photo_count: Math.max(workspaceTotal - shown, 0),
+    is_partial: reviewScopeMode === 'cache' && shown < workspaceTotal,
+    group_fingerprint_status: 'view',
+    review_mode: data ? data.review_mode || null : null,
+  };
+}
+
+// Sync cachedPipelineResults with the current view when we're in Latest
+// review scope. cachedPipelineResults was originally only written at page
+// init / computeReviewNow; without this, slider tunes, GRM apply, species
+// confirmation, and detach — all of which mutate pipelineResults and save
+// the cache while in Latest scope — would be lost the next time the user
+// switched to Workspace/Collection and back, and a later save-cache from
+// that stale view would overwrite the newer saved review on disk.
+function refreshLatestScopeSnapshotIfCurrent() {
+  if (reviewScopeMode !== 'cache') return;
+  if (!pipelineResults) return;
+  cachedPipelineResults = cloneReviewData(pipelineResults);
+  cachedResultsCacheInfo = cloneReviewData(resultsCacheInfo);
+}
+
+function loadReviewScopeResults() {
+  updateReviewScopeControls();
+  // Bump the request sequence up front so that any scope fetch still in
+  // flight from a prior scope choice is invalidated regardless of which
+  // branch we take here. Otherwise a Workspace/Collection request that
+  // resolves after the user switches back to Latest review could pass its
+  // .then() guard and replace the cached view with stale scoped results.
+  var seq = ++reviewScopeRequestSeq;
+  if (reviewScopeMode === 'cache') {
+    if (cachedPipelineResults) {
+      applyReviewResults(
+        cloneReviewData(cachedPipelineResults),
+        cloneReviewData(cachedResultsCacheInfo)
+      );
+    }
+    return;
+  }
+
+  var body = reviewScopePayload(Object.assign({}, getGroupingConfig(), getScoringConfig()));
+  if (!body) {
+    setReviewScopeStatus('Select one');
+    return;
+  }
+  setReviewScopeStatus('Loading...');
+  safeFetch('/api/pipeline/regroup-live', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  }, { toast: false })
+  .then(function(data) {
+    if (seq !== reviewScopeRequestSeq || !data || data.error) return;
+    applyReviewResults(data, scopedCacheInfoFor(data));
+  })
+  .catch(function(e) {
+    if (seq !== reviewScopeRequestSeq) return;
+    setReviewScopeStatus((e && e.message) || 'Could not load', true);
+  });
+}
+
+function onReviewScopeModeChange(mode) {
+  if (['cache', 'workspace', 'collection'].indexOf(mode) === -1) return;
+  // Capture the current Latest-review state before switching away so a later
+  // return to Latest restores the post-mutation view. Must run before
+  // reviewScopeMode changes so refreshLatestScopeSnapshotIfCurrent still
+  // matches on the outgoing (cache) mode.
+  refreshLatestScopeSnapshotIfCurrent();
+  reviewScopeMode = mode;
+  updateReviewScopeControls();
+  loadReviewScopeResults();
+}
+
+function onReviewScopeCollectionChange(value) {
+  reviewScopeCollectionId = value || null;
+  updateReviewScopeControls();
+  loadReviewScopeResults();
+}
+
 function renderEmptyState(readiness) {
   var heading = document.getElementById('emptyStateHeading');
   var body = document.getElementById('emptyStateBody');
@@ -3136,24 +3449,30 @@ function computeReviewNow() {
     }
     // Hide empty state, render results inline
     document.getElementById('emptyState').style.display = 'none';
-    pipelineResults = data;
+    resultsCacheInfo = {
+      workspace_photo_count: reviewReadiness ? reviewReadiness.total_photos : data.summary.total_photos,
+      cached_photo_count: data.summary.total_photos,
+      missing_photo_count: Math.max(
+        (reviewReadiness ? reviewReadiness.total_photos : data.summary.total_photos)
+          - data.summary.total_photos,
+        0
+      ),
+      is_partial: false,
+      group_fingerprint_status: 'current',
+      review_mode: data.review_mode || null
+    };
+    cachedPipelineResults = cloneReviewData(data);
+    cachedResultsCacheInfo = cloneReviewData(resultsCacheInfo);
     // Parity with initPipelineReviewPage's happy path:
-    collapsedEncounters = new Set();
     if (workspaceOverrides && workspaceOverrides.review_min_confidence != null) {
       minConfidence = workspaceOverrides.review_min_confidence;
       document.getElementById('confSlider').value = minConfidence;
       document.getElementById('confSliderVal').textContent = minConfidence + '%';
     }
-    document.getElementById('summaryBar').style.display = '';
-    updateSummaryBar(data.summary);
-    document.getElementById('filterBar').style.display = '';
-    updatePipelineReviewSidebarVisibility();
     restorePipelineReviewViewState();
-    renderResults();
+    applyReviewResults(data, resultsCacheInfo);
     openRequestedGroupReviewFromUrl();
-    checkPendingSync();
-    refreshMissesReviewBtn();
-    renderDegradedBanner(reviewReadiness && reviewReadiness.enhancing_missing);
+    loadReviewScopeCollections();
   }).catch(function() {
     // safeFetch toasts the error; re-enable the button so the user can retry.
     if (btn) { btn.disabled = false; btn.textContent = 'Compute results now'; }
@@ -3187,8 +3506,9 @@ function loadPipelinePageInit() {
     var empty = document.getElementById('emptyState');
     if (empty) empty.style.display = 'none';
 
-    pipelineResults = data.results;
-    collapsedEncounters = new Set();
+    resultsCacheInfo = data.results_cache_info || null;
+    cachedPipelineResults = cloneReviewData(data.results);
+    cachedResultsCacheInfo = cloneReviewData(resultsCacheInfo);
 
     if (data.workspace_overrides && data.workspace_overrides.review_min_confidence != null) {
       minConfidence = data.workspace_overrides.review_min_confidence;
@@ -3196,23 +3516,10 @@ function loadPipelinePageInit() {
       document.getElementById('confSliderVal').textContent = minConfidence + '%';
     }
 
-    updatePipelineReviewSidebarVisibility();
-
-    // Show summary bar and populate
-    var sb = document.getElementById('summaryBar');
-    if (sb) sb.style.display = '';
-    updateSummaryBar(data.results.summary);
-
-    // Show filter bar
-    var fb = document.getElementById('filterBar');
-    if (fb) fb.style.display = '';
-
     restorePipelineReviewViewState();
-    renderResults();
+    applyReviewResults(data.results, resultsCacheInfo);
     openRequestedGroupReviewFromUrl();
-    checkPendingSync();
-    refreshMissesReviewBtn();
-    renderDegradedBanner(data.review_readiness && data.review_readiness.enhancing_missing);
+    loadReviewScopeCollections();
   });
 }
 
@@ -3486,6 +3793,16 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
   event.stopPropagation();
   closeAllDropdowns();
 
+  // /api/encounters/species reloads and rewrites the saved cache on the
+  // server, so calling it from a Workspace/Collection scope view would
+  // overwrite the persisted review with only the scoped photo set. Block
+  // it here — the inline species chip/dropdown buttons that call us have
+  // no scope awareness of their own.
+  if (isScopedReviewView()) {
+    notifyReadOnlyScopedView();
+    return;
+  }
+
   var enc = pipelineResults.encounters[encIdx];
   if (!enc) return;
 
@@ -3576,11 +3893,16 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
   }
   refreshAfterSpeciesConfirm(encIdx, burstIdx, forceFullRender);
   checkPendingSync();
+  refreshLatestScopeSnapshotIfCurrent();
 }
 
 async function clearBurstOverride(event, encIdx, burstIdx) {
   event.stopPropagation();
   closeAllDropdowns();
+  if (isScopedReviewView()) {
+    notifyReadOnlyScopedView();
+    return;
+  }
   var enc = pipelineResults.encounters[encIdx];
   if (!enc || !enc.bursts || !enc.bursts[burstIdx]) return;
   enc.bursts[burstIdx].species_override = null;
@@ -3592,6 +3914,7 @@ async function clearBurstOverride(event, encIdx, burstIdx) {
   });
   renderResults();
   updateSummaryBar(refreshLocalSummaryCounts());
+  refreshLatestScopeSnapshotIfCurrent();
 }
 
 // -- Detach & Undo --
@@ -3627,6 +3950,10 @@ function undoLastAction() {
 }
 
 async function detachBurst(encIdx, burstIdx) {
+  if (isScopedReviewView()) {
+    notifyReadOnlyScopedView();
+    return;
+  }
   // Save state for undo
   var snapshot = JSON.parse(JSON.stringify(pipelineResults));
 
@@ -3641,6 +3968,7 @@ async function detachBurst(encIdx, burstIdx) {
   if (resp.summary) pipelineResults.summary = resp.summary;
   renderResults();
   updateSummaryBar(pipelineResults.summary);
+  refreshLatestScopeSnapshotIfCurrent();
 
   showUndo('Burst detached from encounter', function() {
     // Restore from snapshot
@@ -3653,10 +3981,15 @@ async function detachBurst(encIdx, burstIdx) {
     });
     renderResults();
     updateSummaryBar(pipelineResults.summary);
+    refreshLatestScopeSnapshotIfCurrent();
   });
 }
 
 async function detachPhoto(encIdx, burstIdx, photoId) {
+  if (isScopedReviewView()) {
+    notifyReadOnlyScopedView();
+    return;
+  }
   var snapshot = JSON.parse(JSON.stringify(pipelineResults));
 
   var resp = await safeFetch('/api/pipeline/detach-photo', {
@@ -3670,6 +4003,7 @@ async function detachPhoto(encIdx, burstIdx, photoId) {
   if (resp.summary) pipelineResults.summary = resp.summary;
   renderResults();
   updateSummaryBar(pipelineResults.summary);
+  refreshLatestScopeSnapshotIfCurrent();
 
   showUndo('Photo detached from burst', function() {
     pipelineResults = snapshot;
@@ -3680,6 +4014,7 @@ async function detachPhoto(encIdx, burstIdx, photoId) {
     });
     renderResults();
     updateSummaryBar(pipelineResults.summary);
+    refreshLatestScopeSnapshotIfCurrent();
   });
 }
 
@@ -4382,6 +4717,19 @@ function grmUpdateApplyLabel() {
   if (checks.flags && diff.detachNew > 0) parts.push('Detach ' + diff.detachNew);
   btn.textContent = parts.length ? parts.join(' · ') + ' & Close' : 'Apply and close';
   btn.title = grmApplyTitle(diff, checks, checks.species ? tagCount : 0);
+
+  // In Workspace/Collection scope the current pipelineResults are a *view*
+  // over a different photo set — committing them would overwrite the
+  // workspace's saved review cache with just this scoped subset (both via
+  // the client save-cache POST and the server-side cache rewrite inside
+  // /api/encounters/species). Keep the modal browsable but block Apply.
+  if (isScopedReviewView()) {
+    btn.disabled = true;
+    btn.style.opacity = '0.5';
+    btn.style.cursor = 'not-allowed';
+    btn.textContent = 'Read-only in scope view';
+    btn.title = 'Switch Scope to "Latest review" to save picks, rejects, or species confirmations.';
+  }
 }
 
 // Diff the current modal zones against the DB snapshot we opened with.
@@ -5510,6 +5858,16 @@ async function grmApply() {
     console.warn('grmApply called before /group/state seed completed; ignoring.');
     return;
   }
+  // Scoped-view guard: grmApply POSTs pipelineResults to /api/pipeline/save-cache
+  // (line ~5921) and confirms species via /api/encounters/species, which
+  // reloads and rewrites the saved cache server-side — either path would
+  // clobber the workspace's persisted review with this scoped subset.
+  // grmUpdateApplyLabel keeps the button visibly disabled here; this is
+  // defense in depth against a stray click while still seeded.
+  if (isScopedReviewView()) {
+    notifyReadOnlyScopedView();
+    return;
+  }
   if (grmState.applying) return;
   grmSetApplying(true);
 
@@ -5714,6 +6072,7 @@ async function grmApply() {
       clearBrowseBurstHandoff();
     }
 
+    refreshLatestScopeSnapshotIfCurrent();
     closeGroupReview();
     // Clear the species input for next use
     document.getElementById('grmSpecies').value = '';
