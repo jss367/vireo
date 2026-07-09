@@ -2246,6 +2246,83 @@ def test_api_pipeline_plan_expands_identify_strategy_to_species_review(app_and_d
     assert "species review" in group["summary"].lower(), group
 
 
+def test_api_pipeline_plan_strategy_only_body_merges_skip_flags(app_and_db):
+    """A body of just ``{"strategy": "quick_look"}`` (no explicit skip
+    flags) must plan the same run ``/api/jobs/pipeline`` would run — every
+    stage that quick_look disables must report skipped/disabled, not the
+    ``skip_* = false`` defaults the raw ``PipelinePlanParams`` would use.
+
+    Before the plan route merged the full strategy expansion, it copied
+    only ``review_mode`` from the expansion and left every ``skip_*``
+    field at its default False, so an API caller sending strategy-only
+    got a plan that promised Classify/Extract/Group work the actual
+    strategy job would skip.
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={"strategy": "quick_look"},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # quick_look: skip_classify + skip_extract + skip_eyes + skip_regroup
+    for stage in ("Classify", "Extract", "EyeKeypoints", "Group"):
+        assert data["stages"][stage]["state"] == "will-skip", (stage, data)
+
+
+def test_api_pipeline_plan_strategy_only_identify_runs_species_review(app_and_db):
+    """Strategy-only identify must still surface the species-review branch.
+
+    Pairs with the quick_look case above: identify sets skip_regroup=True
+    *and* review_mode="species", and the plan must reflect that the Group
+    stage will prepare species review even though skip_regroup came from
+    the expansion (not an explicit body key).
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={"strategy": "identify"},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    group = data["stages"]["Group"]
+    assert group["state"] == "will-run", group
+    assert "species review" in group["summary"].lower(), group
+    # Extract/EyeKeypoints must still report skipped — the strategy's
+    # skip flags applied even though the body sent only ``strategy``.
+    assert data["stages"]["Extract"]["state"] == "will-skip", data
+    assert data["stages"]["EyeKeypoints"]["state"] == "will-skip", data
+
+
+def test_api_pipeline_plan_explicit_body_key_wins_over_strategy(app_and_db):
+    """Strategy expansion supplies *defaults*: an explicit body key must
+    still override, mirroring ``/api/jobs/pipeline``. Without this an
+    Advanced/Custom caller can't pin one flag on top of a preset.
+
+    quick_look sets ``skip_regroup=True`` — a body that pins
+    ``skip_regroup=False`` alongside the strategy must produce a Group
+    plan for a real run, not the "Disabled" summary skip_regroup=True
+    would emit. The summary text distinguishes the two branches so the
+    assertion is robust to unrelated environmental reasons a stage might
+    also report will-skip (missing models, no eligible photos, etc.).
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={"strategy": "quick_look", "skip_regroup": False},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    group = data["stages"]["Group"]
+    # skip_regroup=True would produce "Disabled — stage will be skipped"
+    # (pipeline_plan._regroup_plan). Explicit False must route around
+    # that branch entirely.
+    assert "disabled" not in group["summary"].lower(), group
+
+
 def test_api_pipeline_plan_rejects_unknown_strategy(app_and_db):
     """A bad strategy name must 400 — otherwise the plan silently falls back
     to the raw skip flags and disagrees with what /api/jobs/pipeline would

@@ -3050,10 +3050,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # review) shows Group as "Disabled" in the plan even though the
         # actual run prepares species review results — the exact "plan
         # summary is wrong for the default workflow" transparency failure
-        # the review flagged. An explicit ``review_mode`` in the body wins
-        # if both are present (Advanced/Custom callers that want to
-        # override the preset's review path).
-        review_mode = body.get("review_mode")
+        # the review flagged. Strategy expansion supplies *defaults*;
+        # explicitly-present body keys still win, so an Advanced/Custom
+        # caller can pin one flag on top of a preset (mirrors the merge
+        # /api/jobs/pipeline runs). Copying only ``review_mode`` from
+        # the expansion, as the previous shape did, left ``skip_* =
+        # False`` in ``PipelinePlanParams`` when a caller sent only
+        # ``{"strategy": "identify"}`` (or ``"quick_look"``), so the plan
+        # promised Classify/Extract/Group work the actual strategy job
+        # would skip.
         if "strategy" in body and body.get("strategy"):
             strategy_name = body.get("strategy")
             if not isinstance(strategy_name, str):
@@ -3066,8 +3071,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 expanded = resolve_strategy(strategy_name)
             except ValueError as e:
                 return json_error(str(e), 400)
-            if review_mode is None:
-                review_mode = expanded.get("review_mode")
+            body = {**expanded, **body}
+        review_mode = body.get("review_mode")
         if review_mode is not None and not isinstance(review_mode, str):
             return json_error(
                 "review_mode must be a string or null, got "

@@ -5013,9 +5013,20 @@ function _stageStateFor(stage) {
   if (_runningStages[stage.suffix]) return 'running';
   if (_stageOutcomes[stage.suffix]) return _stageOutcomes[stage.suffix];
 
-  // User-toggled skip overrides anything the server-side plan returned —
-  // matches the user's mental model that toggling a stage off is the
-  // strongest signal of "do not run this".
+  var fromPlan = _pipelinePlan && _pipelinePlan.stages
+    ? _pipelinePlan.stages[stage.suffix] : null;
+
+  // Plan wins on 'will-run': /api/pipeline/plan expands ``strategy`` the
+  // same way /api/jobs/pipeline does, so when it says a stage will run,
+  // the actual job WILL run it — even if the stage's checkbox is off.
+  // The identify preset auto-unchecks Group but its species-review
+  // branch still runs regroup_stage and rewrites the review cache;
+  // without this the pill lies about what pressing Start would do.
+  if (fromPlan && fromPlan.state === 'will-run') return 'will-run';
+
+  // Otherwise user-toggled skip overrides the plan — matches the user's
+  // mental model that toggling a stage off is the strongest signal of
+  // "do not run this".
   if (stage.enable) {
     var cb = document.getElementById(stage.enable);
     if (cb && !cb.checked) return 'will-skip';
@@ -5023,7 +5034,6 @@ function _stageStateFor(stage) {
   // Stages with no plan entry (Scan in non-import modes) default to
   // "will-run" — they always run when the pipeline starts.
   if (!_pipelinePlan) return 'will-run';
-  var fromPlan = _pipelinePlan.stages && _pipelinePlan.stages[stage.suffix];
   if (!fromPlan) return 'will-run';
   return fromPlan.state || 'will-run';
 }
