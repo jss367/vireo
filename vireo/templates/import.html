@@ -457,8 +457,6 @@ function renderImportFolderBrowser(data, opts) {
       browseImportFolderTo(item.getAttribute('data-browse-path'));
     }
   };
-  const selectBtn = document.getElementById('folderBrowserSelectBtn');
-  if (selectBtn) selectBtn.disabled = !browserPath;
   updateImportBrowserSelection();
 }
 
@@ -513,18 +511,26 @@ function updateImportBrowserSelection() {
       selectBtn.textContent = browserSelectedPaths.length > 1
         ? 'Add ' + browserSelectedPaths.length + ' Folders'
         : 'Add This Folder';
+      // Volumes root renders with browserPath = '' but selectable drive rows.
+      // Enable submission whenever the user has picked at least one, so
+      // multi-select from the Volumes shortcut is reachable.
+      selectBtn.disabled = !browserPath && browserSelectedPaths.length === 0;
     } else {
       selectBtn.textContent = 'Select This Folder';
+      selectBtn.disabled = !browserPath;
     }
   }
 }
 
 function selectImportBrowserFolder() {
-  if (!browserPath) return;
   if (browserMode === 'destination') {
+    if (!browserPath) return;
     document.getElementById('destInput').value = browserPath;
   } else {
-    const paths = browserSelectedPaths.length ? browserSelectedPaths : [browserPath];
+    const paths = browserSelectedPaths.length
+      ? browserSelectedPaths
+      : (browserPath ? [browserPath] : []);
+    if (!paths.length) return;
     paths.forEach(addSourcePath);
   }
   closeImportFolderBrowser();

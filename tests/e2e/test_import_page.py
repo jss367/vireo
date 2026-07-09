@@ -135,6 +135,55 @@ def test_import_folder_browser_toggles_discontiguous_source_folders(live_server,
     expect(source_list).to_contain_text("/tmp/card-c")
 
 
+def test_import_folder_browser_selects_volumes_from_synthetic_root(live_server, page):
+    # The Volumes shortcut renders /api/volumes as a synthetic root with
+    # browserPath = ''. Volume rows are selectable, so the Add button must
+    # enable once at least one is picked and must submit the selected drives
+    # instead of the (empty) synthetic root.
+    url = live_server["url"]
+    page.goto(f"{url}/import")
+    page.evaluate("window.pickDirectory = async () => null")
+    page.evaluate(
+        """
+        () => {
+          const originalFetch = window.fetch.bind(window);
+          window.fetch = (input, init) => {
+            const target = typeof input === 'string' ? input : input.url;
+            if (target && target.indexOf('/api/volumes') === 0) {
+              return Promise.resolve(new Response(JSON.stringify([
+                {name: 'Volume A', path: '/Volumes/A'},
+                {name: 'Volume B', path: '/Volumes/B'},
+              ]), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            return originalFetch(input, init);
+          };
+        }
+        """
+    )
+
+    page.locator("[data-testid='import-source-browse-btn']").click()
+    # Non-Mac branch fetches /api/volumes (stubbed) and renders the drives
+    # as selectable rows in a synthetic root with browserPath = ''.
+    page.evaluate("async () => { await browseImportFolderTo('__volumes__'); }")
+
+    items = page.locator("#folderBrowserList .folder-browser-item[data-folder-path]")
+    expect(items).to_have_count(2)
+
+    select_btn = page.locator("#folderBrowserSelectBtn")
+    expect(select_btn).to_be_disabled()
+
+    items.nth(0).click(modifiers=["Control"])
+    items.nth(1).click(modifiers=["Control"])
+
+    expect(select_btn).to_be_enabled()
+    expect(select_btn).to_have_text("Add 2 Folders")
+    select_btn.click()
+
+    source_list = page.locator("#sourceList")
+    expect(source_list).to_contain_text("/Volumes/A")
+    expect(source_list).to_contain_text("/Volumes/B")
+
+
 def test_import_folder_browser_disables_select_while_pending(live_server, page):
     # A stale browserPath from a prior fetch used to remain selectable during
     # the next navigation. If the fetch stalled or failed, clicking "Select
