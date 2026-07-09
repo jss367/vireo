@@ -87,16 +87,57 @@ def _escape_like(s: str) -> str:
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _keyword_token_clause(keyword):
+def _is_keyword_word_char(ch):
+    return ch.isalnum()
+
+
+def _contains_whole_keyword_token(value, token):
+    start = 0
+    while True:
+        idx = value.find(token, start)
+        if idx < 0:
+            return False
+        before = idx == 0 or not _is_keyword_word_char(value[idx - 1])
+        end = idx + len(token)
+        after = end == len(value) or not _is_keyword_word_char(value[end])
+        if before and after:
+            return True
+        start = idx + 1
+
+
+def _sqlite_keyword_text_match(value, token, match_case=0, whole_word=0):
+    if value is None or token is None:
+        return 0
+    value = str(value)
+    token = str(token)
+    if not token:
+        return 1
+    if not match_case:
+        value = value.casefold()
+        token = token.casefold()
+    if whole_word:
+        return 1 if _contains_whole_keyword_token(value, token) else 0
+    return 1 if token in value else 0
+
+
+def text_search_match(value, token, match_case=False, whole_word=False):
+    return bool(_sqlite_keyword_text_match(value, token, match_case, whole_word))
+
+
+def _keyword_token_clause(keyword, match_case=False, whole_word=False):
     """Build a WHERE clause for a multi-token keyword search.
 
     The query is split on whitespace into tokens; a photo matches only if
-    EVERY token appears (case-insensitively, as a literal substring) in the
-    photo's filename or in at least one of its keyword names. Tokens may be
-    satisfied by different keywords, so "red bill" matches a photo tagged
-    "Red-billed leiothrix" (both tokens in one keyword) as well as a photo
-    tagged both "Reddish" and "Billboard" (one token each). Tokens are escaped
-    so LIKE metacharacters (``%``/``_``) in the query match literally.
+    EVERY token appears in the photo's filename or in at least one of its
+    keyword names. By default matching is case-insensitive literal substring
+    search. ``match_case`` switches to case-sensitive search. ``whole_word``
+    requires alphanumeric boundaries, so "tern" matches "Common Tern" and
+    "tern_001.jpg" but not "Western Gull". Tokens may be satisfied by
+    different keywords, so "red bill" matches a photo tagged "Red-billed
+    leiothrix" (both tokens in one keyword) as well as a photo tagged both
+    "Reddish" and "Billboard" (one token each). In the default LIKE path,
+    tokens are escaped so LIKE metacharacters (``%``/``_``) in the query match
+    literally.
 
     Returns ``(clause_sql, params)``. The clause references the outer photos
     alias ``p``, so callers must expose the photos table as ``p``. Returns
@@ -108,7 +149,20 @@ def _keyword_token_clause(keyword):
         return None, []
     clauses = []
     params = []
+    match_case_param = 1 if match_case else 0
+    whole_word_param = 1 if whole_word else 0
     for tok in tokens:
+        if match_case or whole_word:
+            clauses.append(
+                "(vireo_keyword_text_match(p.filename, ?, ?, ?) OR EXISTS ("
+                "SELECT 1 FROM photo_keywords pk_s "
+                "JOIN keywords k_s ON k_s.id = pk_s.keyword_id "
+                "WHERE pk_s.photo_id = p.id "
+                "AND vireo_keyword_text_match(k_s.name, ?, ?, ?)))"
+            )
+            params.extend([tok, match_case_param, whole_word_param])
+            params.extend([tok, match_case_param, whole_word_param])
+            continue
         like = f"%{_escape_like(tok)}%"
         clauses.append(
             "(p.filename LIKE ? ESCAPE '\\' OR EXISTS ("
@@ -326,6 +380,12 @@ class Database:
         self.conn = None
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        self.conn.create_function(
+            "vireo_keyword_text_match",
+            4,
+            _sqlite_keyword_text_match,
+            deterministic=True,
+        )
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.execute("PRAGMA synchronous=NORMAL")
@@ -5768,7 +5828,17 @@ class Database:
             "detected_count": detected_count,
         }
 
-    def get_calendar_data(self, year, folder_id=None, rating_min=None, keyword=None, color_label=None, flag=None):
+    def get_calendar_data(
+        self,
+        year,
+        folder_id=None,
+        rating_min=None,
+        keyword=None,
+        keyword_match_case=False,
+        keyword_whole_word=False,
+        color_label=None,
+        flag=None,
+    ):
         """Return daily photo counts for a given year, scoped to active workspace."""
         ws = self._ws_id()
         conditions = ["wf.workspace_id = ?", "p.timestamp IS NOT NULL",
@@ -5791,7 +5861,11 @@ class Database:
             conditions.append("COALESCE(p.flag, 'none') = ?")
             where_params.append(flag)
         if keyword is not None:
-            kw_clause, kw_params = _keyword_token_clause(keyword)
+            kw_clause, kw_params = _keyword_token_clause(
+                keyword,
+                match_case=keyword_match_case,
+                whole_word=keyword_whole_word,
+            )
             if kw_clause:
                 conditions.append(kw_clause)
                 where_params.extend(kw_params)
@@ -5842,6 +5916,8 @@ class Database:
         date_from=None,
         date_to=None,
         keyword=None,
+        keyword_match_case=False,
+        keyword_whole_word=False,
         color_label=None,
         flag=None,
     ):
@@ -5871,7 +5947,11 @@ class Database:
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
         if keyword is not None:
-            kw_clause, kw_params = _keyword_token_clause(keyword)
+            kw_clause, kw_params = _keyword_token_clause(
+                keyword,
+                match_case=keyword_match_case,
+                whole_word=keyword_whole_word,
+            )
             if kw_clause:
                 conditions.append(kw_clause)
                 where_params.extend(kw_params)
@@ -5923,6 +6003,8 @@ class Database:
         date_from=None,
         date_to=None,
         keyword=None,
+        keyword_match_case=False,
+        keyword_whole_word=False,
         color_label=None,
         flag=None,
     ):
@@ -5952,7 +6034,11 @@ class Database:
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
         if keyword is not None:
-            kw_clause, kw_params = _keyword_token_clause(keyword)
+            kw_clause, kw_params = _keyword_token_clause(
+                keyword,
+                match_case=keyword_match_case,
+                whole_word=keyword_whole_word,
+            )
             if kw_clause:
                 conditions.append(kw_clause)
                 where_params.extend(kw_params)
@@ -5993,6 +6079,8 @@ class Database:
         date_from=None,
         date_to=None,
         keyword=None,
+        keyword_match_case=False,
+        keyword_whole_word=False,
         color_label=None,
         flag=None,
     ):
@@ -6022,7 +6110,11 @@ class Database:
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
         if keyword is not None:
-            kw_clause, kw_params = _keyword_token_clause(keyword)
+            kw_clause, kw_params = _keyword_token_clause(
+                keyword,
+                match_case=keyword_match_case,
+                whole_word=keyword_whole_word,
+            )
             if kw_clause:
                 conditions.append(kw_clause)
                 where_params.extend(kw_params)
@@ -6053,6 +6145,8 @@ class Database:
         date_from=None,
         date_to=None,
         keyword=None,
+        keyword_match_case=False,
+        keyword_whole_word=False,
         collection_id=None,
         color_label=None,
         flag=None,
@@ -6102,7 +6196,11 @@ class Database:
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
         if keyword is not None:
-            kw_clause, kw_params = _keyword_token_clause(keyword)
+            kw_clause, kw_params = _keyword_token_clause(
+                keyword,
+                match_case=keyword_match_case,
+                whole_word=keyword_whole_word,
+            )
             if kw_clause:
                 conditions.append(kw_clause)
                 where_params.extend(kw_params)
@@ -6218,6 +6316,8 @@ class Database:
         date_from=None,
         date_to=None,
         keyword=None,
+        keyword_match_case=False,
+        keyword_whole_word=False,
         species=None,
     ):
         """Return all geolocated photos with optional species, scoped to active workspace.
@@ -6282,7 +6382,11 @@ class Database:
             f"\n{location_subquery}"
         )
         if keyword is not None:
-            kw_clause, kw_params = _keyword_token_clause(keyword)
+            kw_clause, kw_params = _keyword_token_clause(
+                keyword,
+                match_case=keyword_match_case,
+                whole_word=keyword_whole_word,
+            )
             if kw_clause:
                 conditions.append(kw_clause)
                 params.extend(kw_params)

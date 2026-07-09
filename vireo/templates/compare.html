@@ -40,6 +40,7 @@ body { padding-bottom: 36px; }
   padding: 7px 9px;
   font-size: 13px;
 }
+.control .search-control input { width: auto; border-radius: 4px 0 0 4px; }
 
 .summary-grid {
   display: grid;
@@ -297,7 +298,11 @@ body { padding-bottom: 36px; }
     </div>
     <div class="control">
       <label for="compareSearch">Search</label>
-      <input id="compareSearch" type="search" placeholder="Filename, keyword, species" oninput="renderCompare()">
+      <div class="search-control">
+        <input id="compareSearch" type="search" placeholder="Filename, keyword, species" oninput="renderCompare()">
+        <button id="compareSearchMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('compareSearch', 'match_case', renderCompare)" title="Match case">Aa</button>
+        <button id="compareSearchWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('compareSearch', 'whole_word', renderCompare)" title="Match whole word">ab</button>
+      </div>
     </div>
   </div>
 
@@ -505,7 +510,7 @@ function photoMatchesFilter(photo, filter) {
   return photo.row_category === filter;
 }
 
-function searchableText(photo) {
+function searchableFields(photo) {
   var parts = [photo.filename, photo.row_label];
   (photo.keywords || []).forEach(function(k) { parts.push(k.name, k.type); });
   Object.keys(photo.predictions || {}).forEach(function(model) {
@@ -514,14 +519,15 @@ function searchableText(photo) {
       parts.push(p.species, p.category_label, p.matched_keyword, p.status);
     });
   });
-  return parts.join(' ').toLowerCase();
+  return parts;
 }
 
 function filteredRows() {
-  var q = document.getElementById('compareSearch').value.trim().toLowerCase();
+  var q = document.getElementById('compareSearch').value.trim();
+  var searchOptions = VireoTextSearch.readOptions('compareSearch');
   return (compareData.photos || []).filter(function(photo) {
     if (!photoMatchesFilter(photo, activeFilter)) return false;
-    if (q && searchableText(photo).indexOf(q) < 0) return false;
+    if (q && !VireoTextSearch.matchesFields(searchableFields(photo), q, searchOptions)) return false;
     return true;
   });
 }

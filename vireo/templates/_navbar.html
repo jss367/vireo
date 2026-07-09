@@ -143,12 +143,11 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   padding: 16px;
   border-bottom: 1px solid var(--border-primary);
 }
+.help-search .search-control { width: 100%; }
 .help-search input {
-  width: 100%;
   padding: 10px 12px;
   font-size: 14px;
   border: 1px solid var(--border-secondary);
-  border-radius: 6px;
   background: var(--bg-input);
   color: var(--text-primary);
   outline: none;
@@ -1729,11 +1728,19 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   max-height: 60vh; display: flex; flex-direction: column;
   box-shadow: 0 8px 32px rgba(0,0,0,0.4);
 }
+.cmd-palette .search-control {
+  border-bottom: 1px solid var(--border-primary);
+}
 .cmd-palette input {
   border: 0; outline: none; padding: 14px 16px;
   background: transparent; color: var(--text-primary);
   font-size: 15px;
-  border-bottom: 1px solid var(--border-primary);
+}
+.cmd-palette .search-option-btn {
+  background: transparent;
+  border-top: 0;
+  border-bottom: 0;
+  height: auto;
 }
 .cmd-palette-results {
   overflow-y: auto; padding: 4px 0;
@@ -1787,7 +1794,11 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 <!-- Command palette (cmd+K) -->
 <div class="cmd-palette-overlay" id="commandPalette" hidden onclick="if(event.target===this)closeCommandPalette()">
   <div class="cmd-palette">
-    <input type="text" id="cmdPaletteInput" autocomplete="off" placeholder="Jump to page…" />
+    <div class="search-control">
+      <input type="text" id="cmdPaletteInput" autocomplete="off" placeholder="Jump to page…" />
+      <button id="cmdPaletteMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('cmdPalette', 'match_case', function() { window._cmdPaletteRender && window._cmdPaletteRender(document.getElementById('cmdPaletteInput').value || ''); })" title="Match case">Aa</button>
+      <button id="cmdPaletteWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('cmdPalette', 'whole_word', function() { window._cmdPaletteRender && window._cmdPaletteRender(document.getElementById('cmdPaletteInput').value || ''); })" title="Match whole word">ab</button>
+    </div>
     <div id="cmdPaletteResults" class="cmd-palette-results"></div>
   </div>
 </div>
@@ -1858,7 +1869,11 @@ document.addEventListener('keydown', function(e) {
 <div class="help-overlay" id="helpModal">
   <div class="help-modal">
     <div class="help-search">
-      <input type="text" id="helpSearchInput" placeholder="Search help..." autocomplete="off">
+      <div class="search-control">
+        <input type="text" id="helpSearchInput" placeholder="Search help..." autocomplete="off">
+        <button id="helpSearchMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('helpSearch', 'match_case', window._helpSearchRefresh)" title="Match case">Aa</button>
+        <button id="helpSearchWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('helpSearch', 'whole_word', window._helpSearchRefresh)" title="Match whole word">ab</button>
+      </div>
     </div>
     <div class="help-results" id="helpResults"></div>
   </div>
@@ -10614,15 +10629,23 @@ async function _deleteMissingPhotoIds(ids, deleteSidecars) {
     list.textContent = '';
     if (!query) {
       results = defaultSorted();
-    } else if (fuse) {
-      results = fuse.search(query).map(r => r.item);
     } else {
-      const q = query.toLowerCase();
-      results = allPages.filter(p =>
-        p.label.toLowerCase().includes(q) ||
-        p.id.includes(q) ||
-        (p.keywords || '').toLowerCase().includes(q)
-      );
+      const options = VireoTextSearch.readOptions('cmdPalette');
+      if ((options.matchCase || options.wholeWord) && window.VireoTextSearch) {
+        results = allPages.filter(p =>
+          VireoTextSearch.matchesFields(
+            [p.label, p.id, p.keywords || ''],
+            query,
+            options
+          )
+        );
+      } else if (fuse) {
+        results = fuse.search(query).map(r => r.item);
+      } else {
+        results = allPages.filter(p =>
+          VireoTextSearch.matchesFields([p.label, p.id, p.keywords || ''], query)
+        );
+      }
     }
     if (selectedIndex >= results.length) selectedIndex = 0;
     const cur = currentNavId();

@@ -17,6 +17,100 @@ function escapeAttr(str) {
     .replace(/>/g, '&gt;');
 }
 
+var VireoTextSearch = (function() {
+  function isWordChar(ch) {
+    return !!ch && (/[0-9]/.test(ch) || ch.toLowerCase() !== ch.toUpperCase());
+  }
+
+  function containsWholeToken(value, token) {
+    var start = 0;
+    while (true) {
+      var idx = value.indexOf(token, start);
+      if (idx < 0) return false;
+      var before = idx === 0 || !isWordChar(value.charAt(idx - 1));
+      var end = idx + token.length;
+      var after = end === value.length || !isWordChar(value.charAt(end));
+      if (before && after) return true;
+      start = idx + 1;
+    }
+  }
+
+  function tokenMatches(value, token, options) {
+    if (value == null || token == null) return false;
+    var text = String(value);
+    var needle = String(token);
+    if (!needle) return true;
+    if (!options || !options.matchCase) {
+      text = text.toLowerCase();
+      needle = needle.toLowerCase();
+    }
+    if (options && options.wholeWord) {
+      return containsWholeToken(text, needle);
+    }
+    return text.indexOf(needle) !== -1;
+  }
+
+  function tokens(query) {
+    return String(query || '').trim().split(/\s+/).filter(Boolean);
+  }
+
+  function matchesFields(fields, query, options) {
+    var parts = tokens(query);
+    if (!parts.length) return true;
+    var values = Array.isArray(fields) ? fields : [fields];
+    return parts.every(function(token) {
+      return values.some(function(value) {
+        return tokenMatches(value, token, options || {});
+      });
+    });
+  }
+
+  function readOptions(prefix) {
+    var matchCase = document.getElementById(prefix + 'MatchCaseBtn');
+    var wholeWord = document.getElementById(prefix + 'WholeWordBtn');
+    return {
+      matchCase: !!(matchCase && matchCase.classList.contains('active')),
+      wholeWord: !!(wholeWord && wholeWord.classList.contains('active')),
+    };
+  }
+
+  function applyButton(button, active) {
+    if (!button) return;
+    button.classList.toggle('active', !!active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  }
+
+  function renderOptions(prefix, options) {
+    applyButton(document.getElementById(prefix + 'MatchCaseBtn'), options.matchCase);
+    applyButton(document.getElementById(prefix + 'WholeWordBtn'), options.wholeWord);
+  }
+
+  function toggle(prefix, option, onChange) {
+    var options = readOptions(prefix);
+    if (option === 'match_case') options.matchCase = !options.matchCase;
+    if (option === 'whole_word') options.wholeWord = !options.wholeWord;
+    renderOptions(prefix, options);
+    if (typeof onChange === 'function') onChange(options);
+    return options;
+  }
+
+  function appendParams(params, options, matchCaseName, wholeWordName) {
+    if (!params || !options) return;
+    if (options.matchCase) params.set(matchCaseName || 'match_case', '1');
+    if (options.wholeWord) params.set(wholeWordName || 'whole_word', '1');
+  }
+
+  return {
+    isWordChar: isWordChar,
+    tokenMatches: tokenMatches,
+    matchesFields: matchesFields,
+    readOptions: readOptions,
+    renderOptions: renderOptions,
+    toggle: toggle,
+    appendParams: appendParams,
+  };
+})();
+
 var VireoPipelineConfig = (function() {
   function defaultPipeline() {
     var defaults = window.VIREO_CONFIG_DEFAULTS;
