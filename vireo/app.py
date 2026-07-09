@@ -2831,8 +2831,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         total_photos = db.count_photos()
 
         import config as cfg
-        from pipeline import compute_review_readiness, load_results
+        from pipeline import (
+            compute_group_fingerprint,
+            compute_review_readiness,
+            load_results,
+            prune_missing_photos,
+        )
         cache_dir = os.path.dirname(db_path)
+        prune_missing_photos(cache_dir, db._active_workspace_id, db)
         results = load_results(cache_dir, db._active_workspace_id)
         if results and results.get("photos"):
             photo_ids = [p["id"] for p in results["photos"]]
@@ -2853,6 +2859,36 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         effective_cfg = db.get_effective_config(cfg.load())
         pipeline_cfg = effective_cfg.get("pipeline", {})
+
+        results_cache_info = None
+        if results is not None:
+            cached_photo_ids = {
+                p.get("id")
+                for p in results.get("photos", [])
+                if p.get("id") is not None
+            }
+            row = db.conn.execute(
+                "SELECT last_group_fingerprint FROM workspaces WHERE id = ?",
+                (db._active_workspace_id,),
+            ).fetchone()
+            last_group_fp = row["last_group_fingerprint"] if row else None
+            current_group_fp = compute_group_fingerprint(effective_cfg)
+            if not last_group_fp:
+                fp_status = "untracked"
+            elif last_group_fp == current_group_fp:
+                fp_status = "current"
+            else:
+                fp_status = "outdated"
+            results_cache_info = {
+                "workspace_photo_count": total_photos,
+                "cached_photo_count": len(cached_photo_ids),
+                "missing_photo_count": max(
+                    total_photos - len(cached_photo_ids), 0,
+                ),
+                "is_partial": len(cached_photo_ids) < total_photos,
+                "group_fingerprint_status": fp_status,
+                "review_mode": results.get("review_mode"),
+            }
 
         # Variant must match the active DINOv2 variant so embedding coverage
         # reflects what /api/pipeline/regroup-live would actually consume —
@@ -2906,6 +2942,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "mask_variant_coverage": db.mask_variant_coverage(),
             "sam_variant_warning": db.sam_variant_rerun_warning(sam2_variant),
             "results": results,
+            "results_cache_info": results_cache_info,
             "review_readiness": review_readiness,
             "workspace_overrides": ws_overrides,
             "recent_destinations": effective_cfg.get("ingest", {}).get("recent_destinations", []),
@@ -19147,6 +19184,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         collection_id = _coerce_collection_id(body.get("collection_id"))
         if collection_id is False:
             return json_error("collection_id must be an integer")
+        photo_ids = body.get("photo_ids")
+        if photo_ids is not None:
+            if not isinstance(photo_ids, list):
+                return json_error("photo_ids must be a list")
+            for pid in photo_ids:
+                if isinstance(pid, bool) or not isinstance(pid, int):
+                    return json_error("photo_ids entries must be integers")
+            if collection_id is not None:
+                return json_error("photo_ids cannot be combined with collection_id")
+        save_cache = body.get("save_cache", True)
+        if not isinstance(save_cache, bool):
+            return json_error("save_cache must be boolean")
 
         import config as cfg
 
@@ -19158,7 +19207,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # We re-group to have the full photo dicts with numpy arrays
         # (the cached JSON doesn't have embeddings)
         photos = load_photo_features(
-            db, collection_id=collection_id, config=effective_cfg
+            db,
+            collection_id=collection_id,
+            config=effective_cfg,
+            photo_ids=photo_ids,
         )
         if not photos:
             return json_error("No photos with pipeline features", 404)
@@ -19178,7 +19230,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if existing and existing.get("miss_computed_at"):
             results["miss_computed_at"] = existing["miss_computed_at"]
 
-        if collection_id is None:
+        if save_cache and collection_id is None and photo_ids is None:
             save_results(results, cache_dir, db._active_workspace_id)
 
         serialized = serialize_results(results)
@@ -19210,6 +19262,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         collection_id = _coerce_collection_id(body.get("collection_id"))
         if collection_id is False:
             return json_error("collection_id must be an integer")
+        photo_ids = body.get("photo_ids")
+        if photo_ids is not None:
+            if not isinstance(photo_ids, list):
+                return json_error("photo_ids must be a list")
+            for pid in photo_ids:
+                if isinstance(pid, bool) or not isinstance(pid, int):
+                    return json_error("photo_ids entries must be integers")
+            if collection_id is not None:
+                return json_error("photo_ids cannot be combined with collection_id")
+        save_cache = body.get("save_cache", True)
+        if not isinstance(save_cache, bool):
+            return json_error("save_cache must be boolean")
 
         import config as cfg
 
@@ -19218,7 +19282,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         pipeline_cfg = {**effective_cfg.get("pipeline", {}), **overrides}
 
         photos = load_photo_features(
-            db, collection_id=collection_id, config=effective_cfg
+            db,
+            collection_id=collection_id,
+            config=effective_cfg,
+            photo_ids=photo_ids,
         )
         if not photos:
             return json_error("No photos with pipeline features", 404)
@@ -19236,7 +19303,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if existing and existing.get("miss_computed_at"):
             results["miss_computed_at"] = existing["miss_computed_at"]
 
-        if collection_id is None:
+        if save_cache and collection_id is None and photo_ids is None:
             save_results(results, cache_dir, db._active_workspace_id)
 
         serialized = serialize_results(results)

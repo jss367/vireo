@@ -3105,6 +3105,70 @@ def test_pipeline_page_init_review_readiness_state_ready_when_cache_exists(setup
         assert "embeddings" in data["review_readiness"]["enhancing_missing"]
 
 
+def test_pipeline_page_init_reports_partial_review_cache(setup):
+    """page-init tells the review UI when cached results cover only a subset."""
+    app, db_path = setup
+    p1, _p2 = _seed_workspace_with_masks(db_path)
+
+    import json as _json
+
+    from db import Database
+    db = Database(db_path)
+    ws = db._active_workspace_id
+    db.close()
+    cache_path = os.path.join(
+        os.path.dirname(db_path), f"pipeline_results_ws{ws}.json"
+    )
+    with open(cache_path, "w") as f:
+        _json.dump({
+            "encounters": [],
+            "photos": [{"id": p1, "filename": "a.jpg", "label": "REVIEW"}],
+            "summary": {"total_photos": 1},
+        }, f)
+
+    with app.test_client() as c:
+        resp = c.get("/api/pipeline/page-init")
+        assert resp.status_code == 200
+        info = resp.get_json()["results_cache_info"]
+        assert info["workspace_photo_count"] == 2
+        assert info["cached_photo_count"] == 1
+        assert info["missing_photo_count"] == 1
+        assert info["is_partial"] is True
+        assert info["group_fingerprint_status"] == "untracked"
+
+
+def test_pipeline_regroup_live_view_scope_does_not_overwrite_cache(setup):
+    """Review-page scope changes can compute all-workspace results as a view."""
+    app, db_path = setup
+    p1, _p2 = _seed_workspace_with_masks(db_path)
+
+    import json as _json
+
+    from db import Database
+    db = Database(db_path)
+    ws = db._active_workspace_id
+    db.close()
+    cache_path = os.path.join(
+        os.path.dirname(db_path), f"pipeline_results_ws{ws}.json"
+    )
+    original_cache = {
+        "encounters": [],
+        "photos": [{"id": p1, "filename": "a.jpg", "label": "REVIEW"}],
+        "summary": {"total_photos": 1},
+    }
+    with open(cache_path, "w") as f:
+        _json.dump(original_cache, f)
+
+    with app.test_client() as c:
+        resp = c.post("/api/pipeline/regroup-live", json={"save_cache": False})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["summary"]["total_photos"] == 2
+
+    with open(cache_path) as f:
+        assert _json.load(f) == original_cache
+
+
 def test_pipeline_page_init_state_ready_folds_blocking_gaps_into_enhancing(setup, tmp_path):
     """When the grouping cache is on disk but mask coverage is below the
     25% threshold, compute_review_readiness returns missing_required=["masks"]
