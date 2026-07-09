@@ -62,7 +62,21 @@
       return;
     }
     if (!fuse) return;
-    var hits = fuse.search(query);
+    var options = VireoTextSearch.readOptions('helpSearch');
+    var hits;
+    if (options.matchCase || options.wholeWord) {
+      hits = helpData
+        .filter(function(item) {
+          return VireoTextSearch.matchesFields(
+            [item.question, item.keywords, item.answer],
+            query,
+            options
+          );
+        })
+        .map(function(item) { return {item: item}; });
+    } else {
+      hits = fuse.search(query);
+    }
     if (hits.length === 0) {
       results.innerHTML = '<div class="help-empty">No results. Try different keywords.</div>';
       return;
@@ -75,6 +89,7 @@
   }
 
   input.addEventListener('input', onSearch);
+  window._helpSearchRefresh = onSearch;
 
   // Open / close
   window.openHelpModal = function() {

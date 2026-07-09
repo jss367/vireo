@@ -715,6 +715,74 @@ def test_get_photos_keyword_multi_token(tmp_path):
     assert len(db.get_photo_ids(keyword='red bill')) == 2
 
 
+def test_get_photos_keyword_whole_word_excludes_embedded_token(tmp_path):
+    """Whole-word keyword search matches separators, not embedded substrings."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    western = db.add_photo(
+        folder_id=fid, filename='western-gull.jpg', extension='.jpg',
+        file_size=100, file_mtime=1.0,
+    )
+    common = db.add_photo(
+        folder_id=fid, filename='common-tern.jpg', extension='.jpg',
+        file_size=100, file_mtime=1.0,
+    )
+    file_only = db.add_photo(
+        folder_id=fid, filename='tern_001.jpg', extension='.jpg',
+        file_size=100, file_mtime=1.0,
+    )
+    eastern = db.add_photo(
+        folder_id=fid, filename='eastern-phoebe.jpg', extension='.jpg',
+        file_size=100, file_mtime=1.0,
+    )
+    db.tag_photo(western, db.add_keyword('Western Gull'))
+    db.tag_photo(common, db.add_keyword('Common Tern'))
+    db.tag_photo(eastern, db.add_keyword('Eastern Phoebe'))
+
+    assert {
+        r['filename'] for r in db.get_photos(keyword='tern')
+    } == {'western-gull.jpg', 'common-tern.jpg', 'tern_001.jpg', 'eastern-phoebe.jpg'}
+
+    whole_word = db.get_photos(keyword='tern', keyword_whole_word=True)
+    assert {r['filename'] for r in whole_word} == {'common-tern.jpg', 'tern_001.jpg'}
+    assert db.count_filtered_photos(keyword='tern', keyword_whole_word=True) == 2
+    assert set(db.get_photo_ids(keyword='tern', keyword_whole_word=True)) == {
+        common,
+        file_only,
+    }
+
+
+def test_get_photos_keyword_match_case(tmp_path):
+    """Match-case keyword search distinguishes otherwise identical tokens."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    db.add_photo(
+        folder_id=fid, filename='Common-Tern.jpg', extension='.jpg',
+        file_size=100, file_mtime=1.0,
+    )
+    db.add_photo(
+        folder_id=fid, filename='common-tern.jpg', extension='.jpg',
+        file_size=100, file_mtime=1.0,
+    )
+
+    assert {
+        r['filename'] for r in db.get_photos(keyword='Tern')
+    } == {'Common-Tern.jpg', 'common-tern.jpg'}
+    assert {
+        r['filename'] for r in db.get_photos(keyword='Tern', keyword_match_case=True)
+    } == {'Common-Tern.jpg'}
+    assert {
+        r['filename']
+        for r in db.get_photos(
+            keyword='Tern',
+            keyword_match_case=True,
+            keyword_whole_word=True,
+        )
+    } == {'Common-Tern.jpg'}
+
+
 def test_add_keyword_idempotent(tmp_path):
     """add_keyword returns existing id if keyword already exists."""
     from db import Database
@@ -3216,6 +3284,33 @@ def test_get_geolocated_photos_filters(tmp_path):
     results = db.get_geolocated_photos(date_from='2024-03-01')
     assert len(results) == 1
     assert results[0]['filename'] == 'b.jpg'
+
+
+def test_get_geolocated_photos_keyword_search_options(tmp_path):
+    """Map keyword filtering uses the shared whole-word and case options."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='western.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='tern.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET latitude=1.0, longitude=2.0 WHERE id IN (?,?)", (p1, p2))
+    db.conn.commit()
+    db.tag_photo(p1, db.add_keyword('Western Tanager'))
+    db.tag_photo(p2, db.add_keyword('Common Tern'))
+
+    assert {
+        r['filename'] for r in db.get_geolocated_photos(keyword='tern')
+    } == {'western.jpg', 'tern.jpg'}
+    assert {
+        r['filename']
+        for r in db.get_geolocated_photos(keyword='tern', keyword_whole_word=True)
+    } == {'tern.jpg'}
+    assert {
+        r['filename']
+        for r in db.get_geolocated_photos(keyword='Tern', keyword_match_case=True)
+    } == {'tern.jpg'}
 
 
 def test_get_geolocated_photos_with_species(tmp_path):

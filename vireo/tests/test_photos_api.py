@@ -70,6 +70,33 @@ def test_api_photo_ids_matches_browse_filters(app_and_db):
     assert data["total"] == len(expected)
 
 
+def test_api_photos_keyword_whole_word_option(app_and_db):
+    """Browse keyword whole-word option excludes embedded token matches."""
+    app, db = app_and_db
+    photos = db.get_photos(sort="name")
+    western_id = photos[0]["id"]
+    tern_id = photos[1]["id"]
+    db.tag_photo(western_id, db.add_keyword("Western Gull"))
+    db.tag_photo(tern_id, db.add_keyword("Common Tern"))
+
+    client = app.test_client()
+    resp = client.get("/api/photos?keyword=tern&sort=name")
+    assert resp.status_code == 200
+    names = {p["filename"] for p in resp.get_json()["photos"]}
+    assert photos[0]["filename"] in names
+    assert photos[1]["filename"] in names
+
+    resp = client.get("/api/photos?keyword=tern&keyword_whole_word=1&sort=name")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert [p["filename"] for p in data["photos"]] == [photos[1]["filename"]]
+    assert data["total"] == 1
+
+    resp = client.get("/api/photos/ids?keyword=tern&keyword_whole_word=1&sort=name")
+    assert resp.status_code == 200
+    assert resp.get_json()["photo_ids"] == [tern_id]
+
+
 def test_api_photo_search_ids_only_returns_all_matches(app_and_db, monkeypatch):
     """GET /api/photos/search?ids_only=1 returns all CLIP match IDs, not the page."""
     app, db = app_and_db

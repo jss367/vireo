@@ -14,6 +14,8 @@
   .control-group input[type=range] { width:120px; }
   .control-group input[type=search], .control-group select { font-size:13px; padding:4px 8px; background:var(--bg-input); color:var(--text-primary); border:1px solid var(--border-secondary); border-radius:4px; }
   .control-group input[type=search] { width:180px; }
+  .control-group .search-control { width:240px; }
+  .control-group .search-control input[type=search] { width:auto; border-radius:4px 0 0 4px; }
   .control-value { font-size:13px; color:var(--text-primary); min-width:36px; }
   .save-btn { margin-left:auto; padding:6px 16px; background:var(--accent); color:var(--accent-text); border:none; border-radius:4px; cursor:pointer; font-size:13px; }
   .save-btn:hover { opacity:0.9; }
@@ -96,7 +98,11 @@
   </div>
   <div class="control-group">
     <label for="speciesSearch">Species</label>
-    <input type="search" id="speciesSearch" placeholder="Cardinal">
+    <div class="search-control">
+      <input type="search" id="speciesSearch" placeholder="Cardinal">
+      <button id="highlightSpeciesMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('highlightSpecies', 'match_case', debounceLoad)" title="Match case">Aa</button>
+      <button id="highlightSpeciesWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('highlightSpecies', 'whole_word', debounceLoad)" title="Match whole word">ab</button>
+    </div>
   </div>
   <div class="control-group">
     <label for="confirmationFilter">Status</label>
@@ -234,7 +240,15 @@ async function loadHighlights() {
   var folderSelect = document.getElementById('folderSelect');
   var speciesSearch = document.getElementById('speciesSearch').value.trim();
   params.set('limit_per_bucket', Math.max(20, parseInt(document.getElementById('perRowSlider').value)));
-  if (speciesSearch) params.set('species', speciesSearch);
+  if (speciesSearch) {
+    params.set('species', speciesSearch);
+    VireoTextSearch.appendParams(
+      params,
+      VireoTextSearch.readOptions('highlightSpecies'),
+      'species_match_case',
+      'species_whole_word'
+    );
+  }
 
   // Capture the issue-time sequence so the prune below can tell rejections that
   // happened after this request was sent (response is stale for them) from

@@ -151,6 +151,7 @@ body {
   outline: none;
 }
 .filter-bar input:focus { border-color: var(--accent); }
+.filter-bar .search-control { min-width: 240px; max-width: 420px; flex: 1 1 280px; }
 .filter-bar select {
   background: var(--bg-tertiary);
   color: var(--text-primary);
@@ -1383,7 +1384,11 @@ body {
 
     <!-- Filter Bar -->
     <div class="filter-bar">
-      <input type="text" id="searchInput" placeholder="Search keywords or filenames..." onkeydown="if(event.key==='Enter')applySearchFilterNow()" oninput="scheduleSearchFilter()">
+      <div class="search-control">
+        <input type="text" id="searchInput" placeholder="Search keywords or filenames..." onkeydown="if(event.key==='Enter')applySearchFilterNow()" oninput="scheduleSearchFilter()">
+        <button id="keywordMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="toggleKeywordSearchOption('match_case')" title="Match case">Aa</button>
+        <button id="keywordWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="toggleKeywordSearchOption('whole_word')" title="Match whole word">ab</button>
+      </div>
       <input type="text" id="clipSearchInput" placeholder="CLIP search: describe what you see..."
              style="flex:1;min-width:200px;"
              onkeydown="if(event.key==='Enter')runClipSearch()">
@@ -1871,6 +1876,8 @@ var flagFilter = '';
 var activeFolderId = null;
 var activeKeyword = null;
 var activeCollectionId = null;
+var keywordSearchMatchCase = false;
+var keywordSearchWholeWord = false;
 var timelineMode = false;
 var calendarYear = new Date().getFullYear();
 var selectedDay = null;
@@ -3352,10 +3359,37 @@ function buildCurrentBrowseParams() {
   if (dateFrom) params.set('date_from', dateFrom);
   if (dateTo) params.set('date_to', dateTo);
 
+  appendKeywordSearchParams(params);
+  return params;
+}
+
+function appendKeywordSearchParams(params) {
   var search = document.getElementById('searchInput').value.trim();
   if (search) params.set('keyword', search);
   if (activeKeyword) params.set('keyword', activeKeyword);
-  return params;
+  if (params.has('keyword')) {
+    VireoTextSearch.appendParams(
+      params,
+      { matchCase: keywordSearchMatchCase, wholeWord: keywordSearchWholeWord },
+      'keyword_match_case',
+      'keyword_whole_word'
+    );
+  }
+}
+
+function renderKeywordSearchOptions() {
+  VireoTextSearch.renderOptions('keyword', {
+    matchCase: keywordSearchMatchCase,
+    wholeWord: keywordSearchWholeWord,
+  });
+}
+
+function toggleKeywordSearchOption(option) {
+  VireoTextSearch.toggle('keyword', option, function(options) {
+    keywordSearchMatchCase = options.matchCase;
+    keywordSearchWholeWord = options.wholeWord;
+    applySearchFilterNow();
+  });
 }
 
 async function loadPhotos(options) {
@@ -3480,9 +3514,7 @@ async function loadCalendarData() {
   if (flagFilter) params.set('flag', flagFilter);
   var colorFilter = document.getElementById('colorFilter').value;
   if (colorFilter) params.set('color_label', colorFilter);
-  var search = document.getElementById('searchInput').value.trim();
-  if (search) params.set('keyword', search);
-  if (activeKeyword) params.set('keyword', activeKeyword);
+  appendKeywordSearchParams(params);
 
   calendarData = await safeFetch('/api/photos/calendar?' + params.toString());
   renderCalendar();
@@ -3720,9 +3752,7 @@ function appendClipSearchScopeParams(params) {
   if (dateFrom) params.set('date_from', dateFrom);
   if (dateTo) params.set('date_to', dateTo);
 
-  var search = document.getElementById('searchInput').value.trim();
-  if (search) params.set('keyword', search);
-  if (activeKeyword) params.set('keyword', activeKeyword);
+  appendKeywordSearchParams(params);
 }
 
 function reloadBrowseResults() {
@@ -5679,9 +5709,7 @@ async function loadSummary() {
   var dateTo = document.getElementById('dateTo').value;
   if (dateFrom) params.set('date_from', dateFrom);
   if (dateTo) params.set('date_to', dateTo);
-  var search = document.getElementById('searchInput').value.trim();
-  if (search) params.set('keyword', search);
-  if (activeKeyword) params.set('keyword', activeKeyword);
+  appendKeywordSearchParams(params);
   if (activeCollectionId) params.set('collection_id', activeCollectionId);
 
   try {
