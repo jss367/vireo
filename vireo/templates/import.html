@@ -145,6 +145,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
       <h3>After import</h3>
       <div class="row">
         <select id="afterImportSelect" style="max-width:280px;">
+          <option id="afterImportHiddenDefault" value="__hidden_default__" hidden disabled></option>
           <option value="__none__">None — import only</option>
           <option value="identify">Identify birds</option>
           <option value="quick_look">Quick look (thumbnails + previews)</option>
@@ -453,7 +454,20 @@ function selectImportBrowserFolder() {
 
 function selectedAfterImport() {
   const v = document.getElementById('afterImportSelect').value;
-  return v === '__none__' ? null : v;
+  // __hidden_default__ is a display-only placeholder — the request path
+  // omits after_import in that state, so callers never read this value.
+  if (v === '__none__' || v === '__hidden_default__') return null;
+  return v;
+}
+
+function retireHiddenDefaultOption(sel) {
+  const placeholder = document.getElementById('afterImportHiddenDefault');
+  if (!placeholder) return;
+  placeholder.hidden = true;
+  placeholder.disabled = true;
+  placeholder.textContent = '';
+  delete placeholder.dataset.maskedValue;
+  if (sel && sel.value === '__hidden_default__') sel.value = '__none__';
 }
 
 function updateAdvancedImportOptions() {
@@ -464,16 +478,41 @@ function updateAdvancedImportOptions() {
     opt.hidden = !advanced;
     opt.disabled = !advanced;
   });
-  if (!advanced && sel.selectedOptions.length && sel.selectedOptions[0].disabled) {
-    // The workspace's default is an advanced-only strategy (e.g. full,
-    // cull_ready) but advanced mode is off, so we have to hide it in the
-    // dropdown. Fall the visual selection back to __none__ but remember
-    // that this fallback isn't a user choice — otherwise startImport
-    // would post after_import: null and silently downgrade the workspace
-    // default to import-only. The flag is cleared as soon as the user
-    // actively interacts with the select.
+  const placeholder = document.getElementById('afterImportHiddenDefault');
+  if (advanced) {
+    // Advanced mode is back on — reveal whichever advanced strategy the
+    // placeholder was masking so the visible selection matches what
+    // Start Import will send, then retire the placeholder.
+    if (placeholder && sel.value === '__hidden_default__') {
+      const masked = placeholder.dataset.maskedValue;
+      sel.value = masked || '__none__';
+      _afterImportHidingDefault = false;
+    }
+    retireHiddenDefaultOption(sel);
+    return;
+  }
+  const current = sel.selectedOptions[0];
+  const currentIsHiddenAdvanced =
+    !!(current && current.disabled && current.hasAttribute('data-advanced-strategy'));
+  if (currentIsHiddenAdvanced && placeholder) {
+    // The workspace's default is an advanced-only strategy (full,
+    // cull_ready) but advanced mode is off. If we silently fell the
+    // display back to __none__, startImport() would omit after_import so
+    // the server still runs the hidden default while the dropdown reads
+    // "None — import only" — the exact mismatch the reviewer flagged.
+    // Instead, surface an honest placeholder that names the masked
+    // strategy so the visible selection tells the truth about what a
+    // Start Import will do.
+    const maskedLabel = (current.textContent || '').trim();
+    placeholder.textContent =
+      'Workspace default: ' + maskedLabel + ' (enable Advanced mode to change)';
+    placeholder.dataset.maskedValue = current.value;
+    placeholder.hidden = false;
+    placeholder.disabled = false;
     _afterImportHidingDefault = true;
-    sel.value = '__none__';
+    sel.value = '__hidden_default__';
+  } else if (sel.value !== '__hidden_default__') {
+    retireHiddenDefaultOption(sel);
   }
 }
 
@@ -999,6 +1038,10 @@ async function initImportPage() {
   // it) is always tracked.
   sel.addEventListener('change', () => {
     _afterImportHidingDefault = false;
+    // Once the user actively picks a real option, the "Workspace
+    // default (hidden)" placeholder is no longer relevant — retire it
+    // so it doesn't clutter the dropdown on the next open.
+    if (sel.value !== '__hidden_default__') retireHiddenDefaultOption(sel);
   });
   _afterImportHidingDefault = false;
   updateAdvancedImportOptions();
