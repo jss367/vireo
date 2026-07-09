@@ -2399,8 +2399,9 @@ function renderResults() {
 
 function renderPhotoCard(p, encIdx, burstIdx) {
   var label = (p.label || '').toLowerCase();
-  var q = p.quality_composite || 0;
-  var qPct = Math.round(q * 100);
+  var hasQuality = hasQualityScore(p);
+  var q = hasQuality ? Number(p.quality_composite) : null;
+  var qPct = hasQuality ? Math.round(q * 100) : 0;
   var thumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(p) : '/thumbnails/' + p.id + '.jpg';
   var html = '<div class="photo-card ' + label + '" data-photo-id="' + p.id + '">';
   html += '<img src="' + escapeAttr(thumbUrl) + '" loading="lazy" alt="" onclick="openInspect(' + p.id + ')">';
@@ -2411,10 +2412,36 @@ function renderPhotoCard(p, encIdx, burstIdx) {
   if (encIdx != null && burstIdx != null) {
     html += '<button class="detach-btn" onclick="event.stopPropagation();detachPhoto(' + encIdx + ',' + burstIdx + ',' + p.id + ')" title="Detach photo" style="position:absolute;top:2px;right:2px;">&times;</button>';
   }
-  html += '<div class="photo-score-bar"><div class="photo-score-fill" style="width:' + qPct + '%"></div></div>';
-  html += '<div class="photo-info">' + escapeHtml(p.filename || '') + ' &middot; Q=' + q.toFixed(2) + '</div>';
+  if (hasQuality) {
+    html += '<div class="photo-score-bar"><div class="photo-score-fill" style="width:' + qPct + '%"></div></div>';
+    html += '<div class="photo-info">' + escapeHtml(p.filename || '') + ' &middot; Q=' + q.toFixed(2) + '</div>';
+  } else {
+    html += '<div class="photo-info">' + escapeHtml(p.filename || '') + '</div>';
+  }
   html += '</div>';
   return html;
+}
+
+function hasQualityScore(photo) {
+  return photo && photo.quality_composite != null && isFinite(Number(photo.quality_composite));
+}
+
+function hasQualityResults() {
+  if (!pipelineResults || pipelineResults.review_mode === 'species') return false;
+  return (pipelineResults.photos || []).some(hasQualityScore);
+}
+
+function updatePipelineReviewSidebarVisibility() {
+  var ss = document.getElementById('sidebarScoring');
+  if (ss) ss.style.display = hasQualityResults() ? '' : 'none';
+  var sg = document.getElementById('sidebarGrouping');
+  // Species-only review has no burst/quality/keep/reject output, and
+  // /api/pipeline/regroup-live always runs the full pipeline — nudging a
+  // grouping slider here would clobber the all-REVIEW cache with quality
+  // triage results, reintroducing the culling pipeline that identify mode
+  // is meant to skip. Hide the grouping sidebar in that mode; users who
+  // want to change grouping can switch to advanced mode and rerun.
+  if (sg) sg.style.display = (pipelineResults && pipelineResults.review_mode === 'species') ? 'none' : '';
 }
 
 function toggleEncounter(idx) {
@@ -2855,7 +2882,7 @@ function openInspect(photoId) {
   inspectPhotoId = photoId;
 
   var label = (photo.label || '').toLowerCase();
-  var q = photo.quality_composite || 0;
+  var q = hasQualityScore(photo) ? Number(photo.quality_composite) : null;
 
   // Score components
   var scores = [
@@ -2903,19 +2930,21 @@ function openInspect(photoId) {
   html += buildSpeciesPredictionsHtml(photo, buildBurstConsensus(encPhotos), 'Encounter consensus', minConfidence / 100);
 
   // Score waterfall
-  html += '<div class="score-waterfall">';
-  html += '<div style="font-size:13px;font-weight:600;margin-bottom:8px;">Quality Score: ' + q.toFixed(3) + '</div>';
-  scores.forEach(function(s) {
-    var val = photo[s.key] || 0;
-    var weighted = val * s.weight;
-    var pct = Math.round(val * 100);
-    html += '<div class="score-waterfall-row">';
-    html += '<span class="score-wf-label">' + s.name + ' (' + (s.weight*100) + '%)</span>';
-    html += '<div class="score-wf-bar-track"><div class="score-wf-bar-fill ' + s.cls + '" style="width:' + pct + '%"></div></div>';
-    html += '<span class="score-wf-val">' + val.toFixed(3) + ' (' + weighted.toFixed(3) + ')</span>';
+  if (q !== null) {
+    html += '<div class="score-waterfall">';
+    html += '<div style="font-size:13px;font-weight:600;margin-bottom:8px;">Quality Score: ' + q.toFixed(3) + '</div>';
+    scores.forEach(function(s) {
+      var val = photo[s.key] || 0;
+      var weighted = val * s.weight;
+      var pct = Math.round(val * 100);
+      html += '<div class="score-waterfall-row">';
+      html += '<span class="score-wf-label">' + s.name + ' (' + (s.weight*100) + '%)</span>';
+      html += '<div class="score-wf-bar-track"><div class="score-wf-bar-fill ' + s.cls + '" style="width:' + pct + '%"></div></div>';
+      html += '<span class="score-wf-val">' + val.toFixed(3) + ' (' + weighted.toFixed(3) + ')</span>';
+      html += '</div>';
+    });
     html += '</div>';
-  });
-  html += '</div>';
+  }
 
   // Encounter context filmstrip
   if (enc) {
@@ -3093,8 +3122,7 @@ function computeReviewNow() {
     document.getElementById('summaryBar').style.display = '';
     updateSummaryBar(data.summary);
     document.getElementById('filterBar').style.display = '';
-    document.getElementById('sidebarScoring').style.display = '';
-    document.getElementById('sidebarGrouping').style.display = '';
+    updatePipelineReviewSidebarVisibility();
     restorePipelineReviewViewState();
     renderResults();
     openRequestedGroupReviewFromUrl();
@@ -3143,11 +3171,7 @@ function loadPipelinePageInit() {
       document.getElementById('confSliderVal').textContent = minConfidence + '%';
     }
 
-    // Show sidebar sections
-    var ss = document.getElementById('sidebarScoring');
-    if (ss) ss.style.display = '';
-    var sg = document.getElementById('sidebarGrouping');
-    if (sg) sg.style.display = '';
+    updatePipelineReviewSidebarVisibility();
 
     // Show summary bar and populate
     var sb = document.getElementById('summaryBar');
@@ -4620,7 +4644,7 @@ function buildSpeciesPredictionsHtml(photo, consensusRows, consensusTitleText, t
 function buildPipelineMetadataHtml(photo) {
   var enc = pipelineResults.encounters[grmState.encIdx];
   var label = (photo.label || '').toLowerCase();
-  var q = photo.quality_composite || 0;
+  var q = hasQualityScore(photo) ? Number(photo.quality_composite) : null;
 
   var html = '';
 
@@ -4668,19 +4692,21 @@ function buildPipelineMetadataHtml(photo) {
     {name: 'Area', key: 'area_score', weight: 0.10, cls: 'area'},
     {name: 'Noise', key: 'noise_score', weight: 0.10, cls: 'noise'},
   ];
-  html += '<div class="score-waterfall">';
-  html += '<div style="font-size:13px;font-weight:600;margin-bottom:8px;">Quality Score: ' + q.toFixed(3) + '</div>';
-  scores.forEach(function(s) {
-    var val = photo[s.key] || 0;
-    var weighted = val * s.weight;
-    var pct = Math.round(val * 100);
-    html += '<div class="score-waterfall-row">';
-    html += '<span class="score-wf-label">' + s.name + ' (' + (s.weight*100) + '%)</span>';
-    html += '<div class="score-wf-bar-track"><div class="score-wf-bar-fill ' + s.cls + '" style="width:' + pct + '%"></div></div>';
-    html += '<span class="score-wf-val">' + val.toFixed(3) + ' (' + weighted.toFixed(3) + ')</span>';
+  if (q !== null) {
+    html += '<div class="score-waterfall">';
+    html += '<div style="font-size:13px;font-weight:600;margin-bottom:8px;">Quality Score: ' + q.toFixed(3) + '</div>';
+    scores.forEach(function(s) {
+      var val = photo[s.key] || 0;
+      var weighted = val * s.weight;
+      var pct = Math.round(val * 100);
+      html += '<div class="score-waterfall-row">';
+      html += '<span class="score-wf-label">' + s.name + ' (' + (s.weight*100) + '%)</span>';
+      html += '<div class="score-wf-bar-track"><div class="score-wf-bar-fill ' + s.cls + '" style="width:' + pct + '%"></div></div>';
+      html += '<span class="score-wf-val">' + val.toFixed(3) + ' (' + weighted.toFixed(3) + ')</span>';
+      html += '</div>';
+    });
     html += '</div>';
-  });
-  html += '</div>';
+  }
 
   // Raw feature table
   html += '<table class="feature-table">';

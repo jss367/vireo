@@ -1771,7 +1771,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   <span class="nav-spacer"></span>
   <span class="nav-icon" onclick="openReportModal()" title="Report Issue" id="reportToggle">&#9888;</span>
   <span class="nav-icon" onclick="openHelpModal()" title="Help (F1)" id="helpToggle">&#63;</span>
-  <span class="nav-icon" onclick="toggleDevMode()" title="Toggle developer mode" id="devModeToggle" style="opacity:0.4;">&#9881;</span>
+  <span class="nav-icon" onclick="toggleAdvancedMode()" title="Toggle advanced mode" id="devModeToggle" style="opacity:0.4;">&#9881;</span>
   <span class="nav-icon" onclick="toggleTheme()" title="Toggle light/dark mode" id="themeToggle">&#9788;</span>
   <span class="nav-icon" onclick="toggleBottomPanel()" title="Toggle panel">
     &#9638;
@@ -8974,27 +8974,36 @@ function formatDuration(seconds) {
     btn.title = 'Theme: ' + theme.name + ' (click to cycle)';
   }
 
-  // Dev mode system
+  // Advanced mode system. Keep the old dev-mode names as aliases so pages
+  // and tests that still use them continue to work.
   (function() {
-    var on = localStorage.getItem('vireo_dev_mode') === 'true';
+    var stored = localStorage.getItem('vireo_advanced_mode');
+    if (stored == null) stored = localStorage.getItem('vireo_dev_mode');
+    var on = stored === 'true';
+    document.documentElement.setAttribute('data-advanced-mode', on ? 'true' : 'false');
     document.documentElement.setAttribute('data-dev-mode', on ? 'true' : 'false');
     var btn = document.getElementById('devModeToggle');
-    if (btn) { btn.style.opacity = on ? '1' : '0.4'; btn.title = 'Developer mode: ' + (on ? 'ON' : 'OFF'); }
+    if (btn) { btn.style.opacity = on ? '1' : '0.4'; btn.title = 'Advanced mode: ' + (on ? 'ON' : 'OFF'); }
   })();
 
-  window.isDevMode = function() {
-    return document.documentElement.getAttribute('data-dev-mode') === 'true';
+  window.isAdvancedMode = function() {
+    return document.documentElement.getAttribute('data-advanced-mode') === 'true';
   };
+  window.isDevMode = window.isAdvancedMode;
 
-  window.toggleDevMode = function() {
-    var on = !isDevMode();
+  window.toggleAdvancedMode = function() {
+    var on = !isAdvancedMode();
+    document.documentElement.setAttribute('data-advanced-mode', on ? 'true' : 'false');
     document.documentElement.setAttribute('data-dev-mode', on ? 'true' : 'false');
+    localStorage.setItem('vireo_advanced_mode', on ? 'true' : 'false');
     localStorage.setItem('vireo_dev_mode', on ? 'true' : 'false');
     var btn = document.getElementById('devModeToggle');
-    if (btn) { btn.style.opacity = on ? '1' : '0.4'; btn.title = 'Developer mode: ' + (on ? 'ON' : 'OFF'); }
+    if (btn) { btn.style.opacity = on ? '1' : '0.4'; btn.title = 'Advanced mode: ' + (on ? 'ON' : 'OFF'); }
     // Notify pages that may want to re-render
+    window.dispatchEvent(new Event('advancedmodechange'));
     window.dispatchEvent(new Event('devmodechange'));
   };
+  window.toggleDevMode = window.toggleAdvancedMode;
 
   function init() {
     // Restore panel state and height

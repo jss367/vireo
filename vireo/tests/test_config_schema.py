@@ -348,6 +348,7 @@ def test_validate_nullable_enum_accepts_null():
 
     assert validate_value("pipeline.default_strategy", None) is None
     assert validate_value("pipeline.default_strategy", "") is None
+    assert validate_value("pipeline.default_strategy", "identify") == "identify"
     assert validate_value("pipeline.default_strategy", "full") == "full"
 
 

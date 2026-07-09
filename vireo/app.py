@@ -3044,6 +3044,40 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         tuple(chunk),
                     )
                 )
+        # Expand a named strategy the same way /api/jobs/pipeline does so
+        # the plan describes the run the same job body would produce.
+        # Without this, the identify preset (skip_regroup=True + species
+        # review) shows Group as "Disabled" in the plan even though the
+        # actual run prepares species review results — the exact "plan
+        # summary is wrong for the default workflow" transparency failure
+        # the review flagged. Strategy expansion supplies *defaults*;
+        # explicitly-present body keys still win, so an Advanced/Custom
+        # caller can pin one flag on top of a preset (mirrors the merge
+        # /api/jobs/pipeline runs). Copying only ``review_mode`` from
+        # the expansion, as the previous shape did, left ``skip_* =
+        # False`` in ``PipelinePlanParams`` when a caller sent only
+        # ``{"strategy": "identify"}`` (or ``"quick_look"``), so the plan
+        # promised Classify/Extract/Group work the actual strategy job
+        # would skip.
+        if "strategy" in body and body.get("strategy"):
+            strategy_name = body.get("strategy")
+            if not isinstance(strategy_name, str):
+                return json_error(
+                    "strategy must be a string, got "
+                    f"{type(strategy_name).__name__}", 400,
+                )
+            from process_strategies import resolve_strategy
+            try:
+                expanded = resolve_strategy(strategy_name)
+            except ValueError as e:
+                return json_error(str(e), 400)
+            body = {**expanded, **body}
+        review_mode = body.get("review_mode")
+        if review_mode is not None and not isinstance(review_mode, str):
+            return json_error(
+                "review_mode must be a string or null, got "
+                f"{type(review_mode).__name__}", 400,
+            )
         params = PipelinePlanParams(
             collection_id=body.get("collection_id"),
             photo_ids=scope_photo_ids,
@@ -3060,6 +3094,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             source_paths=source_paths,
             hash_duplicate_paths=hash_duplicate_paths,
             preview_max_size=body.get("preview_max_size"),
+            review_mode=review_mode,
         )
         db = _get_db()
         return jsonify(compute_plan(db, params, db_path))
@@ -17874,6 +17909,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             skip_eye_keypoints=expanded["skip_eye_keypoints"],
             skip_regroup=expanded["skip_regroup"],
             miss_enabled=expanded["miss_enabled"],
+            review_mode=expanded["review_mode"],
         )
         model_warning = _apply_no_model_auto_skip(params)
 
@@ -17905,6 +17941,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "skip_classify": params.skip_classify,
             "skip_extract_masks": params.skip_extract_masks,
             "skip_regroup": params.skip_regroup,
+            "review_mode": params.review_mode,
             "miss_enabled": params.miss_enabled,
         }
         if chained_from:
@@ -18461,6 +18498,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             skip_extract_masks=body.get("skip_extract_masks", False),
             skip_eye_keypoints=body.get("skip_eye_keypoints", False),
             skip_regroup=body.get("skip_regroup", False),
+            # ``review_mode`` reaches ``body`` only through the strategy
+            # expansion at the top of this handler (identify sets it to
+            # ``"species"``). Callers who send skip_regroup without a
+            # strategy — Advanced/Custom on the Process page, or API
+            # clients refreshing classifications only — leave it None so
+            # regroup_stage skips instead of overwriting the workspace
+            # cache with all-REVIEW output.
+            review_mode=body.get("review_mode"),
             miss_enabled=body.get("miss_enabled"),
             preview_max_size=body.get("preview_max_size"),
             exclude_paths=excluded_paths_set or None,
@@ -18564,6 +18609,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "skip_classify": params.skip_classify,
             "skip_extract_masks": params.skip_extract_masks,
             "skip_regroup": params.skip_regroup,
+            "review_mode": params.review_mode,
             "miss_enabled": params.miss_enabled,
         }
         # Preserve the caller's original folder_ids alongside the derived

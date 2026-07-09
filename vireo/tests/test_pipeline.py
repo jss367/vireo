@@ -420,6 +420,30 @@ def test_run_full_pipeline(tmp_path):
     assert s["keep_count"] + s["review_count"] + s["reject_count"] == 6
 
 
+def test_run_species_review_pipeline_labels_all_review_without_scores(tmp_path):
+    """Identify-only results support review without pretending to cull."""
+    from pipeline import (
+        load_photo_features,
+        run_species_review_pipeline,
+        serialize_results,
+    )
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    photos = load_photo_features(db)
+
+    results = run_species_review_pipeline(photos)
+    serialized = serialize_results(results)
+
+    assert serialized["review_mode"] == "species"
+    assert serialized["summary"]["total_photos"] == 6
+    assert serialized["summary"]["review_count"] == 6
+    assert serialized["summary"]["keep_count"] == 0
+    assert serialized["summary"]["reject_count"] == 0
+    assert {p["label"] for p in serialized["photos"]} == {"REVIEW"}
+    assert all("quality_composite" not in p for p in serialized["photos"])
+    assert serialized["encounters"][0]["species_predictions"]
+
+
 # -- serialize_results + save/load --
 
 
@@ -1300,6 +1324,39 @@ def test_save_results_preserves_miss_computed_at_across_reflow(tmp_path):
 
     loaded = load_results(cache_dir, workspace_id=1)
     assert loaded["miss_computed_at"] == "2026-04-22T12:00:00.000000+00:00"
+
+
+def test_save_results_preserve_miss_marker_false_drops_existing(tmp_path):
+    """When called with preserve_miss_marker=False, save_results must
+    drop any prior miss_computed_at marker instead of carrying it
+    forward. The identify/species-only pipeline uses this so Pipeline
+    Review doesn't render misses from an earlier full run as if this
+    pass produced them."""
+    from pipeline import (
+        load_photo_features,
+        load_results,
+        run_full_pipeline,
+        save_results,
+        save_results_raw,
+    )
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    photos = load_photo_features(db)
+    results = run_full_pipeline(photos)
+
+    cache_dir = str(tmp_path)
+    save_results(results, cache_dir, workspace_id=1)
+
+    raw = load_results(cache_dir, workspace_id=1)
+    raw["miss_computed_at"] = "2026-04-22T12:00:00.000000+00:00"
+    save_results_raw(raw, cache_dir, workspace_id=1)
+
+    fresh = run_full_pipeline(photos)
+    assert "miss_computed_at" not in fresh
+    save_results(fresh, cache_dir, workspace_id=1, preserve_miss_marker=False)
+
+    loaded = load_results(cache_dir, workspace_id=1)
+    assert "miss_computed_at" not in loaded
 
 
 def test_save_results_new_marker_overrides_existing(tmp_path):

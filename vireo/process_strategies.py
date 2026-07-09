@@ -5,8 +5,10 @@ A strategy is pure data: a dict of PipelineParams skip-flag overrides plus
 expands a strategy name server-side so the import page, the process page,
 and import→process chaining all share one vocabulary.
 
-Deviation from the design table: cull_ready keeps regroup — it is cheap
-(no GPU) and pipeline_review requires encounters.
+The default user-facing preset is ``identify``: detect/classify birds and
+write lightweight review results, but skip the experimental quality/culling
+stack (SAM2 masks, DINO embeddings, eye focus, and quality triage). The full
+quality pipeline remains available for Advanced Mode.
 
 The "no processing at all" choice is deliberately NOT a strategy here: it
 is a decision at the import→process boundary, represented as a null
@@ -43,9 +45,24 @@ _BASE = {
     "skip_eye_keypoints": False,
     "skip_regroup": False,
     "miss_enabled": True,
+    # Distinguishes the identify preset's species-only review path from
+    # a generic ``skip_regroup=True`` run (Advanced/Custom on the Process
+    # page, or an API caller that just wants to refresh classifications
+    # without touching grouping). Without this, ``pipeline_job``'s
+    # regroup_stage would treat every classify-only run as species-review
+    # and overwrite ``pipeline_results_ws*.json`` with all-REVIEW output,
+    # silently downgrading the cache for callers who never asked for it.
+    "review_mode": None,
 }
 
 STRATEGIES = {
+    "identify": {
+        "skip_extract_masks": True,
+        "skip_eye_keypoints": True,
+        "skip_regroup": True,
+        "miss_enabled": False,
+        "review_mode": "species",
+    },
     "full": {},
     "cull_ready": {
         "skip_extract_masks": True,

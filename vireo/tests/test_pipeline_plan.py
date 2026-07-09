@@ -1972,6 +1972,108 @@ def test_regroup_plan_will_skip_when_disabled(tmp_path):
     assert plan["stages"]["Group"]["state"] == "will-skip"
 
 
+def test_regroup_plan_will_run_species_review_for_identify_preset(
+    tmp_path, monkeypatch,
+):
+    """The identify preset sets ``skip_regroup=True`` but flags
+    ``review_mode="species"``, and ``regroup_stage`` (pipeline_job.py) then
+    runs the species-review pipeline and overwrites the workspace cache. The
+    plan must NOT report "Disabled" here — that lies about the work the
+    next press performs (and hides that identify wipes the existing full
+    Group cache/fingerprint on save).
+
+    Requires a downloaded/active model: ``/api/jobs/pipeline`` auto-flips
+    ``skip_classify`` on installs without one, and the species-review
+    branch can't run then. The plan mirrors that no-model degradation —
+    see ``test_regroup_plan_species_review_skipped_when_no_active_model``.
+    """
+    from pipeline_plan import compute_plan
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_active_model", lambda: {
+        "id": "m1", "name": "BioCLIP-2", "downloaded": True,
+    })
+    db, _ = _make_db(tmp_path)
+    plan = compute_plan(
+        db,
+        _params(skip_regroup=True, review_mode="species"),
+        str(tmp_path / "test.db"),
+    )
+    group = plan["stages"]["Group"]
+    assert group["state"] == "will-run", group
+    assert "species review" in group["summary"].lower(), group
+
+
+def test_regroup_plan_species_review_ignored_when_classify_also_disabled(tmp_path):
+    """species review only runs when classify runs (regroup_stage's
+    species branch requires ``not skip_classify``). If a caller sends
+    ``review_mode="species"`` alongside ``skip_classify=True``, the actual
+    job skips grouping — the plan must too.
+    """
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+    plan = compute_plan(
+        db,
+        _params(
+            skip_regroup=True, skip_classify=True, review_mode="species",
+        ),
+        str(tmp_path / "test.db"),
+    )
+    assert plan["stages"]["Group"]["state"] == "will-skip"
+
+
+def test_regroup_plan_species_review_skipped_when_no_active_model(
+    tmp_path, monkeypatch,
+):
+    """No downloaded/active model → ``/api/jobs/pipeline`` calls
+    ``_apply_no_model_auto_skip`` and flips ``skip_classify`` +
+    ``skip_regroup`` to True, so ``regroup_stage`` skips and no
+    species-review cache is prepared. The plan must mirror that
+    degradation instead of promising "Will prepare species review" for
+    a run that will only show the no-model warning.
+    """
+    from pipeline_plan import compute_plan
+    import models as models_mod
+    # No downloaded model, no active model — the plan-side auto-skip
+    # gate should trip. The `_make_db` fixture already ships no models,
+    # but the dev's real ~/.vireo/models.json could bleed in without
+    # this monkeypatch.
+    monkeypatch.setattr(models_mod, "get_models", lambda: [])
+    monkeypatch.setattr(models_mod, "get_active_model", lambda: None)
+    db, _ = _make_db(tmp_path)
+    plan = compute_plan(
+        db,
+        _params(skip_regroup=True, review_mode="species"),
+        str(tmp_path / "test.db"),
+    )
+    group = plan["stages"]["Group"]
+    assert group["state"] == "will-skip", group
+    assert "disabled" in group["summary"].lower(), group
+
+
+def test_regroup_plan_species_review_skipped_when_selected_model_not_downloaded(
+    tmp_path, monkeypatch,
+):
+    """The auto-skip in ``/api/jobs/pipeline`` also trips when every
+    requested ``model_ids`` entry is missing its download. The plan
+    must not advertise species review in that case either.
+    """
+    from pipeline_plan import compute_plan
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP-2", "downloaded": False},
+    ])
+    monkeypatch.setattr(models_mod, "get_active_model", lambda: None)
+    db, _ = _make_db(tmp_path)
+    plan = compute_plan(
+        db,
+        _params(
+            skip_regroup=True, review_mode="species", model_ids=["m1"],
+        ),
+        str(tmp_path / "test.db"),
+    )
+    assert plan["stages"]["Group"]["state"] == "will-skip"
+
+
 def test_regroup_plan_done_prior_when_cache_exists_and_no_upstream_work(tmp_path, monkeypatch):
     """The other headline bug: Group & Score had no signal at all and
     always said "Will run." When the cache exists and no upstream stage
@@ -2177,6 +2279,163 @@ def test_api_pipeline_plan_returns_per_stage_state(app_and_db):
     assert data["stages"]["Extract"]["state"] == "will-skip"
     assert data["stages"]["EyeKeypoints"]["state"] == "will-skip"
     assert data["stages"]["Group"]["state"] == "will-skip"
+
+
+def test_api_pipeline_plan_expands_identify_strategy_to_species_review(
+    app_and_db, monkeypatch,
+):
+    """Frontend sends the strategy name so the plan endpoint expands it the
+    same way /api/jobs/pipeline does. Before this route knew about the
+    ``identify`` preset, the plan reported Group as "Disabled — stage will
+    be skipped" because the frontend sent ``skip_regroup=true`` without the
+    ``review_mode`` that identify actually runs — a lie about the plan
+    summary for the default workflow.
+
+    An active model must resolve for the plan to promise species review —
+    on no-model installs the job auto-skips; see the paired plan-side
+    ``test_regroup_plan_species_review_skipped_when_no_active_model``.
+    """
+    app, _ = app_and_db
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_active_model", lambda: {
+        "id": "m1", "name": "BioCLIP-2", "downloaded": True,
+    })
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={
+            "strategy": "identify",
+            # Mirror what applyStrategyPreset() sets when identify is picked:
+            # classify on, extract/eyes/group off.
+            "skip_classify": False,
+            "skip_extract_masks": True,
+            "skip_eye_keypoints": True,
+            "skip_regroup": True,
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    group = data["stages"]["Group"]
+    assert group["state"] == "will-run", group
+    assert "species review" in group["summary"].lower(), group
+
+
+def test_api_pipeline_plan_strategy_only_body_merges_skip_flags(app_and_db):
+    """A body of just ``{"strategy": "quick_look"}`` (no explicit skip
+    flags) must plan the same run ``/api/jobs/pipeline`` would run — every
+    stage that quick_look disables must report skipped/disabled, not the
+    ``skip_* = false`` defaults the raw ``PipelinePlanParams`` would use.
+
+    Before the plan route merged the full strategy expansion, it copied
+    only ``review_mode`` from the expansion and left every ``skip_*``
+    field at its default False, so an API caller sending strategy-only
+    got a plan that promised Classify/Extract/Group work the actual
+    strategy job would skip.
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={"strategy": "quick_look"},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # quick_look: skip_classify + skip_extract + skip_eyes + skip_regroup
+    for stage in ("Classify", "Extract", "EyeKeypoints", "Group"):
+        assert data["stages"][stage]["state"] == "will-skip", (stage, data)
+
+
+def test_api_pipeline_plan_strategy_only_identify_runs_species_review(
+    app_and_db, monkeypatch,
+):
+    """Strategy-only identify must still surface the species-review branch.
+
+    Pairs with the quick_look case above: identify sets skip_regroup=True
+    *and* review_mode="species", and the plan must reflect that the Group
+    stage will prepare species review even though skip_regroup came from
+    the expansion (not an explicit body key).
+    """
+    app, _ = app_and_db
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_active_model", lambda: {
+        "id": "m1", "name": "BioCLIP-2", "downloaded": True,
+    })
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={"strategy": "identify"},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    group = data["stages"]["Group"]
+    assert group["state"] == "will-run", group
+    assert "species review" in group["summary"].lower(), group
+    # Extract/EyeKeypoints must still report skipped — the strategy's
+    # skip flags applied even though the body sent only ``strategy``.
+    assert data["stages"]["Extract"]["state"] == "will-skip", data
+    assert data["stages"]["EyeKeypoints"]["state"] == "will-skip", data
+
+
+def test_api_pipeline_plan_identify_no_model_mirrors_job_auto_skip(app_and_db):
+    """On installs with no active model, ``/api/jobs/pipeline`` calls
+    ``_apply_no_model_auto_skip`` and flips ``skip_classify`` +
+    ``skip_regroup`` to True, so the identify run only shows the
+    no-model warning and skips regroup. The plan endpoint must mirror
+    that degradation instead of promising "Will prepare species review"
+    for the default workflow on a fresh install.
+    """
+    app, _ = app_and_db
+    # `app_and_db` already redirects models.DEFAULT_MODELS_DIR/CONFIG_PATH
+    # to tmp_path, so `get_active_model()` returns None here without any
+    # extra monkeypatching — a clean fresh install.
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={"strategy": "identify"},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["stages"]["Group"]["state"] == "will-skip", data
+
+
+def test_api_pipeline_plan_explicit_body_key_wins_over_strategy(app_and_db):
+    """Strategy expansion supplies *defaults*: an explicit body key must
+    still override, mirroring ``/api/jobs/pipeline``. Without this an
+    Advanced/Custom caller can't pin one flag on top of a preset.
+
+    quick_look sets ``skip_regroup=True`` — a body that pins
+    ``skip_regroup=False`` alongside the strategy must produce a Group
+    plan for a real run, not the "Disabled" summary skip_regroup=True
+    would emit. The summary text distinguishes the two branches so the
+    assertion is robust to unrelated environmental reasons a stage might
+    also report will-skip (missing models, no eligible photos, etc.).
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={"strategy": "quick_look", "skip_regroup": False},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    group = data["stages"]["Group"]
+    # skip_regroup=True would produce "Disabled — stage will be skipped"
+    # (pipeline_plan._regroup_plan). Explicit False must route around
+    # that branch entirely.
+    assert "disabled" not in group["summary"].lower(), group
+
+
+def test_api_pipeline_plan_rejects_unknown_strategy(app_and_db):
+    """A bad strategy name must 400 — otherwise the plan silently falls back
+    to the raw skip flags and disagrees with what /api/jobs/pipeline would
+    do (which 400s the same input)."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={"strategy": "does_not_exist"},
+    )
+    assert resp.status_code == 400
 
 
 def test_api_pipeline_plan_collection_scope(app_and_db):

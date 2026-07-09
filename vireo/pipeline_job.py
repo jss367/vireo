@@ -117,6 +117,13 @@ class PipelineParams:
     reclassify: bool = False
     skip_extract_masks: bool = False
     skip_regroup: bool = False
+    # Distinguishes the identify preset's species-only review from a
+    # generic ``skip_regroup=True`` run. Only set to ``"species"`` by
+    # ``process_strategies.identify`` — Advanced/Custom on the Process
+    # page and API clients sending ``skip_regroup: true`` without a
+    # strategy leave this ``None`` so regroup_stage skips cleanly instead
+    # of overwriting the workspace cache with all-REVIEW output.
+    review_mode: str | None = None
     skip_classify: bool = False
     skip_eye_keypoints: bool = False
     # Per-run override for the config-gated misses stage. None defers to the
@@ -905,6 +912,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         if not params.skip_regroup:
             step_defs.append({"id": "regroup", "label": "Group encounters"})
             step_defs.append({"id": "misses", "label": "Flag missed shots"})
+        elif not params.skip_classify:
+            step_defs.append({"id": "regroup", "label": "Prepare review"})
         if params.local_processing:
             step_defs.append({"id": "archive", "label": "Archive to destination"})
         runner.set_steps(job["id"], step_defs)
@@ -4871,7 +4880,120 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
         def regroup_stage():
             """Run pipeline grouping + scoring + triage from cached features."""
-            if params.skip_regroup or abort.is_set() or not collection_id:
+            if params.skip_regroup:
+                # Only take the species-review save path when the caller
+                # explicitly asked for it (the identify preset sets
+                # ``review_mode="species"`` via process_strategies). A
+                # classify-only run without that opt-in — Advanced/Custom
+                # on the Process page, or an API client sending
+                # ``skip_regroup: true`` — must NOT overwrite
+                # ``pipeline_results_ws*.json`` with all-REVIEW species
+                # output, since that would silently reintroduce the
+                # culling-pipeline downgrade the reviewer flagged (the
+                # user just wanted to refresh classifications, not turn
+                # the workspace cache into a species-review cache).
+                do_species = (
+                    params.review_mode == "species"
+                    and not abort.is_set()
+                    and collection_id
+                    and not params.skip_classify
+                )
+                if not do_species:
+                    stages["regroup"]["status"] = "skipped"
+                    runner.update_step(job["id"], "regroup", status="completed",
+                                       summary="Skipped")
+                    # Emit a progress event so the SSE stream (and tests
+                    # asserting on the last progress payload) can see the
+                    # stage's terminal "skipped" state. Without this, a
+                    # downstream miss_stage that also short-circuits
+                    # leaves the last stages dict stuck at whatever the
+                    # detect/classify stage emitted last.
+                    _update_stages(runner, job["id"], stages)
+                    return
+                try:
+                    import config as cfg
+                    from pipeline import (
+                        load_photo_features,
+                        run_species_review_pipeline,
+                        save_results,
+                    )
+
+                    thread_db = Database(db_path)
+                    thread_db.set_active_workspace(workspace_id)
+
+                    effective_cfg = thread_db.get_effective_config(cfg.load())
+                    pipeline_cfg = effective_cfg.get("pipeline", {})
+
+                    photos = load_photo_features(
+                        thread_db,
+                        collection_id=collection_id,
+                        config=effective_cfg,
+                    )
+                    if params.exclude_photo_ids:
+                        photos = [
+                            p for p in photos
+                            if p["id"] not in params.exclude_photo_ids
+                        ]
+                    if not photos:
+                        result["stages"]["review"] = {
+                            "error": "No photos with pipeline features found.",
+                        }
+                    else:
+                        results = run_species_review_pipeline(
+                            photos,
+                            config=pipeline_cfg,
+                            emit_trace=True,
+                        )
+                        cache_dir = os.path.dirname(db_path)
+                        # Don't preserve miss_computed_at from any prior
+                        # full run. The identify strategy skips the miss
+                        # stage entirely, so the cache we're writing has
+                        # no misses of its own; carrying the old marker
+                        # forward would make Pipeline Review call
+                        # /api/misses?since=<old marker> and render miss
+                        # rows from the previous full run as if they were
+                        # produced by this identify pass.
+                        save_results(
+                            results,
+                            cache_dir,
+                            workspace_id,
+                            preserve_miss_marker=False,
+                        )
+                        # The species-only pipeline overwrites
+                        # pipeline_results_ws*.json with review-only output
+                        # (no burst/keep/reject scoring). If a prior full
+                        # regroup left a valid last_group_fingerprint stamped
+                        # on the workspace, pipeline_plan._group_plan would
+                        # match it against current settings and report
+                        # "done-prior" — silently letting an advanced Group
+                        # & Score run be skipped even though the cache no
+                        # longer contains any triage output. Invalidate the
+                        # stamp so a subsequent full run is correctly shown
+                        # as will-run.
+                        thread_db.set_workspace_group_state(
+                            workspace_id=workspace_id,
+                            fingerprint=None,
+                            when_ts=None,
+                        )
+                        result["stages"]["review"] = results.get("summary", {})
+
+                    stages["regroup"]["status"] = "completed"
+                    runner.update_step(
+                        job["id"], "regroup",
+                        status="completed",
+                        summary="Review results ready" if photos else "No photos to group",
+                    )
+                except Exception as e:
+                    errors.append(f"[review] Fatal: {e}")
+                    log.exception("Pipeline species-review stage failed")
+                    stages["regroup"]["status"] = "failed"
+                    runner.update_step(
+                        job["id"], "regroup", status="failed", error=str(e),
+                    )
+                _update_stages(runner, job["id"], stages)
+                return
+
+            if abort.is_set() or not collection_id:
                 stages["regroup"]["status"] = "skipped"
                 runner.update_step(job["id"], "regroup", status="completed",
                                    summary="Skipped")
