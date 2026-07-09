@@ -1972,15 +1972,26 @@ def test_regroup_plan_will_skip_when_disabled(tmp_path):
     assert plan["stages"]["Group"]["state"] == "will-skip"
 
 
-def test_regroup_plan_will_run_species_review_for_identify_preset(tmp_path):
+def test_regroup_plan_will_run_species_review_for_identify_preset(
+    tmp_path, monkeypatch,
+):
     """The identify preset sets ``skip_regroup=True`` but flags
     ``review_mode="species"``, and ``regroup_stage`` (pipeline_job.py) then
     runs the species-review pipeline and overwrites the workspace cache. The
     plan must NOT report "Disabled" here — that lies about the work the
     next press performs (and hides that identify wipes the existing full
     Group cache/fingerprint on save).
+
+    Requires a downloaded/active model: ``/api/jobs/pipeline`` auto-flips
+    ``skip_classify`` on installs without one, and the species-review
+    branch can't run then. The plan mirrors that no-model degradation —
+    see ``test_regroup_plan_species_review_skipped_when_no_active_model``.
     """
     from pipeline_plan import compute_plan
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_active_model", lambda: {
+        "id": "m1", "name": "BioCLIP-2", "downloaded": True,
+    })
     db, _ = _make_db(tmp_path)
     plan = compute_plan(
         db,
@@ -2004,6 +2015,59 @@ def test_regroup_plan_species_review_ignored_when_classify_also_disabled(tmp_pat
         db,
         _params(
             skip_regroup=True, skip_classify=True, review_mode="species",
+        ),
+        str(tmp_path / "test.db"),
+    )
+    assert plan["stages"]["Group"]["state"] == "will-skip"
+
+
+def test_regroup_plan_species_review_skipped_when_no_active_model(
+    tmp_path, monkeypatch,
+):
+    """No downloaded/active model → ``/api/jobs/pipeline`` calls
+    ``_apply_no_model_auto_skip`` and flips ``skip_classify`` +
+    ``skip_regroup`` to True, so ``regroup_stage`` skips and no
+    species-review cache is prepared. The plan must mirror that
+    degradation instead of promising "Will prepare species review" for
+    a run that will only show the no-model warning.
+    """
+    from pipeline_plan import compute_plan
+    import models as models_mod
+    # No downloaded model, no active model — the plan-side auto-skip
+    # gate should trip. The `_make_db` fixture already ships no models,
+    # but the dev's real ~/.vireo/models.json could bleed in without
+    # this monkeypatch.
+    monkeypatch.setattr(models_mod, "get_models", lambda: [])
+    monkeypatch.setattr(models_mod, "get_active_model", lambda: None)
+    db, _ = _make_db(tmp_path)
+    plan = compute_plan(
+        db,
+        _params(skip_regroup=True, review_mode="species"),
+        str(tmp_path / "test.db"),
+    )
+    group = plan["stages"]["Group"]
+    assert group["state"] == "will-skip", group
+    assert "disabled" in group["summary"].lower(), group
+
+
+def test_regroup_plan_species_review_skipped_when_selected_model_not_downloaded(
+    tmp_path, monkeypatch,
+):
+    """The auto-skip in ``/api/jobs/pipeline`` also trips when every
+    requested ``model_ids`` entry is missing its download. The plan
+    must not advertise species review in that case either.
+    """
+    from pipeline_plan import compute_plan
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP-2", "downloaded": False},
+    ])
+    monkeypatch.setattr(models_mod, "get_active_model", lambda: None)
+    db, _ = _make_db(tmp_path)
+    plan = compute_plan(
+        db,
+        _params(
+            skip_regroup=True, review_mode="species", model_ids=["m1"],
         ),
         str(tmp_path / "test.db"),
     )
@@ -2217,15 +2281,25 @@ def test_api_pipeline_plan_returns_per_stage_state(app_and_db):
     assert data["stages"]["Group"]["state"] == "will-skip"
 
 
-def test_api_pipeline_plan_expands_identify_strategy_to_species_review(app_and_db):
+def test_api_pipeline_plan_expands_identify_strategy_to_species_review(
+    app_and_db, monkeypatch,
+):
     """Frontend sends the strategy name so the plan endpoint expands it the
     same way /api/jobs/pipeline does. Before this route knew about the
     ``identify`` preset, the plan reported Group as "Disabled — stage will
     be skipped" because the frontend sent ``skip_regroup=true`` without the
     ``review_mode`` that identify actually runs — a lie about the plan
     summary for the default workflow.
+
+    An active model must resolve for the plan to promise species review —
+    on no-model installs the job auto-skips; see the paired plan-side
+    ``test_regroup_plan_species_review_skipped_when_no_active_model``.
     """
     app, _ = app_and_db
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_active_model", lambda: {
+        "id": "m1", "name": "BioCLIP-2", "downloaded": True,
+    })
     client = app.test_client()
     resp = client.post(
         "/api/pipeline/plan",
@@ -2271,7 +2345,9 @@ def test_api_pipeline_plan_strategy_only_body_merges_skip_flags(app_and_db):
         assert data["stages"][stage]["state"] == "will-skip", (stage, data)
 
 
-def test_api_pipeline_plan_strategy_only_identify_runs_species_review(app_and_db):
+def test_api_pipeline_plan_strategy_only_identify_runs_species_review(
+    app_and_db, monkeypatch,
+):
     """Strategy-only identify must still surface the species-review branch.
 
     Pairs with the quick_look case above: identify sets skip_regroup=True
@@ -2280,6 +2356,10 @@ def test_api_pipeline_plan_strategy_only_identify_runs_species_review(app_and_db
     the expansion (not an explicit body key).
     """
     app, _ = app_and_db
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_active_model", lambda: {
+        "id": "m1", "name": "BioCLIP-2", "downloaded": True,
+    })
     client = app.test_client()
     resp = client.post(
         "/api/pipeline/plan",
@@ -2294,6 +2374,28 @@ def test_api_pipeline_plan_strategy_only_identify_runs_species_review(app_and_db
     # skip flags applied even though the body sent only ``strategy``.
     assert data["stages"]["Extract"]["state"] == "will-skip", data
     assert data["stages"]["EyeKeypoints"]["state"] == "will-skip", data
+
+
+def test_api_pipeline_plan_identify_no_model_mirrors_job_auto_skip(app_and_db):
+    """On installs with no active model, ``/api/jobs/pipeline`` calls
+    ``_apply_no_model_auto_skip`` and flips ``skip_classify`` +
+    ``skip_regroup`` to True, so the identify run only shows the
+    no-model warning and skips regroup. The plan endpoint must mirror
+    that degradation instead of promising "Will prepare species review"
+    for the default workflow on a fresh install.
+    """
+    app, _ = app_and_db
+    # `app_and_db` already redirects models.DEFAULT_MODELS_DIR/CONFIG_PATH
+    # to tmp_path, so `get_active_model()` returns None here without any
+    # extra monkeypatching — a clean fresh install.
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={"strategy": "identify"},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["stages"]["Group"]["state"] == "will-skip", data
 
 
 def test_api_pipeline_plan_explicit_body_key_wins_over_strategy(app_and_db):
