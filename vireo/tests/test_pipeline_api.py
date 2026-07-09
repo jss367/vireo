@@ -3169,6 +3169,46 @@ def test_pipeline_regroup_live_view_scope_does_not_overwrite_cache(setup):
         assert _json.load(f) == original_cache
 
 
+def test_pipeline_regroup_live_default_persists_cache(setup):
+    """Latest-review-scope slider tunes (no photo_ids, no save_cache flag)
+    must persist to the saved cache so a reload restores the user's
+    latest review adjustments. This is the pre-scope-switcher default
+    behavior; the client's reviewScopePayload sends the same body shape
+    when scope == 'cache'."""
+    app, db_path = setup
+    p1, _p2 = _seed_workspace_with_masks(db_path)
+
+    import json as _json
+
+    from db import Database
+    db = Database(db_path)
+    ws = db._active_workspace_id
+    db.close()
+    cache_path = os.path.join(
+        os.path.dirname(db_path), f"pipeline_results_ws{ws}.json"
+    )
+    original_cache = {
+        "encounters": [],
+        "photos": [{"id": p1, "filename": "a.jpg", "label": "REVIEW"}],
+        "summary": {"total_photos": 1},
+    }
+    with open(cache_path, "w") as f:
+        _json.dump(original_cache, f)
+
+    with app.test_client() as c:
+        resp = c.post("/api/pipeline/regroup-live", json={"config": {}})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["summary"]["total_photos"] == 2
+
+    with open(cache_path) as f:
+        saved = _json.load(f)
+    # The default request shape must have overwritten the partial cache
+    # with the fresh workspace-wide regroup result.
+    assert saved != original_cache
+    assert saved["summary"]["total_photos"] == 2
+
+
 def test_pipeline_page_init_state_ready_folds_blocking_gaps_into_enhancing(setup, tmp_path):
     """When the grouping cache is on disk but mask coverage is below the
     25% threshold, compute_review_readiness returns missing_required=["masks"]

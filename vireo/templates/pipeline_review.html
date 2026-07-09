@@ -3161,6 +3161,25 @@ function cloneReviewData(data) {
   return data ? JSON.parse(JSON.stringify(data)) : null;
 }
 
+// Workspace/Collection scope shows a *view* of the pipeline for a different
+// photo set — the result lives in `pipelineResults` alongside the persisted
+// cache, but writing it back to /api/pipeline/save-cache (or triggering any
+// server endpoint that rewrites the cache: detach-burst, detach-photo,
+// /api/encounters/species) would clobber the workspace's saved review with
+// this scoped subset. Callers use this to short-circuit those flows so
+// editing is confined to the Latest review scope.
+function isScopedReviewView() {
+  return reviewScopeMode && reviewScopeMode !== 'cache';
+}
+
+function notifyReadOnlyScopedView() {
+  var label = reviewScopeMode === 'collection' ? 'Collection' : 'Workspace';
+  showToast(
+    label + ' scope is view-only. Switch to Latest review to make changes.',
+    'warning'
+  );
+}
+
 function setReviewScopeStatus(text, isError) {
   var el = document.getElementById('reviewScopeStatus');
   if (!el) return;
@@ -3209,6 +3228,14 @@ function loadReviewScopeCollections() {
 }
 
 function reviewScopePayload(config) {
+  // Latest review scope: send the pre-scope request shape (config only) so
+  // the backend defaults save_cache=true with no photo_ids filter and
+  // slider tuning persists to the saved cache. Adding photo_ids here (as
+  // an earlier revision did) blocks the save branch in
+  // api_pipeline_reflow/regroup_live and drops slider changes on reload.
+  if (reviewScopeMode === 'cache') {
+    return { config: config || {} };
+  }
   var body = {
     config: config || {},
     save_cache: false,
@@ -3216,10 +3243,6 @@ function reviewScopePayload(config) {
   if (reviewScopeMode === 'collection') {
     if (!reviewScopeCollectionId) return null;
     body.collection_id = parseInt(reviewScopeCollectionId, 10);
-  } else if (reviewScopeMode === 'cache') {
-    var source = pipelineResults || cachedPipelineResults;
-    body.photo_ids = ((source && source.photos) || []).map(function(p) { return p.id; });
-    if (!body.photo_ids.length) return null;
   }
   return body;
 }
@@ -3263,6 +3286,12 @@ function scopedCacheInfoFor(data) {
 
 function loadReviewScopeResults() {
   updateReviewScopeControls();
+  // Bump the request sequence up front so that any scope fetch still in
+  // flight from a prior scope choice is invalidated regardless of which
+  // branch we take here. Otherwise a Workspace/Collection request that
+  // resolves after the user switches back to Latest review could pass its
+  // .then() guard and replace the cached view with stale scoped results.
+  var seq = ++reviewScopeRequestSeq;
   if (reviewScopeMode === 'cache') {
     if (cachedPipelineResults) {
       applyReviewResults(
@@ -3278,7 +3307,6 @@ function loadReviewScopeResults() {
     setReviewScopeStatus('Select one');
     return;
   }
-  var seq = ++reviewScopeRequestSeq;
   setReviewScopeStatus('Loading...');
   safeFetch('/api/pipeline/regroup-live', {
     method: 'POST',
@@ -3730,6 +3758,16 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
   event.stopPropagation();
   closeAllDropdowns();
 
+  // /api/encounters/species reloads and rewrites the saved cache on the
+  // server, so calling it from a Workspace/Collection scope view would
+  // overwrite the persisted review with only the scoped photo set. Block
+  // it here — the inline species chip/dropdown buttons that call us have
+  // no scope awareness of their own.
+  if (isScopedReviewView()) {
+    notifyReadOnlyScopedView();
+    return;
+  }
+
   var enc = pipelineResults.encounters[encIdx];
   if (!enc) return;
 
@@ -3825,6 +3863,10 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
 async function clearBurstOverride(event, encIdx, burstIdx) {
   event.stopPropagation();
   closeAllDropdowns();
+  if (isScopedReviewView()) {
+    notifyReadOnlyScopedView();
+    return;
+  }
   var enc = pipelineResults.encounters[encIdx];
   if (!enc || !enc.bursts || !enc.bursts[burstIdx]) return;
   enc.bursts[burstIdx].species_override = null;
@@ -3871,6 +3913,10 @@ function undoLastAction() {
 }
 
 async function detachBurst(encIdx, burstIdx) {
+  if (isScopedReviewView()) {
+    notifyReadOnlyScopedView();
+    return;
+  }
   // Save state for undo
   var snapshot = JSON.parse(JSON.stringify(pipelineResults));
 
@@ -3901,6 +3947,10 @@ async function detachBurst(encIdx, burstIdx) {
 }
 
 async function detachPhoto(encIdx, burstIdx, photoId) {
+  if (isScopedReviewView()) {
+    notifyReadOnlyScopedView();
+    return;
+  }
   var snapshot = JSON.parse(JSON.stringify(pipelineResults));
 
   var resp = await safeFetch('/api/pipeline/detach-photo', {
@@ -4626,6 +4676,19 @@ function grmUpdateApplyLabel() {
   if (checks.flags && diff.detachNew > 0) parts.push('Detach ' + diff.detachNew);
   btn.textContent = parts.length ? parts.join(' · ') + ' & Close' : 'Apply and close';
   btn.title = grmApplyTitle(diff, checks, checks.species ? tagCount : 0);
+
+  // In Workspace/Collection scope the current pipelineResults are a *view*
+  // over a different photo set — committing them would overwrite the
+  // workspace's saved review cache with just this scoped subset (both via
+  // the client save-cache POST and the server-side cache rewrite inside
+  // /api/encounters/species). Keep the modal browsable but block Apply.
+  if (isScopedReviewView()) {
+    btn.disabled = true;
+    btn.style.opacity = '0.5';
+    btn.style.cursor = 'not-allowed';
+    btn.textContent = 'Read-only in scope view';
+    btn.title = 'Switch Scope to "Latest review" to save picks, rejects, or species confirmations.';
+  }
 }
 
 // Diff the current modal zones against the DB snapshot we opened with.
@@ -5752,6 +5815,16 @@ async function grmApply() {
   // error after retry) must not let Apply clear flags.
   if (!grmState.seeded) {
     console.warn('grmApply called before /group/state seed completed; ignoring.');
+    return;
+  }
+  // Scoped-view guard: grmApply POSTs pipelineResults to /api/pipeline/save-cache
+  // (line ~5921) and confirms species via /api/encounters/species, which
+  // reloads and rewrites the saved cache server-side — either path would
+  // clobber the workspace's persisted review with this scoped subset.
+  // grmUpdateApplyLabel keeps the button visibly disabled here; this is
+  // defense in depth against a stray click while still seeded.
+  if (isScopedReviewView()) {
+    notifyReadOnlyScopedView();
     return;
   }
   if (grmState.applying) return;
