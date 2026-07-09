@@ -822,6 +822,21 @@ function photoSignal(photo) {
   var minConfidence = null;
 
   models.forEach(function(model) {
+    var preds = ((photo.predictions || {})[model] || []).filter(usablePrediction);
+    if (!preds.length) {
+      missing += 1;
+      return;
+    }
+    preds.forEach(function(pred) {
+      var predConf = pred.confidence || 0;
+      if (pred.category === 'conflict') {
+        keywordConflictCount += 1;
+        keywordConflictScore += predConf;
+        maxKeywordConflictConfidence = Math.max(maxKeywordConflictConfidence, predConf);
+      } else if (pred.category === 'match' || pred.category === 'refinement') {
+        keywordSupportScore += predConf;
+      }
+    });
     var best = bestPredictionForModel(photo, model);
     if (!best) {
       missing += 1;
@@ -831,13 +846,6 @@ function photoSignal(photo) {
     topPreds.push({ model: model, species: best.species || '', confidence: conf, pred: best });
     maxConfidence = Math.max(maxConfidence, conf);
     minConfidence = minConfidence === null ? conf : Math.min(minConfidence, conf);
-    if (best.category === 'conflict') {
-      keywordConflictCount += 1;
-      keywordConflictScore += conf;
-      maxKeywordConflictConfidence = Math.max(maxKeywordConflictConfidence, conf);
-    } else if (best.category === 'match' || best.category === 'refinement') {
-      keywordSupportScore += conf;
-    }
   });
 
   var speciesGroups = {};
