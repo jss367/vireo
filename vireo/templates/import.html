@@ -297,6 +297,7 @@ function addSource() {
 
 async function browseForSource() {
   if (typeof pickDirectory === 'function') {
+    const seqBeforePicker = browserSeq;
     const result = await pickDirectory('Select source folders', { multiple: true });
     if (result) {
       const paths = Array.isArray(result) ? result : [result];
@@ -304,12 +305,17 @@ async function browseForSource() {
       return;
     }
     if (typeof isTauri === 'function' && isTauri()) return;
+    if (browserSeq !== seqBeforePicker) {
+      openImportFolderBrowser('source', { skipInitialBrowse: true });
+      return;
+    }
   }
   openImportFolderBrowser('source');
 }
 
 async function browseForDestination() {
   if (typeof pickDirectory === 'function') {
+    const seqBeforePicker = browserSeq;
     const result = await pickDirectory('Select archive folder');
     if (result) {
       const path = Array.isArray(result) ? result[0] : result;
@@ -317,11 +323,15 @@ async function browseForDestination() {
       return;
     }
     if (typeof isTauri === 'function' && isTauri()) return;
+    if (browserSeq !== seqBeforePicker) {
+      openImportFolderBrowser('destination', { skipInitialBrowse: true });
+      return;
+    }
   }
   openImportFolderBrowser('destination');
 }
 
-function openImportFolderBrowser(mode) {
+function openImportFolderBrowser(mode, opts = {}) {
   browserMode = mode === 'destination' ? 'destination' : 'source';
   const overlay = document.getElementById('importFolderBrowser');
   document.getElementById('folderBrowserTitle').textContent =
@@ -344,7 +354,7 @@ function openImportFolderBrowser(mode) {
   const startPath = browserMode === 'destination'
     ? (document.getElementById('destInput').value || '').trim()
     : '';
-  browseImportFolderTo(startPath || null);
+  if (!opts.skipInitialBrowse) browseImportFolderTo(startPath || null);
 }
 
 function closeImportFolderBrowser() {
