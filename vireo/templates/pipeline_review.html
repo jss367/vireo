@@ -2435,7 +2435,13 @@ function updatePipelineReviewSidebarVisibility() {
   var ss = document.getElementById('sidebarScoring');
   if (ss) ss.style.display = hasQualityResults() ? '' : 'none';
   var sg = document.getElementById('sidebarGrouping');
-  if (sg) sg.style.display = '';
+  // Species-only review has no burst/quality/keep/reject output, and
+  // /api/pipeline/regroup-live always runs the full pipeline — nudging a
+  // grouping slider here would clobber the all-REVIEW cache with quality
+  // triage results, reintroducing the culling pipeline that identify mode
+  // is meant to skip. Hide the grouping sidebar in that mode; users who
+  // want to change grouping can switch to advanced mode and rerun.
+  if (sg) sg.style.display = (pipelineResults && pipelineResults.review_mode === 'species') ? 'none' : '';
 }
 
 function toggleEncounter(idx) {

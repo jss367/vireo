@@ -4915,6 +4915,22 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         )
                         cache_dir = os.path.dirname(db_path)
                         save_results(results, cache_dir, workspace_id)
+                        # The species-only pipeline overwrites
+                        # pipeline_results_ws*.json with review-only output
+                        # (no burst/keep/reject scoring). If a prior full
+                        # regroup left a valid last_group_fingerprint stamped
+                        # on the workspace, pipeline_plan._group_plan would
+                        # match it against current settings and report
+                        # "done-prior" — silently letting an advanced Group
+                        # & Score run be skipped even though the cache no
+                        # longer contains any triage output. Invalidate the
+                        # stamp so a subsequent full run is correctly shown
+                        # as will-run.
+                        thread_db.set_workspace_group_state(
+                            workspace_id=workspace_id,
+                            fingerprint=None,
+                            when_ts=None,
+                        )
                         result["stages"]["review"] = results.get("summary", {})
 
                     stages["regroup"]["status"] = "completed"
