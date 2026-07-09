@@ -146,6 +146,10 @@ def test_import_folder_browser_selects_volumes_from_synthetic_root(live_server, 
     page.evaluate(
         """
         () => {
+          Object.defineProperty(navigator, 'userAgent', {
+            value: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+            configurable: true,
+          });
           const originalFetch = window.fetch.bind(window);
           window.fetch = (input, init) => {
             const target = typeof input === 'string' ? input : input.url;
@@ -172,8 +176,18 @@ def test_import_folder_browser_selects_volumes_from_synthetic_root(live_server, 
     select_btn = page.locator("#folderBrowserSelectBtn")
     expect(select_btn).to_be_disabled()
 
-    items.nth(0).click(modifiers=["Control"])
-    items.nth(1).click(modifiers=["Control"])
+    items.nth(0).evaluate(
+        """el => el.dispatchEvent(new MouseEvent('click', {
+          bubbles: true,
+          ctrlKey: true,
+        }))"""
+    )
+    items.nth(1).evaluate(
+        """el => el.dispatchEvent(new MouseEvent('click', {
+          bubbles: true,
+          ctrlKey: true,
+        }))"""
+    )
 
     expect(select_btn).to_be_enabled()
     expect(select_btn).to_have_text("Add 2 Folders")
