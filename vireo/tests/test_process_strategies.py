@@ -5,12 +5,12 @@ from process_strategies import STRATEGIES, resolve_strategy
 
 def test_known_strategies():
     # The whitelist is deliberately narrow: only *processing* presets.
-    # The design doc's "None" / import-only choice is NOT a fourth
+    # The design doc's "None" / import-only choice is NOT another
     # entry here — it lives at the import→process boundary (workspace
     # default in Task 1.5, chaining hook in PR 3). Adding an entry like
     # "none" here would make the process-job API accept it and enqueue
     # a no-op run instead of letting the chaining hook short-circuit.
-    assert set(STRATEGIES) == {"full", "cull_ready", "quick_look"}
+    assert set(STRATEGIES) == {"identify", "full", "cull_ready", "quick_look"}
 
 
 def test_full_skips_nothing():
@@ -27,6 +27,15 @@ def test_cull_ready_skips_expensive_extras():
     # classify and regroup stay on: review pages need predictions + encounters
     assert flags["skip_classify"] is False
     assert flags["skip_regroup"] is False
+
+
+def test_identify_keeps_classify_but_skips_quality_stack():
+    flags = resolve_strategy("identify")
+    assert flags["skip_classify"] is False
+    assert flags["skip_extract_masks"] is True
+    assert flags["skip_eye_keypoints"] is True
+    assert flags["skip_regroup"] is True
+    assert flags["miss_enabled"] is False
 
 
 def test_quick_look_is_thumbs_and_previews_only():

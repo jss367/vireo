@@ -420,6 +420,30 @@ def test_run_full_pipeline(tmp_path):
     assert s["keep_count"] + s["review_count"] + s["reject_count"] == 6
 
 
+def test_run_species_review_pipeline_labels_all_review_without_scores(tmp_path):
+    """Identify-only results support review without pretending to cull."""
+    from pipeline import (
+        load_photo_features,
+        run_species_review_pipeline,
+        serialize_results,
+    )
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    photos = load_photo_features(db)
+
+    results = run_species_review_pipeline(photos)
+    serialized = serialize_results(results)
+
+    assert serialized["review_mode"] == "species"
+    assert serialized["summary"]["total_photos"] == 6
+    assert serialized["summary"]["review_count"] == 6
+    assert serialized["summary"]["keep_count"] == 0
+    assert serialized["summary"]["reject_count"] == 0
+    assert {p["label"] for p in serialized["photos"]} == {"REVIEW"}
+    assert all("quality_composite" not in p for p in serialized["photos"])
+    assert serialized["encounters"][0]["species_predictions"]
+
+
 # -- serialize_results + save/load --
 
 

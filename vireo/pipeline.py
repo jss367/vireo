@@ -538,6 +538,45 @@ def run_full_pipeline(photos, config=None, emit_trace=False):
     }
 
 
+def run_species_review_pipeline(photos, config=None, emit_trace=False):
+    """Build review results from species predictions without quality triage.
+
+    This is the default user-facing processing path: it keeps encounter/burst
+    grouping and species consensus available for Pipeline Review, but does not
+    run or imply the experimental quality/culling stack.
+    """
+    encounters = run_grouping(photos, config=config, emit_trace=emit_trace)
+    all_photos = []
+
+    for enc in encounters:
+        bursts = enc.get("bursts") or []
+        if bursts:
+            for burst in bursts:
+                for photo in burst:
+                    photo["label"] = "REVIEW"
+                    photo["reject_reasons"] = []
+                    all_photos.append(photo)
+        else:
+            for photo in enc.get("photos", []):
+                photo["label"] = "REVIEW"
+                photo["reject_reasons"] = []
+                all_photos.append(photo)
+
+    summary = _make_summary(encounters, all_photos)
+    log.info(
+        "Species review pipeline complete: %d photos → %d REVIEW",
+        summary["total_photos"],
+        summary["review_count"],
+    )
+
+    return {
+        "review_mode": "species",
+        "encounters": encounters,
+        "photos": all_photos,
+        "summary": summary,
+    }
+
+
 def run_selected_batch_review(photos, config=None):
     """Build normal pipeline-review results for one temporary photo batch.
 
@@ -879,6 +918,8 @@ def serialize_results(results):
         "photos": [_clean_photo(p) for p in results["photos"]],
         "summary": results["summary"],
     }
+    if results.get("review_mode"):
+        out["review_mode"] = results["review_mode"]
     # miss_computed_at is attached by pipeline_job's miss_stage and
     # consumed by pipeline_review's "Review misses" shortcut to gate
     # on actual recomputation in this run. Pass it through when the

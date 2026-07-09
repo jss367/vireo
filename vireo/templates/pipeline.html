@@ -909,10 +909,11 @@ body { padding-bottom: 36px; }
     <span style="margin-left:auto;display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);">
       Strategy
       <select id="strategySelect" onchange="applyStrategyPreset()" style="font-size:12px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:3px 6px;">
-        <option value="__custom__" selected>Custom (use toggles)</option>
-        <option value="full">Full pipeline</option>
-        <option value="cull_ready">Cull-ready</option>
+        <option value="identify" selected>Identify birds</option>
         <option value="quick_look">Quick look</option>
+        <option value="__custom__" data-advanced-strategy>Custom (use toggles)</option>
+        <option value="full" data-advanced-strategy>Full pipeline</option>
+        <option value="cull_ready" data-advanced-strategy>Cull-ready</option>
       </select>
     </span>
   </div>
@@ -970,7 +971,7 @@ body { padding-bottom: 36px; }
   </div>
 
   <!-- Card 6: Extract Features -->
-  <div class="stage-card" id="card-extract" data-testid="stage-card">
+  <div class="stage-card" id="card-extract" data-testid="stage-card" data-advanced-stage>
     <div class="stage-header" onclick="toggleCard('extract')">
       <span class="stage-num" id="numExtract">6</span>
       <input type="checkbox" class="stage-enable" id="enableExtract" checked
@@ -1033,7 +1034,7 @@ body { padding-bottom: 36px; }
   </div>
 
   <!-- Card 7: Eye Keypoints (optional, off by default until weights downloaded) -->
-  <div class="stage-card" id="card-eyekeypoints" data-testid="stage-card">
+  <div class="stage-card" id="card-eyekeypoints" data-testid="stage-card" data-advanced-stage>
     <div class="stage-header" onclick="toggleCard('eyekeypoints')">
       <span class="stage-num" id="numEyeKeypoints">7</span>
       <input type="checkbox" class="stage-enable" id="enableEyeKeypoints" checked
@@ -1065,7 +1066,7 @@ body { padding-bottom: 36px; }
   </div>
 
   <!-- Card 8: Group & Score -->
-  <div class="stage-card" id="card-group" data-testid="stage-card">
+  <div class="stage-card" id="card-group" data-testid="stage-card" data-advanced-stage>
     <div class="stage-header" onclick="toggleCard('group')">
       <span class="stage-num" id="numGroup">8</span>
       <input type="checkbox" class="stage-enable" id="enableGroup" checked
@@ -1328,6 +1329,9 @@ document.addEventListener('DOMContentLoaded', initPipelinePage);
 // Render pills + plan summary immediately from default toggle state, so the
 // page isn't blank while the page-init API call is in flight.
 document.addEventListener('DOMContentLoaded', refreshPipelineUI);
+document.addEventListener('DOMContentLoaded', updateAdvancedPipelineOptions);
+window.addEventListener('advancedmodechange', updateAdvancedPipelineOptions);
+window.addEventListener('devmodechange', updateAdvancedPipelineOptions);
 
 // -- New images (Stage 1 third option) --
 var newImagesSnapshotId = null;
@@ -1633,6 +1637,7 @@ function applyStrategyPreset() {
   var sel = document.getElementById('strategySelect');
   if (!sel || sel.value === '__custom__') { refreshPipelineUI(); return; }
   var presets = {
+    identify:   { classify: true,  extract: false, eyes: false, group: false },
     full:       { classify: true,  extract: true,  eyes: true,  group: true  },
     cull_ready: { classify: true,  extract: false, eyes: false, group: true  },
     quick_look: { classify: false, extract: false, eyes: false, group: false },
@@ -1659,6 +1664,23 @@ function applyStrategyPreset() {
     gCb.disabled = false;
   }
   refreshPipelineUI();
+}
+
+function updateAdvancedPipelineOptions() {
+  var sel = document.getElementById('strategySelect');
+  if (!sel) return;
+  var advanced = !!(window.isAdvancedMode && window.isAdvancedMode());
+  sel.querySelectorAll('[data-advanced-strategy]').forEach(function(opt) {
+    opt.hidden = !advanced;
+    opt.disabled = !advanced;
+  });
+  document.querySelectorAll('[data-advanced-stage]').forEach(function(card) {
+    card.style.display = advanced ? '' : 'none';
+  });
+  if (!advanced && sel.selectedOptions.length && sel.selectedOptions[0].disabled) {
+    sel.value = 'identify';
+  }
+  applyStrategyPreset();
 }
 
 var _sourceMode = 'folders'; // 'folders', 'import', 'collection', or 'new_images'

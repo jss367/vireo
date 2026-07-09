@@ -2459,6 +2459,23 @@ def test_pipeline_strategy_expands_flags(app_and_db):
         assert cfg["skip_regroup"] is True
 
 
+def test_pipeline_identify_strategy_keeps_classify_only(app_and_db, monkeypatch):
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    _fake_active_model(monkeypatch)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "strategy": "identify",
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg["strategy"] == "identify"
+        assert cfg["skip_classify"] is False
+        assert cfg["skip_extract_masks"] is True
+        assert cfg["skip_regroup"] is True
+        assert cfg["miss_enabled"] is False
+
+
 def test_pipeline_cull_ready_pins_miss_enabled_false(app_and_db, monkeypatch):
     # quick_look alone can't prove miss_enabled reached PipelineParams:
     # it also sets skip_classify=True, and the misses stage is downstream
@@ -2509,8 +2526,7 @@ def test_pipeline_null_strategy_400(app_and_db):
 
 
 def test_pipeline_none_string_strategy_400(app_and_db):
-    # The literal string "none" is not a valid strategy name either
-    # (STRATEGIES only holds full / cull_ready / quick_look).
+    # The literal string "none" is not a valid strategy name either.
     app, _ = app_and_db
     col_id = _make_collection(app)
     with app.test_client() as client:

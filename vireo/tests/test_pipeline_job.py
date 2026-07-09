@@ -10664,6 +10664,15 @@ def _run_pipeline_for_miss_tests(tmp_path, monkeypatch, *, pipeline_cfg,
         },
     )
     monkeypatch.setattr(
+        pipeline_mod, "run_species_review_pipeline",
+        lambda photos, config=None, emit_trace=False: {
+            "review_mode": "species",
+            "summary": {"review_count": len(photos)},
+            "photos": photos,
+            "encounters": [],
+        },
+    )
+    monkeypatch.setattr(
         pipeline_mod, "save_results", lambda results, cache_dir, ws: None,
     )
     monkeypatch.setattr(
@@ -10731,6 +10740,25 @@ def test_miss_enabled_false_param_short_circuits_before_compute(
         kw for (_, step, kw) in runner.step_updates if step == "misses"
     ]
     assert {"status": "completed", "summary": "Skipped"} in miss_steps
+
+
+def test_identify_run_prepares_species_review_cache(tmp_path, monkeypatch):
+    """skip_regroup + classify still writes species review results."""
+    runner, result, spy_calls, job = _run_pipeline_for_miss_tests(
+        tmp_path, monkeypatch,
+        pipeline_cfg={"miss_enabled": True},
+        params_extra={"skip_regroup": True, "miss_enabled": False},
+    )
+    assert result["stages"]["review"] == {"review_count": 1}
+    assert spy_calls == []
+    assert _last_stages(runner)["regroup"]["status"] == "completed"
+    regroup_steps = [
+        kw for (_, step, kw) in runner.step_updates if step == "regroup"
+    ]
+    assert {
+        "status": "completed",
+        "summary": "Review results ready",
+    } in regroup_steps
 
 
 def test_miss_enabled_true_param_overrides_disabled_workspace(

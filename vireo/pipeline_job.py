@@ -905,6 +905,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         if not params.skip_regroup:
             step_defs.append({"id": "regroup", "label": "Group encounters"})
             step_defs.append({"id": "misses", "label": "Flag missed shots"})
+        elif not params.skip_classify:
+            step_defs.append({"id": "regroup", "label": "Prepare review"})
         if params.local_processing:
             step_defs.append({"id": "archive", "label": "Archive to destination"})
         runner.set_steps(job["id"], step_defs)
@@ -4871,7 +4873,67 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
         def regroup_stage():
             """Run pipeline grouping + scoring + triage from cached features."""
-            if params.skip_regroup or abort.is_set() or not collection_id:
+            if params.skip_regroup:
+                if abort.is_set() or not collection_id or params.skip_classify:
+                    stages["regroup"]["status"] = "skipped"
+                    runner.update_step(job["id"], "regroup", status="completed",
+                                       summary="Skipped")
+                    return
+                try:
+                    import config as cfg
+                    from pipeline import (
+                        load_photo_features,
+                        run_species_review_pipeline,
+                        save_results,
+                    )
+
+                    thread_db = Database(db_path)
+                    thread_db.set_active_workspace(workspace_id)
+
+                    effective_cfg = thread_db.get_effective_config(cfg.load())
+                    pipeline_cfg = effective_cfg.get("pipeline", {})
+
+                    photos = load_photo_features(
+                        thread_db,
+                        collection_id=collection_id,
+                        config=effective_cfg,
+                    )
+                    if params.exclude_photo_ids:
+                        photos = [
+                            p for p in photos
+                            if p["id"] not in params.exclude_photo_ids
+                        ]
+                    if not photos:
+                        result["stages"]["review"] = {
+                            "error": "No photos with pipeline features found.",
+                        }
+                    else:
+                        results = run_species_review_pipeline(
+                            photos,
+                            config=pipeline_cfg,
+                            emit_trace=True,
+                        )
+                        cache_dir = os.path.dirname(db_path)
+                        save_results(results, cache_dir, workspace_id)
+                        result["stages"]["review"] = results.get("summary", {})
+
+                    stages["regroup"]["status"] = "completed"
+                    runner.update_step(
+                        job["id"], "regroup",
+                        status="completed",
+                        summary="Review results ready" if photos else "No photos to group",
+                    )
+                except Exception as e:
+                    errors.append(f"[review] Fatal: {e}")
+                    log.exception("Pipeline species-review stage failed")
+                    stages["regroup"]["status"] = "failed"
+                    runner.update_step(
+                        job["id"], "regroup", status="failed", error=str(e),
+                    )
+                _update_stages(runner, job["id"], stages)
+                return
+
+            if abort.is_set() or not collection_id:
                 stages["regroup"]["status"] = "skipped"
                 runner.update_step(job["id"], "regroup", status="completed",
                                    summary="Skipped")

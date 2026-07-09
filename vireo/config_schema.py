@@ -376,8 +376,9 @@ SCHEMA = {
         # a stored preference and imports do not auto-chain regardless of
         # the value.
         "type": "enum",
-        "enum": ["full", "cull_ready", "quick_look"],
+        "enum": ["identify", "full", "cull_ready", "quick_look"],
         "enum_labels": {
+            "identify": "Identify birds",
             "full": "Full",
             "cull_ready": "Cull-ready",
             "quick_look": "Quick look",

@@ -146,9 +146,10 @@ body { display: flex; flex-direction: column; height: 100vh; }
       <div class="row">
         <select id="afterImportSelect" style="max-width:280px;">
           <option value="__none__">None — import only</option>
+          <option value="identify">Identify birds</option>
           <option value="quick_look">Quick look (thumbnails + previews)</option>
-          <option value="cull_ready">Cull-ready (+ detect, classify, group)</option>
-          <option value="full">Full pipeline (everything)</option>
+          <option value="cull_ready" data-advanced-strategy>Cull-ready (+ quality review)</option>
+          <option value="full" data-advanced-strategy>Full pipeline (everything)</option>
         </select>
       </div>
       <div class="hint">Processing runs as its own job when the import finishes — a processing failure never touches imported photos.</div>
@@ -454,6 +455,22 @@ function selectedAfterImport() {
   const v = document.getElementById('afterImportSelect').value;
   return v === '__none__' ? null : v;
 }
+
+function updateAdvancedImportOptions() {
+  const sel = document.getElementById('afterImportSelect');
+  if (!sel) return;
+  const advanced = !!(window.isAdvancedMode && window.isAdvancedMode());
+  sel.querySelectorAll('[data-advanced-strategy]').forEach((opt) => {
+    opt.hidden = !advanced;
+    opt.disabled = !advanced;
+  });
+  if (!advanced && sel.selectedOptions.length && sel.selectedOptions[0].disabled) {
+    sel.value = '__none__';
+  }
+}
+
+window.addEventListener('advancedmodechange', updateAdvancedImportOptions);
+window.addEventListener('devmodechange', updateAdvancedImportOptions);
 
 // True once initImportPage() has resolved the workspace's after-import
 // default into the select. Until then, the select still shows its HTML
@@ -957,6 +974,7 @@ async function initImportPage() {
   const def = pipelineCfg.default_strategy;
   sel.value = def ? def : '__none__';
   if (sel.selectedIndex === -1) sel.value = '__none__';
+  updateAdvancedImportOptions();
   // Only mark the resolved default as trustworthy when BOTH config
   // fetches actually succeeded. Otherwise the select value reflects the
   // HTML placeholder rather than the workspace default, and startImport
