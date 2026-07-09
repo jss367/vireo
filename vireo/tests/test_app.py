@@ -1497,6 +1497,35 @@ def test_compare_predictions_api(app_and_db):
         assert "confidence" in model_preds[0]
 
 
+def test_compare_predictions_api_exposes_miss_flags(app_and_db):
+    """Miss flags on a photo must reach the compare payload so the
+    'Hide marked misses' exclusion and 'marked miss' badge can work."""
+    app, db = app_and_db
+
+    photos = db.conn.execute("SELECT id FROM photos ORDER BY id").fetchall()
+    p_miss = photos[0]["id"]
+    p_clean = photos[1]["id"]
+    db.conn.execute(
+        "UPDATE photos SET miss_no_subject=1, miss_clipped=1, miss_oof=1 WHERE id=?",
+        (p_miss,),
+    )
+    db.conn.commit()
+
+    rules = json.dumps([{"field": "photo_ids", "value": [p_miss, p_clean]}])
+    cid = db.add_collection("Miss Flag Collection", rules)
+
+    resp = app.test_client().get(f"/api/predictions/compare?collection_id={cid}")
+    assert resp.status_code == 200
+    by_id = {row["photo_id"]: row for row in resp.get_json()["photos"]}
+
+    assert by_id[p_miss]["miss_no_subject"] is True
+    assert by_id[p_miss]["miss_clipped"] is True
+    assert by_id[p_miss]["miss_oof"] is True
+    assert by_id[p_clean]["miss_no_subject"] is False
+    assert by_id[p_clean]["miss_clipped"] is False
+    assert by_id[p_clean]["miss_oof"] is False
+
+
 def test_compare_ignores_resolved_predictions_for_needs_review(app_and_db):
     """A resolved conflict plus a pending match should not stay in review."""
     app, db = app_and_db
