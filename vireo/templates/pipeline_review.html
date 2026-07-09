@@ -3389,7 +3389,7 @@ function searchSpecies(event, encIdx, burstIdx, pos) {
     var hasExact = results.some(function(name) {
       return speciesDropdownSearchOptions.matchCase
         ? name === typed
-        : name.toLocaleLowerCase() === typed.toLocaleLowerCase();
+        : name.toLowerCase() === typed.toLowerCase();
     });
     var html = '';
     if (!hasExact) {

@@ -41,8 +41,8 @@ var VireoTextSearch = (function() {
     var needle = String(token);
     if (!needle) return true;
     if (!options || !options.matchCase) {
-      text = text.toLocaleLowerCase();
-      needle = needle.toLocaleLowerCase();
+      text = text.toLowerCase();
+      needle = needle.toLowerCase();
     }
     if (options && options.wholeWord) {
       return containsWholeToken(text, needle);
