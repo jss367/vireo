@@ -48,11 +48,12 @@ def run(session):
     session.goto("/import")
     session.screenshot("import-initial")
 
-    for el_id in ("sourceInput", "destInput", "afterImportSelect",
+    for el_id in ("sourceInput", "modeCopy", "destInput", "afterImportSelect",
                   "btnStart", "safeToFormatPill"):
         present = session.eval(f"!!document.getElementById('{el_id}')")
         session.assert_that(present, f"expected #{el_id} on /import")
 
+    session.click("#modeCopy")
     session.fill("#sourceInput", card)
     session.click("#btnAddSource")
     added = session.eval(

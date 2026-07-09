@@ -3179,6 +3179,33 @@ def test_import_photos_happy_path(app_and_db, tmp_path):
     assert result["safe_to_format"] is True
 
 
+def test_import_in_place_no_destination_required(app_and_db, tmp_path):
+    app, _ = app_and_db
+    client = app.test_client()
+    card = _import_card(tmp_path)
+
+    resp = client.post("/api/jobs/import-in-place", json={
+        "sources": [card],
+        "after_import": None,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job_id = resp.get_json()["job_id"]
+
+    config = _job_config(client, job_id)
+    assert config["sources"] == [card]
+    assert config["destination"] is None
+    assert config["mode"] == "in_place"
+    assert config["after_import"] is None
+
+    job = wait_for_job_via_client(client, job_id)
+    assert job["status"] == "completed", job
+    result = job["result"]
+    assert result["mode"] == "in_place"
+    assert result["indexed"] == 1
+    assert result["ok"] is True
+    assert result["after_import_skipped"] == "import-only"
+
+
 def test_import_photos_null_after_import_is_import_only(app_and_db, tmp_path):
     """after_import: null means import-only (PR 3's hook short-circuits) —
     same nullable vocabulary as pipeline.default_strategy."""

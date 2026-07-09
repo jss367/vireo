@@ -98,6 +98,11 @@ body { display: flex; flex-direction: column; height: 100vh; }
     </div>
 
     <div class="card" id="sourceCard">
+      <h3>Import mode</h3>
+      <div class="row" style="margin-bottom:14px;">
+        <label><input type="radio" name="importMode" value="in_place" id="modeInPlace" checked onchange="updateImportMode()"> Add in place</label>
+        <label><input type="radio" name="importMode" value="copy" id="modeCopy" onchange="updateImportMode()"> Copy to archive</label>
+      </div>
       <h3>Source</h3>
       <div class="row">
         <button class="btn btn-primary" id="btnBrowseSource" data-testid="import-source-browse-btn" onclick="browseForSource()">Browse...</button>
@@ -110,7 +115,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
       <div class="source-list" id="sourceList"></div>
       <div class="row" style="margin-top:8px;">
         <label><input type="checkbox" id="chkRecursive" checked> Include subfolders</label>
-        <label>File types
+        <label id="fileTypesWrap">File types
           <select id="fileTypes" style="min-width:100px;">
             <option value="both" selected>RAW + JPEG</option>
             <option value="raw">RAW only</option>
@@ -151,7 +156,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
 
     <div class="card">
       <div class="row">
-        <button class="btn" id="btnPreview" onclick="previewImport()">Check for duplicates</button>
+        <button class="btn" id="btnPreview" onclick="previewImport()">Preview import</button>
         <button class="btn btn-primary" id="btnStart" onclick="startImport()">Start import</button>
       </div>
       <div class="preview-summary" id="previewSummary"></div>
@@ -206,9 +211,9 @@ body { display: flex; flex-direction: column; height: 100vh; }
 </div>
 
 <script>
-/* Import page: posts to /api/jobs/import-photos, renders live per-folder
-   progress from the job's SSE stream, and shows the safe-to-format pill
-   with per-file reasons. */
+/* Import page: adds folders in place or copies them to an archive, renders
+   live progress from the job's SSE stream, and only shows safe-to-format
+   messaging for verified archive-copy imports. */
 let sources = [];
 let activeJobId = null;
 let es = null;
@@ -218,6 +223,23 @@ let browserPath = '';
 let browserHomePath = '';
 let browserSeq = 0;
 let browserEscHandler = null;
+let activeImportMode = 'in_place';
+
+function selectedImportMode() {
+  const checked = document.querySelector('input[name="importMode"]:checked');
+  return checked ? checked.value : 'in_place';
+}
+
+function updateImportMode() {
+  activeImportMode = selectedImportMode();
+  const copyMode = activeImportMode === 'copy';
+  document.getElementById('destCard').style.display = copyMode ? '' : 'none';
+  document.getElementById('fileTypesWrap').style.display = copyMode ? '' : 'none';
+  document.getElementById('btnPreview').textContent =
+    copyMode ? 'Check for duplicates' : 'Preview import';
+  document.getElementById('previewSummary').textContent = '';
+  showError('');
+}
 
 function importEscapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (ch) => ({
@@ -623,6 +645,14 @@ async function deleteStaging(path, btn) {
 function useStagingAsImportSource(result) {
   sources = [result.source_root];
   renderSources();
+  // Staging recovery must copy the temporary staging tree into the archive.
+  // In-place would catalog paths that disappear once staging is cleaned,
+  // leaving missing-folder rows, so force Copy to archive here.
+  const copyRadio = document.getElementById('modeCopy');
+  if (copyRadio) {
+    copyRadio.checked = true;
+    updateImportMode();
+  }
   if (result.inferred_destination) {
     document.getElementById('destInput').value = result.inferred_destination;
   }
@@ -632,18 +662,27 @@ function useStagingAsImportSource(result) {
 async function previewImport() {
   showError('');
   if (!sources.length) { showError('Add at least one source folder.'); return; }
+  const copyMode = selectedImportMode() === 'copy';
   const summary = document.getElementById('previewSummary');
   summary.textContent = 'Discovering files…';
   try {
     const resp = await fetch('/api/import/folder-preview', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ folders: sources }),
+      body: JSON.stringify({
+        folders: sources,
+        file_types: copyMode ? document.getElementById('fileTypes').value : 'both',
+        recursive: document.getElementById('chkRecursive').checked,
+      }),
     });
     if (!resp.ok) throw new Error((await resp.json()).error || 'preview failed');
     const data = await resp.json();
     const files = data.files || [];
     if (!files.length) { summary.textContent = 'No importable files found.'; return; }
+    if (!copyMode) {
+      summary.textContent = files.length + ' files found · originals will stay in place';
+      return;
+    }
     summary.textContent = files.length + ' files found — checking for duplicates…';
     // check-duplicates streams results; count flagged paths as they arrive.
     const dupResp = await fetch('/api/import/check-duplicates', {
@@ -705,21 +744,24 @@ function renderFolderTable(el, folders) {
 async function startImport() {
   showError('');
   if (!sources.length) { showError('Add at least one source folder.'); return; }
+  const copyMode = selectedImportMode() === 'copy';
   const destination = (document.getElementById('destInput').value || '').trim();
-  if (!destination) { showError('Choose a destination folder.'); return; }
+  if (copyMode && !destination) { showError('Choose a destination folder.'); return; }
   const body = {
     sources: sources,
-    destination: destination,
-    folder_template: (document.getElementById('folderTemplate').value || '').trim(),
-    file_types: document.getElementById('fileTypes').value,
     recursive: document.getElementById('chkRecursive').checked,
   };
+  if (copyMode) {
+    body.destination = destination;
+    body.folder_template = (document.getElementById('folderTemplate').value || '').trim();
+    body.file_types = document.getElementById('fileTypes').value;
+  }
   if (_afterImportConfigLoaded) {
     body.after_import = selectedAfterImport();
   }
   document.getElementById('btnStart').disabled = true;
   try {
-    const resp = await fetch('/api/jobs/import-photos', {
+    const resp = await fetch(copyMode ? '/api/jobs/import-photos' : '/api/jobs/import-in-place', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -784,6 +826,27 @@ function renderResult(res, status) {
   const pill = document.getElementById('safeToFormatPill');
   const unsafe = document.getElementById('unsafeList');
   unsafe.innerHTML = '';
+  if (res.mode === 'in_place') {
+    pill.className = res.ok === false ? 'pill pill-bad' : 'pill pill-ok';
+    pill.textContent = res.ok === false
+      ? 'Import finished with errors'
+      : 'Imported in place — original files stayed where they are';
+    const errors = res.errors || [];
+    unsafe.style.display = errors.length ? '' : 'none';
+    errors.forEach((msg) => {
+      const li = document.createElement('li');
+      li.textContent = msg;
+      unsafe.appendChild(li);
+    });
+    document.getElementById('resultSummary').textContent =
+      (res.indexed || res.discovered || 0) + ' indexed' +
+      (res.failed ? ' · ' + res.failed + ' failed' : '') +
+      (status && status !== 'completed' ? ' · job ' + status : '');
+    document.getElementById('resultFolders').innerHTML = '';
+    renderChainInfo(res);
+    renderModelWarning(res);
+    return;
+  }
   if (res.safe_to_format) {
     pill.className = 'pill pill-ok';
     pill.textContent = 'Safe to format the card — every file is verified in the archive';
@@ -811,6 +874,11 @@ function renderResult(res, status) {
     (status && status !== 'completed' ? ' · job ' + status : '');
   renderFolderTable(document.getElementById('resultFolders'), res.folders || {});
 
+  renderChainInfo(res);
+  renderModelWarning(res);
+}
+
+function renderChainInfo(res) {
   const chain = document.getElementById('chainInfo');
   if (res.process_job_id) {
     chain.textContent = 'Processing started as its own job: ' + res.process_job_id;
@@ -819,6 +887,9 @@ function renderResult(res, status) {
   } else {
     chain.textContent = '';
   }
+}
+
+function renderModelWarning(res) {
   const warn = document.getElementById('modelWarning');
   if (res.model_warning) {
     warn.textContent = res.model_warning;
@@ -892,6 +963,7 @@ async function initImportPage() {
   // should omit the key so the server applies pipeline.default_strategy.
   _afterImportConfigLoaded = cfgOk && overridesOk;
   loadOrphanedStaging();
+  updateImportMode();
 }
 initImportPage();
 </script>
