@@ -6839,14 +6839,17 @@ def test_import_page_returns_200(app_and_db):
     assert resp.status_code == 200
     html = resp.data.decode()
     assert "navbar" in html
-    # Core controls, by id: the after-import strategy menu (including the
-    # import-only null choice), the duplicate preview trigger, the
-    # safe-to-format pill container, and the start button posting to
-    # /api/jobs/import-photos.
+    # Core controls, by id: the import mode radios, the after-import strategy
+    # menu (including the import-only null choice), the duplicate preview
+    # trigger, the safe-to-format pill container, and the start button posting
+    # to the in-place and copy import endpoints.
+    assert 'id="modeInPlace"' in html
+    assert 'id="modeCopy"' in html
     assert 'id="afterImportSelect"' in html
     assert 'value="__none__"' in html  # "None — import only" option
     assert "/api/import/check-duplicates" in html
     assert 'id="safeToFormatPill"' in html
+    assert "/api/jobs/import-in-place" in html
     assert "/api/jobs/import-photos" in html
 
 

@@ -21,6 +21,7 @@ def test_import_destination_browse_button_sets_destination(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/import")
     page.evaluate("window.pickDirectory = async () => '/tmp/archive'")
+    page.locator("#modeCopy").check()
 
     browse_btn = page.locator("[data-testid='import-destination-browse-btn']")
     expect(browse_btn).to_be_visible()

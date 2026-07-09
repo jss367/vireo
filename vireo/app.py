@@ -15412,6 +15412,278 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(str(exc), status=409)
         return jsonify(result)
 
+    @app.route("/api/jobs/import-in-place", methods=["POST"])
+    def api_job_import_in_place():
+        """Import existing folders without copying files.
+
+        This is the in-place companion to ``/api/jobs/import-photos``: scan
+        selected source folders into the active workspace, leave originals at
+        their current paths, and optionally enqueue the same after-import
+        processing strategy used by archive-copy imports.
+        """
+        from image_loader import is_excluded_scan_path
+
+        body = request.get_json(silent=True) or {}
+        sources = body.get("sources")
+        if isinstance(sources, str):
+            sources = [sources]
+        if not sources or not isinstance(sources, list) or not all(
+            isinstance(s, str) and s for s in sources
+        ):
+            return json_error("sources must be a non-empty list of paths")
+        for s in sources:
+            if is_excluded_scan_path(s):
+                return json_error(
+                    f"source is inside a macOS app-managed library and "
+                    f"cannot be imported: {s}"
+                )
+            if not os.path.isdir(s):
+                return json_error(f"source directory not found: {s}")
+
+        recursive = bool(body.get("recursive", True))
+        db = _get_db()
+        if "after_import" in body:
+            after_import = body.get("after_import")
+        else:
+            import config as cfg
+
+            effective_cfg = db.get_effective_config(cfg.load())
+            after_import = (
+                effective_cfg.get("pipeline", {}).get("default_strategy")
+            )
+        if after_import is not None:
+            if not isinstance(after_import, str):
+                return json_error(
+                    "after_import must be a strategy name or null, got "
+                    f"{type(after_import).__name__}"
+                )
+            from process_strategies import resolve_strategy
+
+            try:
+                resolve_strategy(after_import)
+            except ValueError as e:
+                return json_error(str(e))
+
+        runner = app._job_runner
+        active_ws = db._active_workspace_id
+        thumb_cache_dir = app.config["THUMB_CACHE_DIR"]
+        vireo_dir = os.path.dirname(thumb_cache_dir)
+
+        def _chain_after_import(job, result):
+            if after_import is None:
+                result["after_import_skipped"] = "import-only"
+                return
+            if not result.get("ok"):
+                result["after_import_skipped"] = "import failed"
+                return
+            if result.get("cancelled"):
+                result["after_import_skipped"] = "import cancelled"
+                return
+            photo_ids = result.get("photo_ids") or []
+            if not photo_ids:
+                result["after_import_skipped"] = "no photos"
+                return
+            try:
+                from datetime import datetime as _dt
+
+                thread_db = Database(db_path)
+                thread_db.set_active_workspace(active_ws)
+                col_id = thread_db.add_collection(
+                    "Import " + _dt.now().strftime("%Y-%m-%d %H:%M"),
+                    json.dumps(
+                        [{"field": "photo_ids", "value": photo_ids}]
+                    ),
+                )
+                process_job_id, model_warning = _enqueue_process_job(
+                    thread_db, runner, active_ws,
+                    collection_id=col_id,
+                    strategy_name=after_import,
+                    chained_from=job["id"],
+                )
+                result["process_job_id"] = process_job_id
+                if model_warning:
+                    result["model_warning"] = model_warning
+            except Exception as e:
+                log.exception("after-import chaining failed")
+                result["after_import_skipped"] = (
+                    f"failed to enqueue processing: {e}"
+                )
+
+        def work(job):
+            import config as cfg
+            from scanner import ScanCancelled
+            from scanner import scan as do_scan
+
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(active_ws)
+            thread_db.check_folder_health()
+            effective_cfg = thread_db.get_effective_config(cfg.load())
+            pipeline_cfg = effective_cfg.get("pipeline", {})
+
+            job["_start_time"] = time.time()
+            runner.set_steps(job["id"], [
+                {"id": "scan", "label": "Import in place"},
+            ])
+            runner.update_step(job["id"], "scan", status="running")
+
+            photo_ids = []
+            seen_photo_ids = set()
+            root_errors = []
+            scan_acc = {"prior": 0, "last_current": 0, "last_total": 0}
+
+            def photo_cb(photo_id, path):
+                if photo_id not in seen_photo_ids:
+                    seen_photo_ids.add(photo_id)
+                    photo_ids.append(photo_id)
+                runner.update_step(
+                    job["id"], "scan", current_file=os.path.basename(path),
+                )
+
+            def progress_cb(current, total):
+                scan_acc["last_current"] = current
+                scan_acc["last_total"] = total
+                cum_current = scan_acc["prior"] + current
+                cum_total = scan_acc["prior"] + total
+                job["progress"]["current"] = cum_current
+                job["progress"]["total"] = cum_total
+                runner.update_step(
+                    job["id"], "scan",
+                    progress={"current": cum_current, "total": cum_total},
+                )
+                runner.push_event(job["id"], "progress", {
+                    "current": cum_current,
+                    "total": cum_total,
+                    "current_file": job["progress"].get("current_file", ""),
+                    "phase": "Importing in place",
+                })
+
+            def status_cb(message, phase_current=None, phase_total=None, phase_label=None):
+                job["progress"]["current_file"] = message
+                runner.update_step(job["id"], "scan", current_file=message)
+                runner.push_event(job["id"], "progress", {
+                    "current": job["progress"].get("current", 0),
+                    "total": job["progress"].get("total", 0),
+                    "current_file": message,
+                    "phase": phase_label or message,
+                    "phase_current": phase_current,
+                    "phase_total": phase_total,
+                    "phase_label": phase_label,
+                })
+
+            def advance_scan_acc():
+                scan_acc["prior"] += scan_acc["last_current"]
+                scan_acc["last_current"] = 0
+                scan_acc["last_total"] = 0
+
+            def cancel_check():
+                return runner.is_cancelled(job["id"])
+
+            cancelled = False
+            for idx, source in enumerate(sources, 1):
+                if cancel_check():
+                    cancelled = True
+                    break
+                phase = (
+                    f"Importing source {idx} of {len(sources)}: {source}"
+                    if len(sources) > 1 else "Importing in place"
+                )
+                runner.push_event(job["id"], "progress", {
+                    "current": job["progress"].get("current", 0),
+                    "total": job["progress"].get("total", 0),
+                    "current_file": phase,
+                    "phase": phase,
+                })
+                try:
+                    do_scan(
+                        source, thread_db,
+                        progress_callback=progress_cb,
+                        extract_full_metadata=pipeline_cfg.get(
+                            "extract_full_metadata", True,
+                        ),
+                        photo_callback=photo_cb,
+                        status_callback=status_cb,
+                        recursive=recursive,
+                        vireo_dir=vireo_dir,
+                        thumb_cache_dir=thumb_cache_dir,
+                        cancel_check=cancel_check,
+                    )
+                except Exception as exc:
+                    if isinstance(exc, ScanCancelled) and cancel_check():
+                        cancelled = True
+                        break
+                    log.exception("In-place import failed for source %s", source)
+                    msg = f"[{source}] {exc}"
+                    root_errors.append(msg)
+                    if msg not in job["errors"]:
+                        job["errors"].append(msg)
+                finally:
+                    try:
+                        _invalidate_new_images_after_scan(thread_db, source)
+                    except Exception as cache_exc:
+                        log.exception(
+                            "Failed to invalidate new-image cache for %s", source,
+                        )
+                        msg = (
+                            f"[{source}] cache invalidation failed after import: "
+                            f"{cache_exc}"
+                        )
+                        root_errors.append(msg)
+                        if msg not in job["errors"]:
+                            job["errors"].append(msg)
+                    advance_scan_acc()
+
+            indexed = len(photo_ids)
+            if cancelled or cancel_check():
+                runner.update_step(
+                    job["id"], "scan", status="cancelled",
+                    summary=f"{indexed} photos (cancelled)",
+                )
+                return {
+                    "mode": "in_place",
+                    "ok": False,
+                    "cancelled": True,
+                    "discovered": indexed,
+                    "indexed": indexed,
+                    "failed": len(root_errors),
+                    "errors": root_errors,
+                    "photo_ids": photo_ids,
+                }
+
+            metadata_warning = _scan_metadata_warning()
+            summary = f"{indexed} photos"
+            if metadata_warning:
+                summary += f" — {metadata_warning}"
+            runner.update_step(
+                job["id"], "scan",
+                status="failed" if root_errors else "completed",
+                summary=summary,
+                error=root_errors[0] if root_errors else None,
+                error_count=len(root_errors) if root_errors else None,
+            )
+            result = {
+                "mode": "in_place",
+                "ok": not root_errors,
+                "discovered": indexed,
+                "indexed": indexed,
+                "failed": len(root_errors),
+                "errors": root_errors,
+                "photo_ids": photo_ids,
+            }
+            _chain_after_import(job, result)
+            return result
+
+        job_config = {
+            "sources": sources,
+            "destination": None,
+            "recursive": recursive,
+            "after_import": after_import,
+            "mode": "in_place",
+        }
+        job_id = runner.start(
+            "import-in-place", work, config=job_config, workspace_id=active_ws,
+        )
+        return jsonify({"job_id": job_id})
+
     @app.route("/api/jobs/import-photos", methods=["POST"])
     def api_job_import_photos():
         """Photo import job: copy card -> archive, hash-verify, catalog
@@ -21101,10 +21373,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/import")
     def import_page():
-        """Import page (import/process split PR 3): copy card → archive
-        via /api/jobs/import-photos. Templates are Jinja-free by
-        convention — defaults (workspace strategy, recents, template)
-        resolve client-side from /api/config + /api/workspaces/active."""
+        """Import page: add folders in place or copy card → archive.
+
+        Templates are Jinja-free by convention — defaults (workspace
+        strategy, recents, template) resolve client-side from /api/config +
+        /api/workspaces/active.
+        """
         return render_template("import.html")
 
     @app.route("/map")
