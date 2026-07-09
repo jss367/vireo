@@ -194,8 +194,7 @@
   margin-left: 8px;
 }
 .species-filter-wrap input {
-  padding: 5px 26px 5px 10px;
-  border-radius: 16px;
+  padding: 5px 24px 5px 10px;
   border: 1px solid var(--border-primary);
   background: transparent;
   color: var(--text-primary);
@@ -208,7 +207,7 @@
 .species-filter-wrap input:focus { border-color: var(--accent); }
 .species-filter-clear {
   position: absolute;
-  right: 6px;
+  right: 63px;
   top: 50%;
   transform: translateY(-50%);
   background: none;
@@ -221,6 +220,8 @@
   display: none;
 }
 .species-filter-clear:hover { color: var(--text-primary); }
+.species-filter-wrap .search-control { width: 224px; }
+.species-filter-wrap .search-control input { width: auto; }
 .confidence-slider-wrap {
   display: flex;
   align-items: center;
@@ -812,13 +813,15 @@ input[type="range"]::-moz-range-thumb {
   border-bottom: 1px solid var(--border-secondary);
 }
 .species-dropdown-search input {
-  width: 100%;
   background: var(--bg-input);
   color: var(--text-primary);
   border: 1px solid var(--border-secondary);
-  border-radius: 4px;
   padding: 6px 10px;
   font-size: 12px;
+}
+.species-dropdown-search .search-control { width: 100%; }
+.species-dropdown-search .search-option-btn.active {
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-input));
 }
 
 /* Burst-level species (smaller variant) */
@@ -1478,7 +1481,11 @@ input[type="range"]::-moz-range-thumb {
       <button class="filter-btn" data-filter="REJECT" onclick="setFilter('REJECT')">Reject<span class="count" id="countReject"></span></button>
       <button class="filter-btn" id="hideConfirmedBtn" onclick="toggleHideConfirmed()" title="Hide encounters/bursts whose species has been confirmed">Hide confirmed</button>
       <div class="species-filter-wrap">
-        <input type="text" id="speciesFilterInput" placeholder="Filter by species..." oninput="setSpeciesFilter(this.value)">
+        <div class="search-control">
+          <input type="text" id="speciesFilterInput" placeholder="Filter by species..." oninput="setSpeciesFilter(this.value)">
+          <button id="speciesFilterMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="toggleSpeciesFilterSearchOption('match_case')" title="Match case">Aa</button>
+          <button id="speciesFilterWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="toggleSpeciesFilterSearchOption('whole_word')" title="Match whole word">ab</button>
+        </div>
         <button class="species-filter-clear" id="speciesFilterClear" onclick="clearSpeciesFilter()" title="Clear filter">&times;</button>
       </div>
       <div class="encounter-sort-wrap" title="Order encounters are listed in">
@@ -1624,6 +1631,8 @@ var activeFilter = 'all';
 var minConfidence = 40;
 var speciesFilter = '';
 var speciesFilterText = '';
+var speciesFilterSearchOptions = {matchCase: false, wholeWord: false};
+var speciesDropdownSearchOptions = {matchCase: false, wholeWord: false};
 var hideConfirmed = false;
 // Captured from /api/pipeline/page-init so computeReviewNow() can apply
 // the same workspace-override logic the happy path uses on page load.
@@ -1683,6 +1692,7 @@ function persistPipelineReviewViewState() {
     window.localStorage.setItem(PIPELINE_VIEW_STATE_STORAGE_KEY, JSON.stringify({
       activeFilter: activeFilter,
       speciesFilter: speciesInput ? speciesInput.value : speciesFilterText,
+      speciesFilterSearchOptions: speciesFilterSearchOptions,
       hideConfirmed: !!hideConfirmed,
       encounterSort: encounterSort,
       thumbSize: document.getElementById('thumbSizeSlider')
@@ -1704,6 +1714,7 @@ function applyPipelineReviewToolbarState() {
   if (input) input.value = speciesFilterText || '';
   var clearBtn = document.getElementById('speciesFilterClear');
   if (clearBtn) clearBtn.style.display = speciesFilter ? 'block' : 'none';
+  VireoTextSearch.renderOptions('speciesFilter', speciesFilterSearchOptions);
 
   var sortSel = document.getElementById('encounterSortSelect');
   if (sortSel) sortSel.value = encounterSort;
@@ -1723,7 +1734,13 @@ function restorePipelineReviewViewState() {
     activeFilter = state.activeFilter;
   }
   speciesFilterText = typeof state.speciesFilter === 'string' ? state.speciesFilter : '';
-  speciesFilter = speciesFilterText.toLowerCase();
+  speciesFilter = speciesFilterText;
+  if (state.speciesFilterSearchOptions && typeof state.speciesFilterSearchOptions === 'object') {
+    speciesFilterSearchOptions = {
+      matchCase: !!state.speciesFilterSearchOptions.matchCase,
+      wholeWord: !!state.speciesFilterSearchOptions.wholeWord,
+    };
+  }
   hideConfirmed = !!state.hideConfirmed;
 
   if (PIPELINE_ENCOUNTER_SORTS.indexOf(state.encounterSort) !== -1) {
@@ -2022,11 +2039,19 @@ function _grmFinishLoupeOneToOne() {
 
 function setSpeciesFilter(val) {
   speciesFilterText = val;
-  speciesFilter = val.toLowerCase();
+  speciesFilter = val;
   var clearBtn = document.getElementById('speciesFilterClear');
   if (clearBtn) clearBtn.style.display = val ? 'block' : 'none';
   persistPipelineReviewViewState();
   renderResults();
+}
+
+function toggleSpeciesFilterSearchOption(option) {
+  VireoTextSearch.toggle('speciesFilter', option, function(options) {
+    speciesFilterSearchOptions = options;
+    persistPipelineReviewViewState();
+    renderResults();
+  });
 }
 
 function clearSpeciesFilter() {
@@ -2045,7 +2070,7 @@ function encounterMatchesSpecies(enc) {
   if (!enc.species_predictions || enc.species_predictions.length === 0) return false;
   var threshold = minConfidence / 100;
   return enc.species_predictions.some(function(sp) {
-    if (sp.species.toLowerCase().indexOf(speciesFilter) === -1) return false;
+    if (!VireoTextSearch.matchesFields(sp.species, speciesFilter, speciesFilterSearchOptions)) return false;
     return (sp.models || []).some(function(m) { return m.confidence >= threshold; });
   });
 }
@@ -3264,7 +3289,9 @@ function renderSpeciesWidget(enc, encIdx, level, burstIdx, pos) {
   // Dropdown — bottom-bar widget opens upward to stay inside the card
   var dropdownCls = 'species-dropdown' + (pos === 'bot' ? ' up' : '');
   html += '<div class="' + dropdownCls + '" id="spDrop_' + encIdx + '_' + idKey + '">';
-  html += '<div class="species-dropdown-search"><input type="text" placeholder="Search or type a new name..." oninput="searchSpecies(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',\'' + pos + '\')" onkeydown="speciesInputKey(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ')"></div>';
+  html += '<div class="species-dropdown-search"><div class="search-control"><input type="text" placeholder="Search or type a new name..." oninput="searchSpecies(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',\'' + pos + '\')" onkeydown="speciesInputKey(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ')">';
+  html += '<button class="search-option-btn species-dropdown-match-case' + (speciesDropdownSearchOptions.matchCase ? ' active' : '') + '" type="button" aria-pressed="' + (speciesDropdownSearchOptions.matchCase ? 'true' : 'false') + '" onclick="toggleSpeciesDropdownSearchOption(event, \'match_case\')" title="Match case">Aa</button>';
+  html += '<button class="search-option-btn species-dropdown-whole-word' + (speciesDropdownSearchOptions.wholeWord ? ' active' : '') + '" type="button" aria-pressed="' + (speciesDropdownSearchOptions.wholeWord ? 'true' : 'false') + '" onclick="toggleSpeciesDropdownSearchOption(event, \'whole_word\')" title="Match whole word">ab</button></div></div>';
 
   // "Use encounter label" option for burst level
   var encounterLabel = enc.confirmed_species || (enc.species ? enc.species[0] : null);
@@ -3325,6 +3352,31 @@ document.addEventListener('click', function(e) {
 });
 
 var _searchTimer = null;
+function renderSpeciesDropdownSearchOptions() {
+  document.querySelectorAll('.species-dropdown-match-case').forEach(function(btn) {
+    btn.classList.toggle('active', speciesDropdownSearchOptions.matchCase);
+    btn.setAttribute('aria-pressed', speciesDropdownSearchOptions.matchCase ? 'true' : 'false');
+  });
+  document.querySelectorAll('.species-dropdown-whole-word').forEach(function(btn) {
+    btn.classList.toggle('active', speciesDropdownSearchOptions.wholeWord);
+    btn.setAttribute('aria-pressed', speciesDropdownSearchOptions.wholeWord ? 'true' : 'false');
+  });
+}
+
+function toggleSpeciesDropdownSearchOption(event, option) {
+  if (event) event.stopPropagation();
+  if (option === 'match_case') {
+    speciesDropdownSearchOptions.matchCase = !speciesDropdownSearchOptions.matchCase;
+  }
+  if (option === 'whole_word') {
+    speciesDropdownSearchOptions.wholeWord = !speciesDropdownSearchOptions.wholeWord;
+  }
+  renderSpeciesDropdownSearchOptions();
+  var dropdown = event && event.target ? event.target.closest('.species-dropdown') : null;
+  var input = dropdown ? dropdown.querySelector('.species-dropdown-search input') : null;
+  if (input) input.dispatchEvent(new Event('input', {bubbles: true}));
+}
+
 function searchSpecies(event, encIdx, burstIdx, pos) {
   pos = pos || 'top';
   var q = event.target.value.trim();
@@ -3334,8 +3386,11 @@ function searchSpecies(event, encIdx, burstIdx, pos) {
   if (!q) { container.innerHTML = ''; return; }
 
   function renderInto(target, typed, results) {
-    var qLower = typed.toLowerCase();
-    var hasExact = results.some(function(name) { return name.toLowerCase() === qLower; });
+    var hasExact = results.some(function(name) {
+      return speciesDropdownSearchOptions.matchCase
+        ? name === typed
+        : name.toLowerCase() === typed.toLowerCase();
+    });
     var html = '';
     if (!hasExact) {
       html += '<div class="species-dropdown-item" data-freeform="1">'
@@ -3365,7 +3420,9 @@ function searchSpecies(event, encIdx, burstIdx, pos) {
 
   clearTimeout(_searchTimer);
   _searchTimer = setTimeout(async function() {
-    var results = await safeFetch('/api/species/search?q=' + encodeURIComponent(q), {}, { toast: false });
+    var params = new URLSearchParams({q: q});
+    VireoTextSearch.appendParams(params, speciesDropdownSearchOptions);
+    var results = await safeFetch('/api/species/search?' + params.toString(), {}, { toast: false });
     if (!results || !Array.isArray(results)) results = [];
     renderInto(container, q, results);
   }, 250);

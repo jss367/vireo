@@ -32,6 +32,7 @@ from db import (
     Database,
     IncompatibleDatabaseError,
     commit_with_retry,
+    text_search_match,
 )
 from flask import (
     Flask,
@@ -2752,6 +2753,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             raise ValueError("flag must be 'none', 'flagged', or 'rejected'")
         return flag
 
+    def _request_bool_arg(name):
+        raw = request.args.get(name, "")
+        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
     @app.route("/api/browse/init")
     def api_browse_init():
         """Combined endpoint for browse page initial load — one request instead of five."""
@@ -3371,6 +3376,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         date_from = request.args.get("date_from", None)
         date_to = request.args.get("date_to", None)
         keyword = request.args.get("keyword", None)
+        keyword_match_case = _request_bool_arg("keyword_match_case")
+        keyword_whole_word = _request_bool_arg("keyword_whole_word")
         color_label = request.args.get("color_label", None)
         try:
             flag = _request_flag_filter()
@@ -3386,6 +3393,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             date_from=date_from,
             date_to=date_to,
             keyword=keyword,
+            keyword_match_case=keyword_match_case,
+            keyword_whole_word=keyword_whole_word,
             color_label=color_label,
             flag=flag,
         )
@@ -3400,6 +3409,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 date_from=date_from,
                 date_to=date_to,
                 keyword=keyword,
+                keyword_match_case=keyword_match_case,
+                keyword_whole_word=keyword_whole_word,
                 color_label=color_label,
                 flag=flag,
             )
@@ -3428,6 +3439,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         date_from = request.args.get("date_from", None)
         date_to = request.args.get("date_to", None)
         keyword = request.args.get("keyword", None)
+        keyword_match_case = _request_bool_arg("keyword_match_case")
+        keyword_whole_word = _request_bool_arg("keyword_whole_word")
         color_label = request.args.get("color_label", None)
         try:
             flag = _request_flag_filter()
@@ -3441,6 +3454,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             date_from=date_from,
             date_to=date_to,
             keyword=keyword,
+            keyword_match_case=keyword_match_case,
+            keyword_whole_word=keyword_whole_word,
             color_label=color_label,
             flag=flag,
         )
@@ -3455,6 +3470,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         folder_id = request.args.get("folder_id", None, type=int)
         rating_min = request.args.get("rating_min", None, type=int)
         keyword = request.args.get("keyword", None)
+        keyword_match_case = _request_bool_arg("keyword_match_case")
+        keyword_whole_word = _request_bool_arg("keyword_whole_word")
         color_label = request.args.get("color_label", None)
         try:
             flag = _request_flag_filter()
@@ -3462,6 +3479,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(str(e), 400)
         data = db.get_calendar_data(
             year=year, folder_id=folder_id, rating_min=rating_min, keyword=keyword,
+            keyword_match_case=keyword_match_case,
+            keyword_whole_word=keyword_whole_word,
             color_label=color_label, flag=flag,
         )
         return jsonify(data)
@@ -3474,6 +3493,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         date_from = request.args.get("date_from", None)
         date_to = request.args.get("date_to", None)
         keyword = request.args.get("keyword", None)
+        keyword_match_case = _request_bool_arg("keyword_match_case")
+        keyword_whole_word = _request_bool_arg("keyword_whole_word")
         collection_id = request.args.get("collection_id", None, type=int)
         color_label = request.args.get("color_label", None)
         try:
@@ -3487,6 +3508,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 date_from=date_from,
                 date_to=date_to,
                 keyword=keyword,
+                keyword_match_case=keyword_match_case,
+                keyword_whole_word=keyword_whole_word,
                 collection_id=collection_id,
                 color_label=color_label,
                 flag=flag,
@@ -3779,6 +3802,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         date_from = request.args.get("date_from", None)
         date_to = request.args.get("date_to", None)
         keyword = request.args.get("keyword", None)
+        keyword_match_case = _request_bool_arg("keyword_match_case")
+        keyword_whole_word = _request_bool_arg("keyword_whole_word")
         species = request.args.get("species", None)
 
         photos = db.get_geolocated_photos(
@@ -3787,6 +3812,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             date_from=date_from,
             date_to=date_to,
             keyword=keyword,
+            keyword_match_case=keyword_match_case,
+            keyword_whole_word=keyword_whole_word,
             species=species,
         )
 
@@ -6956,6 +6983,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         confidence_threshold=0.70,
         limit_per_bucket=20,
         species_filter="",
+        species_match_case=False,
+        species_whole_word=False,
         confirmation_filter="all",
     ):
         folders = db.get_folders_with_quality_data()
@@ -6964,7 +6993,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         elif folder_id is None and folders:
             folder_id = folders[0]["id"]  # Most recent
         limit_per_bucket = max(1, min(int(limit_per_bucket), 100))
-        species_filter = (species_filter or "").strip().lower()
+        species_filter = (species_filter or "").strip()
         confirmation_filter = _normalize_highlight_confirmation_filter(
             confirmation_filter
         )
@@ -6981,9 +7010,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         _apply_highlight_preferences(db, buckets)
         if species_filter:
             buckets = [
-                b for b in buckets if species_filter in b["species"].lower()
+                b for b in buckets
+                if text_search_match(
+                    b["species"],
+                    species_filter,
+                    species_match_case,
+                    species_whole_word,
+                )
             ]
-            if "unidentified".find(species_filter) < 0:
+            if not text_search_match(
+                "unidentified",
+                species_filter,
+                species_match_case,
+                species_whole_word,
+            ):
                 unidentified_photos = []
 
         def limited_bucket(bucket):
@@ -7038,6 +7078,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ),
             limit_per_bucket=request.args.get("limit_per_bucket", 20, type=int),
             species_filter=request.args.get("species") or "",
+            species_match_case=_request_bool_arg("species_match_case"),
+            species_whole_word=_request_bool_arg("species_whole_word"),
             confirmation_filter=request.args.get("confirmation") or "all",
         )
         return jsonify(payload)
@@ -18942,7 +18984,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/species/search")
     def api_species_search():
         """Search species names from active label sets for autocomplete."""
-        q = request.args.get("q", "").strip().lower()
+        q = request.args.get("q", "").strip()
+        match_case = _request_bool_arg("match_case")
+        whole_word = _request_bool_arg("whole_word")
         if len(q) < 2:
             return jsonify([])
 
@@ -18960,9 +19004,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         name = line.strip()
                         if not name:
                             continue
-                        name_lower = name.lower()
-                        if q in name_lower and name_lower not in seen:
-                            seen.add(name_lower)
+                        name_key = name.casefold()
+                        if (
+                            text_search_match(name, q, match_case, whole_word)
+                            and name_key not in seen
+                        ):
+                            seen.add(name_key)
                             matches.append(name)
                             if len(matches) >= 20:
                                 break
@@ -18974,12 +19021,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Also search existing species keywords in the database
         db = _get_db()
         kw_rows = db.conn.execute(
-            "SELECT name FROM keywords WHERE is_species = 1 AND LOWER(name) LIKE ?",
-            (f"%{q}%",),
+            """SELECT name FROM keywords
+               WHERE is_species = 1
+                 AND vireo_keyword_text_match(name, ?, ?, ?)""",
+            (q, 1 if match_case else 0, 1 if whole_word else 0),
         ).fetchall()
         for row in kw_rows:
-            if row["name"].lower() not in seen:
-                seen.add(row["name"].lower())
+            name_key = row["name"].casefold()
+            if name_key not in seen:
+                seen.add(name_key)
                 matches.append(row["name"])
 
         return jsonify(matches[:20])
@@ -19840,6 +19890,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         date_from = request.args.get("date_from", None)
         date_to = request.args.get("date_to", None)
         keyword = request.args.get("keyword", None)
+        keyword_match_case = _request_bool_arg("keyword_match_case")
+        keyword_whole_word = _request_bool_arg("keyword_whole_word")
         color_label = request.args.get("color_label", None)
         collection_id = request.args.get("collection_id", None, type=int)
         try:
@@ -19875,6 +19927,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 date_from=date_from,
                 date_to=date_to,
                 keyword=keyword,
+                keyword_match_case=keyword_match_case,
+                keyword_whole_word=keyword_whole_word,
                 color_label=color_label,
                 flag=flag,
             )

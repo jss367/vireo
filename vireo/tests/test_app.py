@@ -1338,6 +1338,27 @@ def test_species_search(app_and_db):
     names_lower = [n.lower() for n in data]
     assert any("robin" in n for n in names_lower)
 
+    db.add_keyword("Western Tanager", is_species=True)
+    db.add_keyword("Common Tern", is_species=True)
+
+    resp = client.get('/api/species/search?q=tern')
+    assert resp.status_code == 200
+    names = resp.get_json()
+    assert "Western Tanager" in names
+    assert "Common Tern" in names
+
+    resp = client.get('/api/species/search?q=tern&whole_word=1')
+    assert resp.status_code == 200
+    names = resp.get_json()
+    assert "Western Tanager" not in names
+    assert "Common Tern" in names
+
+    resp = client.get('/api/species/search?q=Tern&match_case=1')
+    assert resp.status_code == 200
+    names = resp.get_json()
+    assert "Western Tanager" not in names
+    assert "Common Tern" in names
+
     # Too short query returns empty
     resp = client.get('/api/species/search?q=r')
     assert resp.status_code == 200

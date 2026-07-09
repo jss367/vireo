@@ -1057,9 +1057,13 @@
   <div class="section" id="allSettingsSection">
     <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
       <span>All settings</span>
-      <input type="search" id="allSettingsSearch" placeholder="Search settings…" autocomplete="off"
-             oninput="filterAllSettings()"
-             style="flex:1;min-width:200px;max-width:280px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 10px;font-size:13px;">
+      <div class="search-control" style="flex:1;min-width:240px;max-width:340px;">
+        <input type="search" id="allSettingsSearch" placeholder="Search settings…" autocomplete="off"
+               oninput="filterAllSettings()"
+               style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);padding:4px 10px;font-size:13px;">
+        <button id="allSettingsMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('allSettings', 'match_case', filterAllSettings)" title="Match case">Aa</button>
+        <button id="allSettingsWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('allSettings', 'whole_word', filterAllSettings)" title="Match whole word">ab</button>
+      </div>
     </div>
     <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">
       Every Vireo setting, including ones not surfaced by the curated sections above. Edits save automatically; click Reset to revert.
@@ -3454,7 +3458,7 @@ function renderSettingRow(key) {
   } else if (!workspaceTab && hasGlobal) {
     meta += ' · default: ' + escapeHtml(formatSettingValue(defaultVal, spec, true));
   }
-  var search = (key + ' ' + spec.label + ' ' + spec.desc + ' ' + spec.category).toLowerCase();
+  var search = key + ' ' + spec.label + ' ' + spec.desc + ' ' + spec.category;
   return '<div class="setting-row-card" data-search="' + escapeAttr(search) + '" data-key="' + escapeAttr(key) + '" '
        +    'style="display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:1px solid var(--border-primary);">'
        +   '<span class="provenance-dot ' + dotClass + '" title="' + escapeAttr(dotTitle) + '"></span>'
@@ -3744,10 +3748,15 @@ async function importSettingsFile(file) {
 }
 
 function filterAllSettings() {
-  var q = (document.getElementById('allSettingsSearch').value || '').trim().toLowerCase();
+  var q = (document.getElementById('allSettingsSearch').value || '').trim();
+  var searchOptions = VireoTextSearch.readOptions('allSettings');
   var rows = document.querySelectorAll('#allSettingsCategories .setting-row-card');
   rows.forEach(function(row) {
-    row.style.display = (!q || row.getAttribute('data-search').indexOf(q) !== -1) ? '' : 'none';
+    row.style.display = (!q || VireoTextSearch.matchesFields(
+      row.getAttribute('data-search') || '',
+      q,
+      searchOptions
+    )) ? '' : 'none';
   });
   document.querySelectorAll('#allSettingsCategories .setting-category').forEach(function(cat) {
     var anyVisible = false;

@@ -13,6 +13,8 @@
   .control-group label { font-size:13px; color:var(--text-secondary); white-space:nowrap; }
   .control-group input[type=search], .control-group select { font-size:13px; padding:4px 8px; background:var(--bg-input); color:var(--text-primary); border:1px solid var(--border-secondary); border-radius:4px; }
   .control-group input[type=search] { width:180px; }
+  .control-group .search-control { width:240px; }
+  .control-group .search-control input[type=search] { width:auto; border-radius:4px 0 0 4px; }
   .lifelist-actions { margin-left:auto; display:flex; gap:8px; align-items:center; }
   .publish-btn { border:1px solid var(--accent); background:transparent; color:var(--accent); border-radius:4px; padding:5px 10px; font-size:12px; cursor:pointer; }
   .publish-btn:hover { background:rgba(99, 179, 237, 0.08); }
@@ -133,7 +135,11 @@
 <div class="lifelist-controls" id="controlsBar">
   <div class="control-group">
     <label for="speciesSearch">Species</label>
-    <input type="search" id="speciesSearch" placeholder="Cardinal">
+    <div class="search-control">
+      <input type="search" id="speciesSearch" placeholder="Cardinal">
+      <button id="lifeSpeciesMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('lifeSpecies', 'match_case', debounceRender)" title="Match case">Aa</button>
+      <button id="lifeSpeciesWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('lifeSpecies', 'whole_word', debounceRender)" title="Match whole word">ab</button>
+    </div>
   </div>
   <div class="control-group">
     <label for="sortSelect">Sort</label>
@@ -341,13 +347,16 @@ function render() {
   empty.style.display = 'none';
   controls.style.display = '';
 
-  var search = document.getElementById('speciesSearch').value.trim().toLowerCase();
+  var search = document.getElementById('speciesSearch').value.trim();
+  var searchOptions = VireoTextSearch.readOptions('lifeSpecies');
   var list = sortedSpecies();
   if (search) {
     list = list.filter(function(e) {
-      return e.species.toLowerCase().indexOf(search) >= 0
-        || (e.scientific_name || '').toLowerCase().indexOf(search) >= 0
-        || (e.common_name || '').toLowerCase().indexOf(search) >= 0;
+      return VireoTextSearch.matchesFields(
+        [e.species, e.scientific_name || '', e.common_name || ''],
+        search,
+        searchOptions
+      );
     });
   }
 
