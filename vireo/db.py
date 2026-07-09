@@ -1223,19 +1223,18 @@ class Database:
         # and misses.py both reference these; without the fallback ALTER, any
         # DB created before the miss-classifier feature fails every photo-list
         # query with "no such column".
-        for _miss_col in ("miss_no_subject", "miss_clipped", "miss_oof"):
+        for column, column_type in (
+            ("miss_no_subject", "INTEGER"),
+            ("miss_clipped", "INTEGER"),
+            ("miss_oof", "INTEGER"),
+            ("miss_computed_at", "TEXT"),
+        ):
             try:
-                self.conn.execute(f"SELECT {_miss_col} FROM photos LIMIT 0")
+                self.conn.execute(f"SELECT {column} FROM photos LIMIT 0")
             except sqlite3.OperationalError:
                 self.conn.execute(
-                    f"ALTER TABLE photos ADD COLUMN {_miss_col} INTEGER"
+                    f"ALTER TABLE photos ADD COLUMN {column} {column_type}"
                 )
-        try:
-            self.conn.execute("SELECT miss_computed_at FROM photos LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE photos ADD COLUMN miss_computed_at TEXT"
-            )
         # Migration: integrity-verification markers. hash_checked_at is when
         # the file's content was last re-hashed against photos.file_hash;
         # hash_status records the verdict ('ok', 'modified', 'corrupt',

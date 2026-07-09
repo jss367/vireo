@@ -657,25 +657,27 @@ function photoMatchesFilter(photo, filter) {
   return photo.row_category === filter;
 }
 
-function photoMatchesExclusions(photo) {
+function matchesExclusion(photo, id) {
   var flag = photo.flag || 'none';
-  if (excludeState.rejected && flag === 'rejected') return false;
-  if (excludeState.picks && flag === 'flagged') return false;
-  if (excludeState.unflagged && (!flag || flag === 'none')) return false;
-  if (excludeState.not_wildlife && photo.wildlife_excluded) return false;
-  if (excludeState.misses && (photo.miss_no_subject || photo.miss_clipped || photo.miss_oof)) return false;
+  if (id === 'rejected') return flag === 'rejected';
+  if (id === 'picks') return flag === 'flagged';
+  if (id === 'unflagged') return !flag || flag === 'none';
+  if (id === 'not_wildlife') return !!photo.wildlife_excluded;
+  if (id === 'misses') return !!(photo.miss_no_subject || photo.miss_clipped || photo.miss_oof);
+  return false;
+}
+
+function photoMatchesExclusions(photo) {
+  for (var i = 0; i < EXCLUDES.length; i += 1) {
+    var id = EXCLUDES[i].id;
+    if (excludeState[id] && matchesExclusion(photo, id)) return false;
+  }
   return true;
 }
 
 function exclusionCount(id) {
   return (compareData.photos || []).filter(function(photo) {
-    var flag = photo.flag || 'none';
-    if (id === 'rejected') return flag === 'rejected';
-    if (id === 'picks') return flag === 'flagged';
-    if (id === 'unflagged') return !flag || flag === 'none';
-    if (id === 'not_wildlife') return !!photo.wildlife_excluded;
-    if (id === 'misses') return !!(photo.miss_no_subject || photo.miss_clipped || photo.miss_oof);
-    return false;
+    return matchesExclusion(photo, id);
   }).length;
 }
 

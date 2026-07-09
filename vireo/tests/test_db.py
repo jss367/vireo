@@ -9951,6 +9951,57 @@ def test_miss_columns_present(tmp_path):
     }
 
 
+def test_migration_adds_miss_columns_to_existing_photos_table(tmp_path):
+    from db import Database
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    folder_id = db.add_folder("/photos", name="photos")
+    db.add_photo(
+        folder_id=folder_id,
+        filename="legacy.jpg",
+        extension=".jpg",
+        file_size=100,
+        file_mtime=1.0,
+    )
+
+    missing_cols = {
+        "miss_no_subject", "miss_clipped", "miss_oof", "miss_computed_at",
+    }
+    rows = db.conn.execute("PRAGMA table_info(photos)").fetchall()
+    keep = [row for row in rows if row["name"] not in missing_cols]
+    definitions = []
+    for row in keep:
+        definition = f'"{row["name"]}" {row["type"]}'
+        if row["pk"]:
+            definition += " PRIMARY KEY"
+        if row["notnull"]:
+            definition += " NOT NULL"
+        if row["dflt_value"] is not None:
+            definition += f' DEFAULT {row["dflt_value"]}'
+        definitions.append(definition)
+    column_list = ", ".join(f'"{row["name"]}"' for row in keep)
+
+    db.conn.execute("ALTER TABLE photos RENAME TO photos_current")
+    db.conn.execute(f"CREATE TABLE photos ({', '.join(definitions)})")
+    db.conn.execute(
+        f"INSERT INTO photos ({column_list}) SELECT {column_list} FROM photos_current"
+    )
+    db.conn.execute("DROP TABLE photos_current")
+    db.conn.commit()
+    db.conn.close()
+
+    db2 = Database(db_path)
+    cols = {row["name"] for row in db2.conn.execute("PRAGMA table_info(photos)")}
+    assert missing_cols.issubset(cols)
+
+    photos = db2.get_photos()
+    assert len(photos) == 1
+    assert photos[0]["miss_no_subject"] is None
+    assert photos[0]["miss_clipped"] is None
+    assert photos[0]["miss_oof"] is None
+
+
 def test_list_misses_returns_flagged_photos_only(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "m.db"))
