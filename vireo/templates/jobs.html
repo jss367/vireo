@@ -116,7 +116,7 @@
 .job-detail-status.failed { background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }
 .job-detail-meta {
   font-size: 12px; color: var(--text-muted); display: flex; gap: 16px;
-  padding: 8px 24px; border-bottom: 1px solid var(--border-subtle);
+  flex-wrap: wrap; padding: 8px 24px; border-bottom: 1px solid var(--border-subtle);
 }
 .btn-cancel {
   font-size: 12px; padding: 4px 12px; border-radius: 4px; cursor: pointer;
@@ -341,6 +341,19 @@
     return Math.max(0, Math.min(100, Math.round((info.current / info.total) * 100)));
   }
 
+  function jobConfig(job) {
+    return job && job.config && typeof job.config === 'object' ? job.config : {};
+  }
+
+  function jobCollectionText(job) {
+    var cfg = jobConfig(job);
+    if (cfg.collection_name) return 'Collection: ' + cfg.collection_name;
+    if (cfg.collection_id !== undefined && cfg.collection_id !== null && cfg.collection_id !== '') {
+      return 'Collection #' + cfg.collection_id;
+    }
+    return '';
+  }
+
   function renderJobCard(job, options) {
     options = options || {};
     // Queued pipelines are "live" for UI purposes: they have a real
@@ -380,6 +393,10 @@
     html += '<div class="job-detail-meta">';
     html += '<span>Started: ' + new Date(job.started_at).toLocaleTimeString() + '</span>';
     html += '<span>Elapsed: ' + elapsed + '</span>';
+    var collectionText = jobCollectionText(job);
+    if (collectionText) {
+      html += '<span>' + esc(collectionText) + '</span>';
+    }
     var visibleProgress = activeProgress(job.progress);
     if (visibleProgress) {
       html += '<span>' + esc(visibleProgress.label) + ': ' + progressPct(visibleProgress) + '%</span>';
@@ -673,6 +690,7 @@
     }
     var detail = '';
     var visibleProgress = activeProgress(j.progress);
+    var collectionText = jobCollectionText(j);
     if (j.status === 'running' && j.progress && j.progress.phase) {
       detail = esc(j.progress.phase);
       if (visibleProgress && visibleProgress.phase) {
@@ -684,6 +702,9 @@
       detail = '<span style="color:var(--danger);">' + esc(j.errors[0]).substring(0, 60) + '</span>';
     } else if (j.duration) {
       detail = formatElapsed(j.duration);
+    }
+    if (collectionText) {
+      detail = detail ? detail + ' &middot; ' + esc(collectionText) : esc(collectionText);
     }
     var pct = 0;
     if (visibleProgress) {

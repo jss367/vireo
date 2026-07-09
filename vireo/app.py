@@ -17935,6 +17935,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "source": None,
             "sources": None,
             "collection_id": collection_id,
+            "collection_name": next(
+                (
+                    c["name"]
+                    for c in thread_db.get_collections()
+                    if c["id"] == collection_id
+                ),
+                None,
+            ),
             "destination": None,
             "local_processing": False,
             "strategy": strategy_name,
@@ -18522,17 +18530,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if pending_folder_collection is not None:
             from datetime import datetime as _dt
 
+            collection_name = "Process {} {}".format(
+                pending_folder_collection["leaf"],
+                _dt.now().strftime("%Y-%m-%d %H:%M"),
+            )
             collection_id = db.add_collection(
-                "Process {} {}".format(
-                    pending_folder_collection["leaf"],
-                    _dt.now().strftime("%Y-%m-%d %H:%M"),
-                ),
+                collection_name,
                 json.dumps([{
                     "field": "photo_ids",
                     "value": pending_folder_collection["photo_ids"],
                 }]),
             )
             params.collection_id = collection_id
+        elif collection_id is not None:
+            collection_name = next(
+                (
+                    c["name"]
+                    for c in db.get_collections()
+                    if c["id"] == collection_id
+                ),
+                None,
+            )
+        else:
+            collection_name = None
 
         # Auto-skip classify stages if no model is available. Shared with
         # the after-import chaining hook so a chained run and a manually
@@ -18603,6 +18623,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "source": source,
             "sources": sources,
             "collection_id": collection_id,
+            "collection_name": collection_name,
             "destination": destination,
             "local_processing": local_processing,
             "strategy": strategy_name,

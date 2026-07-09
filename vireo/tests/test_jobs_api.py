@@ -684,6 +684,36 @@ def test_pipeline_job_with_collection_returns_job_id(app_and_db):
         assert data["job_id"].startswith("pipeline-")
 
 
+def test_pipeline_job_config_includes_collection_name(app_and_db, monkeypatch):
+    """Collection-scoped jobs carry the collection name for the Jobs page."""
+    import json
+
+    import pipeline_job
+    from db import Database
+
+    app, _ = app_and_db
+    db = Database(app.config["DB_PATH"])
+    db.set_active_workspace(db._active_workspace_id)
+    col_id = db.add_collection("Costa Rica selects", json.dumps([]))
+
+    def fake_run(job, runner, db_path, workspace_id, params, thumb_cache_dir=None):
+        return {"ok": True}
+
+    monkeypatch.setattr(pipeline_job, "run_pipeline_job", fake_run)
+
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id,
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg["collection_id"] == col_id
+        assert cfg["collection_name"] == "Costa Rica selects"
+
+
 def test_pipeline_auto_skips_classify_when_no_model(app_and_db):
     """Pipeline should auto-skip classify/extract/regroup when no model is available."""
     import json
