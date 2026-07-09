@@ -1972,6 +1972,44 @@ def test_regroup_plan_will_skip_when_disabled(tmp_path):
     assert plan["stages"]["Group"]["state"] == "will-skip"
 
 
+def test_regroup_plan_will_run_species_review_for_identify_preset(tmp_path):
+    """The identify preset sets ``skip_regroup=True`` but flags
+    ``review_mode="species"``, and ``regroup_stage`` (pipeline_job.py) then
+    runs the species-review pipeline and overwrites the workspace cache. The
+    plan must NOT report "Disabled" here — that lies about the work the
+    next press performs (and hides that identify wipes the existing full
+    Group cache/fingerprint on save).
+    """
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+    plan = compute_plan(
+        db,
+        _params(skip_regroup=True, review_mode="species"),
+        str(tmp_path / "test.db"),
+    )
+    group = plan["stages"]["Group"]
+    assert group["state"] == "will-run", group
+    assert "species review" in group["summary"].lower(), group
+
+
+def test_regroup_plan_species_review_ignored_when_classify_also_disabled(tmp_path):
+    """species review only runs when classify runs (regroup_stage's
+    species branch requires ``not skip_classify``). If a caller sends
+    ``review_mode="species"`` alongside ``skip_classify=True``, the actual
+    job skips grouping — the plan must too.
+    """
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+    plan = compute_plan(
+        db,
+        _params(
+            skip_regroup=True, skip_classify=True, review_mode="species",
+        ),
+        str(tmp_path / "test.db"),
+    )
+    assert plan["stages"]["Group"]["state"] == "will-skip"
+
+
 def test_regroup_plan_done_prior_when_cache_exists_and_no_upstream_work(tmp_path, monkeypatch):
     """The other headline bug: Group & Score had no signal at all and
     always said "Will run." When the cache exists and no upstream stage
@@ -2177,6 +2215,48 @@ def test_api_pipeline_plan_returns_per_stage_state(app_and_db):
     assert data["stages"]["Extract"]["state"] == "will-skip"
     assert data["stages"]["EyeKeypoints"]["state"] == "will-skip"
     assert data["stages"]["Group"]["state"] == "will-skip"
+
+
+def test_api_pipeline_plan_expands_identify_strategy_to_species_review(app_and_db):
+    """Frontend sends the strategy name so the plan endpoint expands it the
+    same way /api/jobs/pipeline does. Before this route knew about the
+    ``identify`` preset, the plan reported Group as "Disabled — stage will
+    be skipped" because the frontend sent ``skip_regroup=true`` without the
+    ``review_mode`` that identify actually runs — a lie about the plan
+    summary for the default workflow.
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={
+            "strategy": "identify",
+            # Mirror what applyStrategyPreset() sets when identify is picked:
+            # classify on, extract/eyes/group off.
+            "skip_classify": False,
+            "skip_extract_masks": True,
+            "skip_eye_keypoints": True,
+            "skip_regroup": True,
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    group = data["stages"]["Group"]
+    assert group["state"] == "will-run", group
+    assert "species review" in group["summary"].lower(), group
+
+
+def test_api_pipeline_plan_rejects_unknown_strategy(app_and_db):
+    """A bad strategy name must 400 — otherwise the plan silently falls back
+    to the raw skip flags and disagrees with what /api/jobs/pipeline would
+    do (which 400s the same input)."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={"strategy": "does_not_exist"},
+    )
+    assert resp.status_code == 400
 
 
 def test_api_pipeline_plan_collection_scope(app_and_db):

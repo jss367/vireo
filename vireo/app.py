@@ -3044,6 +3044,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         tuple(chunk),
                     )
                 )
+        # Expand a named strategy the same way /api/jobs/pipeline does so
+        # the plan describes the run the same job body would produce.
+        # Without this, the identify preset (skip_regroup=True + species
+        # review) shows Group as "Disabled" in the plan even though the
+        # actual run prepares species review results — the exact "plan
+        # summary is wrong for the default workflow" transparency failure
+        # the review flagged. An explicit ``review_mode`` in the body wins
+        # if both are present (Advanced/Custom callers that want to
+        # override the preset's review path).
+        review_mode = body.get("review_mode")
+        if "strategy" in body and body.get("strategy"):
+            strategy_name = body.get("strategy")
+            if not isinstance(strategy_name, str):
+                return json_error(
+                    "strategy must be a string, got "
+                    f"{type(strategy_name).__name__}", 400,
+                )
+            from process_strategies import resolve_strategy
+            try:
+                expanded = resolve_strategy(strategy_name)
+            except ValueError as e:
+                return json_error(str(e), 400)
+            if review_mode is None:
+                review_mode = expanded.get("review_mode")
+        if review_mode is not None and not isinstance(review_mode, str):
+            return json_error(
+                "review_mode must be a string or null, got "
+                f"{type(review_mode).__name__}", 400,
+            )
         params = PipelinePlanParams(
             collection_id=body.get("collection_id"),
             photo_ids=scope_photo_ids,
@@ -3060,6 +3089,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             source_paths=source_paths,
             hash_duplicate_paths=hash_duplicate_paths,
             preview_max_size=body.get("preview_max_size"),
+            review_mode=review_mode,
         )
         db = _get_db()
         return jsonify(compute_plan(db, params, db_path))

@@ -75,6 +75,15 @@ class PipelinePlanParams:
     # preview_max_size setting. Explicit 0 means "serve originals"; the
     # previews substage no-ops.
     preview_max_size: int | None = None
+    # Distinguishes the identify preset's species-only review path from a
+    # generic ``skip_regroup=True`` run. When ``"species"`` the Group stage
+    # is NOT skipped — the run enters ``regroup_stage``'s species branch and
+    # writes species-review results to ``pipeline_results_ws*.json``. The
+    # plan must reflect that work honestly instead of the "Disabled" pill
+    # ``skip_regroup=True`` normally implies. Populated by
+    # /api/pipeline/plan from the ``strategy`` (or explicit ``review_mode``)
+    # in the request body — the same expansion ``/api/jobs/pipeline`` runs.
+    review_mode: str | None = None
 
 
 def _plural(n, s="s"):
@@ -872,6 +881,26 @@ def _previews_plan(db, params, photo_ids, new_count, effective_cfg):
 def _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg,
                   import_no_new=False):
     if params.skip_regroup:
+        # The identify preset sets ``skip_regroup=True`` but flags
+        # ``review_mode="species"``, and ``regroup_stage`` (pipeline_job.py)
+        # then runs the species-review pipeline and overwrites
+        # ``pipeline_results_ws*.json`` with review-only output. The stage is
+        # NOT actually skipped — reporting "Disabled" would lie about the
+        # work the next press performs (and would let the user think the
+        # existing full-Group cache survives, when in reality identify wipes
+        # ``last_group_fingerprint`` and rewrites the cache).
+        if (
+            params.review_mode == "species"
+            and not params.skip_classify
+            and not import_no_new
+        ):
+            return {
+                "state": "will-run",
+                "summary": (
+                    "Will prepare species review — no grouping/scoring"
+                ),
+                "detail": {"review_mode": "species"},
+            }
         return {
             "state": "will-skip",
             "summary": "Disabled — stage will be skipped",

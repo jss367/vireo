@@ -5174,6 +5174,16 @@ function _buildPlanBody() {
   body.skip_eye_keypoints  = !document.getElementById('enableEyeKeypoints').checked;
   body.skip_regroup        = !document.getElementById('enableGroup').checked;
 
+  // Mirror the strategy field startPipeline() sends so /api/pipeline/plan
+  // expands the preset with the same rules /api/jobs/pipeline does. The
+  // identify preset sets skip_regroup=true but flags review_mode="species";
+  // without the strategy the plan reports Group as "Disabled" even though
+  // the actual run prepares species review results.
+  var planStrategySel = document.getElementById('strategySelect');
+  if (planStrategySel && planStrategySel.value && planStrategySel.value !== '__custom__') {
+    body.strategy = planStrategySel.value;
+  }
+
   // Preview size is a workspace/library setting. Omit preview_max_size so
   // the backend planner and job both use the same workspace-effective value.
 
