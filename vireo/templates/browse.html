@@ -2714,25 +2714,41 @@ function refreshActiveCollectionAfterMembershipChange() {
 // they stay in the grid and in the selection until the user manually
 // changes filters. Two paths can drive the current keyword filter — the
 // keyword tree (via `activeKeyword`) or the search box text (via
-// `appendKeywordSearchParams`) — so check both. If the search query
-// still matches the removed keyword name under the current match_case /
-// whole_word settings, the untagged photos may no longer belong in the
-// grid; reloading is safe either way (a photo still matching via
-// another keyword or filename token just comes back).
+// `appendKeywordSearchParams`) — so check both. Reloading is safe either
+// way (a photo still matching via another keyword or filename token
+// just comes back on the next fetch).
 function refreshActiveKeywordAfterRemoval(removedName) {
   if (!removedName) return;
   if (activeKeyword && activeKeyword === removedName) {
     reloadBrowseResults();
     return;
   }
+  // While a collection is active, `refreshActiveCollectionAfterMembershipChange`
+  // has already reloaded via `filterByCollection`. Collections ignore the
+  // search input, so any stale `#searchInput` text is not driving the
+  // current grid. Calling `reloadBrowseResults` here would run
+  // `resetAndLoad`, which clears `activeCollectionId` and drops the user
+  // into the global keyword search.
+  if (activeCollectionId) return;
   var searchInput = document.getElementById('searchInput');
   var query = searchInput ? searchInput.value.trim() : '';
   if (!query) return;
-  if (VireoTextSearch.matchesFields(
-    removedName,
-    query,
-    { matchCase: keywordSearchMatchCase, wholeWord: keywordSearchWholeWord }
-  )) {
+  // The backend keyword filter tokenizes `keyword=<query>` and satisfies
+  // each token independently — a token can match via a different keyword
+  // or the filename. So a photo can appear in the grid because
+  // `removedName` satisfied one token while other tokens matched
+  // elsewhere. Reload whenever any query token still matches the removed
+  // keyword name; requiring the whole query to match would miss those
+  // multi-token cases.
+  var opts = {
+    matchCase: keywordSearchMatchCase,
+    wholeWord: keywordSearchWholeWord,
+  };
+  var tokens = query.split(/\s+/);
+  var anyTokenMatches = tokens.some(function(token) {
+    return token && VireoTextSearch.tokenMatches(removedName, token, opts);
+  });
+  if (anyTokenMatches) {
     reloadBrowseResults();
   }
 }
