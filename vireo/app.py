@@ -62,6 +62,9 @@ from render_source import (
 from render_source import (
     image_is_smaller_than_expected as _image_is_smaller_than_expected,
 )
+from render_source import (
+    image_size_after_exif_orientation as _image_size_after_exif_orientation,
+)
 from render_source import path_satisfies_recipe_render as _path_satisfies_recipe_render
 from render_source import (
     recipe_render_source as _recipe_render_source,
@@ -21089,13 +21092,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if not os.path.exists(wc_path):
                 return None
             from PIL import Image as _PILImage
+
             try:
                 with _PILImage.open(wc_path) as _wc_img:
-                    wc_w, wc_h = _wc_img.size
+                    wc_w, wc_h = _image_size_after_exif_orientation(_wc_img)
             except Exception:
                 wc_w = wc_h = 0
-            orig_w = photo["width"] or 0
-            orig_h = photo["height"] or 0
+            # Compare in display-orientation space: ``extract_working_copy``
+            # writes the EXIF-transposed JPEG (e.g. 4000x6000 for a portrait
+            # RAW), while ``photo["width"]/height`` are the sensor axes
+            # (6000x4000). Comparing raw sensor axes rejects a valid
+            # full-resolution WC for portrait RAWs and either 500s or forces
+            # a redundant re-decode. ``_recipe_source_dimensions`` swaps the
+            # sensor axes when EXIF Orientation indicates it, matching what
+            # ``load_image`` returns.
+            orig_w, orig_h = _recipe_source_dimensions(photo)
             # Trust the wc when it meets/exceeds the believed original dims,
             # or when those dims are unknown (no basis to declare the wc stale
             # and a speculative RAW re-extract would just thrash the disk).
@@ -21107,17 +21118,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # this often means rawpy.postprocess() failed and we fell back to
             # the embedded JPEG, which can be a few pixels shy of the full
             # sensor area. Re-extracting would yield the same fallback image,
-            # just slower — so trust the wc when it is within 1% of the
-            # believed dims. This tolerance is RAW-only: for JPEG/PNG/etc.,
-            # the wc being smaller means the cap downsized it, and re-extracting
-            # WILL produce more pixels.
+            # just slower — so trust the wc when BOTH axes are within 1% of
+            # the believed dims. A long-edge-only check would silently accept
+            # an embedded JPEG whose long edge is full but whose short edge is
+            # substantially truncated (e.g. 6000x3376 for a 6000x4000 source),
+            # then apply the edit recipe to a cropped image. This tolerance is
+            # RAW-only: for JPEG/PNG/etc., the wc being smaller means the cap
+            # downsized it, and re-extracting WILL produce more pixels.
             from image_loader import RAW_EXTENSIONS
             ext = os.path.splitext(photo["filename"])[1].lower()
-            if ext in RAW_EXTENSIONS and wc_w and wc_h:
-                wc_long = max(wc_w, wc_h)
-                orig_long = max(orig_w, orig_h)
-                if orig_long and wc_long >= orig_long * 0.99:
-                    return wc_path
+            if (
+                ext in RAW_EXTENSIONS
+                and wc_w and wc_h
+                and orig_w and orig_h
+                and wc_w >= orig_w * 0.99
+                and wc_h >= orig_h * 0.99
+            ):
+                return wc_path
             return None
 
         trusted_wc_path = _trusted_full_res_working_copy_path()
@@ -21185,17 +21202,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     folder["path"], using_offline_cache,
                 )
                 image_ext = os.path.splitext(image_path)[1].lower()
-                if (
+                source_failure_current = (
                     primary_is_raw
-                    and trusted_wc_path
-                    and not os.path.exists(image_path)
-                ):
-                    image_path = trusted_wc_path
-                elif companion_source and image_ext not in RAW_EXTENSIONS:
-                    image_path = companion_source
-                elif (
-                    primary_is_raw
-                    and companion_source
                     and _has_current_working_copy_failure(
                         photo,
                         vireo_dir,
@@ -21203,6 +21211,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         live_source_path=image_path,
                         folder_path=folder["path"],
                     )
+                )
+                if (
+                    primary_is_raw
+                    and trusted_wc_path
+                    and not companion_source
+                    and (
+                        not os.path.exists(image_path)
+                        or source_failure_current
+                    )
+                ):
+                    image_path = trusted_wc_path
+                elif companion_source and image_ext not in RAW_EXTENSIONS:
+                    image_path = companion_source
+                elif (
+                    primary_is_raw
+                    and companion_source
+                    and source_failure_current
                 ):
                     # Mirror _recipe_render_source: when scanner has marked
                     # this RAW as failed for the current mtime, route the

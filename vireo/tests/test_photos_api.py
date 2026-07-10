@@ -1204,6 +1204,180 @@ def test_original_trusts_raw_working_copy_even_when_smaller_than_stored_dims(app
         assert resp.data == f.read()
 
 
+def test_original_does_not_trust_raw_working_copy_with_truncated_short_edge(app_and_db):
+    """A RAW working copy whose short edge is substantially truncated must NOT
+    be served as full-res.
+
+    A failed libraw decode can leave an embedded JPEG whose long edge matches
+    the sensor but whose short edge is significantly smaller (e.g. 6000x3376
+    for a 6000x4000 source). A long-edge-only tolerance accepted that WC and
+    served it as the full-resolution original, silently dropping the missing
+    short-edge content. The trust check must reject it on the short edge so
+    the endpoint tries to recover the true full-res instead.
+    """
+    import config as cfg
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    cfg.save({**cfg.DEFAULTS, "working_copy_max_size": 0})
+
+    photos = db.get_photos()
+    pid = photos[0]["id"]
+
+    db.conn.execute(
+        "UPDATE photos SET filename=?, extension=?, width=6000, height=4000 WHERE id=?",
+        ("DSC_0001.NEF", ".nef", pid),
+    )
+    db.conn.commit()
+
+    from PIL import Image
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_path = os.path.join(working_dir, f"{pid}.jpg")
+    # Long edge matches sensor (6000) but short edge is ~15% short — the
+    # kind of truncated embedded JPEG rawpy hands back when demosaic fails.
+    Image.new("RGB", (6000, 3376), color=(200, 100, 50)).save(wc_path, "JPEG")
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=? WHERE id=?",
+        (f"working/{pid}.jpg", pid),
+    )
+    db.conn.commit()
+
+    resp = client.get(f"/photos/{pid}/original")
+
+    # Whatever the endpoint decides to do downstream (re-extract, 500, serve
+    # a companion), it must not have returned the truncated WC as-is.
+    with open(wc_path, "rb") as f:
+        truncated_bytes = f.read()
+    if resp.status_code == 200:
+        assert resp.data != truncated_bytes, (
+            "endpoint trusted a short-edge-truncated RAW working copy as full-res"
+        )
+
+
+def test_original_trusts_portrait_raw_working_copy_with_transposed_dims(app_and_db):
+    """Portrait RAWs store sensor axes while extract_working_copy writes the
+    EXIF-transposed JPEG, so the trust check must compare in display-orientation
+    space.
+
+    For a portrait RAW with sensor 6000x4000 and EXIF Orientation 6, the
+    working copy lands as 4000x6000 on disk. Comparing raw sensor axes
+    (``wc_w >= orig_w`` where wc_w=4000 and orig_w=6000) rejects a legitimate
+    full-resolution WC and forces a redundant re-extract or a 500. The trust
+    check must normalize both sides to display orientation.
+    """
+    import json
+
+    import config as cfg
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    cfg.save({**cfg.DEFAULTS, "working_copy_max_size": 0})
+
+    photos = db.get_photos()
+    pid = photos[0]["id"]
+
+    exif = json.dumps({"EXIF": {"Orientation": 6}})
+    db.conn.execute(
+        "UPDATE photos SET filename=?, extension=?, width=6000, height=4000, "
+        "exif_data=? WHERE id=?",
+        ("DSC_0001.NEF", ".nef", exif, pid),
+    )
+    db.conn.commit()
+
+    from PIL import Image
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_path = os.path.join(working_dir, f"{pid}.jpg")
+    # extract_working_copy writes the EXIF-transposed JPEG: for a portrait
+    # source with sensor 6000x4000 the WC on disk is 4000x6000 (display).
+    Image.new("RGB", (4000, 6000), color=(90, 130, 200)).save(wc_path, "JPEG")
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=? WHERE id=?",
+        (f"working/{pid}.jpg", pid),
+    )
+    db.conn.commit()
+
+    resp = client.get(f"/photos/{pid}/original")
+
+    assert resp.status_code == 200
+    # The endpoint must have trusted and served the WC directly — comparing
+    # sensor vs display would have rejected it and either 500'd or re-extracted.
+    with open(wc_path, "rb") as f:
+        assert resp.data == f.read()
+
+
+def test_edited_original_uses_working_copy_after_current_raw_failure(
+    client_with_photo, monkeypatch,
+):
+    """An unsupported edited RAW should render from its JPEG working copy.
+
+    Nikon HE* RAWs can fail libraw demosaic and only leave a near-full embedded
+    JPEG working copy. Once that source failure is recorded for the current
+    mtime, the edited original route should apply the crop to the JPEG instead
+    of returning a permanent 500.
+    """
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    raw_path = os.path.join(folder["path"], "bad.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(b"unsupported raw")
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_path = os.path.join(working_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (792, 594), color=(80, 120, 160)).save(wc_path, "JPEG")
+
+    mtime = os.path.getmtime(raw_path)
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               width=800, height=600,
+               file_mtime=?,
+               working_copy_path=?,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?,
+               working_copy_failed_source='source'
+           WHERE id=?""",
+        (mtime, f"working/{photo_id}.jpg", mtime, photo_id),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        photo_id,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+    )
+
+    loaded_paths = []
+    original_load_image = image_loader.load_image
+
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        loaded_paths.append(str(file_path))
+        if str(file_path).lower().endswith(".nef"):
+            raise AssertionError("edited original retried failed RAW")
+        return original_load_image(file_path, max_size=max_size, **kwargs)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    resp = client.get(f"/photos/{photo_id}/original")
+
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert [os.path.normpath(path) for path in loaded_paths] == [
+        os.path.normpath(wc_path)
+    ]
+
+
 def test_original_reextracts_stale_capped_jpeg_wc_after_cap_raised(app_and_db, tmp_path):
     """Stale working copies generated under a smaller cap must be re-extracted
     after the cap is raised — the endpoint must not trust the wc just
