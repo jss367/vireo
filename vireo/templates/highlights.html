@@ -902,6 +902,36 @@ function applyPickBonusOnFlagChange(photo, previousFlag, nextFlag) {
   photo.highlight_score = Math.max(0, Math.min(1, photo.highlight_score + delta));
 }
 
+// Refetch a bucket (or the unidentified section) from offset 0 so the loaded
+// window matches the backend's post-pick ordering. Used when `has_more` is
+// true — a client-only resort of the loaded slice can't be trusted because
+// the picked-first bonus can push a previously-visible photo past the loaded
+// window or promote a hidden one into it, and `loadMoreBucket` uses
+// `photos.length` as its next offset. That would append duplicates and skip
+// photos that newly entered the first page. Returns a promise so callers can
+// await the refresh before rendering.
+async function refetchBucketFromZero(bucket, isUnidentified) {
+  var target = bucket;
+  if (!target) return;
+  var currentLen = Array.isArray(target.photos) ? target.photos.length : 0;
+  var params = requestScopeParams();
+  var speciesKey = isUnidentified ? '__unidentified__' : target.species;
+  appendHighlightFilterParams(params);
+  // appendHighlightFilterParams may set 'species' for the species-search
+  // filter; force it back to the target species/unidentified sentinel so
+  // the endpoint returns the right bucket, not whatever the search box holds.
+  params.set('species', speciesKey);
+  params.set('offset', 0);
+  params.set('limit', Math.max(500, currentLen));
+  var data = await safeFetch('/api/highlights/bucket?' + params);
+  if (!data || !Array.isArray(data.photos)) return;
+  target.photos = data.photos;
+  target.loaded_count = data.loaded_count;
+  target.has_more = data.has_more;
+  if (typeof data.photo_count === 'number') target.photo_count = data.photo_count;
+  recomputeBucketBestScore(target);
+}
+
 // Sort a bucket's photos to match the backend's ordering after a client-side
 // flag mutation. If any visible photo maps to a stored species highlight the
 // backend runs `_apply_ordered_highlights` after `_highlight_score_bucket`,
@@ -1305,6 +1335,18 @@ document.addEventListener('lightbox:flagchanged', function(e) {
     if (!hit) return;
     applyPickBonusOnFlagChange(hit.photo, prev, next);
     hit.photo.flag = next;
+    // When the bucket has `has_more`, the loaded window is a subset of
+    // the server's ordered list. A local resort of that window can't
+    // reconcile a pick that promotes a hidden photo into the slice or
+    // demotes a visible one past it, and `loadMoreBucket` would then
+    // append duplicates / skip newly-first-page photos. Refetch instead
+    // so pagination stays aligned with the server's picked-first order.
+    var isUnidentified = hit.bucket === null;
+    var target = isUnidentified ? currentData.unidentified : hit.bucket;
+    if (target && target.has_more) {
+      refetchBucketFromZero(target, isUnidentified).then(render);
+      return;
+    }
     sortBucketAfterFlagChange(hit.photos);
     recomputeBucketBestScore(hit.bucket);
     render();

@@ -480,6 +480,106 @@ def test_highlights_lightbox_pick_applies_backend_score_bonus(live_server, page)
     assert updated_ids[2] == upper_unhighlighted
 
 
+def test_highlights_lightbox_pick_refetches_paged_bucket(live_server, page):
+    """Picking in a bucket with `has_more` must refetch, not just resort locally.
+
+    Regression for Codex feedback on PR #1176 (line 1308): when a bucket
+    still has ``has_more=true``, the client's loaded window is a subset of
+    the server's ordered list. A local resort of that slice can't reconcile
+    a pick that promotes a preloaded-but-hidden photo into the window (or
+    demotes a visible one past it), and ``loadMoreBucket`` uses
+    ``target.photos.length`` as its next offset — so it would either append
+    duplicates for photos still at the same server offset or skip photos
+    that newly entered the first page.
+    """
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+
+    hawk_kid = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("Red-tailed Hawk",)
+    ).fetchone()["id"]
+    folder_id = data["folders"][0]
+
+    # loadHighlights sends limit_per_bucket = max(20, perRowSlider). Seed
+    # >20 hawks total so the initial hawk bucket comes back with
+    # has_more=true (3 seeded hawks + 25 extras = 28 > 20).
+    extras = []
+    for i in range(25):
+        pid = db.add_photo(
+            folder_id=folder_id,
+            filename=f"pageable-hawk-{i}.jpg",
+            extension=".jpg",
+            file_size=1000,
+            file_mtime=1.0,
+            timestamp=f"2024-03-11T09:{i:02d}:00",
+        )
+        db.conn.execute(
+            "UPDATE photos SET quality_score = ? WHERE id = ?",
+            (0.5 - i * 0.005, pid),
+        )
+        db.conn.execute(
+            "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (pid, hawk_kid),
+        )
+        extras.append(pid)
+    db.conn.commit()
+
+    page.goto(f"{live_server['url']}/highlights", timeout=5000)
+    hawk_section = page.locator("section.bucket").filter(has_text="Red-tailed Hawk")
+    expect(hawk_section.locator(".highlights-card").first).to_be_visible(timeout=5000)
+
+    # Sanity: 28 hawks total, 20 loaded → has_more should be true.
+    has_more = page.evaluate(
+        "() => currentData.buckets.find(b => b.species === 'Red-tailed Hawk').has_more"
+    )
+    assert has_more is True
+
+    # Pick a photo from within the loaded window.
+    first_card = hawk_section.locator(".highlights-card").nth(0)
+    first_pid = int(first_card.get_attribute("data-photo-id"))
+    first_card.click()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+    page.wait_for_function(
+        "pid => _lightboxCurrentId === pid",
+        arg=first_pid,
+        timeout=3000,
+    )
+
+    # The pick must trigger a refetch from offset=0 against the bucket
+    # endpoint, not just a local reorder.
+    with page.expect_response(
+        lambda r: (
+            "/api/highlights/bucket" in r.url
+            and "offset=0" in r.url
+            and "species=Red-tailed" in r.url
+        ),
+        timeout=5000,
+    ):
+        page.keyboard.press("p")
+
+    assert _wait_for_flag(db, first_pid, "flagged") == "flagged"
+
+    # Load the rest of the bucket via the Load-more path. If the refetch
+    # aligned the client window with the server's post-bonus ordering, the
+    # combined set is duplicate-free and covers every hawk.
+    page.evaluate(
+        "async () => { while (currentData.buckets.find(b => b.species === 'Red-tailed Hawk').has_more) "
+        "{ await loadMoreBucket('Red-tailed Hawk', false); } }"
+    )
+    all_ids = page.evaluate(
+        "() => currentData.buckets.find(b => b.species === 'Red-tailed Hawk').photos.map(p => p.id)"
+    )
+    assert len(all_ids) == len(set(all_ids)), (
+        f"Duplicate photo IDs after Load-more: {all_ids}"
+    )
+    # 3 seeded hawks + 25 extras = 28 unique hawks in the bucket.
+    assert len(all_ids) == 28
+
+
 def test_highlights_species_search_filters_buckets(live_server, page):
     db = live_server["db"]
     data = live_server["data"]
