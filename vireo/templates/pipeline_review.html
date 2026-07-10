@@ -5753,61 +5753,100 @@ function _grmMarkTouched(photoId) {
   if (photoId) grmState.touched.add(photoId);
 }
 
-function grmMoveUp() {
-  if (!grmState.selected) return;
-  _grmMarkTouched(grmState.selected);
-  var zone = _grmGetZone(grmState.selected);
-  if (zone === 'rejects') {
-    grmState.rejects.delete(grmState.selected);
-  } else if (zone === 'candidates') {
-    grmState.picks.add(grmState.selected);
+function _grmActionTargetIds() {
+  var visible = {};
+  _grmVisibleItems().forEach(function(p) { visible[p.id] = true; });
+  var ids = [];
+  if (grmState.selectedIds && grmState.selectedIds.size) {
+    grmState.selectedIds.forEach(function(id) {
+      var photoId = parseInt(id, 10);
+      if (visible[photoId] && ids.indexOf(photoId) === -1) ids.push(photoId);
+    });
   }
+  if (!ids.length && grmState.selected) {
+    var selectedId = parseInt(grmState.selected, 10);
+    if (visible[selectedId]) ids.push(selectedId);
+  }
+  return ids;
+}
+
+function _grmMarkTouchedMany(photoIds) {
+  photoIds.forEach(function(photoId) { _grmMarkTouched(photoId); });
+}
+
+function grmMoveUp() {
+  var ids = _grmActionTargetIds();
+  if (!ids.length) return;
+  _grmMarkTouchedMany(ids);
+  ids.forEach(function(photoId) {
+    var zone = _grmGetZone(photoId);
+    if (zone === 'rejects') {
+      grmState.rejects.delete(photoId);
+    } else if (zone === 'candidates') {
+      grmState.picks.add(photoId);
+    }
+  });
   renderGroupModal();
 }
 
 function grmMoveDown() {
-  if (!grmState.selected) return;
-  _grmMarkTouched(grmState.selected);
-  var zone = _grmGetZone(grmState.selected);
-  if (zone === 'picks') {
-    grmState.picks.delete(grmState.selected);
-  } else if (zone === 'candidates') {
-    grmState.rejects.add(grmState.selected);
-  }
+  var ids = _grmActionTargetIds();
+  if (!ids.length) return;
+  _grmMarkTouchedMany(ids);
+  ids.forEach(function(photoId) {
+    var zone = _grmGetZone(photoId);
+    if (zone === 'picks') {
+      grmState.picks.delete(photoId);
+    } else if (zone === 'candidates') {
+      grmState.rejects.add(photoId);
+    }
+  });
   renderGroupModal();
 }
 
 function grmMovePick() {
-  if (!grmState.selected) return;
-  _grmMarkTouched(grmState.selected);
-  grmState.rejects.delete(grmState.selected);
-  grmState.picks.add(grmState.selected);
+  var ids = _grmActionTargetIds();
+  if (!ids.length) return;
+  _grmMarkTouchedMany(ids);
+  ids.forEach(function(photoId) {
+    grmState.rejects.delete(photoId);
+    grmState.picks.add(photoId);
+  });
   renderGroupModal();
 }
 
 function grmMoveReject() {
-  if (!grmState.selected) return;
-  _grmMarkTouched(grmState.selected);
-  grmState.picks.delete(grmState.selected);
-  grmState.rejects.add(grmState.selected);
+  var ids = _grmActionTargetIds();
+  if (!ids.length) return;
+  _grmMarkTouchedMany(ids);
+  ids.forEach(function(photoId) {
+    grmState.picks.delete(photoId);
+    grmState.rejects.add(photoId);
+  });
   renderGroupModal();
 }
 
 function grmMoveCandidate() {
-  if (!grmState.selected) return;
-  _grmMarkTouched(grmState.selected);
-  grmState.picks.delete(grmState.selected);
-  grmState.rejects.delete(grmState.selected);
+  var ids = _grmActionTargetIds();
+  if (!ids.length) return;
+  _grmMarkTouchedMany(ids);
+  ids.forEach(function(photoId) {
+    grmState.picks.delete(photoId);
+    grmState.rejects.delete(photoId);
+  });
   renderGroupModal();
 }
 
 function grmRemoveFromGroup() {
   if (grmState && grmState.allowRemove === false) return;
-  if (!grmState.selected) return;
-  _grmMarkTouched(grmState.selected);
-  grmState.removed.add(grmState.selected);
-  grmState.picks.delete(grmState.selected);
-  grmState.rejects.delete(grmState.selected);
+  var ids = _grmActionTargetIds();
+  if (!ids.length) return;
+  _grmMarkTouchedMany(ids);
+  ids.forEach(function(photoId) {
+    grmState.removed.add(photoId);
+    grmState.picks.delete(photoId);
+    grmState.rejects.delete(photoId);
+  });
   grmState.selected = null;
   if (grmState.selectedIds) grmState.selectedIds.clear();
   grmState.selectionAnchor = null;

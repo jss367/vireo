@@ -886,6 +886,96 @@ def test_classic_pipeline_review_group_shortcuts_do_not_flag_prior_single_photo(
     assert stale_flag_payloads == []
 
 
+def test_classic_pipeline_review_group_reject_shortcut_applies_to_multiselection(live_server, page):
+    image_body = base64.b64decode(_PNG_1X1)
+    results = {
+        "photos": [
+            {"id": 1, "filename": "burst-a.jpg", "label": "REVIEW", "quality_composite": 0.3, "subject_tenengrad": 10},
+            {"id": 2, "filename": "burst-b.jpg", "label": "REVIEW", "quality_composite": 0.6, "subject_tenengrad": 20},
+            {"id": 3, "filename": "burst-c.jpg", "label": "REVIEW", "quality_composite": 0.9, "subject_tenengrad": 30},
+        ],
+        "encounters": [
+            {
+                "photo_ids": [1, 2, 3],
+                "photo_count": 3,
+                "burst_count": 1,
+                "species": ["Test bird"],
+                "bursts": [{"photo_ids": [1, 2, 3]}],
+            }
+        ],
+        "summary": {
+            "total_photos": 3,
+            "encounter_count": 1,
+            "burst_count": 1,
+            "keep_count": 0,
+            "review_count": 3,
+            "reject_count": 0,
+        },
+    }
+
+    page.route(
+        "**/api/pipeline/page-init",
+        lambda route: route.fulfill(
+            json={
+                "results": results,
+                "workspace_overrides": {},
+                "review_readiness": {"state": "ready", "total_photos": 3},
+            }
+        ),
+    )
+    page.route(
+        "**/api/pipeline/group/state",
+        lambda route: route.fulfill(
+            json={
+                "photos": {
+                    "1": {"flag": "none", "has_species_keyword": False},
+                    "2": {"flag": "none", "has_species_keyword": False},
+                    "3": {"flag": "none", "has_species_keyword": False},
+                },
+                "species_kid": None,
+            }
+        ),
+    )
+    page.route("**/thumbnails/*.jpg", lambda route: route.fulfill(body=image_body, content_type="image/png"))
+    page.route("**/photos/*/preview?*", lambda route: route.fulfill(body=image_body, content_type="image/png"))
+    page.route("**/photos/*/original", lambda route: route.fulfill(body=image_body, content_type="image/png"))
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+    page.locator(".photo-card[data-photo-id='1'] img").click()
+    expect(page.locator("#grmOverlay")).to_have_class(re.compile(r"\bopen\b"))
+    expect(page.locator("#grmTitle")).to_have_text("Review Burst Group")
+    expect(page.locator("#grmApplyBtn")).to_be_enabled()
+
+    page.evaluate(
+        """() => {
+          grmState.picks.clear();
+          grmState.rejects.clear();
+          grmState.selected = null;
+          grmState.selectedIds.clear();
+          grmState.selectionAnchor = null;
+          renderGroupModal();
+        }"""
+    )
+
+    page.locator('#grmOverlay .grm-card[data-photo-id="1"]').click()
+    page.locator('#grmOverlay .grm-card[data-photo-id="2"]').click(modifiers=["Meta"])
+    page.keyboard.press("x")
+
+    expect(page.locator("#grmCount")).to_have_text("0 picks, 2 rejects, 1 unsorted")
+    state = page.evaluate(
+        """() => ({
+          rejects: Array.from(grmState.rejects).sort(),
+          picks: Array.from(grmState.picks).sort(),
+          selected: Array.from(grmState.selectedIds).sort(),
+          touched: Array.from(grmState.touched || []).sort(),
+        })"""
+    )
+    assert state["rejects"] == [1, 2]
+    assert not set(state["picks"]).intersection({1, 2})
+    assert state["selected"] == [1, 2]
+    assert state["touched"] == [1, 2]
+
+
 def test_rapid_review_apply_tags_all_burst_frames_via_encounters_species(live_server, page):
     # A multi-frame burst where only ONE frame is a pick. Species tagging must
     # cover EVERY frame (matching the pipeline decision / the grid), so the
