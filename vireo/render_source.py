@@ -276,6 +276,23 @@ def working_copy_satisfies_recipe_render(
     )
 
 
+def working_copy_path_if_satisfies(
+    photo, recipe, max_size, vireo_dir, *, rel_slack=0.0,
+):
+    """Return the working-copy path when it can satisfy this recipe render."""
+    wc_rel = photo_value(photo, "working_copy_path")
+    if not wc_rel or not vireo_dir:
+        return None
+    wc_path = wc_rel if os.path.isabs(wc_rel) else os.path.join(vireo_dir, wc_rel)
+    if not os.path.exists(wc_path):
+        return None
+    if not working_copy_satisfies_recipe_render(
+        photo, recipe, max_size, vireo_dir, rel_slack=rel_slack,
+    ):
+        return None
+    return wc_path
+
+
 def path_satisfies_recipe_render(path, photo, recipe, max_size):
     """Return True when the file at ``path`` is large enough for this render."""
     original_w, original_h = recipe_source_dimensions(photo)
@@ -372,8 +389,10 @@ def recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
     if source_failure_current and working_copy_satisfies_recipe_render(
         photo, recipe, max_size, vireo_dir, rel_slack=0.01,
     ):
-        wc_path = os.path.join(vireo_dir, wc_rel)
-        if os.path.exists(wc_path):
+        wc_path = working_copy_path_if_satisfies(
+            photo, recipe, max_size, vireo_dir, rel_slack=0.01,
+        )
+        if wc_path:
             return wc_path, True
     if not os.path.exists(original_abs) and wc_rel:
         wc_path = os.path.join(vireo_dir, wc_rel)

@@ -2484,6 +2484,74 @@ def test_cropped_thumbnail_uses_companion_before_raw_failure_marker(
         assert img.size == (267, 400)
 
 
+def test_cropped_thumbnail_uses_working_copy_on_first_raw_decode_failure(
+    client_with_photo, monkeypatch,
+):
+    import io
+    import os
+
+    import thumbnails
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    raw_path = os.path.join(folder["path"], "DSC_7062.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(b"unsupported raw")
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_path = os.path.join(working_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (800, 600), (30, 120, 200)).save(wc_path, "JPEG")
+    mtime = os.path.getmtime(raw_path)
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='DSC_7062.NEF', extension='.nef',
+               companion_path=NULL,
+               working_copy_path=?,
+               width=800, height=600,
+               file_mtime=?,
+               working_copy_failed_at=NULL,
+               working_copy_failed_mtime=NULL,
+               working_copy_failed_source=NULL
+           WHERE id=?""",
+        (f"working/{photo_id}.jpg", mtime, photo_id),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        photo_id,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+    )
+
+    original_load_image = thumbnails.load_image
+    loaded_paths = []
+
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        loaded_paths.append(str(file_path))
+        if str(file_path).lower().endswith(".nef"):
+            return None
+        return original_load_image(file_path, max_size=max_size, **kwargs)
+
+    monkeypatch.setattr(thumbnails, "load_image", tracking_load_image)
+
+    rendered = client.get(f"/thumbnails/{photo_id}.jpg")
+
+    assert rendered.status_code == 200, rendered.get_data(as_text=True)
+    assert loaded_paths == [raw_path, wc_path]
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (267, 400)
+    row = db.conn.execute(
+        "SELECT working_copy_failed_source FROM photos WHERE id=?",
+        (photo_id,),
+    ).fetchone()
+    assert row["working_copy_failed_source"] == "source"
+
+
 def test_thumbnail_falls_back_when_raw_short_edge_is_smaller(
     client_with_photo, monkeypatch,
 ):
@@ -3668,6 +3736,73 @@ def test_preview_falls_back_to_companion_on_first_raw_decode_failure(
     # The failed RAW decode must stamp the source marker so subsequent
     # requests skip the slow RAW retry and _recipe_render_source selects
     # the companion directly.
+    row = db.conn.execute(
+        "SELECT working_copy_failed_source FROM photos WHERE id=?",
+        (photo_id,),
+    ).fetchone()
+    assert row["working_copy_failed_source"] == "source"
+
+
+def test_preview_falls_back_to_working_copy_on_first_raw_decode_failure(
+    client_with_photo, monkeypatch,
+):
+    import io
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    raw_path = os.path.join(folder["path"], "DSC_7062.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(b"unsupported raw")
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_path = os.path.join(working_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (800, 600), (30, 120, 200)).save(wc_path, "JPEG")
+    mtime = os.path.getmtime(raw_path)
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='DSC_7062.NEF', extension='.nef',
+               companion_path=NULL,
+               working_copy_path=?,
+               width=800, height=600,
+               file_mtime=?,
+               working_copy_failed_at=NULL,
+               working_copy_failed_mtime=NULL,
+               working_copy_failed_source=NULL
+           WHERE id=?""",
+        (f"working/{photo_id}.jpg", mtime, photo_id),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        photo_id,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+    )
+
+    original_load_image = image_loader.load_image
+    loaded_paths = []
+
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        loaded_paths.append(str(file_path))
+        if str(file_path).lower().endswith(".nef"):
+            return None
+        return original_load_image(file_path, max_size=max_size, **kwargs)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    resp = app.test_client().get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert loaded_paths == [raw_path, wc_path]
+    with Image.open(io.BytesIO(resp.data)) as img:
+        assert img.size == (400, 600)
     row = db.conn.execute(
         "SELECT working_copy_failed_source FROM photos WHERE id=?",
         (photo_id,),

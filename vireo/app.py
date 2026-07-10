@@ -78,6 +78,9 @@ from render_source import (
 from render_source import (
     scaled_recipe_source_dimensions as _scaled_recipe_source_dimensions,
 )
+from render_source import (
+    working_copy_path_if_satisfies as _working_copy_path_if_satisfies,
+)
 from werkzeug.exceptions import BadRequest
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -17572,7 +17575,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # decode (the working copy was extracted from the embedded JPEG
         # at scan time).
         import config as cfg
-        from thumbnails import generate_thumbnail
+        from thumbnails import (
+            _retry_thumbnail_with_working_copy,
+            generate_thumbnail,
+        )
         vireo_dir = os.path.dirname(thumb_dir)
         # Look up the photo's folder path directly rather than via
         # ``get_folder_tree()``: the tree filter excludes folders whose
@@ -17679,6 +17685,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         )
                         if result:
                             source = companion_abs
+            if (
+                not result
+                and recipe
+                and os.path.splitext(source)[1].lower() in RAW_EXTENSIONS
+            ):
+                result = _retry_thumbnail_with_working_copy(
+                    db,
+                    photo,
+                    source,
+                    thumb_dir,
+                    thumb_size,
+                    cfg.load().get("thumbnail_quality", 85),
+                    recipe,
+                    vireo_dir,
+                )
+                if result:
+                    source = result
         except Exception:
             log.exception(
                 "Thumbnail self-heal failed for photo %s (source=%s)",
@@ -21295,6 +21318,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     img = load_image(companion_abs, max_size=load_max_size)
                     if img is not None:
                         canonical = companion_abs
+            if img is None:
+                wc_path = _working_copy_path_if_satisfies(
+                    photo, recipe, size, vireo_dir, rel_slack=0.01,
+                )
+                if wc_path and os.path.abspath(wc_path) != os.path.abspath(canonical):
+                    log.info(
+                        "RAW decode failed for photo %s preview at size=%s; "
+                        "falling back to JPEG working copy",
+                        photo_id, size,
+                    )
+                    _record_working_copy_failure(db, photo, canonical)
+                    img = load_image(wc_path, max_size=load_max_size)
+                    if img is not None:
+                        canonical = wc_path
         if img is None:
             _record_working_copy_failure(db, photo, canonical)
             return "Could not load image", 500
