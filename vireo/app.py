@@ -4072,13 +4072,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # change invalidates the old key and would silently regress export
         # to RAW until the user re-developed.
         old_row = db.conn.execute(
-            "SELECT path FROM folders WHERE id = ?", (folder_id,)
+            "SELECT path, status FROM folders WHERE id = ?", (folder_id,)
         ).fetchone()
         old_path = old_row["path"] if old_row else ""
 
         try:
             cascaded = db.relocate_folder(folder_id, new_path)
         except ValueError as e:
+            if old_row and old_row["status"] == "missing":
+                current_row = db.conn.execute(
+                    "SELECT status FROM folders WHERE id = ?", (folder_id,)
+                ).fetchone()
+                if current_row and current_row["status"] == "ok":
+                    _invalidate_missing_originals_cache()
             return json_error(str(e), 409)
 
         # Relocation rewrites folders.path (and can merge/delete rows via the

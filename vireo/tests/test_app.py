@@ -5917,6 +5917,50 @@ def test_api_folder_relocate(app_and_db, tmp_path):
     assert row["path"] == new_path
 
 
+def test_api_folder_relocate_conflict_after_revalidation_invalidates_missing_cache(
+    app_and_db, tmp_path,
+):
+    """A relocate conflict can still mutate folder health and stale the cache.
+
+    ``Database.relocate_folder`` revalidates a missing source folder whose old
+    path came back online, commits ``status='ok'``, then raises if the requested
+    new path is already tracked. The API returns 409, but the ready Missing
+    Originals cache must still be dropped because the folder is now online.
+    """
+    app, db = app_and_db
+    source_path = tmp_path / "source"
+    target_path = tmp_path / "target"
+    source_path.mkdir()
+    target_path.mkdir()
+    source_id = db.add_folder(str(source_path), name="source")
+    db.add_folder(str(target_path), name="target")
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (source_id,)
+    )
+    db.conn.commit()
+
+    key = (db._db_path, db._active_workspace_id, None)
+    with app._missing_originals_lock:
+        app._missing_originals_cache[key] = {
+            "photos": [{"id": 8888, "filename": "hidden.jpg"}],
+            "checked_at": "2026-01-01T00:00:00Z",
+            "set_at": 0.0,
+        }
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/folders/{source_id}/relocate",
+        json={"path": str(target_path)},
+    )
+    assert resp.status_code == 409
+    row = db.conn.execute(
+        "SELECT status FROM folders WHERE id = ?", (source_id,)
+    ).fetchone()
+    assert row["status"] == "ok"
+    with app._missing_originals_lock:
+        assert key not in app._missing_originals_cache
+
+
 def test_api_folder_relocate_rebases_configured_developed_dir(app_and_db, tmp_path):
     """POST /api/folders/<id>/relocate rebases the darktable output subdir.
 
