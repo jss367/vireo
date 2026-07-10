@@ -2137,11 +2137,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
             raise exc
 
-    def _cleanup_cached_files_for_deleted_photos(files):
+    def _cleanup_cached_files_for_deleted_photos(files, progress_callback=None):
         try:
             from preview_cache import cleanup_cached_files_for_deleted_photos
             cleanup_cached_files_for_deleted_photos(
-                app.config["THUMB_CACHE_DIR"], files,
+                app.config["THUMB_CACHE_DIR"], files, progress_callback=progress_callback,
             )
         except BaseException as exc:
             _reraise_fatal_cleanup_error(exc)
@@ -6150,17 +6150,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                            str(kid), items, is_batch=True)
         return jsonify({"ok": True, "updated": len(added_ids)})
 
-    @app.route("/api/batch/delete", methods=["POST"])
-    def api_batch_delete():
-        """Delete photos from Vireo, optionally moving files to trash."""
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        photo_ids = body.get("photo_ids", [])
-        mode = body.get("mode", "vireo")
-        include_companions = body.get("include_companions", False)
-        # For disk_permanent retry: accept paths directly since DB rows
-        # were already deleted in the initial disk-mode call.
-        paths = body.get("paths", [])
+    def _run_batch_delete(
+        db, photo_ids, mode="vireo", include_companions=False, paths=None,
+        progress_callback=None,
+    ):
+        """Delete photos using the same phases for sync and job endpoints."""
+        paths = paths or []
+
+        def emit(phase, current=0, total=0, current_file="", detail=""):
+            if progress_callback:
+                progress_callback({
+                    "phase": phase,
+                    "current": current,
+                    "total": total,
+                    "current_file": current_file,
+                    "detail": detail,
+                })
 
         if mode == "disk_permanent" and paths:
             # Retry path: DB rows were already deleted by the initial
@@ -6171,8 +6176,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # files) is refused, not removed.
             trashed = 0
             trash_failed = []
-            for p in paths:
+            total_paths = len(paths)
+            emit("Deleting files permanently", 0, total_paths)
+            for idx, p in enumerate(paths, start=1):
                 if not isinstance(p, str) or not p:
+                    emit("Deleting files permanently", idx, total_paths)
                     continue
                 candidates = {os.path.dirname(p), os.path.dirname(os.path.realpath(p))}
                 known = db.conn.execute(
@@ -6184,8 +6192,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         "Refusing disk_permanent retry for path outside Vireo folders: %s", p
                     )
                     trash_failed.append({"path": p, "error": "not in a Vireo folder"})
+                    emit("Deleting files permanently", idx, total_paths, os.path.basename(p))
                     continue
                 if not os.path.isfile(p):
+                    emit("Deleting files permanently", idx, total_paths, os.path.basename(p))
                     continue
                 try:
                     os.remove(p)
@@ -6193,15 +6203,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 except OSError:
                     log.warning("Permanent delete failed for %s", p, exc_info=True)
                     trash_failed.append({"path": p})
-            return jsonify({
+                emit("Deleting files permanently", idx, total_paths, os.path.basename(p))
+            return {
                 "ok": True, "deleted": 0, "trashed": trashed,
                 "trash_failed": trash_failed,
-            })
+            }
 
         if not photo_ids:
-            return json_error("photo_ids required")
+            raise ValueError("photo_ids required")
         if mode not in ("vireo", "disk", "disk_permanent"):
-            return json_error("mode must be 'vireo', 'disk', or 'disk_permanent'")
+            raise ValueError("mode must be 'vireo', 'disk', or 'disk_permanent'")
 
         # Chunked because delete_photos issues several IN-clause queries; a
         # 1000+ id request would hit SQLite's bound-parameter cap on legacy
@@ -6214,6 +6225,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # later chunk doesn't leave the cache permanently stripped of rows
         # the DB just restored.
         result = {"deleted": 0, "ids": [], "files": []}
+        total_requested = len(photo_ids)
+        prepared = 0
+        emit(
+            "Removing from Vireo",
+            0,
+            total_requested,
+            detail="Preparing database changes; nothing is committed yet.",
+        )
         try:
             for chunk in _chunked(photo_ids):
                 chunk_result = db.delete_photos(
@@ -6224,72 +6243,185 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 result["deleted"] += chunk_result["deleted"]
                 result["ids"].extend(chunk_result["ids"])
                 result["files"].extend(chunk_result["files"])
+                prepared += len(chunk)
+                emit(
+                    "Removing from Vireo",
+                    min(prepared, total_requested),
+                    total_requested,
+                    detail="Preparing database changes; nothing is committed yet.",
+                )
             db.conn.commit()
         except Exception:
             db.conn.rollback()
             raise
+        emit(
+            "Removed from Vireo",
+            result["deleted"],
+            result["deleted"],
+            detail="Database changes committed.",
+        )
 
         # Run the deferred non-DB side effects only after the outer
         # transaction committed successfully.
+        emit("Pruning pipeline cache", 0, 1)
         try:
             db.prune_pipeline_cache_for_ids(result["ids"])
         except BaseException as exc:
             _reraise_fatal_cleanup_error(exc)
             log.exception("Failed to prune pipeline cache after delete")
-        _cleanup_cached_files_for_deleted_photos(result["files"])
+        emit("Pruning pipeline cache", 1, 1)
+
+        def cache_progress(current, total, filename):
+            emit("Cleaning cached files", current, total, filename)
+
+        emit("Cleaning cached files", 0, len(result["files"]))
+        _cleanup_cached_files_for_deleted_photos(
+            result["files"], progress_callback=cache_progress,
+        )
 
         trashed = 0
         trash_failed = []
         if mode in ("disk", "disk_permanent"):
+            disk_targets = []
             for f in result["files"]:
                 # Collect all files to delete: primary + companion
-                file_paths = []
                 primary = os.path.join(f["folder_path"], f["filename"])
-                file_paths.append(primary)
+                disk_targets.append(primary)
                 if include_companions and f.get("companion_path"):
                     companion = os.path.join(f["folder_path"], f["companion_path"])
-                    file_paths.append(companion)
+                    disk_targets.append(companion)
 
-                for filepath in file_paths:
-                    if not os.path.isfile(filepath):
-                        log.warning("File already missing: %s", filepath)
-                        continue
-                    if mode == "disk":
-                        try:
-                            from send2trash import send2trash as _trash
-                            _trash(filepath)
-                            trashed += 1
-                        except BaseException as send_err:
-                            _reraise_fatal_cleanup_error(send_err)
-                            # send2trash implements the platform trash spec on
-                            # Linux/Windows; the AppleScript Finder fallback only
-                            # helps on macOS. Off-mac, report the real send2trash
-                            # error instead of masking it with the Finder guard.
-                            if sys.platform == "darwin":
-                                log.debug("send2trash failed for %s, trying Finder", filepath)
-                                try:
-                                    _trash_via_finder(filepath)
-                                    trashed += 1
-                                except Exception:
-                                    log.warning("Trash failed for %s", filepath, exc_info=True)
-                                    trash_failed.append({"path": filepath})
-                            else:
-                                log.warning("Trash failed for %s: %s", filepath, send_err)
+            disk_phase = (
+                "Moving files to Trash"
+                if mode == "disk" else "Deleting files permanently"
+            )
+            ensured_volumes = set()
+            emit(disk_phase, 0, len(disk_targets))
+            for idx, filepath in enumerate(disk_targets, start=1):
+                basename = os.path.basename(filepath)
+                if not os.path.isfile(filepath):
+                    log.warning("File already missing: %s", filepath)
+                    emit(disk_phase, idx, len(disk_targets), basename)
+                    continue
+                if mode == "disk":
+                    _ensure_volume_trashes_dir(filepath, ensured_volumes)
+                    try:
+                        from send2trash import send2trash as _trash
+                        _trash(filepath)
+                        trashed += 1
+                    except BaseException as send_err:
+                        _reraise_fatal_cleanup_error(send_err)
+                        # send2trash implements the platform trash spec on
+                        # Linux/Windows; the AppleScript Finder fallback only
+                        # helps on macOS. Off-mac, report the real send2trash
+                        # error instead of masking it with the Finder guard.
+                        if sys.platform == "darwin":
+                            log.debug("send2trash failed for %s, trying Finder", filepath)
+                            try:
+                                _trash_via_finder(filepath)
+                                trashed += 1
+                            except Exception:
+                                log.warning("Trash failed for %s", filepath, exc_info=True)
                                 trash_failed.append({"path": filepath})
-                    else:  # disk_permanent
-                        try:
-                            os.remove(filepath)
-                            trashed += 1
-                        except OSError:
-                            log.warning("Permanent delete failed for %s", filepath, exc_info=True)
+                        else:
+                            log.warning("Trash failed for %s: %s", filepath, send_err)
                             trash_failed.append({"path": filepath})
+                else:  # disk_permanent
+                    try:
+                        os.remove(filepath)
+                        trashed += 1
+                    except OSError:
+                        log.warning("Permanent delete failed for %s", filepath, exc_info=True)
+                        trash_failed.append({"path": filepath})
+                emit(disk_phase, idx, len(disk_targets), basename)
 
-        return jsonify({
+        emit("Finishing", 1, 1)
+        return {
             "ok": True,
             "deleted": result["deleted"],
             "trashed": trashed,
             "trash_failed": trash_failed,
-        })
+        }
+
+    @app.route("/api/batch/delete", methods=["POST"])
+    def api_batch_delete():
+        """Delete photos from Vireo, optionally moving files to trash."""
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids", [])
+        mode = body.get("mode", "vireo")
+        include_companions = body.get("include_companions", False)
+        # For disk_permanent retry: accept paths directly since DB rows
+        # were already deleted in the initial disk-mode call.
+        paths = body.get("paths", [])
+
+        try:
+            result = _run_batch_delete(
+                db, photo_ids, mode, include_companions, paths=paths,
+            )
+        except ValueError as exc:
+            return json_error(str(exc))
+        return jsonify(result)
+
+    @app.route("/api/jobs/batch-delete", methods=["POST"])
+    def api_job_batch_delete():
+        """Start a background delete job with phase progress."""
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids", [])
+        mode = body.get("mode", "vireo")
+        include_companions = body.get("include_companions", False)
+        paths = body.get("paths", [])
+
+        if mode not in ("vireo", "disk", "disk_permanent"):
+            return json_error("mode must be 'vireo', 'disk', or 'disk_permanent'")
+        if not photo_ids and not (mode == "disk_permanent" and paths):
+            return json_error("photo_ids required")
+
+        runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
+
+        def work(job):
+            thread_db = Database(db_path)
+            if active_ws is not None:
+                thread_db.set_active_workspace(active_ws)
+            started = time.time()
+
+            def progress(payload):
+                current = payload.get("current", 0)
+                total = payload.get("total", 0)
+                job["progress"]["current"] = current
+                job["progress"]["total"] = total
+                job["progress"]["current_file"] = payload.get("current_file", "")
+                runner.push_event(job["id"], "progress", {
+                    **payload,
+                    "rate": round(current / max(time.time() - started, 0.01), 1)
+                    if current else 0,
+                })
+
+            try:
+                return _run_batch_delete(
+                    thread_db,
+                    photo_ids,
+                    mode,
+                    include_companions,
+                    paths=paths,
+                    progress_callback=progress,
+                )
+            finally:
+                thread_db.conn.close()
+
+        job_id = runner.start(
+            "batch-delete",
+            work,
+            config={
+                "photo_count": len(photo_ids or []),
+                "mode": mode,
+                "include_companions": bool(include_companions),
+                "path_count": len(paths or []),
+            },
+            workspace_id=active_ws,
+        )
+        return jsonify({"job_id": job_id})
 
     # -- Undo --
 

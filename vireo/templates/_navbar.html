@@ -3504,7 +3504,7 @@ async function createWorkspace() {
       </label>
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:6px 0;">
         <input type="radio" name="deleteMode" value="disk">
-        <span style="color:var(--danger);">Delete from disk<br><small style="color:var(--text-secondary);">Moves files to Trash. Falls back to permanent deletion if Trash is unavailable.</small></span>
+        <span style="color:var(--danger);">Delete from disk<br><small style="color:var(--text-secondary);">Moves files to Trash. If Trash is unavailable, Vireo asks before permanent deletion.</small></span>
       </label>
     </div>
     <div id="deleteCompanionRow" style="display:none;margin-bottom:12px;">
@@ -3512,6 +3512,11 @@ async function createWorkspace() {
         <input type="checkbox" id="deleteCompanionCheck" checked>
         <span id="deleteCompanionLabel">Also delete companion files</span>
       </label>
+    </div>
+    <div id="deleteProgress" class="inat-progress" style="display:none;margin-bottom:12px;">
+      <div id="deleteProgressText" style="font-size:12px;color:var(--text-primary);margin-bottom:6px;">Starting...</div>
+      <div class="inat-progress-bar"><div class="inat-progress-fill" id="deleteProgressFill"></div></div>
+      <div id="deleteProgressDetail" class="inat-progress-text"></div>
     </div>
     <div class="modal-actions">
       <button class="modal-btn modal-btn-cancel" onclick="hideDeleteModal()">Cancel</button>
@@ -6866,6 +6871,7 @@ function buildLightboxContextMenu(pid) {
 /* ---------- Delete Confirmation ---------- */
 var _deletePhotoIds = [];
 var _deleteCallback = null;
+var _deleteJobSource = null;
 
 function showDeleteDialog(photoIds, companionCount, callback) {
   _deletePhotoIds = photoIds;
@@ -6883,14 +6889,86 @@ function showDeleteDialog(photoIds, companionCount, callback) {
     compRow.style.display = 'none';
   }
   document.querySelector('input[name="deleteMode"][value="vireo"]').checked = true;
+  resetDeleteProgress();
   document.getElementById('deleteModal').classList.add('open');
 }
 
 function hideDeleteModal() {
+  if (_deleteJobSource) {
+    _deleteJobSource.close();
+    _deleteJobSource = null;
+  }
   setDeleteModalBusy(false);
+  resetDeleteProgress();
   document.getElementById('deleteModal').classList.remove('open');
   _deletePhotoIds = [];
   _deleteCallback = null;
+}
+
+function resetDeleteProgress() {
+  var box = document.getElementById('deleteProgress');
+  var text = document.getElementById('deleteProgressText');
+  var fill = document.getElementById('deleteProgressFill');
+  var detail = document.getElementById('deleteProgressDetail');
+  if (box) box.style.display = 'none';
+  if (text) text.textContent = 'Starting...';
+  if (fill) fill.style.width = '0%';
+  if (detail) detail.textContent = '';
+}
+
+function updateDeleteProgress(data) {
+  data = data || {};
+  var box = document.getElementById('deleteProgress');
+  var text = document.getElementById('deleteProgressText');
+  var fill = document.getElementById('deleteProgressFill');
+  var detail = document.getElementById('deleteProgressDetail');
+  if (box) box.style.display = '';
+  var phase = data.phase || 'Working';
+  var total = Number(data.total || 0);
+  var current = Number(data.current || 0);
+  var countText = total > 0 ? ' ' + current + '/' + total : '';
+  if (text) text.textContent = phase + countText;
+  if (fill) {
+    var pct = total > 0 ? Math.max(0, Math.min(100, Math.round(100 * current / total))) : 15;
+    fill.style.width = pct + '%';
+  }
+  var parts = [];
+  if (data.current_file) parts.push(data.current_file);
+  if (data.detail) parts.push(data.detail);
+  if (detail) detail.textContent = parts.join(' · ');
+}
+
+function handleDeleteJobComplete(evt, savedCallback, mode) {
+  var data = evt && evt.result;
+  if (!evt || evt.status !== 'completed' || !data) {
+    hideDeleteModal();
+    var errors = (evt && evt.errors) || [];
+    showToast('Delete failed' + (errors.length ? ': ' + errors[0] : ''), 'error');
+    return;
+  }
+
+  hideDeleteModal();
+
+  if (data.trash_failed && data.trash_failed.length > 0) {
+    var paths = data.trash_failed.map(function(f) { return f.path; });
+    if (confirm('Trash not available for ' + paths.length + ' file(s):\n' +
+        paths.slice(0, 5).join('\n') +
+        (paths.length > 5 ? '\n... and ' + (paths.length - 5) + ' more' : '') +
+        '\n\nPermanently delete instead?')) {
+      safeFetch('/api/batch/delete', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({paths: paths, mode: 'disk_permanent'}),
+      }).catch(function() { /* already removed from DB */ });
+    }
+  }
+
+  var msg = mode === 'vireo'
+    ? data.deleted + ' photo' + (data.deleted === 1 ? '' : 's') + ' removed'
+    : data.deleted + ' photo' + (data.deleted === 1 ? '' : 's') + ' moved to Trash';
+  showToast(msg, 'success');
+
+  if (savedCallback) savedCallback(data);
 }
 
 // Toggle the delete modal's in-flight state. While busy we keep the modal
@@ -6938,8 +7016,13 @@ async function confirmDelete() {
   var savedIds = _deletePhotoIds.slice();
   var savedCallback = _deleteCallback;
   setDeleteModalBusy(true, savedIds.length, mode);
+  updateDeleteProgress({
+    phase: 'Starting delete',
+    current: 0,
+    total: savedIds.length,
+  });
   try {
-    var data = await safeFetch('/api/batch/delete', {
+    var start = await safeFetch('/api/jobs/batch-delete', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
@@ -6949,31 +7032,17 @@ async function confirmDelete() {
       }),
     });
   } catch(e) { hideDeleteModal(); return; }
-
-  hideDeleteModal();
-
-  if (data.trash_failed && data.trash_failed.length > 0) {
-    var paths = data.trash_failed.map(function(f) { return f.path; });
-    if (confirm('Trash not available for ' + paths.length + ' file(s):\n' +
-        paths.slice(0, 5).join('\n') +
-        (paths.length > 5 ? '\n... and ' + (paths.length - 5) + ' more' : '') +
-        '\n\nPermanently delete instead?')) {
-      try {
-        await safeFetch('/api/batch/delete', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({paths: paths, mode: 'disk_permanent'}),
-        });
-      } catch(e) { /* already removed from DB */ }
-    }
-  }
-
-  var msg = mode === 'vireo'
-    ? data.deleted + ' photo' + (data.deleted === 1 ? '' : 's') + ' removed'
-    : data.deleted + ' photo' + (data.deleted === 1 ? '' : 's') + ' moved to Trash';
-  showToast(msg, 'success');
-
-  if (savedCallback) savedCallback(data);
+  _deleteJobSource = safeEventSource('/api/jobs/' + start.job_id + '/stream', {
+    onProgress: updateDeleteProgress,
+    onComplete: function(evt) {
+      _deleteJobSource = null;
+      handleDeleteJobComplete(evt, savedCallback, mode);
+    },
+    onError: function() {
+      _deleteJobSource = null;
+      hideDeleteModal();
+    },
+  });
 }
 
 async function lightboxToggleWildlifeExcluded() {

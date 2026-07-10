@@ -14,7 +14,9 @@ import os
 log = logging.getLogger(__name__)
 
 
-def cleanup_cached_files_for_deleted_photos(thumb_cache_dir, files):
+def cleanup_cached_files_for_deleted_photos(
+    thumb_cache_dir, files, progress_callback=None,
+):
     """Remove thumbnail, preview, and working-copy files for deleted photos.
 
     ``files`` is the list returned by ``db.delete_photos`` /
@@ -43,7 +45,8 @@ def cleanup_cached_files_for_deleted_photos(thumb_cache_dir, files):
         os.path.join(vireo_dir, "offline", "xmp"),
         os.path.join(vireo_dir, "offline", "companions"),
     ]
-    for f in files:
+    total = len(files)
+    for idx, f in enumerate(files, start=1):
         pid = f["photo_id"]
         # {id}.jpg lives in all three dirs (legacy full preview, thumb,
         # working copy). {id}_{size}.jpg is sized preview variants.
@@ -78,6 +81,8 @@ def cleanup_cached_files_for_deleted_photos(thumb_cache_dir, files):
                         "Cache: %s",
                         orphan, e,
                     )
+        if progress_callback:
+            progress_callback(idx, total, f.get("filename") or str(pid))
 
 
 def evict_if_over_quota(db, vireo_dir):
