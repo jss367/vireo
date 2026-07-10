@@ -5535,6 +5535,113 @@ def test_highlights_relabel_migrates_species_representative(app_and_db):
     assert "Bald Eagle" not in reps
 
 
+def test_highlights_relabel_undo_restores_curation(app_and_db):
+    """Undoing a Highlights relabel restores the migrated ordered-highlight
+    row and species_representative preference back under the old species,
+    so the photo isn't stranded under the new species when the relabel
+    itself is undone. Redo re-applies the migration."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrundo', 'hrundo', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Bald Eagle", is_species=True)
+    db.add_keyword("Golden Eagle", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'undo-cur.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, old_kid)
+    db.set_species_representative("Bald Eagle", pid)
+    db.add_species_highlight("Bald Eagle", pid)
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Golden Eagle"},
+    )
+    assert resp.status_code == 200
+    assert db.get_species_representatives().get("Golden Eagle") == pid
+    assert pid in (db.get_species_highlights("Golden Eagle") or {}).get(
+        "Golden Eagle", {}
+    )
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+    assert undone["action_type"] == "species_replace"
+    reps = db.get_species_representatives()
+    assert reps.get("Bald Eagle") == pid
+    assert "Golden Eagle" not in reps
+    hl = db.get_species_highlights()
+    assert pid in (hl.get("Bald Eagle") or {})
+    assert "Golden Eagle" not in hl
+
+    redone = db.redo_last_undo()
+    assert redone is not None
+    assert redone["action_type"] == "species_replace"
+    reps_redo = db.get_species_representatives()
+    assert reps_redo.get("Golden Eagle") == pid
+    assert "Bald Eagle" not in reps_redo
+    hl_redo = db.get_species_highlights()
+    assert pid in (hl_redo.get("Golden Eagle") or {})
+    assert "Bald Eagle" not in hl_redo
+
+
+def test_backfill_species_highlights_from_legacy_preferences(tmp_path):
+    """On upgraded databases, legacy photo_preferences rows with
+    purpose='highlights' should seed species_highlights so pre-existing
+    Highlights picks stay visible under the new ordered-highlights UI."""
+    from vireo.db import Database
+
+    db_path = tmp_path / "legacy.db"
+    db = Database(str(db_path))
+    ws_id = db._ws_id()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/legacy', 'legacy', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (ws_id, fid),
+    )
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'legacy.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.execute(
+        """INSERT INTO photo_preferences
+               (workspace_id, purpose, species, photo_id,
+                created_at, updated_at)
+           VALUES (?, 'highlights', 'Legacy Bird', ?,
+                   datetime('now'), datetime('now'))""",
+        (ws_id, pid),
+    )
+    # Clear the one-shot marker so re-running the backfill picks up the
+    # newly-added legacy row (simulates opening a DB that predated the
+    # ordered-highlights feature).
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._SPECIES_HIGHLIGHTS_BACKFILL_KEY,),
+    )
+    db.conn.commit()
+    db.backfill_species_highlights_from_legacy_preferences()
+
+    hl = db.get_species_highlights()
+    assert pid in (hl.get("Legacy Bird") or {})
+
+    # Marker set so subsequent calls are no-ops even if the row is missing.
+    marker = db.conn.execute(
+        "SELECT value FROM db_meta WHERE key = ?",
+        (db._SPECIES_HIGHLIGHTS_BACKFILL_KEY,),
+    ).fetchone()
+    assert marker is not None
+    db.close()
+
+
 def test_highlights_accepted_species_wins_over_higher_confidence_prediction(app_and_db):
     """Manual species tag is authoritative even when a high-confidence
     prediction disagrees."""

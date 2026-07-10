@@ -478,6 +478,12 @@ class Database:
         # SELECT 1 LIMIT 1 short-circuit) — matches ensure_default_workspace
         # above.
         self.ensure_default_genre_keywords()
+        # Idempotent, one-shot: seed species_highlights from legacy
+        # photo_preferences rows with purpose='highlights' so upgraded
+        # DBs don't lose their prior Highlights picks the first time the
+        # ordered-highlights UI reads only species_highlights. Gated by
+        # db_meta so it runs at most once per DB.
+        self.backfill_species_highlights_from_legacy_preferences()
         # Restore last-used workspace, or fall back to Default
         last = self.conn.execute(
             "SELECT id FROM workspaces ORDER BY CASE WHEN last_opened_at IS NULL THEN 0 ELSE 1 END DESC, last_opened_at DESC, id ASC LIMIT 1"
@@ -2330,6 +2336,68 @@ class Database:
                 "INSERT INTO keywords (name, type, is_species) VALUES (?, 'genre', 0)",
                 (name,),
             )
+        self.conn.commit()
+
+    _SPECIES_HIGHLIGHTS_BACKFILL_KEY = "species_highlights_from_preferences_backfill"
+
+    def backfill_species_highlights_from_legacy_preferences(self):
+        """One-shot backfill: seed ``species_highlights`` from legacy
+        ``photo_preferences`` rows with ``purpose='highlights'``.
+
+        Before ordered highlights existed, a "Highlights" pick was stored
+        as a single ``photo_preferences`` row per (workspace, species).
+        The new Highlights UI reads exclusively from ``species_highlights``,
+        so upgraded databases would lose those picks — the pill/rank
+        indicators and bucket ordering would not surface the old choice
+        until the user manually re-added it. This copies each legacy pick
+        into ``species_highlights`` at the end of any existing bucket
+        (rank = MAX(rank) + 1) so pre-existing curated order is preserved
+        and the legacy pick still appears as a highlight.
+
+        Gated by a ``db_meta`` marker so it runs exactly once per DB.
+        """
+        marker = self.conn.execute(
+            "SELECT value FROM db_meta WHERE key = ?",
+            (self._SPECIES_HIGHLIGHTS_BACKFILL_KEY,),
+        ).fetchone()
+        if marker is not None:
+            return
+        try:
+            rows = self.conn.execute(
+                """SELECT workspace_id, species, photo_id
+                   FROM photo_preferences
+                   WHERE purpose = 'highlights'"""
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+        for row in rows:
+            ws = row["workspace_id"]
+            sp = row["species"]
+            pid = row["photo_id"]
+            existing = self.conn.execute(
+                """SELECT 1 FROM species_highlights
+                   WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+                (ws, sp, pid),
+            ).fetchone()
+            if existing:
+                continue
+            next_rank = int(self.conn.execute(
+                """SELECT COALESCE(MAX(rank), 0) AS max_rank
+                   FROM species_highlights
+                   WHERE workspace_id = ? AND species = ?""",
+                (ws, sp),
+            ).fetchone()["max_rank"] or 0) + 1
+            self.conn.execute(
+                """INSERT INTO species_highlights
+                       (workspace_id, species, photo_id, rank,
+                        created_at, updated_at)
+                   VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
+                (ws, sp, pid, next_rank),
+            )
+        self.conn.execute(
+            "INSERT INTO db_meta(key, value) VALUES (?, '1')",
+            (self._SPECIES_HIGHLIGHTS_BACKFILL_KEY,),
+        )
         self.conn.commit()
 
     def migrate_legacy_keyword_types(self):
@@ -12330,12 +12398,14 @@ class Database:
                 old_meta = self._edit_old_value_meta(old_val)
                 new_kid = int(item['new_value']) if item['new_value'] else None
                 old_kids = old_meta.get("keyword_ids") or []
+                new_kw_name = None
                 if new_kid:
                     self.untag_photo(pid, new_kid)
                     new_kw = self.conn.execute(
                         "SELECT name FROM keywords WHERE id = ?", (new_kid,)
                     ).fetchone()
                     if new_kw:
+                        new_kw_name = new_kw['name']
                         cancelled = self.remove_pending_changes(
                             pid, 'keyword_add', new_kw['name']
                         )
@@ -12352,6 +12422,16 @@ class Database:
                         )
                         if cancelled == 0:
                             self.queue_change(pid, 'keyword_add', old_kw['name'])
+                # Restore any species_highlights / photo_preferences rows the
+                # original relabel migrated to `new_kw_name`. Without this,
+                # the photo is back in its old species bucket but the
+                # curated Highlight/Representative rows stay stranded under
+                # the new species. See PR #1161.
+                if new_kw_name:
+                    self._restore_relabel_curation(
+                        entry['workspace_id'], pid, new_kw_name,
+                        old_meta.get('curation'),
+                    )
                 self._restore_edit_prediction_status(old_meta)
 
     def _apply_redo(self, entry, items):
@@ -12445,6 +12525,7 @@ class Database:
                 old_meta = self._edit_old_value_meta(item['old_value'])
                 new_kid = int(new_val) if new_val else None
                 old_kids = old_meta.get("keyword_ids") or []
+                new_kw_name = None
                 for old_kid in old_kids:
                     self.untag_photo(pid, old_kid)
                     old_kw = self.conn.execute(
@@ -12462,12 +12543,168 @@ class Database:
                         "SELECT name FROM keywords WHERE id = ?", (new_kid,)
                     ).fetchone()
                     if new_kw:
+                        new_kw_name = new_kw['name']
                         cancelled = self.remove_pending_changes(
                             pid, 'keyword_remove', new_kw['name']
                         )
                         if cancelled == 0:
                             self.queue_change(pid, 'keyword_add', new_kw['name'])
+                if new_kw_name:
+                    self._reapply_relabel_curation(
+                        entry['workspace_id'], pid, new_kw_name,
+                        old_meta.get('curation'),
+                    )
                 self._reject_edit_prediction(old_meta)
+
+    def _restore_relabel_curation(
+        self, workspace_id, photo_id, new_species, curation,
+    ):
+        """Undo the curation migration performed by ``api_highlights_relabel``.
+
+        For each ``species_highlights`` row the relabel moved from an old
+        species bucket to ``new_species``, delete the row at ``new_species``
+        and re-insert it at the end of the old bucket (unless the photo
+        already appears there). For each ``photo_preferences`` row moved
+        by the relabel, delete the row at ``(new_species, purpose)`` and
+        re-insert it at ``(old_species, purpose)``. Best-effort: if the
+        target row no longer exists (state has changed since the relabel),
+        the corresponding restore is a no-op.
+        """
+        if not curation:
+            return
+        hl_prev = curation.get("hl_prev") or []
+        pref_prev = curation.get("pref_prev") or []
+        for old_species in hl_prev:
+            if not old_species or old_species == new_species:
+                continue
+            self.conn.execute(
+                """DELETE FROM species_highlights
+                   WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+                (workspace_id, new_species, photo_id),
+            )
+            existing = self.conn.execute(
+                """SELECT 1 FROM species_highlights
+                   WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+                (workspace_id, old_species, photo_id),
+            ).fetchone()
+            if existing:
+                continue
+            next_rank = int(self.conn.execute(
+                """SELECT COALESCE(MAX(rank), 0) AS max_rank
+                   FROM species_highlights
+                   WHERE workspace_id = ? AND species = ?""",
+                (workspace_id, old_species),
+            ).fetchone()["max_rank"] or 0) + 1
+            self.conn.execute(
+                """INSERT INTO species_highlights
+                       (workspace_id, species, photo_id, rank,
+                        created_at, updated_at)
+                   VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
+                (workspace_id, old_species, photo_id, next_rank),
+            )
+        for pref in pref_prev:
+            if not isinstance(pref, dict):
+                continue
+            purpose = pref.get("purpose")
+            old_species = pref.get("species")
+            if not purpose or not old_species or old_species == new_species:
+                continue
+            row = self.conn.execute(
+                """SELECT 1 FROM photo_preferences
+                   WHERE workspace_id = ? AND purpose = ?
+                     AND species = ? AND photo_id = ?""",
+                (workspace_id, purpose, new_species, photo_id),
+            ).fetchone()
+            if not row:
+                continue
+            self.conn.execute(
+                """DELETE FROM photo_preferences
+                   WHERE workspace_id = ? AND purpose = ?
+                     AND species = ? AND photo_id = ?""",
+                (workspace_id, purpose, new_species, photo_id),
+            )
+            self.conn.execute(
+                """INSERT OR IGNORE INTO photo_preferences
+                       (workspace_id, purpose, species, photo_id,
+                        created_at, updated_at)
+                   VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
+                (workspace_id, purpose, old_species, photo_id),
+            )
+
+    def _reapply_relabel_curation(
+        self, workspace_id, photo_id, new_species, curation,
+    ):
+        """Redo the curation migration reversed by
+        :meth:`_restore_relabel_curation`. Moves rows from each recorded
+        old species back onto ``new_species``.
+        """
+        if not curation:
+            return
+        hl_prev = curation.get("hl_prev") or []
+        pref_prev = curation.get("pref_prev") or []
+        for old_species in hl_prev:
+            if not old_species or old_species == new_species:
+                continue
+            src = self.conn.execute(
+                """SELECT 1 FROM species_highlights
+                   WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+                (workspace_id, old_species, photo_id),
+            ).fetchone()
+            if not src:
+                continue
+            self.conn.execute(
+                """DELETE FROM species_highlights
+                   WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+                (workspace_id, old_species, photo_id),
+            )
+            existing = self.conn.execute(
+                """SELECT 1 FROM species_highlights
+                   WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+                (workspace_id, new_species, photo_id),
+            ).fetchone()
+            if existing:
+                continue
+            next_rank = int(self.conn.execute(
+                """SELECT COALESCE(MAX(rank), 0) AS max_rank
+                   FROM species_highlights
+                   WHERE workspace_id = ? AND species = ?""",
+                (workspace_id, new_species),
+            ).fetchone()["max_rank"] or 0) + 1
+            self.conn.execute(
+                """INSERT INTO species_highlights
+                       (workspace_id, species, photo_id, rank,
+                        created_at, updated_at)
+                   VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
+                (workspace_id, new_species, photo_id, next_rank),
+            )
+        for pref in pref_prev:
+            if not isinstance(pref, dict):
+                continue
+            purpose = pref.get("purpose")
+            old_species = pref.get("species")
+            if not purpose or not old_species or old_species == new_species:
+                continue
+            row = self.conn.execute(
+                """SELECT 1 FROM photo_preferences
+                   WHERE workspace_id = ? AND purpose = ?
+                     AND species = ? AND photo_id = ?""",
+                (workspace_id, purpose, old_species, photo_id),
+            ).fetchone()
+            if not row:
+                continue
+            self.conn.execute(
+                """DELETE FROM photo_preferences
+                   WHERE workspace_id = ? AND purpose = ?
+                     AND species = ? AND photo_id = ?""",
+                (workspace_id, purpose, old_species, photo_id),
+            )
+            self.conn.execute(
+                """INSERT OR IGNORE INTO photo_preferences
+                       (workspace_id, purpose, species, photo_id,
+                        created_at, updated_at)
+                   VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
+                (workspace_id, purpose, new_species, photo_id),
+            )
 
     def _edit_old_value_meta(self, old_value):
         """Parse edit item old_value, including newer JSON metadata payloads."""

@@ -7867,6 +7867,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             (ws_id, *photo_ids),
         ).fetchall()
         highlight_renames = {}
+        hl_prev_by_pid = {}
         for row in highlight_rows:
             old_species_name = row["species"]
             if old_species_name == species:
@@ -7874,8 +7875,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             highlight_renames.setdefault(old_species_name, []).append(
                 row["photo_id"]
             )
+            hl_prev_by_pid.setdefault(row["photo_id"], []).append(
+                old_species_name
+            )
         preference_rows = db.conn.execute(
-            f"""SELECT species, photo_id FROM photo_preferences
+            f"""SELECT species, photo_id, purpose FROM photo_preferences
                 WHERE workspace_id = ?
                   AND photo_id IN ({placeholders})
                   AND purpose IN (
@@ -7884,6 +7888,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             (ws_id, *photo_ids),
         ).fetchall()
         preference_renames = {}
+        pref_prev_by_pid = {}
         for row in preference_rows:
             old_species_name = row["species"]
             if old_species_name == species:
@@ -7891,6 +7896,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             preference_renames.setdefault(old_species_name, []).append(
                 row["photo_id"]
             )
+            pref_prev_by_pid.setdefault(row["photo_id"], []).append({
+                "purpose": row["purpose"],
+                "species": old_species_name,
+            })
         try:
             kid = db.add_keyword(species, is_species=True, _commit=False)
             items = []
@@ -7925,7 +7934,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 _queue_keyword_add(pid, species, workspace_id=ws_id, _commit=False)
                 old_value = str(old_primary["id"]) if old_primary else ""
                 old_keyword_ids = [old["id"] for old in old_rows]
-                if pred is not None or len(old_keyword_ids) > 1:
+                hl_prev = hl_prev_by_pid.get(pid) or []
+                pref_prev = pref_prev_by_pid.get(pid) or []
+                needs_payload = (
+                    pred is not None
+                    or len(old_keyword_ids) > 1
+                    or hl_prev
+                    or pref_prev
+                )
+                if needs_payload:
                     old_payload = {
                         "keyword_id": old_value,
                         "keyword_ids": old_keyword_ids,
@@ -7935,6 +7952,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             "prediction_id": pred["id"],
                             "prediction_status": pred["status"],
                         })
+                    if hl_prev or pref_prev:
+                        old_payload["curation"] = {
+                            "hl_prev": hl_prev,
+                            "pref_prev": pref_prev,
+                        }
                     old_value = json.dumps(old_payload, sort_keys=True)
                 items.append({
                     "photo_id": pid,
