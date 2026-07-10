@@ -9521,9 +9521,24 @@ class Database:
         if photo_id is None:
             photo_filter = ""
             photo_params = ()
+            bp_filter = ""
+            bp_params = ()
+            tp_filter = ""
+            tp_params = ()
+            kw_filter = ""
+            kw_params = ()
         else:
             photo_filter = "AND p.id = ?"
             photo_params = (photo_id,)
+            # Push the single-photo predicate into every derived subquery so
+            # SQLite never materializes workspace-wide keyword/prediction
+            # aggregations just to discard them at the outer join.
+            bp_filter = "AND pk.photo_id = ?"
+            bp_params = (photo_id,)
+            tp_filter = "AND d.photo_id = ?"
+            tp_params = (photo_id,)
+            kw_filter = "WHERE pk.photo_id = ?"
+            kw_params = (photo_id,)
         rows = self.conn.execute(
             f"""SELECT p.id, p.folder_id, p.filename, p.extension,
                       p.timestamp, p.width, p.height, p.rating, p.flag,
@@ -9553,7 +9568,8 @@ class Database:
                               ) AS rn
                        FROM photo_keywords pk
                        JOIN keywords k ON k.id = pk.keyword_id
-                       WHERE k.is_species = 1 OR k.type = 'taxonomy'
+                       WHERE (k.is_species = 1 OR k.type = 'taxonomy')
+                         {bp_filter}
                    ) WHERE rn = 1
                ) bp ON bp.photo_id = p.id
                LEFT JOIN (
@@ -9581,6 +9597,7 @@ class Database:
                              ORDER BY pr2.created_at DESC, pr2.id DESC
                              LIMIT 1
                          )
+                         {tp_filter}
                    ) WHERE rn = 1
                ) tp ON tp.photo_id = p.id
                LEFT JOIN (
@@ -9588,6 +9605,7 @@ class Database:
                           group_concat(DISTINCT k.name) AS keyword_names
                    FROM photo_keywords pk
                    JOIN keywords k ON k.id = pk.keyword_id
+                   {kw_filter}
                    GROUP BY pk.photo_id
                ) kw ON kw.photo_id = p.id
                WHERE wf.workspace_id = ?
@@ -9597,7 +9615,16 @@ class Database:
                  AND p.quality_score >= ?
                  AND (p.flag IS NULL OR p.flag != 'rejected')
                ORDER BY p.quality_score DESC""",
-            (ws, ws, *folder_params, *photo_params, min_quality),
+            (
+                *bp_params,
+                ws,
+                *tp_params,
+                *kw_params,
+                ws,
+                *folder_params,
+                *photo_params,
+                min_quality,
+            ),
         ).fetchall()
         return rows
 
