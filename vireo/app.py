@@ -8527,12 +8527,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not db.get_folder(folder_id):
             return json_error("Folder not found", 404)
         db.add_workspace_folder(ws_id, folder_id)
+        # A newly linked folder can introduce ghosts (or resolve them if it
+        # was previously offline). The missing-originals cache is keyed by
+        # workspace, so leaving a stale ready payload here would keep serving
+        # the old membership's answer until the next scan.
+        _invalidate_missing_originals_cache()
         return jsonify({"ok": True})
 
     @app.route("/api/workspaces/<int:ws_id>/folders/<int:folder_id>", methods=["DELETE"])
     def api_remove_workspace_folder(ws_id, folder_id):
         db = _get_db()
         db.remove_workspace_folder_tree(ws_id, folder_id)
+        # Unlinking a folder tree removes photos from the workspace's scope;
+        # the cached ready payload would otherwise keep listing ghosts from
+        # the now-detached folders until a manual rescan.
+        _invalidate_missing_originals_cache()
         return jsonify({"ok": True})
 
     @app.route("/api/workspaces/<int:ws_id>/move-folders", methods=["POST"])
@@ -8567,6 +8576,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             result = db.move_folders_to_workspace(ws_id, target_ws_id, folder_ids)
             result["target_workspace_id"] = target_ws_id
+            # Moving folders changes membership on both source and target
+            # workspaces, so any cached missing-originals payloads for either
+            # side would go stale.
+            _invalidate_missing_originals_cache()
             return jsonify(result)
         except ValueError as e:
             return json_error(str(e))
