@@ -38,7 +38,8 @@
   .bucket-strip { display:grid; grid-template-columns:repeat(auto-fill, minmax(180px, 1fr)); gap:10px; }
   .highlights-card { position:relative; border-radius:6px; overflow:hidden; background:var(--bg-secondary); cursor:pointer; border:1px solid var(--border-primary); }
   .highlights-card:hover { border-color:var(--accent); }
-  .highlights-card.best-card { border-color:var(--accent); }
+  .highlights-card.highlight-card,
+  html[data-advanced-mode="true"] .highlights-card.best-card { border-color:var(--accent); }
   .best-ribbon { position:absolute; top:6px; left:6px; padding:2px 6px; border-radius:999px; background:var(--accent); color:var(--accent-text); font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; }
   .highlights-card img { width:100%; aspect-ratio:3/2; object-fit:cover; display:block; background:var(--bg-tertiary); }
   .card-info { padding:6px 8px; font-size:11px; color:var(--text-secondary); display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:4px; min-height:28px; }
@@ -130,10 +131,10 @@
   <div class="control-group">
     <label for="sortSelect">Sort</label>
     <select id="sortSelect">
-      <option value="best">Best photo first</option>
+      <option value="best" data-default-label="Recommended first" data-advanced-label="Best photo first">Recommended first</option>
       <option value="fewest">Fewest photos</option>
       <option value="most">Most photos</option>
-      <option value="worst">Worst photo first</option>
+      <option value="worst" data-advanced-best-sort>Worst photo first</option>
     </select>
   </div>
   <button class="save-btn" id="saveBtn" onclick="showSaveModal()">Save as Collection</button>
@@ -299,6 +300,31 @@ function sortedBuckets() {
   return buckets;
 }
 
+function isHighlightsAdvancedMode() {
+  return !!(window.isAdvancedMode && window.isAdvancedMode());
+}
+
+function updateAdvancedHighlightsOptions() {
+  var advanced = isHighlightsAdvancedMode();
+  var sortSelect = document.getElementById('sortSelect');
+  if (sortSelect) {
+    var recommended = sortSelect.querySelector('option[value="best"]');
+    if (recommended) {
+      recommended.textContent = advanced
+        ? (recommended.dataset.advancedLabel || 'Best photo first')
+        : (recommended.dataset.defaultLabel || 'Recommended first');
+    }
+    sortSelect.querySelectorAll('[data-advanced-best-sort]').forEach(function(opt) {
+      opt.hidden = !advanced;
+      opt.disabled = !advanced;
+    });
+    if (!advanced && sortSelect.value === 'worst') {
+      sortSelect.value = 'best';
+    }
+  }
+  if (currentData) render();
+}
+
 function photoThumbnailUrl(p) {
   if (!p || p.id == null) return '';
   return window.vireoThumbnailUrl
@@ -308,6 +334,7 @@ function photoThumbnailUrl(p) {
 
 function renderCard(p, idx) {
   var thumbSrc = photoThumbnailUrl(p);
+  var advanced = isHighlightsAdvancedMode();
   var conf = p.has_accepted_species
     ? '<span class="card-chip conf">Tagged</span>'
     : (p.predicted_confidence != null ? '<span class="card-chip conf">ID ' + formatPercent(p.predicted_confidence) + '</span>' : '');
@@ -317,8 +344,11 @@ function renderCard(p, idx) {
   var title = (p.reasons || []).join(', ');
   var ribbon = p.is_highlights_photo
     ? '<div class="best-ribbon">Highlight</div>'
-    : (idx === 0 ? '<div class="best-ribbon">Best</div>' : '');
-  return '<div class="highlights-card' + (idx === 0 ? ' best-card' : '') + '" data-photo-id="' + p.id + '" title="' + escapeAttr(title) + '">'
+    : (advanced && idx === 0 ? '<div class="best-ribbon">Best</div>' : '');
+  return '<div class="highlights-card'
+    + (p.is_highlights_photo ? ' highlight-card' : '')
+    + (idx === 0 ? ' best-card' : '')
+    + '" data-photo-id="' + p.id + '" title="' + escapeAttr(title) + '">'
     + ribbon
     + '<img src="' + thumbSrc + '" alt="' + escapeAttr(p.filename) + '" loading="lazy">'
     + '<div class="card-info"><span class="card-chip score">' + formatScore(p.highlight_score) + '</span>' + conf + reasons + '</div>'
@@ -486,8 +516,8 @@ function renderBucket(bucket) {
   var badge = bucket.is_accepted
     ? '<span class="bucket-badge accepted">Confirmed</span>'
     : '<span class="bucket-badge ' + badgeClass + '">' + badgeText + '</span>';
-  var meta = bucket.photo_count + ' photo' + (bucket.photo_count === 1 ? '' : 's')
-    + ' · best ' + formatScore(bucket.best_score);
+  var meta = bucket.photo_count + ' photo' + (bucket.photo_count === 1 ? '' : 's');
+  if (isHighlightsAdvancedMode()) meta += ' · best ' + formatScore(bucket.best_score);
   if (!bucket.is_accepted && bucket.avg_confidence != null) meta += ' · ID ' + formatPercent(bucket.avg_confidence);
   var expandBtn = '';
   // Show the affordance whenever photos are hidden (more loaded than one row)
@@ -855,6 +885,8 @@ document.getElementById('perRowSlider').addEventListener('input', function() {
 document.getElementById('sortSelect').addEventListener('change', function() {
   if (currentData) render();
 });
+window.addEventListener('advancedmodechange', updateAdvancedHighlightsOptions);
+window.addEventListener('devmodechange', updateAdvancedHighlightsOptions);
 document.getElementById('folderSelect').addEventListener('change', function() {
   // Reset per-row expand state when the user picks a different folder
   // so the new folder's rows don't inherit the previous folder's state.
@@ -998,6 +1030,7 @@ document.addEventListener('lightbox:flagchanged', function(e) {
   }
 });
 
+updateAdvancedHighlightsOptions();
 loadHighlights();
 </script>
 </body>
