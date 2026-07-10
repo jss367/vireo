@@ -1490,6 +1490,16 @@ function buildReviewCardContextMenu(pred) {
     label: 'Open in Lightbox',
     onClick: function() { openReviewLightbox(photoId, pred.filename); },
   });
+  if (typeof window.buildSpeciesHighlightMenuItems === 'function') {
+    items = items.concat(window.buildSpeciesHighlightMenuItems([photoId], {
+      showFetchFallback: true,
+    }));
+  }
+  if (typeof window.buildSpeciesRepresentativeMenuItems === 'function') {
+    items = items.concat(window.buildSpeciesRepresentativeMenuItems([photoId], {
+      showFetchFallback: true,
+    }));
+  }
   items.push({
     label: window.VIREO_REVEAL_LABEL,
     onClick: function() { revealReviewPhoto(photoId); },
@@ -1554,6 +1564,15 @@ function buildBurstGroupContextMenu(photoId, filename) {
     ] },
     { separator: true },
     { label: 'Open in Lightbox',        onClick: function() { openReviewLightbox(photoId, filename); } },
+  ].concat(
+    typeof window.buildSpeciesHighlightMenuItems === 'function'
+      ? window.buildSpeciesHighlightMenuItems([photoId], { showFetchFallback: true })
+      : []
+  ).concat(
+    typeof window.buildSpeciesRepresentativeMenuItems === 'function'
+      ? window.buildSpeciesRepresentativeMenuItems([photoId], { showFetchFallback: true })
+      : []
+  ).concat([
     { label: window.VIREO_REVEAL_LABEL, onClick: function() { revealReviewPhoto(photoId); } },
     { label: 'Copy Path',               onClick: function() { copyReviewPhotoPath(photoId); } },
     { separator: true },
@@ -1587,7 +1606,7 @@ function buildBurstGroupContextMenu(photoId, filename) {
           window.open(url, '_blank', 'noopener');
         }
       } },
-  ].concat(
+  ]).concat(
     typeof window.buildOpenInEditorMenuItems === 'function'
       ? window.buildOpenInEditorMenuItems([photoId])
       : []

@@ -9012,6 +9012,28 @@ def test_get_highlights_candidates_workspace_wide(tmp_path):
     assert filenames == {"day1.jpg", "day2.jpg"}
 
 
+def test_get_highlights_candidates_photo_id_restricts_query(tmp_path):
+    """photo_id filter returns only that photo's row, ignoring workspace peers."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    f = db.add_folder('/shoot', name='shoot')
+    p1 = db.add_photo(folder_id=f, filename='a.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=f, filename='b.jpg', extension='.jpg',
+                      file_size=100, file_mtime=2.0)
+    db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id IN (?, ?)",
+                    (p1, p2))
+    db.conn.commit()
+
+    only = db.get_highlights_candidates(folder_id=None, min_quality=0.0,
+                                        photo_id=p1)
+    assert [r["id"] for r in only] == [p1]
+
+    # Non-existent id yields no rows without erroring.
+    assert db.get_highlights_candidates(folder_id=None, min_quality=0.0,
+                                        photo_id=999999) == []
+
+
 def test_get_highlights_candidates_workspace_wide_isolates_workspaces(tmp_path):
     """folder_id=None must not leak photos from folders in other workspaces."""
     from db import Database

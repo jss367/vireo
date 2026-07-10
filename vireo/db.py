@@ -9487,12 +9487,15 @@ class Database:
                 result.setdefault(r["photo_id"], []).append(r["name"])
         return result
 
-    def get_highlights_candidates(self, folder_id, min_quality=0.0):
+    def get_highlights_candidates(self, folder_id, min_quality=0.0, photo_id=None):
         """Return photos eligible for highlights selection.
 
         When ``folder_id`` is an int, returns photos in that folder and its
         descendant folders. When ``folder_id`` is ``None``, returns photos
-        across every folder visible in the active workspace.
+        across every folder visible in the active workspace. When
+        ``photo_id`` is set, the result is additionally restricted to that
+        single photo so the photo-detail endpoint can compute its highlight
+        eligibility without rebuilding every workspace bucket.
 
         Each row carries:
           * ``species`` — accepted species keyword (NULL if none accepted)
@@ -9515,6 +9518,27 @@ class Database:
             placeholders = ",".join("?" for _ in subtree)
             folder_filter = f"AND p.folder_id IN ({placeholders})"
             folder_params = tuple(subtree)
+        if photo_id is None:
+            photo_filter = ""
+            photo_params = ()
+            bp_filter = ""
+            bp_params = ()
+            tp_filter = ""
+            tp_params = ()
+            kw_filter = ""
+            kw_params = ()
+        else:
+            photo_filter = "AND p.id = ?"
+            photo_params = (photo_id,)
+            # Push the single-photo predicate into every derived subquery so
+            # SQLite never materializes workspace-wide keyword/prediction
+            # aggregations just to discard them at the outer join.
+            bp_filter = "AND pk.photo_id = ?"
+            bp_params = (photo_id,)
+            tp_filter = "AND d.photo_id = ?"
+            tp_params = (photo_id,)
+            kw_filter = "WHERE pk.photo_id = ?"
+            kw_params = (photo_id,)
         rows = self.conn.execute(
             f"""SELECT p.id, p.folder_id, p.filename, p.extension,
                       p.timestamp, p.width, p.height, p.rating, p.flag,
@@ -9544,7 +9568,8 @@ class Database:
                               ) AS rn
                        FROM photo_keywords pk
                        JOIN keywords k ON k.id = pk.keyword_id
-                       WHERE k.is_species = 1 OR k.type = 'taxonomy'
+                       WHERE (k.is_species = 1 OR k.type = 'taxonomy')
+                         {bp_filter}
                    ) WHERE rn = 1
                ) bp ON bp.photo_id = p.id
                LEFT JOIN (
@@ -9572,6 +9597,7 @@ class Database:
                              ORDER BY pr2.created_at DESC, pr2.id DESC
                              LIMIT 1
                          )
+                         {tp_filter}
                    ) WHERE rn = 1
                ) tp ON tp.photo_id = p.id
                LEFT JOIN (
@@ -9579,15 +9605,26 @@ class Database:
                           group_concat(DISTINCT k.name) AS keyword_names
                    FROM photo_keywords pk
                    JOIN keywords k ON k.id = pk.keyword_id
+                   {kw_filter}
                    GROUP BY pk.photo_id
                ) kw ON kw.photo_id = p.id
                WHERE wf.workspace_id = ?
                  {folder_filter}
+                 {photo_filter}
                  AND p.quality_score IS NOT NULL
                  AND p.quality_score >= ?
                  AND (p.flag IS NULL OR p.flag != 'rejected')
                ORDER BY p.quality_score DESC""",
-            (ws, ws, *folder_params, min_quality),
+            (
+                *bp_params,
+                ws,
+                *tp_params,
+                *kw_params,
+                ws,
+                *folder_params,
+                *photo_params,
+                min_quality,
+            ),
         ).fetchall()
         return rows
 

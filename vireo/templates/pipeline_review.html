@@ -5895,7 +5895,15 @@ function buildPipelinePhotoContextMenu(photoId) {
       label: 'Open in Browse Mode',
       onClick: function() { window.openInBrowse(photoId); },
     },
-  ];
+  ].concat(
+    typeof window.buildSpeciesHighlightMenuItems === 'function'
+      ? window.buildSpeciesHighlightMenuItems([photoId], { showFetchFallback: true })
+      : []
+  ).concat(
+    typeof window.buildSpeciesRepresentativeMenuItems === 'function'
+      ? window.buildSpeciesRepresentativeMenuItems([photoId], { showFetchFallback: true })
+      : []
+  );
 }
 
 /* --- Right-click menu ---

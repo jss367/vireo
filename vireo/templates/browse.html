@@ -7107,53 +7107,17 @@ function buildPhotoContextMenu(photoIds) {
     { separator: true },
     { label: 'Add Keyword\u2026', onClick: function() { batchAddKeyword(); } },
     { label: 'Add to Collection\u2026', onClick: function() { addToCollection(); } },
-  ]).concat(buildLifeListMenuItems(photoIds)).concat([
+  ]).concat(window.buildSpeciesHighlightMenuItems(photoIds, {
+    showFetchFallback: true,
+  })).concat(window.buildSpeciesRepresentativeMenuItems(photoIds, {
+    getPhoto: function(id) {
+      return photos.find(function(p) { return p.id === id; });
+    },
+  })).concat([
     { label: 'Adjust Capture Time\u2026', onClick: function() { openCaptureTimeModal(); } },
     { separator: true },
     { label: 'Delete', onClick: function() { batchDelete(); } },
   ]);
-}
-
-// "Set Representative" context-menu items. One photo can represent each
-// species in the active workspace. Disabled for a multi-selection because
-// crowning one shot from many is ambiguous; hidden entirely when nothing
-// selected has a species.
-// Rejected photos are excluded here too \u2014 they'd fail the server backstop
-// (`_photo_can_be_life_list_preference` rejects `flag = 'rejected'`) and only
-// produce an error toast, so don't offer the action in the first place.
-function _lifeListEligibleClient(p) {
-  return !!(p && p.species && p.species.length && p.flag !== 'rejected');
-}
-function buildLifeListMenuItems(photoIds) {
-  var anyEligible = photoIds.some(function(id) {
-    return _lifeListEligibleClient(photos.find(function(x) { return x.id === id; }));
-  });
-  if (!anyEligible) return [];
-  if (photoIds.length !== 1) {
-    return [{ label: 'Set Representative', disabled: true,
-              disabledHint: 'Select a single photo' }];
-  }
-  var photo = photos.find(function(p) { return p.id === photoIds[0]; });
-  if (!_lifeListEligibleClient(photo)) return [];
-  return (photo.species || []).map(function(sp) {
-    return {
-      label: 'Set Representative \u2014 ' + sp,
-      onClick: function() { addPhotoToLifeList(sp, photoIds[0]); },
-    };
-  });
-}
-
-function addPhotoToLifeList(species, photoId) {
-  if (!species || !photoId) return;
-  safeFetch('/api/photo-preferences', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ purpose: 'species_representative', species: species, photo_id: photoId }),
-  }).then(function() {
-    if (typeof showToast === 'function') {
-      showToast('Species representative set for ' + species, 'success');
-    }
-  });
 }
 
 // Document-level delegation: grids re-render on sort/filter/scroll, so
