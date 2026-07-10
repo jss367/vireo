@@ -1046,6 +1046,25 @@ def test_add_keyword_dedupes_pre_existing_edge_quote_variant_with_parent(db):
     assert other_id != stored_id
 
 
+def test_add_keyword_rejects_name_that_normalizes_to_empty(db):
+    """Input like `'` or `\"\"` is non-empty as raw text but normalizes to '',
+    which would otherwise insert an invisible keyword row."""
+    for empty in ("'", '"', "\u2018", "\u201c\u201d", "'\"'"):
+        try:
+            db.add_keyword(empty)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(
+                f"expected ValueError for name={empty!r}, none raised"
+            )
+    # No rows should have been inserted from the failed attempts.
+    assert (
+        db.conn.execute("SELECT COUNT(*) FROM keywords WHERE name = ''").fetchone()[0]
+        == 0
+    )
+
+
 def test_merge_duplicate_keywords_normalizes_stray_edge_quotes(db):
     """Cleanup should collapse existing edge-quote variants to a clean spelling."""
     ws = db.create_workspace("A")

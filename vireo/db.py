@@ -8397,6 +8397,13 @@ class Database:
         if kw_type is not None and kw_type not in KEYWORD_TYPES:
             raise ValueError(f"invalid keyword type: {kw_type!r}")
         name = normalize_keyword_display(name)
+        # Reject names that normalize to empty. Input like `"'"` or `'""'` is
+        # non-empty before normalization (so the API boundary's `if not name`
+        # guard passes), but the strip above turns it into `""`. Without this
+        # check, we would insert an invisible/invalid keyword row that could
+        # still be tagged, synced to XMP, and reported in duplicate cleanup.
+        if not name:
+            raise ValueError("keyword name is empty after normalization")
         # Reconcile is_species and kw_type to keep the legacy column coherent
         # with the type enum.
         if is_species and kw_type is not None and kw_type != 'taxonomy':

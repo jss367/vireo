@@ -5035,7 +5035,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             kid = keyword_row["id"]
             name = keyword_row["name"]
         else:
-            if not name:
+            # Reject empty after normalization too, so input like `"'"` — which
+            # passes `not name` before stripping edge quotes — doesn't 500 out
+            # of add_keyword's ValueError; it should look like the plain
+            # empty-name case to the caller.
+            if not name or not normalize_keyword_display(name):
                 return json_error("name required")
             # Validate kw_type at the boundary (isinstance guard against
             # non-hashable JSON; membership against the canonical enum).
@@ -6245,7 +6249,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             kid = keyword_row["id"]
             name = keyword_row["name"]
         else:
-            if not name:
+            # Reject empty after normalization — see api_add_keyword.
+            if not name or not normalize_keyword_display(name):
                 return json_error("photo_ids and name required")
             # Route kw_type through add_keyword so its type-reconciliation logic
             # runs (preserves existing user-typed rows; only upgrades 'general').
@@ -17927,7 +17932,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids", [])
         label = body.get("label", "").strip()
-        if not photo_ids or not label:
+        if not photo_ids or not label or not normalize_keyword_display(label):
             return json_error("photo_ids and label required")
 
         kid = db.add_keyword(label)

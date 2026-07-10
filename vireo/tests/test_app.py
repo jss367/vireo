@@ -4355,6 +4355,61 @@ def test_batch_keyword_route_handles_non_string_type(app_and_db):
     )
 
 
+def test_add_keyword_route_rejects_name_that_normalizes_to_empty(app_and_db):
+    """Names like `'` are non-empty as raw text (so the `not name` guard
+    passes) but strip to '' during normalization. The route must return a
+    clean 400 rather than 500-ing on add_keyword's ValueError, and must not
+    insert an empty keyword row."""
+    app, db = app_and_db
+    folder_id = db.add_folder("/tmp/pe")
+    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "pe.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    client = app.test_client()
+    before = db.conn.execute("SELECT COUNT(*) FROM keywords").fetchone()[0]
+    for empty in ("'", '"', "‘", "“”"):
+        resp = client.post(
+            f"/api/photos/{photo_id}/keywords",
+            json={"name": empty},
+            content_type="application/json",
+        )
+        assert resp.status_code == 400, (
+            f"expected 400 for name={empty!r}, got {resp.status_code} "
+            f"{resp.get_data(as_text=True)}"
+        )
+    after = db.conn.execute("SELECT COUNT(*) FROM keywords").fetchone()[0]
+    assert after == before
+    assert (
+        db.conn.execute("SELECT COUNT(*) FROM keywords WHERE name = ''").fetchone()[0]
+        == 0
+    )
+
+
+def test_batch_keyword_route_rejects_name_that_normalizes_to_empty(app_and_db):
+    """Same normalized-empty guard on the batch endpoint."""
+    app, db = app_and_db
+    folder_id = db.add_folder("/tmp/qe")
+    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "qe.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    client = app.test_client()
+    before = db.conn.execute("SELECT COUNT(*) FROM keywords").fetchone()[0]
+    resp = client.post(
+        "/api/batch/keyword",
+        json={"photo_ids": [photo_id], "name": "‘"},
+        content_type="application/json",
+    )
+    assert resp.status_code == 400, (
+        f"expected 400 for edge-quote-only name, got {resp.status_code} "
+        f"{resp.get_data(as_text=True)}"
+    )
+    assert (
+        db.conn.execute("SELECT COUNT(*) FROM keywords").fetchone()[0] == before
+    )
+
+
 def test_selection_keyword_suggestions_return_partial_keywords(app_and_db):
     """Multi-select suggestions should offer keywords present on only some photos."""
     app, db = app_and_db
