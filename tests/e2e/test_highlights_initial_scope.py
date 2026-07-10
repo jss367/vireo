@@ -215,6 +215,57 @@ def test_highlights_picked_photos_show_flag_marker(live_server, page):
     expect(card.locator(".pick-flag-badge")).to_have_text("Pick")
 
 
+def test_highlights_lightbox_pick_updates_card_without_reload(live_server, page):
+    """Picking/unpicking from the lightbox must refresh the card DOM in place.
+
+    Regression for Codex feedback on PR #1176: the highlights
+    ``lightbox:flagchanged`` handler only reacted to ``rejected`` (and
+    previously-rejected) transitions, so the new Pick badge/outline never
+    appeared or disappeared until a full reload.
+    """
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+
+    page.goto(f"{live_server['url']}/highlights", timeout=5000)
+    hawk_section = page.locator("section.bucket").filter(has_text="Red-tailed Hawk")
+    first_card = hawk_section.locator(".highlights-card").nth(0)
+    expect(first_card).to_be_visible(timeout=5000)
+    first_pid = int(first_card.get_attribute("data-photo-id"))
+
+    # Nothing picked yet — the badge/class must be absent.
+    expect(first_card).not_to_have_class(re.compile(r"\bpick-flag-card\b"))
+    expect(
+        page.locator(f'.highlights-card[data-photo-id="{first_pid}"] .pick-flag-badge')
+    ).to_have_count(0)
+
+    first_card.click()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+    page.wait_for_function(
+        "pid => _lightboxCurrentId === pid",
+        arg=first_pid,
+        timeout=3000,
+    )
+
+    page.keyboard.press("p")
+
+    assert _wait_for_flag(db, first_pid, "flagged") == "flagged"
+    refreshed = page.locator(f'.highlights-card[data-photo-id="{first_pid}"]')
+    expect(refreshed).to_have_class(re.compile(r"\bpick-flag-card\b"), timeout=5000)
+    expect(refreshed.locator(".pick-flag-badge")).to_be_visible()
+
+    # Clearing the pick from the lightbox must also refresh the card DOM.
+    page.keyboard.press("u")
+
+    assert _wait_for_flag(db, first_pid, "none") == "none"
+    cleared = page.locator(f'.highlights-card[data-photo-id="{first_pid}"]')
+    expect(cleared).not_to_have_class(re.compile(r"\bpick-flag-card\b"), timeout=5000)
+    expect(cleared.locator(".pick-flag-badge")).to_have_count(0)
+
+
 def test_highlights_species_search_filters_buckets(live_server, page):
     db = live_server["db"]
     data = live_server["data"]

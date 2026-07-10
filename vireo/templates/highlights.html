@@ -1189,6 +1189,19 @@ document.addEventListener('lightbox:flagchanged', function(e) {
     rejectedFromGrid.delete(detail.photoId);
     delete rejectedAtLoadSeq[detail.photoId];
     loadHighlights();
+  } else {
+    // Pick/Unpick from the lightbox: the badge/outline are derived from
+    // p.flag inside renderCard, so the already-rendered card DOM stays
+    // stale until the model is updated and re-rendered. Only re-render
+    // when the transition actually crosses the 'flagged' boundary.
+    var prev = detail.previousFlag || 'none';
+    var next = detail.flag || 'none';
+    if (prev === next) return;
+    if (prev !== 'flagged' && next !== 'flagged') return;
+    var pickedPhoto = findHighlightPhoto(detail.photoId);
+    if (!pickedPhoto) return;
+    pickedPhoto.flag = next;
+    render();
   }
 });
 
