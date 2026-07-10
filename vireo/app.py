@@ -328,6 +328,16 @@ def _apply_preferred_photo(photos, preferred_photo_id, marker_key):
     return False
 
 
+def _sort_photos_with_representatives_first(photos, representative_order):
+    """Promote representative photos while preserving ranked order otherwise."""
+    ranked_position = {photo["id"]: idx for idx, photo in enumerate(photos)}
+    photos.sort(key=lambda photo: (
+        0 if photo["id"] in representative_order else 1,
+        representative_order.get(photo["id"], 0),
+        ranked_position.get(photo["id"], 0),
+    ))
+
+
 def _bucket_best_score(photos):
     """Return the highest highlight_score in a bucket, or None if empty.
 
@@ -3764,15 +3774,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # photo is one of the shared species representatives. Keep the
         # legacy ``life_list`` key because shared lightbox/menu code reads it.
         representatives = db.get_species_representative_lists()
+        life_list_species = db.get_photo_life_list_species(photo_id)
+        representative_sets = {
+            species: set(representatives.get(species) or [])
+            for species in life_list_species
+        }
         result["life_list"] = [
             {
                 "species": s,
-                "is_current_photo": photo_id in (representatives.get(s) or []),
-                "is_species_representative": photo_id in (
-                    representatives.get(s) or []
-                ),
+                "is_current_photo": photo_id in representative_sets[s],
+                "is_species_representative": photo_id in representative_sets[s],
             }
-            for s in db.get_photo_life_list_species(photo_id)
+            for s in life_list_species
         ]
         result["species_representatives"] = result["life_list"]
 
@@ -7656,12 +7669,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 photo.get("is_species_representative") for photo in photos
             )
             if preferred_applied:
-                ranked_position = {photo["id"]: idx for idx, photo in enumerate(photos)}
-                photos.sort(key=lambda photo: (
-                    0 if photo["id"] in representative_order else 1,
-                    representative_order.get(photo["id"], 0),
-                    ranked_position.get(photo["id"], 0),
-                ))
+                _sort_photos_with_representatives_first(
+                    photos, representative_order
+                )
             best_source = "representative" if preferred_applied else "algorithm"
             if not preferred_applied and highlight_ranks:
                 valid_highlights = [

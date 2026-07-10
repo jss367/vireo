@@ -2447,14 +2447,14 @@ class Database:
                           COALESCE(updated_at, created_at, '') AS ts
                    FROM photo_preferences
                    WHERE purpose IN ('species_representative', 'life_list', 'highlights')
-                   ORDER BY ts,
-                            workspace_id,
-                            species,
-                            CASE purpose
+                   ORDER BY CASE purpose
                               WHEN 'highlights' THEN 0
                               WHEN 'life_list' THEN 1
                               ELSE 2
-                            END"""
+                            END,
+                            ts,
+                            workspace_id,
+                            species"""
             ).fetchall()
         except sqlite3.OperationalError:
             rows = []

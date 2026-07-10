@@ -232,6 +232,37 @@ def test_reselecting_representative_promotes_it(life_app):
     assert [p["id"] for p in cardinal["photos"][:2]] == [ids["p1"], ids["p2"]]
 
 
+def test_representative_backfill_prefers_canonical_purpose(life_app):
+    _app, db, ids = life_app
+    ws = db._ws_id()
+    db.conn.execute("DELETE FROM species_representatives")
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._SPECIES_REPRESENTATIVES_BACKFILL_KEY,),
+    )
+    db.conn.execute(
+        """INSERT INTO photo_preferences
+               (workspace_id, purpose, species, photo_id, created_at, updated_at)
+           VALUES (?, 'species_representative', 'Northern Cardinal', ?,
+                   '2024-01-01T00:00:00', '2024-01-01T00:00:00')""",
+        (ws, ids["p2"]),
+    )
+    db.conn.execute(
+        """INSERT INTO photo_preferences
+               (workspace_id, purpose, species, photo_id, created_at, updated_at)
+           VALUES (?, 'life_list', 'Northern Cardinal', ?,
+                   '2024-02-01T00:00:00', '2024-02-01T00:00:00')""",
+        (ws, ids["p1"]),
+    )
+    db.conn.commit()
+
+    db.backfill_species_representatives_from_legacy_preferences()
+
+    assert db.get_species_representative_lists()["Northern Cardinal"] == [
+        ids["p2"], ids["p1"],
+    ]
+
+
 def test_life_list_photo_preference_must_match_species(life_app):
     app, _, ids = life_app
     resp = app.test_client().post("/api/photo-preferences", json={
