@@ -1405,21 +1405,39 @@ def _can_auto_accept_detection_prediction(prediction, category, existing_keyword
     """Return True when a photo-level match is unambiguous for one detection.
 
     A photo may carry taxonomy-hierarchy keywords (e.g. ``Aves`` alongside
-    ``Robin``) without adding a second species. Those ancestors/duplicates are
-    folded into the matched species; only keywords that resolve to a distinct
-    species (``sibling``, ``unrelated``, or an unknown relationship) force the
-    detection back into pending review.
+    ``Robin``) without adding a second species: ancestors of the matched
+    prediction are just broader labels for the same taxon. A single
+    descendant is also fine — it just refines the prediction to a specific
+    species. But multiple *distinct* descendants (e.g. the prediction is
+    ``Sparrow`` and the sidecar has ``White-crowned Sparrow`` +
+    ``Golden-crowned Sparrow``) describe more than one species and must go
+    through review, even though ``categorize()`` still returns ``"match"``
+    because each keyword is a descendant of the prediction.
+
+    Descendants only fold into the same species when they resolve to one
+    another (a species and its own subspecies, for example); any pair that
+    is ``sibling``/``unrelated`` means genuinely distinct species and
+    forces the detection back to pending review.
     """
     if category != "match":
         return False
     taxa = _recognized_taxon_keywords(existing_keywords, tax)
     if not tax or not hasattr(tax, "relationship"):
         return len(taxa) <= 1
+    descendants = []
     for kw in taxa:
         rel = tax.relationship(kw, prediction)
-        if rel in ("same", "ancestor", "descendant"):
+        if rel in ("same", "ancestor"):
+            continue
+        if rel == "descendant":
+            descendants.append(kw)
             continue
         return False
+    for i, a in enumerate(descendants):
+        for b in descendants[i + 1:]:
+            rel = tax.relationship(a, b)
+            if rel not in ("same", "ancestor", "descendant"):
+                return False
     return True
 
 
