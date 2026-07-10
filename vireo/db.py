@@ -5109,6 +5109,133 @@ class Database:
         ).fetchone()
         return row["n"] or 0
 
+    def count_full_image_fallback_photos(
+        self, photo_ids=None, detector_model="megadetector-v6",
+    ):
+        """Count photos eligible for full-image fallback classification.
+
+        These are photos in the active workspace where the detector has
+        successfully run and found no boxes. Photos with any real detector row,
+        including below-threshold noise, are excluded to match the pipeline's
+        current runtime fallback gate.
+        """
+        ws = self._ws_id()
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        row = self.conn.execute(
+            f"""SELECT COUNT(*) AS n
+                  FROM photos p
+                  JOIN workspace_folders wf
+                    ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                  JOIN detector_runs dr
+                    ON dr.photo_id = p.id
+                   AND dr.detector_model = ?
+                   AND dr.box_count = 0
+                 WHERE NOT EXISTS (
+                         SELECT 1 FROM detections d
+                          WHERE d.photo_id = p.id
+                            AND d.detector_model != 'full-image'
+                       ){scope_sql}""",
+            (ws, detector_model, *scope_params),
+        ).fetchone()
+        return row["n"] or 0
+
+    def count_full_image_classify_pending_pairs(
+        self, classifier_model, labels_fingerprint,
+        photo_ids=None, detector_model="megadetector-v6",
+    ):
+        """Count fallback photos lacking a classifier run for (model, fp)."""
+        ws = self._ws_id()
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        row = self.conn.execute(
+            f"""WITH full_anchor AS (
+                    SELECT photo_id, MIN(id) AS detection_id
+                      FROM detections
+                     WHERE detector_model = 'full-image'
+                     GROUP BY photo_id
+                  ),
+                  fallback AS (
+                    SELECT p.id AS photo_id, fa.detection_id
+                      FROM photos p
+                      JOIN workspace_folders wf
+                        ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                      JOIN detector_runs dr
+                        ON dr.photo_id = p.id
+                       AND dr.detector_model = ?
+                       AND dr.box_count = 0
+                      LEFT JOIN full_anchor fa ON fa.photo_id = p.id
+                     WHERE NOT EXISTS (
+                             SELECT 1 FROM detections d
+                              WHERE d.photo_id = p.id
+                                AND d.detector_model != 'full-image'
+                           ){scope_sql}
+                  )
+                SELECT COUNT(*) AS pending
+                  FROM fallback f
+                  LEFT JOIN classifier_runs cr
+                    ON cr.detection_id = f.detection_id
+                   AND cr.classifier_model = ?
+                   AND cr.labels_fingerprint = ?
+                 WHERE f.detection_id IS NULL
+                    OR cr.detection_id IS NULL""",
+            (
+                ws, detector_model, *scope_params,
+                classifier_model, labels_fingerprint,
+            ),
+        ).fetchone()
+        return row["pending"] or 0
+
+    def count_full_image_classify_stale(
+        self, classifier_model, labels_fingerprint,
+        photo_ids=None, detector_model="megadetector-v6",
+    ):
+        """Count fallback anchors with stale runs and no current run."""
+        ws = self._ws_id()
+        scope_sql, scope_params = self._scope_clause(photo_ids)
+        row = self.conn.execute(
+            f"""WITH full_anchor AS (
+                    SELECT photo_id, MIN(id) AS detection_id
+                      FROM detections
+                     WHERE detector_model = 'full-image'
+                     GROUP BY photo_id
+                  ),
+                  fallback AS (
+                    SELECT p.id AS photo_id, fa.detection_id
+                      FROM photos p
+                      JOIN workspace_folders wf
+                        ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                      JOIN detector_runs dr
+                        ON dr.photo_id = p.id
+                       AND dr.detector_model = ?
+                       AND dr.box_count = 0
+                      JOIN full_anchor fa ON fa.photo_id = p.id
+                     WHERE NOT EXISTS (
+                             SELECT 1 FROM detections d
+                              WHERE d.photo_id = p.id
+                                AND d.detector_model != 'full-image'
+                           ){scope_sql}
+                  )
+                SELECT COUNT(*) AS n
+                  FROM fallback f
+                 WHERE EXISTS (
+                         SELECT 1 FROM classifier_runs cr_stale
+                          WHERE cr_stale.detection_id = f.detection_id
+                            AND cr_stale.classifier_model = ?
+                            AND cr_stale.labels_fingerprint != ?
+                       )
+                   AND NOT EXISTS (
+                         SELECT 1 FROM classifier_runs cr_cur
+                          WHERE cr_cur.detection_id = f.detection_id
+                            AND cr_cur.classifier_model = ?
+                            AND cr_cur.labels_fingerprint = ?
+                       )""",
+            (
+                ws, detector_model, *scope_params,
+                classifier_model, labels_fingerprint,
+                classifier_model, labels_fingerprint,
+            ),
+        ).fetchone()
+        return row["n"] or 0
+
     def get_classification_inventory(self, workspace_id, min_conf=None,
                                      median_sample_per_pair=2000):
         """Per-(model × fingerprint) coverage stats for ``workspace_id``.
@@ -10828,18 +10955,18 @@ class Database:
 
     def count_classifier_runs(self, photo_ids, classifier_model, labels_fingerprint):
         """Count distinct photos in `photo_ids` that have at least one
-        non-full-image detection above the active workspace's
-        ``detector_confidence`` threshold with a classifier_runs row
-        matching the given (classifier_model, labels_fingerprint).
+        runtime-classifiable target with a classifier_runs row matching the
+        given (classifier_model, labels_fingerprint).
 
         Used by the streaming pipeline's classify stage to pre-flight how
         many photos will hit the cache vs. require fresh inference.
 
         Mirrors the runtime gate's photo selection (see pipeline_job.py,
         the ``primary_det = photo_dets[0]`` block in the classify loop):
-        full-image rows are excluded and below-threshold detections are
-        ignored, so prior full-image classifier_runs and low-confidence
-        secondary boxes don't inflate the cached_estimate. May still
+        above-threshold real detections count normally, and photos where
+        MegaDetector ran with ``box_count=0`` count through their synthetic
+        full-image anchor. Below-threshold real detections are ignored because
+        the pipeline still skips them instead of falling back. May still
         overcount for photos with multiple above-threshold non-full-image
         detections where a non-primary one happens to carry the matching
         run key — exact mirroring would require a window function over
@@ -10868,6 +10995,33 @@ class Database:
                 f"  AND d.detector_confidence >= ? "
                 f"  AND d.photo_id IN ({placeholders})",
                 [classifier_model, labels_fingerprint, min_conf, *chunk],
+            ).fetchall()
+            for r in rows:
+                matched.add(r["photo_id"])
+            rows = self.conn.execute(
+                f"""WITH full_anchor AS (
+                        SELECT photo_id, MIN(id) AS detection_id
+                          FROM detections
+                         WHERE detector_model = 'full-image'
+                           AND photo_id IN ({placeholders})
+                         GROUP BY photo_id
+                      )
+                    SELECT DISTINCT fa.photo_id
+                      FROM full_anchor fa
+                      JOIN detector_runs dr
+                        ON dr.photo_id = fa.photo_id
+                       AND dr.detector_model = 'megadetector-v6'
+                       AND dr.box_count = 0
+                      JOIN classifier_runs cr
+                        ON cr.detection_id = fa.detection_id
+                       AND cr.classifier_model = ?
+                       AND cr.labels_fingerprint = ?
+                     WHERE NOT EXISTS (
+                             SELECT 1 FROM detections d
+                              WHERE d.photo_id = fa.photo_id
+                                AND d.detector_model != 'full-image'
+                           )""",
+                [*chunk, classifier_model, labels_fingerprint],
             ).fetchall()
             for r in rows:
                 matched.add(r["photo_id"])

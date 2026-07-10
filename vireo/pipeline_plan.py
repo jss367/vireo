@@ -266,11 +266,13 @@ def _classify_plan(db, params, photo_ids, new_count=0):
     det_counts = db.count_primary_detections_in_scope(photo_ids)
     total_dets = det_counts["total_dets"]
     photos_with_dets = det_counts["photos_with_dets"]
+    full_image_fallbacks = db.count_full_image_fallback_photos(photo_ids)
+    classifiable_units = total_dets + full_image_fallbacks
 
     unblocked_count = sum(
         1 for m in models if not label_resolution[m["id"]].get("blocked")
     )
-    eligible = total_dets * unblocked_count
+    eligible = classifiable_units * unblocked_count
 
     # Every selected model is blocked on missing labels and can't run
     # label-free (Tree of Life). The classify stage cannot do any work for
@@ -298,7 +300,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
         }
 
     stale_total = 0
-    if total_dets > 0 and not params.reclassify:
+    if classifiable_units > 0 and not params.reclassify:
         for m in models:
             info = label_resolution[m["id"]]
             if info.get("blocked"):
@@ -309,11 +311,16 @@ def _classify_plan(db, params, photo_ids, new_count=0):
                 labels_fingerprint=fp,
                 photo_ids=photo_ids,
             )
+            stale_total += db.count_full_image_classify_stale(
+                classifier_model=m["name"],
+                labels_fingerprint=fp,
+                photo_ids=photo_ids,
+            )
     # Reclassify is a user override, not a settings-change signal.
     fingerprint_outdated = stale_total > 0 and not params.reclassify
     fingerprint_reason = "label_set_changed" if fingerprint_outdated else None
 
-    if total_dets == 0:
+    if classifiable_units == 0:
         # Mixed shape with no detections cached yet: some selected models
         # can run (label-free, or have labels) and others are blocked on
         # missing labels. The earlier unblocked_count==0 guard doesn't fire
@@ -339,6 +346,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
                     "blocked_models": blocked_now,
                     "total_dets": 0,
                     "photos_with_dets": 0,
+                    "full_image_fallbacks": 0,
                     "models": [m["name"] for m in models],
                     "pending": 0,
                     "eligible": 0,
@@ -372,6 +380,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
             "detail": {
                 "total_dets": 0,
                 "photos_with_dets": 0,
+                "full_image_fallbacks": 0,
                 "models": [m["name"] for m in models],
                 "pending": new_count,
                 "eligible": new_count,
@@ -393,9 +402,14 @@ def _classify_plan(db, params, photo_ids, new_count=0):
             continue
         fp = info["fingerprint"]
         if params.reclassify:
-            pending = total_dets
+            pending = classifiable_units
         else:
             pending = db.count_primary_classify_pending_pairs(
+                classifier_model=m["name"],
+                labels_fingerprint=fp,
+                photo_ids=photo_ids,
+            )
+            pending += db.count_full_image_classify_pending_pairs(
                 classifier_model=m["name"],
                 labels_fingerprint=fp,
                 photo_ids=photo_ids,
@@ -441,12 +455,13 @@ def _classify_plan(db, params, photo_ids, new_count=0):
                 "summary": (
                     f"Will run on {new_count} new "
                     f"photo{_plural(new_count)} "
-                    f"({total_dets} existing detection"
-                    f"{_plural(total_dets)} already classified)"
+                    f"({classifiable_units} existing target"
+                    f"{_plural(classifiable_units)} already classified)"
                 ),
                 "detail": {
                     "total_dets": total_dets,
                     "photos_with_dets": photos_with_dets,
+                    "full_image_fallbacks": full_image_fallbacks,
                     "models": [m["name"] for m in models],
                     "pending": new_count,
                     "eligible": eligible + new_count,
@@ -459,13 +474,14 @@ def _classify_plan(db, params, photo_ids, new_count=0):
         return {
             "state": "done-prior",
             "summary": (
-                f"Already classified — {total_dets} "
-                f"detection{_plural(total_dets)} across "
+                f"Already classified — {classifiable_units} "
+                f"target{_plural(classifiable_units)} across "
                 f"{len(models)} model{_plural(len(models))}"
             ),
             "detail": {
                 "total_dets": total_dets,
                 "photos_with_dets": photos_with_dets,
+                "full_image_fallbacks": full_image_fallbacks,
                 "models": [m["name"] for m in models],
                 "pending": 0,
                 "eligible": eligible,
@@ -478,8 +494,8 @@ def _classify_plan(db, params, photo_ids, new_count=0):
     if params.reclassify:
         summary = (
             f"Re-classify — {pending_total} "
-            f"detection-model pair{_plural(pending_total)} "
-            f"({total_dets} detection{_plural(total_dets)} × "
+            f"target-model pair{_plural(pending_total)} "
+            f"({classifiable_units} target{_plural(classifiable_units)} × "
             f"{len(models)} model{_plural(len(models))})"
         )
     else:
@@ -509,6 +525,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
         "per_model": pending_per_model,
         "total_dets": total_dets,
         "photos_with_dets": photos_with_dets,
+        "full_image_fallbacks": full_image_fallbacks,
         "pending": pending_total + new_count,
         "eligible": eligible + new_count,
         "stale": stale_total,

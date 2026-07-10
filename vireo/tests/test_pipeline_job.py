@@ -2603,6 +2603,110 @@ def test_pipeline_model_ids_back_compat_with_model_id(tmp_path, monkeypatch):
     )
 
 
+def test_pipeline_classifies_full_image_when_detector_finds_nothing(
+    tmp_path, monkeypatch
+):
+    """Pipeline classify should not strand photos where MegaDetector ran and
+    found no subject. It should classify the full image once, persist the
+    synthetic anchor, and use classifier_runs on the next pass.
+    """
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    import detector
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    photo_id = db.add_photo(
+        folder_id, "empty.jpg", ".jpg", 100, 1_000_000.0,
+    )
+    _drop_jpeg(folder_path, "empty.jpg")
+    col_id = db.add_collection(
+        "No detections",
+        json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
+    )
+
+    _setup_fake_downloaded_model(tmp_path, monkeypatch)
+    monkeypatch.setattr(detector, "ensure_megadetector_weights", lambda **_k: None)
+    monkeypatch.setattr(classify_job, "detect_animals", lambda _path: [])
+    monkeypatch.setattr(classify_job, "get_primary_detection", lambda _dets: None)
+
+    classify_calls = []
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            import numpy as np
+
+            classify_calls.append(len(images))
+            return [
+                (
+                    [{"species": "Full-image Robin", "score": 0.91}],
+                    np.zeros(512, dtype=np.float32),
+                )
+                for _ in images
+            ]
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_id="bioclip-vit-b-16",
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    first = run_pipeline_job(
+        _make_job(), FakeRunner(), db_path, ws_id, params,
+    )
+    assert first["stages"]["detect"] == {
+        "total": 1,
+        "detected": 0,
+        "processed": 1,
+    }
+    assert first["stages"]["classify"]["full_image_fallbacks"] == 1
+    assert classify_calls == [1]
+
+    check = Database(db_path)
+    check.set_active_workspace(ws_id)
+    full = check.get_detections(
+        photo_id, detector_model="full-image", min_conf=0,
+    )
+    assert len(full) == 1
+    pred = check.get_predictions_for_detection(
+        full[0]["id"],
+        classifier_model="BioCLIP",
+        min_classifier_conf=0,
+    )
+    assert len(pred) == 1
+    assert pred[0]["species"] == "Full-image Robin"
+    assert (
+        "BioCLIP", pred[0]["labels_fingerprint"],
+    ) in check.get_classifier_run_keys(full[0]["id"])
+
+    # Rerun: detector_run + full-image classifier_run should make this a
+    # metadata/cache pass, not another model inference.
+    second = run_pipeline_job(
+        _make_job(), FakeRunner(), db_path, ws_id, params,
+    )
+    assert second["stages"]["classify"]["full_image_fallbacks"] == 1
+    assert classify_calls == [1]
+    full_after = check.get_detections(
+        photo_id, detector_model="full-image", min_conf=0,
+    )
+    assert [d["id"] for d in full_after] == [full[0]["id"]]
+
+
 def test_pipeline_redownloads_taxonomy_when_existing_file_is_corrupt(
     tmp_path, monkeypatch
 ):
@@ -5021,30 +5125,27 @@ def test_pipeline_classify_stores_predictions_with_detection_id(
         "its prediction is not reachable via the predictions→detections join."
     )
 
-    # photo_without_det must NOT have a prediction or a detection row. The
-    # pipeline classify stage is detection-driven: photos without a real
-    # MegaDetector hit are skipped, not classified against a synthetic
-    # full-image box (earlier versions did that, but it broke
-    # extract_masks_stage and caused multi-model duplicate inserts).
+    # photo_without_det should now have a full-image prediction anchored to a
+    # synthetic full-image detection. That preserves the non-NULL detection_id
+    # invariant while still letting no-detection photos be classified and cached.
     no_det_preds = db.conn.execute(
-        """SELECT pr.id FROM predictions pr
-           LEFT JOIN detections d ON d.id = pr.detection_id
-           WHERE d.photo_id = ? OR pr.detection_id IS NULL""",
+        """SELECT pr.id, d.detector_model
+             FROM predictions pr
+             JOIN detections d ON d.id = pr.detection_id
+            WHERE d.photo_id = ?""",
         (photo_without_det,),
     ).fetchall()
-    assert not no_det_preds, (
-        f"Pipeline wrote predictions for photo_without_det: {[dict(r) for r in no_det_preds]}. "
-        "Photos without a MegaDetector detection must be skipped by the "
-        "pipeline classify stage."
+    assert [r["detector_model"] for r in no_det_preds] == ["full-image"], (
+        "No-detection photos should be classified against a synthetic "
+        f"full-image anchor, got: {[dict(r) for r in no_det_preds]}"
     )
     leftover_dets = db.conn.execute(
         "SELECT id, detector_model FROM detections WHERE photo_id = ?",
         (photo_without_det,),
     ).fetchall()
-    assert not leftover_dets, (
-        f"Pipeline created spurious detection rows for photo_without_det: "
-        f"{[dict(r) for r in leftover_dets]}. No synthetic detections should "
-        "be inserted — the photo should just be skipped."
+    assert [r["detector_model"] for r in leftover_dets] == ["full-image"], (
+        "No-detection photos should get exactly one synthetic full-image "
+        f"detection anchor, got: {[dict(r) for r in leftover_dets]}"
     )
 
 
@@ -5745,7 +5846,25 @@ def test_pipeline_detect_runs_once_before_any_classifier_loads(
                           det_conf_threshold=None, already_detected_ids=None,
                           cached_detections=None):
         events.append(("detect", [p["id"] for p in batch]))
-        return {}, 0, {p["id"] for p in batch}
+        det_map = {}
+        for p in batch:
+            det_id = db_.save_detections(
+                p["id"],
+                [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+                  "confidence": 0.9, "category": "animal"}],
+                detector_model="megadetector-v6",
+            )[0]
+            det_map[p["id"]] = [{
+                "id": det_id,
+                "box_x": 0.1,
+                "box_y": 0.1,
+                "box_w": 0.5,
+                "box_h": 0.5,
+                "confidence": 0.9,
+                "category": "animal",
+                "detector_model": "megadetector-v6",
+            }]
+        return det_map, len(det_map), {p["id"] for p in batch}
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
 
@@ -5756,6 +5875,16 @@ def test_pipeline_detect_runs_once_before_any_classifier_loads(
         def encode_image(self, *args, **kwargs):
             import numpy as np
             return np.zeros(512, dtype=np.float32)
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            import numpy as np
+            return [
+                (
+                    [{"species": "Test species", "score": 0.9}],
+                    np.zeros(512, dtype=np.float32),
+                )
+                for _ in images
+            ]
 
     monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
 
