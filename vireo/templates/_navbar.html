@@ -8203,8 +8203,39 @@ function showToast(msg, type) {
 // navigation. Use on <a> tags as: onclick="return openExternalLink(event, this.href)".
 function openExternalLink(event, url) {
   if (event) event.preventDefault();
+  function fallbackOpen() {
+    var opened = null;
+    try {
+      opened = window.open('about:blank', '_blank');
+    } catch(e) {}
+    if (opened) {
+      try { opened.opener = null; } catch(e) {}
+      opened.location = url;
+      return true;
+    }
+    if (!opened && url) {
+      try {
+        window.location.href = url;
+        return true;
+      } catch(e) {}
+    }
+    return false;
+  }
+
+  if (typeof openExternal !== 'function') {
+    if (!fallbackOpen()) showToast('Could not open link: ' + url, 'error');
+    return false;
+  }
+
   openExternal(url).then(function(ok) {
     if (!ok) showToast('Could not open link: ' + url, 'error');
+  }).catch(function(e) {
+    if (!fallbackOpen()) {
+      showToast('Could not open link: ' + url, 'error');
+    }
+    if (typeof logError === 'function') {
+      logError('openExternalLink failed for ' + url + ': ' + (e && e.message ? e.message : e));
+    }
   });
   return false;
 }
