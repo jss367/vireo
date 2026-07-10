@@ -307,6 +307,25 @@
   cursor: pointer;
 }
 .encounter-sort-wrap select:focus { border-color: var(--accent); }
+.view-setting-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+  cursor: pointer;
+}
+.view-setting-row input {
+  margin-top: 2px;
+  accent-color: var(--accent);
+}
+.view-setting-row small {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
 
 /* Encounter cards */
 .encounter-card {
@@ -1445,6 +1464,17 @@ input[type="range"]::-moz-range-thumb {
     </div>
 
     <div class="sidebar-section">
+      <div class="sidebar-title">Advanced Display</div>
+      <label class="view-setting-row">
+        <input type="checkbox" id="showPhotoLabelsChk" onchange="togglePhotoLabels(this.checked)">
+        <span>
+          Show automated triage labels
+          <small>Overlay pipeline-generated KEEP, REVIEW, and REJECT labels on thumbnails.</small>
+        </span>
+      </label>
+    </div>
+
+    <div class="sidebar-section">
       <a href="/pipeline" class="back-link">&larr; Back to Pipeline</a>
     </div>
     </div>
@@ -1715,6 +1745,7 @@ var reviewScopeMode = 'cache';
 var reviewScopeCollectionId = null;
 var reviewScopeCollections = [];
 var reviewScopeRequestSeq = 0;
+var showPhotoLabels = false;
 // Survives re-renders so confirming/filtering doesn't re-expand collapsed
 // encounters. Keyed by the encounter's full sorted photo_id set so that
 // detach/regroup (which change composition) naturally invalidate the key
@@ -1768,6 +1799,7 @@ function persistPipelineReviewViewState() {
       speciesFilterSearchOptions: speciesFilterSearchOptions,
       hideConfirmed: !!hideConfirmed,
       encounterSort: encounterSort,
+      showPhotoLabels: !!showPhotoLabels,
       thumbSize: document.getElementById('thumbSizeSlider')
         ? document.getElementById('thumbSizeSlider').value
         : null,
@@ -1791,6 +1823,9 @@ function applyPipelineReviewToolbarState() {
 
   var sortSel = document.getElementById('encounterSortSelect');
   if (sortSel) sortSel.value = encounterSort;
+
+  var labelsChk = document.getElementById('showPhotoLabelsChk');
+  if (labelsChk) labelsChk.checked = !!showPhotoLabels;
 }
 
 function restorePipelineReviewViewState() {
@@ -1815,6 +1850,7 @@ function restorePipelineReviewViewState() {
     };
   }
   hideConfirmed = !!state.hideConfirmed;
+  showPhotoLabels = !!state.showPhotoLabels;
 
   if (PIPELINE_ENCOUNTER_SORTS.indexOf(state.encounterSort) !== -1) {
     encounterSort = state.encounterSort;
@@ -2497,13 +2533,25 @@ function renderResults() {
 
 function renderPhotoCard(p, encIdx, burstIdx) {
   var label = (p.label || '').toLowerCase();
+  var manualLabel = '';
+  var visibleLabel = '';
+  var visibleLabelClass = label;
   var hasQuality = hasQualityScore(p);
   var q = hasQuality ? Number(p.quality_composite) : null;
   var qPct = hasQuality ? Math.round(q * 100) : 0;
+  if (p.flag === 'flagged') {
+    manualLabel = 'KEEP';
+    visibleLabelClass = 'keep';
+  } else if (p.flag === 'rejected') {
+    manualLabel = 'REJECT';
+    visibleLabelClass = 'reject';
+  }
+  visibleLabel = manualLabel || (showPhotoLabels ? (p.label || '') : '');
+  var cardLabelClass = manualLabel ? visibleLabelClass : (showPhotoLabels ? label : '');
   var thumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(p) : '/thumbnails/' + p.id + '.jpg';
-  var html = '<div class="photo-card ' + label + '" data-photo-id="' + p.id + '">';
+  var html = '<div class="photo-card ' + cardLabelClass + '" data-photo-id="' + p.id + '">';
   html += '<img src="' + escapeAttr(thumbUrl) + '" loading="lazy" alt="" onclick="openInspect(' + p.id + ')">';
-  if (p.label) html += '<span class="photo-label ' + label + '">' + p.label + '</span>';
+  if (visibleLabel) html += '<span class="photo-label ' + visibleLabelClass + '">' + visibleLabel + '</span>';
   if (p.rarity_protected) html += '<span class="photo-rarity">protected</span>';
   if (p.flag === 'flagged') html += '<span class="photo-flag-badge flag-flagged">P</span>';
   else if (p.flag === 'rejected') html += '<span class="photo-flag-badge flag-rejected">X</span>';
@@ -2572,6 +2620,13 @@ function isBurstConfirmed(enc, burst) {
 
 function toggleHideConfirmed() {
   hideConfirmed = !hideConfirmed;
+  applyPipelineReviewToolbarState();
+  persistPipelineReviewViewState();
+  renderResults();
+}
+
+function togglePhotoLabels(show) {
+  showPhotoLabels = !!show;
   applyPipelineReviewToolbarState();
   persistPipelineReviewViewState();
   renderResults();

@@ -62,6 +62,9 @@ from render_source import (
 from render_source import (
     image_is_smaller_than_expected as _image_is_smaller_than_expected,
 )
+from render_source import (
+    image_size_after_exif_orientation as _image_size_after_exif_orientation,
+)
 from render_source import path_satisfies_recipe_render as _path_satisfies_recipe_render
 from render_source import (
     recipe_render_source as _recipe_render_source,
@@ -331,6 +334,7 @@ def _apply_highlight_preferences(db, buckets):
         bucket["has_preferred_photo"] = applied
         bucket["best_quality"] = best.get("quality_score")
         bucket["best_score"] = best.get("highlight_score")
+        bucket["best_timestamp"] = best.get("timestamp")
 
 
 def _highlight_confidence_label(confidence, is_accepted):
@@ -386,6 +390,10 @@ def _collect_highlight_buckets(
         photo = {
             "id": r["id"],
             "filename": r["filename"],
+            "timestamp": r.get("timestamp"),
+            "folder_name": r.get("folder_name"),
+            "folder_path": r.get("folder_path"),
+            "keyword_names": r.get("keyword_names") or "",
             "rating": r.get("rating") or 0,
             "flag": r.get("flag") or "none",
             "quality_score": r.get("quality_score"),
@@ -407,6 +415,7 @@ def _collect_highlight_buckets(
             "predicted_species": r.get("predicted_species"),
             "predicted_confidence": predicted_conf,
             "has_accepted_species": accepted is not None,
+            "is_unidentified": species is None,
             "is_confirmable_prediction": (
                 accepted is None
                 and species is not None
@@ -460,6 +469,96 @@ def _collect_highlight_buckets(
         reverse=True,
     )
     return buckets, unidentified_photos
+
+
+def _highlight_search_fields(photo):
+    return [
+        photo.get("filename") or "",
+        photo.get("folder_name") or "",
+        photo.get("folder_path") or "",
+        photo.get("keyword_names") or "",
+        photo.get("species") or "",
+        photo.get("predicted_species") or "",
+        "unidentified" if photo.get("is_unidentified") else "",
+    ]
+
+
+def _highlight_photo_matches_query(
+    photo,
+    query,
+    match_case=False,
+    whole_word=False,
+):
+    tokens = str(query or "").split()
+    if not tokens:
+        return True
+    fields = _highlight_search_fields(photo)
+    return all(
+        any(
+            text_search_match(field, token, match_case, whole_word)
+            for field in fields
+        )
+        for token in tokens
+    )
+
+
+def _refresh_highlight_bucket_metadata(bucket):
+    photos = bucket.get("photos") or []
+    confidences = [
+        p.get("predicted_confidence")
+        for p in photos
+        if p.get("predicted_confidence") is not None
+    ]
+    avg_confidence = (
+        round(sum(confidences) / len(confidences), 4)
+        if confidences else None
+    )
+    best = photos[0] if photos else {}
+    # Filtering can drop the unconfirmed photos from a mixed bucket, leaving
+    # only confirmed ones — recompute so the "candidate" badge and the
+    # `confirmed` sort match what the row now actually contains.
+    bucket["is_accepted"] = bool(photos) and all(
+        p.get("has_accepted_species") for p in photos
+    )
+    bucket["avg_confidence"] = avg_confidence
+    bucket["certainty"] = _highlight_confidence_label(
+        avg_confidence, bucket.get("is_accepted")
+    )
+    bucket["photo_count"] = len(photos)
+    bucket["best_quality"] = best.get("quality_score")
+    bucket["best_score"] = best.get("highlight_score")
+    bucket["best_timestamp"] = best.get("timestamp")
+    return bucket
+
+
+def _filter_highlight_sections(
+    buckets,
+    unidentified_photos,
+    query,
+    match_case=False,
+    whole_word=False,
+):
+    query = (query or "").strip()
+    if not query:
+        for bucket in buckets:
+            _refresh_highlight_bucket_metadata(bucket)
+        return buckets, unidentified_photos
+
+    filtered_buckets = []
+    for bucket in buckets:
+        photos = [
+            p for p in (bucket.get("photos") or [])
+            if _highlight_photo_matches_query(p, query, match_case, whole_word)
+        ]
+        if photos:
+            updated = {**bucket, "photos": photos}
+            filtered_buckets.append(_refresh_highlight_bucket_metadata(updated))
+
+    unidentified = [
+        p for p in unidentified_photos
+        if _highlight_photo_matches_query(p, query, match_case, whole_word)
+    ]
+    return filtered_buckets, unidentified
 
 
 # Maximum number of bound parameters per SQL statement. SQLite's
@@ -2034,11 +2133,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if db is not None:
             db.conn.close()
 
+    def _reraise_fatal_cleanup_error(exc):
+        if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
+            raise exc
+
     def _cleanup_cached_files_for_deleted_photos(files):
-        from preview_cache import cleanup_cached_files_for_deleted_photos
-        cleanup_cached_files_for_deleted_photos(
-            app.config["THUMB_CACHE_DIR"], files,
-        )
+        try:
+            from preview_cache import cleanup_cached_files_for_deleted_photos
+            cleanup_cached_files_for_deleted_photos(
+                app.config["THUMB_CACHE_DIR"], files,
+            )
+        except BaseException as exc:
+            _reraise_fatal_cleanup_error(exc)
+            log.exception("Failed to clean cached files after delete")
 
     @app.before_request
     def _enforce_api_v1_token():
@@ -6124,7 +6231,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Run the deferred non-DB side effects only after the outer
         # transaction committed successfully.
-        db.prune_pipeline_cache_for_ids(result["ids"])
+        try:
+            db.prune_pipeline_cache_for_ids(result["ids"])
+        except BaseException as exc:
+            _reraise_fatal_cleanup_error(exc)
+            log.exception("Failed to prune pipeline cache after delete")
         _cleanup_cached_files_for_deleted_photos(result["files"])
 
         trashed = 0
@@ -6148,7 +6259,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             from send2trash import send2trash as _trash
                             _trash(filepath)
                             trashed += 1
-                        except Exception as send_err:
+                        except BaseException as send_err:
+                            _reraise_fatal_cleanup_error(send_err)
                             # send2trash implements the platform trash spec on
                             # Linux/Windows; the AppleScript Finder fallback only
                             # helps on macOS. Off-mac, report the real send2trash
@@ -7022,6 +7134,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         species_filter="",
         species_match_case=False,
         species_whole_word=False,
+        search_query="",
+        search_match_case=False,
+        search_whole_word=False,
         confirmation_filter="all",
     ):
         folders = db.get_folders_with_quality_data()
@@ -7044,7 +7159,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         eligible_count = sum(b["photo_count"] for b in buckets) + len(
             unidentified_photos
         )
-        _apply_highlight_preferences(db, buckets)
         if species_filter:
             buckets = [
                 b for b in buckets
@@ -7062,6 +7176,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 species_whole_word,
             ):
                 unidentified_photos = []
+
+        buckets, unidentified_photos = _filter_highlight_sections(
+            buckets,
+            unidentified_photos,
+            search_query,
+            search_match_case,
+            search_whole_word,
+        )
+        _apply_highlight_preferences(db, buckets)
 
         def limited_bucket(bucket):
             photos = bucket["photos"]
@@ -7098,6 +7221,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "eligible": eligible_count,
                 "limit_per_bucket": limit_per_bucket,
                 "confirmation": confirmation_filter,
+                "search": (search_query or "").strip(),
             },
             "scope": "workspace" if folder_id is None else "folder",
         }
@@ -7117,6 +7241,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             species_filter=request.args.get("species") or "",
             species_match_case=_request_bool_arg("species_match_case"),
             species_whole_word=_request_bool_arg("species_whole_word"),
+            search_query=request.args.get("q") or "",
+            search_match_case=_request_bool_arg("q_match_case"),
+            search_whole_word=_request_bool_arg("q_whole_word"),
             confirmation_filter=request.args.get("confirmation") or "all",
         )
         return jsonify(payload)
@@ -7684,6 +7811,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         candidates = db.get_highlights_candidates(folder_id, min_quality=min_quality)
         buckets, unidentified_photos = _collect_highlight_buckets(
             candidates, confidence_threshold, confirmation_filter
+        )
+        buckets, unidentified_photos = _filter_highlight_sections(
+            buckets,
+            unidentified_photos,
+            request.args.get("q") or "",
+            _request_bool_arg("q_match_case"),
+            _request_bool_arg("q_whole_word"),
         )
         _apply_highlight_preferences(db, buckets)
         if species == "__unidentified__":
@@ -21089,13 +21223,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if not os.path.exists(wc_path):
                 return None
             from PIL import Image as _PILImage
+
             try:
                 with _PILImage.open(wc_path) as _wc_img:
-                    wc_w, wc_h = _wc_img.size
+                    wc_w, wc_h = _image_size_after_exif_orientation(_wc_img)
             except Exception:
                 wc_w = wc_h = 0
-            orig_w = photo["width"] or 0
-            orig_h = photo["height"] or 0
+            # Compare in display-orientation space: ``extract_working_copy``
+            # writes the EXIF-transposed JPEG (e.g. 4000x6000 for a portrait
+            # RAW), while ``photo["width"]/height`` are the sensor axes
+            # (6000x4000). Comparing raw sensor axes rejects a valid
+            # full-resolution WC for portrait RAWs and either 500s or forces
+            # a redundant re-decode. ``_recipe_source_dimensions`` swaps the
+            # sensor axes when EXIF Orientation indicates it, matching what
+            # ``load_image`` returns.
+            orig_w, orig_h = _recipe_source_dimensions(photo)
             # Trust the wc when it meets/exceeds the believed original dims,
             # or when those dims are unknown (no basis to declare the wc stale
             # and a speculative RAW re-extract would just thrash the disk).
@@ -21107,17 +21249,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # this often means rawpy.postprocess() failed and we fell back to
             # the embedded JPEG, which can be a few pixels shy of the full
             # sensor area. Re-extracting would yield the same fallback image,
-            # just slower — so trust the wc when it is within 1% of the
-            # believed dims. This tolerance is RAW-only: for JPEG/PNG/etc.,
-            # the wc being smaller means the cap downsized it, and re-extracting
-            # WILL produce more pixels.
+            # just slower — so trust the wc when BOTH axes are within 1% of
+            # the believed dims. A long-edge-only check would silently accept
+            # an embedded JPEG whose long edge is full but whose short edge is
+            # substantially truncated (e.g. 6000x3376 for a 6000x4000 source),
+            # then apply the edit recipe to a cropped image. This tolerance is
+            # RAW-only: for JPEG/PNG/etc., the wc being smaller means the cap
+            # downsized it, and re-extracting WILL produce more pixels.
             from image_loader import RAW_EXTENSIONS
             ext = os.path.splitext(photo["filename"])[1].lower()
-            if ext in RAW_EXTENSIONS and wc_w and wc_h:
-                wc_long = max(wc_w, wc_h)
-                orig_long = max(orig_w, orig_h)
-                if orig_long and wc_long >= orig_long * 0.99:
-                    return wc_path
+            if (
+                ext in RAW_EXTENSIONS
+                and wc_w and wc_h
+                and orig_w and orig_h
+                and wc_w >= orig_w * 0.99
+                and wc_h >= orig_h * 0.99
+            ):
+                return wc_path
             return None
 
         trusted_wc_path = _trusted_full_res_working_copy_path()
@@ -21185,17 +21333,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     folder["path"], using_offline_cache,
                 )
                 image_ext = os.path.splitext(image_path)[1].lower()
-                if (
+                source_failure_current = (
                     primary_is_raw
-                    and trusted_wc_path
-                    and not os.path.exists(image_path)
-                ):
-                    image_path = trusted_wc_path
-                elif companion_source and image_ext not in RAW_EXTENSIONS:
-                    image_path = companion_source
-                elif (
-                    primary_is_raw
-                    and companion_source
                     and _has_current_working_copy_failure(
                         photo,
                         vireo_dir,
@@ -21203,6 +21342,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         live_source_path=image_path,
                         folder_path=folder["path"],
                     )
+                )
+                if (
+                    primary_is_raw
+                    and trusted_wc_path
+                    and not companion_source
+                    and (
+                        not os.path.exists(image_path)
+                        or source_failure_current
+                    )
+                ):
+                    image_path = trusted_wc_path
+                elif companion_source and image_ext not in RAW_EXTENSIONS:
+                    image_path = companion_source
+                elif (
+                    primary_is_raw
+                    and companion_source
+                    and source_failure_current
                 ):
                     # Mirror _recipe_render_source: when scanner has marked
                     # this RAW as failed for the current mtime, route the

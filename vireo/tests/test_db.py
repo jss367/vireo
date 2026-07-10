@@ -8923,6 +8923,9 @@ def test_get_highlights_candidates(tmp_path):
     assert scores == sorted(scores, reverse=True)
     # Each result should have species field (may be None for unclassified)
     assert all("species" in dict(r) for r in results)
+    assert all("folder_name" in dict(r) for r in results)
+    assert all("folder_path" in dict(r) for r in results)
+    assert all("keyword_names" in dict(r) for r in results)
 
 
 def test_get_highlights_candidates_includes_descendants(tmp_path):
@@ -10461,6 +10464,18 @@ def test_create_and_get_new_images_snapshot(tmp_path):
     assert snap["file_count"] == 2
     assert snap["workspace_id"] == ws_id
     assert sorted(snap["file_paths"]) == sorted(paths)
+
+
+def test_create_new_images_snapshot_file_count_matches_unique_paths(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    paths = ["/tmp/a/IMG_001.JPG", "/tmp/a/IMG_001.JPG", "/tmp/b/IMG_002.JPG"]
+
+    snap_id = db.create_new_images_snapshot(paths)
+    snap = db.get_new_images_snapshot(snap_id)
+
+    assert snap["file_count"] == 2
+    assert snap["file_paths"] == ["/tmp/a/IMG_001.JPG", "/tmp/b/IMG_002.JPG"]
 
 
 def test_get_snapshot_from_different_workspace_returns_none(tmp_path):

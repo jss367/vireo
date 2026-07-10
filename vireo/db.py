@@ -7154,7 +7154,9 @@ class Database:
                 self._active_workspace_id,
                 ids,
             )
-        except Exception:
+        except BaseException as exc:
+            if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
+                raise
             log.exception("Failed to prune pipeline cache after delete")
 
     def delete_photos(self, photo_ids, include_companions=False, commit=True):
@@ -9379,6 +9381,7 @@ class Database:
         rows = self.conn.execute(
             f"""SELECT p.id, p.folder_id, p.filename, p.extension,
                       p.timestamp, p.width, p.height, p.rating, p.flag,
+                      f.name AS folder_name, f.path AS folder_path,
                       p.thumb_path, p.quality_score, p.subject_sharpness,
                       p.subject_size, p.sharpness, p.phash_crop,
                       p.mask_path, p.subject_tenengrad, p.bg_tenengrad,
@@ -9390,7 +9393,8 @@ class Database:
                       bp.species,
                       tp.prediction_id,
                       tp.predicted_species,
-                      tp.predicted_confidence
+                      tp.predicted_confidence,
+                      kw.keyword_names
                FROM photos p
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
@@ -9433,6 +9437,13 @@ class Database:
                          )
                    ) WHERE rn = 1
                ) tp ON tp.photo_id = p.id
+               LEFT JOIN (
+                   SELECT pk.photo_id,
+                          group_concat(DISTINCT k.name) AS keyword_names
+                   FROM photo_keywords pk
+                   JOIN keywords k ON k.id = pk.keyword_id
+                   GROUP BY pk.photo_id
+               ) kw ON kw.photo_id = p.id
                WHERE wf.workspace_id = ?
                  {folder_filter}
                  AND p.quality_score IS NOT NULL
@@ -12282,16 +12293,14 @@ class Database:
         decides how to handle zero-file snapshots (the pipeline short-circuits).
         """
         ws_id = self._ws_id()
+        unique_paths = sorted(set(file_paths or []))
         cur = self.conn.execute(
             "INSERT INTO new_image_snapshots (workspace_id, created_at, file_count) "
             "VALUES (?, datetime('now'), ?)",
-            (ws_id, len(file_paths)),
+            (ws_id, len(unique_paths)),
         )
         snap_id = cur.lastrowid
-        if file_paths:
-            # De-duplicate in case the caller passed repeats; PK would reject them
-            # but sending a clean set keeps executemany cheap.
-            unique_paths = sorted(set(file_paths))
+        if unique_paths:
             self.conn.executemany(
                 "INSERT INTO new_image_snapshot_files (snapshot_id, file_path) VALUES (?, ?)",
                 [(snap_id, p) for p in unique_paths],
