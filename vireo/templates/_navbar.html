@@ -10635,7 +10635,25 @@ async function _awaitScanJobDone(jobId, opts) {
 // filesystem walk had just completed).
 async function reviewDeletedAfterRescan(folderId, label, scanJobId) {
   if (scanJobId) {
-    await _awaitScanJobDone(scanJobId);
+    const scanDone = await _awaitScanJobDone(scanJobId);
+    if (!scanDone) {
+      // ``_awaitScanJobDone`` returns false for terminal failures/
+      // cancels, transient ``/api/jobs/<id>`` fetch failures, and the
+      // hard polling cap (~10 min) — meaning the rescan job may still
+      // be running. Starting the missing-originals scan now would race
+      // the scan's per-root ``finally`` cache invalidation, which bumps
+      // the missing-scan in-flight generation and discards the freshly
+      // computed result — the modal would then poll to ``not_ready``
+      // even though a full filesystem walk had just completed. Defer
+      // with a toast; the banner's next automatic tick will surface any
+      // deletions once the scan actually finishes.
+      showToast(
+        'Rescan still finishing' + (label ? ' in “' + label + '”' : '')
+          + ' — deleted-photo review will run once it completes.',
+        'info',
+      );
+      return;
+    }
   }
   try {
     const payload = await startMissingPhotosCheck({
