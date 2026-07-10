@@ -340,12 +340,14 @@ def _bucket_best_score(photos):
 
 
 def _apply_highlight_preferences(db, buckets):
-    preferences = db.get_species_representatives()
+    preferences = db.get_species_representative_lists()
     for bucket in buckets:
-        preferred_id = preferences.get(bucket["species"])
+        representative_ids = preferences.get(bucket["species"]) or []
+        representative_set = set(representative_ids)
+        preferred_id = representative_ids[0] if representative_ids else None
         applied = False
         for photo in bucket.get("photos") or []:
-            is_rep = preferred_id is not None and photo.get("id") == preferred_id
+            is_rep = photo.get("id") in representative_set
             photo["is_species_representative"] = is_rep
             applied = applied or is_rep
         top = bucket["photos"][0] if bucket["photos"] else {}
@@ -3759,14 +3761,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result["keywords"] = [dict(k) for k in keywords]
 
         # Representative block: the photo's eligible species plus whether this
-        # photo is the current one-photo species representative. Keep the
+        # photo is one of the shared species representatives. Keep the
         # legacy ``life_list`` key because shared lightbox/menu code reads it.
-        representatives = db.get_species_representatives()
+        representatives = db.get_species_representative_lists()
         result["life_list"] = [
             {
                 "species": s,
-                "is_current_photo": representatives.get(s) == photo_id,
-                "is_species_representative": representatives.get(s) == photo_id,
+                "is_current_photo": photo_id in (representatives.get(s) or []),
+                "is_species_representative": photo_id in (
+                    representatives.get(s) or []
+                ),
             }
             for s in db.get_photo_life_list_species(photo_id)
         ]
@@ -7628,22 +7632,36 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         species_entries = []
         distinct_photo_ids = set()
-        representatives = db.get_species_representatives()
+        representatives = db.get_species_representative_lists()
         highlights_by_species = db.get_species_highlights()
         for species, entry in buckets.items():
             photos = entry["photos"]
             distinct_photo_ids.update(p["id"] for p in photos)
             timestamps = [p["timestamp"] for p in photos if p.get("timestamp")]
             _highlight_score_bucket(photos)
-            preferred_id = representatives.get(species)
+            representative_ids = representatives.get(species) or []
+            representative_order = {
+                photo_id: idx for idx, photo_id in enumerate(representative_ids)
+            }
+            preferred_id = representative_ids[0] if representative_ids else None
             highlight_ranks = highlights_by_species.get(species, {})
             for photo in photos:
                 rank = highlight_ranks.get(photo["id"])
                 photo["is_highlighted"] = rank is not None
                 photo["highlight_rank"] = rank
-            preferred_applied = _apply_preferred_photo(
-                photos, preferred_id, "is_species_representative"
+                photo["is_species_representative"] = (
+                    photo["id"] in representative_order
+                )
+            preferred_applied = any(
+                photo.get("is_species_representative") for photo in photos
             )
+            if preferred_applied:
+                ranked_position = {photo["id"]: idx for idx, photo in enumerate(photos)}
+                photos.sort(key=lambda photo: (
+                    0 if photo["id"] in representative_order else 1,
+                    representative_order.get(photo["id"], 0),
+                    ranked_position.get(photo["id"], 0),
+                ))
             best_source = "representative" if preferred_applied else "algorithm"
             if not preferred_applied and highlight_ranks:
                 valid_highlights = [

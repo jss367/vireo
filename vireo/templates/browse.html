@@ -7114,10 +7114,11 @@ function buildPhotoContextMenu(photoIds) {
   ]);
 }
 
-// "Set Representative" context-menu items. One photo can represent each
-// species in the active workspace. Disabled for a multi-selection because
-// crowning one shot from many is ambiguous; hidden entirely when nothing
-// selected has a species.
+// "Set Representative" context-menu items. Multiple photos can represent a
+// species; selecting a photo marks/promotes that photo in the shared
+// representative order. Disabled for a multi-selection because choosing one
+// shot from many is ambiguous; hidden entirely when nothing selected has a
+// species.
 // Rejected photos are excluded here too \u2014 they'd fail the server backstop
 // (`_photo_can_be_life_list_preference` rejects `flag = 'rejected'`) and only
 // produce an error toast, so don't offer the action in the first place.

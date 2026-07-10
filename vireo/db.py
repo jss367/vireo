@@ -484,6 +484,9 @@ class Database:
         # ordered-highlights UI reads only species_highlights. Gated by
         # db_meta so it runs at most once per DB.
         self.backfill_species_highlights_from_legacy_preferences()
+        # Idempotent, one-shot: seed globally shared species representatives
+        # from the older per-workspace single-preference rows.
+        self.backfill_species_representatives_from_legacy_preferences()
         # Restore last-used workspace, or fall back to Default
         last = self.conn.execute(
             "SELECT id FROM workspaces ORDER BY CASE WHEN last_opened_at IS NULL THEN 0 ELSE 1 END DESC, last_opened_at DESC, id ASC LIMIT 1"
@@ -862,6 +865,16 @@ class Database:
                 PRIMARY KEY (workspace_id, purpose, species)
             );
 
+            CREATE TABLE IF NOT EXISTS species_representatives (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                species        TEXT NOT NULL,
+                photo_id       INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                selected_order INTEGER NOT NULL,
+                created_at     TEXT DEFAULT (datetime('now')),
+                updated_at     TEXT DEFAULT (datetime('now')),
+                UNIQUE(species, photo_id)
+            );
+
             CREATE TABLE IF NOT EXISTS species_highlights (
                 workspace_id  INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
                 species       TEXT NOT NULL,
@@ -954,6 +967,10 @@ class Database:
                 ON photo_color_labels(workspace_id);
             CREATE INDEX IF NOT EXISTS idx_photo_preferences_photo
                 ON photo_preferences(photo_id);
+            CREATE INDEX IF NOT EXISTS idx_species_representatives_photo
+                ON species_representatives(photo_id);
+            CREATE INDEX IF NOT EXISTS idx_species_representatives_order
+                ON species_representatives(species, selected_order DESC);
             CREATE INDEX IF NOT EXISTS idx_species_highlights_photo
                 ON species_highlights(photo_id);
             CREATE INDEX IF NOT EXISTS idx_species_highlights_rank
@@ -2339,6 +2356,7 @@ class Database:
         self.conn.commit()
 
     _SPECIES_HIGHLIGHTS_BACKFILL_KEY = "species_highlights_from_preferences_backfill"
+    _SPECIES_REPRESENTATIVES_BACKFILL_KEY = "species_representatives_from_preferences_backfill"
 
     def backfill_species_highlights_from_legacy_preferences(self):
         """One-shot backfill: seed ``species_highlights`` from legacy
@@ -2397,6 +2415,60 @@ class Database:
         self.conn.execute(
             "INSERT INTO db_meta(key, value) VALUES (?, '1')",
             (self._SPECIES_HIGHLIGHTS_BACKFILL_KEY,),
+        )
+        self.conn.commit()
+
+    def _next_species_representative_order(self):
+        row = self.conn.execute(
+            "SELECT COALESCE(MAX(selected_order), 0) + 1 AS next_order "
+            "FROM species_representatives"
+        ).fetchone()
+        return int(row["next_order"] or 1)
+
+    def backfill_species_representatives_from_legacy_preferences(self):
+        """One-shot backfill from old per-workspace representative rows.
+
+        The current model stores representative markings globally and allows
+        multiple photos per species. Older databases stored one row per
+        (workspace, purpose, species), with ``species_representative`` taking
+        precedence over ``life_list`` and ``highlights`` fallbacks. Copy those
+        choices into the global list once so curated picks persist across
+        workspaces after upgrade.
+        """
+        marker = self.conn.execute(
+            "SELECT value FROM db_meta WHERE key = ?",
+            (self._SPECIES_REPRESENTATIVES_BACKFILL_KEY,),
+        ).fetchone()
+        if marker is not None:
+            return
+        try:
+            rows = self.conn.execute(
+                """SELECT workspace_id, purpose, species, photo_id,
+                          COALESCE(updated_at, created_at, '') AS ts
+                   FROM photo_preferences
+                   WHERE purpose IN ('species_representative', 'life_list', 'highlights')
+                   ORDER BY ts,
+                            workspace_id,
+                            species,
+                            CASE purpose
+                              WHEN 'highlights' THEN 0
+                              WHEN 'life_list' THEN 1
+                              ELSE 2
+                            END"""
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+        for row in rows:
+            order = self._next_species_representative_order()
+            self.conn.execute(
+                """INSERT OR IGNORE INTO species_representatives
+                       (species, photo_id, selected_order, created_at, updated_at)
+                   VALUES (?, ?, ?, datetime('now'), datetime('now'))""",
+                (row["species"], row["photo_id"], order),
+            )
+        self.conn.execute(
+            "INSERT INTO db_meta(key, value) VALUES (?, '1')",
+            (self._SPECIES_REPRESENTATIVES_BACKFILL_KEY,),
         )
         self.conn.commit()
 
@@ -9848,31 +9920,55 @@ class Database:
         ).fetchall()
         return {r["species"]: r["photo_id"] for r in rows}
 
-    def get_species_representatives(self):
-        """Return representative photo preferences with legacy fallback.
+    def get_species_representative_lists(self):
+        """Return {species: [photo_id, ...]} representative photos.
 
-        ``species_representative`` is the canonical purpose. Existing
-        ``life_list`` and ``highlights`` rows are still read as fallbacks so
-        older libraries keep their explicit curation choices.
+        Representative markings are global, but this read is still scoped to
+        the active workspace: only non-rejected photos visible through the
+        workspace's folders are returned. Life List callers still apply these
+        rows only to actual species buckets, so a representative row alone
+        does not make an untagged species appear on the list. Lists are
+        newest-selection first, so item 0 is the main representative.
         """
         ws = self._ws_id()
         rows = self.conn.execute(
-            """SELECT species, photo_id, purpose
-               FROM photo_preferences
-               WHERE workspace_id = ?
-                 AND purpose IN ('species_representative', 'life_list', 'highlights')
-               ORDER BY species,
-                        CASE purpose
-                          WHEN 'species_representative' THEN 0
-                          WHEN 'life_list' THEN 1
-                          ELSE 2
-                        END""",
+            """SELECT sr.species, sr.photo_id
+               FROM species_representatives sr
+               JOIN photos p ON p.id = sr.photo_id
+                AND COALESCE(p.flag, 'none') != 'rejected'
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                AND wf.workspace_id = ?
+               JOIN folders f ON f.id = p.folder_id
+                AND f.status IN ('ok', 'partial')
+               ORDER BY sr.species, sr.selected_order DESC, sr.id DESC""",
             (ws,),
         ).fetchall()
         result = {}
-        for r in rows:
-            result.setdefault(r["species"], r["photo_id"])
+        for row in rows:
+            ids = result.setdefault(row["species"], [])
+            if row["photo_id"] not in ids:
+                ids.append(row["photo_id"])
         return result
+
+    def get_species_representatives(self):
+        """Return {species: main_photo_id} for compatibility callers."""
+        return {
+            species: photo_ids[0]
+            for species, photo_ids in self.get_species_representative_lists().items()
+            if photo_ids
+        }
+
+    def _set_global_species_representative(self, species, photo_id):
+        order = self._next_species_representative_order()
+        self.conn.execute(
+            """INSERT INTO species_representatives
+                   (species, photo_id, selected_order, created_at, updated_at)
+               VALUES (?, ?, ?, datetime('now'), datetime('now'))
+               ON CONFLICT(species, photo_id) DO UPDATE SET
+                   selected_order = excluded.selected_order,
+                   updated_at = excluded.updated_at""",
+            (species, photo_id, order),
+        )
 
     def set_photo_preference(self, purpose, species, photo_id, _commit=True):
         """Set the preferred photo for a species/purpose in this workspace."""
@@ -9886,11 +9982,19 @@ class Database:
                    updated_at = excluded.updated_at""",
             (ws, purpose, species, photo_id),
         )
+        if purpose in {"species_representative", "life_list", "highlights"}:
+            self._set_global_species_representative(species, photo_id)
         if _commit:
             self.conn.commit()
 
     def set_species_representative(self, species, photo_id, _commit=True):
-        """Set the one-photo representative for a species in this workspace."""
+        """Mark a photo as a representative for a species globally.
+
+        Multiple photos can represent a species. Re-selecting an existing
+        representative promotes it by assigning the newest selection order.
+        A compatibility ``photo_preferences`` row is kept for older callers
+        that still expect one main representative in the active workspace.
+        """
         self.set_photo_preference(
             "species_representative", species, photo_id, _commit=_commit
         )
@@ -9907,8 +10011,12 @@ class Database:
             self.conn.commit()
 
     def clear_species_representative(self, species, _commit=True):
-        """Clear canonical and legacy representative preferences for a species."""
+        """Clear all representative photos for a species globally."""
         ws = self._ws_id()
+        self.conn.execute(
+            "DELETE FROM species_representatives WHERE species = ?",
+            (species,),
+        )
         self.conn.execute(
             """DELETE FROM photo_preferences
                WHERE workspace_id = ?
@@ -10033,6 +10141,14 @@ class Database:
         """Rename stored representative-photo preferences across workspaces."""
         if not old_species or not new_species or old_species == new_species:
             return 0
+        global_photo_ids = None
+        if photo_workspace_pairs is not None:
+            global_photo_ids = sorted({
+                photo_id for photo_id, _workspace_id in photo_workspace_pairs
+            })
+        self.rename_species_representatives_species(
+            old_species, new_species, photo_ids=global_photo_ids, _commit=False
+        )
         if photo_workspace_pairs is not None:
             moved = 0
             seen = set()
@@ -10078,6 +10194,48 @@ class Database:
         self.conn.execute(
             "DELETE FROM photo_preferences WHERE species = ?",
             (old_species,),
+        )
+        if _commit:
+            self.conn.commit()
+        return cur.rowcount
+
+    def rename_species_representatives_species(
+        self, old_species, new_species, photo_ids=None, _commit=True,
+    ):
+        """Rename global representative rows for a species.
+
+        ``photo_ids`` limits the rename to selected photos, used by relabel
+        operations that only retag a subset of a species bucket.
+        """
+        if not old_species or not new_species or old_species == new_species:
+            return 0
+        params = [new_species, old_species]
+        where = "species = ?"
+        if photo_ids is not None:
+            ids = [int(pid) for pid in photo_ids]
+            if not ids:
+                return 0
+            placeholders = ",".join("?" for _ in ids)
+            where += f" AND photo_id IN ({placeholders})"
+            params.extend(ids)
+        cur = self.conn.execute(
+            f"""INSERT OR IGNORE INTO species_representatives
+                   (species, photo_id, selected_order, created_at, updated_at)
+                SELECT ?, photo_id, selected_order, created_at, datetime('now')
+                FROM species_representatives
+                WHERE {where}""",
+            params,
+        )
+        delete_params = [old_species]
+        delete_where = "species = ?"
+        if photo_ids is not None:
+            ids = [int(pid) for pid in photo_ids]
+            placeholders = ",".join("?" for _ in ids)
+            delete_where += f" AND photo_id IN ({placeholders})"
+            delete_params.extend(ids)
+        self.conn.execute(
+            f"DELETE FROM species_representatives WHERE {delete_where}",
+            delete_params,
         )
         if _commit:
             self.conn.commit()
@@ -12700,6 +12858,11 @@ class Database:
                          AND species = ? AND photo_id = ?""",
                     (workspace_id, purpose, new_species, photo_id),
                 )
+            self.conn.execute(
+                """DELETE FROM species_representatives
+                   WHERE species = ? AND photo_id = ?""",
+                (new_species, photo_id),
+            )
             # Restore the old-species preference unconditionally. The
             # previous gate on finding a `(new_species, purpose,
             # photo_id)` row skipped restore when the relabel collided
@@ -12712,6 +12875,7 @@ class Database:
                    VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
                 (workspace_id, purpose, old_species, photo_id),
             )
+            self._set_global_species_representative(old_species, photo_id)
 
     def _reapply_relabel_curation(
         self, workspace_id, photo_id, new_species, curation,
@@ -12787,12 +12951,18 @@ class Database:
                 (workspace_id, purpose, old_species, photo_id),
             )
             self.conn.execute(
+                """DELETE FROM species_representatives
+                   WHERE species = ? AND photo_id = ?""",
+                (old_species, photo_id),
+            )
+            self.conn.execute(
                 """INSERT OR IGNORE INTO photo_preferences
                        (workspace_id, purpose, species, photo_id,
                         created_at, updated_at)
                    VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
                 (workspace_id, purpose, new_species, photo_id),
             )
+            self._set_global_species_representative(new_species, photo_id)
 
     def _edit_old_value_meta(self, old_value):
         """Parse edit item old_value, including newer JSON metadata payloads."""

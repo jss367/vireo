@@ -163,6 +163,75 @@ def test_life_list_photo_preference_overrides_best_photo(life_app):
     assert [p["id"] for p in cardinal["photos"][:2]] == [ids["p1"], ids["p2"]]
 
 
+def test_representatives_are_global_but_filtered_to_workspace(life_app):
+    app, db, _ = life_app
+    client = app.test_client()
+    jan_ws = db.create_workspace("January")
+    feb_ws = db.create_workspace("February")
+    year_ws = db.create_workspace("Whole Year")
+    species = "Rollup Cardinal"
+    kid = db.add_keyword(species, is_species=True)
+
+    db.set_active_workspace(jan_ws)
+    jan_fid = db.add_folder("/photos/january", name="january")
+    jan_pid = db.add_photo(
+        folder_id=jan_fid, filename="jan-cardinal.jpg", extension=".jpg",
+        file_size=1000, file_mtime=10.0, timestamp="2024-01-10T09:00:00",
+    )
+    db.tag_photo(jan_pid, kid)
+    db.set_species_representative(species, jan_pid)
+
+    db.set_active_workspace(feb_ws)
+    feb_fid = db.add_folder("/photos/february", name="february")
+    feb_pid = db.add_photo(
+        folder_id=feb_fid, filename="feb-cardinal.jpg", extension=".jpg",
+        file_size=1000, file_mtime=20.0, timestamp="2024-02-10T09:00:00",
+    )
+    db.tag_photo(feb_pid, kid)
+    db.set_species_representative(species, feb_pid)
+
+    db.add_workspace_folder(year_ws, jan_fid)
+    db.add_workspace_folder(year_ws, feb_fid)
+
+    db.set_active_workspace(jan_ws)
+    assert db.get_species_representative_lists()[species] == [jan_pid]
+    db.set_active_workspace(feb_ws)
+    assert db.get_species_representative_lists()[species] == [feb_pid]
+    db.set_active_workspace(year_ws)
+    assert db.get_species_representative_lists()[species] == [feb_pid, jan_pid]
+
+    resp = client.post(f"/api/workspaces/{year_ws}/activate")
+    assert resp.status_code == 200
+    data = _get_life_list(app)
+    entry = _entry(data, species)
+    assert entry["best"]["id"] == feb_pid
+    assert entry["best"]["is_species_representative"] is True
+    assert entry["best_source"] == "representative"
+    assert [p["id"] for p in entry["photos"][:2]] == [feb_pid, jan_pid]
+    assert [p["is_species_representative"] for p in entry["photos"][:2]] == [
+        True, True,
+    ]
+
+
+def test_reselecting_representative_promotes_it(life_app):
+    app, db, ids = life_app
+    db.set_species_representative("Northern Cardinal", ids["p1"])
+    db.set_species_representative("Northern Cardinal", ids["p2"])
+    assert db.get_species_representative_lists()["Northern Cardinal"] == [
+        ids["p2"], ids["p1"],
+    ]
+
+    db.set_species_representative("Northern Cardinal", ids["p1"])
+    assert db.get_species_representative_lists()["Northern Cardinal"] == [
+        ids["p1"], ids["p2"],
+    ]
+
+    data = _get_life_list(app)
+    cardinal = _entry(data, "Northern Cardinal")
+    assert cardinal["best"]["id"] == ids["p1"]
+    assert [p["id"] for p in cardinal["photos"][:2]] == [ids["p1"], ids["p2"]]
+
+
 def test_life_list_photo_preference_must_match_species(life_app):
     app, _, ids = life_app
     resp = app.test_client().post("/api/photo-preferences", json={
