@@ -5870,6 +5870,7 @@ document.addEventListener('contextmenu', function(e) {
   if (!pid) return;
   e.preventDefault();
   if (card.classList.contains('grm-card') && typeof grmState !== 'undefined' && grmState) {
+    var prevSelected = grmState.selected;
     grmState.selected = pid;
     if (!grmState.selectedIds) grmState.selectedIds = new Set();
     if (!grmState.selectedIds.has(pid)) {
@@ -5877,6 +5878,11 @@ document.addEventListener('contextmenu', function(e) {
     }
     grmState.selectionAnchor = pid;
     renderGroupModal();
+    // Keep the right-hand loupe in sync with the newly selected card so it
+    // doesn't stay on the previous photo if the user dismisses the menu.
+    if (prevSelected !== pid && typeof grmRefreshSelectedLoupe === 'function') {
+      grmRefreshSelectedLoupe();
+    }
   }
   if (typeof openContextMenu === 'function') {
     openContextMenu(e, buildPipelinePhotoContextMenu(pid));
