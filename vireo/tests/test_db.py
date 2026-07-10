@@ -10463,6 +10463,18 @@ def test_create_and_get_new_images_snapshot(tmp_path):
     assert sorted(snap["file_paths"]) == sorted(paths)
 
 
+def test_create_new_images_snapshot_file_count_matches_unique_paths(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    paths = ["/tmp/a/IMG_001.JPG", "/tmp/a/IMG_001.JPG", "/tmp/b/IMG_002.JPG"]
+
+    snap_id = db.create_new_images_snapshot(paths)
+    snap = db.get_new_images_snapshot(snap_id)
+
+    assert snap["file_count"] == 2
+    assert snap["file_paths"] == ["/tmp/a/IMG_001.JPG", "/tmp/b/IMG_002.JPG"]
+
+
 def test_get_snapshot_from_different_workspace_returns_none(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
