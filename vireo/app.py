@@ -15371,6 +15371,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 destination=destination,
                 progress_cb=progress_cb,
             )
+            if int(result.get("moved") or 0) > 0:
+                try:
+                    _invalidate_missing_originals_cache()
+                except Exception:
+                    log.exception(
+                        "Failed to invalidate missing-originals cache "
+                        "after move-photos job",
+                    )
 
             if rule_id:
                 thread_db.touch_move_rule(rule_id)
@@ -15916,6 +15924,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             f"; cleanup failed: {cleanup_error}"
                             if cleanup_error else ""
                         )
+                    )
+            if result.get("ok"):
+                try:
+                    _invalidate_missing_originals_cache()
+                except Exception:
+                    log.exception(
+                        "Failed to invalidate missing-originals cache "
+                        "after move-folder job",
                     )
             return result
 
