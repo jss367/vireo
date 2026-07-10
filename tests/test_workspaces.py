@@ -984,6 +984,57 @@ def test_merge_duplicate_keywords_scoped_by_workspace(db):
     assert sparrows == 2
 
 
+def test_add_keyword_normalizes_stray_edge_quotes(db):
+    """New keywords should not preserve accidental leading/trailing quote marks."""
+    keyword_id = db.add_keyword("\u2018apapane'")
+
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
+    ).fetchone()
+    assert row["name"] == "apapane"
+    assert db.add_keyword("apapane") == keyword_id
+
+
+def test_merge_duplicate_keywords_normalizes_stray_edge_quotes(db):
+    """Cleanup should collapse existing edge-quote variants to a clean spelling."""
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos/a", name="a")
+    db.add_workspace_folder(ws, fid)
+    pid_a = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    pid_b = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    db.conn.execute("INSERT INTO keywords (name) VALUES (?)", ("\u2018apapane",))
+    db.conn.execute("INSERT INTO keywords (name) VALUES ('apapane')")
+    db.conn.commit()
+    quoted = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("\u2018apapane",)
+    ).fetchone()[0]
+    clean = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'apapane'"
+    ).fetchone()[0]
+    db.tag_photo(pid_a, quoted)
+    db.tag_photo(pid_b, clean)
+
+    merged = db.merge_duplicate_keywords()
+
+    assert merged == 1
+    rows = db.conn.execute(
+        "SELECT id, name FROM keywords WHERE name LIKE '%apapane'"
+    ).fetchall()
+    assert [(row["id"], row["name"]) for row in rows] == [(clean, "apapane")]
+    tagged = {
+        row["keyword_id"]
+        for row in db.conn.execute(
+            "SELECT keyword_id FROM photo_keywords WHERE photo_id IN (?, ?)",
+            (pid_a, pid_b),
+        ).fetchall()
+    }
+    assert tagged == {clean}
+
+
 def test_merge_duplicate_keywords_respects_parent_and_type(db):
     """Same-name keywords under different parents (Springfield, IL vs MO) or
     with different types are distinct by design and must NOT merge; only

@@ -10,6 +10,7 @@ import unicodedata
 import uuid
 from datetime import datetime
 
+from keyword_normalization import keyword_match_key, normalize_keyword_display
 from new_images import get_shared_cache
 
 log = logging.getLogger(__name__)
@@ -8366,10 +8367,11 @@ class Database:
         return None
 
     def add_keyword(self, name, parent_id=None, is_species=False, kw_type=None, _commit=True):
-        """Insert a keyword. Returns existing id if duplicate (case-insensitive).
+        """Insert a keyword. Returns existing id if duplicate after normalization.
 
-        If a keyword with the same name but different casing exists, reuses
-        the existing one rather than creating a duplicate.
+        If a keyword with the same normalized name but different casing or
+        stray edge quotes exists, reuses the existing one rather than creating
+        a duplicate.
 
         For new species keywords, auto-detects the user's casing convention
         from existing keywords and applies it (unless overridden by config).
@@ -8384,6 +8386,7 @@ class Database:
         """
         if kw_type is not None and kw_type not in KEYWORD_TYPES:
             raise ValueError(f"invalid keyword type: {kw_type!r}")
+        name = normalize_keyword_display(name)
         # Reconcile is_species and kw_type to keep the legacy column coherent
         # with the type enum.
         if is_species and kw_type is not None and kw_type != 'taxonomy':
@@ -9090,10 +9093,10 @@ class Database:
             )
 
     def merge_duplicate_keywords(self):
-        """Find and merge case-insensitive duplicate keywords in active workspace.
+        """Find and merge normalized duplicate keywords in active workspace.
 
-        Duplicates are grouped by (LOWER(name), parent_id, type) — name alone
-        is not identity: the location system deliberately creates same-name
+        Duplicates are grouped by (normalized name, parent_id, type) — name
+        alone is not identity: the location system deliberately creates same-name
         keywords under different parents (Springfield under Illinois vs.
         Missouri), and same-name keywords of different types (species vs.
         genre) are distinct by design. Merging across those slots retags
@@ -9106,12 +9109,12 @@ class Database:
         own; walking up from the tagged leaves brings them in scope while
         still leaving other workspaces' keywords untouched.
 
-        Keeps the lowest ID (earliest created), moves all photo associations,
-        reparents any child keywords onto the survivor (the parent_id FK
-        would otherwise block the DELETE), and deletes the duplicates.
-        Runs passes until convergence so case-duplicate parent chains
-        ("Birds">"Heron" vs "birds">"heron") fully collapse: the children
-        only become same-parent duplicates after their parents merge.
+        Moves all photo associations, reparents any child keywords onto the
+        survivor (the parent_id FK would otherwise block the DELETE), and
+        deletes the duplicates. Runs passes until convergence so duplicate
+        parent chains ("Birds">"Heron" vs "birds">"heron") fully collapse:
+        the children only become same-parent duplicates after their parents
+        merge.
         The whole pass is all-or-nothing: an exception rolls back every
         pending merge instead of leaving a half-merged tree on the
         connection for a later unrelated commit to persist.
@@ -9132,7 +9135,7 @@ class Database:
         """Convergence loop for merge_duplicate_keywords. Caller commits."""
         total_merged = 0
         while True:
-            dupes = self.conn.execute(
+            rows = self.conn.execute(
                 """WITH RECURSIVE
                    tagged AS (
                        SELECT DISTINCT pk.keyword_id AS id
@@ -9149,20 +9152,36 @@ class Database:
                        JOIN in_scope s ON s.id = k.id
                        WHERE k.parent_id IS NOT NULL
                    )
-                   SELECT MIN(k.id) as keep_id,
-                          GROUP_CONCAT(k.id) as all_ids
+                   SELECT k.id, k.name, k.parent_id, k.type
                    FROM keywords k
-                   JOIN in_scope s ON s.id = k.id
-                   GROUP BY LOWER(k.name), k.parent_id, k.type
-                   HAVING COUNT(k.id) > 1""",
+                   JOIN in_scope s ON s.id = k.id""",
                 (ws,),
             ).fetchall()
+            grouped = {}
+            for row in rows:
+                key = keyword_match_key(row["name"])
+                if not key:
+                    continue
+                grouped.setdefault((key, row["parent_id"], row["type"]), []).append(row)
+            dupes = [
+                group for group in grouped.values()
+                if len({row["id"] for row in group}) > 1
+            ]
             if not dupes:
                 break
 
-            for d in dupes:
-                keep_id = d["keep_id"]
-                all_ids = [int(x) for x in d["all_ids"].split(",")]
+            for group in dupes:
+                # Prefer an already-clean spelling when one exists; otherwise
+                # keep the earliest row to preserve the old case-only behavior.
+                ordered = sorted(
+                    group,
+                    key=lambda row: (
+                        normalize_keyword_display(row["name"]) != row["name"],
+                        row["id"],
+                    ),
+                )
+                keep_id = ordered[0]["id"]
+                all_ids = [row["id"] for row in ordered]
 
                 # A prior group in this pass can recursively delete ids
                 # from later groups: merging duplicate parents cascades
@@ -9183,10 +9202,29 @@ class Database:
                     continue
                 remove_ids = [x for x in all_ids if x != keep_id and x in alive]
 
+                self._normalize_keyword_row_name(keep_id)
                 for rid in remove_ids:
                     total_merged += self._merge_keyword_into(rid, keep_id)
 
         return total_merged
+
+    def _normalize_keyword_row_name(self, keyword_id):
+        """Trim stray edge punctuation from a surviving keyword row name."""
+        row = self.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
+        ).fetchone()
+        if row is None:
+            return
+        cleaned = normalize_keyword_display(row["name"])
+        if not cleaned or cleaned == row["name"]:
+            return
+        # A same-name row in a different dedupe boundary can still occupy the
+        # table-level UNIQUE(name, parent_id) slot. In that case the links
+        # still merge correctly; keep the stored spelling unchanged.
+        with contextlib.suppress(sqlite3.IntegrityError):
+            self.conn.execute(
+                "UPDATE keywords SET name = ? WHERE id = ?", (cleaned, keyword_id)
+            )
 
     def _merge_keyword_into(self, src_id, dst_id):
         """Merge keyword ``src_id`` into ``dst_id`` and delete the source.

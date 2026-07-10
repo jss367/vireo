@@ -47,6 +47,7 @@ from flask import (
     send_from_directory,
 )
 from jobs import SLOT_CAP, JobRunner, LogBroadcaster
+from keyword_normalization import keyword_match_key, normalize_keyword_display
 from preview_cache import (
     evict_if_over_quota as evict_preview_cache_if_over_quota,
 )
@@ -4099,44 +4100,50 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/keywords/duplicates")
     def api_keyword_duplicates():
-        """Find case-insensitive duplicate keywords within current workspace."""
+        """Find normalized duplicate keywords within current workspace."""
         db = _get_db()
         ws = db._active_workspace_id
-        dupes = db.conn.execute(
-            """SELECT LOWER(k.name) as lname, GROUP_CONCAT(k.id) as ids,
-                      GROUP_CONCAT(k.name, ' | ') as names, COUNT(DISTINCT k.id) as cnt
+        rows = db.conn.execute(
+            """SELECT k.id, k.name, k.parent_id, k.type,
+                      COUNT(DISTINCT pk.photo_id) as photo_count
                FROM keywords k
                JOIN photo_keywords pk ON pk.keyword_id = k.id
                JOIN photos p ON p.id = pk.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                WHERE wf.workspace_id = ?
-               GROUP BY LOWER(k.name) HAVING COUNT(DISTINCT k.id) > 1""",
+               GROUP BY k.id, k.name, k.parent_id, k.type""",
             (ws,),
         ).fetchall()
+        grouped = {}
+        for row in rows:
+            key = keyword_match_key(row["name"])
+            if not key:
+                continue
+            grouped.setdefault((key, row["parent_id"], row["type"]), []).append(row)
         results = []
-        for d in dupes:
-            ids = list(set(int(x) for x in d["ids"].split(",")))
-            # Count photos per variant within this workspace
-            variants = []
-            for kid in ids:
-                row = db.conn.execute(
-                    """SELECT k.name, COUNT(pk.photo_id) as cnt
-                       FROM keywords k
-                       JOIN photo_keywords pk ON pk.keyword_id = k.id
-                       JOIN photos p ON p.id = pk.photo_id
-                       JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                       WHERE k.id = ? AND wf.workspace_id = ?""",
-                    (kid, ws),
-                ).fetchone()
-                if row and row["cnt"] > 0:
-                    variants.append({"id": kid, "name": row["name"], "photo_count": row["cnt"]})
+        for group in grouped.values():
+            variants = [
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "photo_count": row["photo_count"],
+                }
+                for row in sorted(
+                    group,
+                    key=lambda row: (
+                        normalize_keyword_display(row["name"]) != row["name"],
+                        row["id"],
+                    ),
+                )
+                if row["photo_count"] > 0
+            ]
             if len(variants) > 1:
                 results.append({"variants": variants, "keep": variants[0]["name"]})
         return jsonify(results)
 
     @app.route("/api/keywords/clean", methods=["POST"])
     def api_clean_keywords():
-        """Merge case-insensitive duplicate keywords."""
+        """Merge normalized duplicate keywords."""
         db = _get_db()
         merged = db.merge_duplicate_keywords()
         log.info("Keyword cleanup: merged %d duplicates", merged)
@@ -5101,7 +5108,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             chunk = photo_ids[i:i + batch_size]
             placeholders = ",".join("?" for _ in chunk)
             rows.extend(db.conn.execute(
-                f"""SELECT pk.photo_id, k.id, k.name, k.type
+                f"""SELECT pk.photo_id, k.id, k.name, k.parent_id, k.type
                     FROM photo_keywords pk
                     JOIN keywords k ON k.id = pk.keyword_id
                     WHERE pk.photo_id IN ({placeholders})
@@ -5112,15 +5119,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         selected_count = len(photo_ids)
         by_keyword = {}
         for row in rows:
+            match_key = keyword_match_key(row["name"])
+            if not match_key:
+                continue
+            key = (match_key, row["parent_id"], row["type"])
+            display_name = normalize_keyword_display(row["name"]) or row["name"]
+            variant_rank = (row["name"] != display_name, row["id"])
             entry = by_keyword.setdefault(
-                row["id"],
+                key,
                 {
                     "id": row["id"],
-                    "name": row["name"],
+                    "name": display_name,
                     "type": row["type"],
+                    "_rank": variant_rank,
                     "photo_ids": set(),
                 },
             )
+            if variant_rank < entry["_rank"]:
+                entry["id"] = row["id"]
+                entry["name"] = display_name
+                entry["type"] = row["type"]
+                entry["_rank"] = variant_rank
             entry["photo_ids"].add(row["photo_id"])
 
         suggestions = []

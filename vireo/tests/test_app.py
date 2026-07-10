@@ -3157,6 +3157,36 @@ def test_keyword_duplicates_scoped_by_workspace(app_and_db):
         assert "sparrow" not in dupe_names
 
 
+def test_keyword_duplicates_reports_edge_quote_variants(app_and_db):
+    """Duplicate keyword listing should use the same normalization as cleanup."""
+    app, db = app_and_db
+    folder_id = db.get_folder_tree()[0]["id"]
+    pid_a = db.add_photo(
+        folder_id, "quote-dupe-a.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    pid_b = db.add_photo(
+        folder_id, "quote-dupe-b.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    clean_id = db.add_keyword("apapane")
+    quoted_id = db.conn.execute(
+        "INSERT INTO keywords (name) VALUES (?)", ("\u2018apapane",)
+    ).lastrowid
+    db.conn.commit()
+    db.tag_photo(pid_a, clean_id)
+    db.tag_photo(pid_b, quoted_id)
+
+    resp = app.test_client().get("/api/keywords/duplicates")
+
+    assert resp.status_code == 200
+    groups = resp.get_json()
+    apapane = next(
+        group for group in groups
+        if {variant["name"] for variant in group["variants"]}
+        == {"apapane", "\u2018apapane"}
+    )
+    assert apapane["keep"] == "apapane"
+
+
 def test_all_keywords_scoped_by_workspace(app_and_db):
     """GET /api/keywords/all only returns keywords used in the active workspace, plus ancestors."""
     app, db = app_and_db
@@ -4350,6 +4380,52 @@ def test_selection_keyword_suggestions_return_partial_keywords(app_and_db):
     assert sorted(by_name["Cardinal"]["missing_photo_ids"]) == sorted(ids[1:])
     assert by_name["Sparrow"]["count"] == 1
     assert by_name["Sparrow"]["missing_count"] == 2
+
+
+def test_selection_keyword_suggestions_normalize_edge_quotes(app_and_db):
+    """Stray leading quote variants should count as the same selected keyword."""
+    app, db = app_and_db
+    folder_id = db.get_folder_tree()[0]["id"]
+    ids = [
+        db.add_photo(
+            folder_id,
+            f"quote-normalize-{idx}.jpg",
+            extension=".jpg",
+            file_size=1,
+            file_mtime=1.0,
+        )
+        for idx in range(3)
+    ]
+    clean_id = db.add_keyword("apapane")
+    quoted_id = db.conn.execute(
+        "INSERT INTO keywords (name) VALUES (?)", ("\u2018apapane",)
+    ).lastrowid
+    db.conn.commit()
+    db.tag_photo(ids[0], clean_id)
+    db.tag_photo(ids[1], quoted_id)
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/selection/keyword-suggestions",
+        json={"photo_ids": ids[:2]},
+        content_type="application/json",
+    )
+
+    assert resp.status_code == 200
+    assert resp.get_json()["suggestions"] == []
+
+    resp = client.post(
+        "/api/selection/keyword-suggestions",
+        json={"photo_ids": ids},
+        content_type="application/json",
+    )
+
+    assert resp.status_code == 200
+    by_name = {item["name"]: item for item in resp.get_json()["suggestions"]}
+    assert sorted(by_name) == ["apapane"]
+    assert by_name["apapane"]["count"] == 2
+    assert by_name["apapane"]["missing_count"] == 1
+    assert by_name["apapane"]["missing_photo_ids"] == [ids[2]]
 
 
 def test_selection_keyword_suggestions_chunks_large_selection(app_and_db):
