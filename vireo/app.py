@@ -17059,9 +17059,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 vireo_dir=vireo_dir,
                 thumb_cache_dir=thumb_cache_dir,
             )
-            result = run_import_job(job, runner, db_path, active_ws, params)
-            _chain_after_import(job, result)
-            return result
+            try:
+                result = run_import_job(
+                    job, runner, db_path, active_ws, params,
+                )
+                _chain_after_import(job, result)
+                return result
+            finally:
+                # run_import_job can flip destination folders from
+                # ``missing`` to ``ok`` and re-scans landed files, so a
+                # ready /api/photos/missing cache computed before the
+                # import can now list rows whose originals are back on
+                # disk. The other scan/import paths (rescan-this-folder,
+                # import-in-place) already invalidate the cache after
+                # they touch disk; do the same here so the banner/modal
+                # stop offering ghosts for photos this job just restored,
+                # even if the job failed part-way (rows land
+                # incrementally). Best-effort: never let a cache-drop
+                # failure mask the underlying import result.
+                try:
+                    _invalidate_missing_originals_cache()
+                except Exception:
+                    log.exception(
+                        "Failed to invalidate missing-originals cache "
+                        "after import-photos job",
+                    )
 
         job_id = runner.start(
             "import", work, config=job_config, workspace_id=active_ws,

@@ -5149,6 +5149,89 @@ def test_import_in_place_invalidates_missing_originals_cache(
         assert key not in app._missing_originals_cache
 
 
+def test_import_photos_invalidates_missing_originals_cache(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """POST /api/jobs/import-photos must drop the Missing Originals cache
+    once ``run_import_job`` finishes.
+
+    Regression: unlike scan-in-place and import-in-place, the copy-mode
+    import job (``/api/jobs/import-photos``) never invalidated the
+    missing-originals cache after ``run_import_job`` completed. That job
+    can flip destination folders from ``missing`` to ``ok`` and scans
+    landed files, so a ready ghost payload survived even after the
+    import touched disk. Verify the ``finally`` block drops the cached
+    entry — and drops it even when the import raises, since rows land
+    incrementally.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    source = tmp_path / "import_src"
+    source.mkdir()
+    (source / "keep.jpg").write_bytes(b"stub")
+    destination = tmp_path / "archive"
+    destination.mkdir()
+
+    key = (db._db_path, db._active_workspace_id, None)
+
+    def _seed_cache():
+        with app._missing_originals_lock:
+            app._missing_originals_cache[key] = {
+                "photos": [{"id": 4444, "filename": "stale.jpg"}],
+                "checked_at": "2026-01-01T00:00:00Z",
+                "set_at": 0.0,
+            }
+
+    # Stub ``run_import_job`` so we exercise the endpoint's ``finally``
+    # block without depending on the real ingest+scan pipeline. The
+    # invariant under test is "cache is dropped after the job runs",
+    # not "the import succeeds"; we cover the happy path and the
+    # mid-run failure path separately.
+    import import_job as import_job_module
+
+    def _stub_run_import_job(job, runner, db_path, active_ws, params):
+        return {"ok": True, "photo_ids": []}
+
+    _seed_cache()
+    monkeypatch.setattr(
+        import_job_module, "run_import_job", _stub_run_import_job,
+    )
+    resp = client.post(
+        "/api/jobs/import-photos",
+        json={
+            "sources": [str(source)],
+            "destination": str(destination),
+            "after_import": None,
+        },
+    )
+    assert resp.status_code == 200, resp.get_json()
+    wait_for_job_via_client(client, resp.get_json()["job_id"])
+    with app._missing_originals_lock:
+        assert key not in app._missing_originals_cache
+
+    # Same invariant when the import raises: rows land incrementally,
+    # so a mid-run failure can still leave the cache stale.
+    _seed_cache()
+
+    def _boom(job, runner, db_path, active_ws, params):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(import_job_module, "run_import_job", _boom)
+    resp = client.post(
+        "/api/jobs/import-photos",
+        json={
+            "sources": [str(source)],
+            "destination": str(destination),
+            "after_import": None,
+        },
+    )
+    assert resp.status_code == 200, resp.get_json()
+    wait_for_job_via_client(client, resp.get_json()["job_id"])
+    with app._missing_originals_lock:
+        assert key not in app._missing_originals_cache
+
+
 def test_api_audit_remove_orphans_invalidates_missing_cache(app_and_db, tmp_path):
     """Removing orphaned photo rows must clear the Missing Originals cache.
 
