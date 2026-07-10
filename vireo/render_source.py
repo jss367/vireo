@@ -125,15 +125,27 @@ def scaled_recipe_source_dimensions(photo, max_size=None, exif_data=_UNSET):
     return width, height
 
 
-def rendered_recipe_long_edge(width, height, recipe):
-    """Return the rendered long edge after right-angle rotation and crop."""
+def rendered_recipe_dimensions(width, height, recipe):
+    """Return the rendered ``(width, height)`` after right-angle rotation and crop.
+
+    Kept in floats to match the multiplicative crop shape callers use, and to
+    let :func:`working_copy_satisfies_recipe_render` compare each axis
+    separately — a long-edge-only compare accepts a truncated short edge
+    (e.g. 6000x3376 for a 6000x4000 source) which drops content.
+    """
     rotation = (recipe or {}).get("rotation", 0)
     if rotation in (90, 270):
         width, height = height, width
     crop = (recipe or {}).get("crop") if recipe else None
     if crop:
-        return max(float(crop["w"]) * width, float(crop["h"]) * height)
-    return max(width, height)
+        return float(crop["w"]) * width, float(crop["h"]) * height
+    return float(width), float(height)
+
+
+def rendered_recipe_long_edge(width, height, recipe):
+    """Return the rendered long edge after right-angle rotation and crop."""
+    w, h = rendered_recipe_dimensions(width, height, recipe)
+    return max(w, h)
 
 
 def image_size_after_exif_orientation(img):
@@ -207,10 +219,16 @@ def working_copy_satisfies_recipe_render(
 ):
     """Return True when the working copy is large enough for this recipe render.
 
-    The working copy qualifies when its rendered long edge (after the recipe's
-    rotation/crop) covers ``min(max_size, original render long edge)`` — for a
-    typical capped request that's just ``max_size``, but a native-resolution
+    The working copy qualifies when its rendered dimensions (after the recipe's
+    rotation/crop) cover the rendered original scaled to ``max_size`` on both
+    axes — for a typical capped request that's just ``max_size`` on the long
+    edge with the short edge scaled proportionally, but a native-resolution
     request (the editor's 100% zoom) needs the full original.
+
+    Both axes are compared. A long-edge-only check accepts a working copy whose
+    short edge is truncated (e.g. a failed RAW decode's 6000x3376 embedded
+    preview for a 6000x4000 source) and silently drops that lost short-edge
+    content into the cached edit render.
     """
     wc_rel = photo_value(photo, "working_copy_path")
     if not wc_rel:
@@ -227,12 +245,22 @@ def working_copy_satisfies_recipe_render(
     original_w, original_h = recipe_source_dimensions(photo)
     if original_w <= 0 or original_h <= 0:
         return False
-    original_render_long = rendered_recipe_long_edge(original_w, original_h, recipe)
-    required_long = (
-        min(max_size, original_render_long) if max_size else original_render_long
+    orig_render_w, orig_render_h = rendered_recipe_dimensions(
+        original_w, original_h, recipe,
     )
-    wc_render_long = rendered_recipe_long_edge(wc_w, wc_h, recipe)
-    return wc_render_long >= required_long * (1.0 - rel_slack)
+    orig_render_long = max(orig_render_w, orig_render_h)
+    if max_size and orig_render_long > max_size:
+        scale = max_size / orig_render_long
+        required_w = orig_render_w * scale
+        required_h = orig_render_h * scale
+    else:
+        required_w = orig_render_w
+        required_h = orig_render_h
+    wc_render_w, wc_render_h = rendered_recipe_dimensions(wc_w, wc_h, recipe)
+    return not is_undersized(
+        wc_render_w, wc_render_h, required_w, required_h,
+        abs_slack=0, rel_slack=rel_slack,
+    )
 
 
 def path_satisfies_recipe_render(path, photo, recipe, max_size):

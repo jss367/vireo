@@ -116,3 +116,113 @@ def test_scaled_recipe_source_dimensions_scales_long_edge():
     photo = {"width": 6000, "height": 4000, "exif_data": None}
     assert rs.scaled_recipe_source_dimensions(photo, 3000) == (3000, 2000)
     assert rs.scaled_recipe_source_dimensions(photo, None) == (6000, 4000)
+
+
+def test_rendered_recipe_dimensions_no_recipe():
+    assert rs.rendered_recipe_dimensions(6000, 4000, None) == (6000.0, 4000.0)
+
+
+def test_rendered_recipe_dimensions_swaps_for_right_angle_rotation():
+    assert rs.rendered_recipe_dimensions(6000, 4000, {"rotation": 90}) == (4000.0, 6000.0)
+    assert rs.rendered_recipe_dimensions(6000, 4000, {"rotation": 270}) == (4000.0, 6000.0)
+
+
+def test_rendered_recipe_dimensions_applies_crop_after_rotation():
+    # 90° rotation swaps to (4000, 6000), then a 0.5x0.5 crop yields (2000, 3000).
+    result = rs.rendered_recipe_dimensions(
+        6000, 4000, {"rotation": 90, "crop": {"w": 0.5, "h": 0.5}},
+    )
+    assert result == (2000.0, 3000.0)
+
+
+def test_rendered_recipe_long_edge_matches_max_of_dimensions():
+    # Regression guard: long-edge helper must agree with both-axis helper.
+    for recipe in (
+        None,
+        {"rotation": 90},
+        {"rotation": 180, "crop": {"w": 0.5, "h": 0.75}},
+    ):
+        w, h = rs.rendered_recipe_dimensions(6000, 4000, recipe)
+        assert rs.rendered_recipe_long_edge(6000, 4000, recipe) == max(w, h)
+
+
+def _wc_photo(tmp_path, wc_size, orig_w, orig_h):
+    """Build a photo dict backed by a real JPEG on disk at ``wc_size``."""
+    wc_rel = "wc.jpg"
+    _img(*wc_size).save(str(tmp_path / wc_rel), "JPEG")
+    return {
+        "working_copy_path": wc_rel,
+        "width": orig_w,
+        "height": orig_h,
+        "exif_data": None,
+        "filename": "IMG.NEF",
+    }
+
+
+def test_working_copy_satisfies_recipe_render_full_size_wc_passes(tmp_path):
+    photo = _wc_photo(tmp_path, (6000, 4000), 6000, 4000)
+    assert rs.working_copy_satisfies_recipe_render(
+        photo, recipe=None, max_size=None, vireo_dir=str(tmp_path),
+    ) is True
+
+
+def test_working_copy_satisfies_recipe_render_rejects_short_edge_truncated(tmp_path):
+    # A failed-RAW embedded JPEG at 6000x3376 covers the long edge of a
+    # 6000x4000 source but loses ~15% of the short-edge content. A long-edge-
+    # only check would accept it; the both-axis check must reject it.
+    photo = _wc_photo(tmp_path, (6000, 3376), 6000, 4000)
+    assert rs.working_copy_satisfies_recipe_render(
+        photo, recipe=None, max_size=None, vireo_dir=str(tmp_path),
+    ) is False
+
+
+def test_working_copy_satisfies_recipe_render_short_edge_within_rel_slack(tmp_path):
+    # 1% rel_slack: 5940 is >= 6000*0.99 and 3960 is >= 4000*0.99, so it passes.
+    photo = _wc_photo(tmp_path, (5940, 3960), 6000, 4000)
+    assert rs.working_copy_satisfies_recipe_render(
+        photo, recipe=None, max_size=None, vireo_dir=str(tmp_path),
+        rel_slack=0.01,
+    ) is True
+    # But a WC whose short edge falls below rel_slack must still be rejected.
+    truncated = _wc_photo(tmp_path, (5940, 3376), 6000, 4000)
+    assert rs.working_copy_satisfies_recipe_render(
+        truncated, recipe=None, max_size=None, vireo_dir=str(tmp_path),
+        rel_slack=0.01,
+    ) is False
+
+
+def test_working_copy_satisfies_recipe_render_scales_by_max_size(tmp_path):
+    # For a max_size=3000 request over a 6000x4000 source, the required
+    # rendered dims are (3000, 2000). A 3000x2000 wc satisfies; a 3000x1688
+    # (short-edge truncated after scaling) wc does not.
+    ok = _wc_photo(tmp_path, (3000, 2000), 6000, 4000)
+    assert rs.working_copy_satisfies_recipe_render(
+        ok, recipe=None, max_size=3000, vireo_dir=str(tmp_path),
+    ) is True
+    truncated = _wc_photo(tmp_path, (3000, 1688), 6000, 4000)
+    assert rs.working_copy_satisfies_recipe_render(
+        truncated, recipe=None, max_size=3000, vireo_dir=str(tmp_path),
+    ) is False
+
+
+def test_working_copy_satisfies_recipe_render_respects_recipe_rotation(tmp_path):
+    # A 90° rotation swaps axes: a wc that looks correct pre-rotation but is
+    # short on the post-rotation axis must be rejected on both axes.
+    truncated = _wc_photo(tmp_path, (6000, 3376), 6000, 4000)
+    assert rs.working_copy_satisfies_recipe_render(
+        truncated, recipe={"rotation": 90}, max_size=None,
+        vireo_dir=str(tmp_path),
+    ) is False
+
+
+def test_working_copy_satisfies_recipe_render_missing_wc_path(tmp_path):
+    photo = {
+        "working_copy_path": "does-not-exist.jpg",
+        "width": 6000,
+        "height": 4000,
+        "exif_data": None,
+        "filename": "IMG.NEF",
+    }
+    assert rs.working_copy_satisfies_recipe_render(
+        photo, recipe=None, max_size=None, vireo_dir=str(tmp_path),
+    ) is False

@@ -21107,17 +21107,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # this often means rawpy.postprocess() failed and we fell back to
             # the embedded JPEG, which can be a few pixels shy of the full
             # sensor area. Re-extracting would yield the same fallback image,
-            # just slower — so trust the wc when it is within 1% of the
-            # believed dims. This tolerance is RAW-only: for JPEG/PNG/etc.,
-            # the wc being smaller means the cap downsized it, and re-extracting
-            # WILL produce more pixels.
+            # just slower — so trust the wc when BOTH axes are within 1% of
+            # the believed dims. A long-edge-only check would silently accept
+            # an embedded JPEG whose long edge is full but whose short edge is
+            # substantially truncated (e.g. 6000x3376 for a 6000x4000 source),
+            # then apply the edit recipe to a cropped image. This tolerance is
+            # RAW-only: for JPEG/PNG/etc., the wc being smaller means the cap
+            # downsized it, and re-extracting WILL produce more pixels.
             from image_loader import RAW_EXTENSIONS
             ext = os.path.splitext(photo["filename"])[1].lower()
-            if ext in RAW_EXTENSIONS and wc_w and wc_h:
-                wc_long = max(wc_w, wc_h)
-                orig_long = max(orig_w, orig_h)
-                if orig_long and wc_long >= orig_long * 0.99:
-                    return wc_path
+            if (
+                ext in RAW_EXTENSIONS
+                and wc_w and wc_h
+                and orig_w and orig_h
+                and wc_w >= orig_w * 0.99
+                and wc_h >= orig_h * 0.99
+            ):
+                return wc_path
             return None
 
         trusted_wc_path = _trusted_full_res_working_copy_path()

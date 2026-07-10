@@ -1204,6 +1204,59 @@ def test_original_trusts_raw_working_copy_even_when_smaller_than_stored_dims(app
         assert resp.data == f.read()
 
 
+def test_original_does_not_trust_raw_working_copy_with_truncated_short_edge(app_and_db):
+    """A RAW working copy whose short edge is substantially truncated must NOT
+    be served as full-res.
+
+    A failed libraw decode can leave an embedded JPEG whose long edge matches
+    the sensor but whose short edge is significantly smaller (e.g. 6000x3376
+    for a 6000x4000 source). A long-edge-only tolerance accepted that WC and
+    served it as the full-resolution original, silently dropping the missing
+    short-edge content. The trust check must reject it on the short edge so
+    the endpoint tries to recover the true full-res instead.
+    """
+    import config as cfg
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    cfg.save({**cfg.DEFAULTS, "working_copy_max_size": 0})
+
+    photos = db.get_photos()
+    pid = photos[0]["id"]
+
+    db.conn.execute(
+        "UPDATE photos SET filename=?, extension=?, width=6000, height=4000 WHERE id=?",
+        ("DSC_0001.NEF", ".nef", pid),
+    )
+    db.conn.commit()
+
+    from PIL import Image
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_path = os.path.join(working_dir, f"{pid}.jpg")
+    # Long edge matches sensor (6000) but short edge is ~15% short — the
+    # kind of truncated embedded JPEG rawpy hands back when demosaic fails.
+    Image.new("RGB", (6000, 3376), color=(200, 100, 50)).save(wc_path, "JPEG")
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=? WHERE id=?",
+        (f"working/{pid}.jpg", pid),
+    )
+    db.conn.commit()
+
+    resp = client.get(f"/photos/{pid}/original")
+
+    # Whatever the endpoint decides to do downstream (re-extract, 500, serve
+    # a companion), it must not have returned the truncated WC as-is.
+    with open(wc_path, "rb") as f:
+        truncated_bytes = f.read()
+    if resp.status_code == 200:
+        assert resp.data != truncated_bytes, (
+            "endpoint trusted a short-edge-truncated RAW working copy as full-res"
+        )
+
+
 def test_edited_original_uses_working_copy_after_current_raw_failure(
     client_with_photo, monkeypatch,
 ):
