@@ -175,6 +175,154 @@ def test_highlights_species_search_filters_buckets(live_server, page):
     )
 
 
+def test_highlights_general_search_filters_by_filename_folder_and_keyword(live_server, page):
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+
+    perch_kid = db.add_keyword("Perched portrait")
+    db.tag_photo(data["photos"][1], perch_kid)
+    db.conn.commit()
+
+    page.goto(f"{live_server['url']}/highlights", timeout=5000)
+    expect(page.locator(".highlights-card").first).to_be_visible(timeout=5000)
+
+    search = page.locator("#highlightSearch")
+    with page.expect_response(
+        lambda r: "/api/highlights?" in r.url and "q=hawk1" in r.url.lower()
+    ):
+        search.fill("hawk1")
+    expect(page.locator(".highlights-card")).to_have_count(1)
+    expect(page.locator(".highlights-card img")).to_have_attribute("alt", "hawk1.jpg")
+
+    with page.expect_response(
+        lambda r: "/api/highlights?" in r.url and "q=yard" in r.url.lower()
+    ):
+        search.fill("yard")
+    expect(page.locator(".bucket-title")).to_have_count(1)
+    expect(page.locator(".bucket-title").first).to_contain_text("American Robin")
+    expect(page.locator(".highlights-card")).to_have_count(2)
+
+    with page.expect_response(
+        lambda r: "/api/highlights?" in r.url and "q=perched" in r.url.lower()
+    ):
+        search.fill("perched")
+    expect(page.locator(".highlights-card")).to_have_count(1)
+    expect(page.locator(".highlights-card img")).to_have_attribute("alt", "hawk2.jpg")
+
+
+def test_highlights_unidentified_search_includes_low_confidence_predictions(live_server):
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+
+    pid = db.add_photo(
+        folder_id=data["folders"][0],
+        filename="low-conf-bird.jpg",
+        extension=".jpg",
+        file_size=1000,
+        file_mtime=1.0,
+        timestamp="2024-03-10T08:03:00",
+    )
+    db.conn.execute("UPDATE photos SET quality_score = 0.65 WHERE id = ?", (pid,))
+    det_id = db.save_detections(
+        pid,
+        [{
+            "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+            "confidence": 0.95,
+            "category": "animal",
+        }],
+        detector_model="test-detector",
+    )[0]
+    db.add_prediction(
+        detection_id=det_id,
+        species="Low-confidence Sparrow",
+        confidence=0.55,
+        model="BioCLIP-2",
+    )
+    db.conn.commit()
+
+    base = live_server["url"]
+    with urlopen(f"{base}/api/highlights?scope=workspace&q=unidentified") as resp:
+        payload = json.load(resp)
+
+    filenames = {p["filename"] for p in payload["unidentified"]["photos"]}
+    assert "low-conf-bird.jpg" in filenames
+
+
+def test_highlights_preference_updates_top_photo_timestamp(live_server):
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+
+    preferred = data["photos"][2]
+    db.set_photo_preference("highlights", "Red-tailed Hawk", preferred)
+
+    base = live_server["url"]
+    with urlopen(f"{base}/api/highlights?scope=workspace") as resp:
+        payload = json.load(resp)
+
+    hawk = next(b for b in payload["buckets"] if b["species"] == "Red-tailed Hawk")
+    assert hawk["photos"][0]["id"] == preferred
+    assert hawk["best_timestamp"] == "2024-03-10T08:02:00"
+
+
+def test_highlights_search_recomputes_bucket_accepted_status(live_server):
+    """Filtering a mixed bucket down to only confirmed photos must flip
+    ``is_accepted`` to True so the bucket loses the candidate badge and the
+    Confirmed-first sort places it above unconfirmed rows."""
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+
+    # Add a prediction-only photo that lands in the same "Red-tailed Hawk"
+    # bucket (predicted confidence above the default 0.70 threshold) so the
+    # bucket is a mix of confirmed (keyword-tagged) and unconfirmed photos.
+    pid = db.add_photo(
+        folder_id=data["folders"][0],
+        filename="predicted-hawk.jpg",
+        extension=".jpg",
+        file_size=1000,
+        file_mtime=1.0,
+        timestamp="2024-03-10T08:05:00",
+    )
+    db.conn.execute("UPDATE photos SET quality_score = 0.7 WHERE id = ?", (pid,))
+    det_id = db.save_detections(
+        pid,
+        [{
+            "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+            "confidence": 0.95,
+            "category": "animal",
+        }],
+        detector_model="test-detector",
+    )[0]
+    db.add_prediction(
+        detection_id=det_id,
+        species="Red-tailed Hawk",
+        confidence=0.9,
+        model="BioCLIP-2",
+    )
+    db.conn.commit()
+
+    base = live_server["url"]
+
+    # Without a filter, the mixed bucket is unconfirmed at the bucket level.
+    with urlopen(f"{base}/api/highlights?scope=workspace") as resp:
+        payload = json.load(resp)
+    hawk = next(b for b in payload["buckets"] if b["species"] == "Red-tailed Hawk")
+    assert hawk["is_accepted"] is False
+    assert hawk["certainty"] != "confirmed"
+
+    # Filtering by filename to only include a confirmed (keyword-tagged) photo
+    # must recompute ``is_accepted`` from the filtered photos.
+    with urlopen(f"{base}/api/highlights?scope=workspace&q=hawk1") as resp:
+        payload = json.load(resp)
+    hawk = next(b for b in payload["buckets"] if b["species"] == "Red-tailed Hawk")
+    assert hawk["photo_count"] == 1
+    assert hawk["is_accepted"] is True
+    assert hawk["certainty"] == "confirmed"
+
+
 def test_highlights_lightbox_reject_advances_and_can_restore(live_server, page):
     db = live_server["db"]
     data = live_server["data"]
