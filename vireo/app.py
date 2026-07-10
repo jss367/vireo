@@ -9175,9 +9175,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             row_category = pending_category or highest_category or "missing_prediction"
             photo["row_category"] = row_category
             photo["row_label"] = labels[row_category]
-            photo["needs_review"] = row_category in {
-                "conflict", "refinement", "broader", "new",
-            } and pending_category is not None
+            # Any pending prediction means the user hasn't decided yet, so
+            # the photo still needs review — including pending "match"
+            # predictions, which classify_job stores deliberately when a
+            # multi-species sidecar makes a photo-level match ambiguous
+            # (see _store_pending_detection_prediction / auto_accept=False).
+            photo["needs_review"] = pending_category is not None
             if photo["needs_review"]:
                 summary["needs_review"] += 1
 

@@ -10502,6 +10502,7 @@ class Database:
         labels_fingerprint,
         species,
         category,
+        auto_accept=True,
     ):
         """Re-sync a cached prediction's category and auto-review on reuse.
 
@@ -10514,6 +10515,13 @@ class Database:
         it out of the queue until a full reclassify/clear is forced.  Only the
         marked auto-review row is safe to drop here; explicit user decisions
         from before a temporary XMP match must remain intact.
+
+        ``auto_accept`` is False when the caller has decided this reuse must
+        stay pending even though ``category`` is still ``match`` — e.g. the
+        XMP later gained a second recognized taxon, so a single-species match
+        is now ambiguous.  Without dropping the marker in that case,
+        ``status='accepted'`` from the earlier unambiguous run would keep the
+        detection hidden from the queue.
 
         The persisted ``category`` is always refreshed to the current value:
         ``add_prediction`` is INSERT-OR-IGNORE so it never updates it on
@@ -10531,7 +10539,7 @@ class Database:
         if row is None:
             return
         pred_id = row["id"]
-        if row["category"] == "match" and category != "match":
+        if row["category"] == "match" and (category != "match" or not auto_accept):
             self.conn.execute(
                 "DELETE FROM prediction_review "
                 "WHERE prediction_id = ? AND workspace_id = ? "
@@ -11078,6 +11086,57 @@ class Database:
             params.extend(photo_ids)
         rows = self.conn.execute(sql, params).fetchall()
         return [(row["photo_id"], row["embedding"]) for row in rows]
+
+    def clear_prediction_group_info(self, detection_id, model,
+                                    labels_fingerprint=None):
+        """Drop stale group metadata from the cached prediction's review row.
+
+        Used when a cached prediction that previously belonged to a
+        reviewable burst is reused under a run where the burst is no longer
+        group-reviewable (mixed species, singleton, etc.), so the caller
+        would otherwise pass ``group_id=None`` to
+        ``update_prediction_group_info`` and skip it. Without this, the old
+        ``group_id`` / ``individual`` / vote counts stay attached and group
+        actions retag the whole stale burst together.
+
+        Only updates an existing ``prediction_review`` row — never inserts
+        one — so the "absence == pending" invariant that ``add_prediction``
+        enforces for un-reviewed detections stays intact.
+        """
+        ws = self._ws_id()
+        if labels_fingerprint is not None:
+            row = self.conn.execute(
+                """SELECT pr.id FROM predictions pr
+                   LEFT JOIN prediction_review pr_rev
+                     ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+                   WHERE pr.detection_id = ? AND pr.classifier_model = ?
+                     AND pr.labels_fingerprint = ?
+                     AND COALESCE(pr_rev.status, 'pending') != 'alternative'
+                   ORDER BY pr.confidence DESC LIMIT 1""",
+                (ws, detection_id, model, labels_fingerprint),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                """SELECT pr.id FROM predictions pr
+                   LEFT JOIN prediction_review pr_rev
+                     ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+                   WHERE pr.detection_id = ? AND pr.classifier_model = ?
+                     AND COALESCE(pr_rev.status, 'pending') != 'alternative'
+                   ORDER BY pr.confidence DESC LIMIT 1""",
+                (ws, detection_id, model),
+            ).fetchone()
+        if not row:
+            return
+        self.conn.execute(
+            """UPDATE prediction_review
+                  SET individual  = NULL,
+                      group_id    = NULL,
+                      vote_count  = NULL,
+                      total_votes = NULL
+                WHERE prediction_id = ? AND workspace_id = ?""",
+            (row["id"], ws),
+        )
+        commit_with_retry(self.conn)
 
     def update_prediction_group_info(self, detection_id, model, group_id,
                                      vote_count, total_votes, individual,

@@ -1370,6 +1370,166 @@ def _store_match_prediction(
     )
 
 
+def _recognized_taxon_keywords(keywords, tax):
+    """Return XMP keywords that the loaded taxonomy recognizes as taxa."""
+    if not tax or not hasattr(tax, "is_taxon"):
+        return []
+    taxa = []
+    seen = set()
+    for kw in keywords or []:
+        if not kw or not tax.is_taxon(kw):
+            continue
+        key = kw.strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        taxa.append(kw)
+    return taxa
+
+
+def _categorize_detection_prediction(prediction, existing_keywords, tax):
+    """Categorize one detection prediction against its photo-level keywords.
+
+    Photo keywords are not detection-scoped, so this only describes whether
+    the prediction agrees with the photo's species set. The caller separately
+    decides whether a photo-level match is specific enough to auto-accept.
+    """
+    if not tax:
+        return "new"
+    from compare import categorize
+
+    return categorize(prediction, existing_keywords, tax)
+
+
+def _can_auto_accept_detection_prediction(prediction, category, existing_keywords, tax):
+    """Return True when a photo-level match is unambiguous for one detection.
+
+    A photo may carry taxonomy-hierarchy keywords (e.g. ``Aves`` alongside
+    ``Robin``) without adding a second species: ancestors of the matched
+    prediction are just broader labels for the same taxon. A single
+    descendant is also fine — it just refines the prediction to a specific
+    species. But multiple *distinct* descendants (e.g. the prediction is
+    ``Sparrow`` and the sidecar has ``White-crowned Sparrow`` +
+    ``Golden-crowned Sparrow``) describe more than one species and must go
+    through review, even though ``categorize()`` still returns ``"match"``
+    because each keyword is a descendant of the prediction.
+
+    Descendants only fold into the same species when they resolve to one
+    another (a species and its own subspecies, for example); any pair that
+    is ``sibling``/``unrelated`` means genuinely distinct species and
+    forces the detection back to pending review.
+    """
+    if category != "match":
+        return False
+    taxa = _recognized_taxon_keywords(existing_keywords, tax)
+    if not tax or not hasattr(tax, "relationship"):
+        return len(taxa) <= 1
+    descendants = []
+    for kw in taxa:
+        rel = tax.relationship(kw, prediction)
+        if rel in ("same", "ancestor"):
+            continue
+        if rel == "descendant":
+            descendants.append(kw)
+            continue
+        return False
+    for i, a in enumerate(descendants):
+        for b in descendants[i + 1:]:
+            rel = tax.relationship(a, b)
+            if rel not in ("same", "ancestor", "descendant"):
+                return False
+    return True
+
+
+def _store_pending_detection_prediction(
+    db,
+    item,
+    model_name,
+    labels_fingerprint,
+    category,
+    tax=None,
+    group_id=None,
+    vote_count=None,
+    total_votes=None,
+    individual=None,
+):
+    tax_hierarchy = item.get("taxonomy") or (
+        tax.get_hierarchy(item["prediction"]) if tax else {}
+    )
+    if item.get("_existing"):
+        existing_row = db.conn.execute(
+            """SELECT id FROM predictions
+               WHERE detection_id = ? AND classifier_model = ?
+                 AND labels_fingerprint = ? AND species IS ?""",
+            (
+                item["detection_id"],
+                model_name,
+                labels_fingerprint,
+                item["prediction"],
+            ),
+        ).fetchone()
+        db.reconcile_match_review_state(
+            item["detection_id"], model_name, labels_fingerprint,
+            item["prediction"], category,
+            auto_accept=False,
+        )
+        if existing_row is not None:
+            if group_id is not None:
+                db.update_prediction_group_info(
+                    detection_id=item["detection_id"],
+                    model=model_name,
+                    group_id=group_id,
+                    vote_count=vote_count,
+                    total_votes=total_votes,
+                    individual=individual,
+                    labels_fingerprint=labels_fingerprint,
+                )
+            else:
+                # Cached prediction may still carry group metadata from an
+                # earlier grouped burst; if the current run decided this
+                # detection is not group-reviewable, drop the stale group_id
+                # so ungrouping actually takes effect on reuse.
+                db.clear_prediction_group_info(
+                    detection_id=item["detection_id"],
+                    model=model_name,
+                    labels_fingerprint=labels_fingerprint,
+                )
+            return
+
+    db.add_prediction(
+        detection_id=item["detection_id"],
+        species=item["prediction"],
+        confidence=round(item["confidence"], 4),
+        model=model_name,
+        category=category,
+        group_id=group_id,
+        vote_count=vote_count,
+        total_votes=total_votes,
+        individual=individual,
+        taxonomy=tax_hierarchy,
+        labels_fingerprint=labels_fingerprint,
+    )
+    db.reconcile_match_review_state(
+        item["detection_id"], model_name, labels_fingerprint,
+        item["prediction"], category,
+        auto_accept=False,
+    )
+    for alt in item.get("alternatives", []):
+        alt_tax = alt.get("taxonomy") or (
+            tax.get_hierarchy(alt["species"]) if tax else {}
+        )
+        db.add_prediction(
+            detection_id=item["detection_id"],
+            species=alt["species"],
+            confidence=round(alt["confidence"], 4),
+            model=model_name,
+            category=category,
+            status="alternative",
+            taxonomy=alt_tax,
+            labels_fingerprint=labels_fingerprint,
+        )
+
+
 def _store_grouped_predictions(
     raw_results, job_id, model_name, grouping_window, similarity_threshold, tax, db,
     labels_fingerprint="legacy",
@@ -1385,7 +1545,6 @@ def _store_grouped_predictions(
     Returns:
         dict with predictions_stored, burst_groups, already_labeled counts.
     """
-    from compare import categorize
     from grouping import (
         consensus_prediction,
         group_by_timestamp,
@@ -1408,56 +1567,30 @@ def _store_grouped_predictions(
             folder_path = item["folder_path"]
 
             category = "new"
+            auto_accept = False
             if tax:
                 xmp_path = os.path.join(
                     folder_path,
                     os.path.splitext(photo["filename"])[0] + ".xmp",
                 )
                 existing = read_keywords(xmp_path)
-                category = categorize(item["prediction"], existing, tax)
+                category = _categorize_detection_prediction(
+                    item["prediction"], existing, tax,
+                )
+                auto_accept = _can_auto_accept_detection_prediction(
+                    item["prediction"], category, existing, tax,
+                )
 
-            if category == "match":
+            if auto_accept:
                 _store_match_prediction(
                     db, item, model_name, labels_fingerprint, tax,
                 )
                 skipped_match += 1
                 continue
 
-            tax_hierarchy = item.get("taxonomy") or (
-                tax.get_hierarchy(item["prediction"]) if tax else {}
+            _store_pending_detection_prediction(
+                db, item, model_name, labels_fingerprint, category, tax,
             )
-            db.add_prediction(
-                detection_id=item["detection_id"],
-                species=item["prediction"],
-                confidence=round(item["confidence"], 4),
-                model=model_name,
-                category=category,
-                taxonomy=tax_hierarchy,
-                labels_fingerprint=labels_fingerprint,
-            )
-            # If this detection was a cached 'match', its auto-accepted
-            # review row would otherwise survive the now non-match reuse
-            # (add_prediction's default pending never overwrites it) and
-            # keep it out of the queue. Downgrade it back to pending.
-            db.reconcile_match_review_state(
-                item["detection_id"], model_name, labels_fingerprint,
-                item["prediction"], category,
-            )
-            # Store alternative predictions
-            for alt in item.get("alternatives", []):
-                alt_tax = alt.get("taxonomy") or (
-                    tax.get_hierarchy(alt["species"]) if tax else {}
-                )
-                db.add_prediction(
-                    detection_id=item["detection_id"],
-                    species=alt["species"],
-                    confidence=round(alt["confidence"], 4),
-                    model=model_name,
-                    category=category,
-                    status="alternative",
-                    taxonomy=alt_tax,
-                    labels_fingerprint=labels_fingerprint,
-                )
             predictions_stored += 1
         else:
             group_count += 1
@@ -1473,91 +1606,58 @@ def _store_grouped_predictions(
             if not cons:
                 continue
 
-            representative = group[0]
-            category = "new"
-            if tax:
-                xmp_path = os.path.join(
-                    representative["folder_path"],
-                    os.path.splitext(representative["photo"]["filename"])[0] + ".xmp",
-                )
-                existing = read_keywords(xmp_path)
-                category = categorize(cons["prediction"], existing, tax)
+            group_species = {
+                (item.get("prediction") or "").strip().lower()
+                for item in group
+                if item.get("prediction")
+            }
+            group_reviewable = len(group_species) == 1
+            individual_json = (
+                json.dumps(cons["individual_predictions"])
+                if group_reviewable
+                else None
+            )
+            stored_in_group = 0
+            for item in group:
+                photo = item["photo"]
+                category = "new"
+                auto_accept = False
+                if tax:
+                    xmp_path = os.path.join(
+                        item["folder_path"],
+                        os.path.splitext(photo["filename"])[0] + ".xmp",
+                    )
+                    existing = read_keywords(xmp_path)
+                    category = _categorize_detection_prediction(
+                        item["prediction"], existing, tax,
+                    )
+                    auto_accept = _can_auto_accept_detection_prediction(
+                        item["prediction"], category, existing, tax,
+                    )
 
-            if category == "match":
-                cons_hierarchy = (
-                    tax.get_hierarchy(cons["prediction"]) if tax else {}
-                )
-                for item in group:
+                if auto_accept:
                     _store_match_prediction(
                         db, item, model_name, labels_fingerprint, tax,
-                        species=cons["prediction"],
-                        confidence=cons["confidence"],
-                        taxonomy=cons_hierarchy,
                         store_alternatives=False,
                     )
-                skipped_match += len(group)
-                continue
+                    skipped_match += 1
+                    continue
 
-            individual_json = json.dumps(cons["individual_predictions"])
-            rep_tax = group[0].get("taxonomy")
-            cons_hierarchy = rep_tax or (
-                tax.get_hierarchy(cons["prediction"]) if tax else {}
-            )
-
-            # Drop any stale auto-accept from a prior 'match' pass first, so
-            # the update_prediction_group_info upsert below re-inserts a
-            # fresh pending row (its ON CONFLICT keeps the existing status)
-            # and the burst re-enters review. A prior match pass cached every
-            # detection under the consensus species, so reconcile that same
-            # species (not each frame's own prediction) or the downgrade
-            # misses a dissenting frame's cached row and it stays hidden.
-            for item in group:
-                db.reconcile_match_review_state(
-                    item["detection_id"], model_name, labels_fingerprint,
-                    cons["prediction"], category,
+                _store_pending_detection_prediction(
+                    db,
+                    item,
+                    model_name,
+                    labels_fingerprint,
+                    category,
+                    tax,
+                    group_id=gid if group_reviewable else None,
+                    vote_count=cons["vote_count"] if group_reviewable else None,
+                    total_votes=cons["total_votes"] if group_reviewable else None,
+                    individual=individual_json,
                 )
+                stored_in_group += 1
 
-            for item in group:
-                if item.get("_existing"):
-                    db.update_prediction_group_info(
-                        detection_id=item["detection_id"],
-                        model=model_name,
-                        group_id=gid,
-                        vote_count=cons["vote_count"],
-                        total_votes=cons["total_votes"],
-                        individual=individual_json,
-                        labels_fingerprint=labels_fingerprint,
-                    )
-                else:
-                    db.add_prediction(
-                        detection_id=item["detection_id"],
-                        species=item["prediction"],
-                        confidence=round(item["confidence"], 4),
-                        model=model_name,
-                        category=category,
-                        group_id=gid,
-                        vote_count=cons["vote_count"],
-                        total_votes=cons["total_votes"],
-                        individual=individual_json,
-                        taxonomy=item.get("taxonomy") or cons_hierarchy,
-                        labels_fingerprint=labels_fingerprint,
-                    )
-                    # Store alternative predictions for this group member
-                    for alt in item.get("alternatives", []):
-                        alt_tax = alt.get("taxonomy") or (
-                            tax.get_hierarchy(alt["species"]) if tax else {}
-                        )
-                        db.add_prediction(
-                            detection_id=item["detection_id"],
-                            species=alt["species"],
-                            confidence=round(alt["confidence"], 4),
-                            model=model_name,
-                            category=category,
-                            status="alternative",
-                            taxonomy=alt_tax,
-                            labels_fingerprint=labels_fingerprint,
-                        )
-            predictions_stored += len(group)
+            predictions_stored += stored_in_group
 
     singles = len([g for g in groups if len(g) == 1])
     grouped_photos = sum(len(g) for g in groups if len(g) > 1)

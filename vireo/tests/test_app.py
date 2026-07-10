@@ -1527,7 +1527,7 @@ def test_compare_predictions_api_exposes_miss_flags(app_and_db):
 
 
 def test_compare_ignores_resolved_predictions_for_needs_review(app_and_db):
-    """A resolved conflict plus a pending match should not stay in review."""
+    """When every prediction on a photo is already reviewed, no needs_review."""
     app, db = app_and_db
     photo_id = db.conn.execute(
         "SELECT id FROM photos ORDER BY id LIMIT 1"
@@ -1544,15 +1544,56 @@ def test_compare_ignores_resolved_predictions_for_needs_review(app_and_db):
     db.add_prediction(
         det_ids[0], "Blue Jay", 0.95, "model-a", status="accepted",
     )
-    db.add_prediction(det_ids[1], "Cardinal", 0.92, "model-b")
+    db.add_prediction(
+        det_ids[1], "Cardinal", 0.92, "model-b", status="accepted",
+    )
 
     resp = app.test_client().get(f"/api/predictions/compare?collection_id={cid}")
 
     assert resp.status_code == 200
     row = resp.get_json()["photos"][0]
-    assert row["row_category"] == "match"
+    # Both predictions are already reviewed (accepted). The row falls back
+    # to the highest-priority category among all predictions, but nothing is
+    # pending so it must not appear in the Needs review count/filter.
+    assert row["row_category"] == "conflict"
     assert row["needs_review"] is False
     assert resp.get_json()["summary"]["needs_review"] == 0
+
+
+def test_compare_flags_pending_match_as_needs_review(app_and_db):
+    """A pending match prediction must still surface in the needs-review
+    count/filter.
+
+    classify_job stores a pending prediction with ``category="match"`` when a
+    photo-level match is ambiguous (e.g. multiple recognized species keywords
+    in the sidecar), and expects Compare to route the user to it. Before this
+    fix, ``/api/predictions/compare`` excluded ``match`` from ``needs_review``,
+    so those deliberately-pending detections disappeared from the queue.
+    """
+
+    app, db = app_and_db
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+    species_id = db.add_keyword("Cardinal", is_species=True)
+    db.tag_photo(photo_id, species_id)
+    rules = json.dumps([{"field": "photo_ids", "value": [photo_id]}])
+    cid = db.add_collection("Pending Match", rules)
+
+    det_ids = db.save_detections(photo_id, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], "Cardinal", 0.92, "model-a")
+
+    resp = app.test_client().get(f"/api/predictions/compare?collection_id={cid}")
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    row = payload["photos"][0]
+    assert row["row_category"] == "match"
+    assert row["needs_review"] is True
+    assert payload["summary"]["needs_review"] == 1
 
 
 def test_compare_accepted_matches_are_not_marked_missing(app_and_db):

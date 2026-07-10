@@ -83,16 +83,17 @@ def test_compare_prediction_to_keywords_conflict_with_shared_rank():
     assert result["shared_rank"] == "genus"
 
 
-def test_compare_prediction_to_keywords_conflict_outranks_refinement():
-    # Prediction refines "Sparrow" but conflicts with "Red-tailed Hawk".
-    # The most severe relationship (conflict) must win regardless of the
-    # order keywords are evaluated in, so the row stays in the review flow.
+def test_compare_prediction_to_keywords_refinement_outranks_conflict():
+    # Prediction refines "Sparrow" and conflicts with "Red-tailed Hawk".
+    # A supported relationship (refinement) with any existing species keyword
+    # means the photo already backs the prediction, so refinement wins over
+    # the conflict regardless of the order keywords are evaluated in.
     result = compare_prediction_to_keywords(
         "White-crowned Sparrow",
         ["Sparrow", "Red-tailed Hawk"],
         FakeTaxonomy(),
     )
-    assert result["category"] == "conflict"
+    assert result["category"] == "refinement"
 
     # Same keywords, reversed order — result must be stable.
     reversed_result = compare_prediction_to_keywords(
@@ -100,19 +101,19 @@ def test_compare_prediction_to_keywords_conflict_outranks_refinement():
         ["Red-tailed Hawk", "Sparrow"],
         FakeTaxonomy(),
     )
-    assert reversed_result["category"] == "conflict"
+    assert reversed_result["category"] == "refinement"
 
 
-def test_compare_prediction_to_keywords_match_does_not_hide_conflict():
-    # An exact match must not short-circuit the scan: a contradictory
-    # species keyword on the same photo still has to surface as a conflict
-    # so the row stays in the review flow.
+def test_compare_prediction_to_keywords_match_outranks_conflict():
+    # An exact match with any existing species keyword means the prediction
+    # is already supported by the photo, so a contradictory sibling keyword
+    # on the same photo does not downgrade it to a conflict.
     result = compare_prediction_to_keywords(
         "Red-tailed Hawk",
         ["Red-tailed Hawk", "White-crowned Sparrow"],
         FakeTaxonomy(),
     )
-    assert result["category"] == "conflict"
+    assert result["category"] == "match"
 
     # Order must not matter.
     reversed_result = compare_prediction_to_keywords(
@@ -120,7 +121,7 @@ def test_compare_prediction_to_keywords_match_does_not_hide_conflict():
         ["White-crowned Sparrow", "Red-tailed Hawk"],
         FakeTaxonomy(),
     )
-    assert reversed_result["category"] == "conflict"
+    assert reversed_result["category"] == "match"
 
 
 def test_compare_prediction_to_keywords_pure_match():
