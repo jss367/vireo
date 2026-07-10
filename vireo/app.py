@@ -3501,19 +3501,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         token = object()
         suppressed_reason = None
         reuse_existing = False
+        fresh_cache = False
         with app._missing_originals_lock:
             inflight = app._missing_originals_inflight.get(key)
             if inflight:
                 reuse_existing = True
+            entry = app._missing_originals_cache.get(key)
+            if (
+                not reuse_existing
+                and automatic
+                and entry is not None
+                and now - entry["set_at"] <= _MISSING_ORIGINALS_STALE_SECONDS
+            ):
+                fresh_cache = True
             err = app._missing_originals_errors.get(key)
             if (
                 not reuse_existing
+                and not fresh_cache
                 and automatic
                 and err is not None
                 and now < err["backoff_until"]
             ):
                 suppressed_reason = "backoff"
         if reuse_existing:
+            return _missing_originals_payload(db, folder_id)
+        if fresh_cache:
             return _missing_originals_payload(db, folder_id)
         if automatic and suppressed_reason is None and _missing_originals_heavy_job_active():
             suppressed_reason = "heavy_job_active"

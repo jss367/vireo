@@ -9908,6 +9908,9 @@ let _missingPhotosBannerFetchId = 0;
 let _missingPhotosModalFetchId = 0;
 let _missingPhotosBannerInFlight = false;
 let _missingPhotosStatusPoll = null;
+let _missingPhotosAutomaticTimer = null;
+const MISSING_PHOTOS_INITIAL_DELAY_MS = 180000;
+const MISSING_PHOTOS_AUTOMATIC_INTERVAL_MS = 30 * 60 * 1000;
 
 function _missingPhotosStatusUrl(folderId) {
   return folderId != null
@@ -9927,6 +9930,17 @@ function _scheduleMissingPhotosPoll(folderId, modal) {
     if (modal) loadMissingPhotos();
     else checkMissingPhotos();
   }, 3000);
+}
+
+function _scheduleAutomaticMissingPhotosCheck(delayMs) {
+  if (_missingPhotosAutomaticTimer !== null) clearTimeout(_missingPhotosAutomaticTimer);
+  _missingPhotosAutomaticTimer = setTimeout(async function() {
+    _missingPhotosAutomaticTimer = null;
+    try {
+      await startMissingPhotosCheck({ automatic: true });
+    } catch (e) { /* ignore */ }
+    _scheduleAutomaticMissingPhotosCheck(MISSING_PHOTOS_AUTOMATIC_INTERVAL_MS);
+  }, delayMs);
 }
 
 async function startMissingPhotosCheck(opts) {
@@ -9993,21 +10007,8 @@ function dismissMissingPhotosBanner() {
 // libraries backed by SMB/NAS volumes it can take minutes, so startup uses a
 // delayed background job and the banner only renders cached results. After the
 // initial run, keep re-arming a self-scheduling timer so a long-lived tab still
-// picks up files deleted (or previously skipped due to a heavy job) later on —
-// a bare `setTimeout` would never fire again after the first call.
-const _MISSING_ORIGINALS_INITIAL_DELAY_MS = 180000;      // ~3 min after page load
-const _MISSING_ORIGINALS_INTERVAL_MS = 30 * 60 * 1000;   // then ~every 30 min
-function _scheduleAutomaticMissingPhotosScan(delayMs) {
-  setTimeout(function() {
-    Promise.resolve()
-      .then(function() { return startMissingPhotosCheck({ automatic: true }); })
-      .catch(function() { /* ignore */ })
-      .finally(function() {
-        _scheduleAutomaticMissingPhotosScan(_MISSING_ORIGINALS_INTERVAL_MS);
-      });
-  }, delayMs);
-}
-_scheduleAutomaticMissingPhotosScan(_MISSING_ORIGINALS_INITIAL_DELAY_MS);
+// picks up files deleted, or skipped earlier because a heavy job was active.
+_scheduleAutomaticMissingPhotosCheck(MISSING_PHOTOS_INITIAL_DELAY_MS);
 
 /* ---------- New Images Banner ---------- */
 // Per-workspace dismissal: one sessionStorage key per workspace id so that

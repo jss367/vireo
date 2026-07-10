@@ -17,6 +17,7 @@ def _run_missing_originals_check(client, folder_id=None):
     if folder_id is not None:
         url += f"?folder_id={folder_id}"
     payload = client.get(url).get_json()
+    assert payload["status"] == "ready"
     assert "photos" in payload
     return payload
 
@@ -4435,6 +4436,45 @@ def test_api_photos_missing_cached_result_does_not_rescan(app_and_db, monkeypatc
     assert [row["id"] for row in data["photos"]] == [pid_ghost]
 
 
+def test_api_photos_missing_automatic_uses_fresh_cache(app_and_db, monkeypatch, tmp_path):
+    """Automatic checks should not rescan when the cached result is still fresh."""
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    fid = db.add_folder(str(real_dir), name="live")
+    pid_ghost = db.add_photo(
+        folder_id=fid,
+        filename="ghost.NEF",
+        extension=".nef",
+        file_size=42,
+        file_mtime=2.0,
+    )
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ?", (fid,)
+        ).fetchall()
+    ])
+
+    cached = _run_missing_originals_check(client)
+    assert [row["id"] for row in cached["photos"]] == [pid_ghost]
+
+    def fail_scan(*_args, **_kwargs):
+        raise AssertionError("fresh automatic check must not rescan")
+
+    monkeypatch.setattr(Database, "get_missing_photos", fail_scan)
+
+    resp = client.post("/api/photos/missing/check", json={"automatic": True})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["status"] == "ready"
+    assert data["pending"] is False
+    assert [row["id"] for row in data["photos"]] == [pid_ghost]
+
+
 def test_api_photos_missing_check_coalesces_duplicate_jobs(app_and_db, monkeypatch):
     """Duplicate refreshes for the same scope reuse the active background job."""
     import time
@@ -4478,8 +4518,6 @@ def test_api_photos_missing_stale_in_flight_result_is_discarded(
     """
     import threading
 
-    from PIL import Image
-
     from db import Database
 
     app, db = app_and_db
@@ -4487,15 +4525,13 @@ def test_api_photos_missing_stale_in_flight_result_is_discarded(
 
     real_dir = tmp_path / "live"
     real_dir.mkdir()
-    Image.new("RGB", (10, 10)).save(real_dir / "here.jpg")
     fid = db.add_folder(str(real_dir), name="live")
-    db.add_photo(
-        folder_id=fid, filename="here.jpg",
-        extension=".jpg", file_size=1, file_mtime=1.0,
-    )
     pid_ghost = db.add_photo(
-        folder_id=fid, filename="ghost.NEF",
-        extension=".nef", file_size=42, file_mtime=2.0,
+        folder_id=fid,
+        filename="ghost.NEF",
+        extension=".nef",
+        file_size=42,
+        file_mtime=2.0,
     )
     # Simplify assertions by removing seed rows from other folders.
     db.delete_photos([
@@ -4535,7 +4571,9 @@ def test_api_photos_missing_stale_in_flight_result_is_discarded(
     assert delete_resp.get_json()["deleted"] == 1
 
     release.set()
-    wait_for_job_via_client(client, job_id)
+    job = wait_for_job_via_client(client, job_id)
+    assert job["status"] == "completed"
+    assert job["result"]["stale"] is True
 
     # The scan finished successfully but its results were discarded, so
     # the endpoint reports no cache — not a ready payload still holding

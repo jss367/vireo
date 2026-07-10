@@ -6146,6 +6146,53 @@ def test_get_missing_photos_does_not_stat_every_photo(tmp_path, monkeypatch):
     )
 
 
+def test_get_missing_photos_ignores_progress_callback_errors(tmp_path):
+    """Progress callback failures must not abort missing-original detection."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    folder = tmp_path / "shoot"
+    folder.mkdir()
+    fid = db.add_folder(str(folder), name="shoot")
+    db.add_photo(folder_id=fid, filename="gone.jpg", extension=".jpg",
+                 file_size=1, file_mtime=1.0)
+
+    def broken_progress(_payload):
+        raise RuntimeError("progress sink unavailable")
+
+    missing = db.get_missing_photos(progress_callback=broken_progress)
+
+    assert [row["filename"] for row in missing] == ["gone.jpg"]
+
+
+def test_get_missing_photos_reports_periodic_photo_progress(tmp_path):
+    """Large single-folder scans should emit progress before the final callback."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    folder = tmp_path / "shoot"
+    folder.mkdir()
+    fid = db.add_folder(str(folder), name="shoot")
+    for i in range(401):
+        db.add_photo(folder_id=fid, filename=f"gone_{i:03d}.jpg",
+                     extension=".jpg", file_size=1, file_mtime=1.0)
+
+    events = []
+    missing = db.get_missing_photos(progress_callback=events.append)
+
+    assert len(missing) == 401
+    considered = [event["photos_considered"] for event in events]
+    assert 200 in considered
+    assert 400 in considered
+    assert considered[-1] == 401
+
+
 def test_get_missing_photos_handles_unicode_normalization(tmp_path):
     """A photo row stored as NFC must not be reported missing if the file
     on disk has the same visible name in NFD bytes (or vice versa).
