@@ -2706,6 +2706,35 @@ def test_pipeline_classifies_full_image_when_detector_finds_nothing(
     )
     assert [d["id"] for d in full_after] == [full[0]["id"]]
 
+    # Forced reclassify should infer again, but the stale-detection purge must
+    # treat the synthetic full-image anchor as fresh. Otherwise the purge
+    # cascades through predictions.detection_id and deletes the new result.
+    reclassify_params = PipelineParams(
+        collection_id=col_id,
+        model_id="bioclip-vit-b-16",
+        reclassify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    third = run_pipeline_job(
+        _make_job(), FakeRunner(), db_path, ws_id, reclassify_params,
+    )
+    assert third["stages"]["classify"]["full_image_fallbacks"] == 1
+    assert classify_calls == [1, 1]
+    verify = Database(db_path)
+    verify.set_active_workspace(ws_id)
+    full_reclassified = verify.get_detections(
+        photo_id, detector_model="full-image", min_conf=0,
+    )
+    assert [d["id"] for d in full_reclassified] == [full[0]["id"]]
+    pred_after_reclassify = verify.get_predictions_for_detection(
+        full[0]["id"],
+        classifier_model="BioCLIP",
+        min_classifier_conf=0,
+    )
+    assert len(pred_after_reclassify) == 1
+    assert pred_after_reclassify[0]["species"] == "Full-image Robin"
+
 
 def test_pipeline_redownloads_taxonomy_when_existing_file_is_corrupt(
     tmp_path, monkeypatch

@@ -3512,6 +3512,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 # (all detected photos) would incorrectly delete detections for
                 # photos that weren't reached if the job was aborted mid-classify.
                 first_model_photo_ids: set = set()
+                fresh_full_image_ids_by_photo: dict = {}
 
                 from datetime import datetime as dt
 
@@ -3833,6 +3834,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 }
                                 full_image_fallback = True
                                 full_image_fallbacks += 1
+                                fresh_full_image_ids_by_photo.setdefault(
+                                    photo["id"], set(),
+                                ).add(full_det_id)
 
                             # Classifier-run gate: skip work when this exact
                             # (detection, classifier_model, labels_fingerprint)
@@ -4045,22 +4049,29 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         # whose boxes didn't change — the common reclassify case.
                         # Compare against the ids THIS run actually re-detected
                         # (detect_state["detections"] is the in-memory map
-                        # _detect_batch built); a photo that came back empty has
-                        # no entry, so its pre-run rows are all stale and get
-                        # purged (write_detection_batch([]) already cleared them at
-                        # the data layer — this is the belt-and-suspenders pass and
-                        # cross-model cleanup). A photo re-detected with the same
-                        # boxes has its ids in the fresh set, so they survive.
+                        # _detect_batch built). A no-detection photo may also
+                        # have a freshly used synthetic full-image anchor from
+                        # the fallback path; preserve that id so the purge does
+                        # not cascade-delete the new fallback prediction. Other
+                        # pre-run rows on empty photos are stale and get purged
+                        # (write_detection_batch([]) already cleared the
+                        # MegaDetector rows at the data layer — this is the
+                        # belt-and-suspenders pass and cross-model cleanup). A
+                        # photo re-detected with the same boxes has its ids in
+                        # the fresh set, so they survive.
                         fresh_by_photo = detect_state["detections"]
                         stale_ids = [
                             det_id
                             for photo_id, id_set in pre_ids.items()
                             if photo_id in purge_ids
                             for det_id in id_set
-                            if det_id not in {
-                                d["id"]
-                                for d in fresh_by_photo.get(photo_id, [])
-                            }
+                            if det_id not in (
+                                {
+                                    d["id"]
+                                    for d in fresh_by_photo.get(photo_id, [])
+                                }
+                                | fresh_full_image_ids_by_photo.get(photo_id, set())
+                            )
                         ]
                         if stale_ids:
                             getattr(
