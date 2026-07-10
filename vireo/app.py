@@ -2034,11 +2034,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if db is not None:
             db.conn.close()
 
+    def _reraise_fatal_cleanup_error(exc):
+        if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
+            raise exc
+
     def _cleanup_cached_files_for_deleted_photos(files):
-        from preview_cache import cleanup_cached_files_for_deleted_photos
-        cleanup_cached_files_for_deleted_photos(
-            app.config["THUMB_CACHE_DIR"], files,
-        )
+        try:
+            from preview_cache import cleanup_cached_files_for_deleted_photos
+            cleanup_cached_files_for_deleted_photos(
+                app.config["THUMB_CACHE_DIR"], files,
+            )
+        except BaseException as exc:
+            _reraise_fatal_cleanup_error(exc)
+            log.exception("Failed to clean cached files after delete")
 
     @app.before_request
     def _enforce_api_v1_token():
@@ -6124,7 +6132,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Run the deferred non-DB side effects only after the outer
         # transaction committed successfully.
-        db.prune_pipeline_cache_for_ids(result["ids"])
+        try:
+            db.prune_pipeline_cache_for_ids(result["ids"])
+        except BaseException as exc:
+            _reraise_fatal_cleanup_error(exc)
+            log.exception("Failed to prune pipeline cache after delete")
         _cleanup_cached_files_for_deleted_photos(result["files"])
 
         trashed = 0
@@ -6148,7 +6160,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             from send2trash import send2trash as _trash
                             _trash(filepath)
                             trashed += 1
-                        except Exception as send_err:
+                        except BaseException as send_err:
+                            _reraise_fatal_cleanup_error(send_err)
                             # send2trash implements the platform trash spec on
                             # Linux/Windows; the AppleScript Finder fallback only
                             # helps on macOS. Off-mac, report the real send2trash

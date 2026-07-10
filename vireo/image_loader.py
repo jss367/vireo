@@ -260,8 +260,12 @@ def safe_iter_dir(top, onerror=None):
             onerror(exc)
         return
     skipped = []
+    seen = set()
     with scandir_it:
         for entry in scandir_it:
+            if entry.name in seen:
+                continue
+            seen.add(entry.name)
             if is_excluded_scan_dir(entry.name):
                 skipped.append(entry.name)
                 continue
@@ -311,9 +315,13 @@ def safe_scan_walk(top, onerror=None):
     dirs = []
     nondirs = []
     skipped = []
+    seen = set()
     with scandir_it:
         for entry in scandir_it:
             name = entry.name
+            if name in seen:
+                continue
+            seen.add(name)
             # Name-based exclusion catches direct bundle entries
             # (``Photos Library.photoslibrary``) without any stat.
             if is_excluded_scan_dir(name):

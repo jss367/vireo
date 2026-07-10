@@ -7027,7 +7027,9 @@ class Database:
                 self._active_workspace_id,
                 ids,
             )
-        except Exception:
+        except BaseException as exc:
+            if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
+                raise
             log.exception("Failed to prune pipeline cache after delete")
 
     def delete_photos(self, photo_ids, include_companions=False, commit=True):
@@ -12128,16 +12130,14 @@ class Database:
         decides how to handle zero-file snapshots (the pipeline short-circuits).
         """
         ws_id = self._ws_id()
+        unique_paths = sorted(set(file_paths or []))
         cur = self.conn.execute(
             "INSERT INTO new_image_snapshots (workspace_id, created_at, file_count) "
             "VALUES (?, datetime('now'), ?)",
-            (ws_id, len(file_paths)),
+            (ws_id, len(unique_paths)),
         )
         snap_id = cur.lastrowid
-        if file_paths:
-            # De-duplicate in case the caller passed repeats; PK would reject them
-            # but sending a clean set keeps executemany cheap.
-            unique_paths = sorted(set(file_paths))
+        if unique_paths:
             self.conn.executemany(
                 "INSERT INTO new_image_snapshot_files (snapshot_id, file_path) VALUES (?, ?)",
                 [(snap_id, p) for p in unique_paths],

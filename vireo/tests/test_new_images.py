@@ -46,6 +46,31 @@ def test_count_new_images_detects_unscanned_files(db_with_workspace):
     assert len(result["sample"]) == 2
 
 
+def test_count_new_images_deduplicates_repeated_walk_entries(
+    db_with_workspace, monkeypatch
+):
+    """SMB mounts may repeat exact names from one directory listing."""
+    import new_images
+    from new_images import count_new_images_for_workspace
+
+    db, ws_id, tmp_path = db_with_workspace
+    root = tmp_path / "USA2026"
+    photo = root / "IMG_0001.JPG"
+    _touch_image(str(photo))
+    db.add_folder(str(root), name="USA2026")
+
+    def duplicate_walk(_root):
+        yield str(root), [], ["IMG_0001.JPG", "IMG_0001.JPG", "IMG_0001.JPG"]
+
+    monkeypatch.setattr(new_images, "safe_scan_walk", duplicate_walk)
+
+    result = count_new_images_for_workspace(db, ws_id, sample_limit=None)
+
+    assert result["new_count"] == 1
+    assert result["per_root"][0]["new_count"] == 1
+    assert result["sample"] == [str(photo)]
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks required")
 def test_count_new_images_ignores_broken_symlinks(db_with_workspace):
     """A dangling *.jpg symlink must not be counted as a "new image".

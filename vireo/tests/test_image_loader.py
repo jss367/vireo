@@ -807,6 +807,53 @@ def test_safe_iter_dir_skips_bundle_children_and_yields_paths(tmp_path):
     assert "LibraryAlias" not in names
 
 
+def test_safe_iter_dir_deduplicates_duplicate_scandir_entries(tmp_path, monkeypatch):
+    """Some SMB mounts can return duplicate names from one ``scandir`` call."""
+    import image_loader
+    from image_loader import safe_iter_dir
+
+    root = tmp_path / "photos"
+    root.mkdir()
+    (root / "real.jpg").write_bytes(b"")
+
+    real_scandir = image_loader.os.scandir
+
+    class FakeScandir:
+        def __init__(self, entries):
+            self.entries = entries
+
+        def __iter__(self):
+            return iter(self.entries)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_scandir(path):
+        if path == str(root):
+            return FakeScandir([
+                SimpleNamespace(
+                    name="real.jpg",
+                    path=str(root / "real.jpg"),
+                    is_symlink=lambda: False,
+                    is_dir=lambda follow_symlinks=True: False,
+                ),
+                SimpleNamespace(
+                    name="real.jpg",
+                    path=str(root / "real.jpg"),
+                    is_symlink=lambda: False,
+                    is_dir=lambda follow_symlinks=True: False,
+                ),
+            ])
+        return real_scandir(path)
+
+    monkeypatch.setattr(image_loader.os, "scandir", fake_scandir)
+
+    assert [p.name for p in safe_iter_dir(str(root))] == ["real.jpg"]
+
+
 def test_safe_iter_dir_surfaces_permission_errors_via_onerror(tmp_path):
     """Mirrors ``safe_scan_walk``: a directory the kernel refuses to
     open is reported via the callback, not swallowed. Scanner's
@@ -1044,6 +1091,73 @@ def test_safe_scan_walk_matches_os_walk_for_normal_trees(tmp_path):
         os.path.join("a", "mid.jpg"),
         os.path.join("a", "b", "deep.jpg"),
     }
+
+
+def test_safe_scan_walk_deduplicates_duplicate_scandir_entries(tmp_path, monkeypatch):
+    """Duplicate directory entries must not inflate new-image counts."""
+    import image_loader
+    from image_loader import safe_scan_walk
+
+    root = tmp_path / "photos"
+    root.mkdir()
+    (root / "real.jpg").write_bytes(b"")
+    (root / "sub").mkdir()
+    (root / "sub" / "deep.jpg").write_bytes(b"")
+
+    real_scandir = image_loader.os.scandir
+
+    def file_entry(path, name):
+        return SimpleNamespace(
+            name=name,
+            path=str(path / name),
+            is_symlink=lambda: False,
+            is_dir=lambda follow_symlinks=True: False,
+        )
+
+    def dir_entry(path, name):
+        return SimpleNamespace(
+            name=name,
+            path=str(path / name),
+            is_symlink=lambda: False,
+            is_dir=lambda follow_symlinks=True: True,
+        )
+
+    class FakeScandir:
+        def __init__(self, entries):
+            self.entries = entries
+
+        def __iter__(self):
+            return iter(self.entries)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_scandir(path):
+        if path == str(root):
+            return FakeScandir([
+                file_entry(root, "real.jpg"),
+                file_entry(root, "real.jpg"),
+                dir_entry(root, "sub"),
+                dir_entry(root, "sub"),
+            ])
+        if path == str(root / "sub"):
+            return FakeScandir([
+                file_entry(root / "sub", "deep.jpg"),
+                file_entry(root / "sub", "deep.jpg"),
+            ])
+        return real_scandir(path)
+
+    monkeypatch.setattr(image_loader.os, "scandir", fake_scandir)
+
+    rows = list(safe_scan_walk(str(root)))
+
+    assert [(os.path.relpath(d, str(root)), dirs, files) for d, dirs, files in rows] == [
+        (".", ["sub"], ["real.jpg"]),
+        ("sub", [], ["deep.jpg"]),
+    ]
 
 
 def test_safe_scan_walk_surfaces_permission_errors_via_onerror(tmp_path):
