@@ -920,12 +920,12 @@ function photoReviewStatus(photo) {
 
   var category = pendingCategory || highestCategory;
   if (!category) category = sawLowConflict ? 'low_conflict' : 'missing_prediction';
-  var needsReview = !!pendingCategory && {
-    conflict: true,
-    refinement: true,
-    broader: true,
-    new: true,
-  }[pendingCategory] === true;
+  // Any pending prediction means the user hasn't decided yet — including
+  // pending "match" predictions kept deliberately for ambiguous multi-species
+  // photo-level matches by classify_job. Excluding "match" here would hide
+  // those from the Needs review count/filter even though the backend
+  // deliberately kept them pending for review.
+  var needsReview = !!pendingCategory;
   return {
     category: category,
     label: CATEGORY_LABELS[category] || category,
