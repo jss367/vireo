@@ -511,6 +511,12 @@ def _refresh_highlight_bucket_metadata(bucket):
         if confidences else None
     )
     best = photos[0] if photos else {}
+    # Filtering can drop the unconfirmed photos from a mixed bucket, leaving
+    # only confirmed ones — recompute so the "candidate" badge and the
+    # `confirmed` sort match what the row now actually contains.
+    bucket["is_accepted"] = bool(photos) and all(
+        p.get("has_accepted_species") for p in photos
+    )
     bucket["avg_confidence"] = avg_confidence
     bucket["certainty"] = _highlight_confidence_label(
         avg_confidence, bucket.get("is_accepted")

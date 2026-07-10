@@ -267,6 +267,62 @@ def test_highlights_preference_updates_top_photo_timestamp(live_server):
     assert hawk["best_timestamp"] == "2024-03-10T08:02:00"
 
 
+def test_highlights_search_recomputes_bucket_accepted_status(live_server):
+    """Filtering a mixed bucket down to only confirmed photos must flip
+    ``is_accepted`` to True so the bucket loses the candidate badge and the
+    Confirmed-first sort places it above unconfirmed rows."""
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+
+    # Add a prediction-only photo that lands in the same "Red-tailed Hawk"
+    # bucket (predicted confidence above the default 0.70 threshold) so the
+    # bucket is a mix of confirmed (keyword-tagged) and unconfirmed photos.
+    pid = db.add_photo(
+        folder_id=data["folders"][0],
+        filename="predicted-hawk.jpg",
+        extension=".jpg",
+        file_size=1000,
+        file_mtime=1.0,
+        timestamp="2024-03-10T08:05:00",
+    )
+    db.conn.execute("UPDATE photos SET quality_score = 0.7 WHERE id = ?", (pid,))
+    det_id = db.save_detections(
+        pid,
+        [{
+            "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+            "confidence": 0.95,
+            "category": "animal",
+        }],
+        detector_model="test-detector",
+    )[0]
+    db.add_prediction(
+        detection_id=det_id,
+        species="Red-tailed Hawk",
+        confidence=0.9,
+        model="BioCLIP-2",
+    )
+    db.conn.commit()
+
+    base = live_server["url"]
+
+    # Without a filter, the mixed bucket is unconfirmed at the bucket level.
+    with urlopen(f"{base}/api/highlights?scope=workspace") as resp:
+        payload = json.load(resp)
+    hawk = next(b for b in payload["buckets"] if b["species"] == "Red-tailed Hawk")
+    assert hawk["is_accepted"] is False
+    assert hawk["certainty"] != "confirmed"
+
+    # Filtering by filename to only include a confirmed (keyword-tagged) photo
+    # must recompute ``is_accepted`` from the filtered photos.
+    with urlopen(f"{base}/api/highlights?scope=workspace&q=hawk1") as resp:
+        payload = json.load(resp)
+    hawk = next(b for b in payload["buckets"] if b["species"] == "Red-tailed Hawk")
+    assert hawk["photo_count"] == 1
+    assert hawk["is_accepted"] is True
+    assert hawk["certainty"] == "confirmed"
+
+
 def test_highlights_lightbox_reject_advances_and_can_restore(live_server, page):
     db = live_server["db"]
     data = live_server["data"]
