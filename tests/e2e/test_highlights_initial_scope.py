@@ -155,6 +155,50 @@ def test_highlights_ranks_species_by_rich_subject_score(live_server, page):
     )
 
 
+def test_highlights_best_ui_is_advanced_only(live_server, page):
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+
+    page.add_init_script(
+        """() => {
+            localStorage.setItem('vireo_advanced_mode', 'false');
+            localStorage.setItem('vireo_dev_mode', 'false');
+        }"""
+    )
+    page.goto(f"{live_server['url']}/highlights", timeout=5000)
+    expect(page.locator(".highlights-card").first).to_be_visible(timeout=5000)
+
+    expect(page.locator(".best-ribbon", has_text="Best")).to_have_count(0)
+    expect(page.locator(".highlights-card .card-chip.score")).to_have_count(0)
+    expect(page.locator(".highlights-card .card-chip.reason")).to_have_count(0)
+    expect(page.locator("#sortSelect option[value='best']")).to_have_text(
+        "Recommended first"
+    )
+    assert page.locator("#sortSelect option[value='worst']").evaluate(
+        "el => el.hidden && el.disabled"
+    )
+
+    page.evaluate(
+        """() => {
+            document.documentElement.setAttribute('data-advanced-mode', 'true');
+            document.documentElement.setAttribute('data-dev-mode', 'true');
+            localStorage.setItem('vireo_advanced_mode', 'true');
+            localStorage.setItem('vireo_dev_mode', 'true');
+            window.dispatchEvent(new Event('advancedmodechange'));
+        }"""
+    )
+
+    expect(page.locator(".best-ribbon", has_text="Best").first).to_be_visible()
+    expect(page.locator(".highlights-card .card-chip.score").first).to_be_visible()
+    expect(page.locator("#sortSelect option[value='best']")).to_have_text(
+        "Best photo first"
+    )
+    assert page.locator("#sortSelect option[value='worst']").evaluate(
+        "el => !el.hidden && !el.disabled"
+    )
+
+
 def test_highlights_species_search_filters_buckets(live_server, page):
     db = live_server["db"]
     data = live_server["data"]
@@ -250,20 +294,21 @@ def test_highlights_unidentified_search_includes_low_confidence_predictions(live
     assert "low-conf-bird.jpg" in filenames
 
 
-def test_highlights_preference_updates_top_photo_timestamp(live_server):
+def test_ordered_highlight_updates_top_photo_timestamp(live_server):
     db = live_server["db"]
     data = live_server["data"]
     _seed_quality_scores_and_species(db, data)
 
-    preferred = data["photos"][2]
-    db.set_photo_preference("highlights", "Red-tailed Hawk", preferred)
+    highlighted = data["photos"][2]
+    db.add_species_highlight("Red-tailed Hawk", highlighted)
 
     base = live_server["url"]
     with urlopen(f"{base}/api/highlights?scope=workspace") as resp:
         payload = json.load(resp)
 
     hawk = next(b for b in payload["buckets"] if b["species"] == "Red-tailed Hawk")
-    assert hawk["photos"][0]["id"] == preferred
+    assert hawk["photos"][0]["id"] == highlighted
+    assert hawk["photos"][0]["is_highlighted"] is True
     assert hawk["best_timestamp"] == "2024-03-10T08:02:00"
 
 
