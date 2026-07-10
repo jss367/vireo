@@ -129,6 +129,20 @@ def test_best_photo_is_highest_scored(life_app):
     assert [p["id"] for p in cardinal["photos"]] == [ids["p2"], ids["p1"]]
 
 
+def test_life_list_best_ignores_pick_when_no_preference(life_app):
+    """Life List ranking must stay score-driven — the Highlights-only
+    picked-first ordering must not leak into `_build_life_list_payload`."""
+    app, db, ids = life_app
+    # p1's quality_score (0.5) is lower than p2's (0.9). Flagging p1
+    # must NOT promote it above p2 on the Life List.
+    db.update_photo_flag(ids["p1"], "flagged")
+
+    data = _get_life_list(app)
+    cardinal = _entry(data, "Northern Cardinal")
+    assert cardinal["best"]["id"] == ids["p2"]
+    assert [p["id"] for p in cardinal["photos"]] == [ids["p2"], ids["p1"]]
+
+
 def test_life_list_photo_preference_overrides_best_photo(life_app):
     app, _, ids = life_app
     client = app.test_client()
@@ -187,6 +201,30 @@ def test_highlights_picks_sort_before_higher_scored_unflagged(life_app):
     assert [p["id"] for p in cardinal["photos"][:2]] == [ids["p1"], ids["p2"]]
     assert cardinal["photos"][0]["flag"] == "flagged"
     assert cardinal["photos"][1]["flag"] == "none"
+
+
+def test_highlights_bucket_best_score_ignores_pick_promotion(life_app):
+    """Picking a lower-scored photo must not demote the whole species bucket.
+
+    The Highlights UI ranks buckets by ``best_score`` for the default
+    "Best photo first" sort. A pick moves the flagged photo to
+    ``photos[0]`` for display, but ``best_score`` must still reflect the
+    highest-scored photo in the bucket so the species isn't pushed down
+    below buckets whose actual best photo is worse.
+    """
+    app, db, ids = life_app
+    db.update_photo_flag(ids["p1"], "flagged")
+
+    data = app.test_client().get("/api/highlights?scope=workspace").get_json()
+    cardinal = next(
+        b for b in data["buckets"] if b["species"] == "Northern Cardinal"
+    )
+    picked = next(p for p in cardinal["photos"] if p["id"] == ids["p1"])
+    unpicked = next(p for p in cardinal["photos"] if p["id"] == ids["p2"])
+    # Sanity: p1 (picked) really is the lower-scored photo, so photos[0]'s
+    # score would demote the bucket if best_score anchored to it.
+    assert picked["highlight_score"] < unpicked["highlight_score"]
+    assert cardinal["best_score"] == unpicked["highlight_score"]
 
 
 def test_life_order_numbering_and_dates(life_app):

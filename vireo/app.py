@@ -195,8 +195,13 @@ def _highlight_area_score(subject_size):
     return min(1.0, math.sqrt(subject_size) * 2.0)
 
 
-def _highlight_score_bucket(photos):
-    """Attach highlight scores and compact reason labels to one species bucket."""
+def _highlight_score_bucket(photos, picked_first=False):
+    """Attach highlight scores and compact reason labels to one species bucket.
+
+    picked_first promotes flagged photos above unflagged ones regardless of
+    score — desired on the Highlights page, but off by default so callers
+    like the Life List keep selecting the highest-scored photo.
+    """
     subject_values = [p.get("subject_tenengrad") for p in photos]
     eye_values = [p.get("eye_tenengrad") for p in photos if p.get("eye_tenengrad") is not None]
     bg_values = [p.get("bg_tenengrad") for p in photos]
@@ -297,7 +302,7 @@ def _highlight_score_bucket(photos):
 
     photos.sort(
         key=lambda p: (
-            1 if p.get("flag") == "flagged" else 0,
+            (1 if p.get("flag") == "flagged" else 0) if picked_first else 0,
             p.get("highlight_score") or 0,
             p.get("predicted_confidence") or 0,
             p.get("quality_score") or 0,
@@ -323,6 +328,17 @@ def _apply_preferred_photo(photos, preferred_photo_id, marker_key):
     return False
 
 
+def _bucket_best_score(photos):
+    """Return the highest highlight_score in a bucket, or None if empty.
+
+    Used to rank buckets on the Highlights page. Reads the max across all
+    photos so a pick-first (or user-preferred) reorder at photos[0] can't
+    demote a species by anchoring the bucket score to a lower-scored photo.
+    """
+    scores = [p.get("highlight_score") for p in photos if p.get("highlight_score") is not None]
+    return max(scores) if scores else None
+
+
 def _apply_highlight_preferences(db, buckets):
     preferences = db.get_photo_preferences("highlights")
     for bucket in buckets:
@@ -330,12 +346,17 @@ def _apply_highlight_preferences(db, buckets):
         applied = _apply_preferred_photo(
             bucket["photos"], preferred_id, "is_highlights_photo"
         )
-        best = bucket["photos"][0] if bucket["photos"] else {}
+        top = bucket["photos"][0] if bucket["photos"] else {}
         bucket["preferred_photo_id"] = preferred_id
         bucket["has_preferred_photo"] = applied
-        bucket["best_quality"] = best.get("quality_score")
-        bucket["best_score"] = best.get("highlight_score")
-        bucket["best_timestamp"] = best.get("timestamp")
+        bucket["best_quality"] = top.get("quality_score")
+        # Rank by the highest-scored photo in the bucket, not photos[0].
+        # A picked (or manually preferred) photo may sit at photos[0] with a
+        # lower highlight_score; using its score for bucket ranking would
+        # demote the whole species below buckets with worse actual best
+        # photos.
+        bucket["best_score"] = _bucket_best_score(bucket["photos"])
+        bucket["best_timestamp"] = top.get("timestamp")
 
 
 def _highlight_confidence_label(confidence, is_accepted):
@@ -436,7 +457,7 @@ def _collect_highlight_buckets(
     buckets = []
     for species, entry in bucket_map.items():
         photos = entry["photos"]
-        _highlight_score_bucket(photos)
+        _highlight_score_bucket(photos, picked_first=True)
         confidences = [
             p["predicted_confidence"]
             for p in photos
@@ -446,7 +467,7 @@ def _collect_highlight_buckets(
             round(sum(confidences) / len(confidences), 4)
             if confidences else None
         )
-        best = photos[0] if photos else {}
+        top = photos[0] if photos else {}
         buckets.append({
             "species": species,
             "is_accepted": entry["is_accepted"],
@@ -455,12 +476,13 @@ def _collect_highlight_buckets(
             ),
             "avg_confidence": avg_confidence,
             "photo_count": len(photos),
-            "best_quality": best.get("quality_score"),
-            "best_score": best.get("highlight_score"),
+            "best_quality": top.get("quality_score"),
+            "best_score": _bucket_best_score(photos),
+            "best_timestamp": top.get("timestamp"),
             "photos": photos,
         })
 
-    _highlight_score_bucket(unidentified_photos)
+    _highlight_score_bucket(unidentified_photos, picked_first=True)
     buckets.sort(
         key=lambda b: (
             b.get("best_score") or 0,
@@ -514,7 +536,7 @@ def _refresh_highlight_bucket_metadata(bucket):
         round(sum(confidences) / len(confidences), 4)
         if confidences else None
     )
-    best = photos[0] if photos else {}
+    top = photos[0] if photos else {}
     # Filtering can drop the unconfirmed photos from a mixed bucket, leaving
     # only confirmed ones — recompute so the "candidate" badge and the
     # `confirmed` sort match what the row now actually contains.
@@ -526,9 +548,9 @@ def _refresh_highlight_bucket_metadata(bucket):
         avg_confidence, bucket.get("is_accepted")
     )
     bucket["photo_count"] = len(photos)
-    bucket["best_quality"] = best.get("quality_score")
-    bucket["best_score"] = best.get("highlight_score")
-    bucket["best_timestamp"] = best.get("timestamp")
+    bucket["best_quality"] = top.get("quality_score")
+    bucket["best_score"] = _bucket_best_score(photos)
+    bucket["best_timestamp"] = top.get("timestamp")
     return bucket
 
 
