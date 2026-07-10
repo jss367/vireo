@@ -12574,7 +12574,16 @@ class Database:
             return
         hl_prev = curation.get("hl_prev") or []
         pref_prev = curation.get("pref_prev") or []
-        for old_species in hl_prev:
+        for hl in hl_prev:
+            # Newer relabels record {species, rank}; entries from older
+            # relabels (before PR #1161 landed rank capture) are plain
+            # species-name strings and fall back to append-at-end.
+            if isinstance(hl, dict):
+                old_species = hl.get("species")
+                target_rank = hl.get("rank")
+            else:
+                old_species = hl
+                target_rank = None
             if not old_species or old_species == new_species:
                 continue
             self.conn.execute(
@@ -12589,18 +12598,29 @@ class Database:
             ).fetchone()
             if existing:
                 continue
-            next_rank = int(self.conn.execute(
-                """SELECT COALESCE(MAX(rank), 0) AS max_rank
-                   FROM species_highlights
-                   WHERE workspace_id = ? AND species = ?""",
-                (workspace_id, old_species),
-            ).fetchone()["max_rank"] or 0) + 1
+            if target_rank is None:
+                rank = int(self.conn.execute(
+                    """SELECT COALESCE(MAX(rank), 0) AS max_rank
+                       FROM species_highlights
+                       WHERE workspace_id = ? AND species = ?""",
+                    (workspace_id, old_species),
+                ).fetchone()["max_rank"] or 0) + 1
+            else:
+                try:
+                    rank = int(target_rank)
+                except (TypeError, ValueError):
+                    rank = int(self.conn.execute(
+                        """SELECT COALESCE(MAX(rank), 0) AS max_rank
+                           FROM species_highlights
+                           WHERE workspace_id = ? AND species = ?""",
+                        (workspace_id, old_species),
+                    ).fetchone()["max_rank"] or 0) + 1
             self.conn.execute(
                 """INSERT INTO species_highlights
                        (workspace_id, species, photo_id, rank,
                         created_at, updated_at)
                    VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
-                (workspace_id, old_species, photo_id, next_rank),
+                (workspace_id, old_species, photo_id, rank),
             )
         for pref in pref_prev:
             if not isinstance(pref, dict):
@@ -12642,7 +12662,13 @@ class Database:
             return
         hl_prev = curation.get("hl_prev") or []
         pref_prev = curation.get("pref_prev") or []
-        for old_species in hl_prev:
+        for hl in hl_prev:
+            # Accept both new dict form ({species, rank}) and legacy
+            # string form for compatibility with older edit-history rows.
+            if isinstance(hl, dict):
+                old_species = hl.get("species")
+            else:
+                old_species = hl
             if not old_species or old_species == new_species:
                 continue
             src = self.conn.execute(

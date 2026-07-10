@@ -7102,7 +7102,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         purpose = purpose.strip() if isinstance(purpose, str) else ""
         species = species.strip() if isinstance(species, str) else ""
         if purpose not in {"species_representative", "life_list", "highlights"}:
-            return None, "purpose must be species_representative"
+            return None, (
+                "purpose must be one of species_representative, "
+                "life_list, or highlights"
+            )
         if not species:
             return None, "species required"
 
@@ -7860,46 +7863,57 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         top_predictions = _highlight_top_predictions(db, photo_ids)
         ws_id = db._ws_id()
-        placeholders = ",".join("?" for _ in photo_ids)
-        highlight_rows = db.conn.execute(
-            f"""SELECT species, photo_id FROM species_highlights
-                WHERE workspace_id = ? AND photo_id IN ({placeholders})""",
-            (ws_id, *photo_ids),
-        ).fetchall()
+        # Chunk both lookups: photo_ids has no upstream cap
+        # (_parse_highlight_photo_ids just parses the list), so a bulk
+        # relabel of >999 photos would blow SQLITE_MAX_VARIABLE_NUMBER
+        # on the legacy builds this file already guards against.
         highlight_renames = {}
         hl_prev_by_pid = {}
-        for row in highlight_rows:
-            old_species_name = row["species"]
-            if old_species_name == species:
-                continue
-            highlight_renames.setdefault(old_species_name, []).append(
-                row["photo_id"]
-            )
-            hl_prev_by_pid.setdefault(row["photo_id"], []).append(
-                old_species_name
-            )
-        preference_rows = db.conn.execute(
-            f"""SELECT species, photo_id, purpose FROM photo_preferences
-                WHERE workspace_id = ?
-                  AND photo_id IN ({placeholders})
-                  AND purpose IN (
-                      'species_representative', 'life_list', 'highlights'
-                  )""",
-            (ws_id, *photo_ids),
-        ).fetchall()
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT species, photo_id, rank FROM species_highlights
+                    WHERE workspace_id = ? AND photo_id IN ({placeholders})""",
+                (ws_id, *chunk),
+            ).fetchall()
+            for row in rows:
+                old_species_name = row["species"]
+                if old_species_name == species:
+                    continue
+                highlight_renames.setdefault(old_species_name, []).append(
+                    row["photo_id"]
+                )
+                # Snapshot the original rank so undo can restore each
+                # highlighted photo at its original position instead of
+                # dumping it at MAX(rank)+1 (see _restore_relabel_curation).
+                hl_prev_by_pid.setdefault(row["photo_id"], []).append({
+                    "species": old_species_name,
+                    "rank": row["rank"],
+                })
         preference_renames = {}
         pref_prev_by_pid = {}
-        for row in preference_rows:
-            old_species_name = row["species"]
-            if old_species_name == species:
-                continue
-            preference_renames.setdefault(old_species_name, []).append(
-                row["photo_id"]
-            )
-            pref_prev_by_pid.setdefault(row["photo_id"], []).append({
-                "purpose": row["purpose"],
-                "species": old_species_name,
-            })
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT species, photo_id, purpose FROM photo_preferences
+                    WHERE workspace_id = ?
+                      AND photo_id IN ({placeholders})
+                      AND purpose IN (
+                          'species_representative', 'life_list', 'highlights'
+                      )""",
+                (ws_id, *chunk),
+            ).fetchall()
+            for row in rows:
+                old_species_name = row["species"]
+                if old_species_name == species:
+                    continue
+                preference_renames.setdefault(old_species_name, []).append(
+                    row["photo_id"]
+                )
+                pref_prev_by_pid.setdefault(row["photo_id"], []).append({
+                    "purpose": row["purpose"],
+                    "species": old_species_name,
+                })
         try:
             kid = db.add_keyword(species, is_species=True, _commit=False)
             items = []

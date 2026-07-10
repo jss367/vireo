@@ -3303,6 +3303,21 @@ def test_rename_keyword_updates_photo_preferences(app_and_db):
     assert db.get_photo_preferences("highlights") == {"NewBird": p1}
 
 
+def test_rename_keyword_updates_species_representative(app_and_db):
+    """species_representative preferences follow species keyword renames."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("OldBird", is_species=True)
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.tag_photo(p1, kid)
+    db.set_photo_preference("species_representative", "OldBird", p1)
+
+    resp = client.put(f"/api/keywords/{kid}", json={"name": "NewBird"})
+    assert resp.status_code == 200
+
+    assert db.get_photo_preferences("species_representative") == {"NewBird": p1}
+
+
 def test_rename_keyword_photo_preferences_keep_existing_target(app_and_db):
     """Renaming into an existing preference keeps the target preference."""
     app, db = app_and_db
@@ -5589,6 +5604,57 @@ def test_highlights_relabel_undo_restores_curation(app_and_db):
     hl_redo = db.get_species_highlights()
     assert pid in (hl_redo.get("Golden Eagle") or {})
     assert "Bald Eagle" not in hl_redo
+
+
+def test_highlights_relabel_undo_preserves_original_rank(app_and_db):
+    """Undoing a relabel puts the highlighted photo back at its original
+    rank rather than dumping it at MAX(rank)+1 of the old bucket, so
+    curated order survives a round-trip through undo."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrrank', 'hrrank', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Old Rank Bird", is_species=True)
+    db.add_keyword("New Rank Bird", is_species=True)
+    p1 = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'rank-1.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    p2 = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'rank-2.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(p1, old_kid)
+    db.tag_photo(p2, old_kid)
+    db.add_species_highlight("Old Rank Bird", p1)
+    db.add_species_highlight("Old Rank Bird", p2)
+
+    # Sanity: original ranks are 1 (p1) and 2 (p2).
+    assert db.get_species_highlights("Old Rank Bird") == {
+        "Old Rank Bird": {p1: 1, p2: 2}
+    }
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [p1], "species": "New Rank Bird"},
+    )
+    assert resp.status_code == 200
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+
+    restored = db.get_species_highlights("Old Rank Bird")["Old Rank Bird"]
+    # Before the fix, p1 landed at rank 3 (MAX(rank)+1) and appeared
+    # after p2 in the ordered list.
+    assert restored[p1] == 1
+    assert restored[p2] == 2
 
 
 def test_backfill_species_highlights_from_legacy_preferences(tmp_path):
