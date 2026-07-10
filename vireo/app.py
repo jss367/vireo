@@ -3791,6 +3791,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ws_id = db._active_workspace_id
         deleted = 0
         skipped = 0
+        folder_online_cache = {}
         for raw_id in photo_ids:
             try:
                 pid = int(raw_id)
@@ -3808,7 +3809,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if not row:
                 skipped += 1
                 continue
-            src = os.path.join(row["folder_path"], row["filename"])
+            folder_path = row["folder_path"]
+            folder_online = folder_online_cache.get(folder_path)
+            if folder_online is None:
+                folder_online = os.path.isdir(folder_path)
+                folder_online_cache[folder_path] = folder_online
+            if not folder_online:
+                # Folder is currently unreachable — we can't tell whether
+                # the original was restored before the mount went offline,
+                # so skip the sidecar (a valid original could have a
+                # matching .xmp we would wrongly delete once the volume
+                # comes back).
+                skipped += 1
+                continue
+            src = os.path.join(folder_path, row["filename"])
             if os.path.exists(src):
                 # Original came back — refuse to touch the sidecar.
                 skipped += 1
@@ -3867,8 +3881,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ws_id = db._active_workspace_id
         confirmed_ids = []
         restored_ids = []
+        folder_offline_ids = []
         skipped = 0
         sidecar_targets = []
+        folder_online_cache = {}
         for raw_id in photo_ids:
             try:
                 pid = int(raw_id)
@@ -3886,7 +3902,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if not row:
                 skipped += 1
                 continue
-            src = os.path.join(row["folder_path"], row["filename"])
+            folder_path = row["folder_path"]
+            folder_online = folder_online_cache.get(folder_path)
+            if folder_online is None:
+                folder_online = os.path.isdir(folder_path)
+                folder_online_cache[folder_path] = folder_online
+            if not folder_online:
+                # The parent folder/NAS mount is currently unreachable, so
+                # ``os.path.exists(src)`` would return False for every row
+                # regardless of whether the original was restored before
+                # the volume went offline. Deleting under that ambiguity
+                # would remove valid Vireo rows; leave the decision for a
+                # later scan (once folder health flips or the volume comes
+                # back) instead.
+                folder_offline_ids.append(pid)
+                continue
+            src = os.path.join(folder_path, row["filename"])
             if os.path.exists(src):
                 # Original is back on disk — the cached "missing" verdict
                 # was stale. Keep the Vireo row (and its sidecar).
@@ -3934,13 +3965,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # deletion is also the one the banner will keep serving until the
         # next scan. Dropping it now forces a fresh check the next time
         # the banner/modal asks, so the restored photos stop appearing
-        # as ghosts.
-        if restored_ids and deleted_count == 0:
+        # as ghosts. Do the same when we deferred rows because a folder
+        # was offline: the cache is unreliable evidence for those IDs and
+        # the next scan (or health flip) needs to replace it.
+        if deleted_count == 0 and (restored_ids or folder_offline_ids):
             _invalidate_missing_originals_cache()
 
         return jsonify({
             "deleted": deleted_count,
             "restored": restored_ids,
+            "folder_offline": folder_offline_ids,
             "skipped": skipped,
             "sidecars_deleted": sidecars_deleted,
             "sidecars_skipped": sidecars_skipped,

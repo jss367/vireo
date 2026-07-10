@@ -10775,6 +10775,19 @@ async function _deleteMissingPhotoIds(ids, deleteSidecars) {
       'info',
     );
   }
+  // The cache can't tell "original truly missing" from "folder unreachable"
+  // — if a NAS/SMB mount is currently offline every ready-cache row would
+  // look absent, so the endpoint defers those IDs. Surface that so users
+  // know why the delete didn't happen and can retry once the volume returns.
+  const folderOffline = (payload && Array.isArray(payload.folder_offline))
+    ? payload.folder_offline : [];
+  if (folderOffline.length > 0) {
+    const noun = folderOffline.length === 1 ? 'photo' : 'photos';
+    showToast(
+      `Skipped ${folderOffline.length} ${noun} whose folder is currently offline.`,
+      'warning',
+    );
+  }
   // Best-effort: refreshing the Misses page is an auxiliary UI sync. A
   // failure here must not reject the delete flow or block the caller's
   // own loadMissingPhotos() refresh.

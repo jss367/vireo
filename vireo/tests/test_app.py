@@ -5223,6 +5223,7 @@ def test_api_photos_missing_remove_skips_restored_originals(app_and_db, tmp_path
     data = resp.get_json()
     assert data["deleted"] == 1
     assert data["restored"] == [pid_restored]
+    assert data["folder_offline"] == []
     assert data["skipped"] == 0
     assert data["sidecars_deleted"] == 1
 
@@ -5232,6 +5233,79 @@ def test_api_photos_missing_remove_skips_restored_originals(app_and_db, tmp_path
     # Ghost sidecar was cleaned up, restored one was left alone.
     assert not (real_dir / "ghost.xmp").exists()
     assert (real_dir / "restored.xmp").exists()
+
+
+def test_api_photos_missing_remove_skips_offline_folder(app_and_db, tmp_path):
+    """POST /api/photos/missing/remove must not delete rows from an offline folder.
+
+    A ready ``/api/photos/missing`` cache is served for up to 30 minutes
+    without a filesystem recheck. If a NAS/SMB mount goes offline between
+    the last scan and the user clicking Remove, ``os.path.exists(src)``
+    returns False for every row — but that is evidence the folder is
+    unreachable, not that the originals are gone. If any file was
+    restored before the mount dropped, a naive "still missing" check
+    would silently delete a valid Vireo row. The endpoint must skip
+    deletion when the folder is unreachable and surface the deferred
+    IDs so the modal can explain what happened.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    fid = db.add_folder(str(real_dir), name="live")
+    pid = db.add_photo(folder_id=fid, filename="ghost.NEF",
+                       extension=".nef", file_size=1, file_mtime=1.0)
+    # Ghost sidecar left on disk — must not be deleted while folder offline.
+    (real_dir / "ghost.xmp").write_text("<x:xmpmeta/>")
+
+    # Simulate the parent folder/NAS mount going offline by removing the
+    # folder from disk after the DB row is set up. ``os.path.isdir`` will
+    # now return False so the endpoint must treat this as ambiguous.
+    import shutil
+    shutil.rmtree(real_dir)
+
+    resp = client.post("/api/photos/missing/remove", json={
+        "photo_ids": [pid],
+        "delete_sidecars": True,
+        "mode": "vireo",
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    data = resp.get_json()
+    assert data["deleted"] == 0
+    assert data["restored"] == []
+    assert data["folder_offline"] == [pid]
+    assert data["sidecars_deleted"] == 0
+    # Row must still be present — we did not delete it.
+    assert db.get_photo(pid) is not None
+
+
+def test_api_photos_missing_delete_sidecars_skips_offline_folder(app_and_db, tmp_path):
+    """delete-sidecars must skip when the parent folder is unreachable.
+
+    Same reasoning as the /remove endpoint: an offline mount makes
+    ``os.path.exists`` uninformative, so touching the .xmp for a photo
+    whose original may have been restored risks deleting a valid sidecar.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    fid = db.add_folder(str(real_dir), name="live")
+    pid = db.add_photo(folder_id=fid, filename="ghost.NEF",
+                       extension=".nef", file_size=1, file_mtime=1.0)
+
+    import shutil
+    shutil.rmtree(real_dir)
+
+    resp = client.post("/api/photos/missing/delete-sidecars", json={
+        "photo_ids": [pid],
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["deleted"] == 0
+    assert data["skipped"] == 1
 
 
 def test_api_photos_missing_remove_rejects_ids_outside_workspace(app_and_db, tmp_path):
@@ -5252,6 +5326,7 @@ def test_api_photos_missing_remove_rejects_ids_outside_workspace(app_and_db, tmp
     data = resp.get_json()
     assert data["deleted"] == 0
     assert data["restored"] == []
+    assert data["folder_offline"] == []
     assert data["skipped"] == 1
 
 
