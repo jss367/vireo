@@ -21089,13 +21089,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if not os.path.exists(wc_path):
                 return None
             from PIL import Image as _PILImage
+
+            from render_source import image_size_after_exif_orientation
             try:
                 with _PILImage.open(wc_path) as _wc_img:
-                    wc_w, wc_h = _wc_img.size
+                    wc_w, wc_h = image_size_after_exif_orientation(_wc_img)
             except Exception:
                 wc_w = wc_h = 0
-            orig_w = photo["width"] or 0
-            orig_h = photo["height"] or 0
+            # Compare in display-orientation space: ``extract_working_copy``
+            # writes the EXIF-transposed JPEG (e.g. 4000x6000 for a portrait
+            # RAW), while ``photo["width"]/height`` are the sensor axes
+            # (6000x4000). Comparing raw sensor axes rejects a valid
+            # full-resolution WC for portrait RAWs and either 500s or forces
+            # a redundant re-decode. ``_recipe_source_dimensions`` swaps the
+            # sensor axes when EXIF Orientation indicates it, matching what
+            # ``load_image`` returns.
+            orig_w, orig_h = _recipe_source_dimensions(photo)
             # Trust the wc when it meets/exceeds the believed original dims,
             # or when those dims are unknown (no basis to declare the wc stale
             # and a speculative RAW re-extract would just thrash the disk).

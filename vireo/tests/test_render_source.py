@@ -226,3 +226,23 @@ def test_working_copy_satisfies_recipe_render_missing_wc_path(tmp_path):
     assert rs.working_copy_satisfies_recipe_render(
         photo, recipe=None, max_size=None, vireo_dir=str(tmp_path),
     ) is False
+
+
+def test_working_copy_satisfies_recipe_render_scales_wc_before_compare(tmp_path):
+    # ``load_image(..., max_size=1024)`` caps the long edge and scales the
+    # short edge proportionally. A 6000x3376 embedded preview vs a 1024px
+    # target renders as 1024x576 — its short edge falls short of the
+    # required 1024x683. Without scaling the WC render dims before the
+    # compare, 6000 >= 1024 and 3376 >= 683 both pass and the failed-RAW
+    # fallback would cache the truncated preview.
+    truncated = _wc_photo(tmp_path, (6000, 3376), 6000, 4000)
+    assert rs.working_copy_satisfies_recipe_render(
+        truncated, recipe=None, max_size=1024, vireo_dir=str(tmp_path),
+        rel_slack=0.01,
+    ) is False
+    # A full-resolution WC still passes the capped-request compare.
+    full = _wc_photo(tmp_path, (6000, 4000), 6000, 4000)
+    assert rs.working_copy_satisfies_recipe_render(
+        full, recipe=None, max_size=1024, vireo_dir=str(tmp_path),
+        rel_slack=0.01,
+    ) is True

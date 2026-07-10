@@ -1257,6 +1257,60 @@ def test_original_does_not_trust_raw_working_copy_with_truncated_short_edge(app_
         )
 
 
+def test_original_trusts_portrait_raw_working_copy_with_transposed_dims(app_and_db):
+    """Portrait RAWs store sensor axes while extract_working_copy writes the
+    EXIF-transposed JPEG, so the trust check must compare in display-orientation
+    space.
+
+    For a portrait RAW with sensor 6000x4000 and EXIF Orientation 6, the
+    working copy lands as 4000x6000 on disk. Comparing raw sensor axes
+    (``wc_w >= orig_w`` where wc_w=4000 and orig_w=6000) rejects a legitimate
+    full-resolution WC and forces a redundant re-extract or a 500. The trust
+    check must normalize both sides to display orientation.
+    """
+    import json
+
+    import config as cfg
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    cfg.save({**cfg.DEFAULTS, "working_copy_max_size": 0})
+
+    photos = db.get_photos()
+    pid = photos[0]["id"]
+
+    exif = json.dumps({"EXIF": {"Orientation": 6}})
+    db.conn.execute(
+        "UPDATE photos SET filename=?, extension=?, width=6000, height=4000, "
+        "exif_data=? WHERE id=?",
+        ("DSC_0001.NEF", ".nef", exif, pid),
+    )
+    db.conn.commit()
+
+    from PIL import Image
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_path = os.path.join(working_dir, f"{pid}.jpg")
+    # extract_working_copy writes the EXIF-transposed JPEG: for a portrait
+    # source with sensor 6000x4000 the WC on disk is 4000x6000 (display).
+    Image.new("RGB", (4000, 6000), color=(90, 130, 200)).save(wc_path, "JPEG")
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=? WHERE id=?",
+        (f"working/{pid}.jpg", pid),
+    )
+    db.conn.commit()
+
+    resp = client.get(f"/photos/{pid}/original")
+
+    assert resp.status_code == 200
+    # The endpoint must have trusted and served the WC directly — comparing
+    # sensor vs display would have rejected it and either 500'd or re-extracted.
+    with open(wc_path, "rb") as f:
+        assert resp.data == f.read()
+
+
 def test_edited_original_uses_working_copy_after_current_raw_failure(
     client_with_photo, monkeypatch,
 ):

@@ -257,6 +257,19 @@ def working_copy_satisfies_recipe_render(
         required_w = orig_render_w
         required_h = orig_render_h
     wc_render_w, wc_render_h = rendered_recipe_dimensions(wc_w, wc_h, recipe)
+    # ``load_image(..., max_size=max_size)`` caps the long edge at ``max_size``
+    # and scales the short edge proportionally. Compare what it would actually
+    # produce from this working copy, not the raw WC render dims: a 6000x3376
+    # embedded preview for a 6000x4000 source clears an unscaled compare
+    # against 1024x683 (both axes exceed it), but a max_size=1024 render of
+    # that WC is 1024x576 — its short edge falls short and the truncated
+    # preview would otherwise get cached through the failed-RAW fallback.
+    if max_size:
+        wc_render_long = max(wc_render_w, wc_render_h)
+        if wc_render_long > max_size:
+            wc_scale = max_size / wc_render_long
+            wc_render_w = wc_render_w * wc_scale
+            wc_render_h = wc_render_h * wc_scale
     return not is_undersized(
         wc_render_w, wc_render_h, required_w, required_h,
         abs_slack=0, rel_slack=rel_slack,
