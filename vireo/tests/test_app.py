@@ -7685,6 +7685,27 @@ def test_native_import_commands_route_to_import_page():
     assert "case 'import_folder':\n        nativeMenuRoute('/import');" in navbar
 
 
+def test_external_link_fallback_does_not_navigate_tauri_webview():
+    """If the native browser opener fails, don't load iNat inside Vireo."""
+    import os
+
+    repo_root = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "..")
+    )
+    navbar_path = os.path.join(repo_root, "vireo", "templates", "_navbar.html")
+
+    with open(navbar_path, encoding="utf-8") as f:
+        navbar = f.read()
+
+    fallback_start = navbar.index("function fallbackOpen()")
+    location_fallback = navbar.index("window.location.href = url", fallback_start)
+    tauri_guard = navbar.index(
+        "if (typeof isTauri === 'function' && isTauri()) return false;",
+        fallback_start,
+    )
+    assert tauri_guard < location_fallback
+
+
 def test_pipeline_plan_accepts_folder_scope(app_and_db):
     """The Process page's folder scope must produce truthful readiness
     pills: the plan is computed over the folders' subtree photos, not the
