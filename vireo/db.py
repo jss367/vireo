@@ -70,6 +70,41 @@ def _nfc(name: str) -> str:
     return unicodedata.normalize("NFC", name)
 
 
+_TAXON_LOOKUP_TRANSLATION = str.maketrans({
+    "’": "'",
+    "‘": "'",
+    "`": "'",
+    "´": "'",
+    "ʼ": "'",
+    "ʹ": "'",
+    "‛": "'",
+    "“": '"',
+    "”": '"',
+    "„": '"',
+    "‟": '"',
+    "‐": "-",
+    "‑": "-",
+    "‒": "-",
+    "–": "-",
+    "—": "-",
+    "―": "-",
+})
+
+
+def _taxon_lookup_variants(name: str) -> list[str]:
+    """Return ordered taxon-name variants for punctuation-tolerant lookup."""
+    stripped = str(name).strip()
+    variants = []
+    for variant in (
+        stripped,
+        unicodedata.normalize("NFKC", stripped).translate(_TAXON_LOOKUP_TRANSLATION),
+    ):
+        collapsed = " ".join(variant.split())
+        if collapsed and collapsed not in variants:
+            variants.append(collapsed)
+    return variants
+
+
 def _path_for_subtree_match(value: str) -> str:
     """Normalize a stored path for platform-neutral subtree prefix matching."""
     return value.replace("\\", "/").rstrip("/")
@@ -8042,6 +8077,28 @@ class Database:
             return name.title()
         return name
 
+    def _lookup_taxon_id_for_keyword(self, name):
+        """Return the local taxa.id matching a keyword name, if any."""
+        for variant in _taxon_lookup_variants(name):
+            taxon = self.conn.execute(
+                """SELECT t.id FROM taxa t
+                   WHERE t.common_name = ? COLLATE NOCASE
+                      OR t.name = ? COLLATE NOCASE
+                   LIMIT 1""",
+                (variant, variant),
+            ).fetchone()
+            if taxon:
+                return taxon["id"]
+            taxon = self.conn.execute(
+                """SELECT t.taxon_id AS id FROM taxa_common_names t
+                   WHERE t.name = ? COLLATE NOCASE
+                   LIMIT 1""",
+                (variant,),
+            ).fetchone()
+            if taxon:
+                return taxon["id"]
+        return None
+
     def add_keyword(self, name, parent_id=None, is_species=False, kw_type=None, _commit=True):
         """Insert a keyword. Returns existing id if duplicate (case-insensitive).
 
@@ -8110,14 +8167,14 @@ class Database:
         if parent_id is None:
             if kw_type is None:
                 existing = self.conn.execute(
-                    f"SELECT id FROM keywords WHERE name = ? COLLATE NOCASE "
+                    f"SELECT id, type FROM keywords WHERE name = ? COLLATE NOCASE "
                     f"AND parent_id IS NULL "
                     f"ORDER BY {type_priority_case}, id ASC LIMIT 1",
                     (name,),
                 ).fetchone()
             else:
                 existing = self.conn.execute(
-                    "SELECT id FROM keywords WHERE name = ? COLLATE NOCASE "
+                    "SELECT id, type FROM keywords WHERE name = ? COLLATE NOCASE "
                     "AND parent_id IS NULL AND type IN (?, 'general') "
                     "ORDER BY (type = ?) DESC, id ASC LIMIT 1",
                     (name, kw_type, kw_type),
@@ -8125,19 +8182,30 @@ class Database:
         else:
             if kw_type is None:
                 existing = self.conn.execute(
-                    f"SELECT id FROM keywords WHERE name = ? COLLATE NOCASE "
+                    f"SELECT id, type FROM keywords WHERE name = ? COLLATE NOCASE "
                     f"AND parent_id = ? "
                     f"ORDER BY {type_priority_case}, id ASC LIMIT 1",
                     (name, parent_id),
                 ).fetchone()
             else:
                 existing = self.conn.execute(
-                    "SELECT id FROM keywords WHERE name = ? COLLATE NOCASE "
+                    "SELECT id, type FROM keywords WHERE name = ? COLLATE NOCASE "
                     "AND parent_id = ? AND type IN (?, 'general') "
                     "ORDER BY (type = ?) DESC, id ASC LIMIT 1",
                     (name, parent_id, kw_type, kw_type),
                 ).fetchone()
         if existing:
+            if kw_type is None and not is_species and existing["type"] == "general":
+                taxon_id = self._lookup_taxon_id_for_keyword(name)
+                if taxon_id:
+                    self.conn.execute(
+                        "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
+                        "taxon_id = COALESCE(taxon_id, ?) "
+                        "WHERE id = ? AND type = 'general'",
+                        (taxon_id, existing["id"]),
+                    )
+                    if _commit:
+                        self.conn.commit()
             # Promote an unset row to taxonomy when this call indicates a
             # species. Restrict to 'general' (the legacy default for unknown
             # rows) so a deliberate user type — 'individual', 'location',
@@ -8194,24 +8262,9 @@ class Database:
             if is_species:
                 kw_type = 'taxonomy'
             else:
-                # Check if name matches a known taxon (common name or scientific name)
-                taxon = self.conn.execute(
-                    """SELECT t.id FROM taxa t
-                       WHERE t.common_name = ? COLLATE NOCASE
-                          OR t.name = ? COLLATE NOCASE
-                       LIMIT 1""",
-                    (name, name),
-                ).fetchone()
-                if not taxon:
-                    taxon = self.conn.execute(
-                        """SELECT t.taxon_id AS id FROM taxa_common_names t
-                           WHERE t.name = ? COLLATE NOCASE
-                           LIMIT 1""",
-                        (name,),
-                    ).fetchone()
-                if taxon:
+                taxon_id = self._lookup_taxon_id_for_keyword(name)
+                if taxon_id:
                     kw_type = 'taxonomy'
-                    taxon_id = taxon["id"]
 
         cur = self.conn.execute(
             "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) VALUES (?, ?, ?, ?, ?)",
@@ -9684,25 +9737,12 @@ class Database:
             ).fetchone()
             if current is not None and new_name != current["name"]:
                 cur_type = current["type"]
-                taxon = self.conn.execute(
-                    """SELECT t.id FROM taxa t
-                       WHERE t.common_name = ? COLLATE NOCASE
-                          OR t.name = ? COLLATE NOCASE
-                       LIMIT 1""",
-                    (new_name, new_name),
-                ).fetchone()
-                if not taxon:
-                    taxon = self.conn.execute(
-                        """SELECT t.taxon_id AS id FROM taxa_common_names t
-                           WHERE t.name = ? COLLATE NOCASE
-                           LIMIT 1""",
-                        (new_name,),
-                    ).fetchone()
+                taxon_id = self._lookup_taxon_id_for_keyword(new_name)
 
                 if cur_type == 'general':
                     # Only promote to taxonomy if a match exists; otherwise
                     # leave type/taxon_id alone.
-                    if taxon:
+                    if taxon_id:
                         updates.setdefault('type', 'taxonomy')
                         # Gate taxon_id on the EFFECTIVE type so an
                         # explicit non-taxonomy type kwarg (e.g.
@@ -9711,16 +9751,16 @@ class Database:
                         # for the auto-promoted case: type='taxonomy'
                         # backed by a matched taxon implies is_species=1.
                         if updates.get('type') == 'taxonomy':
-                            updates.setdefault('taxon_id', taxon["id"])
+                            updates.setdefault('taxon_id', taxon_id)
                             updates['is_species'] = 1
-                elif (cur_type == 'taxonomy' and taxon
+                elif (cur_type == 'taxonomy' and taxon_id
                       and updates.get('type', 'taxonomy') == 'taxonomy'):
                     # Already taxonomy: refresh taxon_id only if the new
                     # name matches a (possibly different) taxon AND the
                     # effective type stays 'taxonomy' (caller may demote
                     # to 'location' etc.). If no match, leave the existing
                     # link in place.
-                    updates.setdefault('taxon_id', taxon["id"])
+                    updates.setdefault('taxon_id', taxon_id)
                 # Other manual types ('location', 'people', etc.) are
                 # preserved — user intent wins.
 

@@ -117,6 +117,38 @@ def test_lookup_case_insensitive():
         assert tax.lookup("Song Sparrow") is not None
 
 
+def test_lookup_normalizes_smart_apostrophes():
+    """Smart quotes from photo apps match straight-apostrophe taxonomy names."""
+    from taxonomy import Taxonomy
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tax_path = _create_mock_taxonomy(tmpdir)
+        tax = Taxonomy(tax_path)
+
+        result = tax.lookup("Lincoln’s Sparrow")
+        assert result is not None
+        assert result["scientific_name"] == "Melospiza lincolnii"
+
+
+def test_mark_species_keywords_normalizes_smart_apostrophes(tmp_path):
+    """Startup species marking retypes smart-apostrophe XMP keywords."""
+    from taxonomy import Taxonomy
+
+    tax_path = _create_mock_taxonomy(str(tmp_path))
+    tax = Taxonomy(tax_path)
+    db = Database(str(tmp_path / "test.db"))
+    kid = db.add_keyword("Lincoln’s Sparrow")
+
+    updated = db.mark_species_keywords(tax)
+    assert updated == 1
+
+    row = db.conn.execute(
+        "SELECT is_species, type FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["is_species"] == 1
+    assert row["type"] == "taxonomy"
+
+
 def test_lookup_scientific_name():
     """Lookup works for scientific names too."""
     from taxonomy import Taxonomy
