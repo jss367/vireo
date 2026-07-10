@@ -410,6 +410,22 @@ body {
   cursor: pointer;
 }
 .selection-keyword-add:hover { filter: brightness(1.05); }
+.selection-keyword-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.selection-keyword-remove {
+  flex-shrink: 0;
+  background: var(--bg-primary);
+  color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 60%, var(--border-secondary));
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.selection-keyword-remove:hover { background: color-mix(in srgb, var(--danger) 12%, var(--bg-primary)); }
 .selection-empty {
   color: var(--text-muted);
   font-size: 12px;
@@ -1859,6 +1875,7 @@ var selectedPhotos = new Set(); // multi-select
 var selectionKeywordRequestSeq = 0;
 var selectionKeywordKey = '';
 var selectionKeywordMissingById = {};
+var selectionKeywordPresentById = {};
 var showDetectionBoxes = false;
 var cardFields = ["filename", "rating", "flag", "color_label", "sharpness"]; // default, overridden by config
 var inatSubmitted = {};  // {photo_id: true}
@@ -4425,6 +4442,7 @@ function updateSelectionPanel(ids) {
     panel.classList.add('hidden');
     selectionKeywordKey = '';
     selectionKeywordMissingById = {};
+    selectionKeywordPresentById = {};
     selectionKeywordRequestSeq++;
     var list = document.getElementById('selectionKeywordSuggestions');
     if (list) list.innerHTML = '';
@@ -4460,6 +4478,7 @@ function updateSelectionPanel(ids) {
   if (ids.length > 1000) {
     selectionKeywordKey = selectionIdsKey(ids);
     selectionKeywordMissingById = {};
+    selectionKeywordPresentById = {};
     selectionKeywordRequestSeq++;
     var list = document.getElementById('selectionKeywordSuggestions');
     if (list) {
@@ -4668,7 +4687,7 @@ async function loadSelectionKeywordSuggestions(ids) {
       body: JSON.stringify({photo_ids: ids}),
     }, { toast: false });
     if (seq !== selectionKeywordRequestSeq) return;
-    renderSelectionKeywordSuggestions(data.suggestions || []);
+    renderSelectionKeywordSuggestions(data.keywords || data.suggestions || [], data.selected_count || ids.length);
   } catch(e) {
     if (seq === selectionKeywordRequestSeq && list) {
       list.innerHTML = '<div class="selection-empty">Could not load keyword suggestions.</div>';
@@ -4676,26 +4695,37 @@ async function loadSelectionKeywordSuggestions(ids) {
   }
 }
 
-function renderSelectionKeywordSuggestions(suggestions) {
+function renderSelectionKeywordSuggestions(keywords, selectedCount) {
   var list = document.getElementById('selectionKeywordSuggestions');
   if (!list) return;
-  if (!suggestions.length) {
+  if (!keywords.length) {
     selectionKeywordMissingById = {};
-    list.innerHTML = '<div class="selection-empty">No partial keywords in this selection.</div>';
+    selectionKeywordPresentById = {};
+    list.innerHTML = '<div class="selection-empty">No keywords on selected photos.</div>';
     return;
   }
 
   var html = '';
   selectionKeywordMissingById = {};
-  suggestions.slice(0, 8).forEach(function(k) {
+  selectionKeywordPresentById = {};
+  keywords.forEach(function(k) {
     var missing = k.missing_count || 0;
+    var count = k.count || 0;
     selectionKeywordMissingById[String(k.id)] = k.missing_photo_ids || [];
+    selectionKeywordPresentById[String(k.id)] = k.present_photo_ids || [];
+    var actions = '';
+    if (missing > 0) {
+      actions += '<button class="selection-keyword-add" onclick="applySelectionKeyword(' + k.id + ')" title="Add this keyword to the selected photos missing it">Add to ' + missing + '</button>';
+    }
+    if (count > 0) {
+      actions += '<button class="selection-keyword-remove" onclick="removeSelectionKeyword(' + k.id + ')" title="Remove this keyword from selected photos that have it">Remove from ' + count + '</button>';
+    }
     html += '<div class="selection-keyword-row">' +
       '<div style="min-width:0;">' +
         '<div class="selection-keyword-name">' + escapeHtml(k.name) + '</div>' +
-        '<div class="selection-keyword-meta">On ' + k.count + ', missing from ' + missing + '</div>' +
+        '<div class="selection-keyword-meta">On ' + count + ' of ' + selectedCount + (missing ? ', missing from ' + missing : '') + '</div>' +
       '</div>' +
-      '<button class="selection-keyword-add" onclick="applySelectionKeyword(' + k.id + ')" title="Add this keyword to the selected photos missing it">Add to ' + missing + '</button>' +
+      '<div class="selection-keyword-actions">' + actions + '</div>' +
     '</div>';
   });
   list.innerHTML = html;
@@ -4706,6 +4736,25 @@ async function applySelectionKeyword(keywordId) {
   if (!ids.length) return;
   try {
     await safeFetch('/api/batch/keyword', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids, keyword_id: keywordId}),
+    });
+  } catch(e) { return; }
+  selectionKeywordKey = '';
+  loadSelectionKeywordSuggestions(getActiveSelection());
+  loadKeywords();
+  scheduleCollectionCountsRefresh();
+  refreshActiveCollectionAfterMembershipChange();
+  refreshPendingSyncBanner();
+  showUndoToast();
+}
+
+async function removeSelectionKeyword(keywordId) {
+  var ids = selectionKeywordPresentById[String(keywordId)] || [];
+  if (!ids.length) return;
+  try {
+    await safeFetch('/api/batch/keyword-remove', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({photo_ids: ids, keyword_id: keywordId}),

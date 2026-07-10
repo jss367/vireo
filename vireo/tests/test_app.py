@@ -4351,6 +4351,11 @@ def test_selection_keyword_suggestions_return_partial_keywords(app_and_db):
     assert by_name["Sparrow"]["count"] == 1
     assert by_name["Sparrow"]["missing_count"] == 2
 
+    keywords_by_name = {item["name"]: item for item in data["keywords"]}
+    assert keywords_by_name["Cardinal"]["present_photo_ids"] == [ids[0]]
+    assert sorted(keywords_by_name["Cardinal"]["missing_photo_ids"]) == sorted(ids[1:])
+    assert keywords_by_name["Sparrow"]["present_photo_ids"] == [ids[1]]
+
 
 def test_selection_keyword_suggestions_chunks_large_selection(app_and_db):
     """Large selection suggestions must not exceed SQLite's variable limit."""
@@ -4410,6 +4415,50 @@ def test_batch_keyword_route_accepts_existing_keyword_id(app_and_db):
         (cardinal_id,),
     ).fetchall()
     assert [row["photo_id"] for row in tagged] == sorted(ids)
+
+    undo_resp = client.post("/api/undo")
+    assert undo_resp.status_code == 200
+    tagged_after_undo = db.conn.execute(
+        """SELECT photo_id FROM photo_keywords
+           WHERE keyword_id = ?
+           ORDER BY photo_id""",
+        (cardinal_id,),
+    ).fetchall()
+    assert [row["photo_id"] for row in tagged_after_undo] == [ids[0]]
+
+
+def test_batch_keyword_remove_route_removes_existing_keyword_id(app_and_db):
+    """Selected-keyword removal should only affect selected photos that have it."""
+    app, db = app_and_db
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos ORDER BY filename"
+    ).fetchall()
+    ids = [row["id"] for row in rows]
+    cardinal_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Cardinal'"
+    ).fetchone()["id"]
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/batch/keyword-remove",
+        json={"photo_ids": ids, "keyword_id": cardinal_id},
+        content_type="application/json",
+    )
+
+    assert resp.status_code == 200
+    assert resp.get_json()["updated"] == 1
+    tagged = db.conn.execute(
+        """SELECT photo_id FROM photo_keywords
+           WHERE keyword_id = ?""",
+        (cardinal_id,),
+    ).fetchall()
+    assert tagged == []
+
+    pending = db.conn.execute(
+        """SELECT photo_id, change_type, value FROM pending_changes
+           WHERE change_type = 'keyword_remove' AND value = 'Cardinal'"""
+    ).fetchall()
+    assert [row["photo_id"] for row in pending] == [ids[0]]
 
     undo_resp = client.post("/api/undo")
     assert undo_resp.status_code == 200
