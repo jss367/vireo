@@ -175,6 +175,42 @@ def test_highlights_species_search_filters_buckets(live_server, page):
     )
 
 
+def test_highlights_general_search_filters_by_filename_folder_and_keyword(live_server, page):
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+
+    perch_kid = db.add_keyword("Perched portrait")
+    db.tag_photo(data["photos"][1], perch_kid)
+    db.conn.commit()
+
+    page.goto(f"{live_server['url']}/highlights", timeout=5000)
+    expect(page.locator(".highlights-card").first).to_be_visible(timeout=5000)
+
+    search = page.locator("#highlightSearch")
+    with page.expect_response(
+        lambda r: "/api/highlights?" in r.url and "q=hawk1" in r.url.lower()
+    ):
+        search.fill("hawk1")
+    expect(page.locator(".highlights-card")).to_have_count(1)
+    expect(page.locator(".highlights-card img")).to_have_attribute("alt", "hawk1.jpg")
+
+    with page.expect_response(
+        lambda r: "/api/highlights?" in r.url and "q=yard" in r.url.lower()
+    ):
+        search.fill("yard")
+    expect(page.locator(".bucket-title")).to_have_count(1)
+    expect(page.locator(".bucket-title").first).to_contain_text("American Robin")
+    expect(page.locator(".highlights-card")).to_have_count(2)
+
+    with page.expect_response(
+        lambda r: "/api/highlights?" in r.url and "q=perched" in r.url.lower()
+    ):
+        search.fill("perched")
+    expect(page.locator(".highlights-card")).to_have_count(1)
+    expect(page.locator(".highlights-card img")).to_have_attribute("alt", "hawk2.jpg")
+
+
 def test_highlights_lightbox_reject_advances_and_can_restore(live_server, page):
     db = live_server["db"]
     data = live_server["data"]

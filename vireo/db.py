@@ -9379,6 +9379,7 @@ class Database:
         rows = self.conn.execute(
             f"""SELECT p.id, p.folder_id, p.filename, p.extension,
                       p.timestamp, p.width, p.height, p.rating, p.flag,
+                      f.name AS folder_name, f.path AS folder_path,
                       p.thumb_path, p.quality_score, p.subject_sharpness,
                       p.subject_size, p.sharpness, p.phash_crop,
                       p.mask_path, p.subject_tenengrad, p.bg_tenengrad,
@@ -9390,7 +9391,8 @@ class Database:
                       bp.species,
                       tp.prediction_id,
                       tp.predicted_species,
-                      tp.predicted_confidence
+                      tp.predicted_confidence,
+                      kw.keyword_names
                FROM photos p
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
@@ -9433,6 +9435,13 @@ class Database:
                          )
                    ) WHERE rn = 1
                ) tp ON tp.photo_id = p.id
+               LEFT JOIN (
+                   SELECT pk.photo_id,
+                          group_concat(DISTINCT k.name) AS keyword_names
+                   FROM photo_keywords pk
+                   JOIN keywords k ON k.id = pk.keyword_id
+                   GROUP BY pk.photo_id
+               ) kw ON kw.photo_id = p.id
                WHERE wf.workspace_id = ?
                  {folder_filter}
                  AND p.quality_score IS NOT NULL
