@@ -8228,7 +8228,13 @@ function openExternalLink(event, url) {
   }
 
   openExternal(url).then(function(ok) {
-    if (!ok) showToast('Could not open link: ' + url, 'error');
+    // openExternal catches Tauri command/opener failures internally and
+    // resolves `false` rather than rejecting, so the .catch() below never runs
+    // in the packaged-desktop failure path (ACL denial, opener error, popup
+    // block). Try fallbackOpen here too so the click doesn't silently die.
+    if (!ok && !fallbackOpen()) {
+      showToast('Could not open link: ' + url, 'error');
+    }
   }).catch(function(e) {
     if (!fallbackOpen()) {
       showToast('Could not open link: ' + url, 'error');
