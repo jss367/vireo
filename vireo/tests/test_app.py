@@ -5273,6 +5273,50 @@ def test_api_audit_remove_orphans_invalidates_missing_cache(app_and_db, tmp_path
     assert payload["photos"] == []
 
 
+def test_api_audit_import_untracked_invalidates_missing_cache(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """Audit imports must clear the Missing Originals cache after scanning.
+
+    Regression: ``audit.import_untracked`` runs scanner.scan over the selected
+    parent directory, so it can reconcile a restored original. Without cache
+    invalidation, the banner and modal keep serving the pre-import ghost list.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    img_path = tmp_path / "shoot" / "IMG_0001.JPG"
+    img_path.parent.mkdir()
+    img_path.write_bytes(b"stub")
+
+    key = (db._db_path, db._active_workspace_id, None)
+    with app._missing_originals_lock:
+        app._missing_originals_cache[key] = {
+            "photos": [{"id": 5555, "filename": "stale.jpg"}],
+            "checked_at": "2026-01-01T00:00:00Z",
+            "set_at": 0.0,
+        }
+
+    import audit as audit_module
+    import metadata
+
+    def _stub_import_untracked(db_arg, paths, **kwargs):
+        assert db_arg._db_path == db._db_path
+        assert paths == [str(img_path)]
+
+    monkeypatch.setattr(audit_module, "import_untracked", _stub_import_untracked)
+    monkeypatch.setattr(metadata, "exiftool_available", lambda: True)
+
+    resp = client.post(
+        "/api/audit/import-untracked",
+        json={"paths": [str(img_path)]},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["imported"] == 1
+    with app._missing_originals_lock:
+        assert key not in app._missing_originals_cache
+
+
 def test_api_duplicates_delete_loser_files_invalidates_missing_cache(
     app_and_db, monkeypatch, tmp_path,
 ):

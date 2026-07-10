@@ -12653,11 +12653,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         from audit import import_untracked
 
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
-        import_untracked(
-            db, paths,
-            vireo_dir=vireo_dir,
-            thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
-        )
+        try:
+            import_untracked(
+                db, paths,
+                vireo_dir=vireo_dir,
+                thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
+            )
+        finally:
+            try:
+                _invalidate_missing_originals_cache()
+            except Exception:
+                log.exception(
+                    "Failed to invalidate missing-originals cache after audit import"
+                )
         # Audit import calls scanner.scan just like the standalone scan/import
         # paths above. Without ExifTool the newly imported photos still lose
         # capture date, GPS, and camera info; the frontend renders any warning
