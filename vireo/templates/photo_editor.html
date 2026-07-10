@@ -2404,7 +2404,12 @@ async function runEditorSearch(opts) {
     if (window.vireoEditNav) window.vireoEditNav.setList(ids, target);
     setSearchStatus(ids.length.toLocaleString() + ' match' + (ids.length === 1 ? '' : 'es'));
     updateNavControls();
-    if (target !== current) await loadPhoto(target);
+    if (target !== current) {
+      // Dirty state can change during the fetch above; re-check so edits
+      // made mid-request are not silently discarded when we navigate.
+      if (isEditorDirty() && !window.confirm('Discard unsaved edits to this photo?')) return;
+      await loadPhoto(target);
+    }
   } catch (e) {
     if (seq !== editorState.searchSeq) return;
     setSearchStatus(e.message || 'Search failed', true);

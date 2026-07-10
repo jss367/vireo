@@ -41,3 +41,50 @@ def test_photo_editor_clear_search_invalidates_pending_response(live_server, pag
     expect(page).to_have_url(f"{url}/edit")
     expect(page.locator("#editorFilename")).to_have_text("No photo to edit")
     expect(page.locator("#editorSearchStatus")).to_have_text("")
+
+
+def test_photo_editor_search_confirms_dirty_edits_from_in_flight_search(live_server, page):
+    """Edits made while a search is in flight must not be silently discarded."""
+    url = live_server["url"]
+    hawk_id = live_server["data"]["photos"][0]
+    held_routes = []
+
+    def hold(route):
+        held_routes.append(route)
+
+    page.goto(f"{url}/edit/{hawk_id}")
+    expect(page.locator("#editorFilename")).to_have_text("hawk1.jpg")
+
+    page.route("**/api/photos/ids?*", hold)
+
+    page.locator("#editorSearchInput").fill("American Robin")
+    for _ in range(20):
+        if held_routes:
+            break
+        page.wait_for_timeout(100)
+    assert held_routes, "search request was not issued"
+
+    # Dirty the recipe while the search is in flight.
+    exposure = page.locator("#exposureRange")
+    exposure.evaluate("(el) => { el.value = '1.2'; el.dispatchEvent(new Event('input')); }")
+
+    dialogs = []
+
+    def on_dialog(dialog):
+        dialogs.append(dialog.message)
+        dialog.dismiss()
+
+    page.once("dialog", on_dialog)
+
+    held_routes[0].continue_()
+
+    # The confirm must be shown, and dismissing it keeps us on the current
+    # (dirty) photo instead of navigating to a search match.
+    for _ in range(20):
+        if dialogs:
+            break
+        page.wait_for_timeout(100)
+    assert dialogs, "expected a discard confirmation for dirty in-flight edits"
+    assert "Discard" in dialogs[0]
+    expect(page).to_have_url(f"{url}/edit/{hawk_id}")
+    expect(page.locator("#editorFilename")).to_have_text("hawk1.jpg")
