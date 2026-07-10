@@ -9975,7 +9975,18 @@ async function startMissingPhotosCheck(opts) {
 }
 
 async function checkMissingPhotos() {
-  if (_missingPhotosBannerInFlight) return;
+  if (_missingPhotosBannerInFlight) {
+    // Supersede the in-flight banner poll before returning: bump the
+    // generation counters so the still-running fetch's response is
+    // treated as stale and cannot repaint the banner or overwrite the
+    // cache with a pre-invalidation payload once it lands. Without this
+    // bump, a newer call fired after e.g. a batch-delete invalidation
+    // would return silently and the older response would pass its own
+    // ``myId`` checks and paint just-deleted photos back into view.
+    _missingPhotosCacheFetchId++;
+    _missingPhotosBannerFetchId++;
+    return;
+  }
   _missingPhotosBannerInFlight = true;
   const cacheId = ++_missingPhotosCacheFetchId;
   const myId = ++_missingPhotosBannerFetchId;

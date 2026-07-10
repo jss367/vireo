@@ -3541,7 +3541,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     def _start_missing_originals_scan(db, folder_id=None, automatic=False):
         key = _missing_originals_key(db, folder_id)
-        now = time.monotonic()
+        scan_started_at = time.monotonic()
+        now = scan_started_at
         token = object()
         suppressed_reason = None
         reuse_existing = False
@@ -3551,11 +3552,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if inflight:
                 reuse_existing = True
             entry = app._missing_originals_cache.get(key)
+            # Gate on when the last scan STARTED, not when it finished. The
+            # navbar re-arms its 30-minute automatic timer from POST time,
+            # so a scan that takes real wall-clock time to walk the disk
+            # leaves ``set_at`` well under the threshold when the next tick
+            # arrives — every other automatic scan would otherwise be
+            # skipped, and deletions could stay undiscovered for nearly an
+            # hour. Legacy entries without ``started_at`` fall back to
+            # ``set_at``.
             if (
                 not reuse_existing
                 and automatic
                 and entry is not None
-                and now - entry["set_at"] <= _MISSING_ORIGINALS_STALE_SECONDS
+                and now - entry.get("started_at", entry["set_at"])
+                < _MISSING_ORIGINALS_STALE_SECONDS
             ):
                 fresh_cache = True
             err = app._missing_originals_errors.get(key)
@@ -3647,6 +3657,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             "photos": photos,
                             "checked_at": checked_at,
                             "set_at": time.monotonic(),
+                            "started_at": scan_started_at,
                         }
                         app._missing_originals_errors.pop(key, None)
                 return {

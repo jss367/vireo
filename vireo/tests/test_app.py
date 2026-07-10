@@ -4476,6 +4476,73 @@ def test_api_photos_missing_automatic_uses_fresh_cache(app_and_db, monkeypatch, 
     assert [row["id"] for row in data["photos"]] == [pid_ghost]
 
 
+def test_api_photos_missing_automatic_gate_uses_scan_start_time(
+    app_and_db, tmp_path
+):
+    """Automatic freshness gate must compare against scan-start, not scan-end.
+
+    Regression: the navbar re-arms its 30-minute automatic timer from POST
+    time, but the server used to gate against ``set_at`` (scan-completion
+    time). On any scan that took real wall-clock time, the next tick fired
+    with ``set_at`` under the 30-minute threshold and got skipped — actual
+    filesystem scans then ran only every second tick and deletions could
+    stay undiscovered for nearly an hour.
+    """
+    import time
+
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    fid = db.add_folder(str(real_dir), name="live")
+    pid_ghost = db.add_photo(
+        folder_id=fid,
+        filename="ghost.NEF",
+        extension=".nef",
+        file_size=42,
+        file_mtime=2.0,
+    )
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ?", (fid,)
+        ).fetchall()
+    ])
+
+    # Seed the cache to simulate a scan that started > 30 min ago but
+    # only completed recently. The old (buggy) gate would compare ``now``
+    # against ``set_at`` and treat this as fresh; the fix compares against
+    # ``started_at`` so the next automatic tick rescans as intended.
+    key = (db._db_path, db._active_workspace_id, None)
+    now = time.monotonic()
+    stale_seconds = getattr(
+        Database, "_MISSING_ORIGINALS_STALE_SECONDS", 30 * 60
+    )
+    with app._missing_originals_lock:
+        app._missing_originals_cache[key] = {
+            "photos": [],
+            "checked_at": "2026-01-01T00:00:00Z",
+            "set_at": now - 60,  # completed 1 minute ago
+            "started_at": now - (stale_seconds + 60),  # scheduled long ago
+        }
+
+    resp = client.post("/api/photos/missing/check", json={"automatic": True})
+    # A rescan was actually launched — either it finished synchronously
+    # (returning ready with the just-found ghost) or it's still pending.
+    assert resp.status_code in (200, 202)
+    data = resp.get_json()
+    if data.get("pending"):
+        wait_for_job_via_client(client, data["job_id"])
+        follow = client.get("/api/photos/missing").get_json()
+        assert follow["status"] == "ready"
+        assert [row["id"] for row in follow["photos"]] == [pid_ghost]
+    else:
+        assert data["status"] == "ready"
+        assert [row["id"] for row in data["photos"]] == [pid_ghost]
+
+
 def test_api_photos_missing_check_coalesces_duplicate_jobs(app_and_db, monkeypatch):
     """Duplicate refreshes for the same scope reuse the active background job."""
     import time
