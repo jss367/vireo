@@ -422,6 +422,16 @@ class Database:
             _sqlite_keyword_text_match,
             deterministic=True,
         )
+        # Used by add_keyword() to catch stored variants with edge quotes we
+        # now strip on new inserts (e.g. an imported '‘apapane' row from
+        # before this normalization landed): the plain COLLATE NOCASE query
+        # can't see them, so the fallback compares normalized(name).
+        self.conn.create_function(
+            "vireo_normalize_keyword",
+            1,
+            normalize_keyword_display,
+            deterministic=True,
+        )
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.execute("PRAGMA synchronous=NORMAL")
@@ -8462,6 +8472,36 @@ class Database:
                     "AND parent_id = ? AND type IN (?, 'general') "
                     "ORDER BY (type = ?) DESC, id ASC LIMIT 1",
                     (name, parent_id, kw_type, kw_type),
+                ).fetchone()
+        if not existing:
+            # Fallback: the fast query above compares against the raw stored
+            # name, so an imported/upgraded row whose spelling still carries
+            # edge quotes we now strip (e.g. a legacy `‘apapane` tagged
+            # before this normalization) would be missed and a duplicate
+            # inserted. Re-query using the normalize UDF so both sides are
+            # compared in their cleaned form. Runs only on the miss path,
+            # so the common case still hits idx_keywords_name.
+            if parent_id is None:
+                parent_clause = "parent_id IS NULL"
+                parent_args = ()
+            else:
+                parent_clause = "parent_id = ?"
+                parent_args = (parent_id,)
+            if kw_type is None:
+                existing = self.conn.execute(
+                    f"SELECT id, type FROM keywords "
+                    f"WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE "
+                    f"AND {parent_clause} "
+                    f"ORDER BY {type_priority_case}, id ASC LIMIT 1",
+                    (name, *parent_args),
+                ).fetchone()
+            else:
+                existing = self.conn.execute(
+                    f"SELECT id, type FROM keywords "
+                    f"WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE "
+                    f"AND {parent_clause} AND type IN (?, 'general') "
+                    f"ORDER BY (type = ?) DESC, id ASC LIMIT 1",
+                    (name, *parent_args, kw_type, kw_type),
                 ).fetchone()
         if existing:
             if kw_type is None and not is_species and existing["type"] == "general":

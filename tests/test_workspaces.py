@@ -995,6 +995,57 @@ def test_add_keyword_normalizes_stray_edge_quotes(db):
     assert db.add_keyword("apapane") == keyword_id
 
 
+def test_add_keyword_preserves_leading_okina(db):
+    """Modifier-letter okinas (U+02BB/U+02BC) are letters inside legitimate
+    species names like \u02bbApapane and must not be stripped."""
+    for name in ("\u02bbApapane", "\u02bcHawai\u02bbi", "\u02bbI\u02bbiwi"):
+        keyword_id = db.add_keyword(name)
+        row = db.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
+        ).fetchone()
+        assert row["name"] == name, (
+            f"okina stripped from {name!r} -> {row['name']!r}"
+        )
+
+
+def test_add_keyword_dedupes_pre_existing_edge_quote_variant(db):
+    """When an upgraded database already carries a tagged edge-quote variant
+    like '\u2018apapane', a later `add_keyword('apapane')` must reuse that row
+    instead of inserting a duplicate."""
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name) VALUES (?)", ("\u2018apapane",)
+    )
+    db.conn.commit()
+    stored_id = cur.lastrowid
+
+    assert db.add_keyword("apapane") == stored_id
+
+    rows = db.conn.execute(
+        "SELECT id, name FROM keywords WHERE name LIKE '%apapane'"
+    ).fetchall()
+    assert [(row["id"], row["name"]) for row in rows] == [
+        (stored_id, "\u2018apapane"),
+    ]
+
+
+def test_add_keyword_dedupes_pre_existing_edge_quote_variant_with_parent(db):
+    """Same as above, but scoped under a parent keyword \u2014 the fallback must
+    respect the parent filter and not merge across parents."""
+    birds = db.add_keyword("Birds")
+    other = db.add_keyword("Other")
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id) VALUES (?, ?)",
+        ("\u2018apapane", birds),
+    )
+    db.conn.commit()
+    stored_id = cur.lastrowid
+
+    assert db.add_keyword("apapane", parent_id=birds) == stored_id
+    # A different parent must not reuse the row \u2014 it should insert a new one.
+    other_id = db.add_keyword("apapane", parent_id=other)
+    assert other_id != stored_id
+
+
 def test_merge_duplicate_keywords_normalizes_stray_edge_quotes(db):
     """Cleanup should collapse existing edge-quote variants to a clean spelling."""
     ws = db.create_workspace("A")
