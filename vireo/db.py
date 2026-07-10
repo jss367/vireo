@@ -10097,6 +10097,7 @@ class Database:
         labels_fingerprint,
         species,
         category,
+        auto_accept=True,
     ):
         """Re-sync a cached prediction's category and auto-review on reuse.
 
@@ -10109,6 +10110,13 @@ class Database:
         it out of the queue until a full reclassify/clear is forced.  Only the
         marked auto-review row is safe to drop here; explicit user decisions
         from before a temporary XMP match must remain intact.
+
+        ``auto_accept`` is False when the caller has decided this reuse must
+        stay pending even though ``category`` is still ``match`` — e.g. the
+        XMP later gained a second recognized taxon, so a single-species match
+        is now ambiguous.  Without dropping the marker in that case,
+        ``status='accepted'`` from the earlier unambiguous run would keep the
+        detection hidden from the queue.
 
         The persisted ``category`` is always refreshed to the current value:
         ``add_prediction`` is INSERT-OR-IGNORE so it never updates it on
@@ -10126,7 +10134,7 @@ class Database:
         if row is None:
             return
         pred_id = row["id"]
-        if row["category"] == "match" and category != "match":
+        if row["category"] == "match" and (category != "match" or not auto_accept):
             self.conn.execute(
                 "DELETE FROM prediction_review "
                 "WHERE prediction_id = ? AND workspace_id = ? "

@@ -1599,6 +1599,91 @@ def test_match_then_unmatch_reenters_pending_on_reuse(tmp_path, monkeypatch):
     assert rows["Sparrow"]["status"] == "alternative"   # still nested
 
 
+def test_match_becoming_multispecies_clears_stale_auto_accept(tmp_path, monkeypatch):
+    """A previously auto-accepted single-species match must re-enter the
+    pending queue when the sidecar later gains a second recognized taxon.
+
+    Run 1: XMP has one recognized taxon -> single-species match ->
+    ``_can_auto_accept_detection_prediction`` returns True ->
+    ``_store_match_prediction`` writes the ``AUTO_MATCH_REVIEW_MARKER``
+    review row so the detection stays out of the queue.
+
+    Run 2 (non-reclassify, cache reused via ``_existing=True``): the sidecar
+    now has two recognized taxa. The prediction still matches, so
+    ``category`` remains ``"match"``, but auto-accept flips off. The pending
+    path must drop the stale marker so ``status='accepted'`` no longer hides
+    the detection from review.
+    """
+    import classify_job
+    from db import Database
+    from xmp import write_sidecar
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path))
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    det_id = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+
+    class Tax:
+        def is_taxon(self, name):
+            return name in {"Robin", "Sparrow"}
+
+        def get_hierarchy(self, _species):
+            return {}
+
+    monkeypatch.setattr("compare.categorize", lambda *_a, **_k: "match")
+
+    def run(extra):
+        return classify_job._store_grouped_predictions(
+            raw_results=[{
+                "photo": {
+                    "id": photo_id, "filename": "a.jpg",
+                    "folder_id": folder_id, "timestamp": None, "burst_id": None,
+                },
+                "folder_path": str(tmp_path),
+                "detection_id": det_id,
+                "prediction": "Robin",
+                "confidence": 0.88,
+                "alternatives": [],
+                "taxonomy": {},
+                "timestamp": None,
+                **extra,
+            }],
+            job_id="job-abc",
+            model_name="bioclip-2",
+            grouping_window=0,
+            similarity_threshold=0.99,
+            tax=Tax(),
+            db=db,
+            labels_fingerprint="fp-active",
+        )
+
+    # Run 1: sole recognized taxon matches -> auto-accepted, out of queue.
+    write_sidecar(tmp_path / "a.xmp", {"Robin"}, set())
+    run({})
+    accepted = db.get_predictions(photo_ids=[photo_id], status="accepted")
+    assert [r["species"] for r in accepted] == ["Robin"]
+
+    # Run 2: sidecar now has a second recognized taxon. Category stays
+    # "match" but the match is no longer unambiguous -> pending path.
+    write_sidecar(tmp_path / "a.xmp", {"Robin", "Sparrow"}, set())
+    run({"_existing": True})
+
+    row = db.get_predictions(photo_ids=[photo_id])[0]
+    assert row["species"] == "Robin"
+    assert row["category"] == "match"
+    assert row["status"] == "pending"        # stale auto-accept cleared
+    assert not db.get_predictions(photo_ids=[photo_id], status="accepted")
+
+
 def test_multi_species_xmp_does_not_auto_accept_detection_match(tmp_path):
     """Photo-level multi-species matches stay pending for detection review."""
     import classify_job

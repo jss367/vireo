@@ -1438,6 +1438,7 @@ def _store_pending_detection_prediction(
         db.reconcile_match_review_state(
             item["detection_id"], model_name, labels_fingerprint,
             item["prediction"], category,
+            auto_accept=False,
         )
         if existing_row is not None:
             if group_id is not None:
@@ -1468,6 +1469,7 @@ def _store_pending_detection_prediction(
     db.reconcile_match_review_state(
         item["detection_id"], model_name, labels_fingerprint,
         item["prediction"], category,
+        auto_accept=False,
     )
     for alt in item.get("alternatives", []):
         alt_tax = alt.get("taxonomy") or (
