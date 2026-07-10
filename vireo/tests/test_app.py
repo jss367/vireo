@@ -4608,6 +4608,102 @@ def test_api_photos_missing_automatic_skips_during_heavy_job(app_and_db):
     wait_for_job_via_client(client, scan_job)
 
 
+def test_api_photos_missing_automatic_skips_during_missing_originals_scan(app_and_db):
+    """A folder-scoped scan already walking disk must suppress the automatic
+    workspace-wide check.
+
+    Regression: workspace and folder-scoped scans have distinct cache keys, so
+    the same-key in-flight coalescing does not catch them. Without treating
+    ``missing_originals_scan`` as a heavy job, the 30-minute automatic timer
+    can kick off a second walk over the same tree while a folder scan is
+    still running.
+    """
+    import threading
+    import time
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    # Hold a fake missing_originals_scan job in the running queue long enough
+    # to exercise the automatic-check gate. A real folder-scoped scan would
+    # register the same job type; we don't need the actual scan logic to
+    # observe the heavy-job suppression.
+    release = threading.Event()
+
+    def _hold_running(job):
+        release.wait(timeout=5.0)
+        return {"ok": True}
+
+    scan_job = app._job_runner.start(
+        "missing_originals_scan",
+        _hold_running,
+        workspace_id=db._active_workspace_id,
+        ephemeral=True,
+    )
+    try:
+        # Give the runner a moment to move the job to "running" so
+        # _missing_originals_heavy_job_active sees it.
+        for _ in range(50):
+            jobs = app._job_runner.list_jobs()
+            if any(
+                j.get("id") == scan_job and j.get("status") in ("running", "queued")
+                for j in jobs
+            ):
+                break
+            time.sleep(0.02)
+
+        resp = client.post(
+            "/api/photos/missing/check", json={"automatic": True}
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["suppressed"] is True, data
+        assert data["reason"] == "heavy_job_active", data
+        assert data["status"] == "skipped", data
+    finally:
+        release.set()
+        wait_for_job_via_client(client, scan_job)
+
+
+def test_api_folder_delete_invalidates_missing_cache(app_and_db, tmp_path):
+    """Deleting a folder must clear the Missing Originals cache.
+
+    Regression: ``api_folder_delete`` cascades photo-row deletion but never
+    hit ``_invalidate_missing_originals_cache``. A ready payload built before
+    the delete would keep listing photos from the now-removed folder in the
+    banner/modal, offering them for removal a second time.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    fid = db.add_folder(str(real_dir), name="live")
+    pid_ghost = db.add_photo(
+        folder_id=fid,
+        filename="ghost.NEF",
+        extension=".nef",
+        file_size=42,
+        file_mtime=2.0,
+    )
+    # Drop unrelated seed photos so the cache payload is deterministic.
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ?", (fid,)
+        ).fetchall()
+    ])
+
+    cached = _run_missing_originals_check(client)
+    assert [row["id"] for row in cached["photos"]] == [pid_ghost]
+
+    resp = client.delete(f"/api/folders/{fid}")
+    assert resp.status_code == 200
+
+    payload = client.get("/api/photos/missing").get_json()
+    assert payload["status"] == "not_ready", payload
+    assert payload["photos"] == []
+
+
 def test_api_photos_missing_automatic_respects_failure_backoff(app_and_db, monkeypatch):
     """A failed manual scan suppresses automatic retries during backoff."""
     from db import Database

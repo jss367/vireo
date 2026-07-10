@@ -3333,6 +3333,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # scan would; letting them run concurrently can double the filesystem
         # load on slow NAS/SMB libraries.
         "new_images_walk",
+        # Folder-scoped and workspace-wide missing-originals scans have
+        # distinct cache keys, so the same-key in-flight coalescing does
+        # not catch a workspace scan started while a folder scan is
+        # running (or vice versa). Treat any in-flight
+        # missing_originals_scan as heavy work so automatic reruns
+        # don't kick off a second filesystem walk over the same tree.
+        "missing_originals_scan",
     }
 
     def _utc_iso_now():
@@ -3847,6 +3854,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Clean up cached files alongside the cascaded photo rows so preview
         # files don't get orphaned on disk (untracked by preview_cache).
         _cleanup_cached_files_for_deleted_photos(result.get("files", []))
+        # The cascaded row deletion here is the same shape as any other
+        # photo-removal path: without invalidation, a ready
+        # /api/photos/missing cache could keep listing ghosts from the
+        # now-deleted folder (offered up for removal a second time in
+        # the modal) until the next scan runs.
+        _invalidate_missing_originals_cache()
         # Don't leak the internal file list to the API response — keep the
         # shape callers expect.
         return jsonify({"deleted_photos": result["deleted_photos"]})
