@@ -9893,10 +9893,10 @@ let _missingPhotosCache = [];
 // folder-scoped view.
 let _missingPhotosModalRows = new Map();
 let _missingPhotosBannerDismissedCount = 0;
-// Both the banner poll and the modal load hit /api/photos/missing and write
-// to _missingPhotosCache. A slow earlier fetch returning after a newer one
-// used to overwrite fresh state with stale results — leaving the banner
-// showing ghosts the user just deleted.
+// Both the banner and modal read cached /api/photos/missing status. A slow
+// earlier fetch returning after a newer one used to overwrite fresh state
+// with stale results — leaving the banner showing ghosts the user just
+// deleted.
 //
 // Cache writes share a single monotonic id across both flows, so only the
 // most-recently-started fetch (regardless of which flow issued it) can
@@ -9906,16 +9906,67 @@ let _missingPhotosBannerDismissedCount = 0;
 let _missingPhotosCacheFetchId = 0;
 let _missingPhotosBannerFetchId = 0;
 let _missingPhotosModalFetchId = 0;
+let _missingPhotosBannerInFlight = false;
+let _missingPhotosStatusPoll = null;
+
+function _missingPhotosStatusUrl(folderId) {
+  return folderId != null
+    ? '/api/photos/missing?folder_id=' + encodeURIComponent(folderId)
+    : '/api/photos/missing';
+}
+
+function _missingPhotosPayloadPhotos(payload) {
+  if (Array.isArray(payload)) return payload;  // legacy/test fallback
+  return (payload && Array.isArray(payload.photos)) ? payload.photos : [];
+}
+
+function _scheduleMissingPhotosPoll(folderId, modal) {
+  if (_missingPhotosStatusPoll !== null) clearTimeout(_missingPhotosStatusPoll);
+  _missingPhotosStatusPoll = setTimeout(function() {
+    _missingPhotosStatusPoll = null;
+    if (modal) loadMissingPhotos();
+    else checkMissingPhotos();
+  }, 3000);
+}
+
+async function startMissingPhotosCheck(opts) {
+  opts = opts || {};
+  const body = { automatic: !!opts.automatic };
+  if (opts.folderId != null) body.folder_id = opts.folderId;
+  const resp = await fetch('/api/photos/missing/check', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) throw new Error('missing originals check failed');
+  const payload = await resp.json();
+  if (payload && payload.pending) {
+    _scheduleMissingPhotosPoll(opts.folderId || null, !!opts.modal);
+  } else if (opts.automatic) {
+    checkMissingPhotos();
+  }
+  return payload;
+}
 
 async function checkMissingPhotos() {
+  if (_missingPhotosBannerInFlight) return;
+  _missingPhotosBannerInFlight = true;
   const cacheId = ++_missingPhotosCacheFetchId;
   const myId = ++_missingPhotosBannerFetchId;
   try {
     const resp = await fetch('/api/photos/missing');
     if (!resp.ok) return;
     if (myId !== _missingPhotosBannerFetchId) return;  // a newer banner poll is authoritative
-    const photos = await resp.json();
+    const payload = await resp.json();
     if (myId !== _missingPhotosBannerFetchId) return;
+    const photos = _missingPhotosPayloadPhotos(payload);
+    const ready = Array.isArray(payload) || (payload && payload.status === 'ready');
+    if (payload && payload.pending) _scheduleMissingPhotosPoll(null, false);
+    if (!ready) {
+      const banner = document.getElementById('missingPhotosBanner');
+      if (banner) banner.style.display = 'none';
+      return;
+    }
     if (cacheId === _missingPhotosCacheFetchId) _missingPhotosCache = photos;
     const banner = document.getElementById('missingPhotosBanner');
     const msg = document.getElementById('missingPhotosMsg');
@@ -9928,6 +9979,9 @@ async function checkMissingPhotos() {
       _missingPhotosBannerDismissedCount = 0;
     }
   } catch (e) { /* ignore */ }
+  finally {
+    _missingPhotosBannerInFlight = false;
+  }
 }
 
 function dismissMissingPhotosBanner() {
@@ -9935,11 +9989,12 @@ function dismissMissingPhotosBanner() {
   _missingPhotosBannerDismissedCount = _missingPhotosCache.length;
 }
 
-// Missing-originals scan touches every photo's source path on disk; on a
-// large library that's slow over a network volume. Run on load and every
-// 30 minutes — folders disappear faster than individual files do.
-checkMissingPhotos();
-setInterval(checkMissingPhotos, 1800000);
+// Missing-originals scan touches every photo's source path on disk. On large
+// libraries backed by SMB/NAS volumes it can take minutes, so startup uses a
+// delayed background job and the banner only renders cached results.
+setTimeout(function() {
+  startMissingPhotosCheck({ automatic: true }).catch(function() { /* ignore */ });
+}, 180000);
 
 /* ---------- New Images Banner ---------- */
 // Per-workspace dismissal: one sessionStorage key per workspace id so that
@@ -10486,11 +10541,13 @@ async function runRescan() {
 // missing originals in the same scope and open the review modal if any exist.
 async function reviewDeletedAfterRescan(folderId, label) {
   try {
-    const url = folderId != null
-      ? '/api/photos/missing?folder_id=' + encodeURIComponent(folderId)
-      : '/api/photos/missing';
-    const photos = await safeFetch(url, {}, { toast: false });
-    if (photos && photos.length) {
+    const payload = await startMissingPhotosCheck({
+      folderId: folderId,
+      automatic: false,
+      modal: true,
+    });
+    const photos = _missingPhotosPayloadPhotos(payload);
+    if ((payload && payload.pending) || (photos && photos.length)) {
       openMissingPhotosModal(folderId, label);
     } else {
       showToast('No deleted photos found' + (label ? ' in “' + label + '”' : '') + '.', 'info');
@@ -10516,14 +10573,29 @@ async function loadMissingPhotos() {
   const myId = ++_missingPhotosModalFetchId;
   try {
     const scoped = _missingPhotosScope.folderId != null;
-    const url = scoped
-      ? '/api/photos/missing?folder_id=' + encodeURIComponent(_missingPhotosScope.folderId)
-      : '/api/photos/missing';
+    const url = _missingPhotosStatusUrl(_missingPhotosScope.folderId);
     const resp = await fetch(url);
     if (!resp.ok) throw new Error('check failed');
     if (myId !== _missingPhotosModalFetchId) return;  // superseded by a newer modal load
-    const photos = await resp.json();
+    const payload = await resp.json();
     if (myId !== _missingPhotosModalFetchId) return;
+    const photos = _missingPhotosPayloadPhotos(payload);
+    const ready = Array.isArray(payload) || (payload && payload.status === 'ready');
+    if (payload && payload.pending) {
+      container.innerHTML = '<p style="color:var(--text-secondary);">Checking missing originals…</p>';
+      _scheduleMissingPhotosPoll(_missingPhotosScope.folderId, true);
+      return;
+    }
+    if (!ready) {
+      const err = payload && payload.error ? _escapeHtml(payload.error) : '';
+      const msg = payload && payload.status === 'error'
+        ? 'Could not check missing originals' + (err ? ': ' + err : '') + '.'
+        : 'Missing originals have not been checked yet.';
+      container.innerHTML =
+        '<p style="color:var(--text-secondary);">' + msg + '</p>' +
+        '<button class="modal-btn primary" onclick="refreshMissingPhotosNow()">Check now</button>';
+      return;
+    }
     // A folder-scoped load is a subset — don't overwrite the workspace-wide
     // banner cache with it, or the banner's dismissed-count math goes stale.
     if (!scoped && cacheId === _missingPhotosCacheFetchId) _missingPhotosCache = photos;
@@ -10574,6 +10646,24 @@ async function loadMissingPhotos() {
   }
 }
 
+async function refreshMissingPhotosNow() {
+  const container = document.getElementById('missingPhotosList');
+  const toolbar = document.getElementById('missingPhotosToolbar');
+  if (toolbar) toolbar.style.display = 'none';
+  if (container) container.innerHTML = '<p style="color:var(--text-secondary);">Starting missing originals check…</p>';
+  try {
+    await startMissingPhotosCheck({
+      folderId: _missingPhotosScope.folderId,
+      automatic: false,
+      modal: true,
+    });
+  } catch (e) {
+    if (container) container.innerHTML = '<p style="color:var(--text-secondary);">Failed to start check.</p>';
+    return;
+  }
+  loadMissingPhotos();
+}
+
 function toggleMissingPhoto(id, checked) {
   if (checked) _missingPhotosSelected.add(id);
   else _missingPhotosSelected.delete(id);
@@ -10604,7 +10694,7 @@ async function removeOneMissingPhoto(id) {
     : '\n\nThe XMP sidecar on disk will not be touched.';
   if (!confirm(`Remove this photo from Vireo?\n\nCached thumbnail/preview/working copy (if any) will also be deleted.${sidecarMsg}`)) return;
   await _deleteMissingPhotoIds([id], deleteSidecars);
-  loadMissingPhotos();
+  refreshMissingPhotosNow();
 }
 
 async function removeSelectedMissingPhotos() {
@@ -10614,7 +10704,7 @@ async function removeSelectedMissingPhotos() {
   const sidecarMsg = deleteSidecars ? '\n\nLeftover XMP sidecars will also be deleted from disk.' : '';
   if (!confirm(`Remove ${ids.length} photo${ids.length !== 1 ? 's' : ''} from Vireo?\n\nCached thumbnails/previews/working copies will be deleted.${sidecarMsg}`)) return;
   await _deleteMissingPhotoIds(ids, deleteSidecars);
-  loadMissingPhotos();
+  refreshMissingPhotosNow();
 }
 
 async function _deleteMissingPhotoIds(ids, deleteSidecars) {

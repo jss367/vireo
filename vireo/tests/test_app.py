@@ -4,6 +4,23 @@ import os
 from wait import wait_for_job_via_client
 
 
+def _run_missing_originals_check(client, folder_id=None):
+    body = {}
+    if folder_id is not None:
+        body["folder_id"] = folder_id
+    resp = client.post("/api/photos/missing/check", json=body)
+    assert resp.status_code in (200, 202)
+    data = resp.get_json()
+    if data.get("pending"):
+        wait_for_job_via_client(client, data["job_id"])
+    url = "/api/photos/missing"
+    if folder_id is not None:
+        url += f"?folder_id={folder_id}"
+    payload = client.get(url).get_json()
+    assert "photos" in payload
+    return payload
+
+
 def test_index_redirects_to_browse(app_and_db, monkeypatch, tmp_path):
     """GET / redirects to /browse when classification is usable (a label-free
     Tree-of-Life model needs no species list). The classification-readiness
@@ -4316,8 +4333,27 @@ def test_api_folders_check_health(app_and_db):
     assert isinstance(data["missing"], list)
 
 
+def test_api_photos_missing_uncached_is_immediate(app_and_db, monkeypatch):
+    """GET /api/photos/missing returns cache status without scanning."""
+    from db import Database
+    app, _db = app_and_db
+    client = app.test_client()
+
+    def fail_scan(*_args, **_kwargs):
+        raise AssertionError("GET /api/photos/missing must not scan")
+
+    monkeypatch.setattr(Database, "get_missing_photos", fail_scan)
+
+    resp = client.get("/api/photos/missing")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["status"] == "not_ready"
+    assert data["pending"] is False
+    assert data["photos"] == []
+
+
 def test_api_photos_missing(app_and_db, tmp_path):
-    """GET /api/photos/missing returns photos with absent source files."""
+    """Background check caches photos with absent source files."""
     from PIL import Image
     app, db = app_and_db
     client = app.test_client()
@@ -4348,12 +4384,10 @@ def test_api_photos_missing(app_and_db, tmp_path):
     # Drop an XMP sidecar next to the ghost.
     (real_dir / "ghost.xmp").write_text("<x:xmpmeta/>")
 
-    resp = client.get("/api/photos/missing")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert isinstance(data, list)
-    assert [row["id"] for row in data] == [pid_ghost]
-    row = data[0]
+    data = _run_missing_originals_check(client)
+    assert data["status"] == "ready"
+    assert [row["id"] for row in data["photos"]] == [pid_ghost]
+    row = data["photos"][0]
     assert row["filename"] == "ghost.NEF"
     assert row["folder_path"] == str(real_dir)
     assert row["timestamp"] == "2024-03-08T10:00:00"
@@ -4361,6 +4395,122 @@ def test_api_photos_missing(app_and_db, tmp_path):
     assert row["has_preview"] is False
     assert row["has_working_copy"] is False
     assert row["has_xmp_sidecar"] is True
+
+
+def test_api_photos_missing_cached_result_does_not_rescan(app_and_db, monkeypatch, tmp_path):
+    """A cached Missing Originals result is served without filesystem work."""
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    fid = db.add_folder(str(real_dir), name="live")
+    pid_ghost = db.add_photo(
+        folder_id=fid,
+        filename="ghost.NEF",
+        extension=".nef",
+        file_size=42,
+        file_mtime=2.0,
+    )
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ?", (fid,)
+        ).fetchall()
+    ])
+
+    cached = _run_missing_originals_check(client)
+    assert [row["id"] for row in cached["photos"]] == [pid_ghost]
+
+    def fail_scan(*_args, **_kwargs):
+        raise AssertionError("cached GET must not rescan")
+
+    monkeypatch.setattr(Database, "get_missing_photos", fail_scan)
+
+    resp = client.get("/api/photos/missing")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["status"] == "ready"
+    assert [row["id"] for row in data["photos"]] == [pid_ghost]
+
+
+def test_api_photos_missing_check_coalesces_duplicate_jobs(app_and_db, monkeypatch):
+    """Duplicate refreshes for the same scope reuse the active background job."""
+    import time
+
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_get_missing = Database.get_missing_photos
+
+    def slow_get_missing(self, *args, **kwargs):
+        time.sleep(0.2)
+        return real_get_missing(self, *args, **kwargs)
+
+    monkeypatch.setattr(Database, "get_missing_photos", slow_get_missing)
+
+    first = client.post("/api/photos/missing/check", json={})
+    second = client.post("/api/photos/missing/check", json={})
+
+    assert first.status_code == 202
+    assert second.status_code == 202
+    first_data = first.get_json()
+    second_data = second.get_json()
+    assert first_data["pending"] is True
+    assert second_data["pending"] is True
+    assert first_data["job_id"] == second_data["job_id"]
+    wait_for_job_via_client(client, first_data["job_id"])
+
+
+def test_api_photos_missing_automatic_skips_during_heavy_job(app_and_db):
+    """Automatic idle checks must not start while heavy jobs are running."""
+    import time
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    scan_job = app._job_runner.start(
+        "scan",
+        lambda job: (time.sleep(0.2), {"ok": True})[1],
+        workspace_id=db._active_workspace_id,
+        ephemeral=True,
+    )
+    resp = client.post("/api/photos/missing/check", json={"automatic": True})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["suppressed"] is True
+    assert data["reason"] == "heavy_job_active"
+    assert data["status"] == "skipped"
+    wait_for_job_via_client(client, scan_job)
+
+
+def test_api_photos_missing_automatic_respects_failure_backoff(app_and_db, monkeypatch):
+    """A failed manual scan suppresses automatic retries during backoff."""
+    from db import Database
+
+    app, _db = app_and_db
+    client = app.test_client()
+
+    def fail_scan(self, *args, **kwargs):
+        raise RuntimeError("network volume unavailable")
+
+    monkeypatch.setattr(Database, "get_missing_photos", fail_scan)
+
+    started = client.post("/api/photos/missing/check", json={})
+    assert started.status_code == 202
+    job = wait_for_job_via_client(client, started.get_json()["job_id"])
+    assert job["status"] == "failed"
+
+    retry = client.post("/api/photos/missing/check", json={"automatic": True})
+    assert retry.status_code == 200
+    data = retry.get_json()
+    assert data["status"] == "error"
+    assert data["suppressed"] is True
+    assert data["reason"] == "backoff"
+    assert data["backoff_seconds"] > 0
 
 
 def test_api_photos_missing_delete_sidecars(app_and_db, tmp_path):
@@ -4465,9 +4615,8 @@ def test_api_photos_missing_detects_preview_variants(app_and_db, tmp_path):
     # Stray non-numeric filename in the cache must not crash the indexer.
     Image.new("RGB", (10, 10)).save(os.path.join(preview_dir, "stray.jpg"))
 
-    resp = client.get("/api/photos/missing")
-    assert resp.status_code == 200
-    by_id = {r["id"]: r for r in resp.get_json()}
+    payload = _run_missing_originals_check(client)
+    by_id = {r["id"]: r for r in payload["photos"]}
     assert by_id[pid_sized]["has_preview"] is True
     assert by_id[pid_legacy]["has_preview"] is True
     assert by_id[pid_no_preview]["has_preview"] is False
@@ -4505,9 +4654,7 @@ def test_api_photos_missing_reports_default_working_copy(app_and_db, tmp_path):
     Image.new("RGB", (10, 10)).save(os.path.join(working_dir, f"{pid}.jpg"))
     assert db.get_photo(pid)["working_copy_path"] is None
 
-    resp = client.get("/api/photos/missing")
-    assert resp.status_code == 200
-    data = resp.get_json()
+    data = _run_missing_originals_check(client)["photos"]
     assert len(data) == 1
     assert data[0]["has_working_copy"] is True
 
@@ -4530,9 +4677,8 @@ def test_api_photos_missing_excludes_present_files(app_and_db, tmp_path):
         ).fetchall()
     ])
 
-    resp = client.get("/api/photos/missing")
-    assert resp.status_code == 200
-    assert resp.get_json() == []
+    payload = _run_missing_originals_check(client)
+    assert payload["photos"] == []
 
 
 def test_api_folder_relocate(app_and_db, tmp_path):

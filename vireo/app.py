@@ -2457,6 +2457,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # over large network volumes. Values are per-spawn dicts; a new walk
     # replaces the key wholesale, so readers never see torn state.
     app._new_images_walk_progress = {}
+    app._missing_originals_lock = threading.Lock()
+    app._missing_originals_cache = {}
+    app._missing_originals_inflight = {}
+    app._missing_originals_errors = {}
 
     # Self-healing background backfill of missing working copies. RAW (and
     # oversized JPEG) imports need a JPEG working copy at
@@ -3296,33 +3300,105 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         missing = db.get_missing_folders()
         return jsonify([dict(f) for f in missing])
 
-    @app.route("/api/photos/missing")
-    def api_photos_missing():
-        """Return photos whose original file is gone but the folder remains.
+    _MISSING_ORIGINALS_STALE_SECONDS = 30 * 60
+    _MISSING_ORIGINALS_BACKOFF_SECONDS = 30 * 60
+    _MISSING_ORIGINALS_HEAVY_JOB_TYPES = {
+        "scan",
+        "pipeline",
+        "thumbnails",
+        "previews",
+        "move-photos",
+        "move-folder",
+        "sync",
+        "classify",
+        "cull",
+        "develop",
+        "extract-masks",
+        "regroup",
+        "import",
+        "import-full",
+        "import-in-place",
+        "ingest",
+        "import-photos",
+        "batch-delete",
+        "duplicate-scan",
+        "offline-cache",
+    }
 
-        For each ghost row we report what cached/sidecar artifacts still exist
-        (thumb, preview, working copy, XMP) so the user can decide whether
-        anything is worth keeping before deleting the row.
+    def _utc_iso_now():
+        return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
-        Optional ``?folder_id=N`` scopes the check to that folder and its
-        descendants — the "rescan a specific folder" flow. The id must be
-        linked to the active workspace (same guard as folder rescan); an
-        unknown or foreign id returns 404 rather than silently widening to
-        the whole library.
-        """
-        db = _get_db()
+    def _parse_missing_originals_folder_id(db):
         folder_id = request.args.get("folder_id")
-        if folder_id is not None:
-            try:
-                folder_id = int(folder_id)
-            except (TypeError, ValueError):
-                return json_error("folder_id must be an integer")
-            linked = db.conn.execute(
-                "SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
-                (db._active_workspace_id, folder_id),
-            ).fetchone()
-            if not linked:
-                return json_error("folder not found", 404)
+        if request.is_json:
+            body = request.get_json(silent=True) or {}
+            if "folder_id" in body:
+                folder_id = body.get("folder_id")
+        if folder_id in (None, ""):
+            return None
+        try:
+            folder_id = int(folder_id)
+        except (TypeError, ValueError):
+            raise ValueError("folder_id must be an integer") from None
+        linked = db.conn.execute(
+            "SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+            (db._active_workspace_id, folder_id),
+        ).fetchone()
+        if not linked:
+            raise LookupError("folder not found")
+        return folder_id
+
+    def _missing_originals_key(db, folder_id):
+        return (db._db_path, db._active_workspace_id, folder_id)
+
+    def _missing_originals_payload(db, folder_id):
+        key = _missing_originals_key(db, folder_id)
+        now = time.monotonic()
+        with app._missing_originals_lock:
+            entry = app._missing_originals_cache.get(key)
+            inflight = app._missing_originals_inflight.get(key)
+            err = app._missing_originals_errors.get(key)
+            if entry is not None:
+                status = "pending" if inflight else "ready"
+                photos = entry["photos"]
+                checked_at = entry["checked_at"]
+                stale = now - entry["set_at"] > _MISSING_ORIGINALS_STALE_SECONDS
+                error = None
+            elif inflight:
+                status = "pending"
+                photos = []
+                checked_at = None
+                stale = False
+                error = None
+            elif err is not None:
+                status = "error"
+                photos = []
+                checked_at = err["checked_at"]
+                stale = False
+                error = err["error"]
+            else:
+                status = "not_ready"
+                photos = []
+                checked_at = None
+                stale = False
+                error = None
+            backoff_seconds = 0
+            if err is not None:
+                backoff_seconds = max(0, int(err["backoff_until"] - now))
+            return {
+                "status": status,
+                "pending": bool(inflight),
+                "checked_at": checked_at,
+                "stale": stale,
+                "error": error,
+                "job_id": inflight if isinstance(inflight, str) else None,
+                "photos": photos,
+                "backoff_seconds": backoff_seconds,
+                "workspace_id": db._active_workspace_id,
+                "folder_id": folder_id,
+            }
+
+    def _build_missing_originals_rows(db, folder_id=None, progress_callback=None):
         thumb_dir = app.config["THUMB_CACHE_DIR"]
         vireo_dir = os.path.dirname(thumb_dir)
         preview_dir = os.path.join(vireo_dir, "previews")
@@ -3347,7 +3423,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             pass  # cache dir hasn't been created yet — no previews
 
         out = []
-        for row in db.get_missing_photos(folder_id=folder_id):
+        for row in db.get_missing_photos(
+            folder_id=folder_id,
+            progress_callback=progress_callback,
+        ):
             pid = row["id"]
             src = os.path.join(row["folder_path"], row["filename"])
             stem, _ext = os.path.splitext(src)
@@ -3382,7 +3461,194 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 ),
             })
         _attach_nested_edit_recipes(db, out)
-        return jsonify(out)
+        return out
+
+    def _missing_originals_heavy_job_active():
+        for job in app._job_runner.list_jobs():
+            if job.get("status") not in ("running", "queued"):
+                continue
+            if job.get("type") in _MISSING_ORIGINALS_HEAVY_JOB_TYPES:
+                return True
+        return False
+
+    def _invalidate_missing_originals_cache(workspace_id):
+        with app._missing_originals_lock:
+            for store in (
+                app._missing_originals_cache,
+                app._missing_originals_errors,
+            ):
+                for key in list(store.keys()):
+                    if key[1] == workspace_id:
+                        store.pop(key, None)
+
+    def _start_missing_originals_scan(db, folder_id=None, automatic=False):
+        key = _missing_originals_key(db, folder_id)
+        now = time.monotonic()
+        token = object()
+        suppressed_reason = None
+        reuse_existing = False
+        with app._missing_originals_lock:
+            inflight = app._missing_originals_inflight.get(key)
+            if inflight:
+                reuse_existing = True
+            err = app._missing_originals_errors.get(key)
+            if (
+                not reuse_existing
+                and automatic
+                and err is not None
+                and now < err["backoff_until"]
+            ):
+                suppressed_reason = "backoff"
+        if reuse_existing:
+            return _missing_originals_payload(db, folder_id)
+        if automatic and suppressed_reason is None and _missing_originals_heavy_job_active():
+            suppressed_reason = "heavy_job_active"
+        if suppressed_reason is not None:
+            payload = _missing_originals_payload(db, folder_id)
+            payload["suppressed"] = True
+            payload["reason"] = suppressed_reason
+            if suppressed_reason == "heavy_job_active":
+                payload["status"] = "skipped"
+            return payload
+        with app._missing_originals_lock:
+            inflight = app._missing_originals_inflight.get(key)
+            if inflight:
+                reuse_existing = True
+            else:
+                app._missing_originals_inflight[key] = token
+        if reuse_existing:
+            return _missing_originals_payload(db, folder_id)
+
+        runner = app._job_runner
+        ws_id = db._active_workspace_id
+        db_file = db._db_path
+        scope_label = "workspace" if folder_id is None else f"folder #{folder_id}"
+
+        def work(job):
+            thread_db = Database(db_file)
+            try:
+                if ws_id is not None:
+                    thread_db.set_active_workspace(ws_id)
+
+                def progress(payload):
+                    current = int(payload.get("photos_considered") or 0)
+                    total = int(payload.get("total_photos") or 0)
+                    missing_found = int(payload.get("missing_found") or 0)
+                    folders_checked = int(payload.get("folders_checked") or 0)
+                    current_folder = payload.get("current_folder") or ""
+                    job["progress"]["current"] = current
+                    job["progress"]["total"] = total
+                    job["progress"]["current_file"] = current_folder
+                    job["progress"]["phase"] = (
+                        f"{folders_checked:,} folders checked, "
+                        f"{current:,} photos considered, "
+                        f"{missing_found:,} missing"
+                    )
+                    runner.push_event(job["id"], "progress", {
+                        "current": current,
+                        "total": total,
+                        "current_file": current_folder,
+                        "folders_checked": folders_checked,
+                        "missing_found": missing_found,
+                        "phase": job["progress"]["phase"],
+                    })
+
+                photos = _build_missing_originals_rows(
+                    thread_db,
+                    folder_id=folder_id,
+                    progress_callback=progress,
+                )
+                checked_at = _utc_iso_now()
+                with app._missing_originals_lock:
+                    app._missing_originals_cache[key] = {
+                        "photos": photos,
+                        "checked_at": checked_at,
+                        "set_at": time.monotonic(),
+                    }
+                    app._missing_originals_errors.pop(key, None)
+                return {
+                    "missing_count": len(photos),
+                    "checked_at": checked_at,
+                    "scope": scope_label,
+                }
+            except Exception as exc:
+                checked_at = _utc_iso_now()
+                with app._missing_originals_lock:
+                    app._missing_originals_errors[key] = {
+                        "error": str(exc) or exc.__class__.__name__,
+                        "checked_at": checked_at,
+                        "set_at": time.monotonic(),
+                        "backoff_until": (
+                            time.monotonic()
+                            + _MISSING_ORIGINALS_BACKOFF_SECONDS
+                        ),
+                    }
+                raise
+            finally:
+                thread_db.close()
+                with app._missing_originals_lock:
+                    if app._missing_originals_inflight.get(key) in (
+                        token,
+                        job["id"],
+                    ):
+                        app._missing_originals_inflight.pop(key, None)
+
+        try:
+            job_id = runner.start(
+                "missing_originals_scan",
+                work,
+                workspace_id=ws_id,
+                config={"scope": scope_label, "folder_id": folder_id},
+                ephemeral=True,
+                counts_for_badge=False,
+            )
+        except Exception:
+            with app._missing_originals_lock:
+                if app._missing_originals_inflight.get(key) is token:
+                    app._missing_originals_inflight.pop(key, None)
+            raise
+
+        with app._missing_originals_lock:
+            if app._missing_originals_inflight.get(key) is token:
+                app._missing_originals_inflight[key] = job_id
+        payload = _missing_originals_payload(db, folder_id)
+        if payload.get("status") != "ready":
+            payload["job_id"] = job_id
+            payload["pending"] = True
+            payload["status"] = "pending"
+        return payload
+
+    @app.route("/api/photos/missing")
+    def api_photos_missing():
+        """Return cached Missing Originals scan status without filesystem work."""
+        db = _get_db()
+        try:
+            folder_id = _parse_missing_originals_folder_id(db)
+        except ValueError as exc:
+            return json_error(str(exc))
+        except LookupError:
+            return json_error("folder not found", 404)
+        return jsonify(_missing_originals_payload(db, folder_id))
+
+    @app.route("/api/photos/missing/check", methods=["POST"])
+    def api_photos_missing_check():
+        """Start or reuse a background Missing Originals scan."""
+        db = _get_db()
+        try:
+            folder_id = _parse_missing_originals_folder_id(db)
+        except ValueError as exc:
+            return json_error(str(exc))
+        except LookupError:
+            return json_error("folder not found", 404)
+        body = request.get_json(silent=True) or {}
+        automatic = bool(body.get("automatic"))
+        payload = _start_missing_originals_scan(
+            db,
+            folder_id=folder_id,
+            automatic=automatic,
+        )
+        status_code = 202 if payload.get("pending") else 200
+        return jsonify(payload), status_code
 
     @app.route("/api/folders/check-health", methods=["POST"])
     def api_folders_check_health():
@@ -6384,6 +6650,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         except ValueError as exc:
             return json_error(str(exc))
+        if result.get("deleted"):
+            _invalidate_missing_originals_cache(db._active_workspace_id)
         return jsonify(result)
 
     @app.route("/api/jobs/batch-delete", methods=["POST"])
@@ -6422,7 +6690,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 })
 
             try:
-                return _run_batch_delete(
+                result = _run_batch_delete(
                     thread_db,
                     photo_ids,
                     mode,
@@ -6430,6 +6698,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     paths=paths,
                     progress_callback=progress,
                 )
+                if result.get("deleted"):
+                    _invalidate_missing_originals_cache(active_ws)
+                return result
             finally:
                 thread_db.conn.close()
 

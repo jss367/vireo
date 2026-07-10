@@ -2606,7 +2606,7 @@ class Database:
             (self._ws_id(),),
         ).fetchall()
 
-    def get_missing_photos(self, folder_id=None):
+    def get_missing_photos(self, folder_id=None, progress_callback=None):
         """Return photos whose source file is missing from disk.
 
         Scoped to the active workspace. Skips photos in folders flagged
@@ -2687,12 +2687,26 @@ class Database:
         folder_online: dict[int, bool] = {}
         folder_names: dict[int, set[str] | None] = {}
         missing = []
+        photos_considered = 0
+        folders_checked = 0
+        reported_folders = set()
         for row in rows:
             fid = row["folder_id"]
             if fid not in folder_online:
                 folder_online[fid] = os.path.isdir(row["folder_path"])
             if not folder_online[fid]:
                 # Whole folder is offline — surfaced by missing-folders flow.
+                if fid not in reported_folders:
+                    reported_folders.add(fid)
+                    folders_checked += 1
+                    if progress_callback is not None:
+                        progress_callback({
+                            "folders_checked": folders_checked,
+                            "photos_considered": photos_considered,
+                            "missing_found": len(missing),
+                            "total_photos": len(rows),
+                            "current_folder": row["folder_path"],
+                        })
                 continue
             if fid not in folder_names:
                 try:
@@ -2714,7 +2728,19 @@ class Database:
                     # treat the same as "folder offline" so we don't bulk-flag
                     # every photo as a ghost.
                     folder_names[fid] = None
+                if fid not in reported_folders:
+                    reported_folders.add(fid)
+                    folders_checked += 1
+                    if progress_callback is not None:
+                        progress_callback({
+                            "folders_checked": folders_checked,
+                            "photos_considered": photos_considered,
+                            "missing_found": len(missing),
+                            "total_photos": len(rows),
+                            "current_folder": row["folder_path"],
+                        })
             names = folder_names[fid]
+            photos_considered += 1
             if names is None:
                 continue
             if _nfc(row["filename"]) in names:
@@ -2725,6 +2751,14 @@ class Database:
             # filesystems) it correctly reports the file as absent.
             if not os.path.exists(os.path.join(row["folder_path"], row["filename"])):
                 missing.append(row)
+        if progress_callback is not None:
+            progress_callback({
+                "folders_checked": folders_checked,
+                "photos_considered": photos_considered,
+                "missing_found": len(missing),
+                "total_photos": len(rows),
+                "current_folder": "",
+            })
         return missing
 
     def nearest_ancestor_folder_id(self, path, exclude_id=None):
