@@ -840,14 +840,43 @@ function render() {
 }
 
 function findHighlightPhoto(photoId) {
+  var hit = findHighlightPhotoWithContainer(photoId);
+  return hit ? hit.photo : null;
+}
+
+function findHighlightPhotoWithContainer(photoId) {
   if (!currentData || photoId == null) return null;
   var buckets = currentData.buckets || [];
   for (var i = 0; i < buckets.length; i++) {
-    var match = (buckets[i].photos || []).find(function(p) { return p.id === photoId; });
-    if (match) return match;
+    var photos = buckets[i].photos || [];
+    var match = photos.find(function(p) { return p.id === photoId; });
+    if (match) return { photo: match, photos: photos };
   }
   var unid = currentData.unidentified && currentData.unidentified.photos || [];
-  return unid.find(function(p) { return p.id === photoId; }) || null;
+  var match = unid.find(function(p) { return p.id === photoId; });
+  return match ? { photo: match, photos: unid } : null;
+}
+
+// Mirror the server-side `_highlight_score_bucket(..., picked_first=True)` sort
+// so a client-side pick change moves the photo into the same slot the backend
+// would place it on a reload. Without this, a picked photo hidden past the
+// perRow slice would keep its Pick badge invisible until a refetch.
+function sortBucketPicksFirst(photos) {
+  if (!photos || photos.length < 2) return;
+  photos.sort(function(a, b) {
+    var ap = a.flag === 'flagged' ? 1 : 0;
+    var bp = b.flag === 'flagged' ? 1 : 0;
+    if (ap !== bp) return bp - ap;
+    var ah = a.highlight_score || 0, bh = b.highlight_score || 0;
+    if (ah !== bh) return bh - ah;
+    var ac = a.predicted_confidence || 0, bc = b.predicted_confidence || 0;
+    if (ac !== bc) return bc - ac;
+    var aq = a.quality_score || 0, bq = b.quality_score || 0;
+    if (aq !== bq) return bq - aq;
+    var ar = a.rating || 0, br = b.rating || 0;
+    if (ar !== br) return br - ar;
+    return (a.id || 0) - (b.id || 0);
+  });
 }
 
 function lightboxIsOpenOnPhoto(photoId) {
@@ -1191,16 +1220,19 @@ document.addEventListener('lightbox:flagchanged', function(e) {
     loadHighlights();
   } else {
     // Pick/Unpick from the lightbox: the badge/outline are derived from
-    // p.flag inside renderCard, so the already-rendered card DOM stays
-    // stale until the model is updated and re-rendered. Only re-render
-    // when the transition actually crosses the 'flagged' boundary.
+    // p.flag inside renderCard, and the visible row is a slice(0, perRow)
+    // of bucket.photos, so we must both mutate the flag AND re-sort the
+    // containing bucket to match the backend's picked_first ordering —
+    // otherwise a photo picked from the preloaded-but-hidden tail would
+    // keep its Pick badge invisible until a full refetch.
     var prev = detail.previousFlag || 'none';
     var next = detail.flag || 'none';
     if (prev === next) return;
     if (prev !== 'flagged' && next !== 'flagged') return;
-    var pickedPhoto = findHighlightPhoto(detail.photoId);
-    if (!pickedPhoto) return;
-    pickedPhoto.flag = next;
+    var hit = findHighlightPhotoWithContainer(detail.photoId);
+    if (!hit) return;
+    hit.photo.flag = next;
+    sortBucketPicksFirst(hit.photos);
     render();
   }
 });

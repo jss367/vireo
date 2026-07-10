@@ -266,6 +266,84 @@ def test_highlights_lightbox_pick_updates_card_without_reload(live_server, page)
     expect(cleared.locator(".pick-flag-badge")).to_have_count(0)
 
 
+def test_highlights_lightbox_pick_hidden_photo_promotes_to_visible(live_server, page):
+    """Picking a preloaded-but-hidden photo from the lightbox must promote it
+    into the visible slice, not leave it hidden until a reload.
+
+    Regression for Codex feedback on PR #1176: the ``lightbox:flagchanged``
+    handler only mutated ``pickedPhoto.flag`` and rerendered the existing
+    array order. So a photo picked from beyond the ``perRow`` slice (the
+    backend preloads up to 20 per bucket but the grid shows 5 by default)
+    kept its new Pick badge invisible until a full refetch, even though the
+    server's ``picked_first`` sort would have promoted it.
+    """
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+
+    hawk_kid = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("Red-tailed Hawk",)
+    ).fetchone()["id"]
+    folder_id = data["folders"][0]
+    extras = []
+    for i in range(8):
+        pid = db.add_photo(
+            folder_id=folder_id,
+            filename=f"extra-hawk-{i}.jpg",
+            extension=".jpg",
+            file_size=1000,
+            file_mtime=1.0,
+            timestamp=f"2024-03-11T08:{i:02d}:00",
+        )
+        db.conn.execute(
+            "UPDATE photos SET quality_score = ? WHERE id = ?",
+            (0.5 - i * 0.01, pid),
+        )
+        db.conn.execute(
+            "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (pid, hawk_kid),
+        )
+        extras.append(pid)
+    db.conn.commit()
+
+    page.goto(f"{live_server['url']}/highlights", timeout=5000)
+    hawk_section = page.locator("section.bucket").filter(has_text="Red-tailed Hawk")
+    expect(hawk_section.locator(".highlights-card").first).to_be_visible(timeout=5000)
+
+    visible_ids = hawk_section.locator(".highlights-card").evaluate_all(
+        "cards => cards.map(c => Number(c.getAttribute('data-photo-id')))"
+    )
+    # perRow default is 5; extra hawks (8) plus seeded hawks (3) = 11 in the
+    # bucket, so at least one preloaded photo is hidden past the slice.
+    assert len(visible_ids) == 5
+    hidden_pid = next(pid for pid in extras if pid not in set(visible_ids))
+
+    # Open the lightbox on the first visible card so `_lightboxPhotoList` is
+    # populated with the full bucket, then jump to the hidden photo.
+    hawk_section.locator(".highlights-card").nth(0).click()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+    page.evaluate(
+        "pid => openLightbox(pid, '', _lightboxPhotoList)",
+        hidden_pid,
+    )
+    page.wait_for_function(
+        "pid => _lightboxCurrentId === pid",
+        arg=hidden_pid,
+        timeout=3000,
+    )
+
+    page.keyboard.press("p")
+
+    assert _wait_for_flag(db, hidden_pid, "flagged") == "flagged"
+    promoted = page.locator(f'.highlights-card[data-photo-id="{hidden_pid}"]')
+    expect(promoted).to_be_visible(timeout=5000)
+    expect(promoted).to_have_class(re.compile(r"\bpick-flag-card\b"))
+    expect(promoted.locator(".pick-flag-badge")).to_be_visible()
+
+
 def test_highlights_species_search_filters_buckets(live_server, page):
     db = live_server["db"]
     data = live_server["data"]
