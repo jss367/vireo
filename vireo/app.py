@@ -62,6 +62,9 @@ from render_source import (
 from render_source import (
     image_is_smaller_than_expected as _image_is_smaller_than_expected,
 )
+from render_source import (
+    image_size_after_exif_orientation as _image_size_after_exif_orientation,
+)
 from render_source import path_satisfies_recipe_render as _path_satisfies_recipe_render
 from render_source import (
     recipe_render_source as _recipe_render_source,
@@ -21090,10 +21093,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return None
             from PIL import Image as _PILImage
 
-            from render_source import image_size_after_exif_orientation
             try:
                 with _PILImage.open(wc_path) as _wc_img:
-                    wc_w, wc_h = image_size_after_exif_orientation(_wc_img)
+                    wc_w, wc_h = _image_size_after_exif_orientation(_wc_img)
             except Exception:
                 wc_w = wc_h = 0
             # Compare in display-orientation space: ``extract_working_copy``
