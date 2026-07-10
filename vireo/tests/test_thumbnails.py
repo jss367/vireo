@@ -527,7 +527,9 @@ def test_generate_all_uses_near_full_working_copy_after_current_raw_failure(
 
     assert result["generated"] == 1
     assert result["failed"] == 0
-    assert loaded_paths == [str(wc_path)]
+    assert [os.path.normpath(path) for path in loaded_paths] == [
+        os.path.normpath(str(wc_path))
+    ]
     row = db.conn.execute(
         "SELECT thumb_path FROM photos WHERE id=?", (photo_id,),
     ).fetchone()

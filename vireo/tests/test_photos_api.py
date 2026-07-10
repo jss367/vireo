@@ -1266,7 +1266,9 @@ def test_edited_original_uses_working_copy_after_current_raw_failure(
     resp = client.get(f"/photos/{photo_id}/original")
 
     assert resp.status_code == 200, resp.get_data(as_text=True)
-    assert loaded_paths == [wc_path]
+    assert [os.path.normpath(path) for path in loaded_paths] == [
+        os.path.normpath(wc_path)
+    ]
 
 
 def test_original_reextracts_stale_capped_jpeg_wc_after_cap_raised(app_and_db, tmp_path):
