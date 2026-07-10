@@ -31,6 +31,7 @@ from db import (
     KEYWORD_TYPES,
     Database,
     IncompatibleDatabaseError,
+    MissingPhotosCancelled,
     commit_with_retry,
     text_search_match,
 )
@@ -3447,11 +3448,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "folder_id": folder_id,
             }
 
-    def _build_missing_originals_rows(db, folder_id=None, progress_callback=None):
+    def _build_missing_originals_rows(
+        db,
+        folder_id=None,
+        progress_callback=None,
+        cancel_callback=None,
+    ):
         thumb_dir = app.config["THUMB_CACHE_DIR"]
         vireo_dir = os.path.dirname(thumb_dir)
         preview_dir = os.path.join(vireo_dir, "previews")
         working_dir = os.path.join(vireo_dir, "working")
+
+        def check_cancelled():
+            if cancel_callback is not None and cancel_callback():
+                raise MissingPhotosCancelled("missing originals scan cancelled")
 
         # Index preview cache once. The endpoint is polled from the navbar,
         # so per-photo `glob(preview_dir, f"{pid}_*.jpg")` was O(missing ×
@@ -3459,15 +3469,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # listdir and check the set in O(1) per row.
         preview_pids: set[int] = set()
         try:
-            for name in os.listdir(preview_dir):
-                # Match `{id}.jpg` (legacy full preview) or `{id}_{size}.jpg`
-                # (sized variant). Anything else is not part of the per-photo
-                # cache and should be ignored.
-                if not name.endswith(".jpg"):
-                    continue
-                head = name[:-4].split("_", 1)[0]
-                if head.isdigit():
-                    preview_pids.add(int(head))
+            check_cancelled()
+            with os.scandir(preview_dir) as it:
+                for entry in it:
+                    check_cancelled()
+                    name = entry.name
+                    # Match `{id}.jpg` (legacy full preview) or `{id}_{size}.jpg`
+                    # (sized variant). Anything else is not part of the per-photo
+                    # cache and should be ignored.
+                    if not name.endswith(".jpg"):
+                        continue
+                    head = name[:-4].split("_", 1)[0]
+                    if head.isdigit():
+                        preview_pids.add(int(head))
         except FileNotFoundError:
             pass  # cache dir hasn't been created yet — no previews
 
@@ -3475,7 +3489,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         for row in db.get_missing_photos(
             folder_id=folder_id,
             progress_callback=progress_callback,
+            cancel_callback=cancel_callback,
         ):
+            check_cancelled()
             pid = row["id"]
             src = os.path.join(row["folder_path"], row["filename"])
             stem, _ext = os.path.splitext(src)
@@ -3654,15 +3670,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         "phase": job["progress"]["phase"],
                     })
 
+                def cancel_check():
+                    return runner.is_cancelled(job["id"])
+
                 photos = _build_missing_originals_rows(
                     thread_db,
                     folder_id=folder_id,
                     progress_callback=progress,
+                    cancel_callback=cancel_check,
                 )
+                if cancel_check():
+                    return {"cancelled": True, "scope": scope_label}
                 checked_at = _utc_iso_now()
                 stale = False
                 with app._missing_originals_lock:
                     current_gen = app._missing_originals_generation.get(key, 0)
+                    if cancel_check():
+                        return {"cancelled": True, "scope": scope_label}
                     if current_gen != scan_generation:
                         # A batch delete (or other invalidation) fired
                         # while this scan was walking the disk. Its photo
@@ -3685,6 +3709,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "scope": scope_label,
                     "stale": stale,
                 }
+            except MissingPhotosCancelled:
+                raise
             except Exception as exc:
                 checked_at = _utc_iso_now()
                 with app._missing_originals_lock:

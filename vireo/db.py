@@ -55,6 +55,10 @@ class IncompatibleDatabaseError(RuntimeError):
         super().__init__(msg)
 
 
+class MissingPhotosCancelled(RuntimeError):
+    """Raised when a Missing Originals filesystem scan is cancelled."""
+
+
 def _nfc(name: str) -> str:
     """NFC-normalize a filename for byte-exact comparison against scandir output.
 
@@ -2607,7 +2611,12 @@ class Database:
             (self._ws_id(),),
         ).fetchall()
 
-    def get_missing_photos(self, folder_id=None, progress_callback=None):
+    def get_missing_photos(
+        self,
+        folder_id=None,
+        progress_callback=None,
+        cancel_callback=None,
+    ):
         """Return photos whose source file is missing from disk.
 
         Scoped to the active workspace. Skips photos in folders flagged
@@ -2640,7 +2649,15 @@ class Database:
         containing ``folders_checked``, ``photos_considered``, ``missing_found``,
         ``total_photos``, and ``current_folder``. Callback exceptions are
         logged and ignored so progress reporting cannot abort detection.
+
+        ``cancel_callback`` is optional. When supplied, it is polled between
+        filesystem operations and may abort the scan by returning true.
         """
+        def check_cancelled():
+            if cancel_callback is not None and cancel_callback():
+                raise MissingPhotosCancelled("missing photos scan cancelled")
+
+        check_cancelled()
         params = [self._ws_id()]
         subtree_clause = ""
         if folder_id is not None:
@@ -2672,6 +2689,7 @@ class Database:
                 subtree_clause = (
                     " AND f.id IN (SELECT id FROM missing_subtree_ids)"
                 )
+        check_cancelled()
         rows = self.conn.execute(
             f"""SELECT p.id, p.filename, p.extension, p.file_size,
                       p.timestamp, p.working_copy_path,
@@ -2683,6 +2701,7 @@ class Database:
                ORDER BY f.path, p.filename""",
             params,
         ).fetchall()
+        check_cancelled()
         # One readdir per folder instead of one stat per photo. On a 50k-photo
         # library across a network volume the per-photo `os.path.exists` was
         # costing minutes; a single scandir + set-membership check is orders
@@ -2719,6 +2738,7 @@ class Database:
                 report_progress(current_folder)
 
         for row in rows:
+            check_cancelled()
             fid = row["folder_id"]
             if fid not in folder_online:
                 folder_online[fid] = os.path.isdir(row["folder_path"])
@@ -2734,6 +2754,7 @@ class Database:
                     names_set: set[str] = set()
                     with os.scandir(row["folder_path"]) as it:
                         for entry in it:
+                            check_cancelled()
                             # Broken symlinks: scandir returns the basename even
                             # when the target is gone, but the prior os.path.exists
                             # check returned False. Filter them so missing
@@ -2765,9 +2786,11 @@ class Database:
             # volumes (APFS default, NTFS) os.path.exists resolves a
             # case-mismatched name; on case-sensitive volumes (most Linux
             # filesystems) it correctly reports the file as absent.
+            check_cancelled()
             if not os.path.exists(os.path.join(row["folder_path"], row["filename"])):
                 missing.append(row)
             report_photo_progress(row["folder_path"])
+        check_cancelled()
         report_progress("")
         return missing
 

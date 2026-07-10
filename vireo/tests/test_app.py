@@ -4962,6 +4962,77 @@ def test_api_photos_missing_automatic_respects_failure_backoff(app_and_db, monke
     assert data["backoff_seconds"] > 0
 
 
+def test_get_missing_photos_honors_cancel_callback(app_and_db):
+    """The low-level missing-originals walk must be cooperatively cancellable."""
+    import pytest
+    from db import MissingPhotosCancelled
+
+    _app, db = app_and_db
+
+    with pytest.raises(MissingPhotosCancelled):
+        db.get_missing_photos(cancel_callback=lambda: True)
+
+
+def test_api_photos_missing_cancel_does_not_write_ready_cache(
+    app_and_db, monkeypatch,
+):
+    """Cancelling a Missing Originals job must stop without publishing results.
+
+    Regression: JobRunner marked the job cancelled, but the worker kept walking
+    the filesystem and could write a ready cache before terminal status flipped.
+    """
+    import threading
+    import time
+
+    from db import Database, MissingPhotosCancelled
+
+    app, db = app_and_db
+    client = app.test_client()
+    scan_entered = threading.Event()
+
+    def slow_missing_photos(
+        self,
+        folder_id=None,
+        progress_callback=None,
+        cancel_callback=None,
+    ):
+        scan_entered.set()
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            if cancel_callback is not None and cancel_callback():
+                raise MissingPhotosCancelled("missing photos scan cancelled")
+            time.sleep(0.01)
+        return [{
+            "id": 999,
+            "folder_path": os.getcwd(),
+            "filename": "would-have-been-cached.jpg",
+            "timestamp": None,
+            "working_copy_path": None,
+        }]
+
+    monkeypatch.setattr(Database, "get_missing_photos", slow_missing_photos)
+
+    started = client.post("/api/photos/missing/check", json={})
+    assert started.status_code == 202, started.get_json()
+    job_id = started.get_json()["job_id"]
+    assert scan_entered.wait(timeout=1.0)
+
+    cancelled = client.post(f"/api/jobs/{job_id}/cancel")
+    assert cancelled.status_code == 200, cancelled.get_json()
+    assert cancelled.get_json()["cancelled"] is True
+
+    job = wait_for_job_via_client(client, job_id)
+    assert job["status"] == "cancelled"
+
+    key = (db._db_path, db._active_workspace_id, None)
+    with app._missing_originals_lock:
+        assert key not in app._missing_originals_cache
+        assert key not in app._missing_originals_errors
+        assert key not in app._missing_originals_inflight
+    payload = client.get("/api/photos/missing").get_json()
+    assert payload["status"] == "not_ready", payload
+
+
 def test_api_photos_missing_prefers_fresher_error_over_ready_cache(app_and_db):
     """A failed refresh must not be hidden behind an older ready cache.
 
