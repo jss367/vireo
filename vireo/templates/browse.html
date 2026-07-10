@@ -1876,6 +1876,7 @@ var selectionKeywordRequestSeq = 0;
 var selectionKeywordKey = '';
 var selectionKeywordMissingById = {};
 var selectionKeywordPresentById = {};
+var selectionKeywordNameById = {};
 var showDetectionBoxes = false;
 var cardFields = ["filename", "rating", "flag", "color_label", "sharpness"]; // default, overridden by config
 var inatSubmitted = {};  // {photo_id: true}
@@ -2706,6 +2707,17 @@ function scheduleCollectionCountsRefresh() {
 function refreshActiveCollectionAfterMembershipChange() {
   if (!activeCollectionId) return;
   filterByCollection(activeCollectionId, { preserveAnchor: false });
+}
+
+// When bulk-removing the keyword that currently drives the filter, the
+// photos we just untagged no longer match the query. Without this reload
+// they stay in the grid and in the selection until the user manually
+// changes filters. `filterByKeyword` uses `activeKeyword` as the source
+// of truth, so trigger the same reload path.
+function refreshActiveKeywordAfterRemoval(removedName) {
+  if (!activeKeyword || !removedName) return;
+  if (activeKeyword !== removedName) return;
+  reloadBrowseResults();
 }
 
 function refreshBrowseSidebarCounts() {
@@ -4443,6 +4455,7 @@ function updateSelectionPanel(ids) {
     selectionKeywordKey = '';
     selectionKeywordMissingById = {};
     selectionKeywordPresentById = {};
+    selectionKeywordNameById = {};
     selectionKeywordRequestSeq++;
     var list = document.getElementById('selectionKeywordSuggestions');
     if (list) list.innerHTML = '';
@@ -4479,6 +4492,7 @@ function updateSelectionPanel(ids) {
     selectionKeywordKey = selectionIdsKey(ids);
     selectionKeywordMissingById = {};
     selectionKeywordPresentById = {};
+    selectionKeywordNameById = {};
     selectionKeywordRequestSeq++;
     var list = document.getElementById('selectionKeywordSuggestions');
     if (list) {
@@ -4701,6 +4715,7 @@ function renderSelectionKeywordSuggestions(keywords, selectedCount) {
   if (!keywords.length) {
     selectionKeywordMissingById = {};
     selectionKeywordPresentById = {};
+    selectionKeywordNameById = {};
     list.innerHTML = '<div class="selection-empty">No keywords on selected photos.</div>';
     return;
   }
@@ -4708,11 +4723,13 @@ function renderSelectionKeywordSuggestions(keywords, selectedCount) {
   var html = '';
   selectionKeywordMissingById = {};
   selectionKeywordPresentById = {};
+  selectionKeywordNameById = {};
   keywords.forEach(function(k) {
     var missing = k.missing_count || 0;
     var count = k.count || 0;
     selectionKeywordMissingById[String(k.id)] = k.missing_photo_ids || [];
     selectionKeywordPresentById[String(k.id)] = k.present_photo_ids || [];
+    selectionKeywordNameById[String(k.id)] = k.name;
     var actions = '';
     if (missing > 0) {
       actions += '<button class="selection-keyword-add" onclick="applySelectionKeyword(' + k.id + ')" title="Add this keyword to the selected photos missing it">Add to ' + missing + '</button>';
@@ -4753,6 +4770,7 @@ async function applySelectionKeyword(keywordId) {
 async function removeSelectionKeyword(keywordId) {
   var ids = selectionKeywordPresentById[String(keywordId)] || [];
   if (!ids.length) return;
+  var removedName = selectionKeywordNameById[String(keywordId)] || null;
   try {
     await safeFetch('/api/batch/keyword-remove', {
       method: 'POST',
@@ -4765,6 +4783,7 @@ async function removeSelectionKeyword(keywordId) {
   loadKeywords();
   scheduleCollectionCountsRefresh();
   refreshActiveCollectionAfterMembershipChange();
+  refreshActiveKeywordAfterRemoval(removedName);
   refreshPendingSyncBanner();
   showUndoToast();
 }
