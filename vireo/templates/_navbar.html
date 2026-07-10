@@ -10008,6 +10008,12 @@ function dismissMissingPhotosBanner() {
 // delayed background job and the banner only renders cached results. After the
 // initial run, keep re-arming a self-scheduling timer so a long-lived tab still
 // picks up files deleted, or skipped earlier because a heavy job was active.
+//
+// Read any existing cache immediately: this app spans multiple pages, so each
+// navigation resets the delayed POST timer. Without this cheap cache-only GET,
+// a ready payload from a prior scan or another tab would stay hidden for the
+// full delay window even though showing it costs no filesystem work.
+checkMissingPhotos();
 _scheduleAutomaticMissingPhotosCheck(MISSING_PHOTOS_INITIAL_DELAY_MS);
 
 /* ---------- New Images Banner ---------- */

@@ -3329,6 +3329,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         "batch-delete",
         "duplicate-scan",
         "offline-cache",
+        # Navbar's new-images probe walks the same folders a missing-originals
+        # scan would; letting them run concurrently can double the filesystem
+        # load on slow NAS/SMB libraries.
+        "new_images_walk",
     }
 
     def _utc_iso_now():
