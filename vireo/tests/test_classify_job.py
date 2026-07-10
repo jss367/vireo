@@ -1995,6 +1995,109 @@ def test_mixed_group_match_then_unmatch_reenters_pending_for_dissenters(
     assert not db.get_predictions(photo_ids=photo_ids, status="accepted")
 
 
+def test_ungrouped_burst_clears_stale_group_id_on_reuse(
+    tmp_path, monkeypatch
+):
+    """Cached predictions from a previously reviewable burst must lose their
+    ``group_id`` when the same detections are later reused outside that
+    group — e.g. the grouping window shrinks so the burst dissolves into
+    singletons. Otherwise group actions on any of the freshly-ungrouped
+    detections would retag the whole stale burst together.
+    """
+    from datetime import datetime
+
+    import classify_job
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path))
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_ids = [
+        db.add_photo(
+            folder_id, f"{i}.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        for i in range(2)
+    ]
+    det_ids = [
+        db.save_detections(
+            pid,
+            [{
+                "box": {"x": 0, "y": 0, "w": 1, "h": 1},
+                "confidence": 0.9,
+                "category": "animal",
+            }],
+            detector_model="MDV6",
+        )[0]
+        for pid in photo_ids
+    ]
+
+    class Tax:
+        def get_hierarchy(self, _species):
+            return {}
+
+    # category="new" keeps both runs on the pending path so we can watch
+    # group_id transition without the auto-accept marker interfering.
+    monkeypatch.setattr("compare.categorize", lambda *_a, **_k: "new")
+
+    def run(grouping_window, extra):
+        raw = [
+            {
+                "photo": {
+                    "id": pid, "filename": f"{i}.jpg",
+                    "folder_id": folder_id, "timestamp": None,
+                    "burst_id": None,
+                },
+                "folder_path": str(tmp_path),
+                "detection_id": did,
+                "prediction": "Robin",
+                "confidence": 0.9 - (i * 0.01),
+                "alternatives": [],
+                "taxonomy": {},
+                # Frames 5 seconds apart: grouped under a 10s window,
+                # ungrouped under a 1s window.
+                "timestamp": datetime(2024, 1, 1, 12, 0, i * 5),
+                **extra,
+            }
+            for i, (pid, did) in enumerate(
+                zip(photo_ids, det_ids, strict=True)
+            )
+        ]
+        return classify_job._store_grouped_predictions(
+            raw_results=raw, job_id="job-abc", model_name="bioclip-2",
+            grouping_window=grouping_window, similarity_threshold=0.99,
+            tax=Tax(), db=db, labels_fingerprint="fp-active",
+        )
+
+    # Run 1: 10s window groups both frames -> group_reviewable (same
+    # species) -> both detections share a burst group_id.
+    run(10, {})
+    initial = {r["detection_id"]: r
+               for r in db.get_predictions(photo_ids=photo_ids)}
+    gid_before = initial[det_ids[0]]["group_id"]
+    assert gid_before, "Run 1 should assign a burst group_id"
+    assert initial[det_ids[1]]["group_id"] == gid_before
+
+    # Run 2: cache is reused (_existing=True) with a 1s window that
+    # dissolves the burst into singletons. Each detection goes through
+    # _store_pending_detection_prediction with group_id=None; the cached
+    # rows must lose the stale group_id from Run 1.
+    run(1, {"_existing": True})
+
+    after = {r["detection_id"]: r
+             for r in db.get_predictions(photo_ids=photo_ids)}
+    for det_id in det_ids:
+        assert not after[det_id]["group_id"], (
+            f"Stale group_id survived cache reuse for detection {det_id}: "
+            f"{after[det_id]['group_id']!r}"
+        )
+        assert not after[det_id]["vote_count"]
+        assert not after[det_id]["total_votes"]
+        assert not after[det_id]["individual"]
+
+
 def test_classifier_skipped_when_run_already_recorded(tmp_path, monkeypatch):
     """If (detection, classifier_model, fingerprint) already ran, don't invoke again."""
     from db import Database

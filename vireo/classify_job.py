@@ -1451,6 +1451,16 @@ def _store_pending_detection_prediction(
                     individual=individual,
                     labels_fingerprint=labels_fingerprint,
                 )
+            else:
+                # Cached prediction may still carry group metadata from an
+                # earlier grouped burst; if the current run decided this
+                # detection is not group-reviewable, drop the stale group_id
+                # so ungrouping actually takes effect on reuse.
+                db.clear_prediction_group_info(
+                    detection_id=item["detection_id"],
+                    model=model_name,
+                    labels_fingerprint=labels_fingerprint,
+                )
             return
 
     db.add_prediction(
