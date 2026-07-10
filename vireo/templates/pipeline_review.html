@@ -5869,6 +5869,15 @@ document.addEventListener('contextmenu', function(e) {
   var pid = parseInt(card.dataset.photoId, 10);
   if (!pid) return;
   e.preventDefault();
+  if (card.classList.contains('grm-card') && typeof grmState !== 'undefined' && grmState) {
+    grmState.selected = pid;
+    if (!grmState.selectedIds) grmState.selectedIds = new Set();
+    if (!grmState.selectedIds.has(pid)) {
+      grmState.selectedIds = new Set([pid]);
+    }
+    grmState.selectionAnchor = pid;
+    renderGroupModal();
+  }
   if (typeof openContextMenu === 'function') {
     openContextMenu(e, buildPipelinePhotoContextMenu(pid));
   } else {
