@@ -3394,7 +3394,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             entry = app._missing_originals_cache.get(key)
             inflight = app._missing_originals_inflight.get(key)
             err = app._missing_originals_errors.get(key)
-            if entry is not None:
+            # An error recorded after the last cached scan means a later
+            # refresh failed. Returning the pre-refresh photo list as a
+            # fresh "ready" result would hide the failure — and worse,
+            # let the user delete rows whose originals may have been
+            # restored between scans. When a scan is in flight the UI
+            # already shows "pending", so still surface the stale
+            # entry then; otherwise prefer the error state.
+            cache_superseded_by_error = (
+                entry is not None
+                and err is not None
+                and not inflight
+                and err["set_at"] > entry["set_at"]
+            )
+            if entry is not None and not cache_superseded_by_error:
                 status = "pending" if inflight else "ready"
                 photos = entry["photos"]
                 checked_at = entry["checked_at"]
@@ -14137,6 +14150,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         root_errors.append(cache_msg)
                         if cache_msg not in job["errors"]:
                             job["errors"].append(cache_msg)
+                    # scanner.scan touches disk and may add or remove
+                    # photo rows; a ready Missing Originals payload
+                    # computed before the scan can now be stale (e.g.
+                    # user restored an original before running "Rescan
+                    # this Folder"). The pre-scan health-check
+                    # invalidation only fires when a folder flips
+                    # missing/ok, so also drop the cache once the scan
+                    # itself has run — even on partial failure, since
+                    # rows are committed incrementally.
+                    try:
+                        _invalidate_missing_originals_cache()
+                    except Exception:
+                        log.exception(
+                            "Failed to invalidate missing-originals cache for %s",
+                            root,
+                        )
                     advance_scan_acc()
 
             if cancelled or cancel_check():

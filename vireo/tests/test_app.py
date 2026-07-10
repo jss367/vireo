@@ -4962,6 +4962,109 @@ def test_api_photos_missing_automatic_respects_failure_backoff(app_and_db, monke
     assert data["backoff_seconds"] > 0
 
 
+def test_api_photos_missing_prefers_fresher_error_over_ready_cache(app_and_db):
+    """A failed refresh must not be hidden behind an older ready cache.
+
+    Regression: after a successful scan populated the cache, a later
+    "Check now" that failed (e.g. NAS went offline) would leave the
+    ready photo list in place while recording the failure in
+    ``_missing_originals_errors``. The old ``_missing_originals_payload``
+    branch always won over the error, so ``GET /api/photos/missing``
+    would keep returning ``status: "ready"`` with the pre-failure photo
+    list — hiding the failure and letting the user act on stale ghosts
+    whose originals may have been restored between scans.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    key = (db._db_path, db._active_workspace_id, None)
+    # Fresher error must supersede the cached ready payload.
+    with app._missing_originals_lock:
+        app._missing_originals_cache[key] = {
+            "photos": [{"id": 1, "filename": "ghost.jpg"}],
+            "checked_at": "2026-01-01T00:00:00Z",
+            "set_at": 1.0,
+        }
+        app._missing_originals_errors[key] = {
+            "error": "network volume unavailable",
+            "checked_at": "2026-01-01T00:05:00Z",
+            "set_at": 2.0,
+            "backoff_until": 999999.0,
+        }
+    payload = client.get("/api/photos/missing").get_json()
+    assert payload["status"] == "error", payload
+    assert payload["error"] == "network volume unavailable"
+    assert payload["photos"] == []
+
+    # An older error (already superseded by a successful cache) must
+    # not clobber the ready state — the preference only fires when
+    # the error's set_at is fresher than the cache's.
+    with app._missing_originals_lock:
+        app._missing_originals_errors[key] = {
+            "error": "old",
+            "checked_at": "2025-12-31T23:59:00Z",
+            "set_at": 0.5,
+            "backoff_until": 999999.0,
+        }
+    payload = client.get("/api/photos/missing").get_json()
+    assert payload["status"] == "ready", payload
+    assert payload["photos"] == [{"id": 1, "filename": "ghost.jpg"}]
+
+    # A fresh error alongside an in-flight scan must keep reporting
+    # "pending" so the modal doesn't flicker to an error state while
+    # the user's own refresh is still running.
+    with app._missing_originals_lock:
+        app._missing_originals_errors[key] = {
+            "error": "network volume unavailable",
+            "checked_at": "2026-01-01T00:05:00Z",
+            "set_at": 2.0,
+            "backoff_until": 999999.0,
+        }
+        app._missing_originals_inflight[key] = "job-xyz"
+    payload = client.get("/api/photos/missing").get_json()
+    assert payload["status"] == "pending", payload
+
+
+def test_scan_job_invalidates_missing_originals_cache(app_and_db, tmp_path):
+    """A rescan must clear the Missing Originals cache even when the
+    pre-scan folder-health check doesn't flip anything.
+
+    Regression: the scan work function only invalidated the cache when
+    ``check_folder_health`` returned a nonzero change count. But a
+    normal scan (e.g. Browse's "Rescan this Folder" after the user
+    restored an original) still commits photo rows and can make a
+    ready missing-originals payload stale. Without a post-scan
+    invalidation, ``GET /api/photos/missing`` would keep serving the
+    pre-scan ghost list until a separate missing-originals scan.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    (real_dir / "keep.jpg").write_bytes(b"jpegbytes")
+    fid = db.add_folder(str(real_dir), name="live")
+
+    # Seed a stale ready cache directly (the folder is healthy, so
+    # the scan's own pre-flight would not invalidate it via the
+    # existing health-flip path).
+    key = (db._db_path, db._active_workspace_id, None)
+    with app._missing_originals_lock:
+        app._missing_originals_cache[key] = {
+            "photos": [{"id": 99, "filename": "stale.jpg"}],
+            "checked_at": "2026-01-01T00:00:00Z",
+            "set_at": 0.0,
+        }
+
+    resp = client.post(f"/api/folders/{fid}/rescan", json={})
+    assert resp.status_code == 200, resp.get_json()
+    job_id = resp.get_json()["job_id"]
+    wait_for_job_via_client(client, job_id)
+
+    with app._missing_originals_lock:
+        assert key not in app._missing_originals_cache
+
+
 def test_api_audit_remove_orphans_invalidates_missing_cache(app_and_db, tmp_path):
     """Removing orphaned photo rows must clear the Missing Originals cache.
 
