@@ -9985,6 +9985,15 @@ async function checkMissingPhotos() {
     // ``myId`` checks and paint just-deleted photos back into view.
     _missingPhotosCacheFetchId++;
     _missingPhotosBannerFetchId++;
+    // Bumping the generation only invalidates the older response — it
+    // does NOT send a new /api/photos/missing GET, so an already-visible
+    // banner (with the pre-invalidation count) would stay on-screen
+    // until the next 30-minute automatic tick. Schedule a follow-up
+    // poll so the banner actually catches up once the in-flight fetch
+    // clears; if it's still busy when the timer fires we'll re-enter
+    // this branch and re-arm, keeping the banner honest without
+    // aborting the in-flight request.
+    _scheduleMissingPhotosPoll(null, false);
     return;
   }
   _missingPhotosBannerInFlight = true;
@@ -10548,14 +10557,14 @@ async function runRescan() {
       }
       const label = sel.options[sel.selectedIndex]
         ? sel.options[sel.selectedIndex].textContent : '';
-      await safeFetch('/api/folders/' + fid + '/rescan', {
+      const scanRes = await safeFetch('/api/folders/' + fid + '/rescan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ incremental: true }),
       });
       closeRescanModal();
       showToast('Rescanning “' + label + '” for new and changed photos…', 'info');
-      await reviewDeletedAfterRescan(fid, label);
+      await reviewDeletedAfterRescan(fid, label, scanRes && scanRes.job_id);
     } else {
       const res = await safeFetch('/api/jobs/scan-workspace', {
         method: 'POST',
@@ -10569,7 +10578,7 @@ async function runRescan() {
         msg += ' (' + n + ' offline folder' + (n === 1 ? '' : 's') + ' skipped)';
       }
       showToast(msg, 'info');
-      await reviewDeletedAfterRescan(null, '');
+      await reviewDeletedAfterRescan(null, '', res && res.job_id);
     }
   } catch (e) {
     // safeFetch already surfaced the error; leave the modal open to retry.
@@ -10579,10 +10588,55 @@ async function runRescan() {
   btn.disabled = false;
 }
 
+// Poll a job until it reaches a terminal state (completed / failed /
+// cancelled). Used by the rescan flow so the follow-up missing-originals
+// check doesn't race the scan itself: the scan job invalidates the
+// missing-originals cache in its per-root ``finally``, which bumps the
+// in-flight generation — a missing-originals scan started too early
+// would have its results discarded and the modal would poll to
+// ``not_ready`` instead of showing the just-computed ghosts.
+//
+// Returns true when the job reached ``completed``, false for any other
+// terminal state (or if the status endpoint stops returning the job).
+// Callers treat "unknown" the same as "done" so a lost job id doesn't
+// hang the review modal indefinitely.
+async function _awaitScanJobDone(jobId, opts) {
+  opts = opts || {};
+  const intervalMs = opts.intervalMs || 1500;
+  // Hard cap so a stuck job can never wedge the follow-up modal open.
+  // At the default 1.5s cadence this is ~10 minutes, which covers even
+  // large NAS/SMB rescans; the scan itself keeps running past the cap.
+  const maxAttempts = opts.maxAttempts || 400;
+  for (let i = 0; i < maxAttempts; i++) {
+    let job;
+    try {
+      const resp = await fetch('/api/jobs/' + encodeURIComponent(jobId));
+      if (resp.status === 404) return false;
+      if (!resp.ok) return false;
+      job = await resp.json();
+    } catch (e) {
+      return false;
+    }
+    const status = job && job.status;
+    if (status === 'completed') return true;
+    if (status === 'failed' || status === 'cancelled') return false;
+    await new Promise(function(r) { setTimeout(r, intervalMs); });
+  }
+  return false;
+}
+
 // The scan job (incremental) only adds/updates — it never removes rows for
-// files deleted on disk. So immediately after kicking it off, check for
-// missing originals in the same scope and open the review modal if any exist.
-async function reviewDeletedAfterRescan(folderId, label) {
+// files deleted on disk. So after it finishes, check for missing originals
+// in the same scope and open the review modal if any exist. We wait for
+// the scan job to reach a terminal state first because the scan's own
+// cache invalidation would otherwise bump the missing-originals scan's
+// in-flight generation mid-flight and discard the results (the modal
+// would then poll to ``not_ready``/"not checked yet" even though a full
+// filesystem walk had just completed).
+async function reviewDeletedAfterRescan(folderId, label, scanJobId) {
+  if (scanJobId) {
+    await _awaitScanJobDone(scanJobId);
+  }
   try {
     const payload = await startMissingPhotosCheck({
       folderId: folderId,
