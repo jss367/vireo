@@ -4704,6 +4704,110 @@ def test_api_folder_delete_invalidates_missing_cache(app_and_db, tmp_path):
     assert payload["photos"] == []
 
 
+def test_api_folder_relocate_invalidates_missing_cache(app_and_db, tmp_path):
+    """Relocating a folder must clear the Missing Originals cache.
+
+    Regression: ``api_folder_relocate`` rewrites ``folders.path`` and flips
+    status to ``ok`` (and can merge/delete rows via the missing→existing
+    branch), but never called ``_invalidate_missing_originals_cache``.
+    After moving a missing folder to a path where the originals exist, a
+    ready cached payload would keep offering the pre-relocation ghost
+    rows for removal — and the modal's remove flow would happily delete
+    photos whose originals just came back online.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    # Folder exists on disk (get_missing_photos skips folders whose root
+    # is offline), but the tracked photo file isn't there — so it shows up
+    # as a ghost.
+    old_dir = tmp_path / "orig"
+    old_dir.mkdir()
+    fid = db.add_folder(str(old_dir), name="orig")
+    pid_ghost = db.add_photo(
+        folder_id=fid,
+        filename="ghost.NEF",
+        extension=".nef",
+        file_size=42,
+        file_mtime=2.0,
+    )
+    # Strip unrelated seed photos so the cached payload is deterministic.
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ?", (fid,)
+        ).fetchall()
+    ])
+
+    cached = _run_missing_originals_check(client)
+    assert [row["id"] for row in cached["photos"]] == [pid_ghost], cached
+
+    # Relocate to a new path where the original actually exists.
+    new_dir = tmp_path / "moved"
+    new_dir.mkdir()
+    (new_dir / "ghost.NEF").write_bytes(b"stub")
+
+    resp = client.post(
+        f"/api/folders/{fid}/relocate",
+        json={"path": str(new_dir)},
+    )
+    assert resp.status_code == 200, resp.get_json()
+
+    # Cache must be invalidated: GET falls through to not_ready rather
+    # than serving the pre-relocate ghost payload.
+    payload = client.get("/api/photos/missing").get_json()
+    assert payload["status"] == "not_ready", payload
+    assert payload["photos"] == []
+
+
+def test_api_folders_check_health_invalidates_missing_cache(app_and_db, tmp_path):
+    """A folder health flip must clear the Missing Originals cache.
+
+    Regression: ``api_folders_check_health`` calls
+    ``db.check_folder_health`` which flips folders to/from ``missing`` as
+    disk state changes. Without invalidation, a ready cached payload
+    survives the flip: a folder going ok→missing hides the new ghosts,
+    and missing→ok keeps resurfacing photos whose originals just came
+    back.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    live_dir = tmp_path / "live"
+    live_dir.mkdir()
+    fid = db.add_folder(str(live_dir), name="live")
+    (live_dir / "keep.NEF").write_bytes(b"stub")
+    db.add_photo(
+        folder_id=fid,
+        filename="keep.NEF",
+        extension=".nef",
+        file_size=len(b"stub"),
+        file_mtime=2.0,
+    )
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ?", (fid,)
+        ).fetchall()
+    ])
+
+    # Prime a ready cache while the folder is healthy — no ghosts.
+    cached = _run_missing_originals_check(client)
+    assert cached["photos"] == [], cached
+
+    # Now the folder disappears from disk. The next check-health call
+    # flips its status to missing, which turns every one of its photos
+    # into a ghost. A stale cache would still say "no ghosts".
+    import shutil
+    shutil.rmtree(live_dir)
+
+    resp = client.post("/api/folders/check-health")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["changed"] >= 1
+
+    payload = client.get("/api/photos/missing").get_json()
+    assert payload["status"] == "not_ready", payload
+
+
 def test_workspace_delete_and_create_invalidate_missing_cache(app_and_db):
     """Workspace create/delete must clear their id from the missing cache.
 

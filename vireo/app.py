@@ -3727,6 +3727,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_folders_check_health():
         db = _get_db()
         changed = db.check_folder_health()
+        # A folder flipping ok→missing turns every one of its photos into a
+        # ghost, and missing→ok resurrects them. Either transition would
+        # otherwise be masked by a ready /api/photos/missing cache until the
+        # next full scan.
+        if changed:
+            _invalidate_missing_originals_cache()
         missing = db.get_missing_folders()
         return jsonify({
             "changed": changed,
@@ -3842,6 +3848,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             cascaded = db.relocate_folder(folder_id, new_path)
         except ValueError as e:
             return json_error(str(e), 409)
+
+        # Relocation rewrites folders.path (and can merge/delete rows via the
+        # missing→existing branch). A ready /api/photos/missing cache would
+        # otherwise keep offering the pre-relocation ghost rows for removal
+        # even though the originals just came back online at the new path.
+        _invalidate_missing_originals_cache()
 
         import config as cfg
         from export import relocate_developed_dir
@@ -13787,7 +13799,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
             # Check folder health before scanning to prevent duplicate imports
-            thread_db.check_folder_health()
+            if thread_db.check_folder_health():
+                _invalidate_missing_originals_cache()
 
             # Accumulator so multi-root progress doesn't rewind at each
             # root boundary. scanner.scan() reports (current, total) local
@@ -15885,7 +15898,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
             # Check folder health before scanning to prevent duplicate imports
-            thread_db.check_folder_health()
+            if thread_db.check_folder_health():
+                _invalidate_missing_originals_cache()
             job["_start_time"] = time.time()
 
             scan_target = str(Path(source))  # normalize (strips trailing slash)
@@ -16306,7 +16320,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
-            thread_db.check_folder_health()
+            if thread_db.check_folder_health():
+                _invalidate_missing_originals_cache()
             effective_cfg = thread_db.get_effective_config(cfg.load())
             pipeline_cfg = effective_cfg.get("pipeline", {})
 
