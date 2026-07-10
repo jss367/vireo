@@ -2339,6 +2339,12 @@ function setSearchStatus(text, isError) {
 
 function scheduleEditorSearch() {
   if (editorState.searchTimer) clearTimeout(editorState.searchTimer);
+  var input = document.getElementById('editorSearchInput');
+  if (!input || !input.value.trim()) {
+    editorState.searchTimer = null;
+    clearEditorSearchResults();
+    return;
+  }
   editorState.searchTimer = setTimeout(function() {
     editorState.searchTimer = null;
     runEditorSearch();
@@ -2346,6 +2352,7 @@ function scheduleEditorSearch() {
 }
 
 function clearEditorSearchResults() {
+  editorState.searchSeq++;
   editorState.searchQuery = '';
   editorState.navIds = (editorState.baseNavIds || []).slice();
   if (window.vireoEditNav) window.vireoEditNav.setList(editorState.navIds, editorState.photoId);
