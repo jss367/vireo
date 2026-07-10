@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 
@@ -4739,10 +4740,8 @@ def test_api_duplicates_delete_loser_files_invalidates_missing_cache(
     import send2trash as _send2trash_mod
 
     def fake_send2trash(path):
-        try:
+        with contextlib.suppress(FileNotFoundError):
             os.remove(path)
-        except FileNotFoundError:
-            pass
 
     monkeypatch.setattr(_send2trash_mod, "send2trash", fake_send2trash)
 
