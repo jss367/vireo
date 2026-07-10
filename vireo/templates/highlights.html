@@ -857,12 +857,38 @@ function findHighlightPhotoWithContainer(photoId) {
   return match ? { photo: match, photos: unid } : null;
 }
 
-// Mirror the server-side `_highlight_score_bucket(..., picked_first=True)` sort
-// so a client-side pick change moves the photo into the same slot the backend
-// would place it on a reload. Without this, a picked photo hidden past the
-// perRow slice would keep its Pick badge invisible until a refetch.
-function sortBucketPicksFirst(photos) {
+// Sort a bucket's photos to match the backend's ordering after a client-side
+// flag mutation. If any visible photo maps to a stored species highlight the
+// backend runs `_apply_ordered_highlights` after `_highlight_score_bucket`,
+// which places highlighted photos (by highlight_rank) ahead of unhighlighted
+// ones regardless of flag; otherwise only `_highlight_score_bucket(...,
+// picked_first=True)` applies and flagged photos lead. Without this dispatch,
+// picking an unhighlighted photo in a curated bucket would demote the stored
+// highlight until reload — changing the visible slice and the Save-as-
+// Collection payload that reads from it.
+function sortBucketAfterFlagChange(photos) {
   if (!photos || photos.length < 2) return;
+  var hasHighlights = photos.some(function(p) { return p.is_highlighted; });
+  if (hasHighlights) {
+    photos.sort(function(a, b) {
+      var ah = a.is_highlighted ? 0 : 1;
+      var bh = b.is_highlighted ? 0 : 1;
+      if (ah !== bh) return ah - bh;
+      var ar = a.highlight_rank != null ? a.highlight_rank : Number.MAX_SAFE_INTEGER;
+      var br = b.highlight_rank != null ? b.highlight_rank : Number.MAX_SAFE_INTEGER;
+      if (ar !== br) return ar - br;
+      var as = a.highlight_score || 0, bs = b.highlight_score || 0;
+      if (as !== bs) return bs - as;
+      var ac = a.predicted_confidence || 0, bc = b.predicted_confidence || 0;
+      if (ac !== bc) return bc - ac;
+      var aq = a.quality_score || 0, bq = b.quality_score || 0;
+      if (aq !== bq) return bq - aq;
+      var art = a.rating || 0, brt = b.rating || 0;
+      if (art !== brt) return brt - art;
+      return (a.id || 0) - (b.id || 0);
+    });
+    return;
+  }
   photos.sort(function(a, b) {
     var ap = a.flag === 'flagged' ? 1 : 0;
     var bp = b.flag === 'flagged' ? 1 : 0;
@@ -1222,9 +1248,10 @@ document.addEventListener('lightbox:flagchanged', function(e) {
     // Pick/Unpick from the lightbox: the badge/outline are derived from
     // p.flag inside renderCard, and the visible row is a slice(0, perRow)
     // of bucket.photos, so we must both mutate the flag AND re-sort the
-    // containing bucket to match the backend's picked_first ordering —
+    // containing bucket to match what the backend would render on reload —
     // otherwise a photo picked from the preloaded-but-hidden tail would
-    // keep its Pick badge invisible until a full refetch.
+    // keep its Pick badge invisible, or a pick in a curated bucket would
+    // shove a stored highlight out of the visible slice.
     var prev = detail.previousFlag || 'none';
     var next = detail.flag || 'none';
     if (prev === next) return;
@@ -1232,7 +1259,7 @@ document.addEventListener('lightbox:flagchanged', function(e) {
     var hit = findHighlightPhotoWithContainer(detail.photoId);
     if (!hit) return;
     hit.photo.flag = next;
-    sortBucketPicksFirst(hit.photos);
+    sortBucketAfterFlagChange(hit.photos);
     render();
   }
 });

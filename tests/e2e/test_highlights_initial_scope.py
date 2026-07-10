@@ -344,6 +344,61 @@ def test_highlights_lightbox_pick_hidden_photo_promotes_to_visible(live_server, 
     expect(promoted.locator(".pick-flag-badge")).to_be_visible()
 
 
+def test_highlights_lightbox_pick_keeps_curated_highlight_first(live_server, page):
+    """Picking an unhighlighted photo must not demote a stored species highlight.
+
+    Regression for Codex feedback on PR #1176: the client-side re-sort ran a
+    picked-first ordering that ignored ``is_highlighted``/``highlight_rank``,
+    so pressing ``P`` on an unhighlighted photo in a curated bucket shoved
+    the stored highlight out of its top slot — changing the visible slice
+    and the Save-as-Collection payload — until a full reload restored the
+    server's ``_apply_ordered_highlights`` ordering.
+    """
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+
+    # photos[1] is a lower-quality hawk than photos[0]; without the stored
+    # highlight it would sort second. Marking it a species highlight promotes
+    # it to the top of the bucket via _apply_ordered_highlights.
+    highlighted_id = data["photos"][1]
+    unhighlighted_id = data["photos"][0]
+    db.add_species_highlight("Red-tailed Hawk", highlighted_id)
+
+    page.goto(f"{live_server['url']}/highlights", timeout=5000)
+    hawk_section = page.locator("section.bucket").filter(has_text="Red-tailed Hawk")
+    expect(hawk_section.locator(".highlights-card").first).to_be_visible(timeout=5000)
+
+    first_card = hawk_section.locator(".highlights-card").nth(0)
+    assert int(first_card.get_attribute("data-photo-id")) == highlighted_id
+
+    # Open the lightbox on the unhighlighted card and pick it.
+    unhighlighted_card = hawk_section.locator(
+        f'.highlights-card[data-photo-id="{unhighlighted_id}"]'
+    )
+    unhighlighted_card.click()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+    page.wait_for_function(
+        "pid => _lightboxCurrentId === pid",
+        arg=unhighlighted_id,
+        timeout=3000,
+    )
+    page.keyboard.press("p")
+    assert _wait_for_flag(db, unhighlighted_id, "flagged") == "flagged"
+
+    # The stored highlight must still lead the bucket; the newly-picked
+    # photo must NOT have jumped ahead of it.
+    picked_card = hawk_section.locator(
+        f'.highlights-card[data-photo-id="{unhighlighted_id}"]'
+    )
+    expect(picked_card).to_have_class(re.compile(r"\bpick-flag-card\b"), timeout=5000)
+    still_first = hawk_section.locator(".highlights-card").nth(0)
+    assert int(still_first.get_attribute("data-photo-id")) == highlighted_id
+
+
 def test_highlights_species_search_filters_buckets(live_server, page):
     db = live_server["db"]
     data = live_server["data"]
