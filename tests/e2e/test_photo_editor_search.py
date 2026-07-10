@@ -155,3 +155,52 @@ def test_photo_editor_search_confirms_dirty_edits_from_in_flight_search(live_ser
     assert "Discard" in dialogs[0]
     expect(page).to_have_url(f"{url}/edit/{hawk_id}")
     expect(page.locator("#editorFilename")).to_have_text("hawk1.jpg")
+    # Dismissing the discard prompt must leave the editor visibly untouched:
+    # the "N matches" status and the nav position/list must NOT already
+    # describe the search target, since we haven't navigated to it.
+    expect(page.locator("#editorSearchStatus")).not_to_have_text("1 match")
+
+
+def test_photo_editor_search_revert_to_in_flight_query_refetches(live_server, page):
+    """Reverting to the in-flight query after an intermediate keystroke must refetch."""
+    url = live_server["url"]
+    robin_id = live_server["data"]["photos"][3]
+    held_routes = []
+
+    def hold(route):
+        held_routes.append(route)
+
+    page.goto(f"{url}/edit")
+    page.route("**/api/photos/ids?*", hold)
+
+    # First search fires the debounce and its response is held.
+    page.locator("#editorSearchInput").fill("American Robin")
+    for _ in range(20):
+        if held_routes:
+            break
+        page.wait_for_timeout(100)
+    assert held_routes, "first search request was not issued"
+
+    # Type a different query — this bumps the seq and invalidates the held
+    # response — then quickly revert to the original query before the 300ms
+    # debounce fires. Without the revert-refetch fix, scheduleEditorSearch
+    # would early-return on the same-query check and no replacement fetch
+    # would be dispatched, leaving the UI stranded at "Searching...".
+    page.locator("#editorSearchInput").fill("American Robins")
+    page.locator("#editorSearchInput").fill("American Robin")
+
+    # Wait for a second (replacement) fetch to be issued.
+    for _ in range(20):
+        if len(held_routes) >= 2:
+            break
+        page.wait_for_timeout(100)
+    assert len(held_routes) >= 2, "replacement search after revert was not issued"
+
+    # Release both responses. The first (invalidated) must be ignored; the
+    # replacement must apply and navigate to the robin.
+    held_routes[0].continue_()
+    held_routes[1].continue_()
+
+    expect(page).to_have_url(f"{url}/edit/{robin_id}")
+    expect(page.locator("#editorFilename")).to_have_text("robin1.jpg")
+    expect(page.locator("#editorSearchStatus")).to_have_text("1 match")

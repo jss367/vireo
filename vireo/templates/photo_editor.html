@@ -711,6 +711,11 @@ var editorState = {
   searchTimer: null,
   searchSeq: 0,
   searchQuery: '',
+  // Seq under which the current `searchQuery` was dispatched. When the input
+  // is retyped back to `searchQuery` after an intermediate keystroke bumped
+  // `searchSeq`, this mismatch tells us the in-flight response was already
+  // invalidated so a replacement fetch is required.
+  searchQuerySeq: 0,
   suppressUnloadPrompt: false,
 };
 
@@ -2346,17 +2351,21 @@ function scheduleEditorSearch() {
     clearEditorSearchResults();
     return;
   }
-  if (q === editorState.searchQuery) {
-    // Trimmed query is unchanged (e.g. typing a trailing space after
-    // "American Robin"), so any in-flight fetch is still relevant. Bumping
-    // the seq here would invalidate that response while the debounced
-    // replacement runEditorSearch would early-return on the same-query
-    // check, leaving the UI stuck at "Searching...".
+  if (q === editorState.searchQuery &&
+      editorState.searchQuerySeq === editorState.searchSeq) {
+    // Trimmed query unchanged since our last dispatch AND that dispatch is
+    // still current (e.g. typing a trailing space after "American Robin"),
+    // so its in-flight response will still pass the seq guard. Bumping the
+    // seq here would invalidate it while the debounced replacement would
+    // early-return on the same-query check, leaving the UI stuck at
+    // "Searching...".
     return;
   }
-  // Query actually changed — bump the sequence so any in-flight response for
-  // the previous query fails the seq guard in runEditorSearch, instead of
-  // racing the 300ms debounce and applying stale matches.
+  // Either the trimmed query actually changed, or the previously-dispatched
+  // fetch has been invalidated by an intermediate keystroke (user typed a
+  // different query then reverted before the debounce fired). In both cases
+  // bump the seq so any in-flight response fails the seq guard, then debounce
+  // a replacement fetch.
   editorState.searchSeq++;
   editorState.searchTimer = setTimeout(function() {
     editorState.searchTimer = null;
@@ -2367,6 +2376,7 @@ function scheduleEditorSearch() {
 function clearEditorSearchResults() {
   editorState.searchSeq++;
   editorState.searchQuery = '';
+  editorState.searchQuerySeq = 0;
   editorState.navIds = (editorState.baseNavIds || []).slice();
   if (window.vireoEditNav) window.vireoEditNav.setList(editorState.navIds, editorState.photoId);
   setSearchStatus('');
@@ -2385,7 +2395,15 @@ async function runEditorSearch(opts) {
     clearEditorSearchResults();
     return;
   }
-  if (q === editorState.searchQuery && !opts.immediate) return;
+  if (q === editorState.searchQuery && !opts.immediate &&
+      editorState.searchQuerySeq === editorState.searchSeq) {
+    // Same trimmed query as our last dispatch and that dispatch is still
+    // current (nothing invalidated it) — no need to refire. If the seqs no
+    // longer match, `scheduleEditorSearch` bumped the seq because an
+    // intermediate keystroke invalidated the in-flight response, so we must
+    // fall through to dispatch a replacement.
+    return;
+  }
   if (isEditorDirty()) {
     setSearchStatus('Save or discard this photo before searching.', true);
     return;
@@ -2393,6 +2411,7 @@ async function runEditorSearch(opts) {
 
   var seq = ++editorState.searchSeq;
   editorState.searchQuery = q;
+  editorState.searchQuerySeq = seq;
   setSearchStatus('Searching...');
   try {
     var params = new URLSearchParams();
@@ -2411,16 +2430,22 @@ async function runEditorSearch(opts) {
       return;
     }
 
-    editorState.navIds = ids;
     var current = Number(editorState.photoId);
     var target = ids.indexOf(current) === -1 ? ids[0] : current;
+    // Dirty state can change during the fetch above. Run the confirm before
+    // any nav/status mutation so a dismissed prompt leaves the editor
+    // untouched — otherwise the navIds/nav position/status would already
+    // describe the search target while the still-loaded dirty photo isn't in
+    // ids, leaving the editor visibly inconsistent.
+    if (target !== current && isEditorDirty() &&
+        !window.confirm('Discard unsaved edits to this photo?')) {
+      return;
+    }
+    editorState.navIds = ids;
     if (window.vireoEditNav) window.vireoEditNav.setList(ids, target);
     setSearchStatus(ids.length.toLocaleString() + ' match' + (ids.length === 1 ? '' : 'es'));
     updateNavControls();
     if (target !== current) {
-      // Dirty state can change during the fetch above; re-check so edits
-      // made mid-request are not silently discarded when we navigate.
-      if (isEditorDirty() && !window.confirm('Discard unsaved edits to this photo?')) return;
       await loadPhoto(target);
     }
   } catch (e) {
