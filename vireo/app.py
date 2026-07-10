@@ -399,6 +399,33 @@ def _apply_ordered_highlights(db, buckets):
         bucket["best_timestamp"] = best.get("timestamp")
 
 
+def _photo_highlight_entries(db, photo_id):
+    """Return highlight-eligible species entries for one visible photo."""
+    candidates = db.get_highlights_candidates(None, min_quality=0.0)
+    buckets, _unidentified = _collect_highlight_buckets(
+        candidates, confidence_threshold=0.0
+    )
+    highlights = db.get_species_highlights()
+    entries = []
+    for bucket in buckets:
+        species = bucket.get("species")
+        if not species:
+            continue
+        ranks = highlights.get(species, {})
+        for photo in bucket.get("photos") or []:
+            if photo.get("id") != photo_id:
+                continue
+            rank = ranks.get(photo_id)
+            entries.append({
+                "species": species,
+                "is_highlighted": rank is not None,
+                "highlight_rank": rank,
+                "is_confirmed": bool(photo.get("has_accepted_species")),
+            })
+            break
+    return entries
+
+
 def _highlight_confidence_label(confidence, is_accepted):
     if is_accepted:
         return "confirmed"
@@ -3771,6 +3798,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             for s in db.get_photo_life_list_species(photo_id)
         ]
         result["species_representatives"] = result["life_list"]
+        result["highlight_list"] = _photo_highlight_entries(db, photo_id)
 
         # Location section: pre-resolved leaf + parent chain so the photo
         # detail panel can render the filled state without a second roundtrip.
