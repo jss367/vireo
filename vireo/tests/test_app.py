@@ -3407,6 +3407,51 @@ def test_rename_keyword_species_highlights_dedupe_existing_photo(app_and_db):
     }
 
 
+def test_apply_ordered_highlights_preserves_order_when_no_visible_match():
+    """When a species has highlights elsewhere in the workspace but none are
+    present in the current bucket, _apply_ordered_highlights must not re-sort
+    the bucket. Re-sorting would drop the picked-first order that
+    _highlight_score_bucket already applied on the visible photos."""
+    from app import _apply_ordered_highlights
+
+    class FakeDb:
+        def get_species_highlights(self):
+            return {"Robin": {999: 1}}
+
+    original = [
+        {"id": 1, "highlight_score": 0.4, "flag": "flagged"},
+        {"id": 2, "highlight_score": 0.9, "flag": "none"},
+    ]
+    buckets = [{"species": "Robin", "photos": list(original)}]
+    _apply_ordered_highlights(FakeDb(), buckets)
+    assert [p["id"] for p in buckets[0]["photos"]] == [1, 2]
+    assert all(p["is_highlighted"] is False for p in buckets[0]["photos"])
+    assert all(p["highlight_rank"] is None for p in buckets[0]["photos"])
+
+
+def test_apply_ordered_highlights_resorts_when_visible_match():
+    """When at least one visible photo is a stored highlight, the bucket must
+    be re-sorted so the highlighted photo leads and follows the stored rank."""
+    from app import _apply_ordered_highlights
+
+    class FakeDb:
+        def get_species_highlights(self):
+            return {"Robin": {2: 1}}
+
+    buckets = [{
+        "species": "Robin",
+        "photos": [
+            {"id": 1, "highlight_score": 0.9, "flag": "flagged"},
+            {"id": 2, "highlight_score": 0.4, "flag": "none"},
+        ],
+    }]
+    _apply_ordered_highlights(FakeDb(), buckets)
+    order = [p["id"] for p in buckets[0]["photos"]]
+    assert order == [2, 1]
+    marks = {p["id"]: p["is_highlighted"] for p in buckets[0]["photos"]}
+    assert marks == {1: False, 2: True}
+
+
 def test_rename_homonym_non_species_keyword_leaves_species_preferences(app_and_db):
     """Renaming an unrelated same-name keyword must not rewrite species prefs."""
     app, db = app_and_db

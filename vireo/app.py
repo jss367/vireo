@@ -365,11 +365,20 @@ def _apply_ordered_highlights(db, buckets):
     highlights = db.get_species_highlights()
     for bucket in buckets:
         ranks = highlights.get(bucket["species"], {})
-        for p in bucket.get("photos") or []:
+        photos = bucket.get("photos") or []
+        matched = False
+        for p in photos:
             rank = ranks.get(p.get("id"))
             p["is_highlighted"] = rank is not None
             p["highlight_rank"] = rank
-        if ranks:
+            if rank is not None:
+                matched = True
+        # Only re-sort when at least one visible photo actually maps to a
+        # stored highlight rank. `ranks` is workspace-scoped, so a folder
+        # or search view of the same species can be truthy here while none
+        # of its photos are highlights — re-sorting then discards the
+        # picked-first order that _highlight_score_bucket already applied.
+        if matched:
             bucket["photos"].sort(
                 key=lambda p: (
                     0 if p.get("is_highlighted") else 1,
