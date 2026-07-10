@@ -12324,6 +12324,17 @@ class Database:
                     self.remove_pending_changes(pid, 'keyword_add', kw['name'])
                 if entry['action_type'] == 'keyword_add':
                     self._restore_edit_prediction_status(old_meta)
+                    # Predicted-only relabels (no prior species tag)
+                    # record their action as `keyword_add` but still
+                    # carry a `curation` payload when the photo held
+                    # highlight/representative rows under other species.
+                    # Restore those rows here too, mirroring the
+                    # `species_replace` undo path.
+                    if kw:
+                        self._restore_relabel_curation(
+                            entry['workspace_id'], pid, kw['name'],
+                            old_meta.get('curation'),
+                        )
                 if entry['action_type'] == 'prediction_accept' and old_val:
                     pred_id = self._edit_prediction_id(old_meta, old_val)
                     if pred_id is None:
@@ -12473,6 +12484,15 @@ class Database:
                     self.queue_change(pid, 'keyword_add', kw['name'])
                 if entry['action_type'] == 'keyword_add':
                     self._reject_edit_prediction(old_meta)
+                    # Mirror of the `keyword_add` undo branch: predicted-
+                    # only relabels record curation on `keyword_add`, so
+                    # redo must re-apply it here rather than only in
+                    # `species_replace`.
+                    if kw:
+                        self._reapply_relabel_curation(
+                            entry['workspace_id'], pid, kw['name'],
+                            old_meta.get('curation'),
+                        )
                 if entry['action_type'] == 'prediction_accept' and item['old_value']:
                     pred_id = self._edit_prediction_id(old_meta, item['old_value'])
                     if pred_id is None:
@@ -12575,22 +12595,31 @@ class Database:
         hl_prev = curation.get("hl_prev") or []
         pref_prev = curation.get("pref_prev") or []
         for hl in hl_prev:
-            # Newer relabels record {species, rank}; entries from older
-            # relabels (before PR #1161 landed rank capture) are plain
-            # species-name strings and fall back to append-at-end.
+            # Newer relabels record {species, rank, dst_existed}; entries
+            # from older relabels (before PR #1161 landed rank capture)
+            # are plain species-name strings and fall back to
+            # append-at-end with dst_existed=False.
             if isinstance(hl, dict):
                 old_species = hl.get("species")
                 target_rank = hl.get("rank")
+                dst_existed = bool(hl.get("dst_existed", False))
             else:
                 old_species = hl
                 target_rank = None
+                dst_existed = False
             if not old_species or old_species == new_species:
                 continue
-            self.conn.execute(
-                """DELETE FROM species_highlights
-                   WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
-                (workspace_id, new_species, photo_id),
-            )
+            if not dst_existed:
+                # Only delete the destination row when the relabel
+                # actually created it. If the photo was already
+                # highlighted at `new_species` before the relabel,
+                # rename_species_highlights_species skipped inserting a
+                # duplicate — undo must not remove the pre-existing row.
+                self.conn.execute(
+                    """DELETE FROM species_highlights
+                       WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+                    (workspace_id, new_species, photo_id),
+                )
             existing = self.conn.execute(
                 """SELECT 1 FROM species_highlights
                    WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
@@ -12627,22 +12656,27 @@ class Database:
                 continue
             purpose = pref.get("purpose")
             old_species = pref.get("species")
+            dst_existed = bool(pref.get("dst_existed", False))
             if not purpose or not old_species or old_species == new_species:
                 continue
-            row = self.conn.execute(
-                """SELECT 1 FROM photo_preferences
-                   WHERE workspace_id = ? AND purpose = ?
-                     AND species = ? AND photo_id = ?""",
-                (workspace_id, purpose, new_species, photo_id),
-            ).fetchone()
-            if not row:
-                continue
-            self.conn.execute(
-                """DELETE FROM photo_preferences
-                   WHERE workspace_id = ? AND purpose = ?
-                     AND species = ? AND photo_id = ?""",
-                (workspace_id, purpose, new_species, photo_id),
-            )
+            # Only delete the (new_species, purpose) row when the relabel
+            # created it. When the destination slot was already taken
+            # before the relabel — either by this photo or a different
+            # one — rename_photo_preferences_species's INSERT OR IGNORE
+            # was ignored and no new row was written for this photo, so
+            # undo must leave the destination alone.
+            if not dst_existed:
+                self.conn.execute(
+                    """DELETE FROM photo_preferences
+                       WHERE workspace_id = ? AND purpose = ?
+                         AND species = ? AND photo_id = ?""",
+                    (workspace_id, purpose, new_species, photo_id),
+                )
+            # Restore the old-species preference unconditionally. The
+            # previous gate on finding a `(new_species, purpose,
+            # photo_id)` row skipped restore when the relabel collided
+            # with a different photo holding the destination slot,
+            # stranding the old species' representative.
             self.conn.execute(
                 """INSERT OR IGNORE INTO photo_preferences
                        (workspace_id, purpose, species, photo_id,

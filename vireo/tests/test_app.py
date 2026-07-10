@@ -5702,6 +5702,168 @@ def test_highlights_relabel_undo_preserves_original_rank(app_and_db):
     assert restored[p2] == 2
 
 
+def test_highlights_relabel_prediction_only_undo_restores_curation(app_and_db):
+    """Predicted-only relabels record `keyword_add`, not `species_replace`,
+    but can still carry a `curation` payload when the photo already held a
+    representative or highlight under another species. Undo/redo must
+    move those rows back and forth just like the `species_replace` case."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrpo', 'hrpo', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    db.add_keyword("New Species", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'pred-cur.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    # No prior species tag: only representative + highlight rows exist
+    # for an unrelated species. This is what makes the relabel record as
+    # `keyword_add` (has_old_species stays False) rather than
+    # `species_replace`.
+    db.set_species_representative("Predicted Bird", pid)
+    db.add_species_highlight("Predicted Bird", pid)
+    det = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(det, "Predicted Bird", 0.88, "m")
+    db.conn.commit()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "New Species"},
+    )
+    assert resp.status_code == 200
+    assert db.get_edit_history(limit=1)[0]["action_type"] == "keyword_add"
+    assert db.get_species_representatives().get("New Species") == pid
+    assert pid in (db.get_species_highlights("New Species") or {}).get(
+        "New Species", {}
+    )
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+    assert undone["action_type"] == "keyword_add"
+    reps = db.get_species_representatives()
+    assert reps.get("Predicted Bird") == pid
+    assert "New Species" not in reps
+    hl = db.get_species_highlights()
+    assert pid in (hl.get("Predicted Bird") or {})
+    assert "New Species" not in hl
+
+    redone = db.redo_last_undo()
+    assert redone is not None
+    assert redone["action_type"] == "keyword_add"
+    reps_redo = db.get_species_representatives()
+    assert reps_redo.get("New Species") == pid
+    assert "Predicted Bird" not in reps_redo
+    hl_redo = db.get_species_highlights()
+    assert pid in (hl_redo.get("New Species") or {})
+    assert "Predicted Bird" not in hl_redo
+
+
+def test_highlights_relabel_undo_preserves_existing_destination_highlight(app_and_db):
+    """When a photo is highlighted under both the old and new species,
+    the relabel drops the old-bucket row and leaves the pre-existing
+    destination row alone. Undo must not delete that destination row —
+    it wasn't created by the relabel."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrdst', 'hrdst', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Both Bird A", is_species=True)
+    db.add_keyword("Both Bird B", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'both.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, old_kid)
+    # Highlighted under both species before the relabel.
+    db.add_species_highlight("Both Bird A", pid)
+    db.add_species_highlight("Both Bird B", pid)
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Both Bird B"},
+    )
+    assert resp.status_code == 200
+    # Old-bucket row dropped; destination row retained.
+    assert db.get_species_highlights("Both Bird A") == {}
+    assert pid in (db.get_species_highlights("Both Bird B") or {}).get(
+        "Both Bird B", {}
+    )
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+    hl = db.get_species_highlights()
+    # Old bucket restored AND destination row survives — before the fix
+    # the undo deleted the pre-existing (Both Bird B, pid) row.
+    assert pid in (hl.get("Both Bird A") or {})
+    assert pid in (hl.get("Both Bird B") or {})
+
+
+def test_highlights_relabel_undo_restores_representative_over_collision(app_and_db):
+    """When the destination species already has a different representative,
+    rename_photo_preferences_species's INSERT OR IGNORE is ignored and no
+    row for our photo is written at the new species, but the old-species
+    row is still deleted. Undo must restore the old-species representative
+    even though there's no destination row for this photo to key off of."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrcol', 'hrcol', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Rep Old", is_species=True)
+    db.add_keyword("Rep New", is_species=True)
+    p_moving = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'moving.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    p_incumbent = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'incumbent.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(p_moving, old_kid)
+    db.set_species_representative("Rep Old", p_moving)
+    db.set_species_representative("Rep New", p_incumbent)
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [p_moving], "species": "Rep New"},
+    )
+    assert resp.status_code == 200
+    reps_after = db.get_species_representatives()
+    # Old-species rep dropped; Rep New keeps its original incumbent.
+    assert "Rep Old" not in reps_after
+    assert reps_after.get("Rep New") == p_incumbent
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+    reps = db.get_species_representatives()
+    # Before the fix, the old-species representative stayed stranded
+    # because the destination row for p_moving never existed at "Rep New".
+    assert reps.get("Rep Old") == p_moving
+    assert reps.get("Rep New") == p_incumbent
+
+
 def test_backfill_species_highlights_from_legacy_preferences(tmp_path):
     """On upgraded databases, legacy photo_preferences rows with
     purpose='highlights' should seed species_highlights so pre-existing
