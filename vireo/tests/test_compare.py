@@ -145,6 +145,30 @@ def test_categorize_ignores_non_taxa():
         assert result == 'new'
 
 
+def test_categorize_exact_match_beats_ancestor_regardless_of_order():
+    """Exact match wins over ancestor even when the ancestor comes first.
+
+    ``read_keywords`` returns a set, so a photo tagged with both an exact
+    species keyword and a broader hierarchy ancestor (e.g. ``Song Sparrow``
+    plus ``sparrow`` family) can iterate either taxon first. If the ancestor
+    is seen first, an early-return implementation classifies the prediction
+    as ``refinement`` and the downstream auto-accept gate rejects the
+    already-labeled photo. Iterating all taxa and preferring ``match`` keeps
+    the answer stable across set iteration order.
+    """
+    from compare import categorize
+    from taxonomy import Taxonomy
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tax = Taxonomy(_create_mock_taxonomy(tmpdir))
+        # Ancestor first — this is the order that used to return 'refinement'
+        assert categorize('Song sparrow', ['sparrow', 'Song sparrow'], tax) == 'match'
+        # Exact match first — always returned 'match'
+        assert categorize('Song sparrow', ['Song sparrow', 'sparrow'], tax) == 'match'
+        # As a set — must agree regardless of hash iteration order
+        assert categorize('Song sparrow', {'sparrow', 'Song sparrow'}, tax) == 'match'
+
+
 def test_compare_prediction_multi_species_exact_match_beats_conflict():
     """A prediction matching one photo species is not a conflict."""
     from compare import compare_prediction_to_keywords

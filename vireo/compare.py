@@ -13,6 +13,13 @@ _CATEGORY_PRIORITY = {
 }
 
 
+_CATEGORIZE_PRIORITY = {
+    "match": 3,
+    "refinement": 2,
+    "disagreement": 1,
+}
+
+
 def categorize(prediction, existing_keywords, taxonomy):
     """Categorize a prediction relative to existing keywords using taxonomy.
 
@@ -26,6 +33,14 @@ def categorize(prediction, existing_keywords, taxonomy):
         'new' — no existing species keywords found
         'refinement' — prediction is more specific than an existing keyword
         'disagreement' — prediction differs from existing species keyword
+
+    ``existing_keywords`` is a set, so iteration order is not deterministic.
+    A short-circuit on the first taxon-recognizing keyword would let an
+    ancestor (``Aves``) hide an exact match (``Robin``) purely because the
+    set happened to iterate the ancestor first, sending an already-labeled
+    photo through review. Iterating every taxon and picking the highest
+    priority makes the result depend on the taxa, not on iteration order,
+    and mirrors ``compare_prediction_to_keywords``'s tie-break rule.
     """
     # Filter existing keywords to just those recognized as taxa
     existing_taxa = []
@@ -39,25 +54,33 @@ def categorize(prediction, existing_keywords, taxonomy):
     if not existing_taxa:
         return "new"
 
-    # Check each existing taxon against the prediction
+    best = None
     for taxon_kw in existing_taxa:
         rel = taxonomy.relationship(taxon_kw, prediction)
 
         if rel is None:
             log.warning("Prediction '%s' not found in taxonomy", prediction)
-            return "disagreement"
+            category = "disagreement"
         elif rel == "same":
-            return "match"
+            category = "match"
         elif rel == "ancestor":
             # Existing is broader, prediction is more specific → refinement
-            return "refinement"
+            category = "refinement"
         elif rel == "descendant":
             # Existing is more specific, prediction is broader — unusual but treat as match
-            return "match"
-        # 'sibling' and 'unrelated' fall through to check remaining taxa
+            category = "match"
+        else:
+            # 'sibling' and 'unrelated' don't decide on their own — keep looking
+            continue
+
+        if (
+            best is None
+            or _CATEGORIZE_PRIORITY[category] > _CATEGORIZE_PRIORITY[best]
+        ):
+            best = category
 
     # No existing taxon matched/contained the prediction
-    return "disagreement"
+    return best or "disagreement"
 
 
 def _taxon_rank_map(taxon):
