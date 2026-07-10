@@ -1754,6 +1754,77 @@ def test_multi_species_xmp_does_not_auto_accept_detection_match(tmp_path):
     assert not db.get_predictions(photo_ids=[photo_id], status="accepted")
 
 
+def test_hierarchy_keyword_still_auto_accepts_single_species_match(
+    tmp_path, monkeypatch
+):
+    """An ancestor taxon keyword (e.g. ``Aves``) alongside the matched species
+    must not force the detection back into pending review — it's the same
+    species, just labeled at multiple ranks.
+    """
+    import classify_job
+    from db import Database
+    from xmp import write_sidecar
+
+    monkeypatch.setattr("compare.categorize", lambda *_a, **_k: "match")
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path))
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    det_id = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    write_sidecar(tmp_path / "a.xmp", {"Robin", "Aves"}, set())
+
+    class Tax:
+        def is_taxon(self, name):
+            return name in {"Robin", "Aves"}
+
+        def relationship(self, existing, prediction):
+            if existing == prediction:
+                return "same"
+            if existing == "Aves" and prediction == "Robin":
+                return "ancestor"
+            return "unrelated"
+
+        def get_hierarchy(self, _species):
+            return {}
+
+    result = classify_job._store_grouped_predictions(
+        raw_results=[{
+            "photo": {
+                "id": photo_id, "filename": "a.jpg",
+                "folder_id": folder_id, "timestamp": None, "burst_id": None,
+            },
+            "folder_path": str(tmp_path),
+            "detection_id": det_id,
+            "prediction": "Robin",
+            "confidence": 0.88,
+            "alternatives": [],
+            "taxonomy": {},
+            "timestamp": None,
+        }],
+        job_id="job-abc",
+        model_name="bioclip-2",
+        grouping_window=0,
+        similarity_threshold=0.99,
+        tax=Tax(),
+        db=db,
+        labels_fingerprint="fp-active",
+    )
+
+    assert result["already_labeled"] == 1
+    assert result["predictions_stored"] == 0
+    accepted = db.get_predictions(photo_ids=[photo_id], status="accepted")
+    assert [r["species"] for r in accepted] == ["Robin"]
+
+
 @pytest.mark.parametrize("manual_status", ["accepted", "rejected"])
 def test_match_flip_preserves_manual_review_on_reuse(
     tmp_path, monkeypatch, manual_status

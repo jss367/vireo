@@ -1401,11 +1401,26 @@ def _categorize_detection_prediction(prediction, existing_keywords, tax):
     return categorize(prediction, existing_keywords, tax)
 
 
-def _can_auto_accept_detection_prediction(category, existing_keywords, tax):
-    """Return True when a photo-level match is unambiguous for one detection."""
+def _can_auto_accept_detection_prediction(prediction, category, existing_keywords, tax):
+    """Return True when a photo-level match is unambiguous for one detection.
+
+    A photo may carry taxonomy-hierarchy keywords (e.g. ``Aves`` alongside
+    ``Robin``) without adding a second species. Those ancestors/duplicates are
+    folded into the matched species; only keywords that resolve to a distinct
+    species (``sibling``, ``unrelated``, or an unknown relationship) force the
+    detection back into pending review.
+    """
     if category != "match":
         return False
-    return len(_recognized_taxon_keywords(existing_keywords, tax)) <= 1
+    taxa = _recognized_taxon_keywords(existing_keywords, tax)
+    if not tax or not hasattr(tax, "relationship"):
+        return len(taxa) <= 1
+    for kw in taxa:
+        rel = tax.relationship(kw, prediction)
+        if rel in ("same", "ancestor", "descendant"):
+            continue
+        return False
+    return True
 
 
 def _store_pending_detection_prediction(
@@ -1545,7 +1560,7 @@ def _store_grouped_predictions(
                     item["prediction"], existing, tax,
                 )
                 auto_accept = _can_auto_accept_detection_prediction(
-                    category, existing, tax,
+                    item["prediction"], category, existing, tax,
                 )
 
             if auto_accept:
@@ -1599,7 +1614,7 @@ def _store_grouped_predictions(
                         item["prediction"], existing, tax,
                     )
                     auto_accept = _can_auto_accept_detection_prediction(
-                        category, existing, tax,
+                        item["prediction"], category, existing, tax,
                     )
 
                 if auto_accept:
