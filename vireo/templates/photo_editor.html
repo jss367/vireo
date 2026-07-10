@@ -2340,6 +2340,10 @@ function setSearchStatus(text, isError) {
 function scheduleEditorSearch() {
   if (editorState.searchTimer) clearTimeout(editorState.searchTimer);
   var input = document.getElementById('editorSearchInput');
+  // Bump the sequence the moment the input changes so any in-flight response
+  // for the previous query fails the seq guard in runEditorSearch, instead
+  // of racing the 300ms debounce and applying/navigating to stale matches.
+  editorState.searchSeq++;
   if (!input || !input.value.trim()) {
     editorState.searchTimer = null;
     clearEditorSearchResults();
