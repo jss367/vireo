@@ -7457,12 +7457,12 @@ document.addEventListener('contextmenu', function(e) {
       deepLinkLoaded = true;
     }
 
-    // Keep loading pages until we find the photo or run out
-    var el = document.querySelector('.grid-card[data-id="' + photoId + '"]');
-    while (!el && !allLoaded) {
-      await loadPhotos();
-      el = document.querySelector('.grid-card[data-id="' + photoId + '"]');
-    }
+    // Keep loading pages until we find the photo or run out. The setup guard
+    // above intentionally blocks IntersectionObserver-driven loads, but
+    // loadPhotos() also honors it; clear it before this explicit paging pass
+    // or a target beyond the first page spins in a resolved Promise loop.
+    loading = false;
+    var el = await loadUntilPhotoRendered(photoId);
 
     // Update folder tree active state
     document.querySelectorAll('#folderTree .tree-item').forEach(function(el) {

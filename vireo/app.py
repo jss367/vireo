@@ -2972,9 +2972,47 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         default_per_page = cfg.load().get("photos_per_page", 50)
         per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), _MAX_PER_PAGE))
         sort = request.args.get("sort", "date")
+        folder_id = request.args.get("folder_id", None, type=int)
+        rating_min = request.args.get("rating_min", None, type=int)
+        date_from = request.args.get("date_from", None)
+        date_to = request.args.get("date_to", None)
+        keyword = request.args.get("keyword", None)
+        keyword_match_case = _request_bool_arg("keyword_match_case")
+        keyword_whole_word = _request_bool_arg("keyword_whole_word")
+        color_label = request.args.get("color_label", None)
+        try:
+            flag = _request_flag_filter()
+        except ValueError as e:
+            return json_error(str(e), 400)
 
-        photos = db.get_photos(page=page, per_page=per_page, sort=sort)
-        total = db.count_photos()
+        photos = db.get_photos(
+            folder_id=folder_id,
+            page=page,
+            per_page=per_page,
+            sort=sort,
+            rating_min=rating_min,
+            date_from=date_from,
+            date_to=date_to,
+            keyword=keyword,
+            keyword_match_case=keyword_match_case,
+            keyword_whole_word=keyword_whole_word,
+            color_label=color_label,
+            flag=flag,
+        )
+        if not any([folder_id, rating_min, date_from, date_to, keyword, color_label, flag]):
+            total = db.count_photos()
+        else:
+            total = db.count_filtered_photos(
+                folder_id=folder_id,
+                rating_min=rating_min,
+                date_from=date_from,
+                date_to=date_to,
+                keyword=keyword,
+                keyword_match_case=keyword_match_case,
+                keyword_whole_word=keyword_whole_word,
+                color_label=color_label,
+                flag=flag,
+            )
         folders = db.get_folder_tree()
         keywords = db.get_keyword_tree()
         collections = db.get_collections()
