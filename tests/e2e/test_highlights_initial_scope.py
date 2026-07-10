@@ -199,6 +199,22 @@ def test_highlights_best_ui_is_advanced_only(live_server, page):
     )
 
 
+def test_highlights_picked_photos_show_flag_marker(live_server, page):
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+    picked_id = data["photos"][0]
+    db.update_photo_flag(picked_id, "flagged")
+
+    page.goto(f"{live_server['url']}/highlights", timeout=5000)
+
+    card = page.locator(f'.highlights-card[data-photo-id="{picked_id}"]')
+    expect(card).to_be_visible(timeout=5000)
+    expect(card).to_have_class(re.compile(r"\bpick-flag-card\b"))
+    expect(card.locator(".pick-flag-badge")).to_be_visible()
+    expect(card.locator(".pick-flag-badge")).to_have_text("Pick")
+
+
 def test_highlights_species_search_filters_buckets(live_server, page):
     db = live_server["db"]
     data = live_server["data"]

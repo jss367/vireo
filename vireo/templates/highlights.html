@@ -40,8 +40,11 @@
   .highlights-card:hover { border-color:var(--accent); }
   .highlights-card.highlight-card,
   html[data-advanced-mode="true"] .highlights-card.best-card { border-color:var(--accent); }
+  .highlights-card.pick-flag-card { border-color:var(--accent); box-shadow:0 0 0 2px color-mix(in srgb, var(--accent) 50%, transparent); }
   .best-ribbon { position:absolute; top:6px; left:6px; padding:2px 6px; border-radius:999px; background:var(--accent); color:var(--accent-text); font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; }
+  .pick-flag-badge { position:absolute; top:6px; right:6px; z-index:2; padding:3px 8px; border-radius:999px; background:var(--accent); color:var(--accent-text); border:1px solid color-mix(in srgb, var(--accent-text) 65%, transparent); box-shadow:0 1px 6px rgba(0,0,0,0.45); font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:0.5px; pointer-events:none; }
   .highlight-order { position:absolute; top:6px; right:6px; display:flex; gap:4px; opacity:0; transition:opacity .12s; }
+  .pick-flag-card .highlight-order { top:34px; }
   .highlights-card:hover .highlight-order,
   .highlights-card:focus-within .highlight-order { opacity:1; }
   .highlight-order button { padding:2px 6px; border-radius:999px; border:1px solid rgba(255,255,255,.45); background:rgba(0,0,0,.62); color:#fff; font-size:10px; cursor:pointer; }
@@ -403,6 +406,9 @@ function renderCard(p, idx) {
     : (p.is_species_representative
       ? '<div class="best-ribbon">Representative</div>'
       : (advanced && idx === 0 ? '<div class="best-ribbon">Best</div>' : ''));
+  var flagBadge = p.flag === 'flagged'
+    ? '<div class="pick-flag-badge" title="Flagged as pick">Pick</div>'
+    : '';
   var rep = p.is_species_representative
     ? '<span class="card-chip reason">Representative</span>'
     : '';
@@ -416,8 +422,10 @@ function renderCard(p, idx) {
   return '<div class="highlights-card'
     + (p.is_highlighted ? ' highlight-card' : '')
     + (idx === 0 ? ' best-card' : '')
+    + (p.flag === 'flagged' ? ' pick-flag-card' : '')
     + '" data-photo-id="' + p.id + '" title="' + escapeAttr(title) + '">'
     + ribbon
+    + flagBadge
     + order
     + '<img src="' + thumbSrc + '" alt="' + escapeAttr(p.filename) + '" loading="lazy">'
     + '<div class="card-info">' + scoreChip + conf + rep + reasons + '</div>'
