@@ -1349,7 +1349,7 @@ def test_store_grouped_predictions_persists_match_for_cache(tmp_path, monkeypatc
 
 
 def test_store_grouped_predictions_persists_group_match_for_cache(tmp_path, monkeypatch):
-    """Already-labeled burst groups cache consensus species per detection."""
+    """Already-labeled burst groups cache each detection's own species."""
     from datetime import datetime
 
     import classify_job
@@ -1424,14 +1424,14 @@ def test_store_grouped_predictions_persists_group_match_for_cache(tmp_path, monk
     ).fetchall()
     assert {(r["detection_id"], r["species"], r["category"]) for r in rows} == {
         (det_ids[0], "Robin", "match"),
-        (det_ids[1], "Robin", "match"),
+        (det_ids[1], "Sparrow", "match"),
     }
 
 
 def test_group_match_drops_per_frame_alternatives(tmp_path, monkeypatch):
-    """Burst match caches only the consensus species — per-frame alternatives
+    """Burst match caches only each member's primary species; alternatives
     are dropped so a high-confidence dissenting runner-up can't outrank the
-    consensus primary via get_predictions_for_detection's confidence ordering.
+    accepted primary via get_predictions_for_detection's confidence ordering.
     """
     from datetime import datetime
 
@@ -1599,6 +1599,76 @@ def test_match_then_unmatch_reenters_pending_on_reuse(tmp_path, monkeypatch):
     assert rows["Sparrow"]["status"] == "alternative"   # still nested
 
 
+def test_multi_species_xmp_does_not_auto_accept_detection_match(tmp_path):
+    """Photo-level multi-species matches stay pending for detection review."""
+    import classify_job
+    from db import Database
+    from xmp import write_sidecar
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path))
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    det_id = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    write_sidecar(
+        tmp_path / "a.xmp",
+        {"Robin", "Sparrow", "Wildlife"},
+        set(),
+    )
+
+    class Tax:
+        def is_taxon(self, name):
+            return name in {"Robin", "Sparrow"}
+
+        def relationship(self, existing, prediction):
+            if existing == prediction:
+                return "same"
+            return "unrelated"
+
+        def get_hierarchy(self, _species):
+            return {}
+
+    result = classify_job._store_grouped_predictions(
+        raw_results=[{
+            "photo": {
+                "id": photo_id, "filename": "a.jpg",
+                "folder_id": folder_id, "timestamp": None, "burst_id": None,
+            },
+            "folder_path": str(tmp_path),
+            "detection_id": det_id,
+            "prediction": "Robin",
+            "confidence": 0.88,
+            "alternatives": [],
+            "taxonomy": {},
+            "timestamp": None,
+        }],
+        job_id="job-abc",
+        model_name="bioclip-2",
+        grouping_window=0,
+        similarity_threshold=0.99,
+        tax=Tax(),
+        db=db,
+        labels_fingerprint="fp-active",
+    )
+
+    assert result["predictions_stored"] == 1
+    assert result["already_labeled"] == 0
+    rows = db.get_predictions(photo_ids=[photo_id])
+    assert len(rows) == 1
+    assert rows[0]["species"] == "Robin"
+    assert rows[0]["category"] == "match"
+    assert rows[0]["status"] == "pending"
+    assert not db.get_predictions(photo_ids=[photo_id], status="accepted")
+
+
 @pytest.mark.parametrize("manual_status", ["accepted", "rejected"])
 def test_match_flip_preserves_manual_review_on_reuse(
     tmp_path, monkeypatch, manual_status
@@ -1750,11 +1820,9 @@ def test_group_match_then_unmatch_reenters_pending_on_reuse(tmp_path, monkeypatc
 def test_mixed_group_match_then_unmatch_reenters_pending_for_dissenters(
     tmp_path, monkeypatch
 ):
-    """A mixed burst is cached as 'match' under the consensus species for
-    every detection. When it later stops matching and the cached rows are
-    reused, the downgrade must reconcile by the consensus species so the
-    dissenting frame's detection also re-enters the pending queue rather
-    than staying durably hidden as an auto-accepted match.
+    """A mixed burst caches each detection's own matched species. When it
+    later stops matching and the cached rows are reused, every detection
+    must re-enter the pending queue without grouped consensus review.
     """
     from datetime import datetime
 
@@ -1824,7 +1892,7 @@ def test_mixed_group_match_then_unmatch_reenters_pending_for_dissenters(
     run("match", {})
     accepted = db.get_predictions(photo_ids=photo_ids, status="accepted")
     assert {r["detection_id"] for r in accepted} == set(det_ids)
-    assert {r["species"] for r in accepted} == {"Robin"}
+    assert {r["species"] for r in accepted} == {"Robin", "Sparrow"}
 
     run("disagreement", {"_existing": True})
 
@@ -1833,9 +1901,12 @@ def test_mixed_group_match_then_unmatch_reenters_pending_for_dissenters(
     # Both detections, including the dissenting Sparrow frame, re-enter
     # review; none stay hidden as a stale auto-accepted match.
     assert set(by_det) == set(det_ids)
+    assert by_det[det_ids[0]]["species"] == "Robin"
+    assert by_det[det_ids[1]]["species"] == "Sparrow"
     for r in by_det.values():
         assert r["status"] == "pending"
         assert r["category"] == "disagreement"
+        assert not r["group_id"]
     assert not db.get_predictions(photo_ids=photo_ids, status="accepted")
 
 

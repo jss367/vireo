@@ -5,11 +5,11 @@ import logging
 log = logging.getLogger(__name__)
 
 _CATEGORY_PRIORITY = {
-    "conflict": 50,
+    "match": 50,
     "refinement": 40,
     "broader": 30,
     "new": 20,
-    "match": 10,
+    "conflict": 10,
 }
 
 
@@ -182,7 +182,11 @@ def compare_prediction_to_keywords(prediction, existing_species, taxonomy):
                 "shared_rank": shared,
             }
 
-        if best is None or _CATEGORY_PRIORITY[result["category"]] > _CATEGORY_PRIORITY[best["category"]]:
+        if (
+            best is None
+            or _CATEGORY_PRIORITY[result["category"]]
+            > _CATEGORY_PRIORITY[best["category"]]
+        ):
             best = result
 
     return best or {

@@ -143,3 +143,35 @@ def test_categorize_ignores_non_taxa():
         # "Dyke Marsh" and "0Locations" not in taxonomy -> treated as new
         result = categorize('Northern cardinal', {'Dyke Marsh', '0Locations'}, tax)
         assert result == 'new'
+
+
+def test_compare_prediction_multi_species_exact_match_beats_conflict():
+    """A prediction matching one photo species is not a conflict."""
+    from compare import compare_prediction_to_keywords
+    from taxonomy import Taxonomy
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tax = Taxonomy(_create_mock_taxonomy(tmpdir))
+        result = compare_prediction_to_keywords(
+            'Northern cardinal',
+            ['Blue jay', 'Northern cardinal'],
+            tax,
+        )
+        assert result["category"] == "match"
+        assert result["matched_keyword"] == "Northern cardinal"
+
+
+def test_compare_prediction_multi_species_refinement_beats_conflict():
+    """A supported prediction is not a conflict just because another species is present."""
+    from compare import compare_prediction_to_keywords
+    from taxonomy import Taxonomy
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tax = Taxonomy(_create_mock_taxonomy(tmpdir))
+        result = compare_prediction_to_keywords(
+            'Song sparrow',
+            ['Blue jay', 'sparrow'],
+            tax,
+        )
+        assert result["category"] == "refinement"
+        assert result["matched_keyword"] == "sparrow"
