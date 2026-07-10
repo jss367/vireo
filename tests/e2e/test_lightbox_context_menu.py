@@ -71,6 +71,84 @@ def test_lightbox_right_click_opens_menu(live_server, page):
     assert menu.locator(".vireo-ctx-chip").count() > 5
 
 
+def test_lightbox_menu_sets_species_representative(live_server, page):
+    """The shared lightbox menu can set the current photo as representative."""
+    url = live_server["url"]
+    hawk = live_server["data"]["photos"][0]
+    _open_lightbox(page, url)
+    page.wait_for_function(
+        """() => {
+            const id = window._lightboxCurrentId;
+            const data = window._lbPhotoDataByPhoto && window._lbPhotoDataByPhoto[String(id)];
+            return data && data.life_list && data.life_list.length > 0;
+        }""",
+        timeout=3000,
+    )
+
+    _fire_contextmenu_on_lightbox(page)
+    item = page.locator(
+        ".vireo-ctx-item",
+        has_text="Set Representative — Red-tailed Hawk",
+    )
+    expect(item).to_be_visible()
+    with page.expect_response(
+        lambda r: "/api/photo-preferences" in r.url and r.status == 200
+    ):
+        item.click()
+
+    life_list = page.evaluate(
+        """async (pid) => {
+            const r = await fetch('/api/photos/' + pid);
+            const d = await r.json();
+            return d.life_list;
+        }""",
+        hawk,
+    )
+    assert life_list[0]["is_current_photo"] is True
+    assert life_list[0]["is_species_representative"] is True
+
+
+def test_lightbox_menu_adds_species_highlight(live_server, page):
+    """The shared lightbox menu can add the current photo to Highlights."""
+    db = live_server["db"]
+    url = live_server["url"]
+    hawk = live_server["data"]["photos"][0]
+    db.conn.execute("UPDATE photos SET quality_score = 0.9 WHERE id = ?", (hawk,))
+    db.conn.commit()
+
+    _open_lightbox(page, url)
+    page.wait_for_function(
+        """() => {
+            const id = window._lightboxCurrentId;
+            const data = window._lbPhotoDataByPhoto && window._lbPhotoDataByPhoto[String(id)];
+            return data && data.highlight_list && data.highlight_list.length > 0;
+        }""",
+        timeout=3000,
+    )
+
+    _fire_contextmenu_on_lightbox(page)
+    item = page.locator(
+        ".vireo-ctx-item",
+        has_text="Add to Highlights — Red-tailed Hawk",
+    )
+    expect(item).to_be_visible()
+    with page.expect_response(
+        lambda r: "/api/species-highlights" in r.url and r.status == 200
+    ):
+        item.click()
+
+    highlight_list = page.evaluate(
+        """async (pid) => {
+            const r = await fetch('/api/photos/' + pid);
+            const d = await r.json();
+            return d.highlight_list;
+        }""",
+        hawk,
+    )
+    assert highlight_list[0]["is_highlighted"] is True
+    assert highlight_list[0]["highlight_rank"] == 1
+
+
 def test_lightbox_overlay_toggles_persist_and_context_restores(live_server, page):
     """Lightbox overlay visibility toggles persist and stay recoverable.
 

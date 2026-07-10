@@ -152,6 +152,13 @@ def _open_burst_modal(page, live_server):
     expect(page.locator("#grmApplyBtn")).to_be_enabled()
 
 
+def _dispatch_contextmenu(locator):
+    locator.evaluate(
+        "el => el.dispatchEvent(new MouseEvent('contextmenu', "
+        "{clientX: 100, clientY: 100, bubbles: true, cancelable: true}))"
+    )
+
+
 def _photo_flags(live_server, photo_ids):
     db = live_server["db"]
     placeholders = ",".join("?" for _ in photo_ids)
@@ -185,6 +192,36 @@ def _tag_all(live_server, photo_ids, species):
     for pid in photo_ids:
         db.tag_photo(pid, kid)
     return kid
+
+
+def test_pipeline_burst_context_open_browse_falls_back_to_current_window(live_server, page):
+    """Open in Browse Mode must still navigate when window.open is ignored."""
+    photo_ids = live_server["data"]["photos"][0:3]
+    _write_single_burst_cache(live_server, photo_ids)
+
+    _open_burst_modal(page, live_server)
+    cards = page.locator("#grmOverlay .grm-card[data-photo-id]")
+    assert cards.count() >= 2
+    target = cards.nth(1)
+    target_pid = target.get_attribute("data-photo-id")
+    assert target_pid
+
+    page.evaluate("() => { window.open = () => null; }")
+    _dispatch_contextmenu(target)
+
+    selected = page.evaluate("String(grmState.selected)")
+    assert selected == target_pid
+
+    menu = page.locator(".vireo-ctx-menu")
+    expect(menu).to_be_visible()
+    menu.locator(".vireo-ctx-item", has_text="Open in Browse Mode").click()
+
+    page.wait_for_function(
+        "expectedPid => location.pathname === '/browse'"
+        " && new URLSearchParams(location.search).get('photo_id') === expectedPid",
+        arg=target_pid,
+        timeout=5000,
+    )
 
 
 def test_smart_default_flags_checked_when_moves_pending(live_server, page):

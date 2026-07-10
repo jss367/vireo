@@ -144,7 +144,7 @@ def test_life_list_best_ignores_pick_when_no_preference(life_app):
 
 
 def test_life_list_photo_preference_overrides_best_photo(life_app):
-    app, _, ids = life_app
+    app, db, ids = life_app
     client = app.test_client()
     resp = client.post("/api/photo-preferences", json={
         "purpose": "life_list",
@@ -161,6 +161,55 @@ def test_life_list_photo_preference_overrides_best_photo(life_app):
     assert cardinal["has_preferred_photo"] is True
     assert cardinal["best_source"] == "representative"
     assert [p["id"] for p in cardinal["photos"][:2]] == [ids["p1"], ids["p2"]]
+    assert db.get_species_highlights("Northern Cardinal") == {
+        "Northern Cardinal": {ids["p1"]: 1},
+    }
+
+    highlights = client.get("/api/highlights?scope=workspace").get_json()
+    cardinal_highlights = next(
+        b for b in highlights["buckets"] if b["species"] == "Northern Cardinal"
+    )
+    assert cardinal_highlights["photos"][0]["id"] == ids["p1"]
+    assert cardinal_highlights["photos"][0]["is_highlighted"] is True
+    assert cardinal_highlights["photos"][0]["highlight_rank"] == 1
+
+
+def test_representative_preference_promotes_existing_highlight_to_top(life_app):
+    app, db, ids = life_app
+    db.add_species_highlight("Northern Cardinal", ids["p1"])
+    db.add_species_highlight("Northern Cardinal", ids["p2"])
+
+    resp = app.test_client().post("/api/photo-preferences", json={
+        "purpose": "species_representative",
+        "species": "Northern Cardinal",
+        "photo_id": ids["p2"],
+    })
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["highlight_rank"] == 1
+
+    assert db.get_species_highlights("Northern Cardinal") == {
+        "Northern Cardinal": {ids["p2"]: 1, ids["p1"]: 2},
+    }
+
+
+def test_representative_preference_skips_highlight_when_ineligible(life_app):
+    # p3 (sparrow) is life-list eligible but has no quality_score, so it
+    # can't appear in Highlights. Setting it as representative must not
+    # create an invisible species_highlights row the user can't see or
+    # remove from the Highlights page.
+    app, db, ids = life_app
+
+    resp = app.test_client().post("/api/photo-preferences", json={
+        "purpose": "species_representative",
+        "species": "House Sparrow",
+        "photo_id": ids["p3"],
+    })
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["highlight_rank"] is None
+
+    assert db.get_species_highlights("House Sparrow") == {}
 
 
 def test_representatives_are_global_but_filtered_to_workspace(life_app):

@@ -9559,12 +9559,15 @@ class Database:
                 result.setdefault(r["photo_id"], []).append(r["name"])
         return result
 
-    def get_highlights_candidates(self, folder_id, min_quality=0.0):
+    def get_highlights_candidates(self, folder_id, min_quality=0.0, photo_id=None):
         """Return photos eligible for highlights selection.
 
         When ``folder_id`` is an int, returns photos in that folder and its
         descendant folders. When ``folder_id`` is ``None``, returns photos
-        across every folder visible in the active workspace.
+        across every folder visible in the active workspace. When
+        ``photo_id`` is set, the result is additionally restricted to that
+        single photo so the photo-detail endpoint can compute its highlight
+        eligibility without rebuilding every workspace bucket.
 
         Each row carries:
           * ``species`` — accepted species keyword (NULL if none accepted)
@@ -9587,6 +9590,27 @@ class Database:
             placeholders = ",".join("?" for _ in subtree)
             folder_filter = f"AND p.folder_id IN ({placeholders})"
             folder_params = tuple(subtree)
+        if photo_id is None:
+            photo_filter = ""
+            photo_params = ()
+            bp_filter = ""
+            bp_params = ()
+            tp_filter = ""
+            tp_params = ()
+            kw_filter = ""
+            kw_params = ()
+        else:
+            photo_filter = "AND p.id = ?"
+            photo_params = (photo_id,)
+            # Push the single-photo predicate into every derived subquery so
+            # SQLite never materializes workspace-wide keyword/prediction
+            # aggregations just to discard them at the outer join.
+            bp_filter = "AND pk.photo_id = ?"
+            bp_params = (photo_id,)
+            tp_filter = "AND d.photo_id = ?"
+            tp_params = (photo_id,)
+            kw_filter = "WHERE pk.photo_id = ?"
+            kw_params = (photo_id,)
         rows = self.conn.execute(
             f"""SELECT p.id, p.folder_id, p.filename, p.extension,
                       p.timestamp, p.width, p.height, p.rating, p.flag,
@@ -9616,7 +9640,8 @@ class Database:
                               ) AS rn
                        FROM photo_keywords pk
                        JOIN keywords k ON k.id = pk.keyword_id
-                       WHERE k.is_species = 1 OR k.type = 'taxonomy'
+                       WHERE (k.is_species = 1 OR k.type = 'taxonomy')
+                         {bp_filter}
                    ) WHERE rn = 1
                ) bp ON bp.photo_id = p.id
                LEFT JOIN (
@@ -9644,6 +9669,7 @@ class Database:
                              ORDER BY pr2.created_at DESC, pr2.id DESC
                              LIMIT 1
                          )
+                         {tp_filter}
                    ) WHERE rn = 1
                ) tp ON tp.photo_id = p.id
                LEFT JOIN (
@@ -9651,15 +9677,26 @@ class Database:
                           group_concat(DISTINCT k.name) AS keyword_names
                    FROM photo_keywords pk
                    JOIN keywords k ON k.id = pk.keyword_id
+                   {kw_filter}
                    GROUP BY pk.photo_id
                ) kw ON kw.photo_id = p.id
                WHERE wf.workspace_id = ?
                  {folder_filter}
+                 {photo_filter}
                  AND p.quality_score IS NOT NULL
                  AND p.quality_score >= ?
                  AND (p.flag IS NULL OR p.flag != 'rejected')
                ORDER BY p.quality_score DESC""",
-            (ws, ws, *folder_params, min_quality),
+            (
+                *bp_params,
+                ws,
+                *tp_params,
+                *kw_params,
+                ws,
+                *folder_params,
+                *photo_params,
+                min_quality,
+            ),
         ).fetchall()
         return rows
 
@@ -10088,6 +10125,39 @@ class Database:
         if _commit:
             self.conn.commit()
         return rank
+
+    def promote_species_highlight(self, species, photo_id, _commit=True):
+        """Add a photo to a species' ordered highlights at rank 1."""
+        ws = self._ws_id()
+        rows = self.conn.execute(
+            """SELECT photo_id
+               FROM species_highlights
+               WHERE workspace_id = ? AND species = ?
+               ORDER BY rank, created_at, photo_id""",
+            (ws, species),
+        ).fetchall()
+        ids = [r["photo_id"] for r in rows if r["photo_id"] != photo_id]
+        ids.insert(0, photo_id)
+
+        self.conn.execute(
+            """INSERT INTO species_highlights
+                   (workspace_id, species, photo_id, rank, created_at, updated_at)
+               VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))
+               ON CONFLICT(workspace_id, species, photo_id) DO UPDATE SET
+                   rank = excluded.rank,
+                   updated_at = excluded.updated_at""",
+            (ws, species, photo_id),
+        )
+        for rank, pid in enumerate(ids, start=1):
+            self.conn.execute(
+                """UPDATE species_highlights
+                   SET rank = ?, updated_at = datetime('now')
+                   WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+                (rank, ws, species, pid),
+            )
+        if _commit:
+            self.conn.commit()
+        return 1
 
     def remove_species_highlight(self, species, photo_id, _commit=True):
         """Remove a photo from a species' ordered highlights."""
@@ -10660,6 +10730,7 @@ class Database:
         labels_fingerprint,
         species,
         category,
+        auto_accept=True,
     ):
         """Re-sync a cached prediction's category and auto-review on reuse.
 
@@ -10672,6 +10743,13 @@ class Database:
         it out of the queue until a full reclassify/clear is forced.  Only the
         marked auto-review row is safe to drop here; explicit user decisions
         from before a temporary XMP match must remain intact.
+
+        ``auto_accept`` is False when the caller has decided this reuse must
+        stay pending even though ``category`` is still ``match`` — e.g. the
+        XMP later gained a second recognized taxon, so a single-species match
+        is now ambiguous.  Without dropping the marker in that case,
+        ``status='accepted'`` from the earlier unambiguous run would keep the
+        detection hidden from the queue.
 
         The persisted ``category`` is always refreshed to the current value:
         ``add_prediction`` is INSERT-OR-IGNORE so it never updates it on
@@ -10689,7 +10767,7 @@ class Database:
         if row is None:
             return
         pred_id = row["id"]
-        if row["category"] == "match" and category != "match":
+        if row["category"] == "match" and (category != "match" or not auto_accept):
             self.conn.execute(
                 "DELETE FROM prediction_review "
                 "WHERE prediction_id = ? AND workspace_id = ? "
@@ -11236,6 +11314,57 @@ class Database:
             params.extend(photo_ids)
         rows = self.conn.execute(sql, params).fetchall()
         return [(row["photo_id"], row["embedding"]) for row in rows]
+
+    def clear_prediction_group_info(self, detection_id, model,
+                                    labels_fingerprint=None):
+        """Drop stale group metadata from the cached prediction's review row.
+
+        Used when a cached prediction that previously belonged to a
+        reviewable burst is reused under a run where the burst is no longer
+        group-reviewable (mixed species, singleton, etc.), so the caller
+        would otherwise pass ``group_id=None`` to
+        ``update_prediction_group_info`` and skip it. Without this, the old
+        ``group_id`` / ``individual`` / vote counts stay attached and group
+        actions retag the whole stale burst together.
+
+        Only updates an existing ``prediction_review`` row — never inserts
+        one — so the "absence == pending" invariant that ``add_prediction``
+        enforces for un-reviewed detections stays intact.
+        """
+        ws = self._ws_id()
+        if labels_fingerprint is not None:
+            row = self.conn.execute(
+                """SELECT pr.id FROM predictions pr
+                   LEFT JOIN prediction_review pr_rev
+                     ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+                   WHERE pr.detection_id = ? AND pr.classifier_model = ?
+                     AND pr.labels_fingerprint = ?
+                     AND COALESCE(pr_rev.status, 'pending') != 'alternative'
+                   ORDER BY pr.confidence DESC LIMIT 1""",
+                (ws, detection_id, model, labels_fingerprint),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                """SELECT pr.id FROM predictions pr
+                   LEFT JOIN prediction_review pr_rev
+                     ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+                   WHERE pr.detection_id = ? AND pr.classifier_model = ?
+                     AND COALESCE(pr_rev.status, 'pending') != 'alternative'
+                   ORDER BY pr.confidence DESC LIMIT 1""",
+                (ws, detection_id, model),
+            ).fetchone()
+        if not row:
+            return
+        self.conn.execute(
+            """UPDATE prediction_review
+                  SET individual  = NULL,
+                      group_id    = NULL,
+                      vote_count  = NULL,
+                      total_votes = NULL
+                WHERE prediction_id = ? AND workspace_id = ?""",
+            (row["id"], ws),
+        )
+        commit_with_retry(self.conn)
 
     def update_prediction_group_info(self, detection_id, model, group_id,
                                      vote_count, total_votes, individual,
