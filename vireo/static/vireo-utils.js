@@ -17,6 +17,57 @@ function escapeAttr(str) {
     .replace(/>/g, '&gt;');
 }
 
+var VireoTextInputs = (function() {
+  var selector = 'input[type="text"], input[type="search"], input:not([type]), textarea';
+
+  function disableCorrection(el) {
+    if (!el || !el.setAttribute) return;
+    el.setAttribute('autocomplete', 'off');
+    el.setAttribute('autocorrect', 'off');
+    el.setAttribute('autocapitalize', 'none');
+    el.setAttribute('spellcheck', 'false');
+  }
+
+  function apply(root) {
+    if (!root || !root.querySelectorAll) return;
+    if (root.matches && root.matches(selector)) disableCorrection(root);
+    root.querySelectorAll(selector).forEach(disableCorrection);
+  }
+
+  function start() {
+    apply(document);
+    if (!window.MutationObserver || !document.body) return;
+    var observer = new MutationObserver(function(records) {
+      records.forEach(function(record) {
+        if (record.type === 'attributes') {
+          if (record.target && record.target.nodeType === 1) apply(record.target);
+          return;
+        }
+        record.addedNodes.forEach(function(node) {
+          if (node.nodeType === 1) apply(node);
+        });
+      });
+    });
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['type'],
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start);
+  } else {
+    start();
+  }
+
+  return {
+    apply: apply,
+    disableCorrection: disableCorrection,
+  };
+})();
+
 var VireoTextSearch = (function() {
   function isWordChar(ch) {
     return !!ch && (/[0-9]/.test(ch) || ch.toLowerCase() !== ch.toUpperCase());

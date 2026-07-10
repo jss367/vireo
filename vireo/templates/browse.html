@@ -1401,7 +1401,9 @@ body {
     <!-- Filter Bar -->
     <div class="filter-bar">
       <div class="search-control">
-        <input type="text" id="searchInput" placeholder="Search keywords or filenames..." onkeydown="if(event.key==='Enter')applySearchFilterNow()" oninput="scheduleSearchFilter()">
+        <input type="text" id="searchInput" placeholder="Search keywords or filenames..."
+               autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false"
+               onkeydown="if(event.key==='Enter')applySearchFilterNow()" oninput="scheduleSearchFilter()">
         <button id="keywordMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="toggleKeywordSearchOption('match_case')" title="Match case">Aa</button>
         <button id="keywordWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="toggleKeywordSearchOption('whole_word')" title="Match whole word">ab</button>
       </div>
@@ -1662,7 +1664,8 @@ body {
         <div id="locationFilled" class="single-only" hidden></div>
         <div id="locationEmpty">
           <div class="keyword-autocomplete">
-            <input type="text" id="locationInput" class="add-kw-input" placeholder="📍 Add location..." autocomplete="off">
+            <input type="text" id="locationInput" class="add-kw-input" placeholder="📍 Add location..."
+                   autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false">
             <div class="keyword-suggestion-list location-keyword-suggestion-list" id="locationKeywordSuggestions" role="listbox"></div>
           </div>
           <div id="locationExifSuggestion" class="location-suggestion" hidden></div>
@@ -1674,7 +1677,8 @@ body {
         <div class="detail-section-title">Keywords</div>
         <div id="detailKeywords" class="single-only"></div>
         <div class="keyword-autocomplete">
-          <input class="add-kw-input" id="addKeywordInput" placeholder="Add keyword..." autocomplete="off">
+          <input class="add-kw-input" id="addKeywordInput" placeholder="Add keyword..."
+                 autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false">
           <div class="keyword-suggestion-list" id="addKeywordSuggestions" role="listbox"></div>
         </div>
       </div>
@@ -1733,7 +1737,8 @@ body {
   <div class="modal">
     <h3 id="batchKeywordTitle">Add Keyword</h3>
     <div class="keyword-autocomplete">
-      <input class="modal-input" id="batchKeywordInput" placeholder="Keyword name" autocomplete="off">
+      <input class="modal-input" id="batchKeywordInput" placeholder="Keyword name"
+             autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false">
       <div class="keyword-suggestion-list" id="batchKeywordSuggestions" role="listbox"></div>
     </div>
     <div class="modal-actions">
