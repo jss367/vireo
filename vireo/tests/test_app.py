@@ -4351,6 +4351,11 @@ def test_selection_keyword_suggestions_return_partial_keywords(app_and_db):
     assert by_name["Sparrow"]["count"] == 1
     assert by_name["Sparrow"]["missing_count"] == 2
 
+    keywords_by_name = {item["name"]: item for item in data["keywords"]}
+    assert keywords_by_name["Cardinal"]["present_photo_ids"] == [ids[0]]
+    assert sorted(keywords_by_name["Cardinal"]["missing_photo_ids"]) == sorted(ids[1:])
+    assert keywords_by_name["Sparrow"]["present_photo_ids"] == [ids[1]]
+
 
 def test_selection_keyword_suggestions_chunks_large_selection(app_and_db):
     """Large selection suggestions must not exceed SQLite's variable limit."""
@@ -4420,6 +4425,128 @@ def test_batch_keyword_route_accepts_existing_keyword_id(app_and_db):
         (cardinal_id,),
     ).fetchall()
     assert [row["photo_id"] for row in tagged_after_undo] == [ids[0]]
+
+
+def test_batch_keyword_remove_route_removes_existing_keyword_id(app_and_db):
+    """Selected-keyword removal should only affect selected photos that have it."""
+    app, db = app_and_db
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos ORDER BY filename"
+    ).fetchall()
+    ids = [row["id"] for row in rows]
+    cardinal_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Cardinal'"
+    ).fetchone()["id"]
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/batch/keyword-remove",
+        json={"photo_ids": ids, "keyword_id": cardinal_id},
+        content_type="application/json",
+    )
+
+    assert resp.status_code == 200
+    assert resp.get_json()["updated"] == 1
+    tagged = db.conn.execute(
+        """SELECT photo_id FROM photo_keywords
+           WHERE keyword_id = ?""",
+        (cardinal_id,),
+    ).fetchall()
+    assert tagged == []
+
+    pending = db.conn.execute(
+        """SELECT photo_id, change_type, value FROM pending_changes
+           WHERE change_type = 'keyword_remove' AND value = 'Cardinal'"""
+    ).fetchall()
+    assert [row["photo_id"] for row in pending] == [ids[0]]
+
+    undo_resp = client.post("/api/undo")
+    assert undo_resp.status_code == 200
+    tagged_after_undo = db.conn.execute(
+        """SELECT photo_id FROM photo_keywords
+           WHERE keyword_id = ?
+           ORDER BY photo_id""",
+        (cardinal_id,),
+    ).fetchall()
+    assert [row["photo_id"] for row in tagged_after_undo] == [ids[0]]
+
+
+def test_batch_keyword_remove_undo_restores_pending_add(app_and_db):
+    """Add → bulk remove → undo must leave a pending sidecar write.
+
+    Bulk remove of a not-yet-synced pending add cancels the pending
+    `keyword_add` (via `_queue_keyword_remove`) instead of queuing a
+    `keyword_remove`. Undoing the recorded `keyword_remove` retags the
+    photo but must also re-queue the `keyword_add` so the restored
+    keyword is actually written back to the sidecar; otherwise the tag
+    silently diverges from disk.
+    """
+    app, db = app_and_db
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY filename LIMIT 1"
+    ).fetchone()["id"]
+    sparrow_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Sparrow'"
+    ).fetchone()["id"]
+    client = app.test_client()
+
+    add_resp = client.post(
+        "/api/batch/keyword",
+        json={"photo_ids": [photo_id], "keyword_id": sparrow_id},
+        content_type="application/json",
+    )
+    assert add_resp.status_code == 200
+    pending_add = db.conn.execute(
+        """SELECT photo_id FROM pending_changes
+           WHERE change_type = 'keyword_add' AND value = 'Sparrow'"""
+    ).fetchall()
+    assert [row["photo_id"] for row in pending_add] == [photo_id]
+
+    remove_resp = client.post(
+        "/api/batch/keyword-remove",
+        json={"photo_ids": [photo_id], "keyword_id": sparrow_id},
+        content_type="application/json",
+    )
+    assert remove_resp.status_code == 200
+    pending_after_remove = db.conn.execute(
+        """SELECT change_type FROM pending_changes
+           WHERE photo_id = ? AND value = 'Sparrow'""",
+        (photo_id,),
+    ).fetchall()
+    assert pending_after_remove == []
+
+    undo_resp = client.post("/api/undo")
+    assert undo_resp.status_code == 200
+    tagged = db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (photo_id, sparrow_id),
+    ).fetchone()
+    assert tagged is not None, "undo should restore the Sparrow tag"
+    pending_after_undo = db.conn.execute(
+        """SELECT change_type, value FROM pending_changes
+           WHERE photo_id = ? AND value = 'Sparrow'""",
+        (photo_id,),
+    ).fetchall()
+    assert [(row["change_type"], row["value"]) for row in pending_after_undo] == [
+        ("keyword_add", "Sparrow"),
+    ]
+
+    redo_resp = client.post("/api/redo")
+    assert redo_resp.status_code == 200
+    tagged_after_redo = db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (photo_id, sparrow_id),
+    ).fetchone()
+    assert tagged_after_redo is None, "redo should re-remove the Sparrow tag"
+    pending_after_redo = db.conn.execute(
+        """SELECT change_type FROM pending_changes
+           WHERE photo_id = ? AND value = 'Sparrow'""",
+        (photo_id,),
+    ).fetchall()
+    assert pending_after_redo == [], (
+        "redo of the cancel-a-pending-add remove must leave no pending "
+        "change — mirroring the original bulk remove that cancelled the add"
+    )
 
 
 def test_batch_keyword_route_chunks_large_existing_keyword_lookup(app_and_db):

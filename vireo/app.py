@@ -5069,7 +5069,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/selection/keyword-suggestions", methods=["POST"])
     def api_selection_keyword_suggestions():
-        """Return selected keywords that are present on some, but not all photos."""
+        """Return selected keywords and which selected photos carry each one."""
         db = _get_db()
         body = request.get_json(silent=True) or {}
         raw_ids = body.get("photo_ids", [])
@@ -5123,26 +5123,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
             entry["photo_ids"].add(row["photo_id"])
 
-        suggestions = []
+        keywords = []
         for entry in by_keyword.values():
             count = len(entry["photo_ids"])
             missing_count = selected_count - count
-            if 0 < count < selected_count:
-                missing_photo_ids = [
-                    pid for pid in photo_ids if pid not in entry["photo_ids"]
-                ]
-                suggestions.append({
-                    "id": entry["id"],
-                    "name": entry["name"],
-                    "type": entry["type"],
-                    "count": count,
-                    "missing_count": missing_count,
-                    "missing_photo_ids": missing_photo_ids,
-                })
-        suggestions.sort(
+            present_photo_ids = [
+                pid for pid in photo_ids if pid in entry["photo_ids"]
+            ]
+            missing_photo_ids = [
+                pid for pid in photo_ids if pid not in entry["photo_ids"]
+            ]
+            item = {
+                "id": entry["id"],
+                "name": entry["name"],
+                "type": entry["type"],
+                "count": count,
+                "missing_count": missing_count,
+                "present_photo_ids": present_photo_ids,
+                "missing_photo_ids": missing_photo_ids,
+            }
+            keywords.append(item)
+        keywords.sort(
             key=lambda item: (-item["count"], item["name"].lower(), item["id"])
         )
-        return jsonify({"selected_count": selected_count, "suggestions": suggestions})
+        suggestions = [item for item in keywords if 0 < item["count"] < selected_count]
+        return jsonify({
+            "selected_count": selected_count,
+            "keywords": keywords,
+            "suggestions": suggestions,
+        })
 
     @app.route("/api/keywords/<int:keyword_id>", methods=["PUT"])
     def api_update_keyword(keyword_id):
@@ -6260,6 +6269,73 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db.record_edit('keyword_add', f'Added "{name}" to {len(added_ids)} photos',
                            str(kid), items, is_batch=True)
         return jsonify({"ok": True, "updated": len(added_ids)})
+
+    @app.route("/api/batch/keyword-remove", methods=["POST"])
+    def api_batch_keyword_remove():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids", [])
+        keyword_id = body.get("keyword_id")
+        if not isinstance(photo_ids, list) or not photo_ids:
+            return json_error("photo_ids required")
+        if isinstance(keyword_id, bool) or not isinstance(keyword_id, int):
+            return json_error("keyword_id must be an integer")
+
+        clean_ids = []
+        seen = set()
+        for raw in photo_ids:
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                return json_error("photo_ids must be integers")
+            if raw not in seen:
+                clean_ids.append(raw)
+                seen.add(raw)
+        if not clean_ids:
+            return json_error("photo_ids required")
+
+        keyword_row = db.conn.execute(
+            "SELECT id, name FROM keywords WHERE id = ?", (keyword_id,)
+        ).fetchone()
+        if keyword_row is None:
+            return json_error("keyword not found", 404)
+
+        for pid in clean_ids:
+            if not db._photo_in_workspace(pid):
+                return json_error(
+                    f"Photo {pid} does not belong to the active workspace", 403
+                )
+
+        tagged_ids = []
+        batch_size = 800
+        for i in range(0, len(clean_ids), batch_size):
+            chunk = clean_ids[i:i + batch_size]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT photo_id FROM photo_keywords
+                    WHERE keyword_id = ? AND photo_id IN ({placeholders})""",
+                [keyword_id] + chunk,
+            ).fetchall()
+            tagged_ids.extend(row["photo_id"] for row in rows)
+
+        tagged_set = set(tagged_ids)
+        removed_ids = [pid for pid in clean_ids if pid in tagged_set]
+        name = keyword_row["name"]
+        for pid in removed_ids:
+            db.untag_photo(pid, keyword_id)
+            _queue_keyword_remove(pid, name)
+
+        items = [
+            {"photo_id": pid, "old_value": str(keyword_id), "new_value": ""}
+            for pid in removed_ids
+        ]
+        if items:
+            db.record_edit(
+                "keyword_remove",
+                f'Removed "{name}" from {len(removed_ids)} photos',
+                str(keyword_id),
+                items,
+                is_batch=True,
+            )
+        return jsonify({"ok": True, "updated": len(removed_ids)})
 
     def _run_batch_delete(
         db, photo_ids, mode="vireo", include_companions=False, paths=None,
