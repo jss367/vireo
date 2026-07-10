@@ -328,6 +328,17 @@ def _apply_preferred_photo(photos, preferred_photo_id, marker_key):
     return False
 
 
+def _bucket_best_score(photos):
+    """Return the highest highlight_score in a bucket, or None if empty.
+
+    Used to rank buckets on the Highlights page. Reads the max across all
+    photos so a pick-first (or user-preferred) reorder at photos[0] can't
+    demote a species by anchoring the bucket score to a lower-scored photo.
+    """
+    scores = [p.get("highlight_score") for p in photos if p.get("highlight_score") is not None]
+    return max(scores) if scores else None
+
+
 def _apply_highlight_preferences(db, buckets):
     preferences = db.get_photo_preferences("highlights")
     for bucket in buckets:
@@ -335,11 +346,16 @@ def _apply_highlight_preferences(db, buckets):
         applied = _apply_preferred_photo(
             bucket["photos"], preferred_id, "is_highlights_photo"
         )
-        best = bucket["photos"][0] if bucket["photos"] else {}
+        top = bucket["photos"][0] if bucket["photos"] else {}
         bucket["preferred_photo_id"] = preferred_id
         bucket["has_preferred_photo"] = applied
-        bucket["best_quality"] = best.get("quality_score")
-        bucket["best_score"] = best.get("highlight_score")
+        bucket["best_quality"] = top.get("quality_score")
+        # Rank by the highest-scored photo in the bucket, not photos[0].
+        # A picked (or manually preferred) photo may sit at photos[0] with a
+        # lower highlight_score; using its score for bucket ranking would
+        # demote the whole species below buckets with worse actual best
+        # photos.
+        bucket["best_score"] = _bucket_best_score(bucket["photos"])
 
 
 def _highlight_confidence_label(confidence, is_accepted):
@@ -445,7 +461,7 @@ def _collect_highlight_buckets(
             round(sum(confidences) / len(confidences), 4)
             if confidences else None
         )
-        best = photos[0] if photos else {}
+        top = photos[0] if photos else {}
         buckets.append({
             "species": species,
             "is_accepted": entry["is_accepted"],
@@ -454,8 +470,8 @@ def _collect_highlight_buckets(
             ),
             "avg_confidence": avg_confidence,
             "photo_count": len(photos),
-            "best_quality": best.get("quality_score"),
-            "best_score": best.get("highlight_score"),
+            "best_quality": top.get("quality_score"),
+            "best_score": _bucket_best_score(photos),
             "photos": photos,
         })
 
