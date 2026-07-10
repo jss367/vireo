@@ -337,6 +337,7 @@ def test_pipeline_review_view_settings_persist(live_server, page):
     page.goto(f"{live_server['url']}/pipeline/review")
     expect(page.locator(".encounter-card")).to_have_count(2)
     expect(page.locator(".photo-label")).to_have_count(0)
+    expect(page.locator(".photo-card.review")).to_have_count(0)
 
     page.evaluate(
         "(photoId) => window.setFlagFor(photoId, 'flagged')",
@@ -344,11 +345,14 @@ def test_pipeline_review_view_settings_persist(live_server, page):
     )
     expect(page.locator(".photo-label")).to_have_count(1)
     expect(page.locator(".photo-label")).to_have_text("KEEP")
+    expect(page.locator(".photo-card.keep")).to_have_count(1)
+    expect(page.locator(".photo-card.review")).to_have_count(0)
 
     show_labels = page.locator("#showPhotoLabelsChk")
     expect(show_labels).not_to_be_checked()
     show_labels.check()
     expect(page.locator(".photo-label")).to_have_count(2)
+    expect(page.locator(".photo-card.review")).to_have_count(1)
     page.locator("#hideConfirmedBtn").click()
     page.locator('[data-filter="REVIEW"]').click()
     page.locator("#speciesFilterInput").fill("Robin")

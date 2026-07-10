@@ -2547,8 +2547,9 @@ function renderPhotoCard(p, encIdx, burstIdx) {
     visibleLabelClass = 'reject';
   }
   visibleLabel = manualLabel || (showPhotoLabels ? (p.label || '') : '');
+  var cardLabelClass = manualLabel ? visibleLabelClass : (showPhotoLabels ? label : '');
   var thumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(p) : '/thumbnails/' + p.id + '.jpg';
-  var html = '<div class="photo-card ' + label + '" data-photo-id="' + p.id + '">';
+  var html = '<div class="photo-card ' + cardLabelClass + '" data-photo-id="' + p.id + '">';
   html += '<img src="' + escapeAttr(thumbUrl) + '" loading="lazy" alt="" onclick="openInspect(' + p.id + ')">';
   if (visibleLabel) html += '<span class="photo-label ' + visibleLabelClass + '">' + visibleLabel + '</span>';
   if (p.rarity_protected) html += '<span class="photo-rarity">protected</span>';
