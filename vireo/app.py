@@ -5142,10 +5142,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 and (new_row["is_species"] == 1 or new_row["type"] == "taxonomy")
             )
             if old_is_species_keyword and new_is_species_keyword:
+                pairs = [
+                    (row["photo_id"], row["workspace_id"]) for row in affected
+                ]
                 db.rename_photo_preferences_species(
                     old_name,
                     new_name,
-                    [(row["photo_id"], row["workspace_id"]) for row in affected],
+                    pairs,
+                )
+                db.rename_species_highlights_species(
+                    old_name,
+                    new_name,
+                    pairs,
                 )
             for row in affected:
                 _queue_keyword_remove(row["photo_id"], old_name, workspace_id=row["workspace_id"])
@@ -7852,6 +7860,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         top_predictions = _highlight_top_predictions(db, photo_ids)
         ws_id = db._ws_id()
+        placeholders = ",".join("?" for _ in photo_ids)
+        highlight_rows = db.conn.execute(
+            f"""SELECT species, photo_id FROM species_highlights
+                WHERE workspace_id = ? AND photo_id IN ({placeholders})""",
+            (ws_id, *photo_ids),
+        ).fetchall()
+        highlight_renames = {}
+        for row in highlight_rows:
+            old_species_name = row["species"]
+            if old_species_name == species:
+                continue
+            highlight_renames.setdefault(old_species_name, []).append(
+                row["photo_id"]
+            )
         try:
             kid = db.add_keyword(species, is_species=True, _commit=False)
             items = []
@@ -7902,6 +7924,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "old_value": old_value,
                     "new_value": str(kid),
                 })
+
+            for old_species_name, pids in highlight_renames.items():
+                db.rename_species_highlights_species(
+                    old_species_name,
+                    species,
+                    [(pid, ws_id) for pid in pids],
+                    _commit=False,
+                )
 
             action_type = (
                 "species_replace"

@@ -3321,6 +3321,77 @@ def test_rename_keyword_photo_preferences_keep_existing_target(app_and_db):
     assert db.get_photo_preferences("life_list") == {"NewBird": p_new}
 
 
+def test_rename_keyword_updates_species_highlights(app_and_db):
+    """Ordered species highlights follow species-keyword renames."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("OldBird", is_species=True)
+    rows = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 2").fetchall()
+    p1, p2 = rows[0]["id"], rows[1]["id"]
+    db.tag_photo(p1, kid)
+    db.tag_photo(p2, kid)
+    db.add_species_highlight("OldBird", p1)
+    db.add_species_highlight("OldBird", p2)
+
+    resp = client.put(f"/api/keywords/{kid}", json={"name": "NewBird"})
+    assert resp.status_code == 200
+
+    assert db.get_species_highlights("OldBird") == {}
+    highlights = db.get_species_highlights("NewBird")
+    assert highlights == {"NewBird": {p1: 1, p2: 2}}
+
+
+def test_rename_keyword_species_highlights_merge_into_existing_target(app_and_db):
+    """Renaming into an existing highlights bucket appends after the target's rows."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid_old = db.add_keyword("OldBird", is_species=True)
+    kid_new = db.add_keyword("NewBird", is_species=True)
+    rows = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 3").fetchall()
+    p_target = rows[0]["id"]
+    p_moving_a = rows[1]["id"]
+    p_moving_b = rows[2]["id"]
+    db.tag_photo(p_target, kid_new)
+    db.tag_photo(p_moving_a, kid_old)
+    db.tag_photo(p_moving_b, kid_old)
+    db.add_species_highlight("NewBird", p_target)
+    db.add_species_highlight("OldBird", p_moving_a)
+    db.add_species_highlight("OldBird", p_moving_b)
+
+    resp = client.put(f"/api/keywords/{kid_old}", json={"name": "NewBird"})
+    assert resp.status_code == 200
+
+    assert db.get_species_highlights("OldBird") == {}
+    assert db.get_species_highlights("NewBird") == {
+        "NewBird": {p_target: 1, p_moving_a: 2, p_moving_b: 3}
+    }
+
+
+def test_rename_keyword_species_highlights_dedupe_existing_photo(app_and_db):
+    """A photo already highlighted under the target species keeps its target rank."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid_old = db.add_keyword("OldBird", is_species=True)
+    kid_new = db.add_keyword("NewBird", is_species=True)
+    rows = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 2").fetchall()
+    p_target = rows[0]["id"]
+    p_shared = rows[1]["id"]
+    db.tag_photo(p_target, kid_new)
+    db.tag_photo(p_shared, kid_old)
+    db.tag_photo(p_shared, kid_new)
+    db.add_species_highlight("NewBird", p_target)
+    db.add_species_highlight("NewBird", p_shared)
+    db.add_species_highlight("OldBird", p_shared)
+
+    resp = client.put(f"/api/keywords/{kid_old}", json={"name": "NewBird"})
+    assert resp.status_code == 200
+
+    assert db.get_species_highlights("OldBird") == {}
+    assert db.get_species_highlights("NewBird") == {
+        "NewBird": {p_target: 1, p_shared: 2}
+    }
+
+
 def test_rename_homonym_non_species_keyword_leaves_species_preferences(app_and_db):
     """Renaming an unrelated same-name keyword must not rewrite species prefs."""
     app, db = app_and_db
@@ -5349,6 +5420,85 @@ def test_highlights_relabel_unidentified_sets_species(app_and_db):
     )
     assert resp.status_code == 200
     assert "Song Sparrow" in {kw["name"] for kw in db.get_photo_keywords(pid)}
+
+
+def test_highlights_relabel_moves_species_highlights_to_new_bucket(app_and_db):
+    """Relabel migrates ordered species_highlights rows to the new species."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrh', 'hrh', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Bald Eagle", is_species=True)
+    p1 = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'h1.jpg', 0.8, 'none')",
+        (fid,),
+    ).lastrowid
+    p2 = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'h2.jpg', 0.8, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(p1, old_kid)
+    db.tag_photo(p2, old_kid)
+    db.add_species_highlight("Bald Eagle", p1)
+    db.add_species_highlight("Bald Eagle", p2)
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [p1, p2], "species": "Golden Eagle"},
+    )
+    assert resp.status_code == 200
+
+    assert db.get_species_highlights("Bald Eagle") == {}
+    assert db.get_species_highlights("Golden Eagle") == {
+        "Golden Eagle": {p1: 1, p2: 2}
+    }
+
+
+def test_highlights_relabel_merges_into_existing_new_species_bucket(app_and_db):
+    """Relabel appends after rows already present in the destination bucket."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrm', 'hrm', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    db.add_keyword("Bald Eagle", is_species=True)
+    new_kid = db.add_keyword("Golden Eagle", is_species=True)
+    p_dest = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'dest.jpg', 0.8, 'none')",
+        (fid,),
+    ).lastrowid
+    p_moving = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'moving.jpg', 0.8, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(p_dest, new_kid)
+    db.tag_photo(p_moving, db.add_keyword("Bald Eagle", is_species=True))
+    db.add_species_highlight("Golden Eagle", p_dest)
+    db.add_species_highlight("Bald Eagle", p_moving)
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [p_moving], "species": "Golden Eagle"},
+    )
+    assert resp.status_code == 200
+
+    assert db.get_species_highlights("Bald Eagle") == {}
+    assert db.get_species_highlights("Golden Eagle") == {
+        "Golden Eagle": {p_dest: 1, p_moving: 2}
+    }
 
 
 def test_highlights_accepted_species_wins_over_higher_confidence_prediction(app_and_db):

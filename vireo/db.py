@@ -9985,6 +9985,110 @@ class Database:
             self.conn.commit()
         return cur.rowcount
 
+    def rename_species_highlights_species(
+        self, old_species, new_species, photo_workspace_pairs=None, _commit=True,
+    ):
+        """Rename ordered species-highlight rows to a new species bucket.
+
+        Companion to :meth:`rename_photo_preferences_species` for the
+        ``species_highlights`` table. The rows carry a per-species ``rank``,
+        so we can't just rewrite the ``species`` column — a bucket may
+        already exist for ``new_species`` with its own ranks. Instead, each
+        moved row is deleted from the old bucket and inserted at the end
+        of the new bucket (``MAX(rank) + 1``) while preserving its
+        old-bucket order. Rows whose photo already appears in the new
+        bucket are dropped rather than duplicated.
+
+        When ``photo_workspace_pairs`` is provided, only rows matching
+        those ``(photo_id, workspace_id)`` pairs are moved (used by
+        ``api_update_keyword`` so we only rebucket highlights for photos
+        actually tagged with the renamed keyword). When omitted, all
+        workspaces are rebucketed.
+
+        Returns the count of highlight rows that landed in the new bucket
+        (excludes rows dropped as duplicates).
+        """
+        if not old_species or not new_species or old_species == new_species:
+            return 0
+
+        if photo_workspace_pairs is not None:
+            by_ws = {}
+            seen = set()
+            for photo_id, workspace_id in photo_workspace_pairs:
+                key = (photo_id, workspace_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                by_ws.setdefault(workspace_id, []).append(photo_id)
+            workspace_scopes = list(by_ws.items())
+        else:
+            workspace_ids = [
+                r["workspace_id"] for r in self.conn.execute(
+                    """SELECT DISTINCT workspace_id
+                       FROM species_highlights
+                       WHERE species = ?""",
+                    (old_species,),
+                ).fetchall()
+            ]
+            workspace_scopes = [(ws, None) for ws in workspace_ids]
+
+        moved = 0
+        for workspace_id, photo_ids in workspace_scopes:
+            if photo_ids is None:
+                src_rows = self.conn.execute(
+                    """SELECT photo_id
+                       FROM species_highlights
+                       WHERE workspace_id = ? AND species = ?
+                       ORDER BY rank, created_at, photo_id""",
+                    (workspace_id, old_species),
+                ).fetchall()
+            else:
+                placeholders = ",".join("?" for _ in photo_ids)
+                src_rows = self.conn.execute(
+                    f"""SELECT photo_id
+                        FROM species_highlights
+                        WHERE workspace_id = ? AND species = ?
+                          AND photo_id IN ({placeholders})
+                        ORDER BY rank, created_at, photo_id""",
+                    (workspace_id, old_species, *photo_ids),
+                ).fetchall()
+            if not src_rows:
+                continue
+            existing = {
+                r["photo_id"] for r in self.conn.execute(
+                    """SELECT photo_id FROM species_highlights
+                       WHERE workspace_id = ? AND species = ?""",
+                    (workspace_id, new_species),
+                ).fetchall()
+            }
+            next_rank = int(self.conn.execute(
+                """SELECT COALESCE(MAX(rank), 0) AS max_rank
+                   FROM species_highlights
+                   WHERE workspace_id = ? AND species = ?""",
+                (workspace_id, new_species),
+            ).fetchone()["max_rank"] or 0) + 1
+            for r in src_rows:
+                pid = r["photo_id"]
+                self.conn.execute(
+                    """DELETE FROM species_highlights
+                       WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+                    (workspace_id, old_species, pid),
+                )
+                if pid in existing:
+                    continue
+                self.conn.execute(
+                    """INSERT INTO species_highlights
+                           (workspace_id, species, photo_id, rank,
+                            created_at, updated_at)
+                       VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
+                    (workspace_id, new_species, pid, next_rank),
+                )
+                next_rank += 1
+                moved += 1
+        if _commit:
+            self.conn.commit()
+        return moved
+
     def get_folders_with_quality_data(self):
         """Return folders with at least one scored photo in their subtree.
 
