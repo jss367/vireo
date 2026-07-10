@@ -3347,6 +3347,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # missing_originals_scan as heavy work so automatic reruns
         # don't kick off a second filesystem walk over the same tree.
         "missing_originals_scan",
+        # audit.verify_hashes walks every workspace source file and
+        # hashes readable ones — the same NAS/SMB trees a Missing
+        # Originals scan touches. Letting the 30-minute automatic
+        # missing-originals timer fire during verification would
+        # double the I/O on those slow volumes.
+        "verify-hashes",
     }
 
     def _utc_iso_now():
@@ -3805,6 +3811,124 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             else:
                 skipped += 1
         return jsonify({"deleted": deleted, "skipped": skipped})
+
+    @app.route("/api/photos/missing/remove", methods=["POST"])
+    def api_photos_missing_remove():
+        """Delete Vireo rows for photos whose originals are still gone.
+
+        Body: ``{"photo_ids": [int, ...], "delete_sidecars": bool,
+        "mode": "vireo"|"disk"|"disk_permanent"}``.
+
+        A ready ``/api/photos/missing`` cache is served for up to
+        ``_MISSING_ORIGINALS_STALE_SECONDS`` (30 min) without a filesystem
+        recheck, so a photo whose original came back between the last
+        scan and the user clicking Remove would otherwise be deleted
+        from Vireo by trusting the cache. This endpoint pre-checks each
+        photo's source on disk in the active workspace and only forwards
+        the still-missing IDs to the shared batch-delete implementation.
+        Sidecar cleanup follows the same guard, so a restored original
+        never loses its ``.xmp`` either.
+
+        Response: ``{deleted, restored: [ids], skipped, sidecars_deleted,
+        sidecars_skipped, mode}``. ``restored`` lets the client show which
+        photos were saved from the cache-driven delete so the modal can
+        surface them (e.g. via toast) instead of silently discarding the
+        request.
+        """
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids") or []
+        if not isinstance(photo_ids, list):
+            return json_error("photo_ids must be a list")
+        delete_sidecars = bool(body.get("delete_sidecars"))
+        mode = body.get("mode", "vireo")
+        if mode not in ("vireo", "disk", "disk_permanent"):
+            return json_error(
+                "mode must be 'vireo', 'disk', or 'disk_permanent'"
+            )
+
+        db = _get_db()
+        ws_id = db._active_workspace_id
+        confirmed_ids = []
+        restored_ids = []
+        skipped = 0
+        sidecar_targets = []
+        for raw_id in photo_ids:
+            try:
+                pid = int(raw_id)
+            except (TypeError, ValueError):
+                skipped += 1
+                continue
+            row = db.conn.execute(
+                """SELECT p.filename, f.path AS folder_path
+                   FROM photos p
+                   JOIN folders f ON p.folder_id = f.id
+                   JOIN workspace_folders wf ON wf.folder_id = f.id
+                   WHERE p.id = ? AND wf.workspace_id = ?""",
+                (pid, ws_id),
+            ).fetchone()
+            if not row:
+                skipped += 1
+                continue
+            src = os.path.join(row["folder_path"], row["filename"])
+            if os.path.exists(src):
+                # Original is back on disk — the cached "missing" verdict
+                # was stale. Keep the Vireo row (and its sidecar).
+                restored_ids.append(pid)
+                continue
+            confirmed_ids.append(pid)
+            if delete_sidecars:
+                sidecar_targets.append(src)
+
+        sidecars_deleted = 0
+        sidecars_skipped = 0
+        if delete_sidecars:
+            for src in sidecar_targets:
+                stem, _ = os.path.splitext(src)
+                removed_one = False
+                for candidate in (stem + ".xmp", stem + ".XMP",
+                                  src + ".xmp", src + ".XMP"):
+                    if os.path.isfile(candidate):
+                        try:
+                            os.remove(candidate)
+                            removed_one = True
+                        except OSError as e:
+                            log.warning(
+                                "Failed to delete sidecar %s: %s", candidate, e
+                            )
+                if removed_one:
+                    sidecars_deleted += 1
+                else:
+                    sidecars_skipped += 1
+
+        deleted_count = 0
+        if confirmed_ids:
+            try:
+                result = _run_batch_delete(
+                    db, confirmed_ids, mode, include_companions=False,
+                )
+            except ValueError as exc:
+                return json_error(str(exc))
+            deleted_count = int(result.get("deleted") or 0)
+            if deleted_count:
+                _invalidate_missing_originals_cache()
+
+        # A cache invalidation is still worth doing when everything came
+        # back online: the ready payload we just refused to trust for
+        # deletion is also the one the banner will keep serving until the
+        # next scan. Dropping it now forces a fresh check the next time
+        # the banner/modal asks, so the restored photos stop appearing
+        # as ghosts.
+        if restored_ids and deleted_count == 0:
+            _invalidate_missing_originals_cache()
+
+        return jsonify({
+            "deleted": deleted_count,
+            "restored": restored_ids,
+            "skipped": skipped,
+            "sidecars_deleted": sidecars_deleted,
+            "sidecars_skipped": sidecars_skipped,
+            "mode": mode,
+        })
 
     @app.route("/api/folders/<int:folder_id>", methods=["GET"])
     def api_folder_get(folder_id):

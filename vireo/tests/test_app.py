@@ -5121,6 +5121,73 @@ def test_api_photos_missing_delete_sidecars(app_and_db, tmp_path):
     assert decoy_xmp.exists(), "sidecar with present original must not be deleted"
 
 
+def test_api_photos_missing_remove_skips_restored_originals(app_and_db, tmp_path):
+    """POST /api/photos/missing/remove re-checks each original before deletion.
+
+    Ready /api/photos/missing payloads are cached for up to 30 minutes without
+    a filesystem recheck. If a user restores a file between the last scan and
+    clicking Remove, trusting the cache would delete a valid Vireo row. The
+    endpoint's job is to re-check per photo and refuse to delete rows whose
+    original came back.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    # Ghost stays missing: nothing on disk for this row.
+    fid = db.add_folder(str(real_dir), name="live")
+    pid_ghost = db.add_photo(folder_id=fid, filename="ghost.NEF",
+                             extension=".nef", file_size=1, file_mtime=1.0)
+    # Restored: original file is back on disk (simulated), sidecar too.
+    pid_restored = db.add_photo(folder_id=fid, filename="restored.NEF",
+                                extension=".nef", file_size=1, file_mtime=1.0)
+    (real_dir / "restored.NEF").write_bytes(b"raw")
+    (real_dir / "restored.xmp").write_text("<x:xmpmeta/>")
+    # Ghost sidecar left on disk — should be cleaned when delete_sidecars=True.
+    (real_dir / "ghost.xmp").write_text("<x:xmpmeta/>")
+
+    resp = client.post("/api/photos/missing/remove", json={
+        "photo_ids": [pid_ghost, pid_restored],
+        "delete_sidecars": True,
+        "mode": "vireo",
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    data = resp.get_json()
+    assert data["deleted"] == 1
+    assert data["restored"] == [pid_restored]
+    assert data["skipped"] == 0
+    assert data["sidecars_deleted"] == 1
+
+    # Ghost row is gone, restored row is kept.
+    assert db.get_photo(pid_ghost) is None
+    assert db.get_photo(pid_restored) is not None
+    # Ghost sidecar was cleaned up, restored one was left alone.
+    assert not (real_dir / "ghost.xmp").exists()
+    assert (real_dir / "restored.xmp").exists()
+
+
+def test_api_photos_missing_remove_rejects_ids_outside_workspace(app_and_db, tmp_path):
+    """Unknown or out-of-workspace photo_ids must not affect anything.
+
+    Symmetry with /api/photos/missing/delete-sidecars: the endpoint resolves
+    IDs against the active workspace and refuses to touch rows or files it
+    can't own.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    resp = client.post("/api/photos/missing/remove", json={
+        "photo_ids": [999_999],
+        "mode": "vireo",
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["deleted"] == 0
+    assert data["restored"] == []
+    assert data["skipped"] == 1
+
+
 def test_api_photos_missing_delete_sidecars_rejects_untracked_paths(app_and_db, tmp_path):
     """Endpoint must not delete .xmp files outside the active workspace.
 
