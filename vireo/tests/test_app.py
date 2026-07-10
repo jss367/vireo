@@ -5065,6 +5065,90 @@ def test_scan_job_invalidates_missing_originals_cache(app_and_db, tmp_path):
         assert key not in app._missing_originals_cache
 
 
+def test_import_full_scan_in_place_invalidates_missing_originals_cache(
+    app_and_db, tmp_path,
+):
+    """A scan-in-place import (POST /api/jobs/import-full, copy=false) must
+    drop the Missing Originals cache once its ``do_scan`` runs.
+
+    Regression: the scan job's ``finally`` block invalidated the
+    new-images cache but not the missing-originals cache, so a ready
+    ghost payload survived even after the import touched disk. If the
+    user restored an original before running Import Photos over the
+    same folder, GET ``/api/photos/missing`` would keep serving the
+    pre-import ghost list until a separate missing-originals scan
+    replaced the entry. See Codex review on c4cc32ec.
+    """
+    from PIL import Image
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    source = tmp_path / "import_src"
+    source.mkdir()
+    Image.new("RGB", (10, 10)).save(str(source / "keep.jpg"))
+
+    key = (db._db_path, db._active_workspace_id, None)
+    with app._missing_originals_lock:
+        app._missing_originals_cache[key] = {
+            "photos": [{"id": 4242, "filename": "stale.jpg"}],
+            "checked_at": "2026-01-01T00:00:00Z",
+            "set_at": 0.0,
+        }
+
+    resp = client.post("/api/jobs/import-full", json={
+        "source": str(source),
+        "copy": False,
+        "file_types": [".jpg"],
+    })
+    assert resp.status_code == 200, resp.get_json()
+    wait_for_job_via_client(client, resp.get_json()["job_id"])
+
+    with app._missing_originals_lock:
+        assert key not in app._missing_originals_cache
+
+
+def test_import_in_place_invalidates_missing_originals_cache(
+    app_and_db, tmp_path,
+):
+    """POST /api/jobs/import-in-place must drop the Missing Originals cache
+    once its ``do_scan`` runs.
+
+    Regression: the in-place import's ``finally`` block invalidated the
+    new-images cache but not the missing-originals cache, so a ready
+    ghost payload survived even after the import touched disk. If the
+    user restored an original before importing that folder in place,
+    GET ``/api/photos/missing`` would keep serving the pre-import ghost
+    list. See Codex review on c4cc32ec.
+    """
+    from PIL import Image
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    source = tmp_path / "in_place_src"
+    source.mkdir()
+    Image.new("RGB", (10, 10)).save(str(source / "keep.jpg"))
+
+    key = (db._db_path, db._active_workspace_id, None)
+    with app._missing_originals_lock:
+        app._missing_originals_cache[key] = {
+            "photos": [{"id": 4343, "filename": "stale.jpg"}],
+            "checked_at": "2026-01-01T00:00:00Z",
+            "set_at": 0.0,
+        }
+
+    resp = client.post("/api/jobs/import-in-place", json={
+        "sources": [str(source)],
+        "after_import": None,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    wait_for_job_via_client(client, resp.get_json()["job_id"])
+
+    with app._missing_originals_lock:
+        assert key not in app._missing_originals_cache
+
+
 def test_api_audit_remove_orphans_invalidates_missing_cache(app_and_db, tmp_path):
     """Removing orphaned photo rows must clear the Missing Originals cache.
 

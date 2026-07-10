@@ -16231,6 +16231,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # scanner.scan commits photo rows incrementally, so even a mid-scan
                 # failure can leave DB state that invalidates cached new-image counts.
                 _invalidate_new_images_after_scan(thread_db, scan_target)
+                # scanner.scan touches disk and may reconcile ghost rows
+                # (e.g. a user restored an original before running import).
+                # The pre-scan health-check invalidation only fires when a
+                # folder flips missing/ok, so also drop the missing-originals
+                # cache once the scan itself has run — even on partial
+                # failure, since rows are committed incrementally.
+                try:
+                    _invalidate_missing_originals_cache()
+                except Exception:
+                    log.exception(
+                        "Failed to invalidate missing-originals cache after import scan of %s",
+                        scan_target,
+                    )
             scan_count = job["progress"].get("total", 0)
             scan_summary = f"{scan_count} photos"
             metadata_warning = _scan_metadata_warning()
@@ -16646,6 +16659,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         root_errors.append(msg)
                         if msg not in job["errors"]:
                             job["errors"].append(msg)
+                    # scanner.scan touches disk and may reconcile ghost rows
+                    # (e.g. a user restored an original before running
+                    # import-in-place). The pre-scan health-check invalidation
+                    # only fires when a folder flips missing/ok, so also drop
+                    # the missing-originals cache once the scan itself has
+                    # run — even on partial failure, since rows are committed
+                    # incrementally.
+                    try:
+                        _invalidate_missing_originals_cache()
+                    except Exception:
+                        log.exception(
+                            "Failed to invalidate missing-originals cache after in-place import scan of %s",
+                            source,
+                        )
                     advance_scan_acc()
 
             indexed = len(photo_ids)
