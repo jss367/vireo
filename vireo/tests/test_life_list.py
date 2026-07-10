@@ -193,6 +193,25 @@ def test_representative_preference_promotes_existing_highlight_to_top(life_app):
     }
 
 
+def test_representative_preference_skips_highlight_when_ineligible(life_app):
+    # p3 (sparrow) is life-list eligible but has no quality_score, so it
+    # can't appear in Highlights. Setting it as representative must not
+    # create an invisible species_highlights row the user can't see or
+    # remove from the Highlights page.
+    app, db, ids = life_app
+
+    resp = app.test_client().post("/api/photo-preferences", json={
+        "purpose": "species_representative",
+        "species": "House Sparrow",
+        "photo_id": ids["p3"],
+    })
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["highlight_rank"] is None
+
+    assert db.get_species_highlights("House Sparrow") == {}
+
+
 def test_life_list_photo_preference_must_match_species(life_app):
     app, _, ids = life_app
     resp = app.test_client().post("/api/photo-preferences", json={
