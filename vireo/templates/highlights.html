@@ -858,18 +858,30 @@ function findHighlightPhotoWithContainer(photoId) {
 }
 
 // Backend `_highlight_score_bucket` adds this bonus to `highlight_score`
-// when flag === 'flagged' before sorting (see vireo/app.py). Client-cached
-// scores already include or exclude the bonus depending on the flag at load
-// time, so a lightbox pick/unpick must apply the same delta before re-
-// sorting — otherwise a stale cached score can keep the wrong photo in the
-// visible slice (and in the Save-as-Collection payload derived from it).
+// when flag === 'flagged' before clamping to [0, 1] (see vireo/app.py).
+// The API also sends `highlight_base_score`: the same computation with the
+// pick bonus omitted, clamped and rounded. On a lightbox pick/unpick we
+// recompute `highlight_score = clamp(base + bonus_if_flagged)` from that
+// baseline so the client mirrors what a reload would produce — subtracting
+// the bonus from the already-clamped cached score would under-count when
+// the raw pre-clamp score exceeded 1.0 (e.g. base 0.97 → cached 1.0 →
+// subtract 0.08 → 0.92, but the correct unpicked value is 0.97).
 var PICK_HIGHLIGHT_SCORE_BONUS = 0.08;
 
 function applyPickBonusOnFlagChange(photo, previousFlag, nextFlag) {
-  if (!photo || typeof photo.highlight_score !== 'number') return;
+  if (!photo) return;
   var wasFlagged = previousFlag === 'flagged';
   var isFlagged = nextFlag === 'flagged';
   if (wasFlagged === isFlagged) return;
+  if (typeof photo.highlight_base_score === 'number') {
+    var next = photo.highlight_base_score + (isFlagged ? PICK_HIGHLIGHT_SCORE_BONUS : 0);
+    photo.highlight_score = Math.max(0, Math.min(1, next));
+    return;
+  }
+  // Fallback for payloads that predate highlight_base_score — apply the
+  // delta to the cached (clamped) score. Ordering may drift by up to the
+  // bonus in the rare case where the raw score exceeded 1.0 pre-clamp.
+  if (typeof photo.highlight_score !== 'number') return;
   var delta = isFlagged ? PICK_HIGHLIGHT_SCORE_BONUS : -PICK_HIGHLIGHT_SCORE_BONUS;
   photo.highlight_score = Math.max(0, Math.min(1, photo.highlight_score + delta));
 }

@@ -5100,6 +5100,59 @@ def test_highlights_buckets_by_accepted_species(app_and_db):
     assert qs == sorted(qs, reverse=True)
 
 
+def test_highlights_expose_pre_pick_base_score(app_and_db):
+    """Each photo carries `highlight_base_score` = pre-pick-bonus baseline.
+
+    Regression for Codex feedback on PR #1176 (line 874): the client-side
+    lightbox pick handler must recompute highlight_score without losing
+    precision to clamping. A flagged photo whose raw score is 0.97 gets
+    +0.08 → 1.05, clamped and cached as highlight_score=1.0; subtracting
+    the bonus on unpick would give 0.92 while the correct value is 0.97.
+    Exposing the pre-bonus baseline lets the client compute the exact same
+    value the backend would on a full reload.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/b', 'b', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    robin_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('Robin', 'taxonomy', 1)"
+    ).lastrowid
+    picked_id = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'picked.jpg', 0.97, 'flagged')",
+        (fid,),
+    ).lastrowid
+    unpicked_id = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'unpicked.jpg', 0.60, 'none')",
+        (fid,),
+    ).lastrowid
+    for pid in (picked_id, unpicked_id):
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (pid, robin_kw),
+        )
+    db.conn.commit()
+
+    resp = client.get(f"/api/highlights?folder_id={fid}")
+    assert resp.status_code == 200
+    photos = {p["id"]: p for p in resp.get_json()["buckets"][0]["photos"]}
+    # Picked photo: 0.97 + 0.08 = 1.05, clamped to 1.0 for highlight_score.
+    # highlight_base_score keeps the pre-bonus 0.97 so the client can
+    # reverse the pick without under-counting.
+    assert photos[picked_id]["highlight_score"] == 1.0
+    assert photos[picked_id]["highlight_base_score"] == 0.97
+    # Unpicked photo: no bonus, so base == score.
+    assert photos[unpicked_id]["highlight_score"] == 0.60
+    assert photos[unpicked_id]["highlight_base_score"] == 0.60
+
+
 def test_highlights_bucket_mixed_accepted_predicted_is_not_accepted(app_and_db):
     """A bucket whose photos are a mix of accepted-tag and prediction-only
     must report is_accepted=False. The "Confirmed" badge means the whole

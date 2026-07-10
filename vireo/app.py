@@ -263,12 +263,19 @@ def _highlight_score_bucket(photos, picked_first=False):
             score = p.get("quality_score") if p.get("quality_score") is not None else 0.0
 
         rating = p.get("rating") or 0
-        if p.get("flag") == "flagged":
-            score += 0.08
         if rating >= 4:
             score += 0.04 + 0.02 * (rating - 4)
         elif rating == 3:
             score += 0.015
+        # Baseline BEFORE the pick bonus, so the client can recompute
+        # highlight_score on a lightbox pick/unpick via clamp(base + bonus)
+        # instead of subtracting the bonus from the already-clamped value —
+        # which loses precision when the raw score exceeded 1.0 pre-clamp
+        # (e.g. base 0.97 → cached 1.0 → subtract 0.08 → 0.92, but the
+        # correct unpicked value is 0.97).
+        base_score_pre_pick = score
+        if p.get("flag") == "flagged":
+            score += 0.08
 
         reasons = []
         if p.get("flag") == "flagged":
@@ -294,6 +301,9 @@ def _highlight_score_bucket(photos, picked_first=False):
             reasons.append("legacy quality")
 
         p["highlight_score"] = round(max(0.0, min(1.0, score)), 4)
+        p["highlight_base_score"] = round(
+            max(0.0, min(1.0, base_score_pre_pick)), 4
+        )
         p["score_parts"] = {
             "focus": round(focus, 3),
             "exposure": round(exposure, 3),
