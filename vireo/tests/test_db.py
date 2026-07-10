@@ -8923,6 +8923,9 @@ def test_get_highlights_candidates(tmp_path):
     assert scores == sorted(scores, reverse=True)
     # Each result should have species field (may be None for unclassified)
     assert all("species" in dict(r) for r in results)
+    assert all("folder_name" in dict(r) for r in results)
+    assert all("folder_path" in dict(r) for r in results)
+    assert all("keyword_names" in dict(r) for r in results)
 
 
 def test_get_highlights_candidates_includes_descendants(tmp_path):

@@ -97,6 +97,14 @@
     <select id="folderSelect"></select>
   </div>
   <div class="control-group">
+    <label for="highlightSearch">Search</label>
+    <div class="search-control">
+      <input type="search" id="highlightSearch" placeholder="Name, filename, folder">
+      <button id="highlightSearchMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('highlightSearch', 'match_case', debounceLoad)" title="Match case">Aa</button>
+      <button id="highlightSearchWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('highlightSearch', 'whole_word', debounceLoad)" title="Match whole word">ab</button>
+    </div>
+  </div>
+  <div class="control-group">
     <label for="speciesSearch">Species</label>
     <div class="search-control">
       <input type="search" id="speciesSearch" placeholder="Cardinal">
@@ -134,6 +142,12 @@
       <option value="fewest">Fewest photos</option>
       <option value="most">Most photos</option>
       <option value="worst">Worst photo first</option>
+      <option value="species_asc">Species A-Z</option>
+      <option value="species_desc">Species Z-A</option>
+      <option value="newest">Newest top photo</option>
+      <option value="oldest">Oldest top photo</option>
+      <option value="confidence">Highest ID confidence</option>
+      <option value="confirmed">Confirmed first</option>
     </select>
   </div>
   <button class="save-btn" id="saveBtn" onclick="showSaveModal()">Save as Collection</button>
@@ -235,11 +249,18 @@ function requestScopeParams() {
   return params;
 }
 
-async function loadHighlights() {
-  var params = requestScopeParams();
-  var folderSelect = document.getElementById('folderSelect');
+function appendHighlightFilterParams(params) {
+  var search = document.getElementById('highlightSearch').value.trim();
   var speciesSearch = document.getElementById('speciesSearch').value.trim();
-  params.set('limit_per_bucket', Math.max(20, parseInt(document.getElementById('perRowSlider').value)));
+  if (search) {
+    params.set('q', search);
+    VireoTextSearch.appendParams(
+      params,
+      VireoTextSearch.readOptions('highlightSearch'),
+      'q_match_case',
+      'q_whole_word'
+    );
+  }
   if (speciesSearch) {
     params.set('species', speciesSearch);
     VireoTextSearch.appendParams(
@@ -249,6 +270,13 @@ async function loadHighlights() {
       'species_whole_word'
     );
   }
+}
+
+async function loadHighlights() {
+  var params = requestScopeParams();
+  var folderSelect = document.getElementById('folderSelect');
+  params.set('limit_per_bucket', Math.max(20, parseInt(document.getElementById('perRowSlider').value)));
+  appendHighlightFilterParams(params);
 
   // Capture the issue-time sequence so the prune below can tell rejections that
   // happened after this request was sent (response is stale for them) from
@@ -290,10 +318,28 @@ async function loadHighlights() {
 function sortedBuckets() {
   var sort = document.getElementById('sortSelect').value;
   var buckets = (currentData.buckets || []).slice();
+  function compareTimestamp(a, b, newest) {
+    var ta = a.best_timestamp || '';
+    var tb = b.best_timestamp || '';
+    if (!ta && !tb) return 0;
+    if (!ta) return 1;
+    if (!tb) return -1;
+    return newest ? String(tb).localeCompare(String(ta)) : String(ta).localeCompare(String(tb));
+  }
   buckets.sort(function(a, b) {
     if (sort === 'most') return b.photo_count - a.photo_count;
     if (sort === 'best') return (b.best_score || 0) - (a.best_score || 0);
     if (sort === 'worst') return (a.best_score || 0) - (b.best_score || 0);
+    if (sort === 'species_asc') return String(a.species || '').localeCompare(String(b.species || ''));
+    if (sort === 'species_desc') return String(b.species || '').localeCompare(String(a.species || ''));
+    if (sort === 'newest') return compareTimestamp(a, b, true);
+    if (sort === 'oldest') return compareTimestamp(a, b, false);
+    if (sort === 'confidence') return (b.avg_confidence || 0) - (a.avg_confidence || 0);
+    if (sort === 'confirmed') {
+      var status = Number(!!b.is_accepted) - Number(!!a.is_accepted);
+      if (status) return status;
+      return (b.best_score || 0) - (a.best_score || 0);
+    }
     return a.photo_count - b.photo_count; // 'fewest' default
   });
   return buckets;
@@ -550,6 +596,8 @@ async function loadMoreBucket(species, isUnidentified) {
   var target = isUnidentified ? currentData.unidentified : (currentData.buckets || []).find(function(b) { return b.species === species; });
   if (!target || !target.has_more) return;
   params.set('species', isUnidentified ? '__unidentified__' : species);
+  appendHighlightFilterParams(params);
+  params.set('species', isUnidentified ? '__unidentified__' : species);
   params.set('offset', target.photos.length);
   params.set('limit', 500);
   var data = await safeFetch('/api/highlights/bucket?' + params);
@@ -575,9 +623,10 @@ function render() {
   controls.style.display = '';
 
   var buckets = sortedBuckets();
+  var search = document.getElementById('highlightSearch').value.trim();
   var speciesSearch = document.getElementById('speciesSearch').value.trim();
   var confirmation = document.getElementById('confirmationFilter').value;
-  var filterLabel = speciesSearch ? ' matching' : '';
+  var filterLabel = (search || speciesSearch) ? ' matching' : '';
   if (confirmation === 'confirmed') filterLabel += ' confirmed';
   if (confirmation === 'unconfirmed') filterLabel += ' unconfirmed';
   meta.textContent = buckets.length + filterLabel + ' species · '
@@ -838,6 +887,9 @@ document.getElementById('qualitySlider').addEventListener('input', function() {
 });
 document.getElementById('confidenceSlider').addEventListener('input', function() {
   document.getElementById('confidenceValue').textContent = (this.value / 100).toFixed(2);
+  debounceLoad();
+});
+document.getElementById('highlightSearch').addEventListener('input', function() {
   debounceLoad();
 });
 document.getElementById('speciesSearch').addEventListener('input', function() {
