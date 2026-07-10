@@ -44,6 +44,52 @@ def test_browse_lightbox_arrows_navigate(live_server, page):
     expect(counter).to_contain_text("1 /")
 
 
+def test_browse_photo_id_deep_link_loads_target_folder_first_page(live_server, page):
+    """Open in Browse must find a target that is not on global Browse page 1."""
+    db = live_server["db"]
+    folder_a, folder_b = live_server["data"]["folders"]
+    target_id = live_server["data"]["photos"][3]  # first photo in folder_b
+
+    for idx in range(60):
+        db.add_photo(
+            folder_id=folder_a,
+            filename=f"older-{idx:02d}.jpg",
+            extension=".jpg",
+            file_size=1000,
+            file_mtime=10 + idx,
+            timestamp=f"2024-01-{(idx % 28) + 1:02d}T00:00:00",
+        )
+
+    page.goto(f"{live_server['url']}/browse?photo_id={target_id}")
+
+    target_card = page.locator(f'.grid-card[data-id="{target_id}"]')
+    expect(target_card).to_be_visible(timeout=5000)
+    assert page.evaluate("window.activeFolderId") == folder_b
+
+
+def test_browse_photo_id_deep_link_loads_target_after_first_folder_page(live_server, page):
+    """Open in Browse must page within the target folder without freezing."""
+    db = live_server["db"]
+    _, folder_b = live_server["data"]["folders"]
+    target_id = live_server["data"]["photos"][4]  # robin2 in folder_b
+
+    for idx in range(60):
+        db.add_photo(
+            folder_id=folder_b,
+            filename=f"yard-before-{idx:02d}.jpg",
+            extension=".jpg",
+            file_size=1000,
+            file_mtime=10 + idx,
+            timestamp=f"2024-06-14T10:{idx % 60:02d}:00",
+        )
+
+    page.goto(f"{live_server['url']}/browse?photo_id={target_id}")
+
+    target_card = page.locator(f'.grid-card[data-id="{target_id}"]')
+    expect(target_card).to_be_visible(timeout=5000)
+    assert page.evaluate("window.loading") is False
+
+
 def test_browse_lightbox_arrows_preserve_one_to_one_zoom(live_server, page):
     """Navigating from a 1:1 lightbox view keeps the next photo at 1:1."""
     url = live_server["url"]
