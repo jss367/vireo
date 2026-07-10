@@ -4,6 +4,7 @@ import json
 import os
 
 from PIL import Image
+from wait import wait_for_job_via_client
 
 
 def test_delete_photos_removes_from_db(app_and_db):
@@ -189,6 +190,25 @@ def test_api_batch_delete_vireo_mode(app_and_db):
     data = resp.get_json()
     assert data["ok"] is True
     assert data["deleted"] == 1
+    assert db.get_photo(pid) is None
+
+
+def test_api_job_batch_delete_vireo_mode(app_and_db):
+    """Background delete job removes photos and returns the normal result."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.get_photos()[0]["id"]
+
+    resp = client.post("/api/jobs/batch-delete", json={
+        "photo_ids": [pid],
+        "mode": "vireo",
+    })
+
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+    assert job["result"]["ok"] is True
+    assert job["result"]["deleted"] == 1
     assert db.get_photo(pid) is None
 
 
