@@ -2339,16 +2339,25 @@ function setSearchStatus(text, isError) {
 
 function scheduleEditorSearch() {
   if (editorState.searchTimer) clearTimeout(editorState.searchTimer);
+  editorState.searchTimer = null;
   var input = document.getElementById('editorSearchInput');
-  // Bump the sequence the moment the input changes so any in-flight response
-  // for the previous query fails the seq guard in runEditorSearch, instead
-  // of racing the 300ms debounce and applying/navigating to stale matches.
-  editorState.searchSeq++;
-  if (!input || !input.value.trim()) {
-    editorState.searchTimer = null;
+  var q = input ? input.value.trim() : '';
+  if (!q) {
     clearEditorSearchResults();
     return;
   }
+  if (q === editorState.searchQuery) {
+    // Trimmed query is unchanged (e.g. typing a trailing space after
+    // "American Robin"), so any in-flight fetch is still relevant. Bumping
+    // the seq here would invalidate that response while the debounced
+    // replacement runEditorSearch would early-return on the same-query
+    // check, leaving the UI stuck at "Searching...".
+    return;
+  }
+  // Query actually changed — bump the sequence so any in-flight response for
+  // the previous query fails the seq guard in runEditorSearch, instead of
+  // racing the 300ms debounce and applying stale matches.
+  editorState.searchSeq++;
   editorState.searchTimer = setTimeout(function() {
     editorState.searchTimer = null;
     runEditorSearch();

@@ -78,6 +78,38 @@ def test_photo_editor_search_invalidates_pending_response_when_query_changes(liv
     expect(page.locator("#editorSearchStatus")).not_to_have_text("1 match")
 
 
+def test_photo_editor_search_trailing_space_applies_in_flight_response(live_server, page):
+    """Whitespace-only input changes must not invalidate an in-flight search."""
+    url = live_server["url"]
+    robin_id = live_server["data"]["photos"][3]
+    held_routes = []
+
+    def hold(route):
+        held_routes.append(route)
+
+    page.goto(f"{url}/edit")
+    page.route("**/api/photos/ids?*", hold)
+
+    page.locator("#editorSearchInput").fill("American Robin")
+    for _ in range(20):
+        if held_routes:
+            break
+        page.wait_for_timeout(100)
+    assert held_routes, "search request was not issued"
+
+    # Add a trailing space while the response is held. The trimmed query is
+    # unchanged, so the in-flight response must still apply — bumping the
+    # seq here would strand the UI at "Searching..." because the debounced
+    # replacement would early-return on the same-query check.
+    page.locator("#editorSearchInput").fill("American Robin ")
+
+    held_routes[0].continue_()
+
+    expect(page).to_have_url(f"{url}/edit/{robin_id}")
+    expect(page.locator("#editorFilename")).to_have_text("robin1.jpg")
+    expect(page.locator("#editorSearchStatus")).to_have_text("1 match")
+
+
 def test_photo_editor_search_confirms_dirty_edits_from_in_flight_search(live_server, page):
     """Edits made while a search is in flight must not be silently discarded."""
     url = live_server["url"]
