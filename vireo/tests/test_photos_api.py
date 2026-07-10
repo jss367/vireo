@@ -1204,6 +1204,71 @@ def test_original_trusts_raw_working_copy_even_when_smaller_than_stored_dims(app
         assert resp.data == f.read()
 
 
+def test_edited_original_uses_working_copy_after_current_raw_failure(
+    client_with_photo, monkeypatch,
+):
+    """An unsupported edited RAW should render from its JPEG working copy.
+
+    Nikon HE* RAWs can fail libraw demosaic and only leave a near-full embedded
+    JPEG working copy. Once that source failure is recorded for the current
+    mtime, the edited original route should apply the crop to the JPEG instead
+    of returning a permanent 500.
+    """
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    raw_path = os.path.join(folder["path"], "bad.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(b"unsupported raw")
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_path = os.path.join(working_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (792, 594), color=(80, 120, 160)).save(wc_path, "JPEG")
+
+    mtime = os.path.getmtime(raw_path)
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='bad.NEF', extension='.nef',
+               width=800, height=600,
+               file_mtime=?,
+               working_copy_path=?,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?,
+               working_copy_failed_source='source'
+           WHERE id=?""",
+        (mtime, f"working/{photo_id}.jpg", mtime, photo_id),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        photo_id,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+    )
+
+    loaded_paths = []
+    original_load_image = image_loader.load_image
+
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        loaded_paths.append(str(file_path))
+        if str(file_path).lower().endswith(".nef"):
+            raise AssertionError("edited original retried failed RAW")
+        return original_load_image(file_path, max_size=max_size, **kwargs)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    resp = client.get(f"/photos/{photo_id}/original")
+
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert loaded_paths == [wc_path]
+
+
 def test_original_reextracts_stale_capped_jpeg_wc_after_cap_raised(app_and_db, tmp_path):
     """Stale working copies generated under a smaller cap must be re-extracted
     after the cap is raised — the endpoint must not trust the wc just

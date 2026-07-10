@@ -21185,17 +21185,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     folder["path"], using_offline_cache,
                 )
                 image_ext = os.path.splitext(image_path)[1].lower()
-                if (
+                source_failure_current = (
                     primary_is_raw
-                    and trusted_wc_path
-                    and not os.path.exists(image_path)
-                ):
-                    image_path = trusted_wc_path
-                elif companion_source and image_ext not in RAW_EXTENSIONS:
-                    image_path = companion_source
-                elif (
-                    primary_is_raw
-                    and companion_source
                     and _has_current_working_copy_failure(
                         photo,
                         vireo_dir,
@@ -21203,6 +21194,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         live_source_path=image_path,
                         folder_path=folder["path"],
                     )
+                )
+                if (
+                    primary_is_raw
+                    and trusted_wc_path
+                    and not companion_source
+                    and (
+                        not os.path.exists(image_path)
+                        or source_failure_current
+                    )
+                ):
+                    image_path = trusted_wc_path
+                elif companion_source and image_ext not in RAW_EXTENSIONS:
+                    image_path = companion_source
+                elif (
+                    primary_is_raw
+                    and companion_source
+                    and source_failure_current
                 ):
                     # Mirror _recipe_render_source: when scanner has marked
                     # this RAW as failed for the current mtime, route the

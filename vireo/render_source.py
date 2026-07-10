@@ -202,7 +202,9 @@ def companion_image_can_replace_raw_result(
     )
 
 
-def working_copy_satisfies_recipe_render(photo, recipe, max_size, vireo_dir):
+def working_copy_satisfies_recipe_render(
+    photo, recipe, max_size, vireo_dir, *, rel_slack=0.0,
+):
     """Return True when the working copy is large enough for this recipe render.
 
     The working copy qualifies when its rendered long edge (after the recipe's
@@ -230,7 +232,7 @@ def working_copy_satisfies_recipe_render(photo, recipe, max_size, vireo_dir):
         min(max_size, original_render_long) if max_size else original_render_long
     )
     wc_render_long = rendered_recipe_long_edge(wc_w, wc_h, recipe)
-    return wc_render_long >= required_long
+    return wc_render_long >= required_long * (1.0 - rel_slack)
 
 
 def path_satisfies_recipe_render(path, photo, recipe, max_size):
@@ -306,18 +308,19 @@ def recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
                 return wc_path, True
         return "", False
 
-    companion_path = photo_value(photo, "companion_path")
     original_abs = os.path.join(folder_path, photo_value(photo, "filename"))
+    source_failure_current = primary_is_raw and has_current_working_copy_failure(
+        photo,
+        vireo_dir,
+        trust_existing_working_copy=False,
+        live_source_path=original_abs,
+        folder_path=folder_path,
+    )
+    companion_path = photo_value(photo, "companion_path")
     allow_companion = (
         not primary_is_raw
         or not os.path.exists(original_abs)
-        or has_current_working_copy_failure(
-            photo,
-            vireo_dir,
-            trust_existing_working_copy=False,
-            live_source_path=original_abs,
-            folder_path=folder_path,
-        )
+        or source_failure_current
     )
     if companion_path and allow_companion:
         companion = os.path.join(folder_path, companion_path)
@@ -325,6 +328,12 @@ def recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
             companion, photo, recipe, max_size,
         ):
             return companion, True
+    if source_failure_current and working_copy_satisfies_recipe_render(
+        photo, recipe, max_size, vireo_dir, rel_slack=0.01,
+    ):
+        wc_path = os.path.join(vireo_dir, wc_rel)
+        if os.path.exists(wc_path):
+            return wc_path, True
     if not os.path.exists(original_abs) and wc_rel:
         wc_path = os.path.join(vireo_dir, wc_rel)
         if os.path.exists(wc_path):
