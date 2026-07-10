@@ -4633,6 +4633,131 @@ def test_api_photos_missing_automatic_respects_failure_backoff(app_and_db, monke
     assert data["backoff_seconds"] > 0
 
 
+def test_api_audit_remove_orphans_invalidates_missing_cache(app_and_db, tmp_path):
+    """Removing orphaned photo rows must clear the Missing Originals cache.
+
+    Regression: without invalidation, the banner and modal keep serving the
+    pre-delete cache verbatim, so a photo the user just removed via the
+    Audit page reappears in the ghost list until a later manual or
+    automatic rescan.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    fid = db.add_folder(str(real_dir), name="live")
+    pid_ghost = db.add_photo(
+        folder_id=fid,
+        filename="ghost.NEF",
+        extension=".nef",
+        file_size=42,
+        file_mtime=2.0,
+    )
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ?", (fid,)
+        ).fetchall()
+    ])
+
+    cached = _run_missing_originals_check(client)
+    assert [row["id"] for row in cached["photos"]] == [pid_ghost]
+
+    resp = client.post(
+        "/api/audit/remove-orphans", json={"photo_ids": [pid_ghost]}
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["removed"] == 1
+
+    payload = client.get("/api/photos/missing").get_json()
+    assert payload["status"] == "not_ready", payload
+    assert payload["photos"] == []
+
+
+def test_api_duplicates_delete_loser_files_invalidates_missing_cache(
+    app_and_db, monkeypatch, tmp_path,
+):
+    """Trashing duplicate losers must clear the Missing Originals cache.
+
+    Regression: the duplicate-cleanup path calls ``db.delete_photos`` after
+    trashing loser files; without invalidation, a photo removed here still
+    shows up as a ghost in the banner/modal until the next rescan.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    fid = db.add_folder(str(real_dir), name="live")
+    winner_file = real_dir / "winner.jpg"
+    winner_file.write_bytes(b"jpeg-winner")
+    loser_file = real_dir / "loser.jpg"
+    loser_file.write_bytes(b"jpeg-loser")
+
+    # Add the photos without a hash so the ``add_photo`` auto-resolve
+    # hook doesn't reject either row on insert. We then set the shared
+    # hash + the loser's rejected flag directly, which is the exact
+    # state left behind by an earlier ``apply_duplicate_resolution``.
+    pid_winner = db.add_photo(
+        folder_id=fid, filename="winner.jpg", extension=".jpg",
+        file_size=len(b"jpeg-winner"), file_mtime=1.0,
+    )
+    pid_loser = db.add_photo(
+        folder_id=fid, filename="loser.jpg", extension=".jpg",
+        file_size=len(b"jpeg-loser"), file_mtime=2.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET file_hash='deadbeef' WHERE id IN (?, ?)",
+        (pid_winner, pid_loser),
+    )
+    db.conn.execute(
+        "UPDATE photos SET flag='rejected' WHERE id=?", (pid_loser,),
+    )
+    db.conn.commit()
+    # Make the winner the anchor row and drop unrelated seed photos so the
+    # missing-originals scan is small and deterministic.
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ? AND id NOT IN (?, ?)",
+            (fid, pid_winner, pid_loser),
+        ).fetchall()
+    ])
+
+    # Introduce a ghost row so the cache actually contains something to
+    # invalidate — otherwise the "cache cleared" assertion below is
+    # trivially satisfied even without the fix.
+    pid_ghost = db.add_photo(
+        folder_id=fid, filename="ghost.NEF", extension=".nef",
+        file_size=1, file_mtime=3.0,
+    )
+    cached = _run_missing_originals_check(client)
+    assert pid_ghost in [row["id"] for row in cached["photos"]]
+
+    # Stub send2trash so the test doesn't shell out to the platform trash
+    # implementation; the endpoint's contract is "trashed then row-deleted"
+    # and only the row-delete side is what invalidates the cache.
+    import send2trash as _send2trash_mod
+
+    def fake_send2trash(path):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+
+    monkeypatch.setattr(_send2trash_mod, "send2trash", fake_send2trash)
+
+    resp = client.post(
+        "/api/duplicates/delete-loser-files",
+        json={"photo_ids": [pid_loser]},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["trashed"] == 1
+
+    payload = client.get("/api/photos/missing").get_json()
+    assert payload["status"] == "not_ready", payload
+    assert payload["photos"] == []
+
+
 def test_api_photos_missing_delete_sidecars(app_and_db, tmp_path):
     """POST /api/photos/missing/delete-sidecars removes orphan XMP files for ghost photos.
 

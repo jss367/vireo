@@ -12374,6 +12374,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         result = db.delete_photos(photo_ids)
         _cleanup_cached_files_for_deleted_photos(result.get("files", []))
+        if result.get("deleted"):
+            _invalidate_missing_originals_cache(db._active_workspace_id)
         return jsonify({"ok": True, "removed": result.get("deleted", 0)})
 
     @app.route("/api/audit/import-untracked", methods=["POST"])
@@ -14549,10 +14551,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if trashed_pids:
             try:
                 all_files = []
+                deleted_rows = 0
                 for chunk in _chunked(trashed_pids):
                     result = db.delete_photos(chunk)
                     all_files.extend(result.get("files", []))
+                    deleted_rows += result.get("deleted", 0)
                 _cleanup_cached_files_for_deleted_photos(all_files)
+                if deleted_rows:
+                    _invalidate_missing_originals_cache(db._active_workspace_id)
             except Exception:
                 # Files are already in Trash; if the row delete fails we
                 # surface a 500 so the caller knows reconciliation is
