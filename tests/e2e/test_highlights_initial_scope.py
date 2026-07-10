@@ -170,6 +170,8 @@ def test_highlights_best_ui_is_advanced_only(live_server, page):
     expect(page.locator(".highlights-card").first).to_be_visible(timeout=5000)
 
     expect(page.locator(".best-ribbon", has_text="Best")).to_have_count(0)
+    expect(page.locator(".highlights-card .card-chip.score")).to_have_count(0)
+    expect(page.locator(".highlights-card .card-chip.reason")).to_have_count(0)
     expect(page.locator("#sortSelect option[value='best']")).to_have_text(
         "Recommended first"
     )
@@ -188,6 +190,7 @@ def test_highlights_best_ui_is_advanced_only(live_server, page):
     )
 
     expect(page.locator(".best-ribbon", has_text="Best").first).to_be_visible()
+    expect(page.locator(".highlights-card .card-chip.score").first).to_be_visible()
     expect(page.locator("#sortSelect option[value='best']")).to_have_text(
         "Best photo first"
     )

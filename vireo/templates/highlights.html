@@ -338,10 +338,15 @@ function renderCard(p, idx) {
   var conf = p.has_accepted_species
     ? '<span class="card-chip conf">Tagged</span>'
     : (p.predicted_confidence != null ? '<span class="card-chip conf">ID ' + formatPercent(p.predicted_confidence) + '</span>' : '');
-  var reasons = (p.reasons || []).slice(0, 2).map(function(r) {
-    return '<span class="card-chip reason">' + escapeAttr(r) + '</span>';
-  }).join('');
-  var title = (p.reasons || []).join(', ');
+  var reasons = advanced
+    ? (p.reasons || []).slice(0, 2).map(function(r) {
+        return '<span class="card-chip reason">' + escapeAttr(r) + '</span>';
+      }).join('')
+    : '';
+  var scoreChip = advanced
+    ? '<span class="card-chip score">' + formatScore(p.highlight_score) + '</span>'
+    : '';
+  var title = advanced ? (p.reasons || []).join(', ') : '';
   var ribbon = p.is_highlights_photo
     ? '<div class="best-ribbon">Highlight</div>'
     : (advanced && idx === 0 ? '<div class="best-ribbon">Best</div>' : '');
@@ -351,7 +356,7 @@ function renderCard(p, idx) {
     + '" data-photo-id="' + p.id + '" title="' + escapeAttr(title) + '">'
     + ribbon
     + '<img src="' + thumbSrc + '" alt="' + escapeAttr(p.filename) + '" loading="lazy">'
-    + '<div class="card-info"><span class="card-chip score">' + formatScore(p.highlight_score) + '</span>' + conf + reasons + '</div>'
+    + '<div class="card-info">' + scoreChip + conf + reasons + '</div>'
     + '</div>';
 }
 
