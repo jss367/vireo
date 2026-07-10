@@ -2425,6 +2425,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 changed = health_db.check_folder_health()
                 if changed:
                     log.info("Folder health check: %d folder(s) changed status", changed)
+                    # A background ok↔missing flip would otherwise leave a
+                    # ready /api/photos/missing cache serving the pre-flip
+                    # photo list: the modal/banner could offer to delete
+                    # rows whose folder just went offline, or hide ghosts
+                    # from a folder that just came back, until a later
+                    # rescan replaced the entry.
+                    _invalidate_missing_originals_cache()
             except Exception:
                 log.debug("Folder health check failed", exc_info=True)
             _time.sleep(600)  # 10 minutes

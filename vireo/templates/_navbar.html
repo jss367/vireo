@@ -9907,7 +9907,12 @@ let _missingPhotosCacheFetchId = 0;
 let _missingPhotosBannerFetchId = 0;
 let _missingPhotosModalFetchId = 0;
 let _missingPhotosBannerInFlight = false;
-let _missingPhotosStatusPoll = null;
+// Separate timer handles per target: a banner status poll firing while the
+// modal is waiting on a long scan used to cancel the modal's own poll (they
+// shared a single handle), leaving the modal stuck on "Checking missing
+// originals…" until the user closed and reopened it.
+let _missingPhotosBannerStatusPoll = null;
+let _missingPhotosModalStatusPoll = null;
 let _missingPhotosAutomaticTimer = null;
 const MISSING_PHOTOS_INITIAL_DELAY_MS = 180000;
 const MISSING_PHOTOS_AUTOMATIC_INTERVAL_MS = 30 * 60 * 1000;
@@ -9924,12 +9929,19 @@ function _missingPhotosPayloadPhotos(payload) {
 }
 
 function _scheduleMissingPhotosPoll(folderId, modal) {
-  if (_missingPhotosStatusPoll !== null) clearTimeout(_missingPhotosStatusPoll);
-  _missingPhotosStatusPoll = setTimeout(function() {
-    _missingPhotosStatusPoll = null;
-    if (modal) loadMissingPhotos();
-    else checkMissingPhotos();
-  }, 3000);
+  if (modal) {
+    if (_missingPhotosModalStatusPoll !== null) clearTimeout(_missingPhotosModalStatusPoll);
+    _missingPhotosModalStatusPoll = setTimeout(function() {
+      _missingPhotosModalStatusPoll = null;
+      loadMissingPhotos();
+    }, 3000);
+  } else {
+    if (_missingPhotosBannerStatusPoll !== null) clearTimeout(_missingPhotosBannerStatusPoll);
+    _missingPhotosBannerStatusPoll = setTimeout(function() {
+      _missingPhotosBannerStatusPoll = null;
+      checkMissingPhotos();
+    }, 3000);
+  }
 }
 
 function _scheduleAutomaticMissingPhotosCheck(delayMs) {
