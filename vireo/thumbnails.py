@@ -24,6 +24,9 @@ from render_source import (
 from render_source import (
     scaled_recipe_source_dimensions as _scaled_recipe_source_dimensions,
 )
+from render_source import (
+    working_copy_path_if_satisfies as _working_copy_path_if_satisfies,
+)
 
 log = logging.getLogger(__name__)
 
@@ -114,6 +117,47 @@ def _retry_thumbnail_with_companion(
     return generate_thumbnail(
         photo_id,
         companion_abs,
+        cache_dir,
+        size=size,
+        quality=quality,
+        **recipe_kwargs,
+    )
+
+
+def _retry_thumbnail_with_working_copy(
+    db, photo, source_path, cache_dir, size, quality, recipe, vireo_dir,
+):
+    if not photo or not recipe or not vireo_dir:
+        return None
+    if os.path.splitext(source_path or "")[1].lower() not in RAW_EXTENSIONS:
+        return None
+    wc_path = _working_copy_path_if_satisfies(
+        photo, recipe, size, vireo_dir, rel_slack=0.01,
+    )
+    if not wc_path or os.path.abspath(wc_path) == os.path.abspath(source_path):
+        return None
+    photo_id = _photo_value(photo, "id")
+    log.info(
+        "Thumbnail RAW decode failed for photo %s; falling back to JPEG "
+        "working copy",
+        photo_id,
+    )
+    file_mtime = _photo_value(photo, "file_mtime")
+    if file_mtime is not None and photo_id is not None and hasattr(db, "conn"):
+        with contextlib.suppress(Exception):
+            db.conn.execute(
+                "UPDATE photos SET"
+                " working_copy_failed_at=datetime('now'),"
+                " working_copy_failed_mtime=?,"
+                " working_copy_failed_source='source'"
+                " WHERE id=?",
+                (file_mtime, photo_id),
+            )
+            db.conn.commit()
+    recipe_kwargs = {"recipe": recipe, "native_size": _recipe_source_dimensions(photo)}
+    return generate_thumbnail(
+        photo_id,
+        wc_path,
         cache_dir,
         size=size,
         quality=quality,
@@ -323,6 +367,21 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
                 thumb_quality,
                 recipe,
                 folders.get(source_photo["folder_id"]),
+            )
+        if (
+            result_path is None
+            and recipe
+            and os.path.splitext(source_path)[1].lower() in RAW_EXTENSIONS
+        ):
+            result_path = _retry_thumbnail_with_working_copy(
+                db,
+                source_photo,
+                source_path,
+                cache_dir,
+                thumb_size,
+                thumb_quality,
+                recipe,
+                vireo_dir,
             )
         if result_path is not None:
             generated += 1
