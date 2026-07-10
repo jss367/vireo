@@ -7335,8 +7335,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 parsed["species"], parsed["photo_id"]
             )
             return jsonify({"ok": True, **parsed, "rank": rank})
-        db.set_species_representative(parsed["species"], parsed["photo_id"])
-        return jsonify({"ok": True, **parsed})
+        db.set_species_representative(
+            parsed["species"], parsed["photo_id"], _commit=False
+        )
+        rank = db.promote_species_highlight(
+            parsed["species"], parsed["photo_id"], _commit=False
+        )
+        db.conn.commit()
+        return jsonify({"ok": True, **parsed, "highlight_rank": rank})
 
     @app.route("/api/photo-preferences", methods=["DELETE"])
     def api_photo_preferences_clear():

@@ -9981,6 +9981,39 @@ class Database:
             self.conn.commit()
         return rank
 
+    def promote_species_highlight(self, species, photo_id, _commit=True):
+        """Add a photo to a species' ordered highlights at rank 1."""
+        ws = self._ws_id()
+        rows = self.conn.execute(
+            """SELECT photo_id
+               FROM species_highlights
+               WHERE workspace_id = ? AND species = ?
+               ORDER BY rank, created_at, photo_id""",
+            (ws, species),
+        ).fetchall()
+        ids = [r["photo_id"] for r in rows if r["photo_id"] != photo_id]
+        ids.insert(0, photo_id)
+
+        self.conn.execute(
+            """INSERT INTO species_highlights
+                   (workspace_id, species, photo_id, rank, created_at, updated_at)
+               VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))
+               ON CONFLICT(workspace_id, species, photo_id) DO UPDATE SET
+                   rank = excluded.rank,
+                   updated_at = excluded.updated_at""",
+            (ws, species, photo_id),
+        )
+        for rank, pid in enumerate(ids, start=1):
+            self.conn.execute(
+                """UPDATE species_highlights
+                   SET rank = ?, updated_at = datetime('now')
+                   WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+                (rank, ws, species, pid),
+            )
+        if _commit:
+            self.conn.commit()
+        return 1
+
     def remove_species_highlight(self, species, photo_id, _commit=True):
         """Remove a photo from a species' ordered highlights."""
         ws = self._ws_id()
