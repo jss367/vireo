@@ -10860,6 +10860,14 @@ async function _deleteMissingPhotoIds(ids, deleteSidecars) {
       'warning',
     );
   }
+  // The server just invalidated the Missing Originals cache, but callers
+  // only bump the modal/cache generation counters (via refreshMissingPhotosNow
+  // → loadMissingPhotos). A banner /api/photos/missing GET that was already
+  // in flight before this delete would still pass its own banner-generation
+  // check and repaint the pre-delete count. Route through checkMissingPhotos
+  // so the in-flight branch bumps _missingPhotosBannerFetchId and schedules
+  // a follow-up poll, and an idle banner refetches fresh state.
+  try { checkMissingPhotos(); } catch (err) { /* best-effort banner refresh */ }
   // Best-effort: refreshing the Misses page is an auxiliary UI sync. A
   // failure here must not reject the delete flow or block the caller's
   // own loadMissingPhotos() refresh.
