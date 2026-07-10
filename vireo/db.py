@@ -1219,6 +1219,22 @@ class Database:
                 "ALTER TABLE photos "
                 "ADD COLUMN wildlife_excluded INTEGER NOT NULL DEFAULT 0"
             )
+        # Migration: miss-classifier columns. PHOTO_COLS/get_collection_photos
+        # and misses.py both reference these; without the fallback ALTER, any
+        # DB created before the miss-classifier feature fails every photo-list
+        # query with "no such column".
+        for column, column_type in (
+            ("miss_no_subject", "INTEGER"),
+            ("miss_clipped", "INTEGER"),
+            ("miss_oof", "INTEGER"),
+            ("miss_computed_at", "TEXT"),
+        ):
+            try:
+                self.conn.execute(f"SELECT {column} FROM photos LIMIT 0")
+            except sqlite3.OperationalError:
+                self.conn.execute(
+                    f"ALTER TABLE photos ADD COLUMN {column} {column_type}"
+                )
         # Migration: integrity-verification markers. hash_checked_at is when
         # the file's content was last re-hashed against photos.file_hash;
         # hash_status records the verdict ('ok', 'modified', 'corrupt',
@@ -4445,7 +4461,7 @@ class Database:
                     timestamp, width, height, rating, flag, thumb_path, sharpness,
                     subject_sharpness, subject_size, quality_score,
                     latitude, longitude, companion_path, working_copy_path,
-                    wildlife_excluded"""
+                    wildlife_excluded, miss_no_subject, miss_clipped, miss_oof"""
 
     # Columns for single-photo detail queries (includes exif_data JSON +
     # eye-focus fields consumed by the review lightbox's crosshair overlay)

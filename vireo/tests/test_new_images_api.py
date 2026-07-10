@@ -119,7 +119,11 @@ def test_api_new_images_returns_pending_when_walk_is_slow(app_and_db, monkeypatc
         assert data["new_count"] is None
         assert data["workspace_id"] == ws_id
         # The endpoint must have actually kicked off the background compute.
-        assert started.is_set()
+        # The worker thread opens its own DB before calling the walk fn, so
+        # on loaded CI runners it can still be inside Database.__init__ when
+        # the endpoint's 500ms wait times out and returns pending. Give the
+        # worker a bounded moment to actually reach slow_count.
+        assert started.wait(timeout=2.0)
     finally:
         # Let the background thread finish before pytest tears down tmp_path,
         # otherwise it walks a deleted directory tree.
@@ -639,7 +643,7 @@ def test_post_snapshot_reuses_walk_across_polls(app_and_db, monkeypatch):
             # First POST kicks off the walk; walk is blocked in-flight.
             first = client.post("/api/workspaces/active/new-images/snapshot")
             assert first.status_code == 202
-            assert started.is_set()
+            assert started.wait(timeout=2.0)
             calls_after_first = call_count["n"]
 
             # A poll arriving before the walk finishes must coalesce, not
@@ -784,7 +788,7 @@ def test_post_snapshot_surfaces_async_error_without_retry_loop(
         with app.test_client() as client:
             first = client.post("/api/workspaces/active/new-images/snapshot")
             assert first.status_code == 202
-            assert started.is_set()
+            assert started.wait(timeout=2.0)
             assert call_count["n"] == 1
 
             release.set()
@@ -925,7 +929,7 @@ def test_post_snapshot_returns_pending_when_cache_is_incomplete(app_and_db, monk
             # show real numbers instead of an opaque spinner.
             assert "files_checked" in body
             assert "new_count_so_far" in body
-            assert started.is_set()
+            assert started.wait(timeout=2.0)
     finally:
         release.set()
 
@@ -1013,7 +1017,7 @@ def test_post_snapshot_registers_ephemeral_job_when_walk_needed(
         with app.test_client() as client:
             resp = client.post("/api/workspaces/active/new-images/snapshot")
             assert resp.status_code == 202
-            assert started.is_set()
+            assert started.wait(timeout=2.0)
             deadline = time.monotonic() + 2.0
             walk_jobs = []
             while time.monotonic() < deadline:
