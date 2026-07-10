@@ -850,11 +850,27 @@ function findHighlightPhotoWithContainer(photoId) {
   for (var i = 0; i < buckets.length; i++) {
     var photos = buckets[i].photos || [];
     var match = photos.find(function(p) { return p.id === photoId; });
-    if (match) return { photo: match, photos: photos };
+    if (match) return { photo: match, photos: photos, bucket: buckets[i] };
   }
   var unid = currentData.unidentified && currentData.unidentified.photos || [];
   var match = unid.find(function(p) { return p.id === photoId; });
-  return match ? { photo: match, photos: unid } : null;
+  return match ? { photo: match, photos: unid, bucket: null } : null;
+}
+
+// Mirrors backend `_bucket_best_score`: max highlight_score across the
+// bucket, or null if empty. Called after applyPickBonusOnFlagChange so
+// sortedBuckets() ('Recommended first' / 'Best photo first') doesn't
+// keep the bucket at its pre-pick position — a reload would order it by
+// the post-bonus best.
+function recomputeBucketBestScore(bucket) {
+  if (!bucket || !Array.isArray(bucket.photos)) return;
+  var best = null;
+  for (var i = 0; i < bucket.photos.length; i++) {
+    var s = bucket.photos[i].highlight_score;
+    if (typeof s !== 'number') continue;
+    if (best === null || s > best) best = s;
+  }
+  bucket.best_score = best;
 }
 
 // Backend `_highlight_score_bucket` adds this bonus to `highlight_score`
@@ -1290,6 +1306,7 @@ document.addEventListener('lightbox:flagchanged', function(e) {
     applyPickBonusOnFlagChange(hit.photo, prev, next);
     hit.photo.flag = next;
     sortBucketAfterFlagChange(hit.photos);
+    recomputeBucketBestScore(hit.bucket);
     render();
   }
 });
