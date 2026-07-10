@@ -191,6 +191,88 @@ def test_clearing_representative_removes_legacy_fallbacks(life_app):
     assert cardinal["best_source"] == "algorithm"
 
 
+def test_photo_preferences_highlights_purpose_adds_ordered_highlight(life_app):
+    """POST /api/photo-preferences with purpose='highlights' must add an
+    ordered species highlight — not silently overwrite the species
+    representative. Guards against legacy clients (or a cached Highlights
+    page) whose POST would otherwise mislabel a highlight pick as the
+    canonical representative."""
+    app, db, ids = life_app
+    client = app.test_client()
+
+    resp = client.post("/api/photo-preferences", json={
+        "purpose": "highlights",
+        "species": "Northern Cardinal",
+        "photo_id": ids["p2"],
+    })
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["ok"] is True
+    assert body["purpose"] == "highlights"
+    assert body["rank"] == 1
+
+    # The photo landed in species_highlights, not in photo_preferences
+    # as a representative.
+    assert db.get_species_highlights("Northern Cardinal") == {
+        "Northern Cardinal": {ids["p2"]: 1},
+    }
+    assert db.get_photo_preferences("species_representative") == {}
+
+
+def test_photo_preferences_highlights_delete_removes_ordered_highlight(life_app):
+    """DELETE /api/photo-preferences with purpose='highlights' + photo_id
+    must remove that specific ordered highlight and leave the species
+    representative alone."""
+    app, db, ids = life_app
+    db.add_species_highlight("Northern Cardinal", ids["p1"])
+    db.set_species_representative("Northern Cardinal", ids["p2"])
+
+    resp = app.test_client().delete("/api/photo-preferences", json={
+        "purpose": "highlights",
+        "species": "Northern Cardinal",
+        "photo_id": ids["p1"],
+    })
+    assert resp.status_code == 200
+
+    assert db.get_species_highlights("Northern Cardinal") == {}
+    # The species_representative pick is untouched — DELETE with
+    # purpose=highlights must not clear the representative.
+    assert db.get_species_representatives() == {"Northern Cardinal": ids["p2"]}
+
+
+def test_photo_preferences_highlights_delete_requires_photo_id(life_app):
+    """DELETE with purpose='highlights' but no photo_id is ambiguous
+    (ordered highlights are per-photo) and must 400 rather than clearing
+    all highlights for the species."""
+    app, db, ids = life_app
+    db.add_species_highlight("Northern Cardinal", ids["p1"])
+
+    resp = app.test_client().delete("/api/photo-preferences", json={
+        "purpose": "highlights",
+        "species": "Northern Cardinal",
+    })
+    assert resp.status_code == 400
+    # The highlight is still there.
+    assert db.get_species_highlights("Northern Cardinal") == {
+        "Northern Cardinal": {ids["p1"]: 1},
+    }
+
+
+def test_photo_preferences_highlights_rejects_predicted_only_photo(life_app):
+    """Highlights eligibility is stricter than life-list eligibility: a
+    photo that lacks the accepted species keyword should be checked via
+    the highlights-bucket eligibility path, not the life-list one."""
+    app, _, ids = life_app
+    # p3 belongs to House Sparrow, not Northern Cardinal — so it is not
+    # a valid Northern Cardinal highlight.
+    resp = app.test_client().post("/api/photo-preferences", json={
+        "purpose": "highlights",
+        "species": "Northern Cardinal",
+        "photo_id": ids["p3"],
+    })
+    assert resp.status_code == 400
+
+
 def test_ordered_highlight_is_life_list_fallback(life_app):
     app, db, ids = life_app
     db.add_species_highlight("Northern Cardinal", ids["p1"])

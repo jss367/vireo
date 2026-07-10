@@ -7119,7 +7119,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return None, "species required"
 
         photo_id = body.get("photo_id")
-        if require_photo:
+        # Ordered highlights are per-photo (multiple photos per species),
+        # so photo_id is always required for purpose=highlights — even on
+        # DELETE, where representative purposes let it be omitted to clear
+        # the whole species preference.
+        needs_photo = require_photo or purpose == "highlights"
+        if needs_photo:
             if isinstance(photo_id, bool) or not isinstance(photo_id, int):
                 return None, "photo_id must be an integer"
         else:
@@ -7127,7 +7132,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         return {
             "purpose": purpose,
-            "canonical_purpose": "species_representative",
+            "canonical_purpose": (
+                "highlights" if purpose == "highlights"
+                else "species_representative"
+            ),
             "species": species,
             "photo_id": photo_id,
         }, None
@@ -7163,6 +7171,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return False
 
     def _photo_can_be_preference(db, purpose, species, photo_id):
+        # Ordered highlights use their own (stricter) eligibility check —
+        # the photo must appear in the workspace's highlight buckets for
+        # this species. Representative-style purposes (species_representative,
+        # life_list) only require the photo to carry the species keyword.
+        if purpose == "highlights":
+            return _photo_can_be_highlights_preference(db, species, photo_id)
         return _photo_can_be_life_list_preference(db, species, photo_id)
 
     @app.route("/api/photo-preferences", methods=["POST"])
@@ -7181,6 +7195,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(
                 "photo_id is not eligible for that purpose/species", 400,
             )
+        # Route legacy `purpose=highlights` writes to the ordered-highlights
+        # table so a cached Highlights page or older client doesn't silently
+        # overwrite the species representative instead.
+        if parsed["purpose"] == "highlights":
+            rank = db.add_species_highlight(
+                parsed["species"], parsed["photo_id"]
+            )
+            return jsonify({"ok": True, **parsed, "rank": rank})
         db.set_species_representative(parsed["species"], parsed["photo_id"])
         return jsonify({"ok": True, **parsed})
 
@@ -7191,6 +7213,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         parsed, error = _parse_photo_preference_body(body, require_photo=False)
         if error:
             return json_error(error)
+        # See the POST handler: `purpose=highlights` targets one row in the
+        # ordered-highlights table, so it needs a photo_id (enforced by
+        # _parse_photo_preference_body) and routes to remove_species_highlight
+        # rather than clearing all representative rows for the species.
+        if parsed["purpose"] == "highlights":
+            removed = db.remove_species_highlight(
+                parsed["species"], parsed["photo_id"]
+            )
+            return jsonify({
+                "ok": True,
+                "purpose": parsed["canonical_purpose"],
+                "species": parsed["species"],
+                "photo_id": parsed["photo_id"],
+                "removed": removed,
+            })
         db.clear_species_representative(parsed["species"])
         return jsonify({
             "ok": True,
