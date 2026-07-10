@@ -11271,6 +11271,23 @@ class Database:
                                 photo_id, "keyword_remove", old_name,
                                 _commit=False,
                             )
+                    # Migrate curated species state (representatives and
+                    # ordered highlights) alongside the replaced species
+                    # tag. Without this, a photo highlighted or set as
+                    # representative under the old species keeps rows in
+                    # species_highlights / photo_preferences under a name
+                    # it no longer carries, so it stops driving Highlights
+                    # and Life List for the new species. Mirrors the
+                    # migration in api_highlights_relabel.
+                    for old_name in old_species:
+                        self.rename_species_highlights_species(
+                            old_name, species, [(photo_id, ws)],
+                            _commit=False,
+                        )
+                        self.rename_photo_preferences_species(
+                            old_name, species, [(photo_id, ws)],
+                            _commit=False,
+                        )
                 self.tag_photo(photo_id, kid, _commit=False)
                 self.queue_change(photo_id, "keyword_add", species, _commit=False)
                 affected.append({

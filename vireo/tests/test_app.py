@@ -1615,6 +1615,54 @@ def test_replace_prediction_keywords_updates_grouped_photos(app_and_db):
         )
 
 
+def test_replace_prediction_keywords_migrates_species_curation(app_and_db):
+    """Replacing species via prediction moves ordered highlights and
+    representative preferences from the old species to the new one.
+    Without this migration, a curated photo silently loses its
+    Highlights/Life-List position when its species is swapped."""
+    app, db = app_and_db
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+    old_kid = db.add_keyword("Old Species", is_species=True)
+    db.tag_photo(photo_id, old_kid)
+    db.add_species_highlight("Old Species", photo_id)
+    db.set_species_representative("Old Species", photo_id)
+
+    det_id = db.save_detections(photo_id, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")[0]
+    db.add_prediction(det_id, "New Species", 0.95, "model-a")
+    pred = db.conn.execute(
+        """SELECT id FROM predictions
+           WHERE detection_id = ? AND classifier_model = ?""",
+        (det_id, "model-a"),
+    ).fetchone()
+
+    resp = app.test_client().post(
+        f"/api/predictions/{pred['id']}/replace-keywords"
+    )
+    assert resp.status_code == 200
+
+    ws_id = db._ws_id()
+    highlights = db.conn.execute(
+        """SELECT species FROM species_highlights
+           WHERE workspace_id = ? AND photo_id = ?""",
+        (ws_id, photo_id),
+    ).fetchall()
+    assert [r["species"] for r in highlights] == ["New Species"]
+
+    prefs = db.conn.execute(
+        """SELECT purpose, species FROM photo_preferences
+           WHERE workspace_id = ? AND photo_id = ?""",
+        (ws_id, photo_id),
+    ).fetchall()
+    assert {(p["purpose"], p["species"]) for p in prefs} == {
+        ("species_representative", "New Species"),
+    }
+
+
 def test_api_predictions_include_bounding_box(app_and_db):
     """GET /api/predictions should return bounding box data from detections."""
     app, db = app_and_db
