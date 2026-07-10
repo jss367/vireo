@@ -2461,6 +2461,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     app._missing_originals_cache = {}
     app._missing_originals_inflight = {}
     app._missing_originals_errors = {}
+    # Monotonic per-key counter bumped whenever the cache is invalidated
+    # while a scan is in flight. Each scan snapshots this at start; if the
+    # counter has advanced by the time it finishes, the scan's results are
+    # from a pre-invalidation view of the library and must be discarded so
+    # deleted photos don't reappear in the banner/modal.
+    app._missing_originals_generation = {}
 
     # Self-healing background backfill of missing working copies. RAW (and
     # oversized JPEG) imports need a JPEG working copy at
@@ -3480,6 +3486,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 for key in list(store.keys()):
                     if key[1] == workspace_id:
                         store.pop(key, None)
+            # Bump generation for every in-flight scan touching this
+            # workspace so its completion path refuses to write its stale
+            # pre-invalidation snapshot back into the cache.
+            for key in list(app._missing_originals_inflight.keys()):
+                if key[1] == workspace_id:
+                    app._missing_originals_generation[key] = (
+                        app._missing_originals_generation.get(key, 0) + 1
+                    )
 
     def _start_missing_originals_scan(db, folder_id=None, automatic=False):
         key = _missing_originals_key(db, folder_id)
@@ -3510,12 +3524,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if suppressed_reason == "heavy_job_active":
                 payload["status"] = "skipped"
             return payload
+        scan_generation = 0
         with app._missing_originals_lock:
             inflight = app._missing_originals_inflight.get(key)
             if inflight:
                 reuse_existing = True
             else:
                 app._missing_originals_inflight[key] = token
+                scan_generation = app._missing_originals_generation.get(key, 0)
         if reuse_existing:
             return _missing_originals_payload(db, folder_id)
 
@@ -3559,30 +3575,44 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     progress_callback=progress,
                 )
                 checked_at = _utc_iso_now()
+                stale = False
                 with app._missing_originals_lock:
-                    app._missing_originals_cache[key] = {
-                        "photos": photos,
-                        "checked_at": checked_at,
-                        "set_at": time.monotonic(),
-                    }
-                    app._missing_originals_errors.pop(key, None)
+                    current_gen = app._missing_originals_generation.get(key, 0)
+                    if current_gen != scan_generation:
+                        # A batch delete (or other invalidation) fired
+                        # while this scan was walking the disk. Its photo
+                        # list reflects the pre-delete library, so writing
+                        # it back would resurrect just-removed photos in
+                        # the banner. Drop the result and let the next
+                        # scan recompute.
+                        stale = True
+                    else:
+                        app._missing_originals_cache[key] = {
+                            "photos": photos,
+                            "checked_at": checked_at,
+                            "set_at": time.monotonic(),
+                        }
+                        app._missing_originals_errors.pop(key, None)
                 return {
                     "missing_count": len(photos),
                     "checked_at": checked_at,
                     "scope": scope_label,
+                    "stale": stale,
                 }
             except Exception as exc:
                 checked_at = _utc_iso_now()
                 with app._missing_originals_lock:
-                    app._missing_originals_errors[key] = {
-                        "error": str(exc) or exc.__class__.__name__,
-                        "checked_at": checked_at,
-                        "set_at": time.monotonic(),
-                        "backoff_until": (
-                            time.monotonic()
-                            + _MISSING_ORIGINALS_BACKOFF_SECONDS
-                        ),
-                    }
+                    current_gen = app._missing_originals_generation.get(key, 0)
+                    if current_gen == scan_generation:
+                        app._missing_originals_errors[key] = {
+                            "error": str(exc) or exc.__class__.__name__,
+                            "checked_at": checked_at,
+                            "set_at": time.monotonic(),
+                            "backoff_until": (
+                                time.monotonic()
+                                + _MISSING_ORIGINALS_BACKOFF_SECONDS
+                            ),
+                        }
                 raise
             finally:
                 thread_db.close()

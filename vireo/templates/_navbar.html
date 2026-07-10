@@ -2203,7 +2203,7 @@ function sendReport() {
     <div id="missingPhotosList" style="flex:1;overflow-y:auto;"></div>
     <div class="modal-actions">
       <button class="modal-btn danger" id="missingPhotosRemoveBtn" onclick="removeSelectedMissingPhotos()" disabled>Remove selected</button>
-      <button class="modal-btn" onclick="loadMissingPhotos()">Check Again</button>
+      <button class="modal-btn" onclick="refreshMissingPhotosNow()">Check Again</button>
       <button class="modal-btn modal-btn-cancel" onclick="closeMissingPhotosModal()">Close</button>
     </div>
   </div>
@@ -9991,10 +9991,23 @@ function dismissMissingPhotosBanner() {
 
 // Missing-originals scan touches every photo's source path on disk. On large
 // libraries backed by SMB/NAS volumes it can take minutes, so startup uses a
-// delayed background job and the banner only renders cached results.
-setTimeout(function() {
-  startMissingPhotosCheck({ automatic: true }).catch(function() { /* ignore */ });
-}, 180000);
+// delayed background job and the banner only renders cached results. After the
+// initial run, keep re-arming a self-scheduling timer so a long-lived tab still
+// picks up files deleted (or previously skipped due to a heavy job) later on —
+// a bare `setTimeout` would never fire again after the first call.
+const _MISSING_ORIGINALS_INITIAL_DELAY_MS = 180000;      // ~3 min after page load
+const _MISSING_ORIGINALS_INTERVAL_MS = 30 * 60 * 1000;   // then ~every 30 min
+function _scheduleAutomaticMissingPhotosScan(delayMs) {
+  setTimeout(function() {
+    Promise.resolve()
+      .then(function() { return startMissingPhotosCheck({ automatic: true }); })
+      .catch(function() { /* ignore */ })
+      .finally(function() {
+        _scheduleAutomaticMissingPhotosScan(_MISSING_ORIGINALS_INTERVAL_MS);
+      });
+  }, delayMs);
+}
+_scheduleAutomaticMissingPhotosScan(_MISSING_ORIGINALS_INITIAL_DELAY_MS);
 
 /* ---------- New Images Banner ---------- */
 // Per-workspace dismissal: one sessionStorage key per workspace id so that

@@ -4465,6 +4465,88 @@ def test_api_photos_missing_check_coalesces_duplicate_jobs(app_and_db, monkeypat
     wait_for_job_via_client(client, first_data["job_id"])
 
 
+def test_api_photos_missing_stale_in_flight_result_is_discarded(
+    app_and_db, monkeypatch, tmp_path
+):
+    """An invalidation mid-scan must drop the in-flight scan's stale snapshot.
+
+    Regression: when a batch delete fired while a long missing-originals
+    scan was walking the disk, the completing scan wrote its
+    pre-invalidation photo list back into the ready cache — resurrecting
+    just-deleted photos in the banner/modal until a later scan overwrote
+    them.
+    """
+    import threading
+
+    from PIL import Image
+
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    Image.new("RGB", (10, 10)).save(real_dir / "here.jpg")
+    fid = db.add_folder(str(real_dir), name="live")
+    db.add_photo(
+        folder_id=fid, filename="here.jpg",
+        extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    pid_ghost = db.add_photo(
+        folder_id=fid, filename="ghost.NEF",
+        extension=".nef", file_size=42, file_mtime=2.0,
+    )
+    # Simplify assertions by removing seed rows from other folders.
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ?", (fid,)
+        ).fetchall()
+    ])
+
+    snapshot_captured = threading.Event()
+    release = threading.Event()
+    real_get_missing = Database.get_missing_photos
+
+    def slow_get_missing(self, *args, **kwargs):
+        # Take the "pre-delete" snapshot first so the scan's result would
+        # otherwise resurrect pid_ghost, then park until the test has
+        # fired the batch delete that bumps the generation counter.
+        photos = list(real_get_missing(self, *args, **kwargs))
+        snapshot_captured.set()
+        assert release.wait(timeout=5.0)
+        return photos
+
+    monkeypatch.setattr(Database, "get_missing_photos", slow_get_missing)
+
+    started = client.post("/api/photos/missing/check", json={})
+    assert started.status_code == 202
+    job_id = started.get_json()["job_id"]
+    assert snapshot_captured.wait(timeout=5.0)
+
+    # Batch delete the ghost row. This drops it from the DB and fires
+    # _invalidate_missing_originals_cache, which bumps the in-flight
+    # scan's generation counter.
+    delete_resp = client.post(
+        "/api/batch/delete",
+        json={"photo_ids": [pid_ghost], "mode": "vireo"},
+    )
+    assert delete_resp.status_code == 200, delete_resp.get_json()
+    assert delete_resp.get_json()["deleted"] == 1
+
+    release.set()
+    wait_for_job_via_client(client, job_id)
+
+    # The scan finished successfully but its results were discarded, so
+    # the endpoint reports no cache — not a ready payload still holding
+    # the just-deleted pid_ghost.
+    resp = client.get("/api/photos/missing")
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["status"] == "not_ready", payload
+    assert payload["photos"] == []
+
+
 def test_api_photos_missing_automatic_skips_during_heavy_job(app_and_db):
     """Automatic idle checks must not start while heavy jobs are running."""
     import time
