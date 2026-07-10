@@ -18,7 +18,7 @@ body { padding-bottom: 36px; }
   padding: 12px 16px;
   margin-bottom: 14px;
   display: grid;
-  grid-template-columns: minmax(180px, 1.1fr) repeat(2, minmax(150px, 0.85fr)) minmax(150px, 0.8fr) minmax(180px, 1fr);
+  grid-template-columns: minmax(180px, 1.1fr) repeat(2, minmax(150px, 0.85fr)) minmax(150px, 0.8fr) minmax(170px, 0.8fr) minmax(180px, 1fr);
   gap: 12px;
   align-items: end;
 }
@@ -41,6 +41,22 @@ body { padding-bottom: 36px; }
   font-size: 13px;
 }
 .control .search-control input { width: auto; border-radius: 4px 0 0 4px; }
+.control input[type="range"] {
+  padding: 0;
+  accent-color: var(--accent);
+}
+.range-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.range-control input { flex: 1 1 auto; }
+.range-value {
+  min-width: 38px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-align: right;
+}
 
 .summary-grid {
   display: grid;
@@ -251,6 +267,7 @@ body { padding-bottom: 36px; }
 .category-pill.refinement { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border-primary)); }
 .category-pill.broader { color: var(--info); border-color: color-mix(in srgb, var(--info) 45%, var(--border-primary)); }
 .category-pill.conflict { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 55%, var(--border-primary)); }
+.category-pill.low_conflict { color: var(--text-muted); }
 .category-pill.new { color: var(--text-primary); }
 .category-pill.missing_prediction { color: var(--text-muted); }
 .signal-list {
@@ -280,6 +297,7 @@ body { padding-bottom: 36px; }
   border-bottom: 1px solid var(--border-subtle);
 }
 .pred:last-child { border-bottom: none; }
+.pred.below-threshold { opacity: 0.72; }
 .pred-main {
   display: flex;
   flex-wrap: wrap;
@@ -344,6 +362,13 @@ body { padding-bottom: 36px; }
       </select>
     </div>
     <div class="control">
+      <label for="conflictThreshold">Conflict threshold</label>
+      <div class="range-control">
+        <input id="conflictThreshold" type="range" min="0" max="1" step="0.05" oninput="setConflictThreshold(this.value)">
+        <span id="conflictThresholdValue" class="range-value">40%</span>
+      </div>
+    </div>
+    <div class="control">
       <label for="compareSearch">Search</label>
       <div class="search-control">
         <input id="compareSearch" type="search" placeholder="Filename, keyword, species" oninput="renderCompare()">
@@ -385,6 +410,8 @@ var excludeState = {
 var selectedRows = new Set();
 var loadingSeq = 0;
 var signalCache = new Map();
+var CONFLICT_THRESHOLD_KEY = 'vireo.compare.conflictThreshold';
+var conflictMinConfidence = loadConflictThreshold();
 
 var FILTERS = [
   { id: 'model_disagreement', label: 'Models disagree' },
@@ -433,7 +460,58 @@ var CATEGORY_ORDER = {
   new: 3,
   missing_prediction: 2,
   match: 1,
+  low_conflict: 0,
 };
+
+var CATEGORY_LABELS = {
+  conflict: 'Conflict',
+  refinement: 'Refinement',
+  broader: 'Broader',
+  new: 'No species keyword',
+  missing_prediction: 'Missing prediction',
+  match: 'Match',
+  low_conflict: 'Below threshold',
+};
+
+function clampConfidence(value) {
+  var parsed = parseFloat(value);
+  if (!Number.isFinite(parsed)) return 0.4;
+  return Math.min(1, Math.max(0, parsed));
+}
+
+function loadConflictThreshold() {
+  try {
+    var saved = window.localStorage && window.localStorage.getItem(CONFLICT_THRESHOLD_KEY);
+    if (saved !== null) return clampConfidence(saved);
+  } catch (_e) {}
+  return 0.4;
+}
+
+function updateConflictThresholdControl() {
+  var input = document.getElementById('conflictThreshold');
+  var value = document.getElementById('conflictThresholdValue');
+  if (input) input.value = String(conflictMinConfidence);
+  if (value) value.textContent = Math.round(conflictMinConfidence * 100) + '%';
+}
+
+function setConflictThreshold(value) {
+  conflictMinConfidence = clampConfidence(value);
+  try {
+    if (window.localStorage) {
+      window.localStorage.setItem(CONFLICT_THRESHOLD_KEY, String(conflictMinConfidence));
+    }
+  } catch (_e) {}
+  updateConflictThresholdControl();
+  renderCompare();
+}
+
+function isBelowConflictThreshold(pred) {
+  return pred && pred.category === 'conflict' && (pred.confidence || 0) < conflictMinConfidence;
+}
+
+function effectivePredictionCategory(pred) {
+  return isBelowConflictThreshold(pred) ? 'low_conflict' : (pred.category || 'missing_prediction');
+}
 
 async function jsonFetch(url, options) {
   var resp = await fetch(url, options || {});
@@ -490,7 +568,7 @@ async function loadComparison() {
     compareData = data;
     populateModelSelects(data.models || []);
     populateSortSelect();
-    activeFilter = data.summary && data.summary.needs_review > 0 ? 'needs_review' : 'all';
+    activeFilter = effectiveSummary().needs_review > 0 ? 'needs_review' : 'all';
     renderCompare();
   } catch(e) {
     if (seq !== loadingSeq) return;
@@ -549,7 +627,7 @@ function renderCompare() {
 }
 
 function renderSummary() {
-  var s = compareData.summary || {};
+  var s = effectiveSummary();
   var signals = signalSummary();
   var items = [
     ['photos', 'Photos'],
@@ -643,6 +721,7 @@ function hasReviewedPrediction(photo) {
 
 function photoMatchesFilter(photo, filter) {
   var signal = photoSignal(photo);
+  var status = photoReviewStatus(photo);
   if (filter === 'all') return true;
   if (filter === 'model_disagreement') return signal.model_disagreement_score > 0;
   if (filter === 'strong_model_disagreement') return signal.model_disagreement_score >= 70;
@@ -652,9 +731,9 @@ function photoMatchesFilter(photo, filter) {
   if (filter === 'all_models_agree') return signal.top_prediction_count >= 2 && signal.unique_top_species_count === 1 && signal.missing_visible_model_count === 0;
   if (filter === 'missing_visible_model') return signal.missing_visible_model_count > 0;
   if (filter === 'two_models') return signal.top_prediction_count >= 2;
-  if (filter === 'needs_review') return !!photo.needs_review;
+  if (filter === 'needs_review') return !!status.needs_review;
   if (filter === 'reviewed') return hasReviewedPrediction(photo);
-  return photo.row_category === filter;
+  return status.category === filter;
 }
 
 function matchesExclusion(photo, id) {
@@ -682,7 +761,8 @@ function exclusionCount(id) {
 }
 
 function searchableFields(photo) {
-  var parts = [photo.filename, photo.row_label];
+  var status = photoReviewStatus(photo);
+  var parts = [photo.filename, status.label];
   var signal = photoSignal(photo);
   parts.push(signal.model_disagreement_label, signal.keyword_disagreement_label, signal.consensus_species);
   (photo.keywords || []).forEach(function(k) { parts.push(k.name, k.type); });
@@ -711,6 +791,8 @@ function sortRows(rows) {
   return rows.slice().sort(function(a, b) {
     var sa = photoSignal(a);
     var sb = photoSignal(b);
+    var statusA = photoReviewStatus(a);
+    var statusB = photoReviewStatus(b);
     if (activeSort === 'model_disagreement') {
       return desc(sa.model_disagreement_score, sb.model_disagreement_score)
         || desc(sa.top_prediction_count, sb.top_prediction_count)
@@ -720,7 +802,7 @@ function sortRows(rows) {
     if (activeSort === 'keyword_disagreement') {
       return desc(sa.keyword_conflict_score, sb.keyword_conflict_score)
         || desc(sa.max_keyword_conflict_confidence, sb.max_keyword_conflict_confidence)
-        || desc(CATEGORY_ORDER[a.row_category] || 0, CATEGORY_ORDER[b.row_category] || 0)
+        || desc(CATEGORY_ORDER[statusA.category] || 0, CATEGORY_ORDER[statusB.category] || 0)
         || textAsc(a.filename, b.filename);
     }
     if (activeSort === 'consensus_conflict') {
@@ -738,8 +820,8 @@ function sortRows(rows) {
     if (activeSort === 'filename') return textAsc(a.filename, b.filename);
     if (activeSort === 'newest') return textDesc(a.timestamp || '', b.timestamp || '') || textAsc(a.filename, b.filename);
     if (activeSort === 'oldest') return textAsc(a.timestamp || '', b.timestamp || '') || textAsc(a.filename, b.filename);
-    return desc(a.needs_review ? 1 : 0, b.needs_review ? 1 : 0)
-      || desc(CATEGORY_ORDER[a.row_category] || 0, CATEGORY_ORDER[b.row_category] || 0)
+    return desc(statusA.needs_review ? 1 : 0, statusB.needs_review ? 1 : 0)
+      || desc(CATEGORY_ORDER[statusA.category] || 0, CATEGORY_ORDER[statusB.category] || 0)
       || desc(sa.keyword_conflict_score, sb.keyword_conflict_score)
       || desc(sa.model_disagreement_score, sb.model_disagreement_score)
       || textAsc(a.filename, b.filename);
@@ -775,12 +857,13 @@ function renderTable(rows) {
   html += '</tr></thead><tbody>';
 
   rows.forEach(function(photo) {
+    var status = photoReviewStatus(photo);
     html += '<tr data-photo-id="' + photo.photo_id + '">' +
       '<td><input type="checkbox" ' + (selectedRows.has(photo.photo_id) ? 'checked' : '') +
       ' onchange="toggleRow(' + photo.photo_id + ', this.checked)"></td>' +
       '<td>' + renderPhotoCell(photo) + '</td>' +
-      '<td><span class="category-pill ' + escapeAttr(photo.row_category) + '">' +
-      escapeHtml(photo.row_label) + '</span></td>' +
+      '<td><span class="category-pill ' + escapeAttr(status.category) + '">' +
+      escapeHtml(status.label) + '</span></td>' +
       '<td>' + renderSignalCell(photo) + '</td>' +
       '<td>' + renderKeywordCell(photo) + '</td>';
     models.forEach(function(m) {
@@ -808,6 +891,80 @@ function bestPredictionForModel(photo, model) {
   })[0];
 }
 
+function photoReviewStatus(photo) {
+  var models = visibleModels();
+  var pendingCategory = null;
+  var highestCategory = null;
+  var sawPrediction = false;
+  var sawLowConflict = false;
+
+  models.forEach(function(model) {
+    ((photo.predictions || {})[model] || []).forEach(function(pred) {
+      sawPrediction = true;
+      var category = effectivePredictionCategory(pred);
+      if (category === 'low_conflict') {
+        sawLowConflict = true;
+        return;
+      }
+      if (!highestCategory || (CATEGORY_ORDER[category] || 0) > (CATEGORY_ORDER[highestCategory] || 0)) {
+        highestCategory = category;
+      }
+      if (pred.status === 'pending' && (
+        !pendingCategory
+        || (CATEGORY_ORDER[category] || 0) > (CATEGORY_ORDER[pendingCategory] || 0)
+      )) {
+        pendingCategory = category;
+      }
+    });
+  });
+
+  var category = pendingCategory || highestCategory;
+  if (!category) category = sawLowConflict ? 'low_conflict' : 'missing_prediction';
+  var needsReview = !!pendingCategory && {
+    conflict: true,
+    refinement: true,
+    broader: true,
+    new: true,
+  }[pendingCategory] === true;
+  return {
+    category: category,
+    label: CATEGORY_LABELS[category] || category,
+    needs_review: needsReview,
+    has_prediction: sawPrediction,
+  };
+}
+
+function effectiveSummary() {
+  var s = {
+    photos: compareData ? (compareData.photos || []).length : 0,
+    models: visibleModels().length,
+    matches: 0,
+    refinements: 0,
+    broader: 0,
+    conflicts: 0,
+    new: 0,
+    missing_predictions: 0,
+    needs_review: 0,
+  };
+  if (!compareData) return s;
+  (compareData.photos || []).forEach(function(photo) {
+    var status = photoReviewStatus(photo);
+    if (status.needs_review) s.needs_review += 1;
+    if (status.category === 'missing_prediction') s.missing_predictions += 1;
+    visibleModels().forEach(function(model) {
+      ((photo.predictions || {})[model] || []).forEach(function(pred) {
+        var category = effectivePredictionCategory(pred);
+        if (category === 'match') s.matches += 1;
+        else if (category === 'refinement') s.refinements += 1;
+        else if (category === 'broader') s.broader += 1;
+        else if (category === 'conflict') s.conflicts += 1;
+        else if (category === 'new') s.new += 1;
+      });
+    });
+  });
+  return s;
+}
+
 function photoSignal(photo) {
   var cacheKey = photo.photo_id + '|' + visibleModels().join('|');
   if (signalCache.has(cacheKey)) return signalCache.get(cacheKey);
@@ -829,7 +986,7 @@ function photoSignal(photo) {
     }
     preds.forEach(function(pred) {
       var predConf = pred.confidence || 0;
-      if (pred.category === 'conflict') {
+      if (effectivePredictionCategory(pred) === 'conflict') {
         keywordConflictCount += 1;
         keywordConflictScore += predConf;
         maxKeywordConflictConfidence = Math.max(maxKeywordConflictConfidence, predConf);
@@ -1023,9 +1180,11 @@ function renderPredictionCell(photo, model) {
     var status = pred.status || 'pending';
     var disabled = status !== 'pending' ? ' disabled' : '';
     var detail = pred.category_detail || '';
+    var belowThreshold = isBelowConflictThreshold(pred);
     if (pred.matched_keyword) detail += ' Keyword: ' + pred.matched_keyword + '.';
     if (pred.shared_rank) detail += ' Shared ' + pred.shared_rank + '.';
-    return '<div class="pred">' +
+    if (belowThreshold) detail += ' Below conflict threshold.';
+    return '<div class="pred' + (belowThreshold ? ' below-threshold' : '') + '">' +
       '<div class="pred-main"><span class="pred-species">' + escapeHtml(pred.species) + '</span>' +
       '<span class="pred-confidence">' + Math.round((pred.confidence || 0) * 100) + '%</span>' +
       '<span class="category-pill ' + escapeAttr(pred.category) + '">' + escapeHtml(pred.category_label) + '</span>' +
@@ -1077,8 +1236,8 @@ function bestPrediction(photo) {
         best = pred;
         return;
       }
-      var predScore = CATEGORY_ORDER[pred.category] || 0;
-      var bestScore = CATEGORY_ORDER[best.category] || 0;
+      var predScore = CATEGORY_ORDER[effectivePredictionCategory(pred)] || 0;
+      var bestScore = CATEGORY_ORDER[effectivePredictionCategory(best)] || 0;
       if (predScore > bestScore || (predScore === bestScore && pred.confidence > best.confidence)) {
         best = pred;
       }
@@ -1114,6 +1273,7 @@ async function batchAction(action) {
   await loadComparison();
 }
 
+updateConflictThresholdControl();
 loadCollections();
 </script>
 </body>
