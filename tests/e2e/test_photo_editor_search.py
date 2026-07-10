@@ -204,3 +204,63 @@ def test_photo_editor_search_revert_to_in_flight_query_refetches(live_server, pa
     expect(page).to_have_url(f"{url}/edit/{robin_id}")
     expect(page.locator("#editorFilename")).to_have_text("robin1.jpg")
     expect(page.locator("#editorSearchStatus")).to_have_text("1 match")
+
+
+def test_photo_editor_crop_lock_keeps_current_aspect(live_server, page):
+    """The crop ratio lock should preserve the current crop aspect while resizing."""
+    url = live_server["url"]
+    hawk_id = live_server["data"]["photos"][0]
+    preview_svg = (
+        "<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'>"
+        "<rect width='400' height='400' fill='green'/>"
+        "</svg>"
+    )
+
+    page.route(
+        "**/photos/*/edit-preview**",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="image/svg+xml",
+            body=preview_svg,
+        ),
+    )
+    page.goto(f"{url}/edit/{hawk_id}")
+    expect(page.locator("#editorFilename")).to_have_text("hawk1.jpg")
+    page.wait_for_function(
+        "() => document.getElementById('editorImg').naturalWidth > 0"
+    )
+
+    page.evaluate(
+        """() => {
+            setCropField('x', '10');
+            setCropField('y', '10');
+            setCropField('w', '60');
+            setCropField('h', '40');
+        }"""
+    )
+    page.locator("#aspectLockBtn").click()
+    assert "active" in (page.locator("#aspectLockBtn").get_attribute("class") or "")
+
+    def crop_aspect():
+        return page.evaluate(
+            """() => {
+                const crop = editorState.recipe.crop;
+                const img = document.getElementById('editorImg');
+                return (crop.w * img.clientWidth) / (crop.h * img.clientHeight);
+            }"""
+        )
+
+    before = crop_aspect()
+    handle = page.locator(".crop-handle.se").bounding_box()
+    assert handle is not None
+    page.mouse.move(handle["x"] + handle["width"] / 2, handle["y"] + handle["height"] / 2)
+    page.mouse.down()
+    page.mouse.move(
+        handle["x"] + handle["width"] / 2 + 24,
+        handle["y"] + handle["height"] / 2,
+        steps=4,
+    )
+    page.mouse.up()
+
+    after = crop_aspect()
+    assert abs(after - before) < 0.001
