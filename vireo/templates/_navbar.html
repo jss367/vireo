@@ -2137,7 +2137,13 @@ function sendReport() {
     if (typeof isTauri === 'function' && isTauri()) {
       window.location.href = url;
     } else {
-      window.open(url, '_blank', 'noopener');
+      var opened = window.open('about:blank', '_blank');
+      if (!opened) {
+        window.location.href = url;
+        return;
+      }
+      try { opened.opener = null; } catch (e) {}
+      opened.location = url;
     }
   };
 })();
