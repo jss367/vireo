@@ -2542,7 +2542,10 @@ def test_cropped_thumbnail_uses_working_copy_on_first_raw_decode_failure(
     rendered = client.get(f"/thumbnails/{photo_id}.jpg")
 
     assert rendered.status_code == 200, rendered.get_data(as_text=True)
-    assert loaded_paths == [raw_path, wc_path]
+    assert [os.path.normpath(path) for path in loaded_paths] == [
+        os.path.normpath(raw_path),
+        os.path.normpath(wc_path),
+    ]
     with Image.open(io.BytesIO(rendered.data)) as img:
         assert img.size == (267, 400)
     row = db.conn.execute(
@@ -3800,7 +3803,10 @@ def test_preview_falls_back_to_working_copy_on_first_raw_decode_failure(
     resp = app.test_client().get(f"/photos/{photo_id}/preview?size=1920")
 
     assert resp.status_code == 200, resp.get_data(as_text=True)
-    assert loaded_paths == [raw_path, wc_path]
+    assert [os.path.normpath(path) for path in loaded_paths] == [
+        os.path.normpath(raw_path),
+        os.path.normpath(wc_path),
+    ]
     with Image.open(io.BytesIO(resp.data)) as img:
         assert img.size == (400, 600)
     row = db.conn.execute(
