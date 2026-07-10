@@ -176,6 +176,19 @@ def test_highlights_photo_preference_overrides_best_photo(life_app):
     assert cardinal["has_preferred_photo"] is True
 
 
+def test_highlights_picks_sort_before_higher_scored_unflagged(life_app):
+    app, db, ids = life_app
+    db.update_photo_flag(ids["p1"], "flagged")
+
+    data = app.test_client().get("/api/highlights?scope=workspace").get_json()
+    cardinal = next(
+        b for b in data["buckets"] if b["species"] == "Northern Cardinal"
+    )
+    assert [p["id"] for p in cardinal["photos"][:2]] == [ids["p1"], ids["p2"]]
+    assert cardinal["photos"][0]["flag"] == "flagged"
+    assert cardinal["photos"][1]["flag"] == "none"
+
+
 def test_life_order_numbering_and_dates(life_app):
     app, _, _ = life_app
     data = _get_life_list(app)

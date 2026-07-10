@@ -297,6 +297,7 @@ def _highlight_score_bucket(photos):
 
     photos.sort(
         key=lambda p: (
+            1 if p.get("flag") == "flagged" else 0,
             p.get("highlight_score") or 0,
             p.get("predicted_confidence") or 0,
             p.get("quality_score") or 0,
