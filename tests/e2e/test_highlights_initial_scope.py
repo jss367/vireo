@@ -224,6 +224,7 @@ def test_highlights_curation_filter_controls_combine(live_server, page):
     data = live_server["data"]
     _seed_quality_scores_and_species(db, data)
     db.add_species_highlight("Red-tailed Hawk", data["photos"][0])
+    db.add_species_highlight("American Robin", data["photos"][3])
     db.set_species_representative("American Robin", data["photos"][3])
 
     page.goto(f"{live_server['url']}/highlights", timeout=5000)
@@ -239,6 +240,7 @@ def test_highlights_curation_filter_controls_combine(live_server, page):
         )
     ):
         page.locator("#highlightSelectionFilter").select_option("yes")
+    expect(page.locator(".bucket-title")).to_have_count(2)
 
     with page.expect_response(
         lambda response: (

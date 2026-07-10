@@ -765,14 +765,14 @@ function render() {
   var confirmation = document.getElementById('confirmationFilter').value;
   var highlightSelection = document.getElementById('highlightSelectionFilter').value;
   var representative = document.getElementById('representativeFilter').value;
-  var filterLabel = (search || speciesSearch) ? ' matching' : '';
+  var filterLabel = (search || speciesSearch) ? ' matching species' : ' species';
   if (confirmation === 'confirmed') filterLabel += ' with confirmed keywords';
   if (confirmation === 'unconfirmed') filterLabel += ' without confirmed keywords';
   if (highlightSelection === 'yes') filterLabel += ' with highlights chosen';
   if (highlightSelection === 'no') filterLabel += ' without highlights chosen';
   if (representative === 'yes') filterLabel += ' with representatives set';
   if (representative === 'no') filterLabel += ' without representatives set';
-  meta.textContent = buckets.length + filterLabel + ' species · '
+  meta.textContent = buckets.length + filterLabel + ' · '
     + currentData.meta.eligible + ' of '
     + currentData.meta.total_in_scope + ' photos scored';
 
