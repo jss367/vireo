@@ -1522,10 +1522,10 @@ document.addEventListener('contextmenu', function(e) {
  * names, different closest() matches.
  *
  * Critical: grmMovePick / grmMoveReject / grmMoveCandidate / grmRemoveFromGroup
- * all operate on grmState.selected. On right-click we force the clicked card
- * to be the primary selection before opening the menu. If the clicked card is
- * already part of a multi-selection, preserve that set so drag alignment state
- * is not lost.
+ * all operate on the active selection. On right-click we force the clicked
+ * card to be the primary selection before opening the menu. If the clicked
+ * card is already part of a multi-selection, preserve that set so drag
+ * alignment state and batch actions are not lost.
  */
 function buildBurstGroupContextMenu(photoId, filename) {
   var rateChip = function(n) {
@@ -2722,62 +2722,97 @@ function _grmGetZone(photoId) {
   return 'candidates';
 }
 
-function grmMoveUp() {
-  if (!grmState.selected) return;
-  var zone = _grmGetZone(grmState.selected);
-  if (zone === 'rejects') {
-    // rejects → candidates
-    grmState.rejects.delete(grmState.selected);
-  } else if (zone === 'candidates') {
-    // candidates → picks
-    grmState.picks.add(grmState.selected);
+function _grmActionTargetIds() {
+  var visible = {};
+  _grmVisibleItems().forEach(function(it) { visible[it.photo_id] = true; });
+  var ids = [];
+  if (grmState.selectedIds && grmState.selectedIds.size) {
+    grmState.selectedIds.forEach(function(id) {
+      var photoId = parseInt(id, 10);
+      if (visible[photoId] && ids.indexOf(photoId) === -1) ids.push(photoId);
+    });
   }
-  // already in picks — do nothing
+  if (!ids.length && grmState.selected) {
+    var selectedId = parseInt(grmState.selected, 10);
+    if (visible[selectedId]) ids.push(selectedId);
+  }
+  return ids;
+}
+
+function grmMoveUp() {
+  var ids = _grmActionTargetIds();
+  if (!ids.length) return;
+  ids.forEach(function(photoId) {
+    var zone = _grmGetZone(photoId);
+    if (zone === 'rejects') {
+      // rejects → candidates
+      grmState.rejects.delete(photoId);
+    } else if (zone === 'candidates') {
+      // candidates → picks
+      grmState.picks.add(photoId);
+    }
+    // already in picks — do nothing
+  });
   renderGroupModal();
 }
 
 function grmMoveDown() {
-  if (!grmState.selected) return;
-  var zone = _grmGetZone(grmState.selected);
-  if (zone === 'picks') {
-    // picks → candidates
-    grmState.picks.delete(grmState.selected);
-  } else if (zone === 'candidates') {
-    // candidates → rejects
-    grmState.rejects.add(grmState.selected);
-  }
-  // already in rejects — do nothing
+  var ids = _grmActionTargetIds();
+  if (!ids.length) return;
+  ids.forEach(function(photoId) {
+    var zone = _grmGetZone(photoId);
+    if (zone === 'picks') {
+      // picks → candidates
+      grmState.picks.delete(photoId);
+    } else if (zone === 'candidates') {
+      // candidates → rejects
+      grmState.rejects.add(photoId);
+    }
+    // already in rejects — do nothing
+  });
   renderGroupModal();
 }
 
 function grmMovePick() {
-  if (!grmState.selected) return;
-  grmState.rejects.delete(grmState.selected);
-  grmState.picks.add(grmState.selected);
+  var ids = _grmActionTargetIds();
+  if (!ids.length) return;
+  ids.forEach(function(photoId) {
+    grmState.rejects.delete(photoId);
+    grmState.picks.add(photoId);
+  });
   renderGroupModal();
 }
 
 function grmMoveReject() {
-  if (!grmState.selected) return;
-  grmState.picks.delete(grmState.selected);
-  grmState.rejects.add(grmState.selected);
+  var ids = _grmActionTargetIds();
+  if (!ids.length) return;
+  ids.forEach(function(photoId) {
+    grmState.picks.delete(photoId);
+    grmState.rejects.add(photoId);
+  });
   renderGroupModal();
 }
 
 function grmMoveCandidate() {
-  if (!grmState.selected) return;
-  grmState.picks.delete(grmState.selected);
-  grmState.rejects.delete(grmState.selected);
+  var ids = _grmActionTargetIds();
+  if (!ids.length) return;
+  ids.forEach(function(photoId) {
+    grmState.picks.delete(photoId);
+    grmState.rejects.delete(photoId);
+  });
   renderGroupModal();
 }
 
 function grmRemoveFromGroup() {
-  if (!grmState.selected) return;
-  // Find the prediction id
-  var item = grmState.items.find(function(it) { return it.photo_id === grmState.selected; });
-  if (item) grmState.removed.add(item.id);
-  grmState.picks.delete(grmState.selected);
-  grmState.rejects.delete(grmState.selected);
+  var ids = _grmActionTargetIds();
+  if (!ids.length) return;
+  ids.forEach(function(photoId) {
+    // Find the prediction id
+    var item = grmState.items.find(function(it) { return it.photo_id === photoId; });
+    if (item) grmState.removed.add(item.id);
+    grmState.picks.delete(photoId);
+    grmState.rejects.delete(photoId);
+  });
   grmState.selected = null;
   if (grmState.selectedIds) grmState.selectedIds.clear();
   grmState.selectionAnchor = null;
@@ -2873,6 +2908,8 @@ document.addEventListener('keydown', function(e) {
   if (e.key === ' ') { grmMoveCandidate(); e.preventDefault(); return; }
   if (e.key === '1') { grmSnapOneToOne(); e.preventDefault(); return; }
   if (e.key && e.key.toLowerCase() === 'z') { grmToggleLoupeOneToOne(); e.preventDefault(); return; }
+  if (e.key && e.key.toLowerCase() === 'p' && !e.ctrlKey && !e.metaKey && !e.altKey) { grmMovePick(); e.preventDefault(); return; }
+  if (e.key && e.key.toLowerCase() === 'x' && !e.ctrlKey && !e.metaKey && !e.altKey) { grmMoveReject(); e.preventDefault(); return; }
 });
 
 </script>
