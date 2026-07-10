@@ -39,12 +39,21 @@ var VireoTextInputs = (function() {
     if (!window.MutationObserver || !document.body) return;
     var observer = new MutationObserver(function(records) {
       records.forEach(function(record) {
+        if (record.type === 'attributes') {
+          if (record.target && record.target.nodeType === 1) apply(record.target);
+          return;
+        }
         record.addedNodes.forEach(function(node) {
           if (node.nodeType === 1) apply(node);
         });
       });
     });
-    observer.observe(document.body, { childList: true, subtree: true });
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['type'],
+    });
   }
 
   if (document.readyState === 'loading') {

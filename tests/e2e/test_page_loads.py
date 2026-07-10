@@ -62,3 +62,16 @@ def test_text_inputs_disable_os_correction_app_wide(live_server, page):
         }"""
     )
     _expect_text_correction_disabled(page.locator("#dynamicTextInput"))
+
+    # A password input flipped to text at runtime (Settings "Show" buttons)
+    # should also receive the correction opt-out.
+    page.evaluate(
+        """() => {
+            const input = document.createElement('input');
+            input.type = 'password';
+            input.id = 'flippedPasswordInput';
+            document.body.appendChild(input);
+            input.type = 'text';
+        }"""
+    )
+    _expect_text_correction_disabled(page.locator("#flippedPasswordInput"))
