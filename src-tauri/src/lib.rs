@@ -93,6 +93,19 @@ fn set_job_progress(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    let url = url.trim();
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+        return Err("Only http and https URLs can be opened externally".to_string());
+    }
+
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
 /// Build the logging plugin used in BOTH dev and release builds.
 ///
 /// Previously logging was only initialized under `cfg!(debug_assertions)`, so
@@ -311,6 +324,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_server_port,
             set_job_progress,
+            open_external_url,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

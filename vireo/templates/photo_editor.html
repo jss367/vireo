@@ -31,14 +31,49 @@ body {
   min-height: 52px;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   padding: 10px 14px;
   border-bottom: 1px solid var(--border-primary);
   background: var(--bg-secondary);
 }
+.editor-search {
+  min-width: 220px;
+  flex: 0 1 300px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+}
+.editor-search input {
+  min-width: 0;
+  width: 100%;
+  height: 32px;
+  border: 1px solid var(--border-secondary);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  padding: 0 9px;
+  font-size: 12px;
+}
+.editor-search input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.editor-search-status {
+  grid-column: 1 / -1;
+  min-height: 13px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.editor-search-status.error { color: var(--danger); }
 .editor-title {
   min-width: 0;
-  flex: 1;
+  flex: 1 1 180px;
 }
 .editor-title strong,
 .editor-title span {
@@ -402,6 +437,14 @@ body {
     border-right: 0;
     border-bottom: 1px solid var(--border-primary);
   }
+  .editor-search {
+    flex-basis: 100%;
+    order: 2;
+  }
+  .editor-title {
+    flex-basis: 100%;
+    order: 3;
+  }
   #editorImg {
     max-width: calc(100vw - 32px);
     max-height: 70vh;
@@ -419,6 +462,11 @@ body {
       <button class="editor-btn" id="prevBtn" type="button" onclick="editorNav(-1)" title="Previous photo (←)" hidden>‹ Prev</button>
       <button class="editor-btn" id="nextBtn" type="button" onclick="editorNav(1)" title="Next photo (→)" hidden>Next ›</button>
       <span class="editor-navpos" id="editorNavPos"></span>
+      <div class="editor-search" role="search">
+        <input id="editorSearchInput" type="search" placeholder="Find bird or filename..." autocomplete="off" aria-label="Find bird or filename" oninput="scheduleEditorSearch()" onkeydown="if(event.key==='Enter'){event.preventDefault(); runEditorSearch({immediate:true});}">
+        <button class="editor-btn" type="button" onclick="runEditorSearch({immediate:true})">Search</button>
+        <span class="editor-search-status" id="editorSearchStatus" role="status" aria-live="polite"></span>
+      </div>
       <div class="editor-title">
         <strong id="editorFilename">Loading photo...</strong>
         <span id="editorSubhead">Non-destructive editor</span>
@@ -656,9 +704,18 @@ var editorState = {
   zoomMode: 'fit',
   cropAspect: null,
   navIds: [],
+  baseNavIds: [],
   loadSeq: 0,
   loading: false,
   histogramTimer: null,
+  searchTimer: null,
+  searchSeq: 0,
+  searchQuery: '',
+  // Seq under which the current `searchQuery` was dispatched. When the input
+  // is retyped back to `searchQuery` after an intermediate keystroke bumped
+  // `searchSeq`, this mismatch tells us the in-flight response was already
+  // invalidated so a replacement fetch is required.
+  searchQuerySeq: 0,
   suppressUnloadPrompt: false,
 };
 
@@ -2278,6 +2335,125 @@ function updateNavControls() {
   if (pos) pos.textContent = hasNav ? (idx + 1) + ' / ' + ids.length : '';
 }
 
+function setSearchStatus(text, isError) {
+  var el = document.getElementById('editorSearchStatus');
+  if (!el) return;
+  el.textContent = text || '';
+  el.classList.toggle('error', !!isError);
+}
+
+function scheduleEditorSearch() {
+  if (editorState.searchTimer) clearTimeout(editorState.searchTimer);
+  editorState.searchTimer = null;
+  var input = document.getElementById('editorSearchInput');
+  var q = input ? input.value.trim() : '';
+  if (!q) {
+    clearEditorSearchResults();
+    return;
+  }
+  if (q === editorState.searchQuery &&
+      editorState.searchQuerySeq === editorState.searchSeq) {
+    // Trimmed query unchanged since our last dispatch AND that dispatch is
+    // still current (e.g. typing a trailing space after "American Robin"),
+    // so its in-flight response will still pass the seq guard. Bumping the
+    // seq here would invalidate it while the debounced replacement would
+    // early-return on the same-query check, leaving the UI stuck at
+    // "Searching...".
+    return;
+  }
+  // Either the trimmed query actually changed, or the previously-dispatched
+  // fetch has been invalidated by an intermediate keystroke (user typed a
+  // different query then reverted before the debounce fired). In both cases
+  // bump the seq so any in-flight response fails the seq guard, then debounce
+  // a replacement fetch.
+  editorState.searchSeq++;
+  editorState.searchTimer = setTimeout(function() {
+    editorState.searchTimer = null;
+    runEditorSearch();
+  }, 300);
+}
+
+function clearEditorSearchResults() {
+  editorState.searchSeq++;
+  editorState.searchQuery = '';
+  editorState.searchQuerySeq = 0;
+  editorState.navIds = (editorState.baseNavIds || []).slice();
+  if (window.vireoEditNav) window.vireoEditNav.setList(editorState.navIds, editorState.photoId);
+  setSearchStatus('');
+  updateNavControls();
+}
+
+async function runEditorSearch(opts) {
+  opts = opts || {};
+  if (editorState.searchTimer) {
+    clearTimeout(editorState.searchTimer);
+    editorState.searchTimer = null;
+  }
+  var input = document.getElementById('editorSearchInput');
+  var q = input ? input.value.trim() : '';
+  if (!q) {
+    clearEditorSearchResults();
+    return;
+  }
+  if (q === editorState.searchQuery && !opts.immediate &&
+      editorState.searchQuerySeq === editorState.searchSeq) {
+    // Same trimmed query as our last dispatch and that dispatch is still
+    // current (nothing invalidated it) — no need to refire. If the seqs no
+    // longer match, `scheduleEditorSearch` bumped the seq because an
+    // intermediate keystroke invalidated the in-flight response, so we must
+    // fall through to dispatch a replacement.
+    return;
+  }
+  if (isEditorDirty()) {
+    setSearchStatus('Save or discard this photo before searching.', true);
+    return;
+  }
+
+  var seq = ++editorState.searchSeq;
+  editorState.searchQuery = q;
+  editorState.searchQuerySeq = seq;
+  setSearchStatus('Searching...');
+  try {
+    var params = new URLSearchParams();
+    params.set('keyword', q);
+    params.set('sort', 'name');
+    var data = await safeFetch('/api/photos/ids?' + params.toString(), {}, {toast: false});
+    if (seq !== editorState.searchSeq) return;
+    var ids = (data.photo_ids || [])
+      .map(function(id) { return Number(id); })
+      .filter(function(id) { return Number.isFinite(id) && id > 0; });
+    if (!ids.length) {
+      editorState.navIds = [];
+      if (window.vireoEditNav) window.vireoEditNav.setList([], null);
+      setSearchStatus('No matches for "' + q + '".', true);
+      updateNavControls();
+      return;
+    }
+
+    var current = Number(editorState.photoId);
+    var target = ids.indexOf(current) === -1 ? ids[0] : current;
+    // Dirty state can change during the fetch above. Run the confirm before
+    // any nav/status mutation so a dismissed prompt leaves the editor
+    // untouched — otherwise the navIds/nav position/status would already
+    // describe the search target while the still-loaded dirty photo isn't in
+    // ids, leaving the editor visibly inconsistent.
+    if (target !== current && isEditorDirty() &&
+        !window.confirm('Discard unsaved edits to this photo?')) {
+      return;
+    }
+    editorState.navIds = ids;
+    if (window.vireoEditNav) window.vireoEditNav.setList(ids, target);
+    setSearchStatus(ids.length.toLocaleString() + ' match' + (ids.length === 1 ? '' : 'es'));
+    updateNavControls();
+    if (target !== current) {
+      await loadPhoto(target);
+    }
+  } catch (e) {
+    if (seq !== editorState.searchSeq) return;
+    setSearchStatus(e.message || 'Search failed', true);
+  }
+}
+
 function editorNav(delta) {
   var ids = editorState.navIds || [];
   var idx = ids.indexOf(Number(editorState.photoId));
@@ -2334,6 +2510,10 @@ async function loadPhoto(photoId, opts) {
   editorState.recipe = {};
   var saveBtn = document.getElementById('saveBtn');
   if (saveBtn) saveBtn.disabled = true;
+  ['copySettingsBtn', 'beforeBtn', 'fitBtn', 'actualBtn'].forEach(function(id) {
+    var b = document.getElementById(id);
+    if (b) b.disabled = false;
+  });
   editorState.showBefore = false;
   editorState.cropAspect = null;
   updateAspectButtons();
@@ -2428,6 +2608,7 @@ async function initEditor() {
   setZoomMode('fit');
   loadPresets();
   if (window.vireoEditNav) editorState.navIds = window.vireoEditNav.getList() || [];
+  editorState.baseNavIds = (editorState.navIds || []).slice();
   var match = window.location.pathname.match(/\/edit\/(\d+)/);
   var photoId = match
     ? Number(match[1])

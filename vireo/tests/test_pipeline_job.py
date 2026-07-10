@@ -2706,6 +2706,35 @@ def test_pipeline_classifies_full_image_when_detector_finds_nothing(
     )
     assert [d["id"] for d in full_after] == [full[0]["id"]]
 
+    # Forced reclassify should infer again, but the stale-detection purge must
+    # treat the synthetic full-image anchor as fresh. Otherwise the purge
+    # cascades through predictions.detection_id and deletes the new result.
+    reclassify_params = PipelineParams(
+        collection_id=col_id,
+        model_id="bioclip-vit-b-16",
+        reclassify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    third = run_pipeline_job(
+        _make_job(), FakeRunner(), db_path, ws_id, reclassify_params,
+    )
+    assert third["stages"]["classify"]["full_image_fallbacks"] == 1
+    assert classify_calls == [1, 1]
+    verify = Database(db_path)
+    verify.set_active_workspace(ws_id)
+    full_reclassified = verify.get_detections(
+        photo_id, detector_model="full-image", min_conf=0,
+    )
+    assert [d["id"] for d in full_reclassified] == [full[0]["id"]]
+    pred_after_reclassify = verify.get_predictions_for_detection(
+        full[0]["id"],
+        classifier_model="BioCLIP",
+        min_classifier_conf=0,
+    )
+    assert len(pred_after_reclassify) == 1
+    assert pred_after_reclassify[0]["species"] == "Full-image Robin"
+
 
 def test_pipeline_redownloads_taxonomy_when_existing_file_is_corrupt(
     tmp_path, monkeypatch
@@ -3360,121 +3389,6 @@ def test_pipeline_reclassify_same_boxes_preserves_predictions(
     assert preds >= 1, (
         f"freshly-written predictions must survive the reclassify purge; "
         f"got {preds}"
-    )
-
-
-def test_pipeline_reclassify_preserves_full_image_anchor(
-    tmp_path, monkeypatch,
-):
-    """Reclassify of a no-detection photo must not purge its synthetic
-    full-image anchor (or cascade-delete the fresh predictions on it).
-
-    Scenario: a prior no-detection run stored a synthetic ``full-image``
-    detection anchor plus a classifier prediction on it. Reclassify runs;
-    the detector still finds nothing. classify's fallback branch
-    ``save_detections(..., detector_model="full-image")`` returns the same
-    content-addressed id as the pre-run anchor, upserts it, and writes a
-    fresh prediction. The subsequent stale-row purge compares pre-run ids
-    against ``detect_state["detections"]`` — which only carries real
-    detector rows — so without a carve-out the recreated anchor is flagged
-    stale, its row is deleted, and the fresh prediction cascades away,
-    leaving the photo unclassified after reclassify.
-
-    Regression for Codex P1 review on PR #1148.
-    """
-    import classifier as classifier_mod
-    import classify_job
-    import config as cfg
-    from db import Database
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
-    folder_path = str(tmp_path / "photos")
-    os.makedirs(folder_path, exist_ok=True)
-    folder_id = db.add_folder(folder_path)
-    photo_id = db.add_photo(folder_id, "empty.jpg", ".jpg", 100, 1_000_000.0)
-    _drop_jpeg(folder_path, "empty.jpg")
-
-    # Prior no-detection run: synthetic full-image anchor. Detection ids
-    # are content-addressed so the reclassify pass will re-compute the
-    # SAME id via save_detections in classify's fallback branch.
-    prior_full = db.save_detections(
-        photo_id,
-        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1},
-          "confidence": 0, "category": "animal"}],
-        detector_model="full-image",
-    )
-    prior_full_id = prior_full[0]
-
-    col_id = db.add_collection(
-        "Test", json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
-    )
-    model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
-
-    # Reclassify still finds no animals. detect_state["detections"] stays
-    # empty so the classify loop's fallback branch fires.
-    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
-                          det_conf_threshold=None, already_detected_ids=None,
-                          cached_detections=None):
-        return {}, 0, {p["id"] for p in batch}
-
-    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
-
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def classify_with_embedding(self, img, threshold=0):
-            import numpy as np
-            return ([{"species": "Fresh species", "score": 0.9}],
-                    np.zeros(512, dtype=np.float32))
-
-        def classify_batch_with_embedding(self, images, threshold=0):
-            import numpy as np
-            z = np.zeros(512, dtype=np.float32)
-            return [([{"species": "Fresh species", "score": 0.9}], z)
-                    for _ in images]
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
-
-    params = PipelineParams(
-        collection_id=col_id,
-        model_ids=model_ids[:1],
-        reclassify=True,
-        skip_extract_masks=True,
-        skip_regroup=True,
-    )
-    run_pipeline_job(_make_job(), FakeRunner(), db_path, ws_id, params)
-
-    verify = Database(db_path)
-    verify.set_active_workspace(ws_id)
-
-    surviving_full = verify.get_detections(
-        photo_id, detector_model="full-image", min_conf=0,
-    )
-    assert surviving_full, (
-        "Reclassify's stale-row purge must preserve the synthetic full-image "
-        "anchor recreated by classify's no-detection fallback. Without the "
-        "carve-out, first_model_full_image_ids is empty, the anchor id is "
-        "absent from detect_state['detections'] (real detector rows only), "
-        "and the purge deletes the row — cascading the fresh prediction and "
-        "leaving the photo unclassified after reclassify."
-    )
-    assert [d["id"] for d in surviving_full] == [prior_full_id], (
-        "content-addressed id should match the prior anchor"
-    )
-
-    preds = verify.conn.execute(
-        "SELECT species FROM predictions WHERE detection_id=?",
-        (prior_full_id,),
-    ).fetchall()
-    species = [row["species"] for row in preds]
-    assert "Fresh species" in species, (
-        f"fresh reclassify prediction must survive; got {species!r}"
     )
 
 

@@ -130,6 +130,7 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
     total = 0
     files_checked = 0
     last_emitted = 0
+    seen_new_paths = set()
 
     def _maybe_emit():
         nonlocal last_emitted
@@ -197,6 +198,10 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
                 if ext in _JPEG_EXTS and (dirpath, Path(name).stem) in known_raw_stems:
                     _maybe_emit()
                     continue
+                if full in seen_new_paths:
+                    _maybe_emit()
+                    continue
+                seen_new_paths.add(full)
                 root_new += 1
                 total += 1
                 if sample_limit is None or len(sample) < sample_limit:

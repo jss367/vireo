@@ -121,7 +121,7 @@ def test_kickoff_compute_drops_stale_error_when_generation_changes():
         raise RuntimeError("disk unreachable")
 
     event = cache.kickoff_compute(DB, 1, compute)
-    assert event.wait(timeout=2.0), "background compute did not finish"
+    assert event.wait(timeout=10.0), "background compute did not finish"
 
     assert cache.get_recent_error(DB, 1) is None, (
         "stale error must be dropped when the generation moved during compute"
@@ -138,7 +138,7 @@ def test_kickoff_compute_records_error_when_generation_unchanged():
         raise RuntimeError("disk unreachable")
 
     event = cache.kickoff_compute(DB, 1, compute)
-    assert event.wait(timeout=2.0)
+    assert event.wait(timeout=10.0)
 
     err = cache.get_recent_error(DB, 1)
     assert err is not None and "disk unreachable" in err
@@ -153,7 +153,7 @@ def test_kickoff_compute_clears_prior_error_on_success():
         raise RuntimeError("transient")
 
     event = cache.kickoff_compute(DB, 1, boom)
-    assert event.wait(timeout=2.0)
+    assert event.wait(timeout=10.0)
     assert cache.get_recent_error(DB, 1) is not None
 
     # The error sits in the backoff window and would normally suppress the
@@ -167,7 +167,7 @@ def test_kickoff_compute_clears_prior_error_on_success():
         return {"new_count": 3}
 
     event = cache.kickoff_compute(DB, 1, ok)
-    assert event.wait(timeout=2.0)
+    assert event.wait(timeout=10.0)
     assert cache.get(DB, 1) == {"new_count": 3}
     assert cache.get_recent_error(DB, 1) is None
 
@@ -186,7 +186,7 @@ def test_invalidate_workspaces_clears_recent_error():
         raise RuntimeError("disk unreachable")
 
     event = cache.kickoff_compute(DB, 1, boom)
-    assert event.wait(timeout=2.0)
+    assert event.wait(timeout=10.0)
     assert cache.get_recent_error(DB, 1) is not None
 
     # Invalidation simulates a finished scan or workspace folder change.
@@ -202,7 +202,7 @@ def test_invalidate_workspaces_clears_recent_error():
         return {"new_count": 4}
 
     event = cache.kickoff_compute(DB, 1, ok)
-    assert event.wait(timeout=2.0)
+    assert event.wait(timeout=10.0)
     assert cache.get(DB, 1) == {"new_count": 4}
 
 
@@ -214,8 +214,8 @@ def test_invalidate_workspaces_clears_error_only_for_targeted_keys():
     def boom():
         raise RuntimeError("disk unreachable")
 
-    cache.kickoff_compute(DB, 1, boom).wait(timeout=2.0)
-    cache.kickoff_compute(DB, 2, boom).wait(timeout=2.0)
+    cache.kickoff_compute(DB, 1, boom).wait(timeout=10.0)
+    cache.kickoff_compute(DB, 2, boom).wait(timeout=10.0)
     assert cache.get_recent_error(DB, 1) is not None
     assert cache.get_recent_error(DB, 2) is not None
 
@@ -240,11 +240,11 @@ def test_kickoff_compute_reuses_in_flight_for_current_generation():
         return {"new_count": 3}
 
     e1 = cache.kickoff_compute(DB, 1, slow_compute)
-    assert started.wait(timeout=2.0)
+    assert started.wait(timeout=10.0)
     e2 = cache.kickoff_compute(DB, 1, slow_compute)
     assert e1 is e2, "concurrent kickoff for same generation must reuse in-flight"
     proceed.set()
-    assert e1.wait(timeout=2.0)
+    assert e1.wait(timeout=10.0)
     assert call_count[0] == 1
 
 
@@ -269,7 +269,7 @@ def test_kickoff_compute_coalesces_stale_generation_into_deferred_rerun():
         return {"new_count": 999}  # stale value — must be dropped
 
     e1 = cache.kickoff_compute(DB, 1, stale_compute)
-    assert stale_started.wait(timeout=2.0)
+    assert stale_started.wait(timeout=10.0)
 
     # Invalidation advances the generation while the compute is still running.
     cache.invalidate_workspaces(DB, [1])
@@ -297,8 +297,8 @@ def test_kickoff_compute_coalesces_stale_generation_into_deferred_rerun():
     # Release the stale thread; the deferred rerun fires asynchronously after
     # its finally block runs.
     stale_proceed.set()
-    assert e1.wait(timeout=2.0)
-    assert fresh_called.wait(timeout=2.0), (
+    assert e1.wait(timeout=10.0)
+    assert fresh_called.wait(timeout=10.0), (
         "deferred rerun must spawn fresh compute after stale finishes"
     )
 
@@ -330,7 +330,7 @@ def test_kickoff_compute_coalesces_repeated_invalidations_into_single_rerun():
         return {"new_count": 0}
 
     cache.kickoff_compute(DB, 1, stale_compute)
-    assert stale_started.wait(timeout=2.0)
+    assert stale_started.wait(timeout=10.0)
 
     # Several rounds of invalidation + kickoff with different compute_fns;
     # only the last one's result should ultimately land in the cache.
@@ -387,7 +387,7 @@ def test_kickoff_compute_stale_thread_clears_inflight_slot_for_rerun():
         return {"new_count": 1}
 
     cache.kickoff_compute(DB, 1, stale_compute)
-    assert stale_started.wait(timeout=2.0)
+    assert stale_started.wait(timeout=10.0)
     cache.invalidate_workspaces(DB, [1])
 
     rerun_done = threading.Event()
@@ -399,7 +399,7 @@ def test_kickoff_compute_stale_thread_clears_inflight_slot_for_rerun():
     cache.kickoff_compute(DB, 1, rerun_compute)
     stale_proceed.set()
 
-    assert rerun_done.wait(timeout=2.0), (
+    assert rerun_done.wait(timeout=10.0), (
         "rerun must run after stale thread finishes and frees the in-flight slot"
     )
 

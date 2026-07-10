@@ -4652,6 +4652,47 @@ def test_add_keyword_auto_detects_taxonomy_via_alt_common_name(tmp_path):
     assert row["taxon_id"] == 1
 
 
+def test_add_keyword_auto_detects_taxonomy_with_smart_apostrophe(tmp_path):
+    """Smart-apostrophe user text matches straight-apostrophe taxa names."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.execute(
+        "INSERT INTO taxa (id, name, common_name, rank) "
+        "VALUES (1, 'Sayornis saya', ?, 'species')",
+        ("Say's Phoebe",),
+    )
+    db.conn.commit()
+
+    kid = db.add_keyword("Say’s phoebe")
+    row = db.conn.execute(
+        "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] == 1
+
+
+def test_add_keyword_promotes_existing_general_smart_apostrophe_taxon(tmp_path):
+    """A legacy general row is promoted when auto-detect can now resolve it."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    kid = db.add_keyword("Say’s phoebe")
+    db.conn.execute(
+        "INSERT INTO taxa (id, name, common_name, rank) "
+        "VALUES (1, 'Sayornis saya', ?, 'species')",
+        ("Say's Phoebe",),
+    )
+    db.conn.commit()
+
+    assert db.add_keyword("Say’s phoebe") == kid
+    row = db.conn.execute(
+        "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] == 1
+
+
 def test_add_keyword_no_auto_detect_for_general(tmp_path):
     """add_keyword defaults to general when name doesn't match a taxon."""
     from db import Database
@@ -8882,6 +8923,9 @@ def test_get_highlights_candidates(tmp_path):
     assert scores == sorted(scores, reverse=True)
     # Each result should have species field (may be None for unclassified)
     assert all("species" in dict(r) for r in results)
+    assert all("folder_name" in dict(r) for r in results)
+    assert all("folder_path" in dict(r) for r in results)
+    assert all("keyword_names" in dict(r) for r in results)
 
 
 def test_get_highlights_candidates_includes_descendants(tmp_path):
@@ -10420,6 +10464,18 @@ def test_create_and_get_new_images_snapshot(tmp_path):
     assert snap["file_count"] == 2
     assert snap["workspace_id"] == ws_id
     assert sorted(snap["file_paths"]) == sorted(paths)
+
+
+def test_create_new_images_snapshot_file_count_matches_unique_paths(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    paths = ["/tmp/a/IMG_001.JPG", "/tmp/a/IMG_001.JPG", "/tmp/b/IMG_002.JPG"]
+
+    snap_id = db.create_new_images_snapshot(paths)
+    snap = db.get_new_images_snapshot(snap_id)
+
+    assert snap["file_count"] == 2
+    assert snap["file_paths"] == ["/tmp/a/IMG_001.JPG", "/tmp/b/IMG_002.JPG"]
 
 
 def test_get_snapshot_from_different_workspace_returns_none(tmp_path):

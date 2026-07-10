@@ -1,8 +1,10 @@
 """Tests for photo deletion API and database cleanup."""
+import builtins
 import json
 import os
 
 from PIL import Image
+from wait import wait_for_job_via_client
 
 
 def test_delete_photos_removes_from_db(app_and_db):
@@ -178,6 +180,95 @@ def test_api_batch_delete_vireo_mode(app_and_db):
     client = app.test_client()
     photos = db.get_photos()
     pid = photos[0]["id"]
+
+    resp = client.post("/api/batch/delete", json={
+        "photo_ids": [pid],
+        "mode": "vireo",
+    })
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["ok"] is True
+    assert data["deleted"] == 1
+    assert db.get_photo(pid) is None
+
+
+def test_api_job_batch_delete_vireo_mode(app_and_db):
+    """Background delete job removes photos and returns the normal result."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.get_photos()[0]["id"]
+
+    resp = client.post("/api/jobs/batch-delete", json={
+        "photo_ids": [pid],
+        "mode": "vireo",
+    })
+
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+    assert job["result"]["ok"] is True
+    assert job["result"]["deleted"] == 1
+    assert db.get_photo(pid) is None
+
+
+def test_api_batch_delete_tolerates_pipeline_prune_system_exit(app_and_db, monkeypatch):
+    """A packaged-app lazy import failure must not strand the delete request."""
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.get_photos()[0]["id"]
+
+    def fail_prune(self, ids):
+        raise SystemExit("packaged executable was moved")
+
+    monkeypatch.setattr(Database, "prune_pipeline_cache_for_ids", fail_prune)
+
+    resp = client.post("/api/batch/delete", json={
+        "photo_ids": [pid],
+        "mode": "vireo",
+    })
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["ok"] is True
+    assert data["deleted"] == 1
+    assert db.get_photo(pid) is None
+
+
+def test_delete_photos_tolerates_pipeline_import_system_exit(app_and_db, monkeypatch):
+    """Direct DB deletes should also treat pipeline cache pruning as optional."""
+    app, db = app_and_db
+    pid = db.get_photos()[0]["id"]
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "pipeline":
+            raise SystemExit("packaged executable was moved")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    result = db.delete_photos([pid])
+
+    assert result["deleted"] == 1
+    assert db.get_photo(pid) is None
+
+
+def test_api_batch_delete_tolerates_cache_cleanup_system_exit(app_and_db, monkeypatch):
+    """Preview/thumbnail cleanup failures should not prevent a delete response."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.get_photos()[0]["id"]
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "preview_cache":
+            raise SystemExit("packaged executable was moved")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
 
     resp = client.post("/api/batch/delete", json={
         "photo_ids": [pid],

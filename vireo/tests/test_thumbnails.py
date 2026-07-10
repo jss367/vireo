@@ -457,10 +457,16 @@ def test_generate_all_does_not_record_thumb_path_on_failure(tmp_path, monkeypatc
     assert row["thumb_path"] is None
 
 
-def test_generate_all_skips_current_raw_marker_after_crop_rejects_working_copy(
+def test_generate_all_uses_near_full_working_copy_after_current_raw_failure(
     tmp_path, monkeypatch,
 ):
-    """Batch thumbnails must not retry a RAW that has a current source failure."""
+    """Edited HE/unsupported RAW thumbnails should fall back to the JPEG copy.
+
+    A Nikon HE* embedded/working JPEG can be a few pixels smaller than the
+    RAW's nominal dimensions. Once the RAW source is marked failed for the
+    current mtime, the thumbnail path should use that JPEG when it can satisfy
+    the cropped render instead of leaving the photo permanently thumbnail-less.
+    """
     import thumbnails as thumbnails_mod
     from db import Database
 
@@ -473,7 +479,7 @@ def test_generate_all_skips_current_raw_marker_after_crop_rejects_working_copy(
     working_dir = vireo_dir / "working"
     working_dir.mkdir(parents=True)
     wc_path = working_dir / "1.jpg"
-    Image.new("RGB", (200, 150), color="red").save(wc_path, "JPEG")
+    Image.new("RGB", (792, 594), color="red").save(wc_path, "JPEG")
 
     db = Database(str(vireo_dir / "test.db"))
     fid = db.add_folder(str(photos_dir), name="photos")
@@ -504,21 +510,30 @@ def test_generate_all_skips_current_raw_marker_after_crop_rejects_working_copy(
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
     )
 
-    def fail_if_called(*_args, **_kwargs):
-        raise AssertionError("batch thumbnail generation retried failed RAW")
+    loaded_paths = []
+    original_load_image = thumbnails_mod.load_image
 
-    monkeypatch.setattr(thumbnails_mod, "generate_thumbnail", fail_if_called)
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        loaded_paths.append(str(file_path))
+        if str(file_path).lower().endswith(".nef"):
+            raise AssertionError("batch thumbnail generation retried failed RAW")
+        return original_load_image(file_path, max_size=max_size, **kwargs)
+
+    monkeypatch.setattr(thumbnails_mod, "load_image", tracking_load_image)
 
     result = thumbnails_mod.generate_all(
         db, str(vireo_dir / "thumbnails"), vireo_dir=str(vireo_dir),
     )
 
-    assert result["generated"] == 0
-    assert result["failed"] == 1
+    assert result["generated"] == 1
+    assert result["failed"] == 0
+    assert [os.path.normpath(path) for path in loaded_paths] == [
+        os.path.normpath(str(wc_path))
+    ]
     row = db.conn.execute(
         "SELECT thumb_path FROM photos WHERE id=?", (photo_id,),
     ).fetchone()
-    assert row["thumb_path"] is None
+    assert row["thumb_path"] == f"{photo_id}.jpg"
 
 
 def test_backfill_thumb_paths_sets_path_for_existing_files(tmp_path):

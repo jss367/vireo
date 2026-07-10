@@ -62,6 +62,9 @@ from render_source import (
 from render_source import (
     image_is_smaller_than_expected as _image_is_smaller_than_expected,
 )
+from render_source import (
+    image_size_after_exif_orientation as _image_size_after_exif_orientation,
+)
 from render_source import path_satisfies_recipe_render as _path_satisfies_recipe_render
 from render_source import (
     recipe_render_source as _recipe_render_source,
@@ -192,8 +195,13 @@ def _highlight_area_score(subject_size):
     return min(1.0, math.sqrt(subject_size) * 2.0)
 
 
-def _highlight_score_bucket(photos):
-    """Attach highlight scores and compact reason labels to one species bucket."""
+def _highlight_score_bucket(photos, picked_first=False):
+    """Attach highlight scores and compact reason labels to one species bucket.
+
+    picked_first promotes flagged photos above unflagged ones regardless of
+    score — desired on the Highlights page, but off by default so callers
+    like the Life List keep selecting the highest-scored photo.
+    """
     subject_values = [p.get("subject_tenengrad") for p in photos]
     eye_values = [p.get("eye_tenengrad") for p in photos if p.get("eye_tenengrad") is not None]
     bg_values = [p.get("bg_tenengrad") for p in photos]
@@ -294,6 +302,7 @@ def _highlight_score_bucket(photos):
 
     photos.sort(
         key=lambda p: (
+            (1 if p.get("flag") == "flagged" else 0) if picked_first else 0,
             p.get("highlight_score") or 0,
             p.get("predicted_confidence") or 0,
             p.get("quality_score") or 0,
@@ -319,6 +328,17 @@ def _apply_preferred_photo(photos, preferred_photo_id, marker_key):
     return False
 
 
+def _bucket_best_score(photos):
+    """Return the highest highlight_score in a bucket, or None if empty.
+
+    Used to rank buckets on the Highlights page. Reads the max across all
+    photos so a pick-first (or user-preferred) reorder at photos[0] can't
+    demote a species by anchoring the bucket score to a lower-scored photo.
+    """
+    scores = [p.get("highlight_score") for p in photos if p.get("highlight_score") is not None]
+    return max(scores) if scores else None
+
+
 def _apply_highlight_preferences(db, buckets):
     preferences = db.get_photo_preferences("highlights")
     for bucket in buckets:
@@ -326,11 +346,17 @@ def _apply_highlight_preferences(db, buckets):
         applied = _apply_preferred_photo(
             bucket["photos"], preferred_id, "is_highlights_photo"
         )
-        best = bucket["photos"][0] if bucket["photos"] else {}
+        top = bucket["photos"][0] if bucket["photos"] else {}
         bucket["preferred_photo_id"] = preferred_id
         bucket["has_preferred_photo"] = applied
-        bucket["best_quality"] = best.get("quality_score")
-        bucket["best_score"] = best.get("highlight_score")
+        bucket["best_quality"] = top.get("quality_score")
+        # Rank by the highest-scored photo in the bucket, not photos[0].
+        # A picked (or manually preferred) photo may sit at photos[0] with a
+        # lower highlight_score; using its score for bucket ranking would
+        # demote the whole species below buckets with worse actual best
+        # photos.
+        bucket["best_score"] = _bucket_best_score(bucket["photos"])
+        bucket["best_timestamp"] = top.get("timestamp")
 
 
 def _highlight_confidence_label(confidence, is_accepted):
@@ -386,6 +412,10 @@ def _collect_highlight_buckets(
         photo = {
             "id": r["id"],
             "filename": r["filename"],
+            "timestamp": r.get("timestamp"),
+            "folder_name": r.get("folder_name"),
+            "folder_path": r.get("folder_path"),
+            "keyword_names": r.get("keyword_names") or "",
             "rating": r.get("rating") or 0,
             "flag": r.get("flag") or "none",
             "quality_score": r.get("quality_score"),
@@ -407,6 +437,7 @@ def _collect_highlight_buckets(
             "predicted_species": r.get("predicted_species"),
             "predicted_confidence": predicted_conf,
             "has_accepted_species": accepted is not None,
+            "is_unidentified": species is None,
             "is_confirmable_prediction": (
                 accepted is None
                 and species is not None
@@ -426,7 +457,7 @@ def _collect_highlight_buckets(
     buckets = []
     for species, entry in bucket_map.items():
         photos = entry["photos"]
-        _highlight_score_bucket(photos)
+        _highlight_score_bucket(photos, picked_first=True)
         confidences = [
             p["predicted_confidence"]
             for p in photos
@@ -436,7 +467,7 @@ def _collect_highlight_buckets(
             round(sum(confidences) / len(confidences), 4)
             if confidences else None
         )
-        best = photos[0] if photos else {}
+        top = photos[0] if photos else {}
         buckets.append({
             "species": species,
             "is_accepted": entry["is_accepted"],
@@ -445,12 +476,13 @@ def _collect_highlight_buckets(
             ),
             "avg_confidence": avg_confidence,
             "photo_count": len(photos),
-            "best_quality": best.get("quality_score"),
-            "best_score": best.get("highlight_score"),
+            "best_quality": top.get("quality_score"),
+            "best_score": _bucket_best_score(photos),
+            "best_timestamp": top.get("timestamp"),
             "photos": photos,
         })
 
-    _highlight_score_bucket(unidentified_photos)
+    _highlight_score_bucket(unidentified_photos, picked_first=True)
     buckets.sort(
         key=lambda b: (
             b.get("best_score") or 0,
@@ -460,6 +492,96 @@ def _collect_highlight_buckets(
         reverse=True,
     )
     return buckets, unidentified_photos
+
+
+def _highlight_search_fields(photo):
+    return [
+        photo.get("filename") or "",
+        photo.get("folder_name") or "",
+        photo.get("folder_path") or "",
+        photo.get("keyword_names") or "",
+        photo.get("species") or "",
+        photo.get("predicted_species") or "",
+        "unidentified" if photo.get("is_unidentified") else "",
+    ]
+
+
+def _highlight_photo_matches_query(
+    photo,
+    query,
+    match_case=False,
+    whole_word=False,
+):
+    tokens = str(query or "").split()
+    if not tokens:
+        return True
+    fields = _highlight_search_fields(photo)
+    return all(
+        any(
+            text_search_match(field, token, match_case, whole_word)
+            for field in fields
+        )
+        for token in tokens
+    )
+
+
+def _refresh_highlight_bucket_metadata(bucket):
+    photos = bucket.get("photos") or []
+    confidences = [
+        p.get("predicted_confidence")
+        for p in photos
+        if p.get("predicted_confidence") is not None
+    ]
+    avg_confidence = (
+        round(sum(confidences) / len(confidences), 4)
+        if confidences else None
+    )
+    top = photos[0] if photos else {}
+    # Filtering can drop the unconfirmed photos from a mixed bucket, leaving
+    # only confirmed ones — recompute so the "candidate" badge and the
+    # `confirmed` sort match what the row now actually contains.
+    bucket["is_accepted"] = bool(photos) and all(
+        p.get("has_accepted_species") for p in photos
+    )
+    bucket["avg_confidence"] = avg_confidence
+    bucket["certainty"] = _highlight_confidence_label(
+        avg_confidence, bucket.get("is_accepted")
+    )
+    bucket["photo_count"] = len(photos)
+    bucket["best_quality"] = top.get("quality_score")
+    bucket["best_score"] = _bucket_best_score(photos)
+    bucket["best_timestamp"] = top.get("timestamp")
+    return bucket
+
+
+def _filter_highlight_sections(
+    buckets,
+    unidentified_photos,
+    query,
+    match_case=False,
+    whole_word=False,
+):
+    query = (query or "").strip()
+    if not query:
+        for bucket in buckets:
+            _refresh_highlight_bucket_metadata(bucket)
+        return buckets, unidentified_photos
+
+    filtered_buckets = []
+    for bucket in buckets:
+        photos = [
+            p for p in (bucket.get("photos") or [])
+            if _highlight_photo_matches_query(p, query, match_case, whole_word)
+        ]
+        if photos:
+            updated = {**bucket, "photos": photos}
+            filtered_buckets.append(_refresh_highlight_bucket_metadata(updated))
+
+    unidentified = [
+        p for p in unidentified_photos
+        if _highlight_photo_matches_query(p, query, match_case, whole_word)
+    ]
+    return filtered_buckets, unidentified
 
 
 # Maximum number of bound parameters per SQL statement. SQLite's
@@ -2034,11 +2156,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if db is not None:
             db.conn.close()
 
-    def _cleanup_cached_files_for_deleted_photos(files):
-        from preview_cache import cleanup_cached_files_for_deleted_photos
-        cleanup_cached_files_for_deleted_photos(
-            app.config["THUMB_CACHE_DIR"], files,
-        )
+    def _reraise_fatal_cleanup_error(exc):
+        if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
+            raise exc
+
+    def _cleanup_cached_files_for_deleted_photos(files, progress_callback=None):
+        try:
+            from preview_cache import cleanup_cached_files_for_deleted_photos
+            cleanup_cached_files_for_deleted_photos(
+                app.config["THUMB_CACHE_DIR"], files, progress_callback=progress_callback,
+            )
+        except BaseException as exc:
+            _reraise_fatal_cleanup_error(exc)
+            log.exception("Failed to clean cached files after delete")
 
     @app.before_request
     def _enforce_api_v1_token():
@@ -6043,17 +6173,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                            str(kid), items, is_batch=True)
         return jsonify({"ok": True, "updated": len(added_ids)})
 
-    @app.route("/api/batch/delete", methods=["POST"])
-    def api_batch_delete():
-        """Delete photos from Vireo, optionally moving files to trash."""
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        photo_ids = body.get("photo_ids", [])
-        mode = body.get("mode", "vireo")
-        include_companions = body.get("include_companions", False)
-        # For disk_permanent retry: accept paths directly since DB rows
-        # were already deleted in the initial disk-mode call.
-        paths = body.get("paths", [])
+    def _run_batch_delete(
+        db, photo_ids, mode="vireo", include_companions=False, paths=None,
+        progress_callback=None,
+    ):
+        """Delete photos using the same phases for sync and job endpoints."""
+        paths = paths or []
+
+        def emit(phase, current=0, total=0, current_file="", detail=""):
+            if progress_callback:
+                progress_callback({
+                    "phase": phase,
+                    "current": current,
+                    "total": total,
+                    "current_file": current_file,
+                    "detail": detail,
+                })
 
         if mode == "disk_permanent" and paths:
             # Retry path: DB rows were already deleted by the initial
@@ -6064,8 +6199,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # files) is refused, not removed.
             trashed = 0
             trash_failed = []
-            for p in paths:
+            total_paths = len(paths)
+            emit("Deleting files permanently", 0, total_paths)
+            for idx, p in enumerate(paths, start=1):
                 if not isinstance(p, str) or not p:
+                    emit("Deleting files permanently", idx, total_paths)
                     continue
                 candidates = {os.path.dirname(p), os.path.dirname(os.path.realpath(p))}
                 known = db.conn.execute(
@@ -6077,8 +6215,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         "Refusing disk_permanent retry for path outside Vireo folders: %s", p
                     )
                     trash_failed.append({"path": p, "error": "not in a Vireo folder"})
+                    emit("Deleting files permanently", idx, total_paths, os.path.basename(p))
                     continue
                 if not os.path.isfile(p):
+                    emit("Deleting files permanently", idx, total_paths, os.path.basename(p))
                     continue
                 try:
                     os.remove(p)
@@ -6086,15 +6226,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 except OSError:
                     log.warning("Permanent delete failed for %s", p, exc_info=True)
                     trash_failed.append({"path": p})
-            return jsonify({
+                emit("Deleting files permanently", idx, total_paths, os.path.basename(p))
+            return {
                 "ok": True, "deleted": 0, "trashed": trashed,
                 "trash_failed": trash_failed,
-            })
+            }
 
         if not photo_ids:
-            return json_error("photo_ids required")
+            raise ValueError("photo_ids required")
         if mode not in ("vireo", "disk", "disk_permanent"):
-            return json_error("mode must be 'vireo', 'disk', or 'disk_permanent'")
+            raise ValueError("mode must be 'vireo', 'disk', or 'disk_permanent'")
 
         # Chunked because delete_photos issues several IN-clause queries; a
         # 1000+ id request would hit SQLite's bound-parameter cap on legacy
@@ -6107,6 +6248,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # later chunk doesn't leave the cache permanently stripped of rows
         # the DB just restored.
         result = {"deleted": 0, "ids": [], "files": []}
+        total_requested = len(photo_ids)
+        prepared = 0
+        emit(
+            "Removing from Vireo",
+            0,
+            total_requested,
+            detail="Preparing database changes; nothing is committed yet.",
+        )
         try:
             for chunk in _chunked(photo_ids):
                 chunk_result = db.delete_photos(
@@ -6117,67 +6266,185 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 result["deleted"] += chunk_result["deleted"]
                 result["ids"].extend(chunk_result["ids"])
                 result["files"].extend(chunk_result["files"])
+                prepared += len(chunk)
+                emit(
+                    "Removing from Vireo",
+                    min(prepared, total_requested),
+                    total_requested,
+                    detail="Preparing database changes; nothing is committed yet.",
+                )
             db.conn.commit()
         except Exception:
             db.conn.rollback()
             raise
+        emit(
+            "Removed from Vireo",
+            result["deleted"],
+            result["deleted"],
+            detail="Database changes committed.",
+        )
 
         # Run the deferred non-DB side effects only after the outer
         # transaction committed successfully.
-        db.prune_pipeline_cache_for_ids(result["ids"])
-        _cleanup_cached_files_for_deleted_photos(result["files"])
+        emit("Pruning pipeline cache", 0, 1)
+        try:
+            db.prune_pipeline_cache_for_ids(result["ids"])
+        except BaseException as exc:
+            _reraise_fatal_cleanup_error(exc)
+            log.exception("Failed to prune pipeline cache after delete")
+        emit("Pruning pipeline cache", 1, 1)
+
+        def cache_progress(current, total, filename):
+            emit("Cleaning cached files", current, total, filename)
+
+        emit("Cleaning cached files", 0, len(result["files"]))
+        _cleanup_cached_files_for_deleted_photos(
+            result["files"], progress_callback=cache_progress,
+        )
 
         trashed = 0
         trash_failed = []
         if mode in ("disk", "disk_permanent"):
+            disk_targets = []
             for f in result["files"]:
                 # Collect all files to delete: primary + companion
-                file_paths = []
                 primary = os.path.join(f["folder_path"], f["filename"])
-                file_paths.append(primary)
+                disk_targets.append(primary)
                 if include_companions and f.get("companion_path"):
                     companion = os.path.join(f["folder_path"], f["companion_path"])
-                    file_paths.append(companion)
+                    disk_targets.append(companion)
 
-                for filepath in file_paths:
-                    if not os.path.isfile(filepath):
-                        log.warning("File already missing: %s", filepath)
-                        continue
-                    if mode == "disk":
-                        try:
-                            from send2trash import send2trash as _trash
-                            _trash(filepath)
-                            trashed += 1
-                        except Exception as send_err:
-                            # send2trash implements the platform trash spec on
-                            # Linux/Windows; the AppleScript Finder fallback only
-                            # helps on macOS. Off-mac, report the real send2trash
-                            # error instead of masking it with the Finder guard.
-                            if sys.platform == "darwin":
-                                log.debug("send2trash failed for %s, trying Finder", filepath)
-                                try:
-                                    _trash_via_finder(filepath)
-                                    trashed += 1
-                                except Exception:
-                                    log.warning("Trash failed for %s", filepath, exc_info=True)
-                                    trash_failed.append({"path": filepath})
-                            else:
-                                log.warning("Trash failed for %s: %s", filepath, send_err)
+            disk_phase = (
+                "Moving files to Trash"
+                if mode == "disk" else "Deleting files permanently"
+            )
+            ensured_volumes = set()
+            emit(disk_phase, 0, len(disk_targets))
+            for idx, filepath in enumerate(disk_targets, start=1):
+                basename = os.path.basename(filepath)
+                if not os.path.isfile(filepath):
+                    log.warning("File already missing: %s", filepath)
+                    emit(disk_phase, idx, len(disk_targets), basename)
+                    continue
+                if mode == "disk":
+                    _ensure_volume_trashes_dir(filepath, ensured_volumes)
+                    try:
+                        from send2trash import send2trash as _trash
+                        _trash(filepath)
+                        trashed += 1
+                    except BaseException as send_err:
+                        _reraise_fatal_cleanup_error(send_err)
+                        # send2trash implements the platform trash spec on
+                        # Linux/Windows; the AppleScript Finder fallback only
+                        # helps on macOS. Off-mac, report the real send2trash
+                        # error instead of masking it with the Finder guard.
+                        if sys.platform == "darwin":
+                            log.debug("send2trash failed for %s, trying Finder", filepath)
+                            try:
+                                _trash_via_finder(filepath)
+                                trashed += 1
+                            except Exception:
+                                log.warning("Trash failed for %s", filepath, exc_info=True)
                                 trash_failed.append({"path": filepath})
-                    else:  # disk_permanent
-                        try:
-                            os.remove(filepath)
-                            trashed += 1
-                        except OSError:
-                            log.warning("Permanent delete failed for %s", filepath, exc_info=True)
+                        else:
+                            log.warning("Trash failed for %s: %s", filepath, send_err)
                             trash_failed.append({"path": filepath})
+                else:  # disk_permanent
+                    try:
+                        os.remove(filepath)
+                        trashed += 1
+                    except OSError:
+                        log.warning("Permanent delete failed for %s", filepath, exc_info=True)
+                        trash_failed.append({"path": filepath})
+                emit(disk_phase, idx, len(disk_targets), basename)
 
-        return jsonify({
+        emit("Finishing", 1, 1)
+        return {
             "ok": True,
             "deleted": result["deleted"],
             "trashed": trashed,
             "trash_failed": trash_failed,
-        })
+        }
+
+    @app.route("/api/batch/delete", methods=["POST"])
+    def api_batch_delete():
+        """Delete photos from Vireo, optionally moving files to trash."""
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids", [])
+        mode = body.get("mode", "vireo")
+        include_companions = body.get("include_companions", False)
+        # For disk_permanent retry: accept paths directly since DB rows
+        # were already deleted in the initial disk-mode call.
+        paths = body.get("paths", [])
+
+        try:
+            result = _run_batch_delete(
+                db, photo_ids, mode, include_companions, paths=paths,
+            )
+        except ValueError as exc:
+            return json_error(str(exc))
+        return jsonify(result)
+
+    @app.route("/api/jobs/batch-delete", methods=["POST"])
+    def api_job_batch_delete():
+        """Start a background delete job with phase progress."""
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids", [])
+        mode = body.get("mode", "vireo")
+        include_companions = body.get("include_companions", False)
+        paths = body.get("paths", [])
+
+        if mode not in ("vireo", "disk", "disk_permanent"):
+            return json_error("mode must be 'vireo', 'disk', or 'disk_permanent'")
+        if not photo_ids and not (mode == "disk_permanent" and paths):
+            return json_error("photo_ids required")
+
+        runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
+
+        def work(job):
+            thread_db = Database(db_path)
+            if active_ws is not None:
+                thread_db.set_active_workspace(active_ws)
+            started = time.time()
+
+            def progress(payload):
+                current = payload.get("current", 0)
+                total = payload.get("total", 0)
+                job["progress"]["current"] = current
+                job["progress"]["total"] = total
+                job["progress"]["current_file"] = payload.get("current_file", "")
+                runner.push_event(job["id"], "progress", {
+                    **payload,
+                    "rate": round(current / max(time.time() - started, 0.01), 1)
+                    if current else 0,
+                })
+
+            try:
+                return _run_batch_delete(
+                    thread_db,
+                    photo_ids,
+                    mode,
+                    include_companions,
+                    paths=paths,
+                    progress_callback=progress,
+                )
+            finally:
+                thread_db.conn.close()
+
+        job_id = runner.start(
+            "batch-delete",
+            work,
+            config={
+                "photo_count": len(photo_ids or []),
+                "mode": mode,
+                "include_companions": bool(include_companions),
+                "path_count": len(paths or []),
+            },
+            workspace_id=active_ws,
+        )
+        return jsonify({"job_id": job_id})
 
     # -- Undo --
 
@@ -7022,6 +7289,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         species_filter="",
         species_match_case=False,
         species_whole_word=False,
+        search_query="",
+        search_match_case=False,
+        search_whole_word=False,
         confirmation_filter="all",
     ):
         folders = db.get_folders_with_quality_data()
@@ -7044,7 +7314,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         eligible_count = sum(b["photo_count"] for b in buckets) + len(
             unidentified_photos
         )
-        _apply_highlight_preferences(db, buckets)
         if species_filter:
             buckets = [
                 b for b in buckets
@@ -7062,6 +7331,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 species_whole_word,
             ):
                 unidentified_photos = []
+
+        buckets, unidentified_photos = _filter_highlight_sections(
+            buckets,
+            unidentified_photos,
+            search_query,
+            search_match_case,
+            search_whole_word,
+        )
+        _apply_highlight_preferences(db, buckets)
 
         def limited_bucket(bucket):
             photos = bucket["photos"]
@@ -7098,6 +7376,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "eligible": eligible_count,
                 "limit_per_bucket": limit_per_bucket,
                 "confirmation": confirmation_filter,
+                "search": (search_query or "").strip(),
             },
             "scope": "workspace" if folder_id is None else "folder",
         }
@@ -7117,6 +7396,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             species_filter=request.args.get("species") or "",
             species_match_case=_request_bool_arg("species_match_case"),
             species_whole_word=_request_bool_arg("species_whole_word"),
+            search_query=request.args.get("q") or "",
+            search_match_case=_request_bool_arg("q_match_case"),
+            search_whole_word=_request_bool_arg("q_whole_word"),
             confirmation_filter=request.args.get("confirmation") or "all",
         )
         return jsonify(payload)
@@ -7684,6 +7966,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         candidates = db.get_highlights_candidates(folder_id, min_quality=min_quality)
         buckets, unidentified_photos = _collect_highlight_buckets(
             candidates, confidence_threshold, confirmation_filter
+        )
+        buckets, unidentified_photos = _filter_highlight_sections(
+            buckets,
+            unidentified_photos,
+            request.args.get("q") or "",
+            _request_bool_arg("q_match_case"),
+            _request_bool_arg("q_whole_word"),
         )
         _apply_highlight_preferences(db, buckets)
         if species == "__unidentified__":
@@ -21092,13 +21381,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if not os.path.exists(wc_path):
                 return None
             from PIL import Image as _PILImage
+
             try:
                 with _PILImage.open(wc_path) as _wc_img:
-                    wc_w, wc_h = _wc_img.size
+                    wc_w, wc_h = _image_size_after_exif_orientation(_wc_img)
             except Exception:
                 wc_w = wc_h = 0
-            orig_w = photo["width"] or 0
-            orig_h = photo["height"] or 0
+            # Compare in display-orientation space: ``extract_working_copy``
+            # writes the EXIF-transposed JPEG (e.g. 4000x6000 for a portrait
+            # RAW), while ``photo["width"]/height`` are the sensor axes
+            # (6000x4000). Comparing raw sensor axes rejects a valid
+            # full-resolution WC for portrait RAWs and either 500s or forces
+            # a redundant re-decode. ``_recipe_source_dimensions`` swaps the
+            # sensor axes when EXIF Orientation indicates it, matching what
+            # ``load_image`` returns.
+            orig_w, orig_h = _recipe_source_dimensions(photo)
             # Trust the wc when it meets/exceeds the believed original dims,
             # or when those dims are unknown (no basis to declare the wc stale
             # and a speculative RAW re-extract would just thrash the disk).
@@ -21110,17 +21407,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # this often means rawpy.postprocess() failed and we fell back to
             # the embedded JPEG, which can be a few pixels shy of the full
             # sensor area. Re-extracting would yield the same fallback image,
-            # just slower — so trust the wc when it is within 1% of the
-            # believed dims. This tolerance is RAW-only: for JPEG/PNG/etc.,
-            # the wc being smaller means the cap downsized it, and re-extracting
-            # WILL produce more pixels.
+            # just slower — so trust the wc when BOTH axes are within 1% of
+            # the believed dims. A long-edge-only check would silently accept
+            # an embedded JPEG whose long edge is full but whose short edge is
+            # substantially truncated (e.g. 6000x3376 for a 6000x4000 source),
+            # then apply the edit recipe to a cropped image. This tolerance is
+            # RAW-only: for JPEG/PNG/etc., the wc being smaller means the cap
+            # downsized it, and re-extracting WILL produce more pixels.
             from image_loader import RAW_EXTENSIONS
             ext = os.path.splitext(photo["filename"])[1].lower()
-            if ext in RAW_EXTENSIONS and wc_w and wc_h:
-                wc_long = max(wc_w, wc_h)
-                orig_long = max(orig_w, orig_h)
-                if orig_long and wc_long >= orig_long * 0.99:
-                    return wc_path
+            if (
+                ext in RAW_EXTENSIONS
+                and wc_w and wc_h
+                and orig_w and orig_h
+                and wc_w >= orig_w * 0.99
+                and wc_h >= orig_h * 0.99
+            ):
+                return wc_path
             return None
 
         trusted_wc_path = _trusted_full_res_working_copy_path()
@@ -21188,17 +21491,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     folder["path"], using_offline_cache,
                 )
                 image_ext = os.path.splitext(image_path)[1].lower()
-                if (
+                source_failure_current = (
                     primary_is_raw
-                    and trusted_wc_path
-                    and not os.path.exists(image_path)
-                ):
-                    image_path = trusted_wc_path
-                elif companion_source and image_ext not in RAW_EXTENSIONS:
-                    image_path = companion_source
-                elif (
-                    primary_is_raw
-                    and companion_source
                     and _has_current_working_copy_failure(
                         photo,
                         vireo_dir,
@@ -21206,6 +21500,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         live_source_path=image_path,
                         folder_path=folder["path"],
                     )
+                )
+                if (
+                    primary_is_raw
+                    and trusted_wc_path
+                    and not companion_source
+                    and (
+                        not os.path.exists(image_path)
+                        or source_failure_current
+                    )
+                ):
+                    image_path = trusted_wc_path
+                elif companion_source and image_ext not in RAW_EXTENSIONS:
+                    image_path = companion_source
+                elif (
+                    primary_is_raw
+                    and companion_source
+                    and source_failure_current
                 ):
                     # Mirror _recipe_render_source: when scanner has marked
                     # this RAW as failed for the current mtime, route the
