@@ -3353,6 +3353,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # missing-originals timer fire during verification would
         # double the I/O on those slow volumes.
         "verify-hashes",
+        # The startup working-copy backfill job walks the same source
+        # trees and additionally performs RAW decode + JPEG encode
+        # work per file, so overlapping it with an automatic Missing
+        # Originals scan can double the source-volume I/O on large
+        # legacy RAW libraries over NAS/SMB.
+        "working_copy_backfill",
     }
 
     def _utc_iso_now():
