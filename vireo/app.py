@@ -3924,6 +3924,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         skipped = 0
         sidecar_targets = []
         folder_online_cache = {}
+
+        def folder_accessible(folder_path):
+            cached = folder_online_cache.get(folder_path)
+            if cached is not None:
+                return cached
+            accessible = False
+            if os.path.isdir(folder_path):
+                try:
+                    with os.scandir(folder_path):
+                        accessible = True
+                except OSError:
+                    accessible = False
+            folder_online_cache[folder_path] = accessible
+            return accessible
+
         for raw_id in photo_ids:
             try:
                 pid = int(raw_id)
@@ -3942,11 +3957,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 skipped += 1
                 continue
             folder_path = row["folder_path"]
-            folder_online = folder_online_cache.get(folder_path)
-            if folder_online is None:
-                folder_online = os.path.isdir(folder_path)
-                folder_online_cache[folder_path] = folder_online
-            if not folder_online:
+            if not folder_accessible(folder_path):
                 # The parent folder/NAS mount is currently unreachable, so
                 # ``os.path.exists(src)`` would return False for every row
                 # regardless of whether the original was restored before

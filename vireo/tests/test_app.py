@@ -5665,6 +5665,57 @@ def test_api_photos_missing_remove_skips_offline_folder(app_and_db, tmp_path):
     assert db.get_photo(pid) is not None
 
 
+def test_api_photos_missing_remove_skips_unreadable_folder(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """A present but unreadable folder is still unverified for removal.
+
+    Regression: ``os.path.isdir`` can succeed for a NAS/local folder that the
+    process cannot traverse. In that state ``os.path.exists(child)`` may return
+    false for every original, so removal must defer instead of deleting rows.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    fid = db.add_folder(str(real_dir), name="live")
+    pid = db.add_photo(
+        folder_id=fid,
+        filename="ghost.NEF",
+        extension=".nef",
+        file_size=1,
+        file_mtime=1.0,
+    )
+    sidecar = real_dir / "ghost.xmp"
+    sidecar.write_text("<x:xmpmeta/>")
+
+    import app as app_module
+
+    real_scandir = app_module.os.scandir
+
+    def unreadable_scandir(path):
+        if os.fspath(path) == str(real_dir):
+            raise PermissionError("permission denied")
+        return real_scandir(path)
+
+    monkeypatch.setattr(app_module.os, "scandir", unreadable_scandir)
+
+    resp = client.post("/api/photos/missing/remove", json={
+        "photo_ids": [pid],
+        "delete_sidecars": True,
+        "mode": "vireo",
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    data = resp.get_json()
+    assert data["deleted"] == 0
+    assert data["restored"] == []
+    assert data["folder_offline"] == [pid]
+    assert data["sidecars_deleted"] == 0
+    assert sidecar.exists()
+    assert db.get_photo(pid) is not None
+
+
 def test_api_photos_missing_delete_sidecars_skips_offline_folder(app_and_db, tmp_path):
     """delete-sidecars must skip when the parent folder is unreachable.
 
