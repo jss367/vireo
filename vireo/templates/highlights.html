@@ -40,6 +40,10 @@
   .highlights-card:hover { border-color:var(--accent); }
   .highlights-card.best-card { border-color:var(--accent); }
   .best-ribbon { position:absolute; top:6px; left:6px; padding:2px 6px; border-radius:999px; background:var(--accent); color:var(--accent-text); font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; }
+  .highlight-order { position:absolute; top:6px; right:6px; display:flex; gap:4px; opacity:0; transition:opacity .12s; }
+  .highlights-card:hover .highlight-order { opacity:1; }
+  .highlight-order button { padding:2px 6px; border-radius:999px; border:1px solid rgba(255,255,255,.45); background:rgba(0,0,0,.62); color:#fff; font-size:10px; cursor:pointer; }
+  .highlight-order button:hover { border-color:#fff; }
   .highlights-card img { width:100%; aspect-ratio:3/2; object-fit:cover; display:block; background:var(--bg-tertiary); }
   .card-info { padding:6px 8px; font-size:11px; color:var(--text-secondary); display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:4px; min-height:28px; }
   .card-chip { padding:1px 5px; border-radius:999px; background:var(--bg-tertiary); white-space:nowrap; }
@@ -361,13 +365,26 @@ function renderCard(p, idx) {
     return '<span class="card-chip reason">' + escapeAttr(r) + '</span>';
   }).join('');
   var title = (p.reasons || []).join(', ');
-  var ribbon = p.is_highlights_photo
-    ? '<div class="best-ribbon">Highlight</div>'
-    : (idx === 0 ? '<div class="best-ribbon">Best</div>' : '');
+  var ribbon = p.is_highlighted
+    ? '<div class="best-ribbon">Highlight ' + escapeAttr(p.highlight_rank || '') + '</div>'
+    : (p.is_species_representative
+      ? '<div class="best-ribbon">Representative</div>'
+      : (idx === 0 ? '<div class="best-ribbon">Best</div>' : ''));
+  var rep = p.is_species_representative
+    ? '<span class="card-chip reason">Representative</span>'
+    : '';
+  var order = p.is_highlighted
+    ? '<div class="highlight-order">'
+      + '<button type="button" data-highlight-order="up" data-photo-id="' + p.id + '" data-species="' + escapeAttr(photoSpeciesName(p)) + '">Up</button>'
+      + '<button type="button" data-highlight-order="down" data-photo-id="' + p.id + '" data-species="' + escapeAttr(photoSpeciesName(p)) + '">Down</button>'
+      + '<button type="button" data-highlight-remove="1" data-photo-id="' + p.id + '" data-species="' + escapeAttr(photoSpeciesName(p)) + '">Remove</button>'
+      + '</div>'
+    : '';
   return '<div class="highlights-card' + (idx === 0 ? ' best-card' : '') + '" data-photo-id="' + p.id + '" title="' + escapeAttr(title) + '">'
     + ribbon
+    + order
     + '<img src="' + thumbSrc + '" alt="' + escapeAttr(p.filename) + '" loading="lazy">'
-    + '<div class="card-info"><span class="card-chip score">' + formatScore(p.highlight_score) + '</span>' + conf + reasons + '</div>'
+    + '<div class="card-info"><span class="card-chip score">' + formatScore(p.highlight_score) + '</span>' + conf + rep + reasons + '</div>'
     + '</div>';
 }
 
@@ -382,6 +399,21 @@ function attachCardClicks(container, photoSet) {
       if (window.openLightbox && photo) {
         activeLightboxPhotoId = pid;
         openLightbox(pid, photo.filename, photoSet);
+      }
+    });
+  });
+}
+
+function attachHighlightOrderButtons(container) {
+  container.querySelectorAll('[data-highlight-order], [data-highlight-remove]').forEach(function(btn) {
+    btn.addEventListener('click', function(event) {
+      event.stopPropagation();
+      var species = btn.getAttribute('data-species');
+      var photoId = parseInt(btn.getAttribute('data-photo-id'));
+      if (btn.hasAttribute('data-highlight-remove')) {
+        removeSpeciesHighlight(species, photoId, btn);
+      } else {
+        moveSpeciesHighlight(species, photoId, btn.getAttribute('data-highlight-order'), btn);
       }
     });
   });
@@ -503,20 +535,70 @@ async function submitSpeciesModal() {
   }
 }
 
-async function setPhotoPreference(purpose, species, photoId, button) {
-  if (!purpose || !species || !photoId) return;
+async function setSpeciesRepresentative(species, photoId, button) {
+  if (!species || !photoId) return;
   if (button) button.disabled = true;
   try {
     await safeFetch('/api/photo-preferences', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ purpose: purpose, species: species, photo_id: photoId }),
+      body: JSON.stringify({ purpose: 'species_representative', species: species, photo_id: photoId }),
     });
     await loadHighlights();
     updateHighlightsLightboxControls(activeLightboxPhotoId);
     if (typeof showToast === 'function') {
-      showToast(purpose === 'life_list' ? 'Life List photo set' : 'Highlights photo set', 'success');
+      showToast('Species representative set', 'success');
     }
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function addSpeciesHighlight(species, photoId, button) {
+  if (!species || !photoId) return;
+  if (button) button.disabled = true;
+  try {
+    await safeFetch('/api/species-highlights', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ species: species, photo_id: photoId }),
+    });
+    await loadHighlights();
+    updateHighlightsLightboxControls(activeLightboxPhotoId);
+    if (typeof showToast === 'function') showToast('Added to Highlights', 'success');
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function removeSpeciesHighlight(species, photoId, button) {
+  if (!species || !photoId) return;
+  if (button) button.disabled = true;
+  try {
+    await safeFetch('/api/species-highlights', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ species: species, photo_id: photoId }),
+    });
+    await loadHighlights();
+    updateHighlightsLightboxControls(activeLightboxPhotoId);
+    if (typeof showToast === 'function') showToast('Removed from Highlights', 'success');
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function moveSpeciesHighlight(species, photoId, direction, button) {
+  if (!species || !photoId || !direction) return;
+  if (button) button.disabled = true;
+  try {
+    await safeFetch('/api/species-highlights/order', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ species: species, photo_id: photoId, direction: direction }),
+    });
+    await loadHighlights();
+    updateHighlightsLightboxControls(activeLightboxPhotoId);
   } finally {
     if (button) button.disabled = false;
   }
@@ -534,6 +616,7 @@ function renderBucket(bucket) {
     : '<span class="bucket-badge ' + badgeClass + '">' + badgeText + '</span>';
   var meta = bucket.photo_count + ' photo' + (bucket.photo_count === 1 ? '' : 's')
     + ' · best ' + formatScore(bucket.best_score);
+  if (bucket.highlight_count) meta += ' · ' + bucket.highlight_count + ' highlighted';
   if (!bucket.is_accepted && bucket.avg_confidence != null) meta += ' · ID ' + formatPercent(bucket.avg_confidence);
   var expandBtn = '';
   // Show the affordance whenever photos are hidden (more loaded than one row)
@@ -648,6 +731,7 @@ function render() {
     }
     attachCardClicks(section, photoSet);
   });
+  attachHighlightOrderButtons(content);
 
   // Expand buttons
   content.querySelectorAll('.bucket-expand').forEach(function(btn) {
@@ -822,12 +906,18 @@ function updateHighlightsLightboxControls(photoId) {
   if (photo) {
     var highlightSpecies = photoSpeciesName(photo);
     if (highlightSpecies) {
-      html += '<button data-lb-action="set-highlight"'
-        + (photo.is_highlights_photo ? ' class="primary"' : '') + '>'
-        + (photo.is_highlights_photo ? 'Highlights Photo' : 'Use as Highlights') + '</button>';
+      if (photo.is_highlighted) {
+        html += '<button class="primary" data-lb-action="remove-highlight">Highlighted</button>';
+        html += '<button data-lb-action="highlight-up">Move Up</button>';
+        html += '<button data-lb-action="highlight-down">Move Down</button>';
+      } else {
+        html += '<button data-lb-action="add-highlight">Add to Highlights</button>';
+      }
     }
     if (photo.has_accepted_species && photo.species) {
-      html += '<button data-lb-action="set-life-list">Use as Life List</button>';
+      html += '<button data-lb-action="set-representative"'
+        + (photo.is_species_representative ? ' class="primary"' : '') + '>'
+        + (photo.is_species_representative ? 'Representative' : 'Set Representative') + '</button>';
     }
     if (photo.is_confirmable_prediction) {
       html += '<button class="primary" data-lb-action="confirm">Confirm</button>';
@@ -848,10 +938,16 @@ function updateHighlightsLightboxControls(photoId) {
         return;
       } else if (action === 'confirm') {
         confirmPhotoIds([photo.id], btn);
-      } else if (action === 'set-highlight') {
-        setPhotoPreference('highlights', photoSpeciesName(photo), photo.id, btn);
-      } else if (action === 'set-life-list') {
-        setPhotoPreference('life_list', photo.species, photo.id, btn);
+      } else if (action === 'add-highlight') {
+        addSpeciesHighlight(photoSpeciesName(photo), photo.id, btn);
+      } else if (action === 'remove-highlight') {
+        removeSpeciesHighlight(photoSpeciesName(photo), photo.id, btn);
+      } else if (action === 'highlight-up') {
+        moveSpeciesHighlight(photoSpeciesName(photo), photo.id, 'up', btn);
+      } else if (action === 'highlight-down') {
+        moveSpeciesHighlight(photoSpeciesName(photo), photo.id, 'down', btn);
+      } else if (action === 'set-representative') {
+        setSpeciesRepresentative(photo.species, photo.id, btn);
       } else {
         var modalTitle = (photo.is_confirmable_prediction || photo.has_accepted_species)
           ? 'Change species'

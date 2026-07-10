@@ -3570,11 +3570,11 @@ var _lbEditRecipeWriteSeqByPhoto = {};
 var _lbPhotoDataByPhoto = {};
 var _lbRenderVersionByPhoto = {};
 
-// --- Life List: "Add to Life List" panel, shared across every page's lightbox.
+// --- Species Representative panel, shared across every page's lightbox.
 // Driven by the `life_list` block on GET /api/photos/<id> (cached in
 // _lbPhotoDataByPhoto), so the action works wherever a photo is opened — not
 // just on the /life-list page. Each eligible species gets its own row; the
-// button reflects real state (representative → selected, disabled star).
+// button reflects real state.
 function _lbEnsureLifeListPanel() {
   var actions = document.getElementById('lightboxActions');
   if (!actions) return null;
@@ -3611,9 +3611,9 @@ function _lbRenderLifeListPanel(photoId) {
     if (entry.is_current_photo) {
       btn.className = 'primary';
       btn.disabled = true;
-      btn.textContent = '★ Life List photo';
+      btn.textContent = 'Representative';
     } else {
-      btn.textContent = 'Add to Life List';
+      btn.textContent = 'Set Representative';
     }
     btn.addEventListener('click', function(event) {
       event.stopPropagation();
@@ -3632,7 +3632,7 @@ async function setLifeListPhoto(species, photoId, button) {
     await window.safeFetch('/api/photo-preferences', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ purpose: 'life_list', species: species, photo_id: photoId }),
+      body: JSON.stringify({ purpose: 'species_representative', species: species, photo_id: photoId }),
     });
     // Re-read this photo's block so the panel shows the honest new state, and
     // refresh the lightbox's cache so re-renders stay consistent.
@@ -3646,7 +3646,7 @@ async function setLifeListPhoto(species, photoId, button) {
       detail: { species: species, photoId: photoId },
     }));
     if (typeof showToast === 'function') {
-      showToast('Life List photo set for ' + species, 'success');
+      showToast('Species representative set for ' + species, 'success');
     }
   } finally {
     if (button) button.disabled = false;
@@ -3660,8 +3660,8 @@ document.addEventListener('lightbox:photochanged', function(event) {
   if (pid != null) _lbRenderLifeListPanel(pid);
 });
 
-// A photo's flag decides its life-list eligibility (a rejected photo can't be a
-// Life List photo, per _photo_can_be_life_list_preference). The cached
+// A photo's flag decides representative eligibility (a rejected photo can't be
+// a representative, per _photo_can_be_life_list_preference). The cached
 // `life_list` block goes stale the moment the user changes the flag from the
 // lightbox, so re-fetch it and re-render — this hides the panel when the photo
 // becomes rejected and re-shows it when the flag is cleared again.

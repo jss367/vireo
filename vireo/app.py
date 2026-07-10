@@ -323,15 +323,46 @@ def _apply_preferred_photo(photos, preferred_photo_id, marker_key):
 
 
 def _apply_highlight_preferences(db, buckets):
-    preferences = db.get_photo_preferences("highlights")
+    preferences = db.get_species_representatives()
     for bucket in buckets:
         preferred_id = preferences.get(bucket["species"])
-        applied = _apply_preferred_photo(
-            bucket["photos"], preferred_id, "is_highlights_photo"
-        )
+        applied = False
+        for photo in bucket.get("photos") or []:
+            is_rep = preferred_id is not None and photo.get("id") == preferred_id
+            photo["is_species_representative"] = is_rep
+            applied = applied or is_rep
         best = bucket["photos"][0] if bucket["photos"] else {}
         bucket["preferred_photo_id"] = preferred_id
         bucket["has_preferred_photo"] = applied
+        bucket["best_quality"] = best.get("quality_score")
+        bucket["best_score"] = best.get("highlight_score")
+        bucket["best_timestamp"] = best.get("timestamp")
+
+
+def _apply_ordered_highlights(db, buckets):
+    highlights = db.get_species_highlights()
+    for bucket in buckets:
+        ranks = highlights.get(bucket["species"], {})
+        for p in bucket.get("photos") or []:
+            rank = ranks.get(p.get("id"))
+            p["is_highlighted"] = rank is not None
+            p["highlight_rank"] = rank
+        if ranks:
+            bucket["photos"].sort(
+                key=lambda p: (
+                    0 if p.get("is_highlighted") else 1,
+                    p.get("highlight_rank") if p.get("highlight_rank") is not None else 10**9,
+                    -(p.get("highlight_score") or 0),
+                    -(p.get("predicted_confidence") or 0),
+                    -(p.get("quality_score") or 0),
+                    -(p.get("rating") or 0),
+                    p.get("id", 0),
+                )
+            )
+        best = bucket["photos"][0] if bucket.get("photos") else {}
+        bucket["highlight_count"] = sum(
+            1 for p in bucket.get("photos") or [] if p.get("is_highlighted")
+        )
         bucket["best_quality"] = best.get("quality_score")
         bucket["best_score"] = best.get("highlight_score")
         bucket["best_timestamp"] = best.get("timestamp")
@@ -3695,16 +3726,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         keywords = db.get_photo_keywords(photo_id)
         result["keywords"] = [dict(k) for k in keywords]
 
-        # Life-list block: the photo's eligible species plus whether this photo
-        # is the current representative for each, so the shared lightbox and
-        # browse context menu can offer "Add to Life List" and show the honest
-        # selected state without page-local data. Empty when the photo has no
-        # lifelist species (built from the same eligibility rule as the list).
-        life_list_prefs = db.get_photo_preferences("life_list")
+        # Representative block: the photo's eligible species plus whether this
+        # photo is the current one-photo species representative. Keep the
+        # legacy ``life_list`` key because shared lightbox/menu code reads it.
+        representatives = db.get_species_representatives()
         result["life_list"] = [
-            {"species": s, "is_current_photo": life_list_prefs.get(s) == photo_id}
+            {
+                "species": s,
+                "is_current_photo": representatives.get(s) == photo_id,
+                "is_species_representative": representatives.get(s) == photo_id,
+            }
             for s in db.get_photo_life_list_species(photo_id)
         ]
+        result["species_representatives"] = result["life_list"]
 
         # Location section: pre-resolved leaf + parent chain so the photo
         # detail panel can render the filled state without a second roundtrip.
@@ -7036,8 +7070,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         species = body.get("species", "")
         purpose = purpose.strip() if isinstance(purpose, str) else ""
         species = species.strip() if isinstance(species, str) else ""
-        if purpose not in {"life_list", "highlights"}:
-            return None, "purpose must be life_list or highlights"
+        if purpose not in {"species_representative", "life_list", "highlights"}:
+            return None, "purpose must be species_representative"
         if not species:
             return None, "species required"
 
@@ -7050,6 +7084,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         return {
             "purpose": purpose,
+            "canonical_purpose": "species_representative",
             "species": species,
             "photo_id": photo_id,
         }, None
@@ -7085,9 +7120,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return False
 
     def _photo_can_be_preference(db, purpose, species, photo_id):
-        if purpose == "life_list":
-            return _photo_can_be_life_list_preference(db, species, photo_id)
-        return _photo_can_be_highlights_preference(db, species, photo_id)
+        return _photo_can_be_life_list_preference(db, species, photo_id)
 
     @app.route("/api/photo-preferences", methods=["POST"])
     def api_photo_preferences_set():
@@ -7105,9 +7138,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(
                 "photo_id is not eligible for that purpose/species", 400,
             )
-        db.set_photo_preference(
-            parsed["purpose"], parsed["species"], parsed["photo_id"]
-        )
+        db.set_species_representative(parsed["species"], parsed["photo_id"])
         return jsonify({"ok": True, **parsed})
 
     @app.route("/api/photo-preferences", methods=["DELETE"])
@@ -7117,12 +7148,78 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         parsed, error = _parse_photo_preference_body(body, require_photo=False)
         if error:
             return json_error(error)
-        db.clear_photo_preference(parsed["purpose"], parsed["species"])
+        db.clear_species_representative(parsed["species"])
         return jsonify({
             "ok": True,
-            "purpose": parsed["purpose"],
+            "purpose": parsed["canonical_purpose"],
             "species": parsed["species"],
         })
+
+    def _parse_species_highlight_body(body, require_direction=False):
+        species = body.get("species", "")
+        species = species.strip() if isinstance(species, str) else ""
+        if not species:
+            return None, "species required"
+        photo_id = body.get("photo_id")
+        if isinstance(photo_id, bool) or not isinstance(photo_id, int):
+            return None, "photo_id must be an integer"
+        parsed = {"species": species, "photo_id": photo_id}
+        if require_direction:
+            direction = body.get("direction", "")
+            direction = direction.strip().lower() if isinstance(direction, str) else ""
+            if direction not in {"up", "down"}:
+                return None, "direction must be up or down"
+            parsed["direction"] = direction
+        return parsed, None
+
+    @app.route("/api/species-highlights", methods=["POST"])
+    def api_species_highlights_add():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        parsed, error = _parse_species_highlight_body(body)
+        if error:
+            return json_error(error)
+        error, status = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
+        if error:
+            return json_error(error, status)
+        if not _photo_can_be_highlights_preference(
+            db, parsed["species"], parsed["photo_id"]
+        ):
+            return json_error(
+                "photo_id is not eligible as a highlight for that species", 400,
+            )
+        rank = db.add_species_highlight(parsed["species"], parsed["photo_id"])
+        return jsonify({"ok": True, **parsed, "rank": rank})
+
+    @app.route("/api/species-highlights", methods=["DELETE"])
+    def api_species_highlights_remove():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        parsed, error = _parse_species_highlight_body(body)
+        if error:
+            return json_error(error)
+        error, status = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
+        if error:
+            return json_error(error, status)
+        removed = db.remove_species_highlight(parsed["species"], parsed["photo_id"])
+        return jsonify({"ok": True, **parsed, "removed": removed})
+
+    @app.route("/api/species-highlights/order", methods=["PATCH", "POST"])
+    def api_species_highlights_order():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        parsed, error = _parse_species_highlight_body(body, require_direction=True)
+        if error:
+            return json_error(error)
+        error, status = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
+        if error:
+            return json_error(error, status)
+        ok = db.move_species_highlight(
+            parsed["species"], parsed["photo_id"], parsed["direction"]
+        )
+        if not ok:
+            return json_error("highlight not found", 404)
+        return jsonify({"ok": True, **parsed})
 
     def _build_highlights_payload(
         db,
@@ -7184,6 +7281,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             search_match_case,
             search_whole_word,
         )
+        _apply_ordered_highlights(db, buckets)
         _apply_highlight_preferences(db, buckets)
 
         def limited_bucket(bucket):
@@ -7308,21 +7406,47 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "quality_score": photo.get("quality_score"),
                 "highlight_score": photo.get("highlight_score"),
                 "reasons": photo.get("reasons") or [],
-                "is_life_list_photo": bool(photo.get("is_life_list_photo")),
+                "is_species_representative": bool(
+                    photo.get("is_species_representative")
+                ),
+                "is_life_list_photo": bool(photo.get("is_species_representative")),
+                "is_highlighted": bool(photo.get("is_highlighted")),
+                "highlight_rank": photo.get("highlight_rank"),
             }
 
         species_entries = []
         distinct_photo_ids = set()
-        life_list_preferences = db.get_photo_preferences("life_list")
+        representatives = db.get_species_representatives()
+        highlights_by_species = db.get_species_highlights()
         for species, entry in buckets.items():
             photos = entry["photos"]
             distinct_photo_ids.update(p["id"] for p in photos)
             timestamps = [p["timestamp"] for p in photos if p.get("timestamp")]
             _highlight_score_bucket(photos)
-            preferred_id = life_list_preferences.get(species)
+            preferred_id = representatives.get(species)
+            highlight_ranks = highlights_by_species.get(species, {})
+            for photo in photos:
+                rank = highlight_ranks.get(photo["id"])
+                photo["is_highlighted"] = rank is not None
+                photo["highlight_rank"] = rank
             preferred_applied = _apply_preferred_photo(
-                photos, preferred_id, "is_life_list_photo"
+                photos, preferred_id, "is_species_representative"
             )
+            best_source = "representative" if preferred_applied else "algorithm"
+            if not preferred_applied and highlight_ranks:
+                valid_highlights = [
+                    (highlight_ranks[p["id"]], p["id"])
+                    for p in photos
+                    if p["id"] in highlight_ranks
+                ]
+                if valid_highlights:
+                    _, highlight_id = min(valid_highlights)
+                    for idx, photo in enumerate(photos):
+                        if photo["id"] == highlight_id:
+                            if idx:
+                                photos.insert(0, photos.pop(idx))
+                            best_source = "highlight"
+                            break
             top = photos if photo_limit is None else photos[:photo_limit]
             species_entries.append({
                 "species": species,
@@ -7334,6 +7458,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "locations": locations_by_species.get(species, []),
                 "preferred_photo_id": preferred_id,
                 "has_preferred_photo": preferred_applied,
+                "best_source": best_source,
                 "best": compact(top[0]) if top else None,
                 "photos": [compact(p) for p in top],
             })
@@ -7819,6 +7944,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             _request_bool_arg("q_match_case"),
             _request_bool_arg("q_whole_word"),
         )
+        _apply_ordered_highlights(db, buckets)
         _apply_highlight_preferences(db, buckets)
         if species == "__unidentified__":
             photos = unidentified_photos

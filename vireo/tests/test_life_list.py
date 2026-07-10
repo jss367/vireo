@@ -143,7 +143,9 @@ def test_life_list_photo_preference_overrides_best_photo(life_app):
     cardinal = _entry(data, "Northern Cardinal")
     assert cardinal["best"]["id"] == ids["p1"]
     assert cardinal["best"]["is_life_list_photo"] is True
+    assert cardinal["best"]["is_species_representative"] is True
     assert cardinal["has_preferred_photo"] is True
+    assert cardinal["best_source"] == "representative"
     assert [p["id"] for p in cardinal["photos"][:2]] == [ids["p1"], ids["p2"]]
 
 
@@ -157,23 +159,87 @@ def test_life_list_photo_preference_must_match_species(life_app):
     assert resp.status_code == 400
 
 
-def test_highlights_photo_preference_overrides_best_photo(life_app):
+def test_clearing_representative_removes_legacy_fallbacks(life_app):
+    app, db, ids = life_app
+    db.set_photo_preference("life_list", "Northern Cardinal", ids["p1"])
+    db.set_photo_preference("highlights", "Northern Cardinal", ids["p2"])
+
+    resp = app.test_client().delete("/api/photo-preferences", json={
+        "purpose": "species_representative",
+        "species": "Northern Cardinal",
+    })
+    assert resp.status_code == 200
+
+    assert db.get_species_representatives() == {}
+    data = _get_life_list(app)
+    cardinal = _entry(data, "Northern Cardinal")
+    assert cardinal["best"]["id"] == ids["p2"]
+    assert cardinal["best_source"] == "algorithm"
+
+
+def test_ordered_highlight_is_life_list_fallback(life_app):
+    app, db, ids = life_app
+    db.add_species_highlight("Northern Cardinal", ids["p1"])
+
+    data = _get_life_list(app)
+    cardinal = _entry(data, "Northern Cardinal")
+    assert cardinal["best"]["id"] == ids["p1"]
+    assert cardinal["best"]["is_highlighted"] is True
+    assert cardinal["best_source"] == "highlight"
+
+
+def test_species_representative_beats_ordered_highlight_for_life_list(life_app):
+    app, db, ids = life_app
+    db.add_species_highlight("Northern Cardinal", ids["p1"])
+    db.set_species_representative("Northern Cardinal", ids["p2"])
+
+    data = _get_life_list(app)
+    cardinal = _entry(data, "Northern Cardinal")
+    assert cardinal["best"]["id"] == ids["p2"]
+    assert cardinal["best"]["is_species_representative"] is True
+    assert cardinal["best_source"] == "representative"
+
+
+def test_ordered_highlights_control_highlights_bucket_order(life_app):
     app, _, ids = life_app
     client = app.test_client()
-    resp = client.post("/api/photo-preferences", json={
-        "purpose": "highlights",
+    resp = client.post("/api/species-highlights", json={
         "species": "Northern Cardinal",
         "photo_id": ids["p1"],
     })
     assert resp.status_code == 200
 
-    data = client.get("/api/highlights?scope=workspace").get_json()
+    data = client.get(
+        "/api/highlights?scope=workspace&limit_per_bucket=1"
+    ).get_json()
     cardinal = next(
         b for b in data["buckets"] if b["species"] == "Northern Cardinal"
     )
     assert cardinal["photos"][0]["id"] == ids["p1"]
-    assert cardinal["photos"][0]["is_highlights_photo"] is True
-    assert cardinal["has_preferred_photo"] is True
+    assert cardinal["photos"][0]["is_highlighted"] is True
+    assert cardinal["photos"][0]["highlight_rank"] == 1
+    assert cardinal["highlight_count"] == 1
+
+    resp = client.post("/api/species-highlights", json={
+        "species": "Northern Cardinal",
+        "photo_id": ids["p2"],
+    })
+    assert resp.status_code == 200
+    resp = client.patch("/api/species-highlights/order", json={
+        "species": "Northern Cardinal",
+        "photo_id": ids["p2"],
+        "direction": "up",
+    })
+    assert resp.status_code == 200
+
+    data = client.get(
+        "/api/highlights?scope=workspace&limit_per_bucket=1"
+    ).get_json()
+    cardinal = next(
+        b for b in data["buckets"] if b["species"] == "Northern Cardinal"
+    )
+    assert cardinal["photos"][0]["id"] == ids["p2"]
+    assert cardinal["photos"][0]["highlight_rank"] == 1
 
 
 def test_life_order_numbering_and_dates(life_app):

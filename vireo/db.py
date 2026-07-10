@@ -856,6 +856,16 @@ class Database:
                 PRIMARY KEY (workspace_id, purpose, species)
             );
 
+            CREATE TABLE IF NOT EXISTS species_highlights (
+                workspace_id  INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                species       TEXT NOT NULL,
+                photo_id      INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                rank          INTEGER NOT NULL,
+                created_at    TEXT DEFAULT (datetime('now')),
+                updated_at    TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (workspace_id, species, photo_id)
+            );
+
             CREATE TABLE IF NOT EXISTS preview_cache (
                 photo_id INTEGER NOT NULL,
                 size INTEGER NOT NULL,
@@ -938,6 +948,10 @@ class Database:
                 ON photo_color_labels(workspace_id);
             CREATE INDEX IF NOT EXISTS idx_photo_preferences_photo
                 ON photo_preferences(photo_id);
+            CREATE INDEX IF NOT EXISTS idx_species_highlights_photo
+                ON species_highlights(photo_id);
+            CREATE INDEX IF NOT EXISTS idx_species_highlights_rank
+                ON species_highlights(workspace_id, species, rank);
             CREATE INDEX IF NOT EXISTS preview_cache_last_access
                 ON preview_cache(last_access_at);
             CREATE INDEX IF NOT EXISTS idx_offline_originals_status
@@ -2005,10 +2019,10 @@ class Database:
         """Move folders and their workspace-scoped data to another workspace.
 
         Moves: workspace_folders rows, pending_changes, prediction_review,
-        and photo_preferences. Detections and predictions are global (no
-        workspace_id), so they follow the folder via workspace_folders
-        membership rather than being reassigned. Collections and edit_history
-        stay behind.
+        photo_preferences, and species_highlights. Detections and predictions
+        are global (no workspace_id), so they follow the folder via
+        workspace_folders membership rather than being reassigned. Collections
+        and edit_history stay behind.
 
         Returns:
             dict with keys: folders_moved, pending_changes_moved,
@@ -2030,11 +2044,12 @@ class Database:
                 )
 
         if not folder_ids:
-            return {
-                "folders_moved": 0,
-                "pending_changes_moved": 0,
-                "photo_preferences_moved": 0,
-            }
+                return {
+                    "folders_moved": 0,
+                    "pending_changes_moved": 0,
+                    "photo_preferences_moved": 0,
+                    "species_highlights_moved": 0,
+                }
 
         selected_folder_ids = set(folder_ids)
         source_folder_paths = {
@@ -2128,6 +2143,7 @@ class Database:
             # for the same (purpose, species), keep the target value and drop
             # the now-stale source row.
             photo_preferences_moved = 0
+            species_highlights_moved = 0
             for chunk in _chunks(moved_folder_ids):
                 placeholders = ",".join("?" for _ in chunk)
                 cur = self.conn.execute(
@@ -2146,6 +2162,28 @@ class Database:
                 photo_preferences_moved += cur.rowcount
                 self.conn.execute(
                     f"""DELETE FROM photo_preferences
+                        WHERE workspace_id = ?
+                          AND photo_id IN (
+                              SELECT id FROM photos WHERE folder_id IN ({placeholders})
+                          )""",
+                    [source_ws_id] + chunk,
+                )
+
+                cur = self.conn.execute(
+                    f"""INSERT OR IGNORE INTO species_highlights
+                          (workspace_id, species, photo_id, rank,
+                           created_at, updated_at)
+                        SELECT ?, species, photo_id, rank, created_at, updated_at
+                        FROM species_highlights
+                        WHERE workspace_id = ?
+                          AND photo_id IN (
+                              SELECT id FROM photos WHERE folder_id IN ({placeholders})
+                          )""",
+                    [target_ws_id, source_ws_id] + chunk,
+                )
+                species_highlights_moved += cur.rowcount
+                self.conn.execute(
+                    f"""DELETE FROM species_highlights
                         WHERE workspace_id = ?
                           AND photo_id IN (
                               SELECT id FROM photos WHERE folder_id IN ({placeholders})
@@ -2191,6 +2229,7 @@ class Database:
             "folders_moved": len(folder_ids),
             "pending_changes_moved": pending_changes_moved,
             "photo_preferences_moved": photo_preferences_moved,
+            "species_highlights_moved": species_highlights_moved,
         }
 
     def ensure_default_workspace(self):
@@ -9711,6 +9750,32 @@ class Database:
         ).fetchall()
         return {r["species"]: r["photo_id"] for r in rows}
 
+    def get_species_representatives(self):
+        """Return representative photo preferences with legacy fallback.
+
+        ``species_representative`` is the canonical purpose. Existing
+        ``life_list`` and ``highlights`` rows are still read as fallbacks so
+        older libraries keep their explicit curation choices.
+        """
+        ws = self._ws_id()
+        rows = self.conn.execute(
+            """SELECT species, photo_id, purpose
+               FROM photo_preferences
+               WHERE workspace_id = ?
+                 AND purpose IN ('species_representative', 'life_list', 'highlights')
+               ORDER BY species,
+                        CASE purpose
+                          WHEN 'species_representative' THEN 0
+                          WHEN 'life_list' THEN 1
+                          ELSE 2
+                        END""",
+            (ws,),
+        ).fetchall()
+        result = {}
+        for r in rows:
+            result.setdefault(r["species"], r["photo_id"])
+        return result
+
     def set_photo_preference(self, purpose, species, photo_id, _commit=True):
         """Set the preferred photo for a species/purpose in this workspace."""
         ws = self._ws_id()
@@ -9726,6 +9791,12 @@ class Database:
         if _commit:
             self.conn.commit()
 
+    def set_species_representative(self, species, photo_id, _commit=True):
+        """Set the one-photo representative for a species in this workspace."""
+        self.set_photo_preference(
+            "species_representative", species, photo_id, _commit=_commit
+        )
+
     def clear_photo_preference(self, purpose, species, _commit=True):
         """Clear the preferred photo for a species/purpose in this workspace."""
         ws = self._ws_id()
@@ -9736,6 +9807,127 @@ class Database:
         )
         if _commit:
             self.conn.commit()
+
+    def clear_species_representative(self, species, _commit=True):
+        """Clear canonical and legacy representative preferences for a species."""
+        ws = self._ws_id()
+        self.conn.execute(
+            """DELETE FROM photo_preferences
+               WHERE workspace_id = ?
+                 AND species = ?
+                 AND purpose IN ('species_representative', 'life_list', 'highlights')""",
+            (ws, species),
+        )
+        if _commit:
+            self.conn.commit()
+
+    def get_species_highlights(self, species=None):
+        """Return ordered highlighted photo ids for the active workspace.
+
+        Result shape is ``{species: {photo_id: rank}}``.
+        """
+        ws = self._ws_id()
+        if species:
+            rows = self.conn.execute(
+                """SELECT species, photo_id, rank
+                   FROM species_highlights
+                   WHERE workspace_id = ? AND species = ?
+                   ORDER BY rank, created_at, photo_id""",
+                (ws, species),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """SELECT species, photo_id, rank
+                   FROM species_highlights
+                   WHERE workspace_id = ?
+                   ORDER BY species, rank, created_at, photo_id""",
+                (ws,),
+            ).fetchall()
+        result = {}
+        for r in rows:
+            result.setdefault(r["species"], {})[r["photo_id"]] = r["rank"]
+        return result
+
+    def add_species_highlight(self, species, photo_id, _commit=True):
+        """Add a photo to a species' ordered highlights, appending if new."""
+        ws = self._ws_id()
+        row = self.conn.execute(
+            """SELECT rank FROM species_highlights
+               WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+            (ws, species, photo_id),
+        ).fetchone()
+        if row:
+            self.conn.execute(
+                """UPDATE species_highlights
+                   SET updated_at = datetime('now')
+                   WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+                (ws, species, photo_id),
+            )
+            if _commit:
+                self.conn.commit()
+            return row["rank"]
+        max_rank = self.conn.execute(
+            """SELECT COALESCE(MAX(rank), 0) AS max_rank
+               FROM species_highlights
+               WHERE workspace_id = ? AND species = ?""",
+            (ws, species),
+        ).fetchone()["max_rank"]
+        rank = int(max_rank or 0) + 1
+        self.conn.execute(
+            """INSERT INTO species_highlights
+                   (workspace_id, species, photo_id, rank, created_at, updated_at)
+               VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
+            (ws, species, photo_id, rank),
+        )
+        if _commit:
+            self.conn.commit()
+        return rank
+
+    def remove_species_highlight(self, species, photo_id, _commit=True):
+        """Remove a photo from a species' ordered highlights."""
+        ws = self._ws_id()
+        cur = self.conn.execute(
+            """DELETE FROM species_highlights
+               WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+            (ws, species, photo_id),
+        )
+        if _commit:
+            self.conn.commit()
+        return cur.rowcount
+
+    def move_species_highlight(self, species, photo_id, direction, _commit=True):
+        """Move a highlighted photo one step up/down within its species."""
+        ws = self._ws_id()
+        rows = self.conn.execute(
+            """SELECT photo_id
+               FROM species_highlights
+               WHERE workspace_id = ? AND species = ?
+               ORDER BY rank, created_at, photo_id""",
+            (ws, species),
+        ).fetchall()
+        ids = [r["photo_id"] for r in rows]
+        if photo_id not in ids:
+            return False
+        idx = ids.index(photo_id)
+        if direction == "up":
+            new_idx = max(0, idx - 1)
+        elif direction == "down":
+            new_idx = min(len(ids) - 1, idx + 1)
+        else:
+            return False
+        if new_idx == idx:
+            return True
+        ids.insert(new_idx, ids.pop(idx))
+        for rank, pid in enumerate(ids, start=1):
+            self.conn.execute(
+                """UPDATE species_highlights
+                   SET rank = ?, updated_at = datetime('now')
+                   WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+                (rank, ws, species, pid),
+            )
+        if _commit:
+            self.conn.commit()
+        return True
 
     def rename_photo_preferences_species(
         self, old_species, new_species, photo_workspace_pairs=None, _commit=True,

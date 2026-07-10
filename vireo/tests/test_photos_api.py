@@ -526,7 +526,7 @@ def test_api_photo_detail_includes_on_disk_path(app_and_db):
 def test_photo_detail_life_list_lists_eligible_species(app_and_db):
     """GET /api/photos/<id> exposes a life_list block naming the photo's
     lifelist-eligible species so the shared lightbox / browse menu can offer
-    an 'Add to Life List' action without page-local data."""
+    a representative action without page-local data."""
     app, db = app_and_db
     client = app.test_client()
     pid = db.get_photos()[0]["id"]
@@ -535,7 +535,11 @@ def test_photo_detail_life_list_lists_eligible_species(app_and_db):
 
     data = client.get(f"/api/photos/{pid}").get_json()
     assert data["life_list"] == [
-        {"species": "American Robin", "is_current_photo": False}
+        {
+            "species": "American Robin",
+            "is_current_photo": False,
+            "is_species_representative": False,
+        }
     ]
 
 
@@ -550,7 +554,11 @@ def test_photo_detail_life_list_marks_current_representative(app_and_db):
 
     data = client.get(f"/api/photos/{pid}").get_json()
     assert data["life_list"] == [
-        {"species": "American Robin", "is_current_photo": True}
+        {
+            "species": "American Robin",
+            "is_current_photo": True,
+            "is_species_representative": True,
+        }
     ]
 
 
@@ -568,7 +576,11 @@ def test_photo_detail_life_list_current_false_when_other_photo_is_rep(app_and_db
 
     data = client.get(f"/api/photos/{p1}").get_json()
     assert data["life_list"] == [
-        {"species": "American Robin", "is_current_photo": False}
+        {
+            "species": "American Robin",
+            "is_current_photo": False,
+            "is_species_representative": False,
+        }
     ]
 
 
@@ -601,7 +613,11 @@ def test_photo_detail_life_list_includes_taxonomy_type_keyword(app_and_db):
 
     data = client.get(f"/api/photos/{pid}").get_json()
     assert data["life_list"] == [
-        {"species": "Bald Eagle", "is_current_photo": False}
+        {
+            "species": "Bald Eagle",
+            "is_current_photo": False,
+            "is_species_representative": False,
+        }
     ]
 
 
