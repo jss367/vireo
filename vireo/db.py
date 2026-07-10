@@ -9487,12 +9487,15 @@ class Database:
                 result.setdefault(r["photo_id"], []).append(r["name"])
         return result
 
-    def get_highlights_candidates(self, folder_id, min_quality=0.0):
+    def get_highlights_candidates(self, folder_id, min_quality=0.0, photo_id=None):
         """Return photos eligible for highlights selection.
 
         When ``folder_id`` is an int, returns photos in that folder and its
         descendant folders. When ``folder_id`` is ``None``, returns photos
-        across every folder visible in the active workspace.
+        across every folder visible in the active workspace. When
+        ``photo_id`` is set, the result is additionally restricted to that
+        single photo so the photo-detail endpoint can compute its highlight
+        eligibility without rebuilding every workspace bucket.
 
         Each row carries:
           * ``species`` — accepted species keyword (NULL if none accepted)
@@ -9515,6 +9518,12 @@ class Database:
             placeholders = ",".join("?" for _ in subtree)
             folder_filter = f"AND p.folder_id IN ({placeholders})"
             folder_params = tuple(subtree)
+        if photo_id is None:
+            photo_filter = ""
+            photo_params = ()
+        else:
+            photo_filter = "AND p.id = ?"
+            photo_params = (photo_id,)
         rows = self.conn.execute(
             f"""SELECT p.id, p.folder_id, p.filename, p.extension,
                       p.timestamp, p.width, p.height, p.rating, p.flag,
@@ -9583,11 +9592,12 @@ class Database:
                ) kw ON kw.photo_id = p.id
                WHERE wf.workspace_id = ?
                  {folder_filter}
+                 {photo_filter}
                  AND p.quality_score IS NOT NULL
                  AND p.quality_score >= ?
                  AND (p.flag IS NULL OR p.flag != 'rejected')
                ORDER BY p.quality_score DESC""",
-            (ws, ws, *folder_params, min_quality),
+            (ws, ws, *folder_params, *photo_params, min_quality),
         ).fetchall()
         return rows
 

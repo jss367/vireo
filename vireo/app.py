@@ -400,18 +400,24 @@ def _apply_ordered_highlights(db, buckets):
 
 
 def _photo_highlight_entries(db, photo_id):
-    """Return highlight-eligible species entries for one visible photo."""
-    candidates = db.get_highlights_candidates(None, min_quality=0.0)
+    """Return highlight-eligible species entries for one visible photo.
+
+    Restricts both the candidate scan and the species-highlights lookup to
+    the requested photo so the photo-detail endpoint doesn't rebuild every
+    workspace bucket for each call (browse detail, lightbox, batch actions).
+    """
+    candidates = db.get_highlights_candidates(
+        None, min_quality=0.0, photo_id=photo_id
+    )
     buckets, _unidentified = _collect_highlight_buckets(
         candidates, confidence_threshold=0.0
     )
-    highlights = db.get_species_highlights()
     entries = []
     for bucket in buckets:
         species = bucket.get("species")
         if not species:
             continue
-        ranks = highlights.get(species, {})
+        ranks = db.get_species_highlights(species).get(species, {})
         for photo in bucket.get("photos") or []:
             if photo.get("id") != photo_id:
                 continue
