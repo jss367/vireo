@@ -1362,6 +1362,39 @@ def test_move_folders_moves_photo_preferences(db_with_workspace):
     assert db.get_species_highlights() == {}
 
 
+def test_move_folders_reranks_species_highlights_on_collision(db):
+    """Moving highlights into a target that already has ranks for the same
+    species must append after the target's max rank so `ORDER BY rank`
+    keeps the target's curated order first."""
+    ws1 = db.create_workspace("Source")
+    ws2 = db.create_workspace("Target")
+
+    src_folder = db.add_folder("/src", name="src")
+    tgt_folder = db.add_folder("/tgt", name="tgt")
+    db.add_workspace_folder(ws1, src_folder)
+    db.add_workspace_folder(ws2, tgt_folder)
+
+    src_photo = db.add_photo(folder_id=src_folder, filename="src.jpg",
+                             extension=".jpg", file_size=100, file_mtime=1.0)
+    tgt_photo = db.add_photo(folder_id=tgt_folder, filename="tgt.jpg",
+                             extension=".jpg", file_size=100, file_mtime=2.0)
+
+    db.set_active_workspace(ws1)
+    db.add_species_highlight("Robin", src_photo)
+    db.set_active_workspace(ws2)
+    db.add_species_highlight("Robin", tgt_photo)
+
+    result = db.move_folders_to_workspace(ws1, ws2, [src_folder])
+    assert result["species_highlights_moved"] == 1
+
+    db.set_active_workspace(ws2)
+    # Both photos are in the Robin bucket, with distinct ranks; the target's
+    # original rank-1 stays first because moved rows append after it.
+    assert db.get_species_highlights("Robin") == {
+        "Robin": {tgt_photo: 1, src_photo: 2},
+    }
+
+
 def test_move_folders_collections_stay_behind(db_with_workspace):
     """Collections in the source workspace are NOT moved."""
     db, ws1, folder_id, photo_id = db_with_workspace

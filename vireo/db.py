@@ -2169,19 +2169,49 @@ class Database:
                     [source_ws_id] + chunk,
                 )
 
-                cur = self.conn.execute(
-                    f"""INSERT OR IGNORE INTO species_highlights
-                          (workspace_id, species, photo_id, rank,
-                           created_at, updated_at)
-                        SELECT ?, species, photo_id, rank, created_at, updated_at
+                # Append moved highlights after the target workspace's
+                # existing rows per species. Preserving the source `rank`
+                # verbatim would collide with the target's ranks (rank is
+                # not part of the PK), corrupting the curated order the
+                # target uses in `ORDER BY rank, created_at, photo_id`.
+                src_highlights = self.conn.execute(
+                    f"""SELECT species, photo_id, rank, created_at, updated_at
                         FROM species_highlights
                         WHERE workspace_id = ?
                           AND photo_id IN (
                               SELECT id FROM photos WHERE folder_id IN ({placeholders})
-                          )""",
-                    [target_ws_id, source_ws_id] + chunk,
-                )
-                species_highlights_moved += cur.rowcount
+                          )
+                        ORDER BY species, rank, created_at, photo_id""",
+                    [source_ws_id] + chunk,
+                ).fetchall()
+                by_species = {}
+                for src_row in src_highlights:
+                    by_species.setdefault(src_row["species"], []).append(src_row)
+                for sp, sp_rows in by_species.items():
+                    next_rank = int(self.conn.execute(
+                        """SELECT COALESCE(MAX(rank), 0) AS max_rank
+                           FROM species_highlights
+                           WHERE workspace_id = ? AND species = ?""",
+                        (target_ws_id, sp),
+                    ).fetchone()["max_rank"] or 0) + 1
+                    for src_row in sp_rows:
+                        cur = self.conn.execute(
+                            """INSERT OR IGNORE INTO species_highlights
+                                   (workspace_id, species, photo_id, rank,
+                                    created_at, updated_at)
+                               VALUES (?, ?, ?, ?, ?, ?)""",
+                            (
+                                target_ws_id,
+                                sp,
+                                src_row["photo_id"],
+                                next_rank,
+                                src_row["created_at"],
+                                src_row["updated_at"],
+                            ),
+                        )
+                        if cur.rowcount:
+                            species_highlights_moved += 1
+                            next_rank += 1
                 self.conn.execute(
                     f"""DELETE FROM species_highlights
                         WHERE workspace_id = ?

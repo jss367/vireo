@@ -5501,6 +5501,40 @@ def test_highlights_relabel_merges_into_existing_new_species_bucket(app_and_db):
     }
 
 
+def test_highlights_relabel_migrates_species_representative(app_and_db):
+    """Relabel moves species_representative preferences to the new species
+    so `get_species_representatives()` returns the photo under its new bucket
+    rather than stranding it under the old species."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrrep', 'hrrep', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Bald Eagle", is_species=True)
+    db.add_keyword("Golden Eagle", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'rep.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, old_kid)
+    db.set_species_representative("Bald Eagle", pid)
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Golden Eagle"},
+    )
+    assert resp.status_code == 200
+
+    reps = db.get_species_representatives()
+    assert reps.get("Golden Eagle") == pid
+    assert "Bald Eagle" not in reps
+
+
 def test_highlights_accepted_species_wins_over_higher_confidence_prediction(app_and_db):
     """Manual species tag is authoritative even when a high-confidence
     prediction disagrees."""

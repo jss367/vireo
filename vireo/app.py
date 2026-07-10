@@ -7874,6 +7874,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             highlight_renames.setdefault(old_species_name, []).append(
                 row["photo_id"]
             )
+        preference_rows = db.conn.execute(
+            f"""SELECT species, photo_id FROM photo_preferences
+                WHERE workspace_id = ?
+                  AND photo_id IN ({placeholders})
+                  AND purpose IN (
+                      'species_representative', 'life_list', 'highlights'
+                  )""",
+            (ws_id, *photo_ids),
+        ).fetchall()
+        preference_renames = {}
+        for row in preference_rows:
+            old_species_name = row["species"]
+            if old_species_name == species:
+                continue
+            preference_renames.setdefault(old_species_name, []).append(
+                row["photo_id"]
+            )
         try:
             kid = db.add_keyword(species, is_species=True, _commit=False)
             items = []
@@ -7927,6 +7944,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
             for old_species_name, pids in highlight_renames.items():
                 db.rename_species_highlights_species(
+                    old_species_name,
+                    species,
+                    [(pid, ws_id) for pid in pids],
+                    _commit=False,
+                )
+            for old_species_name, pids in preference_renames.items():
+                db.rename_photo_preferences_species(
                     old_species_name,
                     species,
                     [(pid, ws_id) for pid in pids],
