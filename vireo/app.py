@@ -3477,20 +3477,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return True
         return False
 
-    def _invalidate_missing_originals_cache(workspace_id):
+    def _invalidate_missing_originals_cache():
+        """Drop cached Missing Originals results for every workspace on
+        this app's database.
+
+        Photos are shared across workspaces (a folder can be linked into
+        more than one), so removing a row must clear every workspace
+        cache that could still list it — scoping to the active
+        workspace lets other workspaces keep serving stale ready
+        payloads until their next scan.
+        """
         with app._missing_originals_lock:
             for store in (
                 app._missing_originals_cache,
                 app._missing_originals_errors,
             ):
                 for key in list(store.keys()):
-                    if key[1] == workspace_id:
+                    if key[0] == db_path:
                         store.pop(key, None)
-            # Bump generation for every in-flight scan touching this
-            # workspace so its completion path refuses to write its stale
+            # Bump generation for every in-flight scan under this DB so
+            # its completion path refuses to write its stale
             # pre-invalidation snapshot back into the cache.
             for key in list(app._missing_originals_inflight.keys()):
-                if key[1] == workspace_id:
+                if key[0] == db_path:
                     app._missing_originals_generation[key] = (
                         app._missing_originals_generation.get(key, 0) + 1
                     )
@@ -6693,7 +6702,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except ValueError as exc:
             return json_error(str(exc))
         if result.get("deleted"):
-            _invalidate_missing_originals_cache(db._active_workspace_id)
+            _invalidate_missing_originals_cache()
         return jsonify(result)
 
     @app.route("/api/jobs/batch-delete", methods=["POST"])
@@ -6741,7 +6750,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     progress_callback=progress,
                 )
                 if result.get("deleted"):
-                    _invalidate_missing_originals_cache(active_ws)
+                    _invalidate_missing_originals_cache()
                 return result
             finally:
                 thread_db.conn.close()
@@ -12375,7 +12384,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result = db.delete_photos(photo_ids)
         _cleanup_cached_files_for_deleted_photos(result.get("files", []))
         if result.get("deleted"):
-            _invalidate_missing_originals_cache(db._active_workspace_id)
+            _invalidate_missing_originals_cache()
         return jsonify({"ok": True, "removed": result.get("deleted", 0)})
 
     @app.route("/api/audit/import-untracked", methods=["POST"])
@@ -14558,7 +14567,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     deleted_rows += result.get("deleted", 0)
                 _cleanup_cached_files_for_deleted_photos(all_files)
                 if deleted_rows:
-                    _invalidate_missing_originals_cache(db._active_workspace_id)
+                    _invalidate_missing_originals_cache()
             except Exception:
                 # Files are already in Trash; if the row delete fails we
                 # surface a 500 so the caller knows reconciliation is

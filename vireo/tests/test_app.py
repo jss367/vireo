@@ -4757,6 +4757,71 @@ def test_api_duplicates_delete_loser_files_invalidates_missing_cache(
     assert payload["photos"] == []
 
 
+def test_batch_delete_invalidates_missing_cache_across_workspaces(
+    app_and_db, tmp_path,
+):
+    """Deleting a photo must invalidate every workspace's Missing Originals cache.
+
+    Regression: photos are global (a folder can be linked into more than
+    one workspace), so removing a row from workspace A must clear
+    workspace B's ready cache too. Otherwise switching to B keeps serving
+    a stale payload that still lists the just-deleted photo until B's
+    next scan.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    default_ws = db._active_workspace_id
+    other_ws = db.create_workspace("Other")
+
+    shared_dir = tmp_path / "shared"
+    shared_dir.mkdir()
+    fid = db.add_folder(str(shared_dir), name="shared")
+    db.add_workspace_folder(other_ws, fid)
+
+    pid_ghost = db.add_photo(
+        folder_id=fid,
+        filename="ghost.NEF",
+        extension=".nef",
+        file_size=42,
+        file_mtime=2.0,
+    )
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ?", (fid,)
+        ).fetchall()
+    ])
+
+    # Populate the cache for both workspaces so there's actually
+    # something for the delete path to invalidate in each.
+    db.set_active_workspace(other_ws)
+    other_cache = _run_missing_originals_check(client)
+    assert [row["id"] for row in other_cache["photos"]] == [pid_ghost]
+
+    db.set_active_workspace(default_ws)
+    default_cache = _run_missing_originals_check(client)
+    assert [row["id"] for row in default_cache["photos"]] == [pid_ghost]
+
+    # Delete the ghost while workspace A is active.
+    resp = client.post(
+        "/api/batch/delete",
+        json={"photo_ids": [pid_ghost], "mode": "vireo"},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["deleted"] == 1
+
+    # The active workspace's cache is gone …
+    payload = client.get("/api/photos/missing").get_json()
+    assert payload["status"] == "not_ready", payload
+    assert payload["photos"] == []
+
+    # … and so is workspace B's, even though it wasn't the caller.
+    db.set_active_workspace(other_ws)
+    payload = client.get("/api/photos/missing").get_json()
+    assert payload["status"] == "not_ready", payload
+    assert payload["photos"] == []
+
+
 def test_api_photos_missing_delete_sidecars(app_and_db, tmp_path):
     """POST /api/photos/missing/delete-sidecars removes orphan XMP files for ghost photos.
 
