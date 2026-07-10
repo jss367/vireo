@@ -331,6 +331,7 @@ def _apply_highlight_preferences(db, buckets):
         bucket["has_preferred_photo"] = applied
         bucket["best_quality"] = best.get("quality_score")
         bucket["best_score"] = best.get("highlight_score")
+        bucket["best_timestamp"] = best.get("timestamp")
 
 
 def _highlight_confidence_label(confidence, is_accepted):
@@ -411,6 +412,7 @@ def _collect_highlight_buckets(
             "predicted_species": r.get("predicted_species"),
             "predicted_confidence": predicted_conf,
             "has_accepted_species": accepted is not None,
+            "is_unidentified": species is None,
             "is_confirmable_prediction": (
                 accepted is None
                 and species is not None
@@ -474,11 +476,7 @@ def _highlight_search_fields(photo):
         photo.get("keyword_names") or "",
         photo.get("species") or "",
         photo.get("predicted_species") or "",
-        (
-            "unidentified"
-            if not photo.get("species") and not photo.get("predicted_species")
-            else ""
-        ),
+        "unidentified" if photo.get("is_unidentified") else "",
     ]
 
 
