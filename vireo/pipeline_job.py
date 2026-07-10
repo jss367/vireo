@@ -3496,6 +3496,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 total = len(photos)
 
                 total_predictions_stored = 0
+                total_full_image_fallbacks = 0
                 total_failed = 0
                 total_skipped_existing = 0
                 # Track unique photo IDs that failed in any model so the rollup
@@ -3511,6 +3512,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 # (all detected photos) would incorrectly delete detections for
                 # photos that weren't reached if the job was aborted mid-classify.
                 first_model_photo_ids: set = set()
+                fresh_full_image_ids_by_photo: dict = {}
 
                 from datetime import datetime as dt
 
@@ -3661,6 +3663,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     raw_results: list = []
                     failed = 0
                     skipped_existing = 0
+                    full_image_fallbacks = 0
                     stages["classify"].setdefault("cached", 0)
                     stages["classify"].setdefault("seen", 0)
                     # Photos that iterated past the inner abort check IN THIS spec.
@@ -3756,16 +3759,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             # never completed (e.g. mid-batch exception, or the
                             # detect stage was skipped for an already-detected
                             # non-reclassify run — in which case the DB holds the
-                            # authoritative rows). Photos with no detections get
-                            # skipped entirely; pipeline classify is detection-
-                            # driven and won't synthesize full-image boxes.
+                            # authoritative rows). If MegaDetector produced no
+                            # real rows at all, synthesize a full-image anchor so
+                            # classifiers still get one attempt and future reruns
+                            # can hit classifier_runs for that attempt.
+                            full_image_fallback = False
                             if photo["id"] in cached_detections:
                                 # cached_detections from _detect_batch can include
                                 # full-image rows when an earlier pass synthesized
                                 # them (legacy db state); filter to match the
-                                # fallback-query branch below so primary_det never
-                                # lands on a full-image box. Pipeline classify is
-                                # detection-driven and won't classify full-image.
+                                # fallback-query branch below so primary_det only
+                                # lands on a real detector box.
                                 photo_dets = [
                                     d for d in cached_detections[photo["id"]]
                                     if d.get("detector_model") != "full-image"
@@ -3786,7 +3790,53 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 ]
                             primary_det = photo_dets[0] if photo_dets else None
                             if primary_det is None:
-                                continue
+                                # Distinguish "no eligible detection at the
+                                # workspace threshold" from "MegaDetector found
+                                # nothing at all." Weak raw detections keep the
+                                # existing behavior for now; true no-detection
+                                # photos get full-image classification.
+                                raw_real_dets = [
+                                    d for d in thread_db.get_detections(
+                                        photo["id"], min_conf=0,
+                                    )
+                                    if d["detector_model"] != "full-image"
+                                ]
+                                if raw_real_dets:
+                                    continue
+
+                                existing_full = thread_db.get_detections(
+                                    photo["id"],
+                                    detector_model="full-image",
+                                    min_conf=0,
+                                )
+                                if existing_full and not params.reclassify:
+                                    full_det_id = existing_full[0]["id"]
+                                else:
+                                    full_det_ids = thread_db.save_detections(
+                                        photo["id"],
+                                        [{
+                                            "box": {"x": 0, "y": 0, "w": 1, "h": 1},
+                                            "confidence": 0,
+                                            "category": "animal",
+                                        }],
+                                        detector_model="full-image",
+                                    )
+                                    full_det_id = full_det_ids[0]
+                                primary_det = {
+                                    "id": full_det_id,
+                                    "box_x": 0,
+                                    "box_y": 0,
+                                    "box_w": 1,
+                                    "box_h": 1,
+                                    "confidence": 0,
+                                    "category": "animal",
+                                    "detector_model": "full-image",
+                                }
+                                full_image_fallback = True
+                                full_image_fallbacks += 1
+                                fresh_full_image_ids_by_photo.setdefault(
+                                    photo["id"], set(),
+                                ).add(full_det_id)
 
                             # Classifier-run gate: skip work when this exact
                             # (detection, classifier_model, labels_fingerprint)
@@ -3851,7 +3901,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     # instead of stranding the detection.
 
                             img, folder_path, image_path = _prepare_image(
-                                photo, folders, primary_det,
+                                photo, folders,
+                                None if full_image_fallback else primary_det,
                             )
                             if img is None:
                                 failed += 1
@@ -3958,6 +4009,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     )
                     preds = group_result["predictions_stored"]
                     total_predictions_stored += preds
+                    total_full_image_fallbacks += full_image_fallbacks
                     total_failed += failed
                     total_skipped_existing += skipped_existing
                     models_succeeded += 1
@@ -3997,22 +4049,29 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         # whose boxes didn't change — the common reclassify case.
                         # Compare against the ids THIS run actually re-detected
                         # (detect_state["detections"] is the in-memory map
-                        # _detect_batch built); a photo that came back empty has
-                        # no entry, so its pre-run rows are all stale and get
-                        # purged (write_detection_batch([]) already cleared them at
-                        # the data layer — this is the belt-and-suspenders pass and
-                        # cross-model cleanup). A photo re-detected with the same
-                        # boxes has its ids in the fresh set, so they survive.
+                        # _detect_batch built). A no-detection photo may also
+                        # have a freshly used synthetic full-image anchor from
+                        # the fallback path; preserve that id so the purge does
+                        # not cascade-delete the new fallback prediction. Other
+                        # pre-run rows on empty photos are stale and get purged
+                        # (write_detection_batch([]) already cleared the
+                        # MegaDetector rows at the data layer — this is the
+                        # belt-and-suspenders pass and cross-model cleanup). A
+                        # photo re-detected with the same boxes has its ids in
+                        # the fresh set, so they survive.
                         fresh_by_photo = detect_state["detections"]
                         stale_ids = [
                             det_id
                             for photo_id, id_set in pre_ids.items()
                             if photo_id in purge_ids
                             for det_id in id_set
-                            if det_id not in {
-                                d["id"]
-                                for d in fresh_by_photo.get(photo_id, [])
-                            }
+                            if det_id not in (
+                                {
+                                    d["id"]
+                                    for d in fresh_by_photo.get(photo_id, [])
+                                }
+                                | fresh_full_image_ids_by_photo.get(photo_id, set())
+                            )
                         ]
                         if stale_ids:
                             getattr(
@@ -4031,6 +4090,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     parts = [f"{preds} predictions"]
                     if skipped_existing:
                         parts.append(f"{skipped_existing} cached")
+                    if full_image_fallbacks:
+                        parts.append(f"{full_image_fallbacks} full-image fallback")
                     if failed:
                         parts.append(f"{failed} failed")
                     runner.update_step(
@@ -4075,6 +4136,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     "detected": detect_state["total_detected"],
                     "failed": total_failed,
                     "already_classified": total_skipped_existing,
+                    "full_image_fallbacks": total_full_image_fallbacks,
                     "model_count": len(resolved_specs_local),
                     "models_succeeded": models_succeeded,
                     "models_skipped": len(skipped_model_names),
