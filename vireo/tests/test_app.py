@@ -1570,6 +1570,7 @@ def test_compare_flags_pending_match_as_needs_review(app_and_db):
     fix, ``/api/predictions/compare`` excluded ``match`` from ``needs_review``,
     so those deliberately-pending detections disappeared from the queue.
     """
+
     app, db = app_and_db
     photo_id = db.conn.execute(
         "SELECT id FROM photos ORDER BY id LIMIT 1"
@@ -1593,6 +1594,34 @@ def test_compare_flags_pending_match_as_needs_review(app_and_db):
     assert row["row_category"] == "match"
     assert row["needs_review"] is True
     assert payload["summary"]["needs_review"] == 1
+
+
+def test_compare_accepted_matches_are_not_marked_missing(app_and_db):
+    """Accepted match predictions still make the photo a match row."""
+    app, db = app_and_db
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+    species_id = db.add_keyword("Cardinal", is_species=True)
+    db.tag_photo(photo_id, species_id)
+    rules = json.dumps([{"field": "photo_ids", "value": [photo_id]}])
+    cid = db.add_collection("Accepted Matches", rules)
+
+    det_ids = db.save_detections(photo_id, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], "Cardinal", 0.95, "model-a", status="accepted")
+    db.add_prediction(det_ids[0], "Cardinal", 0.93, "model-b", status="accepted")
+
+    resp = app.test_client().get(f"/api/predictions/compare?collection_id={cid}")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    row = data["photos"][0]
+    assert row["row_category"] == "match"
+    assert row["row_label"] == "Match"
+    assert row["needs_review"] is False
+    assert data["summary"]["missing_predictions"] == 0
 
 
 def test_replace_prediction_keywords_updates_grouped_photos(app_and_db):
@@ -1653,6 +1682,54 @@ def test_replace_prediction_keywords_updates_grouped_photos(app_and_db):
             and c["value"] == "New Species"
             for c in changes
         )
+
+
+def test_replace_prediction_keywords_migrates_species_curation(app_and_db):
+    """Replacing species via prediction moves ordered highlights and
+    representative preferences from the old species to the new one.
+    Without this migration, a curated photo silently loses its
+    Highlights/Life-List position when its species is swapped."""
+    app, db = app_and_db
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+    old_kid = db.add_keyword("Old Species", is_species=True)
+    db.tag_photo(photo_id, old_kid)
+    db.add_species_highlight("Old Species", photo_id)
+    db.set_species_representative("Old Species", photo_id)
+
+    det_id = db.save_detections(photo_id, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")[0]
+    db.add_prediction(det_id, "New Species", 0.95, "model-a")
+    pred = db.conn.execute(
+        """SELECT id FROM predictions
+           WHERE detection_id = ? AND classifier_model = ?""",
+        (det_id, "model-a"),
+    ).fetchone()
+
+    resp = app.test_client().post(
+        f"/api/predictions/{pred['id']}/replace-keywords"
+    )
+    assert resp.status_code == 200
+
+    ws_id = db._ws_id()
+    highlights = db.conn.execute(
+        """SELECT species FROM species_highlights
+           WHERE workspace_id = ? AND photo_id = ?""",
+        (ws_id, photo_id),
+    ).fetchall()
+    assert [r["species"] for r in highlights] == ["New Species"]
+
+    prefs = db.conn.execute(
+        """SELECT purpose, species FROM photo_preferences
+           WHERE workspace_id = ? AND photo_id = ?""",
+        (ws_id, photo_id),
+    ).fetchall()
+    assert {(p["purpose"], p["species"]) for p in prefs} == {
+        ("species_representative", "New Species"),
+    }
 
 
 def test_api_predictions_include_bounding_box(app_and_db):
@@ -3343,6 +3420,21 @@ def test_rename_keyword_updates_photo_preferences(app_and_db):
     assert db.get_photo_preferences("highlights") == {"NewBird": p1}
 
 
+def test_rename_keyword_updates_species_representative(app_and_db):
+    """species_representative preferences follow species keyword renames."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("OldBird", is_species=True)
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.tag_photo(p1, kid)
+    db.set_photo_preference("species_representative", "OldBird", p1)
+
+    resp = client.put(f"/api/keywords/{kid}", json={"name": "NewBird"})
+    assert resp.status_code == 200
+
+    assert db.get_photo_preferences("species_representative") == {"NewBird": p1}
+
+
 def test_rename_keyword_photo_preferences_keep_existing_target(app_and_db):
     """Renaming into an existing preference keeps the target preference."""
     app, db = app_and_db
@@ -3359,6 +3451,163 @@ def test_rename_keyword_photo_preferences_keep_existing_target(app_and_db):
     assert resp.status_code == 200
 
     assert db.get_photo_preferences("life_list") == {"NewBird": p_new}
+
+
+def test_rename_keyword_updates_species_highlights(app_and_db):
+    """Ordered species highlights follow species-keyword renames."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("OldBird", is_species=True)
+    rows = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 2").fetchall()
+    p1, p2 = rows[0]["id"], rows[1]["id"]
+    db.tag_photo(p1, kid)
+    db.tag_photo(p2, kid)
+    db.add_species_highlight("OldBird", p1)
+    db.add_species_highlight("OldBird", p2)
+
+    resp = client.put(f"/api/keywords/{kid}", json={"name": "NewBird"})
+    assert resp.status_code == 200
+
+    assert db.get_species_highlights("OldBird") == {}
+    highlights = db.get_species_highlights("NewBird")
+    assert highlights == {"NewBird": {p1: 1, p2: 2}}
+
+
+def test_rename_keyword_species_highlights_merge_into_existing_target(app_and_db):
+    """Renaming into an existing highlights bucket appends after the target's rows."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid_old = db.add_keyword("OldBird", is_species=True)
+    kid_new = db.add_keyword("NewBird", is_species=True)
+    rows = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 3").fetchall()
+    p_target = rows[0]["id"]
+    p_moving_a = rows[1]["id"]
+    p_moving_b = rows[2]["id"]
+    db.tag_photo(p_target, kid_new)
+    db.tag_photo(p_moving_a, kid_old)
+    db.tag_photo(p_moving_b, kid_old)
+    db.add_species_highlight("NewBird", p_target)
+    db.add_species_highlight("OldBird", p_moving_a)
+    db.add_species_highlight("OldBird", p_moving_b)
+
+    resp = client.put(f"/api/keywords/{kid_old}", json={"name": "NewBird"})
+    assert resp.status_code == 200
+
+    assert db.get_species_highlights("OldBird") == {}
+    assert db.get_species_highlights("NewBird") == {
+        "NewBird": {p_target: 1, p_moving_a: 2, p_moving_b: 3}
+    }
+
+
+def test_rename_keyword_species_highlights_dedupe_existing_photo(app_and_db):
+    """A photo already highlighted under the target species keeps its target rank."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid_old = db.add_keyword("OldBird", is_species=True)
+    kid_new = db.add_keyword("NewBird", is_species=True)
+    rows = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 2").fetchall()
+    p_target = rows[0]["id"]
+    p_shared = rows[1]["id"]
+    db.tag_photo(p_target, kid_new)
+    db.tag_photo(p_shared, kid_old)
+    db.tag_photo(p_shared, kid_new)
+    db.add_species_highlight("NewBird", p_target)
+    db.add_species_highlight("NewBird", p_shared)
+    db.add_species_highlight("OldBird", p_shared)
+
+    resp = client.put(f"/api/keywords/{kid_old}", json={"name": "NewBird"})
+    assert resp.status_code == 200
+
+    assert db.get_species_highlights("OldBird") == {}
+    assert db.get_species_highlights("NewBird") == {
+        "NewBird": {p_target: 1, p_shared: 2}
+    }
+
+
+def test_rename_species_highlights_species_chunks_scoped_photo_ids(
+    app_and_db, monkeypatch,
+):
+    """rename_species_highlights_species must chunk the IN(...) clause when
+    called with more photos than SQLite's bound-parameter cap. Without the
+    chunk, an unbounded IN clause on legacy SQLite builds
+    (SQLITE_MAX_VARIABLE_NUMBER=999) raises OperationalError and strands the
+    highlight rows under the renamed species."""
+    from vireo import db as db_module
+
+    _app, db = app_and_db
+    ws = db._ws_id()
+    kid_old = db.add_keyword("OldBird", is_species=True)
+    fid = db.add_folder("/renamed", name="renamed")
+    db.add_workspace_folder(ws, fid)
+
+    # Seed enough photos+highlight rows to exceed the shrunk parameter cap
+    # in a single un-chunked query.
+    monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 3)
+    photo_ids = []
+    for i in range(7):
+        pid = db.add_photo(
+            folder_id=fid, filename=f"p{i}.jpg", extension=".jpg",
+            file_size=1, file_mtime=float(i),
+        )
+        db.tag_photo(pid, kid_old)
+        db.add_species_highlight("OldBird", pid)
+        photo_ids.append(pid)
+
+    pairs = [(pid, ws) for pid in photo_ids]
+    moved = db.rename_species_highlights_species("OldBird", "NewBird", pairs)
+
+    assert moved == len(photo_ids)
+    assert db.get_species_highlights("OldBird") == {}
+    highlights = db.get_species_highlights("NewBird")
+    # Ranks preserve the original bucket order (1..N).
+    assert highlights == {
+        "NewBird": {pid: rank for rank, pid in enumerate(photo_ids, start=1)}
+    }
+
+
+def test_apply_ordered_highlights_preserves_order_when_no_visible_match():
+    """When a species has highlights elsewhere in the workspace but none are
+    present in the current bucket, _apply_ordered_highlights must not re-sort
+    the bucket. Re-sorting would drop the picked-first order that
+    _highlight_score_bucket already applied on the visible photos."""
+    from app import _apply_ordered_highlights
+
+    class FakeDb:
+        def get_species_highlights(self):
+            return {"Robin": {999: 1}}
+
+    original = [
+        {"id": 1, "highlight_score": 0.4, "flag": "flagged"},
+        {"id": 2, "highlight_score": 0.9, "flag": "none"},
+    ]
+    buckets = [{"species": "Robin", "photos": list(original)}]
+    _apply_ordered_highlights(FakeDb(), buckets)
+    assert [p["id"] for p in buckets[0]["photos"]] == [1, 2]
+    assert all(p["is_highlighted"] is False for p in buckets[0]["photos"])
+    assert all(p["highlight_rank"] is None for p in buckets[0]["photos"])
+
+
+def test_apply_ordered_highlights_resorts_when_visible_match():
+    """When at least one visible photo is a stored highlight, the bucket must
+    be re-sorted so the highlighted photo leads and follows the stored rank."""
+    from app import _apply_ordered_highlights
+
+    class FakeDb:
+        def get_species_highlights(self):
+            return {"Robin": {2: 1}}
+
+    buckets = [{
+        "species": "Robin",
+        "photos": [
+            {"id": 1, "highlight_score": 0.9, "flag": "flagged"},
+            {"id": 2, "highlight_score": 0.4, "flag": "none"},
+        ],
+    }]
+    _apply_ordered_highlights(FakeDb(), buckets)
+    order = [p["id"] for p in buckets[0]["photos"]]
+    assert order == [2, 1]
+    marks = {p["id"]: p["is_highlighted"] for p in buckets[0]["photos"]}
+    assert marks == {1: False, 2: True}
 
 
 def test_rename_homonym_non_species_keyword_leaves_species_preferences(app_and_db):
@@ -5389,6 +5638,439 @@ def test_highlights_relabel_unidentified_sets_species(app_and_db):
     )
     assert resp.status_code == 200
     assert "Song Sparrow" in {kw["name"] for kw in db.get_photo_keywords(pid)}
+
+
+def test_highlights_relabel_moves_species_highlights_to_new_bucket(app_and_db):
+    """Relabel migrates ordered species_highlights rows to the new species."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrh', 'hrh', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Bald Eagle", is_species=True)
+    p1 = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'h1.jpg', 0.8, 'none')",
+        (fid,),
+    ).lastrowid
+    p2 = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'h2.jpg', 0.8, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(p1, old_kid)
+    db.tag_photo(p2, old_kid)
+    db.add_species_highlight("Bald Eagle", p1)
+    db.add_species_highlight("Bald Eagle", p2)
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [p1, p2], "species": "Golden Eagle"},
+    )
+    assert resp.status_code == 200
+
+    assert db.get_species_highlights("Bald Eagle") == {}
+    assert db.get_species_highlights("Golden Eagle") == {
+        "Golden Eagle": {p1: 1, p2: 2}
+    }
+
+
+def test_highlights_relabel_merges_into_existing_new_species_bucket(app_and_db):
+    """Relabel appends after rows already present in the destination bucket."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrm', 'hrm', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    db.add_keyword("Bald Eagle", is_species=True)
+    new_kid = db.add_keyword("Golden Eagle", is_species=True)
+    p_dest = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'dest.jpg', 0.8, 'none')",
+        (fid,),
+    ).lastrowid
+    p_moving = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'moving.jpg', 0.8, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(p_dest, new_kid)
+    db.tag_photo(p_moving, db.add_keyword("Bald Eagle", is_species=True))
+    db.add_species_highlight("Golden Eagle", p_dest)
+    db.add_species_highlight("Bald Eagle", p_moving)
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [p_moving], "species": "Golden Eagle"},
+    )
+    assert resp.status_code == 200
+
+    assert db.get_species_highlights("Bald Eagle") == {}
+    assert db.get_species_highlights("Golden Eagle") == {
+        "Golden Eagle": {p_dest: 1, p_moving: 2}
+    }
+
+
+def test_highlights_relabel_migrates_species_representative(app_and_db):
+    """Relabel moves species_representative preferences to the new species
+    so `get_species_representatives()` returns the photo under its new bucket
+    rather than stranding it under the old species."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrrep', 'hrrep', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Bald Eagle", is_species=True)
+    db.add_keyword("Golden Eagle", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'rep.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, old_kid)
+    db.set_species_representative("Bald Eagle", pid)
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Golden Eagle"},
+    )
+    assert resp.status_code == 200
+
+    reps = db.get_species_representatives()
+    assert reps.get("Golden Eagle") == pid
+    assert "Bald Eagle" not in reps
+
+
+def test_highlights_relabel_undo_restores_curation(app_and_db):
+    """Undoing a Highlights relabel restores the migrated ordered-highlight
+    row and species_representative preference back under the old species,
+    so the photo isn't stranded under the new species when the relabel
+    itself is undone. Redo re-applies the migration."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrundo', 'hrundo', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Bald Eagle", is_species=True)
+    db.add_keyword("Golden Eagle", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'undo-cur.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, old_kid)
+    db.set_species_representative("Bald Eagle", pid)
+    db.add_species_highlight("Bald Eagle", pid)
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Golden Eagle"},
+    )
+    assert resp.status_code == 200
+    assert db.get_species_representatives().get("Golden Eagle") == pid
+    assert pid in (db.get_species_highlights("Golden Eagle") or {}).get(
+        "Golden Eagle", {}
+    )
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+    assert undone["action_type"] == "species_replace"
+    reps = db.get_species_representatives()
+    assert reps.get("Bald Eagle") == pid
+    assert "Golden Eagle" not in reps
+    hl = db.get_species_highlights()
+    assert pid in (hl.get("Bald Eagle") or {})
+    assert "Golden Eagle" not in hl
+
+    redone = db.redo_last_undo()
+    assert redone is not None
+    assert redone["action_type"] == "species_replace"
+    reps_redo = db.get_species_representatives()
+    assert reps_redo.get("Golden Eagle") == pid
+    assert "Bald Eagle" not in reps_redo
+    hl_redo = db.get_species_highlights()
+    assert pid in (hl_redo.get("Golden Eagle") or {})
+    assert "Bald Eagle" not in hl_redo
+
+
+def test_highlights_relabel_undo_preserves_original_rank(app_and_db):
+    """Undoing a relabel puts the highlighted photo back at its original
+    rank rather than dumping it at MAX(rank)+1 of the old bucket, so
+    curated order survives a round-trip through undo."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrrank', 'hrrank', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Old Rank Bird", is_species=True)
+    db.add_keyword("New Rank Bird", is_species=True)
+    p1 = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'rank-1.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    p2 = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'rank-2.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(p1, old_kid)
+    db.tag_photo(p2, old_kid)
+    db.add_species_highlight("Old Rank Bird", p1)
+    db.add_species_highlight("Old Rank Bird", p2)
+
+    # Sanity: original ranks are 1 (p1) and 2 (p2).
+    assert db.get_species_highlights("Old Rank Bird") == {
+        "Old Rank Bird": {p1: 1, p2: 2}
+    }
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [p1], "species": "New Rank Bird"},
+    )
+    assert resp.status_code == 200
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+
+    restored = db.get_species_highlights("Old Rank Bird")["Old Rank Bird"]
+    # Before the fix, p1 landed at rank 3 (MAX(rank)+1) and appeared
+    # after p2 in the ordered list.
+    assert restored[p1] == 1
+    assert restored[p2] == 2
+
+
+def test_highlights_relabel_prediction_only_undo_restores_curation(app_and_db):
+    """Predicted-only relabels record `keyword_add`, not `species_replace`,
+    but can still carry a `curation` payload when the photo already held a
+    representative or highlight under another species. Undo/redo must
+    move those rows back and forth just like the `species_replace` case."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrpo', 'hrpo', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    db.add_keyword("New Species", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'pred-cur.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    # No prior species tag: only representative + highlight rows exist
+    # for an unrelated species. This is what makes the relabel record as
+    # `keyword_add` (has_old_species stays False) rather than
+    # `species_replace`.
+    db.set_species_representative("Predicted Bird", pid)
+    db.add_species_highlight("Predicted Bird", pid)
+    det = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(det, "Predicted Bird", 0.88, "m")
+    db.conn.commit()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "New Species"},
+    )
+    assert resp.status_code == 200
+    assert db.get_edit_history(limit=1)[0]["action_type"] == "keyword_add"
+    assert db.get_species_representatives().get("New Species") == pid
+    assert pid in (db.get_species_highlights("New Species") or {}).get(
+        "New Species", {}
+    )
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+    assert undone["action_type"] == "keyword_add"
+    reps = db.get_species_representatives()
+    assert reps.get("Predicted Bird") == pid
+    assert "New Species" not in reps
+    hl = db.get_species_highlights()
+    assert pid in (hl.get("Predicted Bird") or {})
+    assert "New Species" not in hl
+
+    redone = db.redo_last_undo()
+    assert redone is not None
+    assert redone["action_type"] == "keyword_add"
+    reps_redo = db.get_species_representatives()
+    assert reps_redo.get("New Species") == pid
+    assert "Predicted Bird" not in reps_redo
+    hl_redo = db.get_species_highlights()
+    assert pid in (hl_redo.get("New Species") or {})
+    assert "Predicted Bird" not in hl_redo
+
+
+def test_highlights_relabel_undo_preserves_existing_destination_highlight(app_and_db):
+    """When a photo is highlighted under both the old and new species,
+    the relabel drops the old-bucket row and leaves the pre-existing
+    destination row alone. Undo must not delete that destination row —
+    it wasn't created by the relabel."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrdst', 'hrdst', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Both Bird A", is_species=True)
+    db.add_keyword("Both Bird B", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'both.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, old_kid)
+    # Highlighted under both species before the relabel.
+    db.add_species_highlight("Both Bird A", pid)
+    db.add_species_highlight("Both Bird B", pid)
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Both Bird B"},
+    )
+    assert resp.status_code == 200
+    # Old-bucket row dropped; destination row retained.
+    assert db.get_species_highlights("Both Bird A") == {}
+    assert pid in (db.get_species_highlights("Both Bird B") or {}).get(
+        "Both Bird B", {}
+    )
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+    hl = db.get_species_highlights()
+    # Old bucket restored AND destination row survives — before the fix
+    # the undo deleted the pre-existing (Both Bird B, pid) row.
+    assert pid in (hl.get("Both Bird A") or {})
+    assert pid in (hl.get("Both Bird B") or {})
+
+
+def test_highlights_relabel_undo_restores_representative_over_collision(app_and_db):
+    """When the destination species already has a different representative,
+    rename_photo_preferences_species's INSERT OR IGNORE is ignored and no
+    row for our photo is written at the new species, but the old-species
+    row is still deleted. Undo must restore the old-species representative
+    even though there's no destination row for this photo to key off of."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrcol', 'hrcol', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Rep Old", is_species=True)
+    db.add_keyword("Rep New", is_species=True)
+    p_moving = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'moving.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    p_incumbent = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'incumbent.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(p_moving, old_kid)
+    db.set_species_representative("Rep Old", p_moving)
+    db.set_species_representative("Rep New", p_incumbent)
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [p_moving], "species": "Rep New"},
+    )
+    assert resp.status_code == 200
+    reps_after = db.get_species_representatives()
+    # Old-species rep dropped; Rep New keeps its original incumbent.
+    assert "Rep Old" not in reps_after
+    assert reps_after.get("Rep New") == p_incumbent
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+    reps = db.get_species_representatives()
+    # Before the fix, the old-species representative stayed stranded
+    # because the destination row for p_moving never existed at "Rep New".
+    assert reps.get("Rep Old") == p_moving
+    assert reps.get("Rep New") == p_incumbent
+
+
+def test_backfill_species_highlights_from_legacy_preferences(tmp_path):
+    """On upgraded databases, legacy photo_preferences rows with
+    purpose='highlights' should seed species_highlights so pre-existing
+    Highlights picks stay visible under the new ordered-highlights UI."""
+    from vireo.db import Database
+
+    db_path = tmp_path / "legacy.db"
+    db = Database(str(db_path))
+    ws_id = db._ws_id()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/legacy', 'legacy', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (ws_id, fid),
+    )
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'legacy.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.execute(
+        """INSERT INTO photo_preferences
+               (workspace_id, purpose, species, photo_id,
+                created_at, updated_at)
+           VALUES (?, 'highlights', 'Legacy Bird', ?,
+                   datetime('now'), datetime('now'))""",
+        (ws_id, pid),
+    )
+    # Clear the one-shot marker so re-running the backfill picks up the
+    # newly-added legacy row (simulates opening a DB that predated the
+    # ordered-highlights feature).
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._SPECIES_HIGHLIGHTS_BACKFILL_KEY,),
+    )
+    db.conn.commit()
+    db.backfill_species_highlights_from_legacy_preferences()
+
+    hl = db.get_species_highlights()
+    assert pid in (hl.get("Legacy Bird") or {})
+
+    # Marker set so subsequent calls are no-ops even if the row is missing.
+    marker = db.conn.execute(
+        "SELECT value FROM db_meta WHERE key = ?",
+        (db._SPECIES_HIGHLIGHTS_BACKFILL_KEY,),
+    ).fetchone()
+    assert marker is not None
+    db.close()
 
 
 def test_highlights_accepted_species_wins_over_higher_confidence_prediction(app_and_db):

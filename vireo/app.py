@@ -340,12 +340,14 @@ def _bucket_best_score(photos):
 
 
 def _apply_highlight_preferences(db, buckets):
-    preferences = db.get_photo_preferences("highlights")
+    preferences = db.get_species_representatives()
     for bucket in buckets:
         preferred_id = preferences.get(bucket["species"])
-        applied = _apply_preferred_photo(
-            bucket["photos"], preferred_id, "is_highlights_photo"
-        )
+        applied = False
+        for photo in bucket.get("photos") or []:
+            is_rep = preferred_id is not None and photo.get("id") == preferred_id
+            photo["is_species_representative"] = is_rep
+            applied = applied or is_rep
         top = bucket["photos"][0] if bucket["photos"] else {}
         bucket["preferred_photo_id"] = preferred_id
         bucket["has_preferred_photo"] = applied
@@ -357,6 +359,44 @@ def _apply_highlight_preferences(db, buckets):
         # photos.
         bucket["best_score"] = _bucket_best_score(bucket["photos"])
         bucket["best_timestamp"] = top.get("timestamp")
+
+
+def _apply_ordered_highlights(db, buckets):
+    highlights = db.get_species_highlights()
+    for bucket in buckets:
+        ranks = highlights.get(bucket["species"], {})
+        photos = bucket.get("photos") or []
+        matched = False
+        for p in photos:
+            rank = ranks.get(p.get("id"))
+            p["is_highlighted"] = rank is not None
+            p["highlight_rank"] = rank
+            if rank is not None:
+                matched = True
+        # Only re-sort when at least one visible photo actually maps to a
+        # stored highlight rank. `ranks` is workspace-scoped, so a folder
+        # or search view of the same species can be truthy here while none
+        # of its photos are highlights — re-sorting then discards the
+        # picked-first order that _highlight_score_bucket already applied.
+        if matched:
+            bucket["photos"].sort(
+                key=lambda p: (
+                    0 if p.get("is_highlighted") else 1,
+                    p.get("highlight_rank") if p.get("highlight_rank") is not None else 10**9,
+                    -(p.get("highlight_score") or 0),
+                    -(p.get("predicted_confidence") or 0),
+                    -(p.get("quality_score") or 0),
+                    -(p.get("rating") or 0),
+                    p.get("id", 0),
+                )
+            )
+        best = bucket["photos"][0] if bucket.get("photos") else {}
+        bucket["highlight_count"] = sum(
+            1 for p in bucket.get("photos") or [] if p.get("is_highlighted")
+        )
+        bucket["best_quality"] = best.get("quality_score")
+        bucket["best_score"] = best.get("highlight_score")
+        bucket["best_timestamp"] = best.get("timestamp")
 
 
 def _highlight_confidence_label(confidence, is_accepted):
@@ -3718,16 +3758,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         keywords = db.get_photo_keywords(photo_id)
         result["keywords"] = [dict(k) for k in keywords]
 
-        # Life-list block: the photo's eligible species plus whether this photo
-        # is the current representative for each, so the shared lightbox and
-        # browse context menu can offer "Add to Life List" and show the honest
-        # selected state without page-local data. Empty when the photo has no
-        # lifelist species (built from the same eligibility rule as the list).
-        life_list_prefs = db.get_photo_preferences("life_list")
+        # Representative block: the photo's eligible species plus whether this
+        # photo is the current one-photo species representative. Keep the
+        # legacy ``life_list`` key because shared lightbox/menu code reads it.
+        representatives = db.get_species_representatives()
         result["life_list"] = [
-            {"species": s, "is_current_photo": life_list_prefs.get(s) == photo_id}
+            {
+                "species": s,
+                "is_current_photo": representatives.get(s) == photo_id,
+                "is_species_representative": representatives.get(s) == photo_id,
+            }
             for s in db.get_photo_life_list_species(photo_id)
         ]
+        result["species_representatives"] = result["life_list"]
 
         # Location section: pre-resolved leaf + parent chain so the photo
         # detail panel can render the filled state without a second roundtrip.
@@ -5108,10 +5151,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 and (new_row["is_species"] == 1 or new_row["type"] == "taxonomy")
             )
             if old_is_species_keyword and new_is_species_keyword:
+                pairs = [
+                    (row["photo_id"], row["workspace_id"]) for row in affected
+                ]
                 db.rename_photo_preferences_species(
                     old_name,
                     new_name,
-                    [(row["photo_id"], row["workspace_id"]) for row in affected],
+                    pairs,
+                )
+                db.rename_species_highlights_species(
+                    old_name,
+                    new_name,
+                    pairs,
                 )
             for row in affected:
                 _queue_keyword_remove(row["photo_id"], old_name, workspace_id=row["workspace_id"])
@@ -7191,13 +7242,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         species = body.get("species", "")
         purpose = purpose.strip() if isinstance(purpose, str) else ""
         species = species.strip() if isinstance(species, str) else ""
-        if purpose not in {"life_list", "highlights"}:
-            return None, "purpose must be life_list or highlights"
+        if purpose not in {"species_representative", "life_list", "highlights"}:
+            return None, (
+                "purpose must be one of species_representative, "
+                "life_list, or highlights"
+            )
         if not species:
             return None, "species required"
 
         photo_id = body.get("photo_id")
-        if require_photo:
+        # Ordered highlights are per-photo (multiple photos per species),
+        # so photo_id is always required for purpose=highlights — even on
+        # DELETE, where representative purposes let it be omitted to clear
+        # the whole species preference.
+        needs_photo = require_photo or purpose == "highlights"
+        if needs_photo:
             if isinstance(photo_id, bool) or not isinstance(photo_id, int):
                 return None, "photo_id must be an integer"
         else:
@@ -7205,6 +7264,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         return {
             "purpose": purpose,
+            "canonical_purpose": (
+                "highlights" if purpose == "highlights"
+                else "species_representative"
+            ),
             "species": species,
             "photo_id": photo_id,
         }, None
@@ -7240,9 +7303,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return False
 
     def _photo_can_be_preference(db, purpose, species, photo_id):
-        if purpose == "life_list":
-            return _photo_can_be_life_list_preference(db, species, photo_id)
-        return _photo_can_be_highlights_preference(db, species, photo_id)
+        # Ordered highlights use their own (stricter) eligibility check —
+        # the photo must appear in the workspace's highlight buckets for
+        # this species. Representative-style purposes (species_representative,
+        # life_list) only require the photo to carry the species keyword.
+        if purpose == "highlights":
+            return _photo_can_be_highlights_preference(db, species, photo_id)
+        return _photo_can_be_life_list_preference(db, species, photo_id)
 
     @app.route("/api/photo-preferences", methods=["POST"])
     def api_photo_preferences_set():
@@ -7260,9 +7327,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(
                 "photo_id is not eligible for that purpose/species", 400,
             )
-        db.set_photo_preference(
-            parsed["purpose"], parsed["species"], parsed["photo_id"]
-        )
+        # Route legacy `purpose=highlights` writes to the ordered-highlights
+        # table so a cached Highlights page or older client doesn't silently
+        # overwrite the species representative instead.
+        if parsed["purpose"] == "highlights":
+            rank = db.add_species_highlight(
+                parsed["species"], parsed["photo_id"]
+            )
+            return jsonify({"ok": True, **parsed, "rank": rank})
+        db.set_species_representative(parsed["species"], parsed["photo_id"])
         return jsonify({"ok": True, **parsed})
 
     @app.route("/api/photo-preferences", methods=["DELETE"])
@@ -7272,12 +7345,93 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         parsed, error = _parse_photo_preference_body(body, require_photo=False)
         if error:
             return json_error(error)
-        db.clear_photo_preference(parsed["purpose"], parsed["species"])
+        # See the POST handler: `purpose=highlights` targets one row in the
+        # ordered-highlights table, so it needs a photo_id (enforced by
+        # _parse_photo_preference_body) and routes to remove_species_highlight
+        # rather than clearing all representative rows for the species.
+        if parsed["purpose"] == "highlights":
+            removed = db.remove_species_highlight(
+                parsed["species"], parsed["photo_id"]
+            )
+            return jsonify({
+                "ok": True,
+                "purpose": parsed["canonical_purpose"],
+                "species": parsed["species"],
+                "photo_id": parsed["photo_id"],
+                "removed": removed,
+            })
+        db.clear_species_representative(parsed["species"])
         return jsonify({
             "ok": True,
-            "purpose": parsed["purpose"],
+            "purpose": parsed["canonical_purpose"],
             "species": parsed["species"],
         })
+
+    def _parse_species_highlight_body(body, require_direction=False):
+        species = body.get("species", "")
+        species = species.strip() if isinstance(species, str) else ""
+        if not species:
+            return None, "species required"
+        photo_id = body.get("photo_id")
+        if isinstance(photo_id, bool) or not isinstance(photo_id, int):
+            return None, "photo_id must be an integer"
+        parsed = {"species": species, "photo_id": photo_id}
+        if require_direction:
+            direction = body.get("direction", "")
+            direction = direction.strip().lower() if isinstance(direction, str) else ""
+            if direction not in {"up", "down"}:
+                return None, "direction must be up or down"
+            parsed["direction"] = direction
+        return parsed, None
+
+    @app.route("/api/species-highlights", methods=["POST"])
+    def api_species_highlights_add():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        parsed, error = _parse_species_highlight_body(body)
+        if error:
+            return json_error(error)
+        error, status = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
+        if error:
+            return json_error(error, status)
+        if not _photo_can_be_highlights_preference(
+            db, parsed["species"], parsed["photo_id"]
+        ):
+            return json_error(
+                "photo_id is not eligible as a highlight for that species", 400,
+            )
+        rank = db.add_species_highlight(parsed["species"], parsed["photo_id"])
+        return jsonify({"ok": True, **parsed, "rank": rank})
+
+    @app.route("/api/species-highlights", methods=["DELETE"])
+    def api_species_highlights_remove():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        parsed, error = _parse_species_highlight_body(body)
+        if error:
+            return json_error(error)
+        error, status = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
+        if error:
+            return json_error(error, status)
+        removed = db.remove_species_highlight(parsed["species"], parsed["photo_id"])
+        return jsonify({"ok": True, **parsed, "removed": removed})
+
+    @app.route("/api/species-highlights/order", methods=["PATCH", "POST"])
+    def api_species_highlights_order():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        parsed, error = _parse_species_highlight_body(body, require_direction=True)
+        if error:
+            return json_error(error)
+        error, status = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
+        if error:
+            return json_error(error, status)
+        ok = db.move_species_highlight(
+            parsed["species"], parsed["photo_id"], parsed["direction"]
+        )
+        if not ok:
+            return json_error("highlight not found", 404)
+        return jsonify({"ok": True, **parsed})
 
     def _build_highlights_payload(
         db,
@@ -7339,6 +7493,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             search_match_case,
             search_whole_word,
         )
+        _apply_ordered_highlights(db, buckets)
         _apply_highlight_preferences(db, buckets)
 
         def limited_bucket(bucket):
@@ -7463,21 +7618,47 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "quality_score": photo.get("quality_score"),
                 "highlight_score": photo.get("highlight_score"),
                 "reasons": photo.get("reasons") or [],
-                "is_life_list_photo": bool(photo.get("is_life_list_photo")),
+                "is_species_representative": bool(
+                    photo.get("is_species_representative")
+                ),
+                "is_life_list_photo": bool(photo.get("is_species_representative")),
+                "is_highlighted": bool(photo.get("is_highlighted")),
+                "highlight_rank": photo.get("highlight_rank"),
             }
 
         species_entries = []
         distinct_photo_ids = set()
-        life_list_preferences = db.get_photo_preferences("life_list")
+        representatives = db.get_species_representatives()
+        highlights_by_species = db.get_species_highlights()
         for species, entry in buckets.items():
             photos = entry["photos"]
             distinct_photo_ids.update(p["id"] for p in photos)
             timestamps = [p["timestamp"] for p in photos if p.get("timestamp")]
             _highlight_score_bucket(photos)
-            preferred_id = life_list_preferences.get(species)
+            preferred_id = representatives.get(species)
+            highlight_ranks = highlights_by_species.get(species, {})
+            for photo in photos:
+                rank = highlight_ranks.get(photo["id"])
+                photo["is_highlighted"] = rank is not None
+                photo["highlight_rank"] = rank
             preferred_applied = _apply_preferred_photo(
-                photos, preferred_id, "is_life_list_photo"
+                photos, preferred_id, "is_species_representative"
             )
+            best_source = "representative" if preferred_applied else "algorithm"
+            if not preferred_applied and highlight_ranks:
+                valid_highlights = [
+                    (highlight_ranks[p["id"]], p["id"])
+                    for p in photos
+                    if p["id"] in highlight_ranks
+                ]
+                if valid_highlights:
+                    _, highlight_id = min(valid_highlights)
+                    for idx, photo in enumerate(photos):
+                        if photo["id"] == highlight_id:
+                            if idx:
+                                photos.insert(0, photos.pop(idx))
+                            best_source = "highlight"
+                            break
             top = photos if photo_limit is None else photos[:photo_limit]
             species_entries.append({
                 "species": species,
@@ -7489,6 +7670,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "locations": locations_by_species.get(species, []),
                 "preferred_photo_id": preferred_id,
                 "has_preferred_photo": preferred_applied,
+                "best_source": best_source,
                 "best": compact(top[0]) if top else None,
                 "photos": [compact(p) for p in top],
             })
@@ -7859,6 +8041,88 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         top_predictions = _highlight_top_predictions(db, photo_ids)
         ws_id = db._ws_id()
+        # Chunk both lookups: photo_ids has no upstream cap
+        # (_parse_highlight_photo_ids just parses the list), so a bulk
+        # relabel of >999 photos would blow SQLITE_MAX_VARIABLE_NUMBER
+        # on the legacy builds this file already guards against.
+        highlight_renames = {}
+        hl_prev_by_pid = {}
+        # Photos that already had a `(species=<target>, photo_id)` row in
+        # species_highlights before the relabel. rename_species_highlights_species
+        # skips inserting a duplicate for these, so the destination row is
+        # pre-existing and undo must not delete it.
+        hl_dst_preexisting = set()
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT species, photo_id, rank FROM species_highlights
+                    WHERE workspace_id = ? AND photo_id IN ({placeholders})""",
+                (ws_id, *chunk),
+            ).fetchall()
+            for row in rows:
+                old_species_name = row["species"]
+                if old_species_name == species:
+                    hl_dst_preexisting.add(row["photo_id"])
+                    continue
+                highlight_renames.setdefault(old_species_name, []).append(
+                    row["photo_id"]
+                )
+                # Snapshot the original rank so undo can restore each
+                # highlighted photo at its original position instead of
+                # dumping it at MAX(rank)+1 (see _restore_relabel_curation).
+                hl_prev_by_pid.setdefault(row["photo_id"], []).append({
+                    "species": old_species_name,
+                    "rank": row["rank"],
+                })
+        # Backfill dst_existed onto each entry now that the target-species
+        # pass has finished (row order within the query is unspecified).
+        for pid, entries in hl_prev_by_pid.items():
+            dst = pid in hl_dst_preexisting
+            for entry in entries:
+                entry["dst_existed"] = dst
+        preference_renames = {}
+        pref_prev_by_pid = {}
+        # Purposes that already have a row at (new_species, purpose) — for
+        # any photo. rename_photo_preferences_species uses INSERT OR IGNORE,
+        # so when the destination slot is already taken (either by this
+        # photo or a different one), the relabel does not create a new
+        # destination row for this photo and undo must not attempt to
+        # delete it. Un-gating the old-species restore from a destination
+        # row lookup lets undo recover representatives even when the
+        # relabel collided with another photo holding the slot.
+        pref_dst_taken = {
+            r["purpose"] for r in db.conn.execute(
+                """SELECT purpose FROM photo_preferences
+                   WHERE workspace_id = ? AND species = ?
+                     AND purpose IN (
+                         'species_representative', 'life_list', 'highlights'
+                     )""",
+                (ws_id, species),
+            ).fetchall()
+        }
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT species, photo_id, purpose FROM photo_preferences
+                    WHERE workspace_id = ?
+                      AND photo_id IN ({placeholders})
+                      AND purpose IN (
+                          'species_representative', 'life_list', 'highlights'
+                      )""",
+                (ws_id, *chunk),
+            ).fetchall()
+            for row in rows:
+                old_species_name = row["species"]
+                if old_species_name == species:
+                    continue
+                preference_renames.setdefault(old_species_name, []).append(
+                    row["photo_id"]
+                )
+                pref_prev_by_pid.setdefault(row["photo_id"], []).append({
+                    "purpose": row["purpose"],
+                    "species": old_species_name,
+                    "dst_existed": row["purpose"] in pref_dst_taken,
+                })
         try:
             kid = db.add_keyword(species, is_species=True, _commit=False)
             items = []
@@ -7893,7 +8157,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 _queue_keyword_add(pid, species, workspace_id=ws_id, _commit=False)
                 old_value = str(old_primary["id"]) if old_primary else ""
                 old_keyword_ids = [old["id"] for old in old_rows]
-                if pred is not None or len(old_keyword_ids) > 1:
+                hl_prev = hl_prev_by_pid.get(pid) or []
+                pref_prev = pref_prev_by_pid.get(pid) or []
+                needs_payload = (
+                    pred is not None
+                    or len(old_keyword_ids) > 1
+                    or hl_prev
+                    or pref_prev
+                )
+                if needs_payload:
                     old_payload = {
                         "keyword_id": old_value,
                         "keyword_ids": old_keyword_ids,
@@ -7903,12 +8175,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             "prediction_id": pred["id"],
                             "prediction_status": pred["status"],
                         })
+                    if hl_prev or pref_prev:
+                        old_payload["curation"] = {
+                            "hl_prev": hl_prev,
+                            "pref_prev": pref_prev,
+                        }
                     old_value = json.dumps(old_payload, sort_keys=True)
                 items.append({
                     "photo_id": pid,
                     "old_value": old_value,
                     "new_value": str(kid),
                 })
+
+            for old_species_name, pids in highlight_renames.items():
+                db.rename_species_highlights_species(
+                    old_species_name,
+                    species,
+                    [(pid, ws_id) for pid in pids],
+                    _commit=False,
+                )
+            for old_species_name, pids in preference_renames.items():
+                db.rename_photo_preferences_species(
+                    old_species_name,
+                    species,
+                    [(pid, ws_id) for pid in pids],
+                    _commit=False,
+                )
 
             action_type = (
                 "species_replace"
@@ -7974,6 +8266,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             _request_bool_arg("q_match_case"),
             _request_bool_arg("q_whole_word"),
         )
+        _apply_ordered_highlights(db, buckets)
         _apply_highlight_preferences(db, buckets)
         if species == "__unidentified__":
             photos = unidentified_photos
@@ -8852,7 +9145,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         }
 
         for photo in by_photo.values():
-            highest_category = "missing_prediction"
+            highest_category = None
             pending_category = None
             for model_preds in photo["predictions"].values():
                 for pred in model_preds:
@@ -8867,7 +9160,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         summary["conflicts"] += 1
                     elif cat == "new":
                         summary["new"] += 1
-                    if priority[cat] > priority[highest_category]:
+                    if (
+                        highest_category is None
+                        or priority[cat] > priority[highest_category]
+                    ):
                         highest_category = cat
                     if pred.get("status") == "pending" and (
                         pending_category is None
@@ -8876,7 +9172,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         pending_category = cat
             if not photo["predictions"]:
                 summary["missing_predictions"] += 1
-            row_category = pending_category or highest_category
+            row_category = pending_category or highest_category or "missing_prediction"
             photo["row_category"] = row_category
             photo["row_label"] = labels[row_category]
             # Any pending prediction means the user hasn't decided yet, so

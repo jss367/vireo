@@ -321,7 +321,7 @@ function renderCard(entry) {
   return '<div class="species-card" data-species="' + escapeAttr(entry.species) + '" title="'
     + escapeAttr((entry.locations || []).join(', ')) + '">'
     + '<div class="lifer-number">#' + entry.number + '</div>'
-    + (best && best.is_life_list_photo ? '<div class="lifelist-ribbon">Life List</div>' : '')
+    + (best && best.is_species_representative ? '<div class="lifelist-ribbon">Representative</div>' : '')
     + (best ? '<img src="' + escapeAttr(thumb) + '" data-photo-id="' + escapeAttr(best.id) + '" alt="' + escapeAttr(best.filename) + '" loading="lazy">' : '')
     + '<div class="species-info">'
     + '<div class="species-name">' + escapeAttr(entry.species) + '</div>'
@@ -374,7 +374,7 @@ function render() {
       if (entry && entry.best && window.openLightbox) {
         // The lightbox set is this species' top photos so the user can
         // flip through their best shots of the lifer. The shared lightbox
-        // panel (see _navbar.html) renders its own "Add to Life List" control.
+        // panel (see _navbar.html) renders its own representative control.
         openLightbox(entry.best.id, entry.best.filename, entry.photos || [entry.best]);
       }
     });
@@ -488,7 +488,7 @@ async function startPublishSite() {
   }
 }
 
-// The "Add to Life List" lightbox panel is shared (see _navbar.html) and
+// The representative lightbox panel is shared (see _navbar.html) and
 // works on every page. When it changes a representative photo, it dispatches
 // `lifelist:changed`; refresh this page's grid + ribbons in response.
 document.addEventListener('lifelist:changed', function() {

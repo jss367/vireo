@@ -294,20 +294,21 @@ def test_highlights_unidentified_search_includes_low_confidence_predictions(live
     assert "low-conf-bird.jpg" in filenames
 
 
-def test_highlights_preference_updates_top_photo_timestamp(live_server):
+def test_ordered_highlight_updates_top_photo_timestamp(live_server):
     db = live_server["db"]
     data = live_server["data"]
     _seed_quality_scores_and_species(db, data)
 
-    preferred = data["photos"][2]
-    db.set_photo_preference("highlights", "Red-tailed Hawk", preferred)
+    highlighted = data["photos"][2]
+    db.add_species_highlight("Red-tailed Hawk", highlighted)
 
     base = live_server["url"]
     with urlopen(f"{base}/api/highlights?scope=workspace") as resp:
         payload = json.load(resp)
 
     hawk = next(b for b in payload["buckets"] if b["species"] == "Red-tailed Hawk")
-    assert hawk["photos"][0]["id"] == preferred
+    assert hawk["photos"][0]["id"] == highlighted
+    assert hawk["photos"][0]["is_highlighted"] is True
     assert hawk["best_timestamp"] == "2024-03-10T08:02:00"
 
 

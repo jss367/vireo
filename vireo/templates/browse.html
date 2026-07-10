@@ -7114,12 +7114,10 @@ function buildPhotoContextMenu(photoIds) {
   ]);
 }
 
-// "Add to Life List" context-menu items. A photo is a lifelist representative
-// per species keyword, so one item per eligible species (the same species
-// names shown on the card). Fire-and-forget: it sets the representative and
-// toasts; the server (_photo_can_be_life_list_preference) is the backstop for
-// a stale menu. Disabled for a multi-selection because crowning one shot from
-// many is ambiguous; hidden entirely when nothing selected has a species.
+// "Set Representative" context-menu items. One photo can represent each
+// species in the active workspace. Disabled for a multi-selection because
+// crowning one shot from many is ambiguous; hidden entirely when nothing
+// selected has a species.
 // Rejected photos are excluded here too \u2014 they'd fail the server backstop
 // (`_photo_can_be_life_list_preference` rejects `flag = 'rejected'`) and only
 // produce an error toast, so don't offer the action in the first place.
@@ -7132,14 +7130,14 @@ function buildLifeListMenuItems(photoIds) {
   });
   if (!anyEligible) return [];
   if (photoIds.length !== 1) {
-    return [{ label: 'Add to Life List', disabled: true,
+    return [{ label: 'Set Representative', disabled: true,
               disabledHint: 'Select a single photo' }];
   }
   var photo = photos.find(function(p) { return p.id === photoIds[0]; });
   if (!_lifeListEligibleClient(photo)) return [];
   return (photo.species || []).map(function(sp) {
     return {
-      label: 'Add to Life List \u2014 ' + sp,
+      label: 'Set Representative \u2014 ' + sp,
       onClick: function() { addPhotoToLifeList(sp, photoIds[0]); },
     };
   });
@@ -7148,12 +7146,12 @@ function buildLifeListMenuItems(photoIds) {
 function addPhotoToLifeList(species, photoId) {
   if (!species || !photoId) return;
   safeFetch('/api/photo-preferences', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ purpose: 'life_list', species: species, photo_id: photoId }),
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ purpose: 'species_representative', species: species, photo_id: photoId }),
   }).then(function() {
     if (typeof showToast === 'function') {
-      showToast('Life List photo set for ' + species, 'success');
+      showToast('Species representative set for ' + species, 'success');
     }
   });
 }
