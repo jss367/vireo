@@ -108,14 +108,21 @@ async function openExternal(url) {
   }
   if (isTauri()) {
     try {
-      await window.__TAURI_INTERNALS__.invoke('plugin:opener|open_url', { url: url, with: null });
+      await window.__TAURI_INTERNALS__.invoke('open_external_url', { url: url });
       logInfo('openExternal: opened ' + url);
       return true;
     } catch (e) {
-      // Surface the *real* opener error (e.g. ForbiddenUrl from a missing
-      // capability scope) to the log file so this stops being a silent no-op.
-      logError('openExternal failed for ' + url + ': ' + (e && e.message ? e.message : e));
-      return false;
+      logWarn('openExternal command failed for ' + url + ': ' + (e && e.message ? e.message : e));
+      try {
+        await window.__TAURI_INTERNALS__.invoke('plugin:opener|open_url', { url: url, with: null });
+        logInfo('openExternal: opened ' + url + ' via opener plugin fallback');
+        return true;
+      } catch (fallbackError) {
+        // Surface the *real* opener error (e.g. ForbiddenUrl from a missing
+        // capability scope) to the log file so this stops being a silent no-op.
+        logError('openExternal failed for ' + url + ': ' + (fallbackError && fallbackError.message ? fallbackError.message : fallbackError));
+        return false;
+      }
     }
   }
   // Browser fallback. We deliberately omit the 'noopener' window feature: with
