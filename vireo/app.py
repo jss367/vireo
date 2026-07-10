@@ -8852,7 +8852,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         }
 
         for photo in by_photo.values():
-            highest_category = "missing_prediction"
+            highest_category = None
             pending_category = None
             for model_preds in photo["predictions"].values():
                 for pred in model_preds:
@@ -8867,7 +8867,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         summary["conflicts"] += 1
                     elif cat == "new":
                         summary["new"] += 1
-                    if priority[cat] > priority[highest_category]:
+                    if (
+                        highest_category is None
+                        or priority[cat] > priority[highest_category]
+                    ):
                         highest_category = cat
                     if pred.get("status") == "pending" and (
                         pending_category is None
@@ -8876,7 +8879,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         pending_category = cat
             if not photo["predictions"]:
                 summary["missing_predictions"] += 1
-            row_category = pending_category or highest_category
+            row_category = pending_category or highest_category or "missing_prediction"
             photo["row_category"] = row_category
             photo["row_label"] = labels[row_category]
             photo["needs_review"] = row_category in {
