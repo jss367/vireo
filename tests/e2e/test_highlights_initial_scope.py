@@ -399,6 +399,87 @@ def test_highlights_lightbox_pick_keeps_curated_highlight_first(live_server, pag
     assert int(still_first.get_attribute("data-photo-id")) == highlighted_id
 
 
+def test_highlights_lightbox_pick_applies_backend_score_bonus(live_server, page):
+    """Picking must apply the backend's pick bonus before client-side re-sort.
+
+    Regression for Codex feedback on PR #1176 (thread on line 881): the
+    client sort compares cached ``highlight_score`` values, but the backend
+    bakes a ``+0.08`` bonus into ``highlight_score`` for flagged photos in
+    ``_highlight_score_bucket`` before ordering. In a curated bucket with a
+    stored species highlight, unhighlighted photos are ordered by
+    ``highlight_score``. Without the bonus adjustment, picking an
+    unhighlighted photo whose score is within 0.08 of the next one leaves
+    it behind in the client slice, while a reload would promote it — so the
+    visible slice (and the Save-as-Collection payload derived from it)
+    diverges from what the backend would produce.
+    """
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+
+    # Seeded quality scores: hawks are photos[0]=0.90, photos[1]=0.85,
+    # photos[2]=0.80. With no other subject metrics populated,
+    # highlight_score == quality_score in _highlight_score_bucket.
+    highlighted_id = data["photos"][0]  # promoted to top by the stored highlight
+    upper_unhighlighted = data["photos"][1]  # score 0.85 — the pick target
+    lower_unhighlighted = data["photos"][2]  # score 0.80
+
+    # Reduce the gap between the two unhighlighted hawks so the +0.08 bonus
+    # is enough to flip their order, but small enough that a stale cached
+    # score would still leave lower_unhighlighted second.
+    db.conn.execute(
+        "UPDATE photos SET quality_score = ? WHERE id = ?",
+        (0.83, lower_unhighlighted),
+    )
+    db.conn.commit()
+
+    db.add_species_highlight("Red-tailed Hawk", highlighted_id)
+
+    page.goto(f"{live_server['url']}/highlights", timeout=5000)
+    hawk_section = page.locator("section.bucket").filter(has_text="Red-tailed Hawk")
+    expect(hawk_section.locator(".highlights-card").first).to_be_visible(timeout=5000)
+
+    # Initial order: [highlighted, upper_unhighlighted(0.85), lower_unhighlighted(0.83)].
+    initial_ids = hawk_section.locator(".highlights-card").evaluate_all(
+        "cards => cards.map(c => Number(c.getAttribute('data-photo-id')))"
+    )
+    assert initial_ids[0] == highlighted_id
+    assert initial_ids[1] == upper_unhighlighted
+    assert initial_ids[2] == lower_unhighlighted
+
+    # Open the lightbox on the lower unhighlighted card and pick it. The
+    # backend would add +0.08 to its highlight_score (0.83 -> 0.91),
+    # promoting it above upper_unhighlighted (0.85).
+    lower_card = hawk_section.locator(
+        f'.highlights-card[data-photo-id="{lower_unhighlighted}"]'
+    )
+    lower_card.click()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+    page.wait_for_function(
+        "pid => _lightboxCurrentId === pid",
+        arg=lower_unhighlighted,
+        timeout=3000,
+    )
+    page.keyboard.press("p")
+    assert _wait_for_flag(db, lower_unhighlighted, "flagged") == "flagged"
+
+    # The picked photo must jump ahead of the higher-scored unhighlighted
+    # photo — mirroring what a full reload would render.
+    picked_card = hawk_section.locator(
+        f'.highlights-card[data-photo-id="{lower_unhighlighted}"]'
+    )
+    expect(picked_card).to_have_class(re.compile(r"\bpick-flag-card\b"), timeout=5000)
+    updated_ids = hawk_section.locator(".highlights-card").evaluate_all(
+        "cards => cards.map(c => Number(c.getAttribute('data-photo-id')))"
+    )
+    assert updated_ids[0] == highlighted_id
+    assert updated_ids[1] == lower_unhighlighted
+    assert updated_ids[2] == upper_unhighlighted
+
+
 def test_highlights_species_search_filters_buckets(live_server, page):
     db = live_server["db"]
     data = live_server["data"]

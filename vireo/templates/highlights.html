@@ -857,6 +857,23 @@ function findHighlightPhotoWithContainer(photoId) {
   return match ? { photo: match, photos: unid } : null;
 }
 
+// Backend `_highlight_score_bucket` adds this bonus to `highlight_score`
+// when flag === 'flagged' before sorting (see vireo/app.py). Client-cached
+// scores already include or exclude the bonus depending on the flag at load
+// time, so a lightbox pick/unpick must apply the same delta before re-
+// sorting — otherwise a stale cached score can keep the wrong photo in the
+// visible slice (and in the Save-as-Collection payload derived from it).
+var PICK_HIGHLIGHT_SCORE_BONUS = 0.08;
+
+function applyPickBonusOnFlagChange(photo, previousFlag, nextFlag) {
+  if (!photo || typeof photo.highlight_score !== 'number') return;
+  var wasFlagged = previousFlag === 'flagged';
+  var isFlagged = nextFlag === 'flagged';
+  if (wasFlagged === isFlagged) return;
+  var delta = isFlagged ? PICK_HIGHLIGHT_SCORE_BONUS : -PICK_HIGHLIGHT_SCORE_BONUS;
+  photo.highlight_score = Math.max(0, Math.min(1, photo.highlight_score + delta));
+}
+
 // Sort a bucket's photos to match the backend's ordering after a client-side
 // flag mutation. If any visible photo maps to a stored species highlight the
 // backend runs `_apply_ordered_highlights` after `_highlight_score_bucket`,
@@ -1258,6 +1275,7 @@ document.addEventListener('lightbox:flagchanged', function(e) {
     if (prev !== 'flagged' && next !== 'flagged') return;
     var hit = findHighlightPhotoWithContainer(detail.photoId);
     if (!hit) return;
+    applyPickBonusOnFlagChange(hit.photo, prev, next);
     hit.photo.flag = next;
     sortBucketAfterFlagChange(hit.photos);
     render();
