@@ -37,3 +37,28 @@ def test_page_loads_within_timeout(live_server, page, path):
     assert response.status == 200
     # Page should have rendered — title or body content present
     expect(page.locator("body")).not_to_be_empty()
+
+
+def _expect_text_correction_disabled(locator):
+    expect(locator).to_have_attribute("autocomplete", "off")
+    expect(locator).to_have_attribute("autocorrect", "off")
+    expect(locator).to_have_attribute("autocapitalize", "none")
+    expect(locator).to_have_attribute("spellcheck", "false")
+
+
+def test_text_inputs_disable_os_correction_app_wide(live_server, page):
+    """Text/search fields should not let browser or OS autocorrect alter queries."""
+    url = live_server["url"]
+    page.goto(f"{url}/edit")
+
+    _expect_text_correction_disabled(page.locator("#editorSearchInput"))
+
+    page.evaluate(
+        """() => {
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.id = 'dynamicTextInput';
+            document.body.appendChild(input);
+        }"""
+    )
+    _expect_text_correction_disabled(page.locator("#dynamicTextInput"))
