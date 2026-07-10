@@ -9956,26 +9956,46 @@ class Database:
         if _commit:
             self.conn.commit()
 
-    def get_species_highlights(self, species=None):
+    def get_species_highlights(self, species=None, eligible_only=False):
         """Return ordered highlighted photo ids for the active workspace.
+
+        When ``eligible_only`` is true, omit rejected photos and photos that
+        are no longer eligible for the Highlights page. Stored rows are kept
+        intact so un-rejecting a photo restores its selection.
 
         Result shape is ``{species: {photo_id: rank}}``.
         """
         ws = self._ws_id()
+        eligibility_joins = ""
+        eligibility_filter = ""
+        if eligible_only:
+            eligibility_joins = """
+                   JOIN photos p ON p.id = sh.photo_id
+                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                    AND wf.workspace_id = sh.workspace_id
+                   JOIN folders f ON f.id = p.folder_id
+                    AND f.status IN ('ok', 'partial')"""
+            eligibility_filter = """
+                 AND p.quality_score IS NOT NULL
+                 AND COALESCE(p.flag, 'none') != 'rejected'"""
         if species:
             rows = self.conn.execute(
-                """SELECT species, photo_id, rank
-                   FROM species_highlights
-                   WHERE workspace_id = ? AND species = ?
-                   ORDER BY rank, created_at, photo_id""",
+                f"""SELECT sh.species, sh.photo_id, sh.rank
+                   FROM species_highlights sh
+                   {eligibility_joins}
+                   WHERE sh.workspace_id = ? AND sh.species = ?
+                   {eligibility_filter}
+                   ORDER BY sh.rank, sh.created_at, sh.photo_id""",
                 (ws, species),
             ).fetchall()
         else:
             rows = self.conn.execute(
-                """SELECT species, photo_id, rank
-                   FROM species_highlights
-                   WHERE workspace_id = ?
-                   ORDER BY species, rank, created_at, photo_id""",
+                f"""SELECT sh.species, sh.photo_id, sh.rank
+                   FROM species_highlights sh
+                   {eligibility_joins}
+                   WHERE sh.workspace_id = ?
+                   {eligibility_filter}
+                   ORDER BY sh.species, sh.rank, sh.created_at, sh.photo_id""",
                 (ws,),
             ).fetchall()
         result = {}

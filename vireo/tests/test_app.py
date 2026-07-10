@@ -3573,7 +3573,8 @@ def test_apply_ordered_highlights_preserves_order_when_no_visible_match():
     from app import _apply_ordered_highlights
 
     class FakeDb:
-        def get_species_highlights(self):
+        def get_species_highlights(self, eligible_only=False):
+            assert eligible_only is True
             return {"Robin": {999: 1}}
 
     original = [
@@ -3593,7 +3594,8 @@ def test_apply_ordered_highlights_resorts_when_visible_match():
     from app import _apply_ordered_highlights
 
     class FakeDb:
-        def get_species_highlights(self):
+        def get_species_highlights(self, eligible_only=False):
+            assert eligible_only is True
             return {"Robin": {2: 1}}
 
     buckets = [{
@@ -5393,6 +5395,7 @@ def test_highlights_curation_filters_combine_independently(app_and_db):
     )
 
     photo_ids = {}
+    keyword_ids = {}
     for index, species in enumerate(("Alpha Bird", "Beta Bird", "Gamma Bird", "Delta Bird")):
         keyword_id = db.conn.execute(
             "INSERT INTO keywords (name, type, is_species) VALUES (?, 'taxonomy', 1)",
@@ -5408,6 +5411,17 @@ def test_highlights_curation_filters_combine_independently(app_and_db):
             (photo_id, keyword_id),
         )
         photo_ids[species] = photo_id
+        keyword_ids[species] = keyword_id
+
+    alpha_alternate = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'alpha-alternate.jpg', 0.65, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (alpha_alternate, keyword_ids["Alpha Bird"]),
+    )
     db.conn.commit()
 
     # Alpha has only a highlight, Beta only a representative, Gamma has both,
@@ -5435,6 +5449,20 @@ def test_highlights_curation_filters_combine_independently(app_and_db):
         highlight_selection="no",
         species_representative="no",
     ) == {"Delta Bird"}
+
+    # Rejecting Alpha's selected photo leaves another eligible Alpha photo in
+    # the bucket. The stored rank is retained for undo, but it must not make the
+    # active-selection filter report that Alpha still has a chosen highlight.
+    db.update_photo_flag(photo_ids["Alpha Bird"], "rejected")
+    assert species_for(highlight_selection="yes") == {"Gamma Bird"}
+    assert species_for(
+        highlight_selection="no", species_representative="no"
+    ) == {"Alpha Bird", "Delta Bird"}
+    assert db.get_species_highlights("Alpha Bird") == {
+        "Alpha Bird": {photo_ids["Alpha Bird"]: 1}
+    }
+    db.update_photo_flag(photo_ids["Alpha Bird"], "none")
+    assert species_for(highlight_selection="yes") == {"Alpha Bird", "Gamma Bird"}
 
     response = client.get(
         "/api/highlights",

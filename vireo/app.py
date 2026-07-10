@@ -368,7 +368,7 @@ def _apply_highlight_preferences(db, buckets):
 
 
 def _apply_ordered_highlights(db, buckets):
-    highlights = db.get_species_highlights()
+    highlights = db.get_species_highlights(eligible_only=True)
     for bucket in buckets:
         ranks = highlights.get(bucket["species"], {})
         # Species-level state stays true even when every selected highlight is
