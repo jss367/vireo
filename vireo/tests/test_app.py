@@ -4704,6 +4704,67 @@ def test_api_folder_delete_invalidates_missing_cache(app_and_db, tmp_path):
     assert payload["photos"] == []
 
 
+def test_workspace_delete_and_create_invalidate_missing_cache(app_and_db):
+    """Workspace create/delete must clear their id from the missing cache.
+
+    Regression: the cache key is ``(db_path, workspace_id, folder_id)``,
+    and SQLite ``INTEGER PRIMARY KEY`` can reuse the rowid of a deleted
+    workspace for the next ``create_workspace``. If the deleted workspace
+    left a ready Missing Originals payload behind, ``GET /api/photos/missing``
+    on the freshly created workspace would serve the previous workspace's
+    ghost photos and folder paths until a rescan overwrote the entry.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    # Create a second workspace and give it a fake ready cache entry.
+    resp = client.post(
+        "/api/workspaces",
+        json={"name": "temp-ws"},
+    )
+    assert resp.status_code == 200
+    ws = resp.get_json()
+    ws_id = ws["id"]
+    key = (db._db_path, ws_id, None)
+    with app._missing_originals_lock:
+        app._missing_originals_cache[key] = {
+            "photos": [{"id": 99999, "filename": "ghost.jpg"}],
+            "checked_at": "2026-01-01T00:00:00Z",
+            "set_at": 0.0,
+        }
+
+    # Delete the workspace via the API and confirm the cache entry
+    # (which is keyed on this ws_id) is gone. Without invalidation on
+    # delete, a subsequent workspace that reused this rowid would still
+    # see the stale payload.
+    resp = client.delete(f"/api/workspaces/{ws_id}")
+    assert resp.status_code == 200
+    with app._missing_originals_lock:
+        assert key not in app._missing_originals_cache
+
+    # Prime a stale cache entry directly at the next id SQLite could
+    # hand out, then create a workspace to verify the create path also
+    # clears the specific workspace's key even if the store somehow
+    # retained one (e.g. a concurrent write racing between the delete
+    # invalidation and the new insert).
+    next_id_row = db.conn.execute(
+        "SELECT seq FROM sqlite_sequence WHERE name = 'workspaces'"
+    ).fetchone()
+    likely_next_id = (next_id_row["seq"] + 1) if next_id_row else ws_id + 1
+    poison_key = (db._db_path, likely_next_id, None)
+    with app._missing_originals_lock:
+        app._missing_originals_cache[poison_key] = {
+            "photos": [{"id": 42, "filename": "poison.jpg"}],
+            "checked_at": "2026-01-01T00:00:00Z",
+            "set_at": 0.0,
+        }
+    resp = client.post("/api/workspaces", json={"name": "fresh-ws"})
+    assert resp.status_code == 200
+    new_ws_id = resp.get_json()["id"]
+    with app._missing_originals_lock:
+        assert (db._db_path, new_ws_id, None) not in app._missing_originals_cache
+
+
 def test_api_photos_missing_automatic_respects_failure_backoff(app_and_db, monkeypatch):
     """A failed manual scan suppresses automatic retries during backoff."""
     from db import Database

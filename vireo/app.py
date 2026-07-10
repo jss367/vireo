@@ -3488,32 +3488,43 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return True
         return False
 
-    def _invalidate_missing_originals_cache():
-        """Drop cached Missing Originals results for every workspace on
-        this app's database.
+    def _invalidate_missing_originals_cache(workspace_ids=None):
+        """Drop cached Missing Originals results for this app's database.
 
         Photos are shared across workspaces (a folder can be linked into
-        more than one), so removing a row must clear every workspace
-        cache that could still list it — scoping to the active
-        workspace lets other workspaces keep serving stale ready
-        payloads until their next scan.
+        more than one), so a photo-row removal must clear every
+        workspace cache that could still list it — scoping to the
+        active workspace lets other workspaces keep serving stale
+        ready payloads until their next scan.
+
+        ``workspace_ids`` narrows the invalidation to those workspace
+        ids. Use it on workspace create/delete to clear entries that
+        could otherwise be served to a later workspace that reuses a
+        SQLite rowid.
         """
+        ws_filter = None if workspace_ids is None else {int(w) for w in workspace_ids}
         with app._missing_originals_lock:
             for store in (
                 app._missing_originals_cache,
                 app._missing_originals_errors,
             ):
                 for key in list(store.keys()):
-                    if key[0] == db_path:
-                        store.pop(key, None)
+                    if key[0] != db_path:
+                        continue
+                    if ws_filter is not None and key[1] not in ws_filter:
+                        continue
+                    store.pop(key, None)
             # Bump generation for every in-flight scan under this DB so
             # its completion path refuses to write its stale
             # pre-invalidation snapshot back into the cache.
             for key in list(app._missing_originals_inflight.keys()):
-                if key[0] == db_path:
-                    app._missing_originals_generation[key] = (
-                        app._missing_originals_generation.get(key, 0) + 1
-                    )
+                if key[0] != db_path:
+                    continue
+                if ws_filter is not None and key[1] not in ws_filter:
+                    continue
+                app._missing_originals_generation[key] = (
+                    app._missing_originals_generation.get(key, 0) + 1
+                )
 
     def _start_missing_originals_scan(db, folder_id=None, automatic=False):
         key = _missing_originals_key(db, folder_id)
@@ -8415,6 +8426,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return err
         try:
             ws_id = db.create_workspace(name, config_overrides=config_overrides)
+            # SQLite can reuse the rowid of a deleted workspace here, so a
+            # ready Missing Originals payload cached under the old
+            # workspace could otherwise be served to this fresh workspace
+            # until its own scan overwrites the entry — mirroring the
+            # new-images cache guard in db.create_workspace.
+            _invalidate_missing_originals_cache(workspace_ids=[ws_id])
             # Seed the standard smart collections (All Photos, Flagged, etc.).
             # Startup only seeds the active workspace, so without this a
             # workspace created via the API never gets defaults until it's
@@ -8464,6 +8481,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if ws_id == db._active_workspace_id:
             return json_error("Cannot delete the active workspace. Switch first.")
         db.delete_workspace(ws_id)
+        # Drop this workspace's cached Missing Originals payload so a
+        # later workspace that reuses this SQLite rowid can't be served
+        # the deleted workspace's ghost photos / folder paths.
+        _invalidate_missing_originals_cache(workspace_ids=[ws_id])
         return jsonify({"ok": True})
 
     @app.route("/api/workspaces/<int:ws_id>/activate", methods=["POST"])
