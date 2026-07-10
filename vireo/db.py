@@ -10141,15 +10141,26 @@ class Database:
                     (workspace_id, old_species),
                 ).fetchall()
             else:
-                placeholders = ",".join("?" for _ in photo_ids)
-                src_rows = self.conn.execute(
-                    f"""SELECT photo_id
-                        FROM species_highlights
-                        WHERE workspace_id = ? AND species = ?
-                          AND photo_id IN ({placeholders})
-                        ORDER BY rank, created_at, photo_id""",
-                    (workspace_id, old_species, *photo_ids),
-                ).fetchall()
+                # Chunk the IN(...) clause: photo_ids can carry every photo
+                # tagged with the renamed keyword in this workspace, which on
+                # legacy SQLite builds (SQLITE_MAX_VARIABLE_NUMBER=999) blows
+                # the parameter cap once a species passes ~997 tagged photos.
+                # Chunk in memory then re-sort so the rebucket order matches
+                # the single-query path.
+                raw_rows = []
+                for chunk in _chunks(photo_ids):
+                    placeholders = ",".join("?" for _ in chunk)
+                    raw_rows.extend(self.conn.execute(
+                        f"""SELECT photo_id, rank, created_at
+                            FROM species_highlights
+                            WHERE workspace_id = ? AND species = ?
+                              AND photo_id IN ({placeholders})""",
+                        (workspace_id, old_species, *chunk),
+                    ).fetchall())
+                raw_rows.sort(
+                    key=lambda r: (r["rank"], r["created_at"], r["photo_id"])
+                )
+                src_rows = raw_rows
             if not src_rows:
                 continue
             existing = {

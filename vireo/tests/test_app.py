@@ -3455,6 +3455,47 @@ def test_rename_keyword_species_highlights_dedupe_existing_photo(app_and_db):
     }
 
 
+def test_rename_species_highlights_species_chunks_scoped_photo_ids(
+    app_and_db, monkeypatch,
+):
+    """rename_species_highlights_species must chunk the IN(...) clause when
+    called with more photos than SQLite's bound-parameter cap. Without the
+    chunk, an unbounded IN clause on legacy SQLite builds
+    (SQLITE_MAX_VARIABLE_NUMBER=999) raises OperationalError and strands the
+    highlight rows under the renamed species."""
+    from vireo import db as db_module
+
+    _app, db = app_and_db
+    ws = db._ws_id()
+    kid_old = db.add_keyword("OldBird", is_species=True)
+    fid = db.add_folder("/renamed", name="renamed")
+    db.add_workspace_folder(ws, fid)
+
+    # Seed enough photos+highlight rows to exceed the shrunk parameter cap
+    # in a single un-chunked query.
+    monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 3)
+    photo_ids = []
+    for i in range(7):
+        pid = db.add_photo(
+            folder_id=fid, filename=f"p{i}.jpg", extension=".jpg",
+            file_size=1, file_mtime=float(i),
+        )
+        db.tag_photo(pid, kid_old)
+        db.add_species_highlight("OldBird", pid)
+        photo_ids.append(pid)
+
+    pairs = [(pid, ws) for pid in photo_ids]
+    moved = db.rename_species_highlights_species("OldBird", "NewBird", pairs)
+
+    assert moved == len(photo_ids)
+    assert db.get_species_highlights("OldBird") == {}
+    highlights = db.get_species_highlights("NewBird")
+    # Ranks preserve the original bucket order (1..N).
+    assert highlights == {
+        "NewBird": {pid: rank for rank, pid in enumerate(photo_ids, start=1)}
+    }
+
+
 def test_apply_ordered_highlights_preserves_order_when_no_visible_match():
     """When a species has highlights elsewhere in the workspace but none are
     present in the current bucket, _apply_ordered_highlights must not re-sort
