@@ -12558,7 +12558,18 @@ class Database:
                 kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?",
                                        (int(entry['new_value']),)).fetchone()
                 if kw:
-                    self.remove_pending_changes(pid, 'keyword_remove', kw['name'])
+                    # Symmetric with `_queue_keyword_remove`: the original
+                    # remove either queued a `keyword_remove` or, when a
+                    # not-yet-synced `keyword_add` was pending, cancelled
+                    # that add. Reversing needs to restore whichever side
+                    # the remove touched — otherwise an add → remove → undo
+                    # flow leaves the tag on the photo with no pending
+                    # sidecar write, and the restored keyword never syncs.
+                    cancelled = self.remove_pending_changes(
+                        pid, 'keyword_remove', kw['name']
+                    )
+                    if cancelled == 0:
+                        self.queue_change(pid, 'keyword_add', kw['name'])
             elif entry['action_type'] == 'species_replace':
                 # Atomic swap: the edit replaced old_value's species with
                 # new_value's. Undo untags the new species and retags the
@@ -12696,7 +12707,14 @@ class Database:
                 kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?",
                                        (int(entry['new_value']),)).fetchone()
                 if kw:
-                    self.queue_change(pid, 'keyword_remove', kw['name'])
+                    # Mirror the undo path: if undo re-queued a
+                    # `keyword_add`, redo should cancel it rather than
+                    # stack a conflicting `keyword_remove` alongside it.
+                    cancelled = self.remove_pending_changes(
+                        pid, 'keyword_add', kw['name']
+                    )
+                    if cancelled == 0:
+                        self.queue_change(pid, 'keyword_remove', kw['name'])
             elif entry['action_type'] == 'species_replace':
                 # Re-apply the swap: untag old, retag new, mirror pending queue.
                 old_meta = self._edit_old_value_meta(item['old_value'])
