@@ -119,11 +119,27 @@
     </div>
   </div>
   <div class="control-group">
-    <label for="confirmationFilter">Status</label>
-    <select id="confirmationFilter">
-      <option value="all">All</option>
-      <option value="confirmed">Confirmed only</option>
-      <option value="unconfirmed">Unconfirmed only</option>
+    <label for="confirmationFilter">Species keyword</label>
+    <select id="confirmationFilter" title="Whether the species keyword has been confirmed on the photo">
+      <option value="all">Any</option>
+      <option value="confirmed">Confirmed</option>
+      <option value="unconfirmed">Not confirmed</option>
+    </select>
+  </div>
+  <div class="control-group">
+    <label for="highlightSelectionFilter">Highlight chosen</label>
+    <select id="highlightSelectionFilter" title="Whether this species has at least one chosen highlight">
+      <option value="all">Any</option>
+      <option value="yes">Yes</option>
+      <option value="no">No</option>
+    </select>
+  </div>
+  <div class="control-group">
+    <label for="representativeFilter">Representative set</label>
+    <select id="representativeFilter" title="Whether this species has a representative photo set">
+      <option value="all">Any</option>
+      <option value="yes">Yes</option>
+      <option value="no">No</option>
     </select>
   </div>
   <div class="control-group">
@@ -153,7 +169,7 @@
       <option value="newest">Newest top photo</option>
       <option value="oldest">Oldest top photo</option>
       <option value="confidence">Highest ID confidence</option>
-      <option value="confirmed">Confirmed first</option>
+      <option value="confirmed">Confirmed keywords first</option>
     </select>
   </div>
   <button class="save-btn" id="saveBtn" onclick="showSaveModal()">Save as Collection</button>
@@ -252,6 +268,8 @@ function requestScopeParams() {
   params.set('min_quality', (parseInt(document.getElementById('qualitySlider').value) / 100).toFixed(2));
   params.set('confidence_threshold', (parseInt(document.getElementById('confidenceSlider').value) / 100).toFixed(2));
   params.set('confirmation', document.getElementById('confirmationFilter').value || 'all');
+  params.set('highlight_selection', document.getElementById('highlightSelectionFilter').value || 'all');
+  params.set('species_representative', document.getElementById('representativeFilter').value || 'all');
   return params;
 }
 
@@ -480,7 +498,7 @@ async function unidPhotoIds() {
 function photoCurrentLabel(photo) {
   if (!photo) return '';
   if (photo.has_accepted_species && photo.species) {
-    return 'Confirmed: ' + photo.species;
+    return 'Keyword confirmed: ' + photo.species;
   }
   if (photo.predicted_species) {
     var conf = photo.predicted_confidence != null
@@ -508,7 +526,7 @@ async function confirmPhotoIds(photoIds, button) {
       body: JSON.stringify({ photo_ids: photoIds }),
     });
     await loadHighlights();
-    if (typeof showToast === 'function') showToast('Prediction confirmed', 'success');
+    if (typeof showToast === 'function') showToast('Species keyword confirmed', 'success');
   } finally {
     if (button) button.disabled = false;
   }
@@ -646,9 +664,9 @@ function renderBucket(bucket) {
   var visible = expanded ? bucket.photos : bucket.photos.slice(0, perRow);
   var remaining = bucket.photo_count - visible.length;
   var badgeClass = bucket.is_accepted ? 'accepted' : (bucket.certainty === 'likely' ? 'likely' : 'candidate');
-  var badgeText = bucket.is_accepted ? 'Confirmed' : (bucket.certainty === 'likely' ? 'Likely ID' : 'Top candidates');
+  var badgeText = bucket.is_accepted ? 'Keyword confirmed' : (bucket.certainty === 'likely' ? 'Likely ID' : 'Top candidates');
   var badge = bucket.is_accepted
-    ? '<span class="bucket-badge accepted">Confirmed</span>'
+    ? '<span class="bucket-badge accepted">Keyword confirmed</span>'
     : '<span class="bucket-badge ' + badgeClass + '">' + badgeText + '</span>';
   var meta = bucket.photo_count + ' photo' + (bucket.photo_count === 1 ? '' : 's');
   if (bucket.highlight_count) meta += ' · ' + bucket.highlight_count + ' highlighted';
@@ -668,7 +686,7 @@ function renderBucket(bucket) {
   var actions = '<div class="bucket-actions">';
   if (!bucket.is_accepted) {
     actions += '<button class="bucket-action primary" data-action="confirm-bucket" data-species="'
-      + escapeAttr(bucket.species) + '">Confirm</button>';
+      + escapeAttr(bucket.species) + '">Confirm keyword</button>';
   }
   actions += '<button class="bucket-action" data-action="change-bucket" data-species="'
     + escapeAttr(bucket.species) + '">Change</button></div>';
@@ -745,9 +763,15 @@ function render() {
   var search = document.getElementById('highlightSearch').value.trim();
   var speciesSearch = document.getElementById('speciesSearch').value.trim();
   var confirmation = document.getElementById('confirmationFilter').value;
+  var highlightSelection = document.getElementById('highlightSelectionFilter').value;
+  var representative = document.getElementById('representativeFilter').value;
   var filterLabel = (search || speciesSearch) ? ' matching' : '';
-  if (confirmation === 'confirmed') filterLabel += ' confirmed';
-  if (confirmation === 'unconfirmed') filterLabel += ' unconfirmed';
+  if (confirmation === 'confirmed') filterLabel += ' with confirmed keywords';
+  if (confirmation === 'unconfirmed') filterLabel += ' without confirmed keywords';
+  if (highlightSelection === 'yes') filterLabel += ' with highlights chosen';
+  if (highlightSelection === 'no') filterLabel += ' without highlights chosen';
+  if (representative === 'yes') filterLabel += ' with representatives set';
+  if (representative === 'no') filterLabel += ' without representatives set';
   meta.textContent = buckets.length + filterLabel + ' species · '
     + currentData.meta.eligible + ' of '
     + currentData.meta.total_in_scope + ' photos scored';
@@ -1028,6 +1052,16 @@ document.getElementById('speciesSearch').addEventListener('input', function() {
   debounceLoad();
 });
 document.getElementById('confirmationFilter').addEventListener('change', function() {
+  expandedBuckets.clear();
+  unidentifiedExpanded = false;
+  loadHighlights();
+});
+document.getElementById('highlightSelectionFilter').addEventListener('change', function() {
+  expandedBuckets.clear();
+  unidentifiedExpanded = false;
+  loadHighlights();
+});
+document.getElementById('representativeFilter').addEventListener('change', function() {
   expandedBuckets.clear();
   unidentifiedExpanded = false;
   loadHighlights();

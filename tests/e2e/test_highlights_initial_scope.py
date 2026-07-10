@@ -91,9 +91,9 @@ def test_initial_load_matches_default_workspace_scope(live_server, page):
     # a per-card .card-species label.
     bucket_titles = page.locator(".bucket-title").all_inner_texts()
     species_text = {t.strip() for title in bucket_titles for t in [title]}
-    # bucket-title text may include a trailing badge (e.g. "Confirmed"); match
+    # bucket-title text may include a trailing badge (e.g. "Keyword confirmed"); match
     # by substring so we tolerate either "Red-tailed Hawk" or
-    # "Red-tailed Hawk Confirmed".
+    # "Red-tailed Hawk Keyword confirmed".
     has_hawk = any("Red-tailed Hawk" in t for t in species_text)
     has_robin = any("American Robin" in t for t in species_text)
     assert has_hawk and has_robin, (
@@ -219,6 +219,40 @@ def test_highlights_species_search_filters_buckets(live_server, page):
     )
 
 
+def test_highlights_curation_filter_controls_combine(live_server, page):
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+    db.add_species_highlight("Red-tailed Hawk", data["photos"][0])
+    db.set_species_representative("American Robin", data["photos"][3])
+
+    page.goto(f"{live_server['url']}/highlights", timeout=5000)
+    expect(page.locator(".highlights-card").first).to_be_visible(timeout=5000)
+    expect(page.locator("label[for='confirmationFilter']")).to_have_text(
+        "Species keyword"
+    )
+
+    with page.expect_response(
+        lambda response: (
+            "/api/highlights?" in response.url
+            and "highlight_selection=yes" in response.url
+        )
+    ):
+        page.locator("#highlightSelectionFilter").select_option("yes")
+
+    with page.expect_response(
+        lambda response: (
+            "/api/highlights?" in response.url
+            and "highlight_selection=yes" in response.url
+            and "species_representative=no" in response.url
+        )
+    ):
+        page.locator("#representativeFilter").select_option("no")
+
+    expect(page.locator(".bucket-title")).to_have_count(1)
+    expect(page.locator(".bucket-title").first).to_contain_text("Red-tailed Hawk")
+
+
 def test_highlights_general_search_filters_by_filename_folder_and_keyword(live_server, page):
     db = live_server["db"]
     data = live_server["data"]
@@ -313,16 +347,16 @@ def test_ordered_highlight_updates_top_photo_timestamp(live_server):
 
 
 def test_highlights_search_recomputes_bucket_accepted_status(live_server):
-    """Filtering a mixed bucket down to only confirmed photos must flip
+    """Filtering a mixed bucket down to keyword-confirmed photos must flip
     ``is_accepted`` to True so the bucket loses the candidate badge and the
-    Confirmed-first sort places it above unconfirmed rows."""
+    confirmed-keywords-first sort places it above prediction-only rows."""
     db = live_server["db"]
     data = live_server["data"]
     _seed_quality_scores_and_species(db, data)
 
     # Add a prediction-only photo that lands in the same "Red-tailed Hawk"
     # bucket (predicted confidence above the default 0.70 threshold) so the
-    # bucket is a mix of confirmed (keyword-tagged) and unconfirmed photos.
+    # bucket mixes keyword-confirmed and prediction-only photos.
     pid = db.add_photo(
         folder_id=data["folders"][0],
         filename="predicted-hawk.jpg",
@@ -351,14 +385,14 @@ def test_highlights_search_recomputes_bucket_accepted_status(live_server):
 
     base = live_server["url"]
 
-    # Without a filter, the mixed bucket is unconfirmed at the bucket level.
+    # Without a filter, the mixed bucket is not fully keyword-confirmed.
     with urlopen(f"{base}/api/highlights?scope=workspace") as resp:
         payload = json.load(resp)
     hawk = next(b for b in payload["buckets"] if b["species"] == "Red-tailed Hawk")
     assert hawk["is_accepted"] is False
     assert hawk["certainty"] != "confirmed"
 
-    # Filtering by filename to only include a confirmed (keyword-tagged) photo
+    # Filtering by filename to only include a keyword-confirmed photo
     # must recompute ``is_accepted`` from the filtered photos.
     with urlopen(f"{base}/api/highlights?scope=workspace&q=hawk1") as resp:
         payload = json.load(resp)

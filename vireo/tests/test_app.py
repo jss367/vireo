@@ -5229,8 +5229,8 @@ def test_highlights_buckets_by_accepted_species(app_and_db):
 
 def test_highlights_bucket_mixed_accepted_predicted_is_not_accepted(app_and_db):
     """A bucket whose photos are a mix of accepted-tag and prediction-only
-    must report is_accepted=False. The "Confirmed" badge means the whole
-    row is confirmed, not just some of it (UI transparency rule)."""
+    must report is_accepted=False. The "Keyword confirmed" badge means every
+    photo in the row is keyword-confirmed, not just some of it."""
     app, db = app_and_db
     client = app.test_client()
     fid = db.conn.execute(
@@ -5379,6 +5379,73 @@ def test_highlights_confirmation_filter_splits_confirmed_and_unconfirmed(app_and
     data = resp.get_json()
     assert data["photo_count"] == 1
     assert data["photos"][0]["id"] == predicted_pid
+
+
+def test_highlights_curation_filters_combine_independently(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/curated', 'curated', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+
+    photo_ids = {}
+    for index, species in enumerate(("Alpha Bird", "Beta Bird", "Gamma Bird", "Delta Bird")):
+        keyword_id = db.conn.execute(
+            "INSERT INTO keywords (name, type, is_species) VALUES (?, 'taxonomy', 1)",
+            (species,),
+        ).lastrowid
+        photo_id = db.conn.execute(
+            "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+            "VALUES (?, ?, ?, 'none')",
+            (fid, f"{index}.jpg", 0.9 - index * 0.1),
+        ).lastrowid
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (photo_id, keyword_id),
+        )
+        photo_ids[species] = photo_id
+    db.conn.commit()
+
+    # Alpha has only a highlight, Beta only a representative, Gamma has both,
+    # and Delta has neither. Every pair of filters should intersect cleanly.
+    db.add_species_highlight("Alpha Bird", photo_ids["Alpha Bird"])
+    db.set_species_representative("Beta Bird", photo_ids["Beta Bird"])
+    db.add_species_highlight("Gamma Bird", photo_ids["Gamma Bird"])
+    db.set_species_representative("Gamma Bird", photo_ids["Gamma Bird"])
+
+    def species_for(**filters):
+        response = client.get(
+            "/api/highlights",
+            query_string={"folder_id": fid, **filters},
+        )
+        assert response.status_code == 200
+        return {bucket["species"] for bucket in response.get_json()["buckets"]}
+
+    assert species_for(highlight_selection="yes") == {"Alpha Bird", "Gamma Bird"}
+    assert species_for(species_representative="yes") == {"Beta Bird", "Gamma Bird"}
+    assert species_for(
+        highlight_selection="yes", species_representative="yes"
+    ) == {"Gamma Bird"}
+    assert species_for(
+        confirmation="confirmed",
+        highlight_selection="no",
+        species_representative="no",
+    ) == {"Delta Bird"}
+
+    response = client.get(
+        "/api/highlights",
+        query_string={
+            "folder_id": fid,
+            "highlight_selection": "not-a-filter",
+            "species_representative": "not-a-filter",
+        },
+    )
+    assert response.get_json()["meta"]["highlight_selection"] == "all"
+    assert response.get_json()["meta"]["species_representative"] == "all"
 
 
 def test_highlights_predictions_above_threshold_populate_buckets(app_and_db):

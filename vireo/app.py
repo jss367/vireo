@@ -353,6 +353,9 @@ def _apply_highlight_preferences(db, buckets):
             applied = applied or is_rep
         top = bucket["photos"][0] if bucket["photos"] else {}
         bucket["preferred_photo_id"] = preferred_id
+        # Species-level state stays true even when the representative photo is
+        # outside the current folder or search result.
+        bucket["has_species_representative"] = preferred_id is not None
         bucket["has_preferred_photo"] = applied
         bucket["best_quality"] = top.get("quality_score")
         # Rank by the highest-scored photo in the bucket, not photos[0].
@@ -368,6 +371,9 @@ def _apply_ordered_highlights(db, buckets):
     highlights = db.get_species_highlights()
     for bucket in buckets:
         ranks = highlights.get(bucket["species"], {})
+        # Species-level state stays true even when every selected highlight is
+        # outside the current folder or search result.
+        bucket["has_highlight_selection"] = bool(ranks)
         photos = bucket.get("photos") or []
         matched = False
         for p in photos:
@@ -448,6 +454,13 @@ def _highlight_confidence_label(confidence, is_accepted):
 def _normalize_highlight_confirmation_filter(value):
     value = (value or "all").strip().lower()
     if value not in {"all", "confirmed", "unconfirmed"}:
+        return "all"
+    return value
+
+
+def _normalize_highlight_presence_filter(value):
+    value = (value or "all").strip().lower()
+    if value not in {"all", "yes", "no"}:
         return "all"
     return value
 
@@ -658,6 +671,38 @@ def _filter_highlight_sections(
         if _highlight_photo_matches_query(p, query, match_case, whole_word)
     ]
     return filtered_buckets, unidentified
+
+
+def _filter_highlight_curation_state(
+    buckets,
+    unidentified_photos,
+    highlight_filter="all",
+    representative_filter="all",
+):
+    highlight_filter = _normalize_highlight_presence_filter(highlight_filter)
+    representative_filter = _normalize_highlight_presence_filter(
+        representative_filter
+    )
+
+    def matches(bucket, filter_value, field):
+        if filter_value == "all":
+            return True
+        return bool(bucket.get(field)) == (filter_value == "yes")
+
+    filtered = [
+        bucket for bucket in buckets
+        if matches(bucket, highlight_filter, "has_highlight_selection")
+        and matches(
+            bucket,
+            representative_filter,
+            "has_species_representative",
+        )
+    ]
+    # These two states only apply to named species. Unidentified photos have
+    # neither a species highlight list nor a species representative assignment.
+    if highlight_filter != "all" or representative_filter != "all":
+        unidentified_photos = []
+    return filtered, unidentified_photos
 
 
 # Maximum number of bound parameters per SQL statement. SQLite's
@@ -7612,6 +7657,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         search_match_case=False,
         search_whole_word=False,
         confirmation_filter="all",
+        highlight_filter="all",
+        representative_filter="all",
     ):
         folders = db.get_folders_with_quality_data()
         if scope == "workspace":
@@ -7622,6 +7669,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         species_filter = (species_filter or "").strip()
         confirmation_filter = _normalize_highlight_confirmation_filter(
             confirmation_filter
+        )
+        highlight_filter = _normalize_highlight_presence_filter(highlight_filter)
+        representative_filter = _normalize_highlight_presence_filter(
+            representative_filter
         )
 
         candidates = db.get_highlights_candidates(folder_id, min_quality=min_quality)
@@ -7660,6 +7711,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         _apply_ordered_highlights(db, buckets)
         _apply_highlight_preferences(db, buckets)
+        buckets, unidentified_photos = _filter_highlight_curation_state(
+            buckets,
+            unidentified_photos,
+            highlight_filter,
+            representative_filter,
+        )
 
         def limited_bucket(bucket):
             photos = bucket["photos"]
@@ -7696,6 +7753,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "eligible": eligible_count,
                 "limit_per_bucket": limit_per_bucket,
                 "confirmation": confirmation_filter,
+                "highlight_selection": highlight_filter,
+                "species_representative": representative_filter,
                 "search": (search_query or "").strip(),
             },
             "scope": "workspace" if folder_id is None else "folder",
@@ -7720,6 +7779,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             search_match_case=_request_bool_arg("q_match_case"),
             search_whole_word=_request_bool_arg("q_whole_word"),
             confirmation_filter=request.args.get("confirmation") or "all",
+            highlight_filter=request.args.get("highlight_selection") or "all",
+            representative_filter=(
+                request.args.get("species_representative") or "all"
+            ),
         )
         return jsonify(payload)
 
@@ -8433,6 +8496,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         _apply_ordered_highlights(db, buckets)
         _apply_highlight_preferences(db, buckets)
+        buckets, unidentified_photos = _filter_highlight_curation_state(
+            buckets,
+            unidentified_photos,
+            request.args.get("highlight_selection") or "all",
+            request.args.get("species_representative") or "all",
+        )
         if species == "__unidentified__":
             photos = unidentified_photos
             label = "Unidentified"
