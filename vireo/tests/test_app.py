@@ -1555,6 +1555,34 @@ def test_compare_ignores_resolved_predictions_for_needs_review(app_and_db):
     assert resp.get_json()["summary"]["needs_review"] == 0
 
 
+def test_compare_accepted_matches_are_not_marked_missing(app_and_db):
+    """Accepted match predictions still make the photo a match row."""
+    app, db = app_and_db
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+    species_id = db.add_keyword("Cardinal", is_species=True)
+    db.tag_photo(photo_id, species_id)
+    rules = json.dumps([{"field": "photo_ids", "value": [photo_id]}])
+    cid = db.add_collection("Accepted Matches", rules)
+
+    det_ids = db.save_detections(photo_id, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], "Cardinal", 0.95, "model-a", status="accepted")
+    db.add_prediction(det_ids[0], "Cardinal", 0.93, "model-b", status="accepted")
+
+    resp = app.test_client().get(f"/api/predictions/compare?collection_id={cid}")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    row = data["photos"][0]
+    assert row["row_category"] == "match"
+    assert row["row_label"] == "Match"
+    assert row["needs_review"] is False
+    assert data["summary"]["missing_predictions"] == 0
+
+
 def test_replace_prediction_keywords_updates_grouped_photos(app_and_db):
     """Replacing a grouped prediction removes old species keywords from the group."""
     app, db = app_and_db
