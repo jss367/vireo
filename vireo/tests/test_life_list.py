@@ -129,6 +129,20 @@ def test_best_photo_is_highest_scored(life_app):
     assert [p["id"] for p in cardinal["photos"]] == [ids["p2"], ids["p1"]]
 
 
+def test_life_list_best_ignores_pick_when_no_preference(life_app):
+    """Life List ranking must stay score-driven — the Highlights-only
+    picked-first ordering must not leak into `_build_life_list_payload`."""
+    app, db, ids = life_app
+    # p1's quality_score (0.5) is lower than p2's (0.9). Flagging p1
+    # must NOT promote it above p2 on the Life List.
+    db.update_photo_flag(ids["p1"], "flagged")
+
+    data = _get_life_list(app)
+    cardinal = _entry(data, "Northern Cardinal")
+    assert cardinal["best"]["id"] == ids["p2"]
+    assert [p["id"] for p in cardinal["photos"]] == [ids["p2"], ids["p1"]]
+
+
 def test_life_list_photo_preference_overrides_best_photo(life_app):
     app, _, ids = life_app
     client = app.test_client()

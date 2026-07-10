@@ -195,8 +195,13 @@ def _highlight_area_score(subject_size):
     return min(1.0, math.sqrt(subject_size) * 2.0)
 
 
-def _highlight_score_bucket(photos):
-    """Attach highlight scores and compact reason labels to one species bucket."""
+def _highlight_score_bucket(photos, picked_first=False):
+    """Attach highlight scores and compact reason labels to one species bucket.
+
+    picked_first promotes flagged photos above unflagged ones regardless of
+    score — desired on the Highlights page, but off by default so callers
+    like the Life List keep selecting the highest-scored photo.
+    """
     subject_values = [p.get("subject_tenengrad") for p in photos]
     eye_values = [p.get("eye_tenengrad") for p in photos if p.get("eye_tenengrad") is not None]
     bg_values = [p.get("bg_tenengrad") for p in photos]
@@ -297,7 +302,7 @@ def _highlight_score_bucket(photos):
 
     photos.sort(
         key=lambda p: (
-            1 if p.get("flag") == "flagged" else 0,
+            (1 if p.get("flag") == "flagged" else 0) if picked_first else 0,
             p.get("highlight_score") or 0,
             p.get("predicted_confidence") or 0,
             p.get("quality_score") or 0,
@@ -430,7 +435,7 @@ def _collect_highlight_buckets(
     buckets = []
     for species, entry in bucket_map.items():
         photos = entry["photos"]
-        _highlight_score_bucket(photos)
+        _highlight_score_bucket(photos, picked_first=True)
         confidences = [
             p["predicted_confidence"]
             for p in photos
@@ -454,7 +459,7 @@ def _collect_highlight_buckets(
             "photos": photos,
         })
 
-    _highlight_score_bucket(unidentified_photos)
+    _highlight_score_bucket(unidentified_photos, picked_first=True)
     buckets.sort(
         key=lambda b: (
             b.get("best_score") or 0,
