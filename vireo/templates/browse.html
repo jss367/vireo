@@ -2712,12 +2712,29 @@ function refreshActiveCollectionAfterMembershipChange() {
 // When bulk-removing the keyword that currently drives the filter, the
 // photos we just untagged no longer match the query. Without this reload
 // they stay in the grid and in the selection until the user manually
-// changes filters. `filterByKeyword` uses `activeKeyword` as the source
-// of truth, so trigger the same reload path.
+// changes filters. Two paths can drive the current keyword filter — the
+// keyword tree (via `activeKeyword`) or the search box text (via
+// `appendKeywordSearchParams`) — so check both. If the search query
+// still matches the removed keyword name under the current match_case /
+// whole_word settings, the untagged photos may no longer belong in the
+// grid; reloading is safe either way (a photo still matching via
+// another keyword or filename token just comes back).
 function refreshActiveKeywordAfterRemoval(removedName) {
-  if (!activeKeyword || !removedName) return;
-  if (activeKeyword !== removedName) return;
-  reloadBrowseResults();
+  if (!removedName) return;
+  if (activeKeyword && activeKeyword === removedName) {
+    reloadBrowseResults();
+    return;
+  }
+  var searchInput = document.getElementById('searchInput');
+  var query = searchInput ? searchInput.value.trim() : '';
+  if (!query) return;
+  if (VireoTextSearch.matchesFields(
+    removedName,
+    query,
+    { matchCase: keywordSearchMatchCase, wholeWord: keywordSearchWholeWord }
+  )) {
+    reloadBrowseResults();
+  }
 }
 
 function refreshBrowseSidebarCounts() {
