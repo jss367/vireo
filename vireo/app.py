@@ -3433,7 +3433,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "results_cache_info": results_cache_info,
             "review_readiness": review_readiness,
             "workspace_overrides": ws_overrides,
-            "recent_destinations": effective_cfg.get("ingest", {}).get("recent_destinations", []),
         })
 
     @app.route("/api/pipeline/plan", methods=["POST"])

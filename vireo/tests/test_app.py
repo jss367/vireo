@@ -2258,11 +2258,12 @@ def test_pipeline_page_init_api(app_and_db):
     assert data['total_photos'] == 3
 
 
-def test_pipeline_page_init_includes_recent_destinations(app_and_db):
-    """page-init response includes recent_destinations from ingest config."""
+def test_pipeline_page_init_omits_recent_destinations(app_and_db):
+    """recent_destinations left page-init with the Destination card: the
+    process page no longer copies files anywhere, so leaking the import
+    history here would just invite the UI to grow a destination again."""
     import config as cfg
     app, _ = app_and_db
-    # Write config with recent_destinations
     config = cfg.load()
     config.setdefault("ingest", {})["recent_destinations"] = ["/photos/out1", "/photos/out2"]
     cfg.save(config)
@@ -2270,8 +2271,7 @@ def test_pipeline_page_init_includes_recent_destinations(app_and_db):
         resp = c.get("/api/pipeline/page-init")
         assert resp.status_code == 200
         data = resp.get_json()
-        assert "recent_destinations" in data
-        assert data["recent_destinations"] == ["/photos/out1", "/photos/out2"]
+        assert "recent_destinations" not in data
 
 
 def test_templates_jinja_free_except_includes():
