@@ -7,7 +7,6 @@ from playwright.sync_api import expect
 PAGES = [
     "/browse",
     "/review",
-    "/lightroom",
     "/audit",
     "/cull",
     "/pipeline",

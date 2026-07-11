@@ -12,7 +12,6 @@ DEFAULT_PAGES = [
     "/dashboard",
     "/browse",
     "/review",
-    "/lightroom",
     "/audit",
     "/cull",
     "/pipeline",
