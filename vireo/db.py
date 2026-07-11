@@ -9420,16 +9420,51 @@ class Database:
         ).fetchone()
         if row is None:
             return
-        cleaned = normalize_keyword_display(row["name"])
-        if not cleaned or cleaned == row["name"]:
+        old_name = row["name"]
+        cleaned = normalize_keyword_display(old_name)
+        if not cleaned or cleaned == old_name:
             return
         # A same-name row in a different dedupe boundary can still occupy the
         # table-level UNIQUE(name, parent_id) slot. In that case the links
         # still merge correctly; keep the stored spelling unchanged.
-        with contextlib.suppress(sqlite3.IntegrityError):
+        try:
             self.conn.execute(
                 "UPDATE keywords SET name = ? WHERE id = ?", (cleaned, keyword_id)
             )
+        except sqlite3.IntegrityError:
+            return
+        # Retarget pending keyword_add/keyword_remove rows queued under the
+        # survivor's pre-canonical spelling onto the cleaned name so a
+        # still-unsynced sidecar write can't leak the legacy variant back
+        # after cleanup has already rewritten the DB row. Without this, an
+        # upgraded DB where the kept id itself carries a legacy `‘apapane`
+        # spelling still has pending changes referencing that quoted value
+        # even though the DB row is now `apapane`; the next sync_to_xmp
+        # would then write the stray-quote entry the cleanup was supposed
+        # to eliminate. A pending row that would collide with an existing
+        # (photo_id, change_type, cleaned) row is dropped rather than
+        # duplicated to match queue_change's dedupe contract.
+        self.conn.execute(
+            """DELETE FROM pending_changes
+               WHERE change_type IN ('keyword_add', 'keyword_remove')
+                 AND value = ?
+                 AND EXISTS (
+                     SELECT 1 FROM pending_changes pc2
+                     WHERE pc2.photo_id = pending_changes.photo_id
+                       AND pc2.change_type = pending_changes.change_type
+                       AND pc2.value = ?
+                       AND COALESCE(pc2.workspace_id, -1)
+                           = COALESCE(pending_changes.workspace_id, -1)
+                 )""",
+            (old_name, cleaned),
+        )
+        self.conn.execute(
+            """UPDATE pending_changes
+               SET value = ?
+               WHERE change_type IN ('keyword_add', 'keyword_remove')
+                 AND value = ?""",
+            (cleaned, old_name),
+        )
 
     def _merge_keyword_into(self, src_id, dst_id):
         """Merge keyword ``src_id`` into ``dst_id`` and delete the source.
