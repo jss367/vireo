@@ -2458,12 +2458,24 @@ class Database:
             ).fetchall()
         except sqlite3.OperationalError:
             rows = []
+        # Rows are ordered so higher-priority purposes are inserted last
+        # (highlights first, then life_list, then species_representative).
+        # Use UPSERT so a later canonical species_representative row for a
+        # (species, photo_id) already inserted by a fallback purpose promotes
+        # its selected_order to the newest value. Otherwise INSERT OR IGNORE
+        # would keep the fallback's low order and the reader (which sorts by
+        # selected_order DESC) could rank an unrelated life_list photo ahead
+        # of the canonical representative — inverting the pre-migration
+        # precedence this backfill is supposed to preserve.
         for row in rows:
             order = self._next_species_representative_order()
             self.conn.execute(
-                """INSERT OR IGNORE INTO species_representatives
+                """INSERT INTO species_representatives
                        (species, photo_id, selected_order, created_at, updated_at)
-                   VALUES (?, ?, ?, datetime('now'), datetime('now'))""",
+                   VALUES (?, ?, ?, datetime('now'), datetime('now'))
+                   ON CONFLICT(species, photo_id) DO UPDATE SET
+                       selected_order = excluded.selected_order,
+                       updated_at = excluded.updated_at""",
                 (row["species"], row["photo_id"], order),
             )
         self.conn.execute(

@@ -357,12 +357,27 @@ def _apply_highlight_preferences(db, buckets):
     for bucket in buckets:
         representative_ids = preferences.get(bucket["species"]) or []
         representative_set = set(representative_ids)
+        representative_order = {
+            photo_id: idx for idx, photo_id in enumerate(representative_ids)
+        }
         preferred_id = representative_ids[0] if representative_ids else None
         applied = False
         for photo in bucket.get("photos") or []:
             is_rep = photo.get("id") in representative_set
             photo["is_species_representative"] = is_rep
             applied = applied or is_rep
+        # Promote representatives to the front so cross-workspace reps
+        # (visible via species_representatives but without a workspace-scoped
+        # species_highlights rank) become the bucket's primary photo.
+        # _apply_ordered_highlights runs before this and only sorts when a
+        # visible photo has a workspace highlight rank, so without this pass
+        # a rep chosen in another workspace stays buried in score order.
+        # Matches the Life List behavior which also promotes reps over
+        # workspace highlights.
+        if applied:
+            _sort_photos_with_representatives_first(
+                bucket["photos"], representative_order
+            )
         top = bucket["photos"][0] if bucket["photos"] else {}
         bucket["preferred_photo_id"] = preferred_id
         # Species-level state stays true even when the representative photo is
