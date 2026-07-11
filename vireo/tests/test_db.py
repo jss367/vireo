@@ -13322,6 +13322,55 @@ def test_add_keyword_species_prefers_taxonomy_peer_over_general_exact_match(tmp_
     assert general_row["type"] == "general"
 
 
+def test_add_keyword_untyped_prefers_taxonomy_peer_over_general_auto_promote(
+    tmp_path,
+):
+    """Untyped `add_keyword('apapane')` must not silently promote the clean
+    general row to taxonomy when a legacy edge-quote taxonomy peer exists
+    at the same slot. The fast exact-match query returns the general row
+    (raw name matches under COLLATE NOCASE) and the auto-promote branch
+    below would stamp it with type='taxonomy' via
+    `_lookup_taxon_id_for_keyword` — producing two normalized-equal
+    taxonomy rows at the same slot. Untyped callers (typing into a
+    generic keyword input) would then bind to either at random.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    # Seed a taxon so `_lookup_taxon_id_for_keyword('apapane')` matches
+    # and would otherwise trigger the auto-promote path.
+    db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (1, 'Himatione sanguinea', 'apapane', 'species', 'Animalia')"
+    )
+    # Legacy edge-quoted taxonomy row (imported/upgraded DB shape).
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES (?, NULL, 1, 'taxonomy')",
+        ("‘apapane",),
+    )
+    taxonomy_id = cur.lastrowid
+    # A clean general row exists at the same slot.
+    general_id = db.add_keyword("apapane", kw_type='general')
+    assert general_id != taxonomy_id
+
+    # Untyped call from a generic keyword path — no is_species, no kw_type.
+    resolved = db.add_keyword("apapane")
+    assert resolved == taxonomy_id
+
+    # Guard against the silent-duplicate: the general row must NOT have
+    # been promoted into a second taxonomy row.
+    taxonomy_rows = db.conn.execute(
+        "SELECT id FROM keywords "
+        "WHERE vireo_normalize_keyword(name) = 'apapane' COLLATE NOCASE "
+        "AND parent_id IS NULL AND type = 'taxonomy'"
+    ).fetchall()
+    assert [r["id"] for r in taxonomy_rows] == [taxonomy_id]
+    general_row = db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (general_id,)
+    ).fetchone()
+    assert general_row["type"] == "general"
+
+
 def test_add_photo_retries_on_database_is_locked(tmp_path):
     """The INSERT inside add_photo must retry transient 'database is locked'.
 

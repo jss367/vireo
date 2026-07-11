@@ -8533,6 +8533,30 @@ class Database:
             ).fetchone()
             if preferred is not None:
                 existing = preferred
+        elif (
+            kw_type is None
+            and not is_species
+            and existing["type"] == 'general'
+        ):
+            # Untyped auto-promote path: the block below stamps this general
+            # row with type='taxonomy' when _lookup_taxon_id_for_keyword
+            # matches. A legacy taxonomy peer whose stored spelling differs
+            # only in stray edge quotes could already exist at the same
+            # parent slot — the fast exact query above can't see it and the
+            # fallback only runs on a total miss. Without this check, the
+            # auto-promotion would produce two normalized-equal taxonomy
+            # rows at the same slot, and later untyped calls (typing into a
+            # generic keyword input) would bind to either at random.
+            # Only pays for the extra query when the general row is
+            # promote-eligible.
+            taxonomy_peer = self.conn.execute(
+                f"SELECT id, type FROM keywords "
+                f"WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE "
+                f"AND {parent_clause} AND type = 'taxonomy' AND id != ? LIMIT 1",
+                (name, *parent_args, existing["id"]),
+            ).fetchone()
+            if taxonomy_peer is not None:
+                existing = taxonomy_peer
         if existing:
             if kw_type is None and not is_species and existing["type"] == "general":
                 taxon_id = self._lookup_taxon_id_for_keyword(name)

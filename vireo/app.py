@@ -8182,105 +8182,116 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         top_predictions = _highlight_top_predictions(db, photo_ids)
         ws_id = db._ws_id()
-        # Chunk both lookups: photo_ids has no upstream cap
-        # (_parse_highlight_photo_ids just parses the list), so a bulk
-        # relabel of >999 photos would blow SQLITE_MAX_VARIABLE_NUMBER
-        # on the legacy builds this file already guards against.
-        highlight_renames = {}
-        hl_prev_by_pid = {}
-        # Photos that already had a `(species=<target>, photo_id)` row in
-        # species_highlights before the relabel. rename_species_highlights_species
-        # skips inserting a duplicate for these, so the destination row is
-        # pre-existing and undo must not delete it.
-        hl_dst_preexisting = set()
-        for chunk in _chunked(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            rows = db.conn.execute(
-                f"""SELECT species, photo_id, rank FROM species_highlights
-                    WHERE workspace_id = ? AND photo_id IN ({placeholders})""",
-                (ws_id, *chunk),
-            ).fetchall()
-            for row in rows:
-                old_species_name = row["species"]
-                if old_species_name == species:
-                    hl_dst_preexisting.add(row["photo_id"])
-                    continue
-                highlight_renames.setdefault(old_species_name, []).append(
-                    row["photo_id"]
-                )
-                # Snapshot the original rank so undo can restore each
-                # highlighted photo at its original position instead of
-                # dumping it at MAX(rank)+1 (see _restore_relabel_curation).
-                hl_prev_by_pid.setdefault(row["photo_id"], []).append({
-                    "species": old_species_name,
-                    "rank": row["rank"],
-                })
-        # Backfill dst_existed onto each entry now that the target-species
-        # pass has finished (row order within the query is unspecified).
-        for pid, entries in hl_prev_by_pid.items():
-            dst = pid in hl_dst_preexisting
-            for entry in entries:
-                entry["dst_existed"] = dst
-        preference_renames = {}
-        pref_prev_by_pid = {}
-        # Purposes that already have a row at (new_species, purpose) — for
-        # any photo. rename_photo_preferences_species uses INSERT OR IGNORE,
-        # so when the destination slot is already taken (either by this
-        # photo or a different one), the relabel does not create a new
-        # destination row for this photo and undo must not attempt to
-        # delete it. Un-gating the old-species restore from a destination
-        # row lookup lets undo recover representatives even when the
-        # relabel collided with another photo holding the slot.
-        pref_dst_taken = {
-            r["purpose"] for r in db.conn.execute(
-                """SELECT purpose FROM photo_preferences
-                   WHERE workspace_id = ? AND species = ?
-                     AND purpose IN (
-                         'species_representative', 'life_list', 'highlights'
-                     )""",
-                (ws_id, species),
-            ).fetchall()
-        }
-        for chunk in _chunked(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            rows = db.conn.execute(
-                f"""SELECT species, photo_id, purpose FROM photo_preferences
-                    WHERE workspace_id = ?
-                      AND photo_id IN ({placeholders})
-                      AND purpose IN (
-                          'species_representative', 'life_list', 'highlights'
-                      )""",
-                (ws_id, *chunk),
-            ).fetchall()
-            for row in rows:
-                old_species_name = row["species"]
-                if old_species_name == species:
-                    continue
-                preference_renames.setdefault(old_species_name, []).append(
-                    row["photo_id"]
-                )
-                pref_prev_by_pid.setdefault(row["photo_id"], []).append({
-                    "purpose": row["purpose"],
-                    "species": old_species_name,
-                    "dst_existed": row["purpose"] in pref_dst_taken,
-                })
         try:
             kid = db.add_keyword(species, is_species=True, _commit=False)
             # Re-read the stored keyword name so subsequent queue/history
-            # entries, highlight/preference renames, and the "did this photo
-            # already carry the target species?" comparison all reflect the
-            # row actually tagged. Without this, `‘apapane` from the request
-            # tags the normalized `apapane` row but queues the raw stray-
-            # quote value for XMP sync, and the old-name comparison below
-            # spuriously sees `apapane` (stored on the photo) as different
-            # from `‘apapane` (request), producing a remove/add pair that
-            # rewrites the sidecar to the stray-quote spelling. Same
-            # rationale as api_add_keyword / api_batch_keyword.
+            # entries, highlight/preference renames, the curation snapshots
+            # below, and the "did this photo already carry the target
+            # species?" comparison all reflect the row actually tagged.
+            # Without this, `‘apapane` from the request tags the normalized
+            # `apapane` row but queues the raw stray-quote value for XMP
+            # sync, and the old-name comparison below spuriously sees
+            # `apapane` (stored on the photo) as different from `‘apapane`
+            # (request), producing a remove/add pair that rewrites the
+            # sidecar to the stray-quote spelling. Same rationale as
+            # api_add_keyword / api_batch_keyword.
             stored = db.conn.execute(
                 "SELECT name FROM keywords WHERE id = ?", (kid,)
             ).fetchone()
             if stored and stored["name"]:
                 species = stored["name"]
+            # Chunk both lookups: photo_ids has no upstream cap
+            # (_parse_highlight_photo_ids just parses the list), so a bulk
+            # relabel of >999 photos would blow SQLITE_MAX_VARIABLE_NUMBER
+            # on the legacy builds this file already guards against.
+            # Snapshots MUST run after the stored-name resolution above so
+            # `hl_dst_preexisting` / `pref_dst_taken` compare against the
+            # same species name the rename_* helpers will insert under.
+            # Without this ordering, add_keyword resolving to a legacy
+            # edge-quote row (stored name `‘apapane` when the request was
+            # `apapane`) would leave the snapshots computed under the
+            # normalized `apapane`, mark `dst_existed=False` for photos
+            # that already carry a `‘apapane` highlight/preference row,
+            # and the undo path would then delete those pre-existing rows
+            # as if this relabel had created them.
+            highlight_renames = {}
+            hl_prev_by_pid = {}
+            # Photos that already had a `(species=<target>, photo_id)` row in
+            # species_highlights before the relabel. rename_species_highlights_species
+            # skips inserting a duplicate for these, so the destination row is
+            # pre-existing and undo must not delete it.
+            hl_dst_preexisting = set()
+            for chunk in _chunked(photo_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                rows = db.conn.execute(
+                    f"""SELECT species, photo_id, rank FROM species_highlights
+                        WHERE workspace_id = ? AND photo_id IN ({placeholders})""",
+                    (ws_id, *chunk),
+                ).fetchall()
+                for row in rows:
+                    old_species_name = row["species"]
+                    if old_species_name == species:
+                        hl_dst_preexisting.add(row["photo_id"])
+                        continue
+                    highlight_renames.setdefault(old_species_name, []).append(
+                        row["photo_id"]
+                    )
+                    # Snapshot the original rank so undo can restore each
+                    # highlighted photo at its original position instead of
+                    # dumping it at MAX(rank)+1 (see _restore_relabel_curation).
+                    hl_prev_by_pid.setdefault(row["photo_id"], []).append({
+                        "species": old_species_name,
+                        "rank": row["rank"],
+                    })
+            # Backfill dst_existed onto each entry now that the target-species
+            # pass has finished (row order within the query is unspecified).
+            for pid, entries in hl_prev_by_pid.items():
+                dst = pid in hl_dst_preexisting
+                for entry in entries:
+                    entry["dst_existed"] = dst
+            preference_renames = {}
+            pref_prev_by_pid = {}
+            # Purposes that already have a row at (new_species, purpose) — for
+            # any photo. rename_photo_preferences_species uses INSERT OR IGNORE,
+            # so when the destination slot is already taken (either by this
+            # photo or a different one), the relabel does not create a new
+            # destination row for this photo and undo must not attempt to
+            # delete it. Un-gating the old-species restore from a destination
+            # row lookup lets undo recover representatives even when the
+            # relabel collided with another photo holding the slot.
+            pref_dst_taken = {
+                r["purpose"] for r in db.conn.execute(
+                    """SELECT purpose FROM photo_preferences
+                       WHERE workspace_id = ? AND species = ?
+                         AND purpose IN (
+                             'species_representative', 'life_list', 'highlights'
+                         )""",
+                    (ws_id, species),
+                ).fetchall()
+            }
+            for chunk in _chunked(photo_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                rows = db.conn.execute(
+                    f"""SELECT species, photo_id, purpose FROM photo_preferences
+                        WHERE workspace_id = ?
+                          AND photo_id IN ({placeholders})
+                          AND purpose IN (
+                              'species_representative', 'life_list', 'highlights'
+                          )""",
+                    (ws_id, *chunk),
+                ).fetchall()
+                for row in rows:
+                    old_species_name = row["species"]
+                    if old_species_name == species:
+                        continue
+                    preference_renames.setdefault(old_species_name, []).append(
+                        row["photo_id"]
+                    )
+                    pref_prev_by_pid.setdefault(row["photo_id"], []).append({
+                        "purpose": row["purpose"],
+                        "species": old_species_name,
+                        "dst_existed": row["purpose"] in pref_dst_taken,
+                    })
             items = []
             rejected_prediction_ids = []
             has_old_species = False
