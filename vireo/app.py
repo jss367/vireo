@@ -17391,6 +17391,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except Exception as e:
             return None, None, json_error(str(e))
 
+    def _validate_after_import(value):
+        """Return a JSON error response for a bad after_import spec, else None.
+
+        Shared by both import endpoints: the type check rejects non-string,
+        non-null bodies and resolve_strategy() rejects unknown names, so
+        chained processing can't fail hours later on a typo the enqueue
+        step could have caught.
+        """
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return json_error(
+                "after_import must be a strategy name or null, got "
+                f"{type(value).__name__}"
+            )
+        from process_strategies import resolve_strategy
+
+        try:
+            resolve_strategy(value)
+        except ValueError as e:
+            return json_error(str(e))
+        return None
+
     @app.route("/api/jobs/import-in-place", methods=["POST"])
     def api_job_import_in_place():
         """Import existing folders without copying files.
@@ -17421,33 +17444,36 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         recursive = bool(body.get("recursive", True))
         db = _get_db()
-        if "after_import" in body:
+        # Preflight an explicit after_import before creating a workspace so
+        # a bad value doesn't leave an orphan Card Import behind. The
+        # omitted branch has to wait until AFTER the workspace switch — see
+        # below.
+        explicit_after_import = "after_import" in body
+        if explicit_after_import:
             after_import = body.get("after_import")
-        else:
-            import config as cfg
-
-            effective_cfg = db.get_effective_config(cfg.load())
-            after_import = (
-                effective_cfg.get("pipeline", {}).get("default_strategy")
-            )
-        if after_import is not None:
-            if not isinstance(after_import, str):
-                return json_error(
-                    "after_import must be a strategy name or null, got "
-                    f"{type(after_import).__name__}"
-                )
-            from process_strategies import resolve_strategy
-
-            try:
-                resolve_strategy(after_import)
-            except ValueError as e:
-                return json_error(str(e))
+            err = _validate_after_import(after_import)
+            if err is not None:
+                return err
 
         active_ws, created_workspace, workspace_err = (
             _prepare_import_workspace(db, body)
         )
         if workspace_err is not None:
             return workspace_err
+
+        # Resolve the omitted-default AFTER the workspace switch. Reading
+        # pipeline.default_strategy off the previously-active workspace
+        # would leak that workspace's override into a new-workspace import.
+        if not explicit_after_import:
+            import config as cfg
+
+            effective_cfg = db.get_effective_config(cfg.load())
+            after_import = (
+                effective_cfg.get("pipeline", {}).get("default_strategy")
+            )
+            err = _validate_after_import(after_import)
+            if err is not None:
+                return err
 
         runner = app._job_runner
         thumb_cache_dir = app.config["THUMB_CACHE_DIR"]
@@ -17884,27 +17910,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # omitted -> default from the workspace's pipeline.default_strategy
         # (nullable, same vocabulary). Stored in the job config for the
         # PR 3 chaining hook; the import job itself never reads it.
-        if "after_import" in body:
+        # Preflight an explicit value before creating a workspace so a bad
+        # string doesn't leave an orphan Archive Import behind.
+        explicit_after_import = "after_import" in body
+        if explicit_after_import:
             after_import = body.get("after_import")
-        else:
-            import config as cfg
-
-            effective_cfg = db.get_effective_config(cfg.load())
-            after_import = (
-                effective_cfg.get("pipeline", {}).get("default_strategy")
-            )
-        if after_import is not None:
-            if not isinstance(after_import, str):
-                return json_error(
-                    "after_import must be a strategy name or null, got "
-                    f"{type(after_import).__name__}"
-                )
-            from process_strategies import resolve_strategy
-
-            try:
-                resolve_strategy(after_import)
-            except ValueError as e:
-                return json_error(str(e))
+            err = _validate_after_import(after_import)
+            if err is not None:
+                return err
 
         file_types = body.get("file_types", "both")
         skip_duplicates = bool(body.get("skip_duplicates", True))
@@ -17916,6 +17929,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         if workspace_err is not None:
             return workspace_err
+
+        # Resolve the omitted-default AFTER the workspace switch. Reading
+        # pipeline.default_strategy off the previously-active workspace
+        # would leak that workspace's override into a new-workspace import.
+        if not explicit_after_import:
+            import config as cfg
+
+            effective_cfg = db.get_effective_config(cfg.load())
+            after_import = (
+                effective_cfg.get("pipeline", {}).get("default_strategy")
+            )
+            err = _validate_after_import(after_import)
+            if err is not None:
+                return err
 
         runner = app._job_runner
         thumb_cache_dir = app.config["THUMB_CACHE_DIR"]

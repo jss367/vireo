@@ -3383,6 +3383,49 @@ def test_import_photos_after_import_defaults_from_workspace(
     assert config["after_import"] == "cull_ready"
 
 
+def test_import_photos_new_workspace_ignores_old_default_strategy(
+        app_and_db, tmp_path):
+    """Regression: an omitted after_import must resolve against the TARGET
+    workspace's effective config, not the caller's previously-active one.
+    Otherwise a stale pipeline.default_strategy override on the old
+    workspace silently chains onto a fresh-workspace import."""
+    app, db = app_and_db
+    client = app.test_client()
+    old_ws = db._active_workspace_id
+    db.update_workspace(old_ws, config_overrides={
+        "pipeline": {"default_strategy": "cull_ready"},
+    })
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "new_workspace_name": "Fresh Archive",
+    })
+    assert resp.status_code == 200, resp.get_json()
+    config = _job_config(client, resp.get_json()["job_id"])
+    assert config["workspace_id"] != old_ws
+    assert config["after_import"] is None
+
+
+def test_import_in_place_new_workspace_ignores_old_default_strategy(
+        app_and_db, tmp_path):
+    """Same regression as above, exercised through the in-place endpoint —
+    both routes call _prepare_import_workspace so both had the bug."""
+    app, db = app_and_db
+    client = app.test_client()
+    old_ws = db._active_workspace_id
+    db.update_workspace(old_ws, config_overrides={
+        "pipeline": {"default_strategy": "cull_ready"},
+    })
+    resp = client.post("/api/jobs/import-in-place", json={
+        "sources": [_import_card(tmp_path)],
+        "new_workspace_name": "Fresh In-Place",
+    })
+    assert resp.status_code == 200, resp.get_json()
+    config = _job_config(client, resp.get_json()["job_id"])
+    assert config["workspace_id"] != old_ws
+    assert config["after_import"] is None
+
+
 def test_import_photos_validation_400s(app_and_db, tmp_path):
     app, _ = app_and_db
     client = app.test_client()
