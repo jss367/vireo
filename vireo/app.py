@@ -19704,7 +19704,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # Compare via vireo_normalize_keyword so a legacy row whose
                 # stored spelling still carries edge quotes is also found.
                 old_kid_row = db.conn.execute(
-                    """SELECT id FROM keywords
+                    """SELECT id, name FROM keywords
                        WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE
                          AND parent_id IS NULL
                          AND is_species = 1""",
@@ -19712,6 +19712,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 ).fetchone()
                 if old_kid_row:
                     old_kid = old_kid_row["id"]
+                    # Use the stored keyword name (not the raw cached
+                    # `previous_species`) for the sidecar remove queue so
+                    # pending-change cancellation lines up with the pending
+                    # `keyword_add` written under the normalized spelling.
+                    # A legacy pipeline cache can still hold `‘apapane` while
+                    # the DB keyword row is stored as clean `apapane`; queuing
+                    # the raw quoted value would leave a stale add un-cancelled
+                    # and a quoted remove that the next XMP sync writes back to
+                    # the sidecar.
+                    if old_kid_row["name"]:
+                        previous_species = old_kid_row["name"]
 
             # Precheck which submitted photos already carry the new species
             # keyword. Only photos that get a *new* tag should generate

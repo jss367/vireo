@@ -1010,6 +1010,52 @@ def test_burst_override_change_untags_previous(app_and_db):
     assert ("keyword_add", "Junco") in values
 
 
+def test_encounter_species_replacement_queues_stored_previous_name(app_and_db):
+    """When the pipeline cache still holds a legacy quoted species like
+    `‘apapane` but the DB row is stored under the normalized `apapane`, the
+    replacement path must queue keyword_remove with the STORED normalized
+    name so it cancels an outstanding keyword_add for the same normalized
+    key. Queuing the raw quoted value would leave both the stale add and a
+    quoted remove in the pending set, and the next XMP sync would then
+    write the stray-quote spelling back to the sidecar.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+
+    # Pretend an earlier confirm queued a keyword_add for the normalized
+    # spelling. This is the state we need cancellation to fire against.
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Apapane", "photo_ids": photo_ids},
+    )
+    assert resp.status_code == 200
+    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    assert ("keyword_add", "Apapane") in values
+
+    # Seed the pipeline cache's confirmed_species with the LEGACY quoted
+    # spelling. In reality this would come from an upgraded pipeline cache
+    # written before keyword normalization landed. The DB row is still stored
+    # as clean `Apapane` (add_keyword strips the leading edge quote).
+    _seed_encounter_cache(app, db, photo_ids, confirmed_species="‘Apapane")
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Blue Jay", "photo_ids": photo_ids},
+    )
+    assert resp.status_code == 200
+
+    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    # The stale keyword_add for the normalized spelling must be cancelled by
+    # a remove that targets the same normalized value — not the raw quoted
+    # cache value. If the queue used the cache spelling, this assertion
+    # would fail because the raw remove wouldn't match the stored add and
+    # both would linger.
+    assert ("keyword_add", "Apapane") not in values
+    assert ("keyword_remove", "‘Apapane") not in values
+    assert ("keyword_add", "Blue Jay") in values
+
+
 def test_encounter_species_confirm_same_species_noop_on_keywords(app_and_db):
     """Re-confirming the same species doesn't queue a remove."""
     app, db = app_and_db
