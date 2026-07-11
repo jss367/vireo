@@ -636,6 +636,8 @@ def test_install_exiftool_endpoint_exists(app_and_db, monkeypatch):
     """Install-exiftool endpoint should exist and return JSON."""
     import shutil
     import subprocess
+    import sys
+    monkeypatch.setattr(sys, "platform", "darwin")
     original_which = shutil.which
     monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/local/bin/brew" if cmd == "brew" else (None if cmd == "exiftool" else original_which(cmd)))
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: type("R", (), {"returncode": 0, "stderr": ""})())
@@ -650,6 +652,8 @@ def test_install_exiftool_endpoint_exists(app_and_db, monkeypatch):
 def test_install_exiftool_fails_without_brew(app_and_db, monkeypatch):
     """Install endpoint should fail gracefully when brew is not available."""
     import shutil
+    import sys
+    monkeypatch.setattr(sys, "platform", "darwin")
     original_which = shutil.which
     monkeypatch.setattr(shutil, "which", lambda cmd: None if cmd in ("brew", "exiftool") else original_which(cmd))
     app, _ = app_and_db
