@@ -296,7 +296,7 @@ def test_map_tab_can_be_pinned_before_leaflet_cdn_finishes(live_server, page):
 def test_rapid_review_ephemeral_tab_pin_button_persists_tab(live_server, page):
     """Rapid Review can be pinned from its ephemeral tab."""
     url = live_server["url"]
-    page.goto(f"{url}/pipeline/rapid-review")
+    page.goto(f"{url}/pipeline/rapid-review", wait_until="domcontentloaded")
     page.wait_for_selector(
         ".nav-tab[data-nav-id='pipeline_rapid_review'].is-ephemeral",
         timeout=3000,
