@@ -4654,19 +4654,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result["keywords"] = [dict(k) for k in keywords]
 
         # Representative block: the photo's eligible species plus whether this
-        # photo is one of the shared species representatives. Keep the
-        # legacy ``life_list`` key because shared lightbox/menu code reads it.
+        # photo is the primary species representative. Only the primary (item 0
+        # of get_species_representative_lists, which sorts newest-selection
+        # first) flips these flags — secondary reps stay false so shared UI
+        # code (context menus, panel buttons) can still offer to promote them
+        # via set_species_representative's re-select-to-newest behavior.
+        # Keep the legacy ``life_list`` key because shared lightbox/menu code
+        # reads it.
         representatives = db.get_species_representative_lists()
         life_list_species = db.get_photo_life_list_species(photo_id)
-        representative_sets = {
-            species: set(representatives.get(species) or [])
-            for species in life_list_species
+        primary_by_species = {
+            species: (photo_ids[0] if photo_ids else None)
+            for species, photo_ids in representatives.items()
         }
         result["life_list"] = [
             {
                 "species": s,
-                "is_current_photo": photo_id in representative_sets[s],
-                "is_species_representative": photo_id in representative_sets[s],
+                "is_current_photo": photo_id == primary_by_species.get(s),
+                "is_species_representative": photo_id == primary_by_species.get(s),
             }
             for s in life_list_species
         ]
