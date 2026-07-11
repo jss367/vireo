@@ -307,7 +307,8 @@ def test_remove_keywords_matches_normalized_edge_quote_variant(tmp_path):
         "      </dc:subject>\n"
         "    </rdf:Description>\n"
         "  </rdf:RDF>\n"
-        "</x:xmpmeta>\n"
+        "</x:xmpmeta>\n",
+        encoding="utf-8",
     )
     remove_keywords(str(p), {"apapane"})
 
@@ -332,7 +333,8 @@ def test_remove_keywords_matches_hierarchical_edge_quote_segment(tmp_path):
         "      </lr:hierarchicalSubject>\n"
         "    </rdf:Description>\n"
         "  </rdf:RDF>\n"
-        "</x:xmpmeta>\n"
+        "</x:xmpmeta>\n",
+        encoding="utf-8",
     )
     remove_keywords(str(p), {"apapane"})
 
