@@ -9885,21 +9885,46 @@ class Database:
         ).fetchall()
         return {r["species"]: r["photo_id"] for r in rows}
 
-    def get_species_representatives(self):
+    def get_species_representatives(self, eligible_only=False):
         """Return representative photo preferences with legacy fallback.
 
         ``species_representative`` is the canonical purpose. Existing
         ``life_list`` and ``highlights`` rows are still read as fallbacks so
         older libraries keep their explicit curation choices.
+
+        When ``eligible_only`` is true, omit preferences whose photo is
+        rejected, unavailable to the workspace, or no longer carries the
+        stored species keyword. The preference row remains intact for undo.
         """
         ws = self._ws_id()
+        eligibility_joins = ""
+        eligibility_filter = ""
+        if eligible_only:
+            eligibility_joins = """
+               JOIN photos p ON p.id = pp.photo_id
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                AND wf.workspace_id = pp.workspace_id
+               JOIN folders f ON f.id = p.folder_id
+                AND f.status IN ('ok', 'partial')"""
+            eligibility_filter = """
+                 AND COALESCE(p.flag, 'none') != 'rejected'
+                 AND EXISTS (
+                     SELECT 1
+                     FROM photo_keywords pk
+                     JOIN keywords k ON k.id = pk.keyword_id
+                      AND (k.is_species = 1 OR k.type = 'taxonomy')
+                     WHERE pk.photo_id = pp.photo_id
+                       AND k.name = pp.species
+                 )"""
         rows = self.conn.execute(
-            """SELECT species, photo_id, purpose
-               FROM photo_preferences
-               WHERE workspace_id = ?
-                 AND purpose IN ('species_representative', 'life_list', 'highlights')
-               ORDER BY species,
-                        CASE purpose
+            f"""SELECT pp.species, pp.photo_id, pp.purpose
+               FROM photo_preferences pp
+               {eligibility_joins}
+               WHERE pp.workspace_id = ?
+                 AND pp.purpose IN ('species_representative', 'life_list', 'highlights')
+                 {eligibility_filter}
+               ORDER BY pp.species,
+                        CASE pp.purpose
                           WHEN 'species_representative' THEN 0
                           WHEN 'life_list' THEN 1
                           ELSE 2
@@ -9956,26 +9981,78 @@ class Database:
         if _commit:
             self.conn.commit()
 
-    def get_species_highlights(self, species=None):
+    def get_species_highlights(self, species=None, eligible_only=False):
         """Return ordered highlighted photo ids for the active workspace.
+
+        When ``eligible_only`` is true, omit rejected photos and photos that
+        are no longer eligible for the Highlights page. Stored rows are kept
+        intact so un-rejecting a photo restores its selection.
 
         Result shape is ``{species: {photo_id: rank}}``.
         """
         ws = self._ws_id()
+        eligibility_joins = ""
+        eligibility_filter = ""
+        if eligible_only:
+            eligibility_joins = """
+                   JOIN photos p ON p.id = sh.photo_id
+                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                    AND wf.workspace_id = sh.workspace_id
+                   JOIN folders f ON f.id = p.folder_id
+                    AND f.status IN ('ok', 'partial')"""
+            eligibility_filter = """
+                 AND p.quality_score IS NOT NULL
+                 AND COALESCE(p.flag, 'none') != 'rejected'
+                 AND sh.species = COALESCE(
+                     (
+                         SELECT k.name
+                         FROM photo_keywords pk
+                         JOIN keywords k ON k.id = pk.keyword_id
+                          AND (k.is_species = 1 OR k.type = 'taxonomy')
+                         WHERE pk.photo_id = sh.photo_id
+                         ORDER BY pk.rowid DESC
+                         LIMIT 1
+                     ),
+                     (
+                         SELECT pr.species
+                         FROM detections d
+                         JOIN predictions pr ON pr.detection_id = d.id
+                         LEFT JOIN prediction_review pr_rev
+                          ON pr_rev.prediction_id = pr.id
+                         AND pr_rev.workspace_id = sh.workspace_id
+                         WHERE d.photo_id = sh.photo_id
+                           AND pr.species IS NOT NULL
+                           AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                           AND pr.labels_fingerprint = (
+                               SELECT pr2.labels_fingerprint
+                               FROM predictions pr2
+                               WHERE pr2.detection_id = pr.detection_id
+                                 AND pr2.classifier_model = pr.classifier_model
+                               ORDER BY pr2.created_at DESC, pr2.id DESC
+                               LIMIT 1
+                           )
+                         ORDER BY pr.confidence DESC, pr.id DESC
+                         LIMIT 1
+                     )
+                 )"""
         if species:
             rows = self.conn.execute(
-                """SELECT species, photo_id, rank
-                   FROM species_highlights
-                   WHERE workspace_id = ? AND species = ?
-                   ORDER BY rank, created_at, photo_id""",
+                f"""SELECT sh.species, sh.photo_id, sh.rank
+                   FROM species_highlights sh
+                   {eligibility_joins}
+                   WHERE sh.workspace_id = ? AND sh.species = ?
+                   {eligibility_filter}
+                   ORDER BY sh.rank, sh.created_at, sh.photo_id""",
                 (ws, species),
             ).fetchall()
         else:
             rows = self.conn.execute(
-                """SELECT species, photo_id, rank
-                   FROM species_highlights
-                   WHERE workspace_id = ?
-                   ORDER BY species, rank, created_at, photo_id""",
+                f"""SELECT sh.species, sh.photo_id, sh.rank
+                   FROM species_highlights sh
+                   {eligibility_joins}
+                   WHERE sh.workspace_id = ?
+                   {eligibility_filter}
+                   ORDER BY sh.species, sh.rank, sh.created_at, sh.photo_id""",
                 (ws,),
             ).fetchall()
         result = {}
