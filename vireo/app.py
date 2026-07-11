@@ -8341,12 +8341,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         chunk = photos[offset: offset + limit]
         _attach_edit_recipes(db, chunk)
+        # Include the full-bucket ordering keys so a client refetch of a
+        # paged bucket (has_more still true after the loaded window) can
+        # keep bucket.best_score / best_timestamp anchored to the actual
+        # tail. Recomputing them from only the loaded slice would drop
+        # a large species below its true Recommended/Best sort position
+        # when the highest-scored photo lives past the loaded window.
+        top = photos[0] if photos else {}
         return jsonify({
             "species": label,
             "photos": chunk,
             "photo_count": len(photos),
             "loaded_count": min(len(photos), offset + len(chunk)),
             "has_more": offset + len(chunk) < len(photos),
+            "best_score": _bucket_best_score(photos),
+            "best_timestamp": top.get("timestamp") if top else None,
         })
 
     @app.route("/api/highlights/save", methods=["POST"])

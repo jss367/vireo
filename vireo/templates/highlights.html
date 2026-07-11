@@ -857,26 +857,34 @@ function findHighlightPhotoWithContainer(photoId) {
   return match ? { photo: match, photos: unid, bucket: null } : null;
 }
 
-// Re-derive the bucket-level keys that sortedBuckets() reads so a
-// client-side pick change orders species the same way a reload would.
-// `best_score` mirrors backend `_bucket_best_score` (max highlight_score
-// across the bucket, or null if empty) so 'Recommended first' / 'Best
-// photo first' don't anchor to the pre-pick max. `best_timestamp`
-// mirrors the backend's `top.get("timestamp")` on photos[0] so 'Newest
-// top photo' / 'Oldest top photo' don't rank the species by whichever
-// photo led before the pick — a pick that promotes a photo to
-// photos[0] must move its timestamp with it.
-function refreshBucketOrderingKeys(bucket) {
-  if (!bucket || !Array.isArray(bucket.photos)) return;
-  var best = null;
-  for (var i = 0; i < bucket.photos.length; i++) {
-    var s = bucket.photos[i].highlight_score;
-    if (typeof s !== 'number') continue;
-    if (best === null || s > best) best = s;
+// Copy the authoritative full-bucket ordering keys from a bucket-endpoint
+// page onto the client-side bucket so sortedBuckets() ranks species the
+// same way a reload would. Prefer the endpoint's `best_score` /
+// `best_timestamp` (computed over the entire filtered bucket) over
+// recomputing from `bucket.photos`, because a paged refetch (has_more
+// still true) only loads a prefix — recomputing would drop a species
+// below its true Recommended/Best position when the highest-scored photo
+// lives past the loaded window. Falls back to a local scan only if the
+// endpoint didn't return the keys (older server, defensive).
+function applyBucketOrderingKeysFromPage(bucket, page) {
+  if (!bucket) return;
+  if (page && Object.prototype.hasOwnProperty.call(page, 'best_score')) {
+    bucket.best_score = page.best_score;
+  } else if (Array.isArray(bucket.photos)) {
+    var best = null;
+    for (var i = 0; i < bucket.photos.length; i++) {
+      var s = bucket.photos[i].highlight_score;
+      if (typeof s !== 'number') continue;
+      if (best === null || s > best) best = s;
+    }
+    bucket.best_score = best;
   }
-  bucket.best_score = best;
-  var top = bucket.photos[0];
-  bucket.best_timestamp = top ? (top.timestamp || null) : null;
+  if (page && Object.prototype.hasOwnProperty.call(page, 'best_timestamp')) {
+    bucket.best_timestamp = page.best_timestamp;
+  } else {
+    var top = Array.isArray(bucket.photos) ? bucket.photos[0] : null;
+    bucket.best_timestamp = top ? (top.timestamp || null) : null;
+  }
 }
 
 // Refetch a bucket (or the unidentified section) from offset 0 so the loaded
@@ -920,7 +928,7 @@ async function refetchBucketFromZero(target, isUnidentified) {
   target.loaded_count = allPhotos.length;
   target.has_more = !!lastPage.has_more;
   if (typeof lastPage.photo_count === 'number') target.photo_count = lastPage.photo_count;
-  refreshBucketOrderingKeys(target);
+  applyBucketOrderingKeysFromPage(target, lastPage);
 }
 
 function lightboxIsOpenOnPhoto(photoId) {
