@@ -637,7 +637,7 @@ def test_encounter_species_confirm_ignores_corrupt_pipeline_cache(app_and_db):
 
 def test_encounter_species_validation(app_and_db):
     """POST /api/encounters/species validates required fields."""
-    app, _ = app_and_db
+    app, db = app_and_db
     client = app.test_client()
 
     resp = client.post('/api/encounters/species', json={"species": ""})
@@ -646,6 +646,21 @@ def test_encounter_species_validation(app_and_db):
     resp = client.post('/api/encounters/species',
                        json={"species": "Robin", "photo_ids": []})
     assert resp.status_code == 400
+
+    # A species that normalizes to `""` (bare quote / whitespace / quote-only)
+    # must be rejected as a client validation error before reaching
+    # add_keyword. Without the pre-normalization guard, add_keyword's
+    # ValueError would escape the transaction handler as a 500.
+    photos = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchall()
+    photo_ids = [p["id"] for p in photos]
+    for bad in ("'", "\"", "‘’"):
+        resp = client.post(
+            '/api/encounters/species',
+            json={"species": bad, "photo_ids": photo_ids},
+        )
+        assert resp.status_code == 400, (
+            f"expected 400 for species={bad!r}, got {resp.status_code}: {resp.get_data(as_text=True)}"
+        )
 
 
 def test_encounter_species_rejects_invalid_photo_ids(app_and_db):

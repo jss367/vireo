@@ -19561,7 +19561,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         photo_ids = body.get("photo_ids", [])
         burst_index = body.get("burst_index")
 
-        if not species:
+        # Reject empty-after-normalization inputs (e.g. `"'"`, `"""`) up front
+        # so add_keyword's ValueError doesn't escape the surrounding try/except
+        # as a 500 — this matches the client-visible 400 behavior of
+        # api_add_keyword and api_label_cluster for the same input class.
+        if not species or not normalize_keyword_display(species):
             return json_error("species is required")
         if not photo_ids:
             return json_error("photo_ids is required")
