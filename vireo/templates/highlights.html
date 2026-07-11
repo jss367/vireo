@@ -857,12 +857,16 @@ function findHighlightPhotoWithContainer(photoId) {
   return match ? { photo: match, photos: unid, bucket: null } : null;
 }
 
-// Mirrors backend `_bucket_best_score`: max highlight_score across the
-// bucket, or null if empty. Called after applyPickBonusOnFlagChange so
-// sortedBuckets() ('Recommended first' / 'Best photo first') doesn't
-// keep the bucket at its pre-pick position — a reload would order it by
-// the post-bonus best.
-function recomputeBucketBestScore(bucket) {
+// Re-derive the bucket-level keys that sortedBuckets() reads so a
+// client-side pick change orders species the same way a reload would.
+// `best_score` mirrors backend `_bucket_best_score` (max highlight_score
+// across the bucket, or null if empty) so 'Recommended first' / 'Best
+// photo first' don't anchor to the pre-pick max. `best_timestamp`
+// mirrors the backend's `top.get("timestamp")` on photos[0] so 'Newest
+// top photo' / 'Oldest top photo' don't rank the species by whichever
+// photo led before the pick — a pick that promotes a photo to
+// photos[0] must move its timestamp with it.
+function refreshBucketOrderingKeys(bucket) {
   if (!bucket || !Array.isArray(bucket.photos)) return;
   var best = null;
   for (var i = 0; i < bucket.photos.length; i++) {
@@ -871,6 +875,8 @@ function recomputeBucketBestScore(bucket) {
     if (best === null || s > best) best = s;
   }
   bucket.best_score = best;
+  var top = bucket.photos[0];
+  bucket.best_timestamp = top ? (top.timestamp || null) : null;
 }
 
 // Backend `_highlight_score_bucket` adds this bonus to `highlight_score`
@@ -929,7 +935,7 @@ async function refetchBucketFromZero(bucket, isUnidentified) {
   target.loaded_count = data.loaded_count;
   target.has_more = data.has_more;
   if (typeof data.photo_count === 'number') target.photo_count = data.photo_count;
-  recomputeBucketBestScore(target);
+  refreshBucketOrderingKeys(target);
 }
 
 // Sort a bucket's photos to match the backend's ordering after a client-side
@@ -1348,7 +1354,7 @@ document.addEventListener('lightbox:flagchanged', function(e) {
       return;
     }
     sortBucketAfterFlagChange(hit.photos);
-    recomputeBucketBestScore(hit.bucket);
+    refreshBucketOrderingKeys(hit.bucket);
     render();
   }
 });

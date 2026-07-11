@@ -480,6 +480,74 @@ def test_highlights_lightbox_pick_applies_backend_score_bonus(live_server, page)
     assert updated_ids[2] == upper_unhighlighted
 
 
+def test_highlights_lightbox_pick_refreshes_bucket_best_timestamp(live_server, page):
+    """Picking a photo that becomes ``bucket.photos[0]`` must refresh
+    ``bucket.best_timestamp`` so ``sortedBuckets()`` ('Newest top photo' /
+    'Oldest top photo') doesn't rank the species by the pre-pick top
+    photo's timestamp until reload.
+
+    Regression for Codex feedback on PR #1176 (line 873): the client-side
+    pick handler only refreshed ``best_score`` after re-sorting. A pick
+    that promoted an older/newer photo to ``photos[0]`` left
+    ``best_timestamp`` pointing at the previous top photo, so a reload
+    would rank the species differently in the timestamp-based sorts.
+    """
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+
+    # Seeded quality scores put hawk1 (2024-03-10T08:00:00) at photos[0]
+    # via _highlight_score_bucket. Picking hawk3 (2024-03-10T08:02:00)
+    # promotes it to photos[0] under picked_first ordering.
+    hawk1_id = data["photos"][0]
+    hawk3_id = data["photos"][2]
+
+    page.goto(f"{live_server['url']}/highlights", timeout=5000)
+    hawk_section = page.locator("section.bucket").filter(has_text="Red-tailed Hawk")
+    expect(hawk_section.locator(".highlights-card").first).to_be_visible(timeout=5000)
+
+    initial = page.evaluate(
+        "() => {"
+        "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+        "  return { first: b.photos[0].id, ts: b.best_timestamp };"
+        "}"
+    )
+    assert initial["first"] == hawk1_id
+    assert initial["ts"] == "2024-03-10T08:00:00"
+
+    hawk3_card = hawk_section.locator(
+        f'.highlights-card[data-photo-id="{hawk3_id}"]'
+    )
+    hawk3_card.click()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+    page.wait_for_function(
+        "pid => _lightboxCurrentId === pid",
+        arg=hawk3_id,
+        timeout=3000,
+    )
+    page.keyboard.press("p")
+    assert _wait_for_flag(db, hawk3_id, "flagged") == "flagged"
+
+    page.wait_for_function(
+        "() => {"
+        "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+        "  return b && b.photos[0] && b.photos[0].flag === 'flagged';"
+        "}",
+        timeout=5000,
+    )
+    after = page.evaluate(
+        "() => {"
+        "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+        "  return { first: b.photos[0].id, ts: b.best_timestamp };"
+        "}"
+    )
+    assert after["first"] == hawk3_id
+    assert after["ts"] == "2024-03-10T08:02:00"
+
+
 def test_highlights_lightbox_pick_refetches_paged_bucket(live_server, page):
     """Picking in a bucket with `has_more` must refetch, not just resort locally.
 
