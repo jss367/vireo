@@ -8707,6 +8707,30 @@ def test_api_import_folder_preview_duplicate_count_deferred(app_and_db, tmp_path
     assert data["duplicate_count"] == 0
 
 
+def test_api_import_folder_preview_summary_only_omits_file_rows(app_and_db, tmp_path):
+    """Summary-only folder preview keeps count cheap for import source rows."""
+    app, _ = app_and_db
+
+    source = tmp_path / "source_summary"
+    source.mkdir()
+    from PIL import Image
+    Image.new("RGB", (100, 100)).save(str(source / "bird1.jpg"))
+    Image.new("RGB", (100, 100)).save(str(source / "bird2.jpg"))
+    (source / "notes.txt").write_text("ignore me")
+
+    client = app.test_client()
+    resp = client.post("/api/import/folder-preview", json={
+        "folders": [str(source)],
+        "file_types": "both",
+        "summary_only": True,
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total_count"] == 2
+    assert data["type_breakdown"][".jpg"] == 2
+    assert data["files"] == []
+
+
 def test_api_import_folder_preview_no_folders(app_and_db):
     """Folder preview returns error when no folders provided."""
     app, _ = app_and_db

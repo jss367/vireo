@@ -27,6 +27,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .source-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
 .source-item { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-primary); background: var(--bg-tertiary); border-radius: 4px; padding: 4px 8px; }
 .source-item button { background: none; border: none; color: var(--danger); cursor: pointer; font-size: 14px; }
+.source-meta { color: var(--text-secondary); white-space: nowrap; }
 .hint { font-size: 11px; color: var(--text-secondary); }
 .preview-summary { font-size: 12px; color: var(--text-secondary); margin-top: 6px; }
 .progress-bar { height: 8px; background: var(--bg-tertiary); border-radius: 4px; overflow: hidden; }
@@ -115,9 +116,9 @@ body { display: flex; flex-direction: column; height: 100vh; }
       </div>
       <div class="source-list" id="sourceList"></div>
       <div class="row" style="margin-top:8px;">
-        <label><input type="checkbox" id="chkRecursive" checked> Include subfolders</label>
+        <label><input type="checkbox" id="chkRecursive" checked onchange="refreshSourceCounts()"> Include subfolders</label>
         <label id="fileTypesWrap">File types
-          <select id="fileTypes" style="min-width:100px;">
+          <select id="fileTypes" style="min-width:100px;" onchange="refreshSourceCounts()">
             <option value="both" selected>RAW + JPEG</option>
             <option value="raw">RAW only</option>
             <option value="jpeg">JPEG only</option>
@@ -222,6 +223,8 @@ let sources = [];
 let activeJobId = null;
 let es = null;
 let stagingResultsByPath = {};
+let sourceCounts = {};
+let sourceCountRequestSeq = 0;
 let browserMode = 'source';
 let browserPath = '';
 let browserHomePath = '';
@@ -245,6 +248,7 @@ function updateImportMode() {
     copyMode ? 'Check for duplicates' : 'Preview import';
   document.getElementById('previewSummary').textContent = '';
   showError('');
+  refreshSourceCounts();
 }
 
 function importEscapeHtml(s) {
@@ -266,14 +270,96 @@ function renderSources() {
     const span = document.createElement('span');
     span.textContent = s;
     span.style.flex = '1';
+    const meta = document.createElement('span');
+    meta.className = 'source-meta';
+    meta.textContent = sourceCounts[s] && sourceCounts[s].text
+      ? sourceCounts[s].text
+      : 'Counting photos...';
     const btn = document.createElement('button');
     btn.textContent = '×';
     btn.title = 'Remove';
-    btn.onclick = () => { sources.splice(i, 1); renderSources(); };
+    btn.onclick = () => {
+      sources.splice(i, 1);
+      delete sourceCounts[s];
+      renderSources();
+    };
     div.appendChild(span);
+    div.appendChild(meta);
     div.appendChild(btn);
     list.appendChild(div);
   });
+}
+
+function selectedSourceCountOptions() {
+  const copyMode = selectedImportMode() === 'copy';
+  return {
+    file_types: copyMode ? document.getElementById('fileTypes').value : 'both',
+    recursive: document.getElementById('chkRecursive').checked,
+  };
+}
+
+function sourceCountKey(path, options) {
+  return [
+    path,
+    options.file_types,
+    options.recursive ? 'recursive' : 'flat',
+  ].join('\n');
+}
+
+function formatPhotoCount(n) {
+  const count = Number(n || 0);
+  return count + ' photo' + (count === 1 ? '' : 's');
+}
+
+async function refreshSourceCount(path) {
+  if (!path) return;
+  const options = selectedSourceCountOptions();
+  const key = sourceCountKey(path, options);
+  const existing = sourceCounts[path];
+  if (existing && existing.key === key && existing.status === 'loaded') return;
+  const requestId = ++sourceCountRequestSeq;
+  sourceCounts[path] = {
+    key: key,
+    requestId: requestId,
+    status: 'loading',
+    text: 'Counting photos...',
+  };
+  renderSources();
+  try {
+    const resp = await fetch('/api/import/folder-preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        folders: [path],
+        file_types: options.file_types,
+        recursive: options.recursive,
+        summary_only: true,
+      }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    const current = sourceCounts[path];
+    if (!sources.includes(path) || !current || current.requestId !== requestId) return;
+    sourceCounts[path] = {
+      key: key,
+      requestId: requestId,
+      status: resp.ok ? 'loaded' : 'error',
+      text: resp.ok ? formatPhotoCount(data.total_count) : 'Count unavailable',
+    };
+  } catch (e) {
+    const current = sourceCounts[path];
+    if (!sources.includes(path) || !current || current.requestId !== requestId) return;
+    sourceCounts[path] = {
+      key: key,
+      requestId: requestId,
+      status: 'error',
+      text: 'Count unavailable',
+    };
+  }
+  renderSources();
+}
+
+function refreshSourceCounts() {
+  sources.forEach(refreshSourceCount);
 }
 
 function addSourcePath(path) {
@@ -282,6 +368,7 @@ function addSourcePath(path) {
   if (!sources.includes(v)) {
     sources.push(v);
     renderSources();
+    refreshSourceCount(v);
     return true;
   }
   return false;
