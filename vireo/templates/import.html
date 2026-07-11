@@ -1393,7 +1393,6 @@ async function previewDestinationFolders() {
   showError('');
   const hint = document.getElementById('previewFoldersHint');
   const btn = document.getElementById('btnPreviewFolders');
-  const stale = document.getElementById('folderPreviewStale');
   const destination = (document.getElementById('destInput').value || '').trim();
   const fileTypes = selectedFileTypes();
   if (importRemoteTargetId()) return true;
@@ -1412,7 +1411,6 @@ async function previewDestinationFolders() {
   const requestSignature = destinationPreviewSignature(destination, fileTypes);
   const requestSeq = ++_folderPreviewRequestSeq;
   hint.textContent = '';
-  if (stale) stale.style.display = 'none';
   btn.disabled = true;
   btn.textContent = 'Loading...';
   try {

@@ -218,6 +218,66 @@ def test_import_destination_preview_ignores_stale_response(live_server, page):
     )
 
 
+def test_import_destination_preview_keeps_stale_warning_after_failed_refresh(live_server, page):
+    url = live_server["url"]
+
+    successful_body = json.dumps({
+        "total_photos": 1,
+        "total_folders": 1,
+        "new_folders": 1,
+        "existing_folders": 0,
+        "managed_archive": None,
+        "folders": [{
+            "path": "2026/07/11",
+            "full_path": "/archive/2026/07/11",
+            "count": 1,
+            "exists": False,
+        }],
+    })
+    state = {"calls": 0}
+
+    def destination_preview(route):
+        state["calls"] += 1
+        if state["calls"] == 1:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=successful_body,
+            )
+        else:
+            route.fulfill(
+                status=500,
+                content_type="application/json",
+                body=json.dumps({"error": "preview blew up"}),
+            )
+
+    page.route("**/api/import/destination-preview", destination_preview)
+    page.goto(f"{url}/import")
+    page.locator("#modeCopy").check()
+    page.evaluate(
+        """
+        () => {
+          addSourcePath('/card');
+          document.getElementById('destInput').value = '/archive';
+          document.getElementById('folderTemplate').value = '%Y/%m/%d';
+        }
+        """
+    )
+
+    page.locator("[data-testid='import-preview-folders-btn']").click()
+    expect(page.locator("[data-testid='import-folder-preview-results']")).to_be_visible()
+    expect(page.locator("#folderPreviewList")).to_contain_text("/archive/2026/07/11")
+
+    page.locator("#folderTemplate").fill("%Y/%Y-%m-%d")
+    expect(page.locator("#folderPreviewStale")).to_be_visible()
+
+    page.locator("[data-testid='import-preview-folders-btn']").click()
+
+    expect(page.locator("#folderPreviewStale")).to_be_visible()
+    expect(page.locator("#folderPreviewList")).to_contain_text("/archive/2026/07/11")
+    expect(page.locator("#previewFoldersHint")).to_contain_text("preview blew up")
+
+
 def test_import_custom_extensions_feed_preview(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/import")
