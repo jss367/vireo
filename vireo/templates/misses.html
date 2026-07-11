@@ -1048,6 +1048,38 @@ async function bulkReject(cat, e) {
   loadMisses();
 }
 
+// Server-side representative eligibility (see get_species_representatives)
+// hides rejected photos. Both flag paths below intentionally leave the card
+// rendered until the next loadMisses() so keyboard navigation stays put, but
+// without clearing rep state here the "Representative" badge and the shared
+// context menu's Already-representative hint keep treating the just-rejected
+// card as current until that later refetch. Walk missesData across all
+// categories in place — same shape the lifelist:changed listener uses.
+function _clearMissRepresentativeStateIfIneligible(photoIds, flag) {
+  if (flag !== 'rejected') return false;
+  var ids = photoIds instanceof Set ? photoIds : new Set(photoIds || []);
+  if (!ids.size) return false;
+  var changed = false;
+  CATEGORY_ORDER.forEach(function(cat) {
+    var photos = missesData[cat] || [];
+    photos.forEach(function(p) {
+      if (!ids.has(p.id)) return;
+      if (p.is_species_representative) {
+        p.is_species_representative = false;
+        changed = true;
+      }
+      if (Array.isArray(p.life_list)) {
+        p.life_list.forEach(function(entry) {
+          if (!entry) return;
+          if (entry.is_current_photo) { entry.is_current_photo = false; changed = true; }
+          if (entry.is_species_representative) { entry.is_species_representative = false; changed = true; }
+        });
+      }
+    });
+  });
+  return changed;
+}
+
 /* ---------- Per-card flag/reject (keyboard) ----------
  * Mirrors the bulk-reject behavior: sets the photo's flag without removing
  * the card from the list, so j/k navigation stays continuous. The card will
@@ -1064,6 +1096,9 @@ async function flagFocusedMiss(photoId, flag) {
   } catch (err) {
     if (typeof showToast === 'function') showToast('Flag update failed', 'error');
     return;
+  }
+  if (_clearMissRepresentativeStateIfIneligible([photoId], flag)) {
+    render();
   }
   if (typeof showToast === 'function') {
     var label = flag === 'flagged' ? 'Flagged' : flag === 'rejected' ? 'Rejected' : 'Cleared';
@@ -1091,11 +1126,13 @@ async function bulkFlagSelection(flag) {
     if (typeof showToast === 'function') showToast('Bulk flag failed', 'error');
     return;
   }
+  var repChanged = _clearMissRepresentativeStateIfIneligible(ids, flag);
   if (typeof showToast === 'function') {
     var verb = flag === 'flagged' ? 'Flagged' : flag === 'rejected' ? 'Rejected' : 'Cleared';
     showToast(verb + ' ' + ids.length + ' photo' + (ids.length === 1 ? '' : 's'), 'success');
   }
   clearSelection();
+  if (repChanged) render();
 }
 
 /* Bulk unflag-as-miss across the selection. Each photo can be flagged in
