@@ -695,6 +695,124 @@ def test_encounter_species_canonicalizes_legacy_variant_rows(app_and_db):
     )
 
 
+def test_encounter_species_canonicalizes_taxonomy_only_legacy_variant(app_and_db):
+    """Legacy `type='taxonomy'` rows without `is_species=1` are still species tags.
+
+    The endpoint elsewhere treats a keyword as a species when
+    ``is_species = 1 OR type = 'taxonomy'`` (see
+    ``Database.get_confirmed_species_for_photo`` and related helpers). Rows can
+    end up with ``type='taxonomy', is_species=0`` after a user promotes a
+    general keyword to taxonomy via the type dropdown, or after an upgrade
+    path that stamped ``type`` without flipping ``is_species``.
+
+    If the canonicalization pass only checks ``is_species = 1``, such a legacy
+    row is invisible to it and the photo keeps the legacy tag alongside the
+    clean row that ``add_keyword`` resolves — the same duplicate-tag failure
+    covered by ``test_encounter_species_canonicalizes_legacy_variant_rows``,
+    but on the taxonomy-only branch of species membership.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    # Legacy edge-quote row with taxonomy typing but is_species=0 — this
+    # combination is what the canonicalization query previously missed.
+    legacy_kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('‘apapane', 'taxonomy', 0)"
+    ).lastrowid
+    clean_kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('apapane', 'taxonomy', 1)"
+    ).lastrowid
+    db.conn.commit()
+
+    photos = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 2").fetchall()
+    p_legacy, p_other = photos[0]["id"], photos[1]["id"]
+    db.tag_photo(p_legacy, legacy_kid)
+
+    resp = client.post(
+        '/api/encounters/species',
+        json={"species": "apapane", "photo_ids": [p_legacy, p_other]},
+    )
+    assert resp.status_code == 200
+
+    # The legacy taxonomy-only row must be untagged from p_legacy, leaving
+    # exactly the clean species row. Species membership matches the
+    # endpoint's own semantics: is_species=1 OR type='taxonomy'.
+    for pid in (p_legacy, p_other):
+        species_tags = db.conn.execute(
+            """SELECT k.id, k.name FROM keywords k
+               JOIN photo_keywords pk ON pk.keyword_id = k.id
+               WHERE pk.photo_id = ?
+                 AND (k.is_species = 1 OR k.type = 'taxonomy')""",
+            (pid,),
+        ).fetchall()
+        assert len(species_tags) == 1, (
+            f"photo {pid} should have exactly one species tag after canonicalization "
+            f"of the taxonomy-only legacy row, got {[dict(t) for t in species_tags]!r}"
+        )
+        assert species_tags[0]["id"] == clean_kid
+        assert species_tags[0]["name"] == "apapane"
+
+    # The legacy stored spelling must be queued for XMP removal so the
+    # sidecar drops the quoted entry.
+    pending = db.get_pending_changes()
+    legacy_removes = [
+        c for c in pending
+        if c["change_type"] == "keyword_remove"
+        and c["photo_id"] == p_legacy
+        and c["value"] == "‘apapane"
+    ]
+    assert legacy_removes, (
+        f"expected a keyword_remove for the legacy '‘apapane' spelling on photo {p_legacy}; "
+        f"pending: {pending!r}"
+    )
+
+
+def test_encounter_species_replacement_finds_taxonomy_only_previous(app_and_db):
+    """Replacement path resolves ``previous_species`` via the taxonomy-only rule.
+
+    When ``previous_species`` (drawn from the pipeline cache's
+    ``confirmed_species``) normalizes to a stored row that carries
+    ``type='taxonomy'`` but ``is_species=0``, the ``old_kid`` lookup must find
+    it. Without ``OR type='taxonomy'`` it misses, ``is_replacement`` stays true
+    but no ``old_kid`` is resolved, so the previously-tagged photo keeps the
+    legacy tag while ``add_keyword`` adds the new species alongside it —
+    leaving two normalized-equivalent taxonomy tags on the same photo.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    prev_kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('apapane', 'taxonomy', 0)"
+    ).lastrowid
+    db.conn.commit()
+
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+    db.tag_photo(photo_id, prev_kid)
+
+    _seed_encounter_cache(app, db, [photo_id], confirmed_species="apapane")
+
+    resp = client.post(
+        '/api/encounters/species',
+        json={"species": "iiwi", "photo_ids": [photo_id]},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json().get("previous_species") == "apapane"
+
+    remaining = db.conn.execute(
+        """SELECT k.name FROM keywords k
+           JOIN photo_keywords pk ON pk.keyword_id = k.id
+           WHERE pk.photo_id = ?
+             AND (k.is_species = 1 OR k.type = 'taxonomy')""",
+        (photo_id,),
+    ).fetchall()
+    names = sorted(row["name"] for row in remaining)
+    assert names == ["iiwi"], (
+        f"expected only the new species after replacement, got {names!r}"
+    )
+
+
 def test_encounter_species_confirm_ignores_corrupt_pipeline_cache(app_and_db):
     """A bad pipeline cache must not turn species confirmation into a 500."""
     app, db = app_and_db

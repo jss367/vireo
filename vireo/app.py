@@ -20997,11 +20997,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # adds the clean row and queues the clean sidecar entry.
             canonical_target = normalize_keyword_display(species)
             if canonical_target:
+                # Species membership here matches the rest of the endpoint's
+                # semantics: a row is a species tag if is_species=1 OR
+                # type='taxonomy'. An upgraded row that carries taxonomy typing
+                # but hasn't had is_species flipped (e.g. legacy edge-quote
+                # `‘apapane` promoted via the type dropdown) would otherwise
+                # slip past this lookup, so photos tagged only with that
+                # legacy row would keep the stray-quote tag and also gain the
+                # clean one below.
                 legacy_rows = db.conn.execute(
                     """SELECT id, name FROM keywords
                        WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE
                          AND parent_id IS NULL
-                         AND is_species = 1
+                         AND (is_species = 1 OR type = 'taxonomy')
                          AND id != ?""",
                     (canonical_target, kid),
                 ).fetchall()
@@ -21035,7 +21043,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     """SELECT id, name FROM keywords
                        WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE
                          AND parent_id IS NULL
-                         AND is_species = 1""",
+                         AND (is_species = 1 OR type = 'taxonomy')""",
                     (normalize_keyword_display(previous_species),),
                 ).fetchone()
                 if old_kid_row:
