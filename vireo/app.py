@@ -21261,7 +21261,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if row:
                 species_kid = row["id"]
 
-        representatives = db.get_species_representatives()
+        # Gate the badge on the same eligibility rules the shared payload
+        # attachers use, so a stale preference row (photo later rejected or
+        # no longer carrying the species keyword) doesn't light up the modal
+        # while browse/highlights hide it.
+        representatives = db.get_species_representatives(eligible_only=True)
         photos = {}
         for pid in photo_ids:
             # Same workspace guard the apply endpoint uses, so a malicious
