@@ -9,6 +9,8 @@ import math
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+from keyword_normalization import keyword_match_key
+
 log = logging.getLogger(__name__)
 
 # ── Namespace constants (single source of truth) ────────────────────────
@@ -378,13 +380,23 @@ def remove_keywords(xmp_path, keywords_to_remove):
         return
 
     root = tree.getroot()
-    remove_lower = {kw.lower() for kw in keywords_to_remove}
+    # Compare using the same normalized key add_keyword() uses on insert so a
+    # DB removal of `apapane` also clears a sidecar `‘apapane` (or `´apapane`
+    # / whitespace/casing variants). A plain `.lower()` comparison would leave
+    # the quoted <rdf:li> in place; the next XMP import path would then
+    # re-add the keyword the user removed. Drop empty keys so removing a
+    # keyword whose name normalizes to `""` doesn't accidentally match empty
+    # hierarchical segments (e.g. `"|Birds|"` -> `["", "Birds", ""]`).
+    remove_keys = {keyword_match_key(kw) for kw in keywords_to_remove}
+    remove_keys.discard("")
+    if not remove_keys:
+        return
     removed = []
 
     # Remove from dc:subject bag
     for bag in root.findall(f".//{{{NS_DC}}}subject/{{{NS_RDF}}}Bag"):
         for li in bag.findall(f"{{{NS_RDF}}}li"):
-            if li.text and li.text.lower() in remove_lower:
+            if li.text and keyword_match_key(li.text) in remove_keys:
                 removed.append(li.text)
                 bag.remove(li)
 
@@ -393,8 +405,9 @@ def remove_keywords(xmp_path, keywords_to_remove):
         for li in bag.findall(f"{{{NS_RDF}}}li"):
             if li.text:
                 # Hierarchical keywords use pipe-delimited paths like "Animals|Birds|Hawk"
-                segments = {s.lower() for s in li.text.split("|")}
-                if segments & remove_lower:
+                segments = {keyword_match_key(s) for s in li.text.split("|")}
+                segments.discard("")
+                if segments & remove_keys:
                     removed.append(li.text)
                     bag.remove(li)
 

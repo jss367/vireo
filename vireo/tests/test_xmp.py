@@ -283,3 +283,71 @@ def test_remove_keywords_no_file(missing_xmp):
     # Should be a no-op, not raise
     remove_keywords(missing_xmp, {"Bird"})
     assert not os.path.exists(missing_xmp)
+
+
+def test_remove_keywords_matches_normalized_edge_quote_variant(tmp_path):
+    """Removing 'apapane' must also clear a sidecar '‘apapane' variant.
+
+    add_keyword() normalizes on insert, so a DB tag stored as 'apapane' may
+    have originated from an XMP '‘apapane'. If remove_keywords compares raw
+    lowercased text, the stray-quote <rdf:li> stays in the sidecar and gets
+    re-added on the next XMP import.
+    """
+    p = tmp_path / "photo.xmp"
+    p.write_text(
+        "<?xml version='1.0' encoding='utf-8'?>\n"
+        "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n"
+        "  <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n"
+        "    <rdf:Description>\n"
+        "      <dc:subject xmlns:dc=\"http://purl.org/dc/elements/1.1/\">\n"
+        "        <rdf:Bag>\n"
+        "          <rdf:li>‘apapane</rdf:li>\n"
+        "          <rdf:li>Raptor</rdf:li>\n"
+        "        </rdf:Bag>\n"
+        "      </dc:subject>\n"
+        "    </rdf:Description>\n"
+        "  </rdf:RDF>\n"
+        "</x:xmpmeta>\n"
+    )
+    remove_keywords(str(p), {"apapane"})
+
+    kw = read_keywords(str(p))
+    assert "‘apapane" not in kw
+    assert "Raptor" in kw
+
+
+def test_remove_keywords_matches_hierarchical_edge_quote_segment(tmp_path):
+    """Hierarchical segments must be matched using the normalized key too."""
+    p = tmp_path / "photo.xmp"
+    p.write_text(
+        "<?xml version='1.0' encoding='utf-8'?>\n"
+        "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n"
+        "  <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n"
+        "    <rdf:Description>\n"
+        "      <lr:hierarchicalSubject xmlns:lr=\"http://ns.adobe.com/lightroom/1.0/\">\n"
+        "        <rdf:Bag>\n"
+        "          <rdf:li>Birds|‘apapane</rdf:li>\n"
+        "          <rdf:li>Location|Forest</rdf:li>\n"
+        "        </rdf:Bag>\n"
+        "      </lr:hierarchicalSubject>\n"
+        "    </rdf:Description>\n"
+        "  </rdf:RDF>\n"
+        "</x:xmpmeta>\n"
+    )
+    remove_keywords(str(p), {"apapane"})
+
+    hier = read_hierarchical_keywords(str(p))
+    assert "Birds|‘apapane" not in hier
+    assert "Location|Forest" in hier
+
+
+def test_remove_keywords_ignores_empty_normalized_input(sample_xmp):
+    """A removal request whose only entry normalizes to empty must not
+    accidentally match empty hierarchical segments (e.g. `"|Birds|"` splits
+    into `["", "Birds", ""]`) and it must not blow away every keyword.
+    """
+    remove_keywords(sample_xmp, {"'"})
+
+    assert read_keywords(sample_xmp) == {"Bird", "Raptor"}
+    hier = read_hierarchical_keywords(sample_xmp)
+    assert set(hier) == {"Animals|Birds|Raptor", "Location|Forest"}

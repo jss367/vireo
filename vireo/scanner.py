@@ -24,6 +24,7 @@ from image_loader import (
     safe_iter_dir,
     safe_scan_walk,
 )
+from keyword_normalization import keyword_match_key
 from metadata import extract_metadata
 from PIL import Image
 from render_source import exif_orientation as _exif_orientation_from_data
@@ -158,8 +159,14 @@ def _import_keywords_for_photo(db, photo_id, xmp_path_str):
 
     # Build hierarchy from lr:hierarchicalSubject
     # e.g., 'Birds|Raptors|Black kite' creates Birds -> Raptors -> Black kite
+    # Skip a hierarchical entry whose chain contains any segment that
+    # normalizes to `""` (e.g. `"|Birds"` or `"Birds|'|Hawk"`). add_keyword()
+    # raises ValueError on those, and letting it propagate would abort the
+    # whole scan on a malformed sidecar entry instead of ignoring it.
     for hier in hier_keywords:
         parts = hier.split("|")
+        if any(not keyword_match_key(part) for part in parts):
+            continue
         parent_id = None
         for part in parts:
             kid = db.add_keyword(part, parent_id=parent_id)
@@ -167,12 +174,17 @@ def _import_keywords_for_photo(db, photo_id, xmp_path_str):
         # Tag with the leaf keyword
         db.tag_photo(photo_id, parent_id)
 
-    # Also add any flat keywords not already covered by hierarchy
+    # Also add any flat keywords not already covered by hierarchy. Same
+    # empty-normalized filter as above — a lone smart-quote entry would
+    # otherwise raise inside add_keyword() and abort the scan.
     existing_kw_names = {k["name"] for k in db.get_photo_keywords(photo_id)}
     for kw in flat_keywords:
-        if kw not in existing_kw_names:
-            kid = db.add_keyword(kw)
-            db.tag_photo(photo_id, kid)
+        if kw in existing_kw_names:
+            continue
+        if not keyword_match_key(kw):
+            continue
+        kid = db.add_keyword(kw)
+        db.tag_photo(photo_id, kid)
 
 
 def _extract_dimensions(exif_group, file_group, extension=None):

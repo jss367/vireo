@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 from catalog import read_catalog
+from keyword_normalization import keyword_match_key
 from xmp import write_sidecar
 
 log = logging.getLogger(__name__)
@@ -160,14 +161,25 @@ def execute_import(
             continue
 
         try:
-            # Import keywords into DB
+            # Import keywords into DB. Skip entries that normalize to `""`
+            # (a lone smart quote, whitespace) — add_keyword() rejects those
+            # after this PR, and the surrounding try/except would otherwise
+            # count the whole photo as failed rather than just dropping the
+            # malformed keyword.
             for kw_name in kw_data["flat_keywords"]:
+                if not keyword_match_key(kw_name):
+                    continue
                 kid = db.add_keyword(kw_name)
                 db.tag_photo(photo["id"], kid)
 
-            # Import hierarchical keywords
+            # Import hierarchical keywords. Skip an entry whose chain
+            # contains any segment that normalizes to `""` — the resulting
+            # `add_keyword()` call would raise and the whole hierarchical
+            # tree for this photo would be lost.
             for hier in kw_data["hierarchical_keywords"]:
                 parts = hier.split("|")
+                if any(not keyword_match_key(part) for part in parts):
+                    continue
                 parent_id = None
                 for part in parts:
                     kid = db.add_keyword(part, parent_id=parent_id)

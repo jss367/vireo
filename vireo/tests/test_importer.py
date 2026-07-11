@@ -163,6 +163,47 @@ def test_execute_import_populates_db(tmp_path):
         assert 'Cardinal' in kw_names
 
 
+def test_execute_import_skips_empty_normalized_keywords(tmp_path):
+    """A catalog keyword whose name normalizes to `""` must be dropped, not
+    aborting the import.
+
+    add_keyword() rejects names that normalize to empty (a lone smart quote,
+    stray whitespace). Without a caller-side filter here, the ValueError
+    would propagate to execute_import's try/except and mark the whole photo
+    as failed; the review contract is to skip the malformed catalog keyword
+    and continue.
+    """
+    from db import Database
+    from importer import execute_import
+
+    root = str(tmp_path / "photos") + '/'
+    os.makedirs(root)
+    with open(os.path.join(root, 'DSC_0001.NEF'), 'wb') as f:
+        f.write(b'\x00' * 100)
+
+    cat_path = str(tmp_path / "test.lrcat")
+    # `'` normalizes to `""`. The importer must skip it and still tag
+    # `Cardinal`.
+    _create_test_catalog(cat_path, root, [
+        ('DSC_0001.NEF', '', [("'", 'Birds'), ('Cardinal', 'Birds')]),
+    ])
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(root, name='photos')
+    db.add_photo(folder_id=fid, filename='DSC_0001.NEF', extension='.nef',
+                 file_size=100, file_mtime=1.0)
+
+    result = execute_import([cat_path], db, write_xmp=False)
+
+    assert result['failed'] == 0
+    assert result['imported'] >= 1
+    photos = db.get_photos()
+    assert photos
+    kw_names = {k['name'] for k in db.get_photo_keywords(photos[0]['id'])}
+    assert 'Cardinal' in kw_names
+    assert "'" not in kw_names
+
+
 def test_preview_import_detects_conflicts(tmp_path):
     """preview_import flags files that appear in multiple catalogs."""
     from db import Database
