@@ -651,7 +651,8 @@ def _collapse_scan_roots(paths):
 
 
 def run_pipeline_job(job, runner, db_path, workspace_id, params,
-                     thumb_cache_dir=None):
+                     thumb_cache_dir=None,
+                     missing_originals_invalidator=None):
     """Execute streaming pipeline. Called by JobRunner in a background thread.
 
     Args:
@@ -665,6 +666,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             pipeline writes and invalidates the real cache even when
             ``--thumb-dir`` points outside ``dirname(db_path)/thumbnails``.
             Defaults to that convention for backward compatibility.
+        missing_originals_invalidator: optional zero-arg callable that
+            drops the Flask app's Missing Originals cache for this DB.
+            Called after every scanned root in the finally block, mirroring
+            api_job_scan / api_job_import_full so a pipeline scan that
+            touches disk doesn't leave GET /api/photos/missing serving a
+            pre-scan ghost list.
 
     Returns:
         dict with stage results, duration, and errors
@@ -1100,6 +1107,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             )
                             unreachable += 1
                             continue
+                        # Track the repair folder so the outer finally
+                        # invalidates the Missing Originals cache for it —
+                        # scanner.scan touches the folder on disk and can
+                        # revalidate a restored original that a ready
+                        # /api/photos/missing payload still lists as a
+                        # ghost. Matches the append pattern used by the
+                        # normal ingest/scan-in-place paths below.
+                        scanned_roots.append(folder_path)
                         try:
                             # restrict_files limits discovery to the known
                             # broken photos in this folder. Without it, new
@@ -2116,6 +2131,23 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 "Failed to invalidate new-images cache for %s",
                                 scanned_root,
                             )
+                        # scanner.scan touches disk and may add or remove
+                        # photo rows; a ready Missing Originals payload
+                        # computed before the pipeline scan can now be
+                        # stale (e.g. user restored an original before
+                        # running Process). Standalone scan / import jobs
+                        # already invalidate here — mirror that for
+                        # pipeline scans so GET /api/photos/missing does
+                        # not keep serving the pre-scan photo list.
+                        if missing_originals_invalidator is not None:
+                            try:
+                                missing_originals_invalidator()
+                            except Exception:
+                                log.exception(
+                                    "Failed to invalidate missing-originals "
+                                    "cache for %s",
+                                    scanned_root,
+                                )
                 scan_to_thumb.put(_SENTINEL)
                 _update_stages(runner, job["id"], stages)
 

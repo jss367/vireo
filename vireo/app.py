@@ -31,6 +31,7 @@ from db import (
     KEYWORD_TYPES,
     Database,
     IncompatibleDatabaseError,
+    MissingPhotosCancelled,
     commit_with_retry,
     text_search_match,
 )
@@ -2546,6 +2547,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 changed = health_db.check_folder_health()
                 if changed:
                     log.info("Folder health check: %d folder(s) changed status", changed)
+                    # A background ok↔missing flip would otherwise leave a
+                    # ready /api/photos/missing cache serving the pre-flip
+                    # photo list: the modal/banner could offer to delete
+                    # rows whose folder just went offline, or hide ghosts
+                    # from a folder that just came back, until a later
+                    # rescan replaced the entry.
+                    _invalidate_missing_originals_cache()
             except Exception:
                 log.debug("Folder health check failed", exc_info=True)
             _time.sleep(600)  # 10 minutes
@@ -2578,6 +2586,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # over large network volumes. Values are per-spawn dicts; a new walk
     # replaces the key wholesale, so readers never see torn state.
     app._new_images_walk_progress = {}
+    app._missing_originals_lock = threading.Lock()
+    app._missing_originals_cache = {}
+    app._missing_originals_inflight = {}
+    app._missing_originals_errors = {}
+    # Monotonic per-key counter bumped whenever the cache is invalidated
+    # while a scan is in flight. Each scan snapshots this at start; if the
+    # counter has advanced by the time it finishes, the scan's results are
+    # from a pre-invalidation view of the library and must be discarded so
+    # deleted photos don't reappear in the banner/modal.
+    app._missing_originals_generation = {}
 
     # Self-healing background backfill of missing working copies. RAW (and
     # oversized JPEG) imports need a JPEG working copy at
@@ -3455,37 +3473,154 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         missing = db.get_missing_folders()
         return jsonify([dict(f) for f in missing])
 
-    @app.route("/api/photos/missing")
-    def api_photos_missing():
-        """Return photos whose original file is gone but the folder remains.
+    _MISSING_ORIGINALS_STALE_SECONDS = 30 * 60
+    _MISSING_ORIGINALS_BACKOFF_SECONDS = 30 * 60
+    _MISSING_ORIGINALS_HEAVY_JOB_TYPES = {
+        "scan",
+        "pipeline",
+        "thumbnails",
+        "previews",
+        "move-photos",
+        "move-folder",
+        "sync",
+        "classify",
+        "cull",
+        "develop",
+        "extract-masks",
+        "regroup",
+        "import",
+        "import-full",
+        "import-in-place",
+        "ingest",
+        "import-photos",
+        "batch-delete",
+        "duplicate-scan",
+        "offline-cache",
+        # Navbar's new-images probe walks the same folders a missing-originals
+        # scan would; letting them run concurrently can double the filesystem
+        # load on slow NAS/SMB libraries.
+        "new_images_walk",
+        # Folder-scoped and workspace-wide missing-originals scans have
+        # distinct cache keys, so the same-key in-flight coalescing does
+        # not catch a workspace scan started while a folder scan is
+        # running (or vice versa). Treat any in-flight
+        # missing_originals_scan as heavy work so automatic reruns
+        # don't kick off a second filesystem walk over the same tree.
+        "missing_originals_scan",
+        # audit.verify_hashes walks every workspace source file and
+        # hashes readable ones — the same NAS/SMB trees a Missing
+        # Originals scan touches. Letting the 30-minute automatic
+        # missing-originals timer fire during verification would
+        # double the I/O on those slow volumes.
+        "verify-hashes",
+        # The startup working-copy backfill job walks the same source
+        # trees and additionally performs RAW decode + JPEG encode
+        # work per file, so overlapping it with an automatic Missing
+        # Originals scan can double the source-volume I/O on large
+        # legacy RAW libraries over NAS/SMB.
+        "working_copy_backfill",
+    }
 
-        For each ghost row we report what cached/sidecar artifacts still exist
-        (thumb, preview, working copy, XMP) so the user can decide whether
-        anything is worth keeping before deleting the row.
+    def _utc_iso_now():
+        return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
-        Optional ``?folder_id=N`` scopes the check to that folder and its
-        descendants — the "rescan a specific folder" flow. The id must be
-        linked to the active workspace (same guard as folder rescan); an
-        unknown or foreign id returns 404 rather than silently widening to
-        the whole library.
-        """
-        db = _get_db()
+    def _parse_missing_originals_folder_id(db):
         folder_id = request.args.get("folder_id")
-        if folder_id is not None:
-            try:
-                folder_id = int(folder_id)
-            except (TypeError, ValueError):
-                return json_error("folder_id must be an integer")
-            linked = db.conn.execute(
-                "SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
-                (db._active_workspace_id, folder_id),
-            ).fetchone()
-            if not linked:
-                return json_error("folder not found", 404)
+        if request.is_json:
+            body = request.get_json(silent=True) or {}
+            if "folder_id" in body:
+                folder_id = body.get("folder_id")
+        if folder_id in (None, ""):
+            return None
+        try:
+            folder_id = int(folder_id)
+        except (TypeError, ValueError):
+            raise ValueError("folder_id must be an integer") from None
+        linked = db.conn.execute(
+            "SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+            (db._active_workspace_id, folder_id),
+        ).fetchone()
+        if not linked:
+            raise LookupError("folder not found")
+        return folder_id
+
+    def _missing_originals_key(db, folder_id):
+        return (db._db_path, db._active_workspace_id, folder_id)
+
+    def _missing_originals_payload(db, folder_id):
+        key = _missing_originals_key(db, folder_id)
+        now = time.monotonic()
+        with app._missing_originals_lock:
+            entry = app._missing_originals_cache.get(key)
+            inflight = app._missing_originals_inflight.get(key)
+            err = app._missing_originals_errors.get(key)
+            # An error recorded after the last cached scan means a later
+            # refresh failed. Returning the pre-refresh photo list as a
+            # fresh "ready" result would hide the failure — and worse,
+            # let the user delete rows whose originals may have been
+            # restored between scans. When a scan is in flight the UI
+            # already shows "pending", so still surface the stale
+            # entry then; otherwise prefer the error state.
+            cache_superseded_by_error = (
+                entry is not None
+                and err is not None
+                and not inflight
+                and err["set_at"] > entry["set_at"]
+            )
+            if entry is not None and not cache_superseded_by_error:
+                status = "pending" if inflight else "ready"
+                photos = entry["photos"]
+                checked_at = entry["checked_at"]
+                stale = now - entry["set_at"] > _MISSING_ORIGINALS_STALE_SECONDS
+                error = None
+            elif inflight:
+                status = "pending"
+                photos = []
+                checked_at = None
+                stale = False
+                error = None
+            elif err is not None:
+                status = "error"
+                photos = []
+                checked_at = err["checked_at"]
+                stale = False
+                error = err["error"]
+            else:
+                status = "not_ready"
+                photos = []
+                checked_at = None
+                stale = False
+                error = None
+            backoff_seconds = 0
+            if err is not None:
+                backoff_seconds = max(0, int(err["backoff_until"] - now))
+            return {
+                "status": status,
+                "pending": bool(inflight),
+                "checked_at": checked_at,
+                "stale": stale,
+                "error": error,
+                "job_id": inflight if isinstance(inflight, str) else None,
+                "photos": photos,
+                "backoff_seconds": backoff_seconds,
+                "workspace_id": db._active_workspace_id,
+                "folder_id": folder_id,
+            }
+
+    def _build_missing_originals_rows(
+        db,
+        folder_id=None,
+        progress_callback=None,
+        cancel_callback=None,
+    ):
         thumb_dir = app.config["THUMB_CACHE_DIR"]
         vireo_dir = os.path.dirname(thumb_dir)
         preview_dir = os.path.join(vireo_dir, "previews")
         working_dir = os.path.join(vireo_dir, "working")
+
+        def check_cancelled():
+            if cancel_callback is not None and cancel_callback():
+                raise MissingPhotosCancelled("missing originals scan cancelled")
 
         # Index preview cache once. The endpoint is polled from the navbar,
         # so per-photo `glob(preview_dir, f"{pid}_*.jpg")` was O(missing ×
@@ -3493,20 +3628,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # listdir and check the set in O(1) per row.
         preview_pids: set[int] = set()
         try:
-            for name in os.listdir(preview_dir):
-                # Match `{id}.jpg` (legacy full preview) or `{id}_{size}.jpg`
-                # (sized variant). Anything else is not part of the per-photo
-                # cache and should be ignored.
-                if not name.endswith(".jpg"):
-                    continue
-                head = name[:-4].split("_", 1)[0]
-                if head.isdigit():
-                    preview_pids.add(int(head))
+            check_cancelled()
+            with os.scandir(preview_dir) as it:
+                for entry in it:
+                    check_cancelled()
+                    name = entry.name
+                    # Match `{id}.jpg` (legacy full preview) or `{id}_{size}.jpg`
+                    # (sized variant). Anything else is not part of the per-photo
+                    # cache and should be ignored.
+                    if not name.endswith(".jpg"):
+                        continue
+                    head = name[:-4].split("_", 1)[0]
+                    if head.isdigit():
+                        preview_pids.add(int(head))
         except FileNotFoundError:
             pass  # cache dir hasn't been created yet — no previews
 
         out = []
-        for row in db.get_missing_photos(folder_id=folder_id):
+        for row in db.get_missing_photos(
+            folder_id=folder_id,
+            progress_callback=progress_callback,
+            cancel_callback=cancel_callback,
+        ):
+            check_cancelled()
             pid = row["id"]
             src = os.path.join(row["folder_path"], row["filename"])
             stem, _ext = os.path.splitext(src)
@@ -3541,12 +3685,284 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 ),
             })
         _attach_nested_edit_recipes(db, out)
-        return jsonify(out)
+        return out
+
+    def _missing_originals_heavy_job_active():
+        for job in app._job_runner.list_jobs():
+            if job.get("status") not in ("running", "queued"):
+                continue
+            if job.get("type") in _MISSING_ORIGINALS_HEAVY_JOB_TYPES:
+                return True
+        return False
+
+    def _invalidate_missing_originals_cache(workspace_ids=None):
+        """Drop cached Missing Originals results for this app's database.
+
+        Photos are shared across workspaces (a folder can be linked into
+        more than one), so a photo-row removal must clear every
+        workspace cache that could still list it — scoping to the
+        active workspace lets other workspaces keep serving stale
+        ready payloads until their next scan.
+
+        ``workspace_ids`` narrows the invalidation to those workspace
+        ids. Use it on workspace create/delete to clear entries that
+        could otherwise be served to a later workspace that reuses a
+        SQLite rowid.
+        """
+        ws_filter = None if workspace_ids is None else {int(w) for w in workspace_ids}
+        with app._missing_originals_lock:
+            for store in (
+                app._missing_originals_cache,
+                app._missing_originals_errors,
+            ):
+                for key in list(store.keys()):
+                    if key[0] != db_path:
+                        continue
+                    if ws_filter is not None and key[1] not in ws_filter:
+                        continue
+                    store.pop(key, None)
+            # Bump generation for every in-flight scan under this DB so
+            # its completion path refuses to write its stale
+            # pre-invalidation snapshot back into the cache.
+            for key in list(app._missing_originals_inflight.keys()):
+                if key[0] != db_path:
+                    continue
+                if ws_filter is not None and key[1] not in ws_filter:
+                    continue
+                app._missing_originals_generation[key] = (
+                    app._missing_originals_generation.get(key, 0) + 1
+                )
+
+    def _start_missing_originals_scan(db, folder_id=None, automatic=False):
+        key = _missing_originals_key(db, folder_id)
+        scan_started_at = time.monotonic()
+        now = scan_started_at
+        token = object()
+        suppressed_reason = None
+        reuse_existing = False
+        fresh_cache = False
+        with app._missing_originals_lock:
+            inflight = app._missing_originals_inflight.get(key)
+            if inflight:
+                reuse_existing = True
+            entry = app._missing_originals_cache.get(key)
+            # Gate on when the last scan STARTED, not when it finished. The
+            # navbar re-arms its 30-minute automatic timer from POST time,
+            # so a scan that takes real wall-clock time to walk the disk
+            # leaves ``set_at`` well under the threshold when the next tick
+            # arrives — every other automatic scan would otherwise be
+            # skipped, and deletions could stay undiscovered for nearly an
+            # hour. Legacy entries without ``started_at`` fall back to
+            # ``set_at``.
+            if (
+                not reuse_existing
+                and automatic
+                and entry is not None
+                and now - entry.get("started_at", entry["set_at"])
+                < _MISSING_ORIGINALS_STALE_SECONDS
+            ):
+                fresh_cache = True
+            err = app._missing_originals_errors.get(key)
+            if (
+                not reuse_existing
+                and not fresh_cache
+                and automatic
+                and err is not None
+                and now < err["backoff_until"]
+            ):
+                suppressed_reason = "backoff"
+        if reuse_existing:
+            return _missing_originals_payload(db, folder_id)
+        if fresh_cache:
+            return _missing_originals_payload(db, folder_id)
+        if automatic and suppressed_reason is None and _missing_originals_heavy_job_active():
+            suppressed_reason = "heavy_job_active"
+        if suppressed_reason is not None:
+            payload = _missing_originals_payload(db, folder_id)
+            payload["suppressed"] = True
+            payload["reason"] = suppressed_reason
+            if suppressed_reason == "heavy_job_active":
+                payload["status"] = "skipped"
+            return payload
+        scan_generation = 0
+        with app._missing_originals_lock:
+            inflight = app._missing_originals_inflight.get(key)
+            if inflight:
+                reuse_existing = True
+            else:
+                app._missing_originals_inflight[key] = token
+                scan_generation = app._missing_originals_generation.get(key, 0)
+        if reuse_existing:
+            return _missing_originals_payload(db, folder_id)
+
+        runner = app._job_runner
+        ws_id = db._active_workspace_id
+        db_file = db._db_path
+        scope_label = "workspace" if folder_id is None else f"folder #{folder_id}"
+
+        def work(job):
+            thread_db = None
+            try:
+                thread_db = Database(db_file)
+                if ws_id is not None:
+                    thread_db.set_active_workspace(ws_id)
+
+                def progress(payload):
+                    current = int(payload.get("photos_considered") or 0)
+                    total = int(payload.get("total_photos") or 0)
+                    missing_found = int(payload.get("missing_found") or 0)
+                    folders_checked = int(payload.get("folders_checked") or 0)
+                    current_folder = payload.get("current_folder") or ""
+                    job["progress"]["current"] = current
+                    job["progress"]["total"] = total
+                    job["progress"]["current_file"] = current_folder
+                    phase = (
+                        f"{folders_checked:,} folders checked, "
+                        f"{current:,} photos considered, "
+                        f"{missing_found:,} missing"
+                    )
+                    runner.push_event(job["id"], "progress", {
+                        "current": current,
+                        "total": total,
+                        "current_file": current_folder,
+                        "folders_checked": folders_checked,
+                        "missing_found": missing_found,
+                        "phase": phase,
+                    })
+
+                def cancel_check():
+                    return runner.is_cancelled(job["id"])
+
+                photos = _build_missing_originals_rows(
+                    thread_db,
+                    folder_id=folder_id,
+                    progress_callback=progress,
+                    cancel_callback=cancel_check,
+                )
+                if cancel_check():
+                    return {"cancelled": True, "scope": scope_label}
+                checked_at = _utc_iso_now()
+                stale = False
+                with app._missing_originals_lock:
+                    current_gen = app._missing_originals_generation.get(key, 0)
+                    if cancel_check():
+                        return {"cancelled": True, "scope": scope_label}
+                    if current_gen != scan_generation:
+                        # A batch delete (or other invalidation) fired
+                        # while this scan was walking the disk. Its photo
+                        # list reflects the pre-delete library, so writing
+                        # it back would resurrect just-removed photos in
+                        # the banner. Drop the result and let the next
+                        # scan recompute.
+                        stale = True
+                    else:
+                        app._missing_originals_cache[key] = {
+                            "photos": photos,
+                            "checked_at": checked_at,
+                            "set_at": time.monotonic(),
+                            "started_at": scan_started_at,
+                        }
+                        app._missing_originals_errors.pop(key, None)
+                return {
+                    "missing_count": len(photos),
+                    "checked_at": checked_at,
+                    "scope": scope_label,
+                    "stale": stale,
+                }
+            except MissingPhotosCancelled:
+                raise
+            except Exception as exc:
+                checked_at = _utc_iso_now()
+                with app._missing_originals_lock:
+                    current_gen = app._missing_originals_generation.get(key, 0)
+                    if current_gen == scan_generation:
+                        app._missing_originals_errors[key] = {
+                            "error": str(exc) or exc.__class__.__name__,
+                            "checked_at": checked_at,
+                            "set_at": time.monotonic(),
+                            "backoff_until": (
+                                time.monotonic()
+                                + _MISSING_ORIGINALS_BACKOFF_SECONDS
+                            ),
+                        }
+                raise
+            finally:
+                if thread_db is not None:
+                    thread_db.close()
+                with app._missing_originals_lock:
+                    if app._missing_originals_inflight.get(key) in (
+                        token,
+                        job["id"],
+                    ):
+                        app._missing_originals_inflight.pop(key, None)
+
+        try:
+            job_id = runner.start(
+                "missing_originals_scan",
+                work,
+                workspace_id=ws_id,
+                config={"scope": scope_label, "folder_id": folder_id},
+                ephemeral=True,
+                counts_for_badge=False,
+            )
+        except Exception:
+            with app._missing_originals_lock:
+                if app._missing_originals_inflight.get(key) is token:
+                    app._missing_originals_inflight.pop(key, None)
+            raise
+
+        with app._missing_originals_lock:
+            if app._missing_originals_inflight.get(key) is token:
+                app._missing_originals_inflight[key] = job_id
+        payload = _missing_originals_payload(db, folder_id)
+        if payload.get("status") != "ready":
+            payload["job_id"] = job_id
+            payload["pending"] = True
+            payload["status"] = "pending"
+        return payload
+
+    @app.route("/api/photos/missing")
+    def api_photos_missing():
+        """Return cached Missing Originals scan status without filesystem work."""
+        db = _get_db()
+        try:
+            folder_id = _parse_missing_originals_folder_id(db)
+        except ValueError as exc:
+            return json_error(str(exc))
+        except LookupError:
+            return json_error("folder not found", 404)
+        return jsonify(_missing_originals_payload(db, folder_id))
+
+    @app.route("/api/photos/missing/check", methods=["POST"])
+    def api_photos_missing_check():
+        """Start or reuse a background Missing Originals scan."""
+        db = _get_db()
+        try:
+            folder_id = _parse_missing_originals_folder_id(db)
+        except ValueError as exc:
+            return json_error(str(exc))
+        except LookupError:
+            return json_error("folder not found", 404)
+        body = request.get_json(silent=True) or {}
+        automatic = bool(body.get("automatic"))
+        payload = _start_missing_originals_scan(
+            db,
+            folder_id=folder_id,
+            automatic=automatic,
+        )
+        status_code = 202 if payload.get("pending") else 200
+        return jsonify(payload), status_code
 
     @app.route("/api/folders/check-health", methods=["POST"])
     def api_folders_check_health():
         db = _get_db()
         changed = db.check_folder_health()
+        # A folder flipping ok→missing turns every one of its photos into a
+        # ghost, and missing→ok resurrects them. Either transition would
+        # otherwise be masked by a ready /api/photos/missing cache until the
+        # next full scan.
+        if changed:
+            _invalidate_missing_originals_cache()
         missing = db.get_missing_folders()
         return jsonify({
             "changed": changed,
@@ -3575,6 +3991,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ws_id = db._active_workspace_id
         deleted = 0
         skipped = 0
+        folder_online_cache = {}
         for raw_id in photo_ids:
             try:
                 pid = int(raw_id)
@@ -3592,7 +4009,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if not row:
                 skipped += 1
                 continue
-            src = os.path.join(row["folder_path"], row["filename"])
+            folder_path = row["folder_path"]
+            folder_online = folder_online_cache.get(folder_path)
+            if folder_online is None:
+                # Match /api/photos/missing/remove: a path that stats as a
+                # directory but can't be enumerated (NAS/share ACL denial,
+                # missing search permission) makes ``os.path.exists(src)``
+                # unreliable for every child, so we'd otherwise unlink
+                # sidecars belonging to originals we couldn't actually
+                # verify were missing.
+                folder_online = False
+                if os.path.isdir(folder_path):
+                    try:
+                        with os.scandir(folder_path):
+                            folder_online = True
+                    except OSError:
+                        folder_online = False
+                folder_online_cache[folder_path] = folder_online
+            if not folder_online:
+                # Folder is currently unreachable — we can't tell whether
+                # the original was restored before the mount went offline,
+                # so skip the sidecar (a valid original could have a
+                # matching .xmp we would wrongly delete once the volume
+                # comes back).
+                skipped += 1
+                continue
+            src = os.path.join(folder_path, row["filename"])
             if os.path.exists(src):
                 # Original came back — refuse to touch the sidecar.
                 skipped += 1
@@ -3612,6 +4054,155 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             else:
                 skipped += 1
         return jsonify({"deleted": deleted, "skipped": skipped})
+
+    @app.route("/api/photos/missing/remove", methods=["POST"])
+    def api_photos_missing_remove():
+        """Delete Vireo rows for photos whose originals are still gone.
+
+        Body: ``{"photo_ids": [int, ...], "delete_sidecars": bool,
+        "mode": "vireo"|"disk"|"disk_permanent"}``.
+
+        A ready ``/api/photos/missing`` cache is served for up to
+        ``_MISSING_ORIGINALS_STALE_SECONDS`` (30 min) without a filesystem
+        recheck, so a photo whose original came back between the last
+        scan and the user clicking Remove would otherwise be deleted
+        from Vireo by trusting the cache. This endpoint pre-checks each
+        photo's source on disk in the active workspace and only forwards
+        the still-missing IDs to the shared batch-delete implementation.
+        Sidecar cleanup follows the same guard, so a restored original
+        never loses its ``.xmp`` either.
+
+        Response: ``{deleted, restored: [ids], skipped, sidecars_deleted,
+        sidecars_skipped, mode}``. ``restored`` lets the client show which
+        photos were saved from the cache-driven delete so the modal can
+        surface them (e.g. via toast) instead of silently discarding the
+        request.
+        """
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids") or []
+        if not isinstance(photo_ids, list):
+            return json_error("photo_ids must be a list")
+        delete_sidecars = bool(body.get("delete_sidecars"))
+        mode = body.get("mode", "vireo")
+        if mode not in ("vireo", "disk", "disk_permanent"):
+            return json_error(
+                "mode must be 'vireo', 'disk', or 'disk_permanent'"
+            )
+
+        db = _get_db()
+        ws_id = db._active_workspace_id
+        confirmed_ids = []
+        restored_ids = []
+        folder_offline_ids = []
+        skipped = 0
+        sidecar_targets = []
+        folder_online_cache = {}
+
+        def folder_accessible(folder_path):
+            cached = folder_online_cache.get(folder_path)
+            if cached is not None:
+                return cached
+            accessible = False
+            if os.path.isdir(folder_path):
+                try:
+                    with os.scandir(folder_path):
+                        accessible = True
+                except OSError:
+                    accessible = False
+            folder_online_cache[folder_path] = accessible
+            return accessible
+
+        for raw_id in photo_ids:
+            try:
+                pid = int(raw_id)
+            except (TypeError, ValueError):
+                skipped += 1
+                continue
+            row = db.conn.execute(
+                """SELECT p.filename, f.path AS folder_path
+                   FROM photos p
+                   JOIN folders f ON p.folder_id = f.id
+                   JOIN workspace_folders wf ON wf.folder_id = f.id
+                   WHERE p.id = ? AND wf.workspace_id = ?""",
+                (pid, ws_id),
+            ).fetchone()
+            if not row:
+                skipped += 1
+                continue
+            folder_path = row["folder_path"]
+            if not folder_accessible(folder_path):
+                # The parent folder/NAS mount is currently unreachable, so
+                # ``os.path.exists(src)`` would return False for every row
+                # regardless of whether the original was restored before
+                # the volume went offline. Deleting under that ambiguity
+                # would remove valid Vireo rows; leave the decision for a
+                # later scan (once folder health flips or the volume comes
+                # back) instead.
+                folder_offline_ids.append(pid)
+                continue
+            src = os.path.join(folder_path, row["filename"])
+            if os.path.exists(src):
+                # Original is back on disk — the cached "missing" verdict
+                # was stale. Keep the Vireo row (and its sidecar).
+                restored_ids.append(pid)
+                continue
+            confirmed_ids.append(pid)
+            if delete_sidecars:
+                sidecar_targets.append(src)
+
+        sidecars_deleted = 0
+        sidecars_skipped = 0
+        if delete_sidecars:
+            for src in sidecar_targets:
+                stem, _ = os.path.splitext(src)
+                removed_one = False
+                for candidate in (stem + ".xmp", stem + ".XMP",
+                                  src + ".xmp", src + ".XMP"):
+                    if os.path.isfile(candidate):
+                        try:
+                            os.remove(candidate)
+                            removed_one = True
+                        except OSError as e:
+                            log.warning(
+                                "Failed to delete sidecar %s: %s", candidate, e
+                            )
+                if removed_one:
+                    sidecars_deleted += 1
+                else:
+                    sidecars_skipped += 1
+
+        deleted_count = 0
+        if confirmed_ids:
+            try:
+                result = _run_batch_delete(
+                    db, confirmed_ids, mode, include_companions=False,
+                )
+            except ValueError as exc:
+                return json_error(str(exc))
+            deleted_count = int(result.get("deleted") or 0)
+            if deleted_count:
+                _invalidate_missing_originals_cache()
+
+        # A cache invalidation is still worth doing when everything came
+        # back online: the ready payload we just refused to trust for
+        # deletion is also the one the banner will keep serving until the
+        # next scan. Dropping it now forces a fresh check the next time
+        # the banner/modal asks, so the restored photos stop appearing
+        # as ghosts. Do the same when we deferred rows because a folder
+        # was offline: the cache is unreliable evidence for those IDs and
+        # the next scan (or health flip) needs to replace it.
+        if deleted_count == 0 and (restored_ids or folder_offline_ids):
+            _invalidate_missing_originals_cache()
+
+        return jsonify({
+            "deleted": deleted_count,
+            "restored": restored_ids,
+            "folder_offline": folder_offline_ids,
+            "skipped": skipped,
+            "sidecars_deleted": sidecars_deleted,
+            "sidecars_skipped": sidecars_skipped,
+            "mode": mode,
+        })
 
     @app.route("/api/folders/<int:folder_id>", methods=["GET"])
     def api_folder_get(folder_id):
@@ -3654,14 +4245,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # change invalidates the old key and would silently regress export
         # to RAW until the user re-developed.
         old_row = db.conn.execute(
-            "SELECT path FROM folders WHERE id = ?", (folder_id,)
+            "SELECT path, status FROM folders WHERE id = ?", (folder_id,)
         ).fetchone()
         old_path = old_row["path"] if old_row else ""
 
         try:
             cascaded = db.relocate_folder(folder_id, new_path)
         except ValueError as e:
+            if old_row and old_row["status"] == "missing":
+                current_row = db.conn.execute(
+                    "SELECT status FROM folders WHERE id = ?", (folder_id,)
+                ).fetchone()
+                if current_row and current_row["status"] == "ok":
+                    _invalidate_missing_originals_cache()
             return json_error(str(e), 409)
+
+        # Relocation rewrites folders.path (and can merge/delete rows via the
+        # missing→existing branch). A ready /api/photos/missing cache would
+        # otherwise keep offering the pre-relocation ghost rows for removal
+        # even though the originals just came back online at the new path.
+        _invalidate_missing_originals_cache()
 
         import config as cfg
         from export import relocate_developed_dir
@@ -3685,6 +4288,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Clean up cached files alongside the cascaded photo rows so preview
         # files don't get orphaned on disk (untracked by preview_cache).
         _cleanup_cached_files_for_deleted_photos(result.get("files", []))
+        # The cascaded row deletion here is the same shape as any other
+        # photo-removal path: without invalidation, a ready
+        # /api/photos/missing cache could keep listing ghosts from the
+        # now-deleted folder (offered up for removal a second time in
+        # the modal) until the next scan runs.
+        _invalidate_missing_originals_cache()
         # Don't leak the internal file list to the API response — keep the
         # shape callers expect.
         return jsonify({"deleted_photos": result["deleted_photos"]})
@@ -6631,6 +7240,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         except ValueError as exc:
             return json_error(str(exc))
+        if result.get("deleted"):
+            _invalidate_missing_originals_cache()
         return jsonify(result)
 
     @app.route("/api/jobs/batch-delete", methods=["POST"])
@@ -6669,7 +7280,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 })
 
             try:
-                return _run_batch_delete(
+                result = _run_batch_delete(
                     thread_db,
                     photo_ids,
                     mode,
@@ -6677,6 +7288,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     paths=paths,
                     progress_callback=progress,
                 )
+                if result.get("deleted"):
+                    _invalidate_missing_originals_cache()
+                return result
             finally:
                 thread_db.conn.close()
 
@@ -8603,6 +9217,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return err
         try:
             ws_id = db.create_workspace(name, config_overrides=config_overrides)
+            # SQLite can reuse the rowid of a deleted workspace here, so a
+            # ready Missing Originals payload cached under the old
+            # workspace could otherwise be served to this fresh workspace
+            # until its own scan overwrites the entry — mirroring the
+            # new-images cache guard in db.create_workspace.
+            _invalidate_missing_originals_cache(workspace_ids=[ws_id])
             # Seed the standard smart collections (All Photos, Flagged, etc.).
             # Startup only seeds the active workspace, so without this a
             # workspace created via the API never gets defaults until it's
@@ -8652,6 +9272,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if ws_id == db._active_workspace_id:
             return json_error("Cannot delete the active workspace. Switch first.")
         db.delete_workspace(ws_id)
+        # Drop this workspace's cached Missing Originals payload so a
+        # later workspace that reuses this SQLite rowid can't be served
+        # the deleted workspace's ghost photos / folder paths.
+        _invalidate_missing_originals_cache(workspace_ids=[ws_id])
         return jsonify({"ok": True})
 
     @app.route("/api/workspaces/<int:ws_id>/activate", methods=["POST"])
@@ -8728,12 +9352,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not db.get_folder(folder_id):
             return json_error("Folder not found", 404)
         db.add_workspace_folder(ws_id, folder_id)
+        # A newly linked folder can introduce ghosts (or resolve them if it
+        # was previously offline). The missing-originals cache is keyed by
+        # workspace, so leaving a stale ready payload here would keep serving
+        # the old membership's answer until the next scan.
+        _invalidate_missing_originals_cache()
         return jsonify({"ok": True})
 
     @app.route("/api/workspaces/<int:ws_id>/folders/<int:folder_id>", methods=["DELETE"])
     def api_remove_workspace_folder(ws_id, folder_id):
         db = _get_db()
         db.remove_workspace_folder_tree(ws_id, folder_id)
+        # Unlinking a folder tree removes photos from the workspace's scope;
+        # the cached ready payload would otherwise keep listing ghosts from
+        # the now-detached folders until a manual rescan.
+        _invalidate_missing_originals_cache()
         return jsonify({"ok": True})
 
     @app.route("/api/workspaces/<int:ws_id>/move-folders", methods=["POST"])
@@ -8768,6 +9401,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             result = db.move_folders_to_workspace(ws_id, target_ws_id, folder_ids)
             result["target_workspace_id"] = target_ws_id
+            # Moving folders changes membership on both source and target
+            # workspaces, so any cached missing-originals payloads for either
+            # side would go stale.
+            _invalidate_missing_originals_cache()
             return jsonify(result)
         except ValueError as e:
             return json_error(str(e))
@@ -12594,6 +13231,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         result = db.delete_photos(photo_ids)
         _cleanup_cached_files_for_deleted_photos(result.get("files", []))
+        if result.get("deleted"):
+            _invalidate_missing_originals_cache()
         return jsonify({"ok": True, "removed": result.get("deleted", 0)})
 
     @app.route("/api/audit/import-untracked", methods=["POST"])
@@ -12604,11 +13243,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         from audit import import_untracked
 
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
-        import_untracked(
-            db, paths,
-            vireo_dir=vireo_dir,
-            thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
-        )
+        try:
+            import_untracked(
+                db, paths,
+                vireo_dir=vireo_dir,
+                thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
+            )
+        finally:
+            try:
+                _invalidate_missing_originals_cache()
+            except Exception:
+                log.exception(
+                    "Failed to invalidate missing-originals cache after audit import"
+                )
         # Audit import calls scanner.scan just like the standalone scan/import
         # paths above. Without ExifTool the newly imported photos still lose
         # capture date, GPS, and camera info; the frontend renders any warning
@@ -13945,7 +14592,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
             # Check folder health before scanning to prevent duplicate imports
-            thread_db.check_folder_health()
+            if thread_db.check_folder_health():
+                _invalidate_missing_originals_cache()
 
             # Accumulator so multi-root progress doesn't rewind at each
             # root boundary. scanner.scan() reports (current, total) local
@@ -14100,6 +14748,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         root_errors.append(cache_msg)
                         if cache_msg not in job["errors"]:
                             job["errors"].append(cache_msg)
+                    # scanner.scan touches disk and may add or remove
+                    # photo rows; a ready Missing Originals payload
+                    # computed before the scan can now be stale (e.g.
+                    # user restored an original before running "Rescan
+                    # this Folder"). The pre-scan health-check
+                    # invalidation only fires when a folder flips
+                    # missing/ok, so also drop the cache once the scan
+                    # itself has run — even on partial failure, since
+                    # rows are committed incrementally.
+                    try:
+                        _invalidate_missing_originals_cache()
+                    except Exception:
+                        log.exception(
+                            "Failed to invalidate missing-originals cache for %s",
+                            root,
+                        )
                     advance_scan_acc()
 
             if cancelled or cancel_check():
@@ -14769,10 +15433,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if trashed_pids:
             try:
                 all_files = []
+                deleted_rows = 0
                 for chunk in _chunked(trashed_pids):
                     result = db.delete_photos(chunk)
                     all_files.extend(result.get("files", []))
+                    deleted_rows += result.get("deleted", 0)
                 _cleanup_cached_files_for_deleted_photos(all_files)
+                if deleted_rows:
+                    _invalidate_missing_originals_cache()
             except Exception:
                 # Files are already in Trash; if the row delete fails we
                 # surface a 500 so the caller knows reconciliation is
@@ -15256,6 +15924,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 destination=destination,
                 progress_cb=progress_cb,
             )
+            if int(result.get("moved") or 0) > 0:
+                try:
+                    _invalidate_missing_originals_cache()
+                except Exception:
+                    log.exception(
+                        "Failed to invalidate missing-originals cache "
+                        "after move-photos job",
+                    )
 
             if rule_id:
                 thread_db.touch_move_rule(rule_id)
@@ -15802,6 +16478,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             if cleanup_error else ""
                         )
                     )
+            if result.get("ok"):
+                try:
+                    _invalidate_missing_originals_cache()
+                except Exception:
+                    log.exception(
+                        "Failed to invalidate missing-originals cache "
+                        "after move-folder job",
+                    )
             return result
 
         job_config = {
@@ -16039,7 +16723,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
             # Check folder health before scanning to prevent duplicate imports
-            thread_db.check_folder_health()
+            if thread_db.check_folder_health():
+                _invalidate_missing_originals_cache()
             job["_start_time"] = time.time()
 
             scan_target = str(Path(source))  # normalize (strips trailing slash)
@@ -16160,6 +16845,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # scanner.scan commits photo rows incrementally, so even a mid-scan
                 # failure can leave DB state that invalidates cached new-image counts.
                 _invalidate_new_images_after_scan(thread_db, scan_target)
+                # scanner.scan touches disk and may reconcile ghost rows
+                # (e.g. a user restored an original before running import).
+                # The pre-scan health-check invalidation only fires when a
+                # folder flips missing/ok, so also drop the missing-originals
+                # cache once the scan itself has run — even on partial
+                # failure, since rows are committed incrementally.
+                try:
+                    _invalidate_missing_originals_cache()
+                except Exception:
+                    log.exception(
+                        "Failed to invalidate missing-originals cache after import scan of %s",
+                        scan_target,
+                    )
             scan_count = job["progress"].get("total", 0)
             scan_summary = f"{scan_count} photos"
             metadata_warning = _scan_metadata_warning()
@@ -16460,7 +17158,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
-            thread_db.check_folder_health()
+            if thread_db.check_folder_health():
+                _invalidate_missing_originals_cache()
             effective_cfg = thread_db.get_effective_config(cfg.load())
             pipeline_cfg = effective_cfg.get("pipeline", {})
 
@@ -16574,6 +17273,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         root_errors.append(msg)
                         if msg not in job["errors"]:
                             job["errors"].append(msg)
+                    # scanner.scan touches disk and may reconcile ghost rows
+                    # (e.g. a user restored an original before running
+                    # import-in-place). The pre-scan health-check invalidation
+                    # only fires when a folder flips missing/ok, so also drop
+                    # the missing-originals cache once the scan itself has
+                    # run — even on partial failure, since rows are committed
+                    # incrementally.
+                    try:
+                        _invalidate_missing_originals_cache()
+                    except Exception:
+                        log.exception(
+                            "Failed to invalidate missing-originals cache after in-place import scan of %s",
+                            source,
+                        )
                     advance_scan_acc()
 
             indexed = len(photo_ids)
@@ -16960,9 +17673,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 vireo_dir=vireo_dir,
                 thumb_cache_dir=thumb_cache_dir,
             )
-            result = run_import_job(job, runner, db_path, active_ws, params)
-            _chain_after_import(job, result)
-            return result
+            try:
+                result = run_import_job(
+                    job, runner, db_path, active_ws, params,
+                )
+                _chain_after_import(job, result)
+                return result
+            finally:
+                # run_import_job can flip destination folders from
+                # ``missing`` to ``ok`` and re-scans landed files, so a
+                # ready /api/photos/missing cache computed before the
+                # import can now list rows whose originals are back on
+                # disk. The other scan/import paths (rescan-this-folder,
+                # import-in-place) already invalidate the cache after
+                # they touch disk; do the same here so the banner/modal
+                # stop offering ghosts for photos this job just restored,
+                # even if the job failed part-way (rows land
+                # incrementally). Best-effort: never let a cache-drop
+                # failure mask the underlying import result.
+                try:
+                    _invalidate_missing_originals_cache()
+                except Exception:
+                    log.exception(
+                        "Failed to invalidate missing-originals cache "
+                        "after import-photos job",
+                    )
 
         job_id = runner.start(
             "import", work, config=job_config, workspace_id=active_ws,
@@ -18858,6 +19593,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return run_pipeline_job(
                 job, runner, db_path, workspace_id, params,
                 thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
+                missing_originals_invalidator=_invalidate_missing_originals_cache,
             )
 
         job_config = {
@@ -19539,6 +20275,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return run_pipeline_job(
                 job, runner, db_path, active_ws, params,
                 thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
+                missing_originals_invalidator=_invalidate_missing_originals_cache,
             )
 
         # Enqueue rather than start directly: when SLOT_CAP is 1 and

@@ -9,6 +9,7 @@ import os
 
 import pytest
 from db import Database
+from wait import wait_for_job_via_client
 
 
 def _db_with_active_ws(tmp_path):
@@ -24,6 +25,23 @@ def _add_photo_file(db, folder_dir, folder_id, name):
         folder_id=folder_id, filename=name, extension=".jpg",
         file_size=9, file_mtime=1.0,
     )
+
+
+def _run_missing_originals_check(client, folder_id=None):
+    body = {}
+    if folder_id is not None:
+        body["folder_id"] = folder_id
+    resp = client.post("/api/photos/missing/check", json=body)
+    assert resp.status_code in (200, 202)
+    data = resp.get_json()
+    if data.get("pending"):
+        wait_for_job_via_client(client, data["job_id"])
+    url = "/api/photos/missing"
+    if folder_id is not None:
+        url += f"?folder_id={folder_id}"
+    payload = client.get(url).get_json()
+    assert payload["status"] == "ready"
+    return payload["photos"]
 
 
 # ---- DB layer: get_missing_photos(folder_id=...) -------------------------
@@ -166,15 +184,15 @@ def test_missing_endpoint_scoped_by_folder(app_with_real_folders):
     client = app.test_client()
 
     # Whole-workspace: the one ghost.
-    allm = client.get("/api/photos/missing").get_json()
+    allm = _run_missing_originals_check(client)
     assert [p["id"] for p in allm] == [ids["pa"]]
 
     # Scoped to A: the ghost.
-    scoped_a = client.get(f"/api/photos/missing?folder_id={ids['fa']}").get_json()
+    scoped_a = _run_missing_originals_check(client, ids["fa"])
     assert [p["id"] for p in scoped_a] == [ids["pa"]]
 
     # Scoped to B: empty.
-    scoped_b = client.get(f"/api/photos/missing?folder_id={ids['fb']}").get_json()
+    scoped_b = _run_missing_originals_check(client, ids["fb"])
     assert scoped_b == []
 
 

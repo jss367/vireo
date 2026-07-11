@@ -696,7 +696,8 @@ def test_pipeline_job_config_includes_collection_name(app_and_db, monkeypatch):
     db.set_active_workspace(db._active_workspace_id)
     col_id = db.add_collection("Costa Rica selects", json.dumps([]))
 
-    def fake_run(job, runner, db_path, workspace_id, params, thumb_cache_dir=None):
+    def fake_run(job, runner, db_path, workspace_id, params, thumb_cache_dir=None,
+                 **_kwargs):
         return {"ok": True}
 
     monkeypatch.setattr(pipeline_job, "run_pipeline_job", fake_run)
@@ -2417,7 +2418,7 @@ def test_pipeline_remote_archive_snapshots_target_at_enqueue(
     captured = {}
 
     def fake_run(job, runner, db_path, workspace_id, params,
-                 thumb_cache_dir=None):
+                 thumb_cache_dir=None, **_kwargs):
         captured["params"] = params
         return {}
 

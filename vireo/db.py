@@ -19,6 +19,7 @@ _UNSET = object()  # sentinel for "not provided" vs explicit None
 AUTO_MATCH_REVIEW_MARKER = "__vireo_auto_match__"
 
 _SQLITE_PARAM_CHUNK_SIZE = 800
+_MISSING_PHOTOS_PROGRESS_INTERVAL = 200
 
 
 class IncompatibleDatabaseError(RuntimeError):
@@ -52,6 +53,10 @@ class IncompatibleDatabaseError(RuntimeError):
         if cause:
             msg += f" ({cause})"
         super().__init__(msg)
+
+
+class MissingPhotosCancelled(RuntimeError):
+    """Raised when a Missing Originals filesystem scan is cancelled."""
 
 
 def _nfc(name: str) -> str:
@@ -2743,7 +2748,12 @@ class Database:
             (self._ws_id(),),
         ).fetchall()
 
-    def get_missing_photos(self, folder_id=None):
+    def get_missing_photos(
+        self,
+        folder_id=None,
+        progress_callback=None,
+        cancel_callback=None,
+    ):
         """Return photos whose source file is missing from disk.
 
         Scoped to the active workspace. Skips photos in folders flagged
@@ -2771,7 +2781,20 @@ class Database:
         Each row carries ``folder_path``, ``timestamp``, and
         ``working_copy_path`` so the caller can render rich UI without
         joining again.
+
+        ``progress_callback`` is optional. When supplied, it receives dicts
+        containing ``folders_checked``, ``photos_considered``, ``missing_found``,
+        ``total_photos``, and ``current_folder``. Callback exceptions are
+        logged and ignored so progress reporting cannot abort detection.
+
+        ``cancel_callback`` is optional. When supplied, it is polled between
+        filesystem operations and may abort the scan by returning true.
         """
+        def check_cancelled():
+            if cancel_callback is not None and cancel_callback():
+                raise MissingPhotosCancelled("missing photos scan cancelled")
+
+        check_cancelled()
         params = [self._ws_id()]
         subtree_clause = ""
         if folder_id is not None:
@@ -2803,6 +2826,7 @@ class Database:
                 subtree_clause = (
                     " AND f.id IN (SELECT id FROM missing_subtree_ids)"
                 )
+        check_cancelled()
         rows = self.conn.execute(
             f"""SELECT p.id, p.filename, p.extension, p.file_size,
                       p.timestamp, p.working_copy_path,
@@ -2814,6 +2838,7 @@ class Database:
                ORDER BY f.path, p.filename""",
             params,
         ).fetchall()
+        check_cancelled()
         # One readdir per folder instead of one stat per photo. On a 50k-photo
         # library across a network volume the per-photo `os.path.exists` was
         # costing minutes; a single scandir + set-membership check is orders
@@ -2824,18 +2849,49 @@ class Database:
         folder_online: dict[int, bool] = {}
         folder_names: dict[int, set[str] | None] = {}
         missing = []
+        photos_considered = 0
+        folders_checked = 0
+        reported_folders = set()
+        progress_callback_enabled = True
+
+        def report_progress(current_folder):
+            nonlocal progress_callback_enabled
+            if progress_callback is None or not progress_callback_enabled:
+                return
+            try:
+                progress_callback({
+                    "folders_checked": folders_checked,
+                    "photos_considered": photos_considered,
+                    "missing_found": len(missing),
+                    "total_photos": len(rows),
+                    "current_folder": current_folder,
+                })
+            except Exception:
+                progress_callback_enabled = False
+                log.exception("Missing photos progress callback failed")
+
+        def report_photo_progress(current_folder):
+            if photos_considered % _MISSING_PHOTOS_PROGRESS_INTERVAL == 0:
+                report_progress(current_folder)
+
         for row in rows:
+            check_cancelled()
             fid = row["folder_id"]
             if fid not in folder_online:
                 folder_online[fid] = os.path.isdir(row["folder_path"])
             if not folder_online[fid]:
                 # Whole folder is offline — surfaced by missing-folders flow.
+                if fid not in reported_folders:
+                    reported_folders.add(fid)
+                    folders_checked += 1
+                    report_progress(row["folder_path"])
                 continue
             if fid not in folder_names:
                 try:
                     names_set: set[str] = set()
                     with os.scandir(row["folder_path"]) as it:
                         for entry in it:
+                            check_cancelled()
                             # Broken symlinks: scandir returns the basename even
                             # when the target is gone, but the prior os.path.exists
                             # check returned False. Filter them so missing
@@ -2851,17 +2907,28 @@ class Database:
                     # treat the same as "folder offline" so we don't bulk-flag
                     # every photo as a ghost.
                     folder_names[fid] = None
+                if fid not in reported_folders:
+                    reported_folders.add(fid)
+                    folders_checked += 1
+                    report_progress(row["folder_path"])
             names = folder_names[fid]
+            photos_considered += 1
             if names is None:
+                report_photo_progress(row["folder_path"])
                 continue
             if _nfc(row["filename"]) in names:
+                report_photo_progress(row["folder_path"])
                 continue
             # NFC miss: defer to the kernel for case rules. On case-insensitive
             # volumes (APFS default, NTFS) os.path.exists resolves a
             # case-mismatched name; on case-sensitive volumes (most Linux
             # filesystems) it correctly reports the file as absent.
+            check_cancelled()
             if not os.path.exists(os.path.join(row["folder_path"], row["filename"])):
                 missing.append(row)
+            report_photo_progress(row["folder_path"])
+        check_cancelled()
+        report_progress("")
         return missing
 
     def nearest_ancestor_folder_id(self, path, exclude_id=None):
