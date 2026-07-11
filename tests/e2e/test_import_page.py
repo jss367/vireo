@@ -375,6 +375,80 @@ def test_import_preview_passes_verify_by_hash_to_duplicate_check(live_server, pa
     assert body["verify_by_hash"] is True
 
 
+def test_import_destination_preview_excludes_skipped_duplicates(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/import")
+    page.evaluate(
+        """
+        () => {
+          const originalFetch = window.fetch.bind(window);
+          window.__dupBody = null;
+          window.__destPreviewBody = null;
+          window.fetch = (input, init) => {
+            const target = typeof input === 'string' ? input : input.url;
+            if (target && target.indexOf('/api/import/folder-preview') === 0) {
+              return Promise.resolve(new Response(JSON.stringify({
+                total_count: 2,
+                total_size: 0,
+                type_breakdown: {'.jpg': 2},
+                duplicate_count: 0,
+                files: [
+                  {path: '/tmp/card-a/DUP.jpg'},
+                  {path: '/tmp/card-a/NEW.jpg'},
+                ],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            if (target && target.indexOf('/api/import/check-duplicates') === 0) {
+              window.__dupBody = JSON.parse(init.body);
+              const frame = 'data: ' + JSON.stringify({
+                duplicates: ['/tmp/card-a/DUP.jpg'],
+                checked: 2,
+                total: 2,
+              }) + '\\n\\n' + 'data: ' + JSON.stringify({
+                done: true,
+                duplicate_count: 1,
+                checked: 2,
+                total: 2,
+              }) + '\\n\\n';
+              return Promise.resolve(new Response(frame, {
+                status: 200,
+                headers: {'Content-Type': 'text/event-stream'},
+              }));
+            }
+            if (target && target.indexOf('/api/import/destination-preview') === 0) {
+              window.__destPreviewBody = JSON.parse(init.body);
+              return Promise.resolve(new Response(JSON.stringify({
+                total_photos: 1,
+                total_folders: 1,
+                new_folders: 1,
+                existing_folders: 0,
+                managed_archive: null,
+                folders: [{
+                  path: '2026/07/11',
+                  full_path: '/archive/2026/07/11',
+                  count: 1,
+                  exists: false,
+                }],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            return originalFetch(input, init);
+          };
+          addSourcePath('/tmp/card-a');
+          document.getElementById('destInput').value = '/archive';
+        }
+        """
+    )
+
+    page.locator("#modeCopy").check()
+    page.locator("[data-testid='import-preview-folders-btn']").click()
+    page.wait_for_function("window.__destPreviewBody !== null")
+
+    dup_body = page.evaluate("window.__dupBody")
+    dest_body = page.evaluate("window.__destPreviewBody")
+    assert dup_body["paths"] == ["/tmp/card-a/DUP.jpg", "/tmp/card-a/NEW.jpg"]
+    assert dest_body["exclude_paths"] == ["/tmp/card-a/DUP.jpg"]
+
+
 def test_import_copy_start_sends_restored_options(live_server, page):
     url = live_server["url"]
     captured = {}

@@ -1288,21 +1288,23 @@ function useStagingAsImportSource(result) {
   document.getElementById('sourceCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-function destinationPreviewSignature(destination, fileTypes) {
+function destinationPreviewSignature(destination, fileTypes, excludePaths = []) {
   return JSON.stringify({
     sources: sources.slice(),
     destination: destination,
     folder_template: (document.getElementById('folderTemplate').value || '').trim(),
     file_types: fileTypes,
     recursive: document.getElementById('chkRecursive').checked,
+    exclude_paths: excludePaths.slice().sort(),
   });
 }
 
-function currentDestinationPreviewSignature() {
+function currentDestinationPreviewSignature(excludePaths = []) {
   if (importRemoteTargetId()) return '';
   return destinationPreviewSignature(
     (document.getElementById('destInput').value || '').trim(),
     selectedFileTypes(),
+    excludePaths,
   );
 }
 
@@ -1389,7 +1391,66 @@ function markDestinationPreviewStale() {
   if (btn) btn.textContent = 'Refresh preview';
 }
 
-async function previewDestinationFolders() {
+async function importDuplicatePaths(paths) {
+  if (!paths.length || !document.getElementById('chkSkipDuplicates').checked) {
+    return {count: 0, paths: []};
+  }
+  const dupResp = await fetch('/api/import/check-duplicates', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      paths: paths,
+      verify_by_hash: document.getElementById('chkVerifyByHash').checked,
+    }),
+  });
+  if (!dupResp.ok) throw new Error('duplicate check failed');
+  const reader = dupResp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let dupCount = 0;
+  const duplicatePaths = [];
+  for (;;) {
+    const r = await reader.read();
+    if (r.done) break;
+    buffer += decoder.decode(r.value, { stream: true });
+    const parts = buffer.split('\n\n');
+    buffer = parts.pop();
+    for (const part of parts) {
+      const m = part.match(/^data: (.+)$/m);
+      if (!m) continue;
+      try {
+        const d = JSON.parse(m[1]);
+        if (d.duplicates) {
+          dupCount += d.duplicates.length;
+          duplicatePaths.push(...d.duplicates);
+        }
+      } catch (e) { /* partial frame */ }
+    }
+  }
+  return {count: dupCount, paths: duplicatePaths};
+}
+
+async function destinationPreviewExcludePaths(fileTypes, requestSeq) {
+  if (!document.getElementById('chkSkipDuplicates').checked) return [];
+  const resp = await fetch('/api/import/folder-preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      folders: sources,
+      file_types: fileTypes,
+      recursive: document.getElementById('chkRecursive').checked,
+    }),
+  });
+  if (!resp.ok) throw new Error((await resp.json()).error || 'preview failed');
+  const data = await resp.json();
+  if (requestSeq !== _folderPreviewRequestSeq) return null;
+  const files = data.files || [];
+  const duplicateResult = await importDuplicatePaths(files.map(f => f.path));
+  if (requestSeq !== _folderPreviewRequestSeq) return null;
+  return duplicateResult.paths;
+}
+
+async function previewDestinationFolders(excludePaths = null) {
   showError('');
   const hint = document.getElementById('previewFoldersHint');
   const btn = document.getElementById('btnPreviewFolders');
@@ -1408,12 +1469,19 @@ async function previewDestinationFolders() {
     showError('Choose at least one file extension.');
     return false;
   }
-  const requestSignature = destinationPreviewSignature(destination, fileTypes);
   const requestSeq = ++_folderPreviewRequestSeq;
   hint.textContent = '';
   btn.disabled = true;
   btn.textContent = 'Loading...';
+  let resolvedExcludePaths = excludePaths || [];
+  let requestSignature = '';
   try {
+    resolvedExcludePaths = excludePaths === null
+      ? await destinationPreviewExcludePaths(fileTypes, requestSeq)
+      : excludePaths;
+    if (resolvedExcludePaths === null) return false;
+    requestSignature = destinationPreviewSignature(
+      destination, fileTypes, resolvedExcludePaths);
     const resp = await fetch('/api/import/destination-preview', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1423,12 +1491,13 @@ async function previewDestinationFolders() {
         folder_template: (document.getElementById('folderTemplate').value || '').trim(),
         file_types: fileTypes,
         recursive: document.getElementById('chkRecursive').checked,
+        exclude_paths: resolvedExcludePaths,
       }),
     });
     const data = await resp.json().catch(() => ({}));
     if (
       requestSeq !== _folderPreviewRequestSeq ||
-      requestSignature !== currentDestinationPreviewSignature()
+      requestSignature !== currentDestinationPreviewSignature(resolvedExcludePaths)
     ) {
       return false;
     }
@@ -1444,7 +1513,8 @@ async function previewDestinationFolders() {
   } catch (e) {
     if (
       requestSeq !== _folderPreviewRequestSeq ||
-      requestSignature !== currentDestinationPreviewSignature()
+      (requestSignature &&
+        requestSignature !== currentDestinationPreviewSignature(resolvedExcludePaths))
     ) {
       return false;
     }
@@ -1496,38 +1566,11 @@ async function previewImport() {
     // Pass verify_by_hash so the preview and the import agree on which files
     // are duplicates — otherwise a renamed/metadata-colliding file counted
     // as "to copy" in the preview would be skipped by the hash-based import.
-    const dupResp = await fetch('/api/import/check-duplicates', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        paths: files.map(f => f.path),
-        verify_by_hash: document.getElementById('chkVerifyByHash').checked,
-      }),
-    });
-    if (!dupResp.ok) throw new Error('duplicate check failed');
-    const reader = dupResp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let dupCount = 0;
-    for (;;) {
-      const r = await reader.read();
-      if (r.done) break;
-      buffer += decoder.decode(r.value, { stream: true });
-      const parts = buffer.split('\n\n');
-      buffer = parts.pop();
-      for (const part of parts) {
-        const m = part.match(/^data: (.+)$/m);
-        if (!m) continue;
-        try {
-          const d = JSON.parse(m[1]);
-          if (d.duplicates) dupCount += d.duplicates.length;
-        } catch (e) { /* partial frame */ }
-      }
-    }
-    summary.textContent = files.length + ' files found · ' + dupCount +
+    const duplicateResult = await importDuplicatePaths(files.map(f => f.path));
+    summary.textContent = files.length + ' files found · ' + duplicateResult.count +
       ' already in your library (will be skipped) · ' +
-      (files.length - dupCount) + ' to copy';
-    await previewDestinationFolders();
+      (files.length - duplicateResult.count) + ' to copy';
+    await previewDestinationFolders(duplicateResult.paths);
   } catch (e) {
     summary.textContent = '';
     showError(String(e.message || e));
