@@ -9961,20 +9961,21 @@ class Database:
         """Return {species: [photo_id, ...]} representative photos.
 
         Representative markings are global, but this read is still scoped to
-        the active workspace: only non-rejected photos visible through the
-        workspace's folders are returned. Life List callers still apply these
+        the active workspace's folders. Life List callers still apply these
         rows only to actual species buckets, so a representative row alone
         does not make an untagged species appear on the list. Lists are
         newest-selection first, so item 0 is the main representative.
 
         When ``eligible_only`` is true, omit preferences whose photo is
-        rejected, unavailable to the workspace, or no longer carries the
-        stored species keyword. The preference row remains intact for undo.
+        rejected, unavailable, or no longer carries the stored species keyword.
+        The preference row remains intact for undo.
         """
         ws = self._ws_id()
         eligibility_filter = ""
         if eligible_only:
             eligibility_filter = """
+                 AND COALESCE(p.flag, 'none') != 'rejected'
+                 AND f.status IN ('ok', 'partial')
                  AND EXISTS (
                      SELECT 1
                      FROM photo_keywords pk
@@ -9987,11 +9988,9 @@ class Database:
             f"""SELECT sr.species, sr.photo_id
                FROM species_representatives sr
                JOIN photos p ON p.id = sr.photo_id
-                AND COALESCE(p.flag, 'none') != 'rejected'
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                 AND wf.workspace_id = ?
                JOIN folders f ON f.id = p.folder_id
-                AND f.status IN ('ok', 'partial')
                  {eligibility_filter}
                ORDER BY sr.species, sr.selected_order DESC, sr.id DESC""",
             (ws,),
