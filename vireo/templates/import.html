@@ -29,6 +29,22 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .source-item button { background: none; border: none; color: var(--danger); cursor: pointer; font-size: 14px; }
 .source-meta { color: var(--text-secondary); white-space: nowrap; }
 .hint { font-size: 11px; color: var(--text-secondary); }
+.section-divider { border-top: 1px solid var(--border-primary); margin-top: 12px; padding-top: 12px; }
+.option-stack { display: flex; flex-direction: column; gap: 8px; margin: 6px 0 8px; }
+.option-stack label { font-size: 12px; color: var(--text-primary); }
+.extension-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(86px, 1fr));
+  gap: 6px 10px; width: 100%; margin: 4px 0 8px;
+}
+.extension-grid label {
+  background: var(--bg-tertiary); border: 1px solid var(--border-secondary);
+  border-radius: 4px; padding: 5px 8px; color: var(--text-primary);
+}
+.remote-preview {
+  font-size: 11px; color: var(--text-secondary); overflow-wrap: anywhere;
+  margin-top: 4px; width: 100%;
+}
+.input-fixed { max-width: 240px; flex: 0 1 240px; }
 .preview-summary { font-size: 12px; color: var(--text-secondary); margin-top: 6px; }
 .progress-bar { height: 8px; background: var(--bg-tertiary); border-radius: 4px; overflow: hidden; }
 .progress-bar > div { height: 100%; background: var(--accent); width: 0; transition: width 0.2s; }
@@ -117,18 +133,64 @@ body { display: flex; flex-direction: column; height: 100vh; }
       <div class="source-list" id="sourceList"></div>
       <div class="row" style="margin-top:8px;">
         <label><input type="checkbox" id="chkRecursive" checked onchange="refreshSourceCounts()"> Include subfolders</label>
-        <label id="fileTypesWrap">File types
-          <select id="fileTypes" style="min-width:100px;" onchange="refreshSourceCounts()">
+      </div>
+      <div id="fileTypesWrap" class="section-divider" style="display:none;">
+        <div class="row">
+          <label>File types</label>
+          <select id="fileTypePreset" class="input-fixed" onchange="updateFileTypeControls(); refreshSourceCounts();">
             <option value="both" selected>RAW + JPEG</option>
             <option value="raw">RAW only</option>
             <option value="jpeg">JPEG only</option>
+            <option value="custom">Choose extensions</option>
           </select>
-        </label>
+        </div>
+        <div id="customFileTypes" style="display:none;">
+          <div class="hint">Standard formats</div>
+          <div class="extension-grid">
+            <label><input type="checkbox" class="file-ext standard-ext" value=".jpg" checked onchange="refreshSourceCounts()"> JPG</label>
+            <label><input type="checkbox" class="file-ext standard-ext" value=".jpeg" checked onchange="refreshSourceCounts()"> JPEG</label>
+            <label><input type="checkbox" class="file-ext standard-ext" value=".png" checked onchange="refreshSourceCounts()"> PNG</label>
+            <label><input type="checkbox" class="file-ext standard-ext" value=".tif" checked onchange="refreshSourceCounts()"> TIF</label>
+            <label><input type="checkbox" class="file-ext standard-ext" value=".tiff" checked onchange="refreshSourceCounts()"> TIFF</label>
+            <label><input type="checkbox" class="file-ext standard-ext" value=".bmp" checked onchange="refreshSourceCounts()"> BMP</label>
+            <label><input type="checkbox" class="file-ext standard-ext" value=".webp" checked onchange="refreshSourceCounts()"> WebP</label>
+          </div>
+          <div class="hint">RAW formats</div>
+          <div class="extension-grid">
+            <label><input type="checkbox" class="file-ext raw-ext" value=".nef" checked onchange="refreshSourceCounts()"> NEF</label>
+            <label><input type="checkbox" class="file-ext raw-ext" value=".cr2" checked onchange="refreshSourceCounts()"> CR2</label>
+            <label><input type="checkbox" class="file-ext raw-ext" value=".cr3" checked onchange="refreshSourceCounts()"> CR3</label>
+            <label><input type="checkbox" class="file-ext raw-ext" value=".arw" checked onchange="refreshSourceCounts()"> ARW</label>
+            <label><input type="checkbox" class="file-ext raw-ext" value=".raf" checked onchange="refreshSourceCounts()"> RAF</label>
+            <label><input type="checkbox" class="file-ext raw-ext" value=".dng" checked onchange="refreshSourceCounts()"> DNG</label>
+            <label><input type="checkbox" class="file-ext raw-ext" value=".rw2" checked onchange="refreshSourceCounts()"> RW2</label>
+            <label><input type="checkbox" class="file-ext raw-ext" value=".orf" checked onchange="refreshSourceCounts()"> ORF</label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="workspaceCard">
+      <h3>Workspace</h3>
+      <div class="option-stack">
+        <label><input type="radio" name="workspaceMode" value="current" id="workspaceCurrent" checked onchange="updateWorkspaceMode()"> Current workspace <span class="hint" id="activeWorkspaceName"></span></label>
+        <label><input type="radio" name="workspaceMode" value="new" id="workspaceNew" onchange="updateWorkspaceMode()"> New workspace</label>
+      </div>
+      <div class="row" id="newWorkspaceRow" style="display:none;">
+        <label>Workspace name</label>
+        <input type="text" id="newWorkspaceName" class="input-fixed" placeholder="New workspace">
       </div>
     </div>
 
     <div class="card" id="destCard">
       <h3>Destination</h3>
+      <div class="row">
+        <label>Archive destination</label>
+        <select id="destMode" class="input-fixed" onchange="onImportDestModeChange()">
+          <option value="local" selected>Local path</option>
+        </select>
+      </div>
+      <div id="destLocalRows">
       <div class="row">
         <button class="btn btn-primary" id="btnBrowseDestination" data-testid="import-destination-browse-btn" onclick="browseForDestination()">Browse...</button>
         <input type="text" id="destInput" list="recentDestinations"
@@ -136,10 +198,26 @@ body { display: flex; flex-direction: column; height: 100vh; }
                value="">
         <datalist id="recentDestinations"></datalist>
       </div>
+      </div>
+      <div id="destRemoteRows" style="display:none;">
+        <div class="row">
+          <label>Remote subpath</label>
+          <input type="text" id="remoteSubpath" class="input-fixed" placeholder="2026/trip" oninput="updateRemoteDestPreview()">
+        </div>
+        <div class="remote-preview" id="remoteDestPreview"></div>
+      </div>
       <div class="row">
         <label>Folder template</label>
         <input type="text" id="folderTemplate" value="%Y/%Y-%m-%d" style="max-width:200px;flex:0 1 auto;">
         <span class="hint">strftime of each photo's capture time, e.g. %Y/%Y-%m-%d</span>
+      </div>
+      <div class="section-divider">
+        <div class="option-stack">
+          <label><input type="checkbox" id="chkSkipDuplicates" checked> Skip duplicates</label>
+          <label><input type="checkbox" id="chkVerifyByHash"> Verify copied files with full content hashes</label>
+          <label><input type="checkbox" id="chkLocalProcessing" disabled> Use local staging while processing</label>
+        </div>
+        <div class="hint">Local staging is temporarily unavailable in the split Import flow; old staging folders can still be recovered above.</div>
       </div>
     </div>
 
@@ -233,6 +311,8 @@ let browserEscHandler = null;
 let browserSelectedPaths = [];
 let browserSelectAnchorPath = '';
 let activeImportMode = 'in_place';
+let importRemoteTargets = [];
+let importRsyncAvailable = false;
 
 function selectedImportMode() {
   const checked = document.querySelector('input[name="importMode"]:checked');
@@ -248,7 +328,148 @@ function updateImportMode() {
     copyMode ? 'Check for duplicates' : 'Preview import';
   document.getElementById('previewSummary').textContent = '';
   showError('');
+  updateFileTypeControls();
+  updateWorkspaceMode();
+  onImportDestModeChange();
   refreshSourceCounts();
+}
+
+function selectedFileTypes() {
+  const preset = document.getElementById('fileTypePreset').value;
+  if (preset !== 'custom') return preset;
+  return Array.from(document.querySelectorAll('.file-ext:checked'))
+    .map(el => el.value);
+}
+
+function updateFileTypeControls() {
+  const preset = document.getElementById('fileTypePreset');
+  const custom = document.getElementById('customFileTypes');
+  if (!preset || !custom) return;
+  custom.style.display = preset.value === 'custom' ? '' : 'none';
+}
+
+function updateWorkspaceMode() {
+  const newMode = !!document.getElementById('workspaceNew')?.checked;
+  const row = document.getElementById('newWorkspaceRow');
+  if (row) row.style.display = newMode ? '' : 'none';
+}
+
+function importRemoteTargetId() {
+  const el = document.getElementById('destMode');
+  const v = el ? el.value : 'local';
+  return v.indexOf('remote:') === 0 ? v.slice(7) : '';
+}
+
+function importRemoteTarget() {
+  const id = importRemoteTargetId();
+  if (!id) return null;
+  return importRemoteTargets.find(t => t.id === id) || null;
+}
+
+function normalizeRemoteSubpath(raw) {
+  const trimmed = (raw || '').trim();
+  if (!trimmed) return {value: '', error: ''};
+  const s = trimmed.replace(/\\/g, '/');
+  if (s.charAt(0) === '/' || /^[A-Za-z]:/.test(s)) {
+    return {value: '', error: 'Subpath must be relative.'};
+  }
+  const parts = [];
+  for (const seg of s.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') return {value: '', error: "Subpath may not contain '..'."};
+    parts.push(seg);
+  }
+  return {value: parts.join('/'), error: ''};
+}
+
+function importIsAbsolutePath(p) {
+  if (!p) return false;
+  return p.charAt(0) === '/' || /^[A-Za-z]:[\\\/]/.test(p) || /^\\\\/.test(p);
+}
+
+function rsyncDestSpec(user, host, path) {
+  const hostToken = host && host.indexOf(':') !== -1 ? '[' + host + ']' : host;
+  return user + '@' + hostToken + ':' + path;
+}
+
+function remotePreviewWarn(text) {
+  const d = document.createElement('div');
+  d.style.color = 'var(--warning,#bf8700)';
+  d.textContent = text;
+  return d;
+}
+
+function updateRemoteDestPreview() {
+  const el = document.getElementById('remoteDestPreview');
+  if (!el) return;
+  el.textContent = '';
+  const t = importRemoteTarget();
+  if (!t) return;
+  const subResult = normalizeRemoteSubpath(document.getElementById('remoteSubpath').value);
+  if (subResult.error) {
+    el.appendChild(remotePreviewWarn('Warning: ' + subResult.error));
+  } else if (!subResult.value) {
+    const hint = document.createElement('div');
+    hint.textContent = 'Name the archive folder under ' + t.remote_path + ', e.g. 2026/kenya-trip.';
+    el.appendChild(hint);
+  } else {
+    const line = document.createElement('div');
+    line.textContent = 'Archive over SSH to: ';
+    const span = document.createElement('span');
+    span.style.fontFamily = 'monospace';
+    span.textContent = rsyncDestSpec(
+      t.user, t.host, t.remote_path.replace(/\/+$/, '') + '/' + subResult.value);
+    line.appendChild(span);
+    el.appendChild(line);
+  }
+  if (!importRsyncAvailable) {
+    el.appendChild(remotePreviewWarn('Warning: no GNU rsync found. Install GNU rsync or set its path under Settings > Paths.'));
+  }
+  if (!t.mount_path) {
+    el.appendChild(remotePreviewWarn('Warning: this target needs a local mount path for cataloging. Add one under Settings > Remote targets.'));
+  } else if (!importIsAbsolutePath(t.mount_path)) {
+    el.appendChild(remotePreviewWarn('Warning: this target local mount path must be absolute.'));
+  }
+}
+
+function remoteArchiveSelectionReady() {
+  const t = importRemoteTarget();
+  if (!t || !importRsyncAvailable) return false;
+  if (!t.mount_path || !importIsAbsolutePath(t.mount_path)) return false;
+  const subResult = normalizeRemoteSubpath(document.getElementById('remoteSubpath').value);
+  return !subResult.error && !!subResult.value;
+}
+
+function onImportDestModeChange() {
+  const remoteId = importRemoteTargetId();
+  const localRows = document.getElementById('destLocalRows');
+  const remoteRows = document.getElementById('destRemoteRows');
+  if (localRows) localRows.style.display = remoteId ? 'none' : '';
+  if (remoteRows) remoteRows.style.display = remoteId ? '' : 'none';
+  updateRemoteDestPreview();
+}
+
+async function loadImportRemoteTargets() {
+  try {
+    const resp = await fetch('/api/remote-targets');
+    if (!resp.ok) throw new Error('remote targets unavailable');
+    const data = await resp.json();
+    importRemoteTargets = (data && data.targets) || [];
+    importRsyncAvailable = !!(data && data.rsync_available);
+  } catch (e) {
+    importRemoteTargets = [];
+    importRsyncAvailable = false;
+  }
+  const sel = document.getElementById('destMode');
+  if (!sel) return;
+  while (sel.options.length > 1) sel.remove(1);
+  importRemoteTargets.forEach((t) => {
+    const opt = document.createElement('option');
+    opt.value = 'remote:' + t.id;
+    opt.textContent = t.name + ' - ' + t.user + '@' + t.host + ' (SSH)';
+    sel.appendChild(opt);
+  });
+  onImportDestModeChange();
 }
 
 function importEscapeHtml(s) {
@@ -293,7 +514,7 @@ function renderSources() {
 function selectedSourceCountOptions() {
   const copyMode = selectedImportMode() === 'copy';
   return {
-    file_types: copyMode ? document.getElementById('fileTypes').value : 'both',
+    file_types: copyMode ? selectedFileTypes() : 'both',
     recursive: document.getElementById('chkRecursive').checked,
   };
 }
@@ -920,6 +1141,11 @@ async function previewImport() {
   showError('');
   if (!sources.length) { showError('Add at least one source folder.'); return; }
   const copyMode = selectedImportMode() === 'copy';
+  const fileTypes = copyMode ? selectedFileTypes() : 'both';
+  if (copyMode && Array.isArray(fileTypes) && !fileTypes.length) {
+    showError('Choose at least one file extension.');
+    return;
+  }
   const summary = document.getElementById('previewSummary');
   summary.textContent = 'Discovering files…';
   try {
@@ -928,7 +1154,7 @@ async function previewImport() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         folders: sources,
-        file_types: copyMode ? document.getElementById('fileTypes').value : 'both',
+        file_types: fileTypes,
         recursive: document.getElementById('chkRecursive').checked,
       }),
     });
@@ -938,6 +1164,10 @@ async function previewImport() {
     if (!files.length) { summary.textContent = 'No importable files found.'; return; }
     if (!copyMode) {
       summary.textContent = files.length + ' files found · originals will stay in place';
+      return;
+    }
+    if (!document.getElementById('chkSkipDuplicates').checked) {
+      summary.textContent = files.length + ' files found · duplicates will be copied';
       return;
     }
     summary.textContent = files.length + ' files found — checking for duplicates…';
@@ -1002,16 +1232,39 @@ async function startImport() {
   showError('');
   if (!sources.length) { showError('Add at least one source folder.'); return; }
   const copyMode = selectedImportMode() === 'copy';
-  const destination = (document.getElementById('destInput').value || '').trim();
-  if (copyMode && !destination) { showError('Choose a destination folder.'); return; }
   const body = {
     sources: sources,
     recursive: document.getElementById('chkRecursive').checked,
   };
+  if (document.getElementById('workspaceNew').checked) {
+    const name = (document.getElementById('newWorkspaceName').value || '').trim();
+    if (!name) { showError('Name the new workspace.'); return; }
+    body.new_workspace_name = name;
+  }
   if (copyMode) {
-    body.destination = destination;
+    const fileTypes = selectedFileTypes();
+    if (Array.isArray(fileTypes) && !fileTypes.length) {
+      showError('Choose at least one file extension.');
+      return;
+    }
+    const remoteId = importRemoteTargetId();
+    if (remoteId) {
+      if (!remoteArchiveSelectionReady()) {
+        showError('Choose a usable remote target and relative subpath.');
+        return;
+      }
+      body.remote_target_id = remoteId;
+      body.remote_subpath = normalizeRemoteSubpath(
+        document.getElementById('remoteSubpath').value).value;
+    } else {
+      const destination = (document.getElementById('destInput').value || '').trim();
+      if (!destination) { showError('Choose a destination folder.'); return; }
+      body.destination = destination;
+    }
     body.folder_template = (document.getElementById('folderTemplate').value || '').trim();
-    body.file_types = document.getElementById('fileTypes').value;
+    body.file_types = fileTypes;
+    body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
+    body.verify_by_hash = document.getElementById('chkVerifyByHash').checked;
   }
   if (_afterImportConfigLoaded && !_afterImportHidingDefault) {
     body.after_import = selectedAfterImport();
@@ -1025,6 +1278,10 @@ async function startImport() {
     });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || 'import failed to start');
+    if (data.workspace && data.workspace.name) {
+      const activeName = document.getElementById('activeWorkspaceName');
+      if (activeName) activeName.textContent = '(' + data.workspace.name + ')';
+    }
     activeJobId = data.job_id;
     document.getElementById('progressCard').style.display = '';
     document.getElementById('resultCard').style.display = 'none';
@@ -1186,6 +1443,8 @@ async function initImportPage() {
     const resp = await fetch('/api/workspaces/active');
     if (resp.ok) {
       const ws = await resp.json();
+      const activeName = document.getElementById('activeWorkspaceName');
+      if (activeName && ws.name) activeName.textContent = '(' + ws.name + ')';
       const raw = ws.config_overrides;
       overrides = typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
       overridesOk = true;
@@ -1233,6 +1492,7 @@ async function initImportPage() {
   // HTML placeholder rather than the workspace default, and startImport
   // should omit the key so the server applies pipeline.default_strategy.
   _afterImportConfigLoaded = cfgOk && overridesOk;
+  loadImportRemoteTargets();
   loadOrphanedStaging();
   updateImportMode();
 }

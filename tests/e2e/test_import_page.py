@@ -1,3 +1,4 @@
+import json
 import re
 
 from playwright.sync_api import expect
@@ -60,6 +61,123 @@ def test_import_destination_browse_button_sets_destination(live_server, page):
     browse_btn.click()
 
     expect(page.locator("#destInput")).to_have_value("/tmp/archive")
+
+
+def test_import_custom_extensions_feed_preview(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/import")
+    page.evaluate(
+        """
+        () => {
+          const originalFetch = window.fetch.bind(window);
+          window.__previewBody = null;
+          window.fetch = (input, init) => {
+            const target = typeof input === 'string' ? input : input.url;
+            if (target && target.indexOf('/api/import/folder-preview') === 0) {
+              window.__previewBody = JSON.parse(init.body);
+              return Promise.resolve(new Response(JSON.stringify({
+                total_count: 0,
+                total_size: 0,
+                type_breakdown: {},
+                duplicate_count: 0,
+                files: [],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            return originalFetch(input, init);
+          };
+        }
+        """
+    )
+
+    page.locator("#modeCopy").check()
+    page.locator("#sourceInput").fill("/tmp/card-a")
+    page.locator("#btnAddSource").click()
+    page.locator("#fileTypePreset").select_option("custom")
+    page.evaluate(
+        """
+        () => {
+          document.querySelectorAll('.file-ext').forEach(el => { el.checked = false; });
+          document.querySelector('.file-ext[value=".jpg"]').checked = true;
+          document.querySelector('.file-ext[value=".nef"]').checked = true;
+        }
+        """
+    )
+    page.locator("#btnPreview").click()
+    page.wait_for_function("window.__previewBody !== null")
+
+    body = page.evaluate("window.__previewBody")
+    assert body["folders"] == ["/tmp/card-a"]
+    assert body["file_types"] == [".jpg", ".nef"]
+
+
+def test_import_copy_start_sends_restored_options(live_server, page):
+    url = live_server["url"]
+    captured = {}
+
+    def remote_targets(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "rsync_available": True,
+                "targets": [{
+                    "id": "nas1",
+                    "name": "Photo NAS",
+                    "user": "photo",
+                    "host": "nas.local",
+                    "remote_path": "/srv/photos",
+                    "mount_path": "/Volumes/photos",
+                }],
+            }),
+        )
+
+    def start_import(route):
+        captured["body"] = json.loads(route.request.post_data or "{}")
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "job_id": "import-test",
+                "workspace": {"id": 22, "name": "Kenya 2026"},
+            }),
+        )
+
+    page.route("**/api/remote-targets", remote_targets)
+    page.route("**/api/jobs/import-photos", start_import)
+    page.goto(f"{url}/import")
+
+    page.locator("#modeCopy").check()
+    page.locator("#sourceInput").fill("/tmp/card-a")
+    page.locator("#btnAddSource").click()
+    page.locator("#workspaceNew").check()
+    page.locator("#newWorkspaceName").fill("Kenya 2026")
+    page.locator("#destMode").select_option("remote:nas1")
+    page.locator("#remoteSubpath").fill("2026/kenya")
+    page.locator("#fileTypePreset").select_option("custom")
+    page.evaluate(
+        """
+        () => {
+          document.querySelectorAll('.file-ext').forEach(el => { el.checked = false; });
+          document.querySelector('.file-ext[value=".jpg"]').checked = true;
+          document.querySelector('.file-ext[value=".nef"]').checked = true;
+        }
+        """
+    )
+    page.locator("#chkSkipDuplicates").uncheck()
+    page.locator("#chkVerifyByHash").check()
+
+    page.locator("#btnStart").click()
+    expect(page.locator("#progressCard")).to_be_visible()
+
+    body = captured["body"]
+    assert body["sources"] == ["/tmp/card-a"]
+    assert body["new_workspace_name"] == "Kenya 2026"
+    assert body["remote_target_id"] == "nas1"
+    assert body["remote_subpath"] == "2026/kenya"
+    assert "destination" not in body
+    assert body["file_types"] == [".jpg", ".nef"]
+    assert body["skip_duplicates"] is False
+    assert body["verify_by_hash"] is True
 
 
 def test_import_browse_button_opens_folder_browser_fallback(live_server, page):

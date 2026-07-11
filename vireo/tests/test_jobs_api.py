@@ -3293,6 +3293,27 @@ def test_import_in_place_no_destination_required(app_and_db, tmp_path):
     assert result["after_import_skipped"] == "import-only"
 
 
+def test_import_in_place_can_target_new_workspace(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    old_ws = db._active_workspace_id
+
+    resp = client.post("/api/jobs/import-in-place", json={
+        "sources": [_import_card(tmp_path)],
+        "after_import": None,
+        "new_workspace_name": "Card Import",
+    })
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+    assert data["workspace"]["name"] == "Card Import"
+
+    config = _job_config(client, data["job_id"])
+    assert config["workspace_id"] != old_ws
+    assert config["created_workspace"]["name"] == "Card Import"
+    active = client.get("/api/workspaces/active").get_json()
+    assert active["id"] == config["workspace_id"]
+
+
 def test_import_photos_null_after_import_is_import_only(app_and_db, tmp_path):
     """after_import: null means import-only (PR 3's hook short-circuits) —
     same nullable vocabulary as pipeline.default_strategy."""
@@ -3306,6 +3327,28 @@ def test_import_photos_null_after_import_is_import_only(app_and_db, tmp_path):
     assert resp.status_code == 200, resp.get_json()
     config = _job_config(client, resp.get_json()["job_id"])
     assert config["after_import"] is None
+
+
+def test_import_photos_can_target_new_workspace(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    old_ws = db._active_workspace_id
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+        "new_workspace_name": "Archive Import",
+    })
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+    assert data["workspace"]["name"] == "Archive Import"
+
+    config = _job_config(client, data["job_id"])
+    assert config["workspace_id"] != old_ws
+    assert config["created_workspace"]["name"] == "Archive Import"
+    active = client.get("/api/workspaces/active").get_json()
+    assert active["id"] == config["workspace_id"]
 
 
 @pytest.mark.parametrize("bad", ["yolo", "none"])

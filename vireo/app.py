@@ -17363,6 +17363,34 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(str(exc), status=409)
         return jsonify(result)
 
+    def _prepare_import_workspace(db, body):
+        """Return the workspace id an import should write to.
+
+        `new_workspace_name` mirrors the normal workspace creation route
+        so import-to-new-workspace jobs get default collections and do not
+        inherit stale per-workspace caches from a reused SQLite rowid.
+        """
+        if "new_workspace_name" not in body:
+            return db._active_workspace_id, None, None
+        raw_name = body.get("new_workspace_name")
+        if not isinstance(raw_name, str):
+            return None, None, json_error("new_workspace_name must be a string")
+        name = raw_name.strip()
+        if not name:
+            return None, None, json_error("new_workspace_name is required")
+        try:
+            from datetime import datetime
+
+            ws_id = db.create_workspace(name)
+            _invalidate_missing_originals_cache(workspace_ids=[ws_id])
+            db.create_default_collections(workspace_id=ws_id)
+            db.set_active_workspace(ws_id)
+            db.update_workspace(ws_id, last_opened_at=datetime.now().isoformat())
+            ws = db.get_workspace(ws_id)
+            return ws_id, dict(ws) if ws else {"id": ws_id, "name": name}, None
+        except Exception as e:
+            return None, None, json_error(str(e))
+
     @app.route("/api/jobs/import-in-place", methods=["POST"])
     def api_job_import_in_place():
         """Import existing folders without copying files.
@@ -17415,8 +17443,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             except ValueError as e:
                 return json_error(str(e))
 
+        active_ws, created_workspace, workspace_err = (
+            _prepare_import_workspace(db, body)
+        )
+        if workspace_err is not None:
+            return workspace_err
+
         runner = app._job_runner
-        active_ws = db._active_workspace_id
         thumb_cache_dir = app.config["THUMB_CACHE_DIR"]
         vireo_dir = os.path.dirname(thumb_cache_dir)
 
@@ -17644,11 +17677,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "recursive": recursive,
             "after_import": after_import,
             "mode": "in_place",
+            "workspace_id": active_ws,
+            "created_workspace": created_workspace,
         }
         job_id = runner.start(
             "import-in-place", work, config=job_config, workspace_id=active_ws,
         )
-        return jsonify({"job_id": job_id})
+        response = {"job_id": job_id}
+        if created_workspace is not None:
+            response["workspace"] = created_workspace
+        return jsonify(response)
 
     @app.route("/api/jobs/import-photos", methods=["POST"])
     def api_job_import_photos():
@@ -17873,8 +17911,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         verify_by_hash = bool(body.get("verify_by_hash", False))
         recursive = bool(body.get("recursive", True))
 
+        active_ws, created_workspace, workspace_err = (
+            _prepare_import_workspace(db, body)
+        )
+        if workspace_err is not None:
+            return workspace_err
+
         runner = app._job_runner
-        active_ws = db._active_workspace_id
         thumb_cache_dir = app.config["THUMB_CACHE_DIR"]
         vireo_dir = os.path.dirname(thumb_cache_dir)
 
@@ -17909,6 +17952,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "after_import": after_import,
             "remote_target_id": remote_target_id or None,
             "remote_subpath": remote_subpath or None,
+            "workspace_id": active_ws,
+            "created_workspace": created_workspace,
         }
 
         def _chain_after_import(job, result):
@@ -18011,7 +18056,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         job_id = runner.start(
             "import", work, config=job_config, workspace_id=active_ws,
         )
-        return jsonify({"job_id": job_id})
+        response = {"job_id": job_id}
+        if created_workspace is not None:
+            response["workspace"] = created_workspace
+        return jsonify(response)
 
     @app.route("/api/jobs/sync", methods=["POST"])
     def api_job_sync():
