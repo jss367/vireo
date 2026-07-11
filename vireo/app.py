@@ -8424,6 +8424,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # name — leaving both species without a representative. Query
         # species_representatives directly and enqueue any rep-only moves
         # the preference pass didn't already cover.
+        #
+        # Restrict rep-only moves to species the photo currently carries
+        # as a taxonomy keyword. untag_photo does not clear
+        # species_representatives, so a photo may retain a stale rep row
+        # for species A after that keyword was removed. Without this
+        # filter, relabeling the photo's current species B→C would also
+        # sweep the stale A rep into an A→C rename — losing the preserved
+        # A rep state and making C look manually selected.
+        current_species_by_pid = {}
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT pk.photo_id, k.name
+                    FROM photo_keywords pk
+                    JOIN keywords k ON k.id = pk.keyword_id
+                    WHERE pk.photo_id IN ({placeholders})
+                      AND (k.is_species = 1 OR k.type = 'taxonomy')""",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                current_species_by_pid.setdefault(row["photo_id"], set()).add(
+                    row["name"].strip().lower()
+                )
         representative_renames = {}
         rep_prev_by_pid = {}
         for chunk in _chunked(photo_ids):
@@ -8442,6 +8465,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # species_representatives for pids in preference_renames,
                 # so skip anything the preference pass will cover.
                 if (pid, old_species_name) in pref_covered_by_pid_species:
+                    continue
+                # Only migrate rep rows whose species is among the photo's
+                # current taxonomy keywords (about to be untagged). Stale
+                # reps for species the photo no longer carries stay put.
+                if old_species_name.strip().lower() not in current_species_by_pid.get(pid, set()):
                     continue
                 representative_renames.setdefault(old_species_name, []).append(pid)
                 rep_prev_by_pid.setdefault(pid, []).append({

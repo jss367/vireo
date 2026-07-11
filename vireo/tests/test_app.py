@@ -6441,6 +6441,82 @@ def test_highlights_relabel_migrates_cross_workspace_representative(app_and_db):
     assert "Bald Eagle" not in reps_redone
 
 
+def test_highlights_relabel_ignores_stale_representative_rows(app_and_db):
+    """A photo can retain a global ``species_representatives`` row for a
+    species it no longer carries (untag_photo doesn't clear the global
+    rep row, and a rep picked from another workspace has no active-
+    workspace pref row to sweep it through the preference pass).
+    Relabeling the photo's current species must not renaming that stale
+    rep into the target species — it should stay under the old species,
+    and only the rep for the species actually being replaced should
+    move."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/stalerep', 'stalerep', 'ok')"
+    ).lastrowid
+    ws_a = db._active_workspace_id
+    ws_b = db.create_workspace("StaleRep Other")
+    for ws in (ws_a, ws_b):
+        db.conn.execute(
+            "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+            (ws, fid),
+        )
+    stale_kid = db.add_keyword("Bald Eagle", is_species=True)
+    current_kid = db.add_keyword("Osprey", is_species=True)
+    db.add_keyword("Golden Eagle", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'stale.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, stale_kid)
+    db.tag_photo(pid, current_kid)
+    # Select the Bald Eagle rep from ws_b — the compat pref row lives
+    # under ws_b, so the active workspace ws_a's preference-rename pass
+    # won't sweep this rep during a ws_a relabel. Only the direct rep-
+    # only pass could pick it up, which is the code path under test.
+    db.set_active_workspace(ws_b)
+    db.set_species_representative("Bald Eagle", pid)
+    db.set_active_workspace(ws_a)
+    # The current-species rep is set from the active workspace and has
+    # a local pref row, so its migration goes through the preference
+    # pass and is unrelated to the rep-only filter.
+    db.set_species_representative("Osprey", pid)
+    # Untag Bald Eagle from the photo. The global species_representatives
+    # row remains, so the photo now carries only Osprey as a taxonomy
+    # keyword but still has a stale (Bald Eagle, pid) rep row.
+    db.untag_photo(pid, stale_kid)
+
+    stale_before = db.conn.execute(
+        "SELECT 1 FROM species_representatives WHERE species = ? AND photo_id = ?",
+        ("Bald Eagle", pid),
+    ).fetchone()
+    assert stale_before is not None
+    # And no ws_a pref row exists for Bald Eagle either — confirms the
+    # preference pass won't touch it.
+    local_pref = db.conn.execute(
+        """SELECT 1 FROM photo_preferences
+           WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+        (ws_a, "Bald Eagle", pid),
+    ).fetchone()
+    assert local_pref is None
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Golden Eagle"},
+    )
+    assert resp.status_code == 200
+
+    reps = db.get_species_representatives()
+    # The Osprey rep moved to Golden Eagle (the relabel target).
+    assert reps.get("Golden Eagle") == pid
+    assert "Osprey" not in reps
+    # The stale Bald Eagle rep stays under Bald Eagle — it was never
+    # part of the relabel and must not be renamed to Golden Eagle.
+    assert reps.get("Bald Eagle") == pid
+
+
 def test_rename_species_representatives_species_chunks_large_photo_lists(tmp_path):
     """``rename_species_representatives_species`` must chunk the IN(...)
     clause so a species tagged on thousands of photos doesn't blow
