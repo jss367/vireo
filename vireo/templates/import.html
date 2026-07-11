@@ -1172,10 +1172,16 @@ async function previewImport() {
     }
     summary.textContent = files.length + ' files found — checking for duplicates…';
     // check-duplicates streams results; count flagged paths as they arrive.
+    // Pass verify_by_hash so the preview and the import agree on which files
+    // are duplicates — otherwise a renamed/metadata-colliding file counted
+    // as "to copy" in the preview would be skipped by the hash-based import.
     const dupResp = await fetch('/api/import/check-duplicates', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ paths: files.map(f => f.path) }),
+      body: JSON.stringify({
+        paths: files.map(f => f.path),
+        verify_by_hash: document.getElementById('chkVerifyByHash').checked,
+      }),
     });
     if (!dupResp.ok) throw new Error('duplicate check failed');
     const reader = dupResp.body.getReader();

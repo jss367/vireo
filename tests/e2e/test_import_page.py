@@ -110,6 +110,56 @@ def test_import_custom_extensions_feed_preview(live_server, page):
     assert body["file_types"] == [".jpg", ".nef"]
 
 
+def test_import_preview_passes_verify_by_hash_to_duplicate_check(live_server, page):
+    """The preview and the actual import must use the same duplicate mode so
+    the counts don't disagree for renamed / metadata-colliding files."""
+    url = live_server["url"]
+    page.goto(f"{url}/import")
+    page.evaluate(
+        """
+        () => {
+          const originalFetch = window.fetch.bind(window);
+          window.__dupBody = null;
+          window.fetch = (input, init) => {
+            const target = typeof input === 'string' ? input : input.url;
+            if (target && target.indexOf('/api/import/folder-preview') === 0) {
+              return Promise.resolve(new Response(JSON.stringify({
+                total_count: 1,
+                total_size: 0,
+                type_breakdown: {'.jpg': 1},
+                duplicate_count: 0,
+                files: [{path: '/tmp/card-a/IMG_0001.jpg'}],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            if (target && target.indexOf('/api/import/check-duplicates') === 0) {
+              window.__dupBody = JSON.parse(init.body);
+              const frame = 'data: ' + JSON.stringify({
+                done: true, duplicate_count: 0, checked: 1, total: 1,
+              }) + '\\n\\n';
+              return Promise.resolve(new Response(frame, {
+                status: 200,
+                headers: {'Content-Type': 'text/event-stream'},
+              }));
+            }
+            return originalFetch(input, init);
+          };
+        }
+        """
+    )
+
+    page.locator("#modeCopy").check()
+    page.locator("#sourceInput").fill("/tmp/card-a")
+    page.locator("#btnAddSource").click()
+    page.locator("#chkSkipDuplicates").check()
+    page.locator("#chkVerifyByHash").check()
+    page.locator("#btnPreview").click()
+    page.wait_for_function("window.__dupBody !== null")
+
+    body = page.evaluate("window.__dupBody")
+    assert body["paths"] == ["/tmp/card-a/IMG_0001.jpg"]
+    assert body["verify_by_hash"] is True
+
+
 def test_import_copy_start_sends_restored_options(live_server, page):
     url = live_server["url"]
     captured = {}
