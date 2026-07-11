@@ -8,7 +8,7 @@ def test_pipeline_page_loads_with_stages(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
     stages = page.locator("[data-testid='stage-card']")
-    expect(stages).to_have_count(8)
+    expect(stages).to_have_count(7)
 
 
 def test_pipeline_start_button_disabled_without_folders(live_server, page):
@@ -18,153 +18,67 @@ def test_pipeline_start_button_disabled_without_folders(live_server, page):
     expect(btn).to_be_disabled()
 
 
-def test_pipeline_destination_points_imports_to_import_page(live_server, page):
+def test_pipeline_has_no_destination_card(live_server, page):
+    """The Destination card left with the import/process split — Process
+    never copies files, so the page must not offer a destination or any
+    of the legacy copy controls."""
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
-    page.click("#card-destination .stage-header")
-    dest_card = page.locator("#card-destination")
-    expect(dest_card).to_contain_text("Copying cards or folders into the archive now happens on the")
-    expect(dest_card.locator("a[href='/import']")).to_contain_text("Import")
+    expect(page.locator("#card-destination")).to_have_count(0)
+    for testid in (
+        "file-copying-section",
+        "copy-photos-toggle",
+        "destination-section",
+        "custom-template-input",
+        "preview-folders-btn",
+        "workspace-new",
+        "workspace-current",
+    ):
+        expect(page.locator(f"[data-testid='{testid}']")).to_have_count(0)
 
 
-def test_pipeline_legacy_copy_controls_stay_hidden(live_server, page):
+def test_pipeline_source_points_imports_to_import_page(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
-    page.click("#card-destination .stage-header")
-    expect(page.locator("[data-testid='file-copying-section']")).to_be_hidden()
-    expect(page.locator("[data-testid='copy-photos-toggle']")).to_be_hidden()
-    expect(page.locator("[data-testid='destination-section']")).to_be_hidden()
+    hint = page.locator("[data-testid='source-import-hint']")
+    expect(hint).to_contain_text("Adding new photos to your library happens on the")
+    expect(hint.locator("a[href='/import']")).to_contain_text("Import")
 
 
-def test_pipeline_collection_source_dims_import(live_server, page):
+def test_pipeline_has_no_source_browse_controls(live_server, page):
+    """Arbitrary-path sources left with the import/process split: the
+    Source card offers only workspace folders and collections, so the
+    Browse button, the type-a-path input, and the folder-browser modal
+    must all be gone."""
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    expect(page.locator("[data-testid='source-browse-btn']")).to_have_count(0)
+    expect(page.locator("#cfgSourceInput")).to_have_count(0)
+    expect(page.locator("#folderBrowserOverlay")).to_have_count(0)
+
+
+def test_pipeline_collection_source_dims_folders(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
     page.click("[data-testid='source-collection']")
-    import_body = page.locator("#sourceImportBody")
-    expect(import_body).to_have_class(re.compile("dimmed"))
+    folders_body = page.locator("#sourceImportBody")
+    expect(folders_body).to_have_class(re.compile("dimmed"))
 
 
-def test_pipeline_import_source_dims_collection(live_server, page):
+def test_pipeline_folders_source_dims_collection(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
     page.click("[data-testid='source-collection']")
     collection_body = page.locator("[data-testid='collection-section']")
     expect(collection_body).not_to_have_class(re.compile("dimmed"))
-    page.click("[data-testid='source-import']")
+    page.click("[data-testid='source-folders-option']")
     expect(collection_body).to_have_class(re.compile("dimmed"))
 
 
-def test_pipeline_source_browse_button_adds_source_folder(live_server, page):
-    url = live_server["url"]
-    page.route(
-        "**/api/import/folder-preview",
-        lambda route: route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps({
-                "total_count": 0,
-                "total_size": 0,
-                "type_breakdown": {},
-                "duplicate_count": 0,
-                "files": [],
-            }),
-        ),
-    )
-    page.goto(f"{url}/pipeline")
-    page.evaluate("window.pickDirectory = async () => ['/tmp/vireo-source']")
-
-    browse_btn = page.locator("[data-testid='source-browse-btn']")
-    expect(browse_btn).to_be_visible()
-    browse_btn.click()
-
-    expect(page.locator("#sourceFolderList")).to_contain_text("/tmp/vireo-source")
-    assert page.evaluate("_sourceMode") == "import"
-
-
-def test_pipeline_import_source_start_posts_source_folders(live_server, page):
-    """Import mode (source folders added via Browse/type) must enable Start
-    and POST /api/jobs/pipeline with `sources` = the folder list — not
-    fall through to collection scope and send `collection_id`.
-
-    Regression test for a bug where startPipeline() only special-cased
-    'folders' and 'new_images', so 'import' mode was treated as a
-    collection: Start stayed disabled unless a collection was selected,
-    and if one was, the request POSTed that collection_id instead of the
-    previewed source paths.
-    """
-    url = live_server["url"]
-    page.route(
-        "**/api/import/folder-preview",
-        lambda route: route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps({
-                "total_count": 1,
-                "total_size": 1000,
-                "type_breakdown": {".jpg": 1},
-                "duplicate_count": 0,
-                "files": [{
-                    "path": "/tmp/vireo-source/hawk.jpg",
-                    "size": 1000,
-                    "mtime": 1.0,
-                    "duplicate": False,
-                }],
-            }),
-        ),
-    )
-    pipeline_payloads = []
-
-    def capture_pipeline(route):
-        pipeline_payloads.append(route.request.post_data_json)
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps({"job_id": "job-abc"}),
-        )
-
-    page.route("**/api/jobs/pipeline", capture_pipeline)
-
-    page.goto(f"{url}/pipeline")
-    page.evaluate("window.pickDirectory = async () => ['/tmp/vireo-source']")
-
-    page.locator("[data-testid='source-browse-btn']").click()
-    expect(page.locator("#sourceFolderList")).to_contain_text("/tmp/vireo-source")
-    assert page.evaluate("_sourceMode") == "import"
-
-    start_btn = page.locator("[data-testid='start-pipeline-btn']")
-    expect(start_btn).to_be_enabled()
-
-    # Turn Classify off so Start doesn't wait on the plan-refresh gate —
-    # the wiring under test is source scope, not classify gating.
-    page.uncheck("#enableClassify")
-    expect(start_btn).to_be_enabled()
-
-    start_btn.click()
-
-    for _ in range(50):
-        if pipeline_payloads:
-            break
-        page.wait_for_timeout(100)
-    assert pipeline_payloads, "expected /api/jobs/pipeline to be POSTed"
-    body = pipeline_payloads[0]
-    assert body.get("sources") == ["/tmp/vireo-source"], (
-        f"expected sources=['/tmp/vireo-source'], got body={body!r}"
-    )
-    assert "collection_id" not in body, (
-        f"import mode must not POST collection_id, got body={body!r}"
-    )
-    assert "folder_ids" not in body, (
-        f"import mode must not POST folder_ids, got body={body!r}"
-    )
-
-
-def test_pipeline_import_mode_switches_to_folders_on_checkbox(live_server, page):
-    """P2 regression: with a workspace folder checkbox available, checking
-    it while in `_sourceMode === 'import'` must switch mode back to
-    `'folders'`. Otherwise `updateStartButton()` keeps gating on
-    `_sourceFolders` and `startPipeline()` POSTs the stale `sources` list
-    instead of the `folder_ids` the user just picked.
-    """
+def test_pipeline_folder_selection_posts_folder_ids(live_server, page):
+    """Switching back from collection mode and checking a workspace folder
+    must make Start POST `folder_ids` — not the previously selected
+    collection scope."""
     url = live_server["url"]
     page.route(
         re.compile(r"/api/workspaces/\d+/folders$"),
@@ -180,20 +94,6 @@ def test_pipeline_import_mode_switches_to_folders_on_checkbox(live_server, page)
                     "workspace_photo_count": 5,
                 },
             ]),
-        ),
-    )
-    page.route(
-        "**/api/import/folder-preview",
-        lambda route: route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps({
-                "total_count": 0,
-                "total_size": 0,
-                "type_breakdown": {},
-                "duplicate_count": 0,
-                "files": [],
-            }),
         ),
     )
     pipeline_payloads = []
@@ -209,19 +109,17 @@ def test_pipeline_import_mode_switches_to_folders_on_checkbox(live_server, page)
     page.route("**/api/jobs/pipeline", capture_pipeline)
 
     page.goto(f"{url}/pipeline")
-    page.evaluate("window.pickDirectory = async () => ['/tmp/vireo-source']")
+    page.click("[data-testid='source-collection']")
+    assert page.evaluate("_sourceMode") == "collection"
 
-    page.locator("[data-testid='source-browse-btn']").click()
-    assert page.evaluate("_sourceMode") == "import"
-
-    # Wait for the workspace folder list to render, then check the folder.
+    # Return to folders scope, then check a workspace folder.
+    page.click("[data-testid='source-folders-option']")
+    assert page.evaluate("_sourceMode") == "folders"
     folder_cb = page.locator("#folderScopeList input[type='checkbox']").first
     expect(folder_cb).to_be_visible()
     folder_cb.check()
 
-    assert page.evaluate("_sourceMode") == "folders"
-
-    # Start now uses folder_ids, not sources.
+    # Start posts folder_ids, not a collection scope.
     page.uncheck("#enableClassify")
     start_btn = page.locator("[data-testid='start-pipeline-btn']")
     expect(start_btn).to_be_enabled()
@@ -236,113 +134,12 @@ def test_pipeline_import_mode_switches_to_folders_on_checkbox(live_server, page)
     assert body.get("folder_ids") == [42], (
         f"expected folder_ids=[42], got body={body!r}"
     )
+    assert "collection_id" not in body, (
+        f"folders mode must not POST collection_id, got body={body!r}"
+    )
     assert "sources" not in body, (
         f"folders mode must not POST sources, got body={body!r}"
     )
-
-
-def test_pipeline_removing_last_import_source_restores_folder_mode(live_server, page):
-    """P2 regression: removing the last import source folder must switch
-    `_sourceMode` back to `'folders'`. Otherwise Start stays stuck
-    disabled with `_sourceMode === 'import'` and an empty source list,
-    even if workspace-folder checkboxes are still ticked.
-    """
-    url = live_server["url"]
-    page.route(
-        "**/api/import/folder-preview",
-        lambda route: route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps({
-                "total_count": 0,
-                "total_size": 0,
-                "type_breakdown": {},
-                "duplicate_count": 0,
-                "files": [],
-            }),
-        ),
-    )
-    page.goto(f"{url}/pipeline")
-    page.evaluate("window.pickDirectory = async () => ['/tmp/vireo-source']")
-
-    page.locator("[data-testid='source-browse-btn']").click()
-    expect(page.locator("#sourceFolderList")).to_contain_text("/tmp/vireo-source")
-    assert page.evaluate("_sourceMode") == "import"
-
-    page.locator("#sourceFolderList button:has-text('Remove')").first.click()
-
-    assert page.evaluate("_sourceMode") == "folders"
-    expect(page.locator("#sourceFolderList")).to_be_empty()
-
-
-def test_pipeline_source_browse_reselect_restores_import_mode(live_server, page):
-    """P2 regression: after adding a source path, reverting to
-    workspace-folder scope, then using Browse to pick that same source
-    path again must switch `_sourceMode` back to `'import'`. Otherwise
-    Start posts `folder_ids` instead of the previewed `sources`, and
-    the UI still shows the source path row but Start would execute a
-    different scope than the plan describes.
-    """
-    url = live_server["url"]
-    page.route(
-        re.compile(r"/api/workspaces/\d+/folders$"),
-        lambda route: route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps([
-                {
-                    "id": 42,
-                    "path": "/library",
-                    "parent_id": None,
-                    "photo_count": 5,
-                    "workspace_photo_count": 5,
-                },
-            ]),
-        ),
-    )
-    page.route(
-        "**/api/import/folder-preview",
-        lambda route: route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps({
-                "total_count": 0,
-                "total_size": 0,
-                "type_breakdown": {},
-                "duplicate_count": 0,
-                "files": [],
-            }),
-        ),
-    )
-    page.goto(f"{url}/pipeline")
-    page.evaluate("window.pickDirectory = async () => ['/tmp/vireo-source']")
-
-    page.locator("[data-testid='source-browse-btn']").click()
-    expect(page.locator("#sourceFolderList")).to_contain_text("/tmp/vireo-source")
-    assert page.evaluate("_sourceMode") == "import"
-
-    folder_cb = page.locator("#folderScopeList input[type='checkbox']").first
-    expect(folder_cb).to_be_visible()
-    folder_cb.check()
-    assert page.evaluate("_sourceMode") == "folders"
-
-    # Re-pick the already-added path via Browse. Without the fix
-    # `added` stays false so the mode/render/refresh block is skipped
-    # and mode stays 'folders'.
-    page.locator("[data-testid='source-browse-btn']").click()
-    assert page.evaluate("_sourceMode") == "import"
-
-
-def test_pipeline_source_browse_cancel_keeps_workspace_folder_mode(live_server, page):
-    url = live_server["url"]
-    page.goto(f"{url}/pipeline")
-    assert page.evaluate("_sourceMode") == "folders"
-    page.evaluate("window.pickDirectory = async () => null")
-
-    page.locator("[data-testid='source-browse-btn']").click()
-
-    assert page.evaluate("_sourceMode") == "folders"
-    expect(page.locator("#sourceFolderList")).to_be_empty()
 
 
 def test_pipeline_source_card_expanded_by_default(live_server, page):
@@ -360,61 +157,6 @@ def test_pipeline_stage_cards_collapse_expand(live_server, page):
     expect(source_card).not_to_have_class(re.compile("expanded"))
     page.click("#card-source .stage-header")
     expect(source_card).to_have_class(re.compile("expanded"))
-
-
-def test_pipeline_folder_template_hidden_on_process_page(live_server, page):
-    url = live_server["url"]
-    page.goto(f"{url}/pipeline")
-    page.click("#card-destination .stage-header")
-    template = page.locator("#cfgFolderTemplate")
-    expect(template).to_be_hidden()
-
-
-def test_pipeline_custom_template_hidden_on_process_page(live_server, page):
-    url = live_server["url"]
-    page.goto(f"{url}/pipeline")
-    page.click("#card-destination .stage-header")
-    custom_input = page.locator("[data-testid='custom-template-input']")
-    expect(custom_input).to_be_hidden()
-
-
-def test_pipeline_destination_preview_button_hidden_on_process_page(live_server, page):
-    url = live_server["url"]
-    page.goto(f"{url}/pipeline")
-    page.click("#card-destination .stage-header")
-    btn = page.locator("[data-testid='preview-folders-btn']")
-    expect(btn).to_be_hidden()
-
-
-def test_pipeline_duplicate_summary_reframed_when_merging(live_server, page):
-    """With a managed archive in play, the duplicate summary reads as an
-    archive merge (already-in-archive + new-will-be-merged), not the generic
-    'already imported' wording."""
-    url = live_server["url"]
-    page.goto(f"{url}/pipeline")
-    # Managed-merge framing.
-    page.evaluate(
-        "window._managedArchive = {path: '/arch/USA', photo_count: 10};"
-        "updateDuplicateSummary({done: true, duplicate_count: 2, total: 5});"
-    )
-    dup = page.locator("#previewSummary .dup-status")
-    expect(dup).to_contain_text("already in your library")
-    expect(dup).to_contain_text("will be skipped")
-    expect(dup).to_contain_text("3 new")
-    expect(dup).to_contain_text("will be merged")
-
-
-def test_pipeline_duplicate_summary_generic_when_fresh(live_server, page):
-    """No managed archive -> today's exact 'already imported' wording."""
-    url = live_server["url"]
-    page.goto(f"{url}/pipeline")
-    page.evaluate(
-        "window._managedArchive = null;"
-        "updateDuplicateSummary({done: true, duplicate_count: 2, total: 5});"
-    )
-    dup = page.locator("#previewSummary .dup-status")
-    expect(dup).to_contain_text("already imported")
-    expect(dup).not_to_contain_text("this archive")
 
 
 def test_pipeline_section_headers_visible(live_server, page):
@@ -440,63 +182,6 @@ def test_pipeline_status_pills_visible_for_processing_stages(live_server, page):
     expect(page.locator("#pillClassify")).to_contain_text("Already done")
     # Extract has no seeded masks → "Will run".
     expect(page.locator("#pillExtract")).to_contain_text("Will run")
-
-
-def test_pipeline_import_plan_waits_for_folder_preview_scope(live_server, page):
-    url = live_server["url"]
-    page.goto(f"{url}/pipeline")
-    expect(page.locator("#pillClassify")).to_contain_text("Already done")
-
-    stale_plan_route = []
-
-    def hold_stale_plan(route):
-        stale_plan_route.append(route)
-
-    page.route("**/api/pipeline/plan", hold_stale_plan)
-    page.evaluate("setTimeout(refreshPipelinePlan, 0)")
-    for _ in range(50):
-        if stale_plan_route:
-            break
-        page.wait_for_timeout(100)
-    assert stale_plan_route
-
-    folder_preview_route = []
-    page.route("**/api/import/folder-preview", lambda route: folder_preview_route.append(route))
-    page.fill("#cfgSourceInput", "/Volumes/Photography/Raw Files/USA/2026/2026-05-30")
-    page.press("#cfgSourceInput", "Enter")
-    stale_plan_route[0].fulfill(
-        status=200,
-        content_type="application/json",
-        body=json.dumps({
-            "stages": {
-                "Previews": {"state": "done-prior", "summary": "stale"},
-                "Classify": {"state": "done-prior", "summary": "stale"},
-                "Extract": {"state": "done-prior", "summary": "stale"},
-                "EyeKeypoints": {"state": "done-prior", "summary": "stale"},
-                "Group": {"state": "done-prior", "summary": "stale"},
-            },
-            "scope": {"collection_id": None, "photo_count": None, "new_count": 0, "known_count": 0},
-        }),
-    )
-
-    expect(page.locator("[data-testid='pipeline-plan-summary'] .plan-loading")).to_be_visible()
-    expect(page.locator("#pillClassify")).not_to_contain_text("Already done")
-    for _ in range(50):
-        if folder_preview_route:
-            break
-        page.wait_for_timeout(100)
-    assert folder_preview_route
-    folder_preview_route[0].fulfill(
-        status=200,
-        content_type="application/json",
-        body=json.dumps({
-            "total_count": 0,
-            "total_size": 0,
-            "type_breakdown": {},
-            "duplicate_count": 0,
-            "files": [],
-        }),
-    )
 
 
 def test_pipeline_reclassify_flips_classify_pill_to_will_run(live_server, page):
