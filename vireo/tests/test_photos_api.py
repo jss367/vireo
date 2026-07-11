@@ -5501,15 +5501,26 @@ def test_edit_math_version_migration_survives_unreadable_preview_dir(
         db3.conn.close()
 
 
-def test_external_edit_handoff_meta_includes_math_version(client_with_photo):
+def test_external_edit_handoff_meta_includes_math_version(
+    client_with_photo, monkeypatch,
+):
     """The external-editor handoff render reuses external-edits/<id>.jpg only
     when its cached metadata matches. That metadata must carry
     EDIT_MATH_VERSION so a math bump (which changes per-pixel output but not
     recipe/source/mtime) invalidates the stale hard-clipped render."""
     import json
     import os
+    import subprocess
 
     from image_edits import EDIT_MATH_VERSION
+
+    # Stub the launcher: with no editor configured this endpoint falls through
+    # to a real `open <handoff>.jpg` on macOS, which pops the render up in
+    # Preview during the test run. The handoff meta is written before launch,
+    # so a no-op launcher doesn't weaken what this test checks.
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a[0] if a else [], 0))
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: None)
 
     app, db, photo_id = client_with_photo
     client = app.test_client()
