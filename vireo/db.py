@@ -2461,9 +2461,10 @@ class Database:
                        updated_at = excluded.updated_at""",
                 (row["species"], row["photo_id"], order),
             )
-        self.conn.execute(
-            "INSERT INTO db_meta(key, value) VALUES (?, '1')",
-            (self._SPECIES_REPRESENTATIVES_BACKFILL_KEY,),
+        self.set_meta(
+            self._SPECIES_REPRESENTATIVES_BACKFILL_KEY,
+            "1",
+            _commit=False,
         )
         self.conn.commit()
 
