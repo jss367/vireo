@@ -207,6 +207,18 @@
     height: 8px;
     border-radius: 50%;
   }
+  .miss-card-representative {
+    position: absolute;
+    bottom: 6px;
+    left: 6px;
+    padding: 2px 6px;
+    background: var(--accent);
+    color: var(--accent-text);
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
 
   .miss-card-unflag {
     position: absolute;
@@ -888,6 +900,7 @@ function renderCard(cat, p, idx) {
           '<span class="dot cat-' + cat + '"></span>' +
           escapeHtml(CATEGORY_LABELS[cat]) +
         '</span>' +
+        (p.is_species_representative ? '<span class="miss-card-representative">Representative</span>' : '') +
         '<button class="miss-card-unflag" ' +
           'title="Unflag as miss (U)" ' +
           'data-testid="miss-unflag-' + cat + '-' + p.id + '" ' +

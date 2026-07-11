@@ -447,6 +447,18 @@
   color: var(--accent-text);
   font-weight: 600;
 }
+.photo-representative {
+  position: absolute;
+  bottom: 24px;
+  right: 6px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: 9px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 700;
+  text-transform: uppercase;
+}
 .photo-score-bar {
   height: 3px;
   background: var(--bg-tertiary);
@@ -1082,6 +1094,18 @@ input[type="range"]::-moz-range-thumb {
 .grm-card-species { color: var(--text-primary); font-weight: 600; }
 .grm-card-scores { color: var(--text-dim); }
 .grm-card-scores .score-val { color: var(--text-secondary); }
+.grm-card-representative {
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
 
 .grm-footer {
   padding: 12px 20px;
@@ -2553,6 +2577,7 @@ function renderPhotoCard(p, encIdx, burstIdx) {
   html += '<img src="' + escapeAttr(thumbUrl) + '" loading="lazy" alt="" onclick="openInspect(' + p.id + ')">';
   if (visibleLabel) html += '<span class="photo-label ' + visibleLabelClass + '">' + visibleLabel + '</span>';
   if (p.rarity_protected) html += '<span class="photo-rarity">protected</span>';
+  if (p.is_species_representative) html += '<span class="photo-representative">Representative</span>';
   if (p.flag === 'flagged') html += '<span class="photo-flag-badge flag-flagged">P</span>';
   else if (p.flag === 'rejected') html += '<span class="photo-flag-badge flag-rejected">X</span>';
   if (encIdx != null && burstIdx != null) {
@@ -4560,6 +4585,9 @@ function renderGroupModal() {
     var kwHtml = hasKw
       ? '<span class="grm-card-kw-badge" title="Species keyword already applied" style="position:absolute;top:4px;right:4px;background:var(--accent);color:var(--accent-text);font-size:10px;font-weight:600;padding:2px 6px;border-radius:3px;letter-spacing:0.04em;">TAG</span>'
       : '';
+    var repHtml = dbSt.is_species_representative
+      ? '<span class="grm-card-representative">Representative</span>'
+      : '';
 
     var nat = grmNaturalDims(p);
     var imgStyle = 'width:' + nat.w + 'px;height:' + nat.h + 'px;';
@@ -4575,6 +4603,7 @@ function renderGroupModal() {
           ' onload="grmCardImgLoaded(this)" loading="lazy" draggable="false">' +
         flagHtml +
         kwHtml +
+        repHtml +
       '</div>' +
       '<div class="grm-card-info">' +
         '<div class="grm-card-species">' + escapeHtml(p.filename || '') + '</div>' +

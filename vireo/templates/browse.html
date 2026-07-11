@@ -267,6 +267,19 @@ body {
   border-radius: 3px;
   pointer-events: none;
 }
+.representative-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  pointer-events: none;
+}
 .grid-card-info {
   padding: 8px 10px;
 }
@@ -2259,6 +2272,7 @@ function renderPhotoCard(p, idx) {
   }
   var inatBadge = inatSubmitted[String(p.id)] ? '<span class="inat-badge">iNat</span>' : '';
   var wildlifeBadge = p.wildlife_excluded ? '<span class="no-wildlife-badge">No Wildlife</span>' : '';
+  var representativeBadge = p.is_species_representative ? '<span class="representative-badge">Representative</span>' : '';
 
   // Species badges on image overlay (only when NOT in cardFields — if in cardFields, rendered below)
   var speciesBadgeHtml = '';
@@ -2283,6 +2297,7 @@ function renderPhotoCard(p, idx) {
       boxHtml +
       inatBadge +
       wildlifeBadge +
+      representativeBadge +
       speciesBadgeHtml +
     '</div>' +
     '<div class="grid-card-info">' +
@@ -2391,9 +2406,50 @@ function refreshGridCards(photoIds) {
       } else if (!shouldShow && existing) {
         existing.remove();
       }
+      var rep = wrap.querySelector('.representative-badge');
+      if (p.is_species_representative && !rep) {
+        wrap.insertAdjacentHTML('beforeend', '<span class="representative-badge">Representative</span>');
+      } else if (!p.is_species_representative && rep) {
+        rep.remove();
+      }
     }
   });
 }
+
+document.addEventListener('lifelist:changed', function(e) {
+  var detail = e && e.detail ? e.detail : {};
+  var species = detail.species;
+  var photoId = detail.photoId;
+  if (!species || !photoId) return;
+  var changed = [];
+  photos.forEach(function(p) {
+    var entries = Array.isArray(p.life_list) ? p.life_list : [];
+    var touched = false;
+    entries.forEach(function(entry) {
+      if (!entry || entry.species !== species) return;
+      var isCurrent = p.id === photoId;
+      if (entry.is_current_photo !== isCurrent || entry.is_species_representative !== isCurrent) {
+        entry.is_current_photo = isCurrent;
+        entry.is_species_representative = isCurrent;
+        touched = true;
+      }
+    });
+    if (p.id === photoId && !entries.some(function(entry) { return entry && entry.species === species; })) {
+      entries.push({species: species, is_current_photo: true, is_species_representative: true});
+      p.life_list = entries;
+      touched = true;
+    }
+    var isRep = entries.some(function(entry) {
+      return entry && entry.is_species_representative;
+    });
+    if (p.is_species_representative !== isRep) {
+      p.is_species_representative = isRep;
+      touched = true;
+    }
+    if (touched) changed.push(p.id);
+  });
+  if (changed.length) refreshGridCards(changed);
+});
 
 function getGridCard(photoId) {
   return document.querySelector('.grid-card[data-id="' + photoId + '"]');

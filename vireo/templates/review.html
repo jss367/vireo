@@ -164,6 +164,10 @@
     aspect-ratio: 3/2;
     object-fit: cover;
   }
+  .card > .card-img-wrap > img {
+    aspect-ratio: 3/2;
+    object-fit: cover;
+  }
   .card-body { padding: 12px 14px; }
   .card-filename {
     font-size: 12px;
@@ -199,6 +203,19 @@
     margin-left: 6px;
     background: var(--bg-tertiary, #14374E);
     color: var(--info);
+  }
+  .representative-badge {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: var(--accent);
+    color: var(--accent-text);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    pointer-events: none;
   }
 
   /* Existing keywords */
@@ -1277,6 +1294,9 @@ function renderPredictionCard(pred) {
   var imgStyle = hasBox ? 'cursor:pointer;object-fit:contain;' : 'cursor:pointer;';
   var imgTag = '<img src="' + thumbUrl + '" loading="lazy" alt="' + escapeAttr(pred.filename || '') +
     '" style="' + imgStyle + '" data-photo-id="' + pred.photo_id + '" data-filename="' + escapeAttr(pred.filename || '') + '">';
+  var representativeBadge = pred.is_species_representative
+    ? '<span class="representative-badge">Representative</span>'
+    : '';
 
   var imgHtml;
   if (hasBox) {
@@ -1286,13 +1306,14 @@ function renderPredictionCard(pred) {
     var bWidth = (pred.box_w * 100).toFixed(2) + '%';
     var bHeight = (pred.box_h * 100).toFixed(2) + '%';
     imgHtml = '<div class="card-img-wrap">' + imgTag +
+      representativeBadge +
       '<div class="detection-box" data-photo-id="' + pred.photo_id + '" style="' + (hideDetectionOverlay ? 'display:none;' : '') + 'left:' + bLeft + ';top:' + bTop +
       ';width:' + bWidth + ';height:' + bHeight + ';border-color:' + color + ';">' +
       '<span class="detection-label" style="background:' + color +
       ';color:#0A1F2E;">' + escapeHtml(displaySpecies) + ' ' + confPct + '%</span>' +
       '</div></div>';
   } else {
-    imgHtml = imgTag;
+    imgHtml = '<div class="card-img-wrap">' + imgTag + representativeBadge + '</div>';
   }
 
   return '<div class="' + cardClass + '" data-pred-id="' + pred.id + '">' +
