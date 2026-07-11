@@ -3633,7 +3633,6 @@ function _lbRenderLifeListPanel(photoId) {
     btn.type = 'button';
     if (entry.is_current_photo) {
       btn.className = 'primary';
-      btn.disabled = true;
       btn.textContent = 'Representative';
     } else {
       btn.textContent = 'Set Representative';
@@ -3755,8 +3754,6 @@ window.buildSpeciesRepresentativeMenuItems = function(photoIds, opts) {
     return entries.map(function(entry) {
       return {
         label: 'Set Representative \u2014 ' + entry.species,
-        disabled: !!entry.is_current_photo,
-        disabledHint: entry.is_current_photo ? 'Already representative' : undefined,
         onClick: function() { setLifeListPhoto(entry.species, photoId); },
       };
     });

@@ -340,6 +340,16 @@ def _apply_preferred_photo(photos, preferred_photo_id, marker_key):
     return False
 
 
+def _sort_photos_with_representatives_first(photos, representative_order):
+    """Promote representative photos while preserving ranked order otherwise."""
+    ranked_position = {photo["id"]: idx for idx, photo in enumerate(photos)}
+    photos.sort(key=lambda photo: (
+        0 if photo["id"] in representative_order else 1,
+        representative_order.get(photo["id"], 0),
+        ranked_position.get(photo["id"], 0),
+    ))
+
+
 def _bucket_best_score(photos):
     """Return the highest highlight_score in a bucket, or None if empty.
 
@@ -352,14 +362,31 @@ def _bucket_best_score(photos):
 
 
 def _apply_highlight_preferences(db, buckets):
-    preferences = db.get_species_representatives(eligible_only=True)
+    preferences = db.get_species_representative_lists(eligible_only=True)
     for bucket in buckets:
-        preferred_id = preferences.get(bucket["species"])
+        representative_ids = preferences.get(bucket["species"]) or []
+        representative_set = set(representative_ids)
+        representative_order = {
+            photo_id: idx for idx, photo_id in enumerate(representative_ids)
+        }
+        preferred_id = representative_ids[0] if representative_ids else None
         applied = False
         for photo in bucket.get("photos") or []:
-            is_rep = preferred_id is not None and photo.get("id") == preferred_id
+            is_rep = photo.get("id") in representative_set
             photo["is_species_representative"] = is_rep
             applied = applied or is_rep
+        # Promote representatives to the front so cross-workspace reps
+        # (visible via species_representatives but without a workspace-scoped
+        # species_highlights rank) become the bucket's primary photo.
+        # _apply_ordered_highlights runs before this and only sorts when a
+        # visible photo has a workspace highlight rank, so without this pass
+        # a rep chosen in another workspace stays buried in score order.
+        # Matches the Life List behavior which also promotes reps over
+        # workspace highlights.
+        if applied:
+            _sort_photos_with_representatives_first(
+                bucket["photos"], representative_order
+            )
         top = bucket["photos"][0] if bucket["photos"] else {}
         bucket["preferred_photo_id"] = preferred_id
         # Species-level state stays true even when the representative photo is
@@ -4587,16 +4614,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result["keywords"] = [dict(k) for k in keywords]
 
         # Representative block: the photo's eligible species plus whether this
-        # photo is the current one-photo species representative. Keep the
+        # photo is one of the shared species representatives. Keep the
         # legacy ``life_list`` key because shared lightbox/menu code reads it.
-        representatives = db.get_species_representatives()
+        representatives = db.get_species_representative_lists()
+        life_list_species = db.get_photo_life_list_species(photo_id)
+        representative_sets = {
+            species: set(representatives.get(species) or [])
+            for species in life_list_species
+        }
         result["life_list"] = [
             {
                 "species": s,
-                "is_current_photo": representatives.get(s) == photo_id,
-                "is_species_representative": representatives.get(s) == photo_id,
+                "is_current_photo": photo_id in representative_sets[s],
+                "is_species_representative": photo_id in representative_sets[s],
             }
-            for s in db.get_photo_life_list_species(photo_id)
+            for s in life_list_species
         ]
         result["species_representatives"] = result["life_list"]
         result["highlight_list"] = _photo_highlight_entries(db, photo_id)
@@ -8515,22 +8547,33 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         species_entries = []
         distinct_photo_ids = set()
-        representatives = db.get_species_representatives()
+        representatives = db.get_species_representative_lists()
         highlights_by_species = db.get_species_highlights()
         for species, entry in buckets.items():
             photos = entry["photos"]
             distinct_photo_ids.update(p["id"] for p in photos)
             timestamps = [p["timestamp"] for p in photos if p.get("timestamp")]
             _highlight_score_bucket(photos)
-            preferred_id = representatives.get(species)
+            representative_ids = representatives.get(species) or []
+            representative_order = {
+                photo_id: idx for idx, photo_id in enumerate(representative_ids)
+            }
+            preferred_id = representative_ids[0] if representative_ids else None
             highlight_ranks = highlights_by_species.get(species, {})
             for photo in photos:
                 rank = highlight_ranks.get(photo["id"])
                 photo["is_highlighted"] = rank is not None
                 photo["highlight_rank"] = rank
-            preferred_applied = _apply_preferred_photo(
-                photos, preferred_id, "is_species_representative"
+                photo["is_species_representative"] = (
+                    photo["id"] in representative_order
+                )
+            preferred_applied = any(
+                photo.get("is_species_representative") for photo in photos
             )
+            if preferred_applied:
+                _sort_photos_with_representatives_first(
+                    photos, representative_order
+                )
             best_source = "representative" if preferred_applied else "algorithm"
             if not preferred_applied and highlight_ranks:
                 valid_highlights = [
@@ -8927,11 +8970,69 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(error, status)
 
         top_predictions = _highlight_top_predictions(db, photo_ids)
+        # Snapshot the top-prediction species per photo (lowercase). Used
+        # below in the current_species-empty filter branch to accept only
+        # curation whose old species matches an active prediction — see
+        # the prediction-only relabel scenario in
+        # test_highlights_relabel_prediction_only_undo_restores_curation.
+        predicted_species_by_pid = {}
+        for pid_pred, pred_row in top_predictions.items():
+            pred_species = pred_row["species"] if pred_row else None
+            if pred_species:
+                predicted_species_by_pid.setdefault(pid_pred, set()).add(
+                    pred_species.strip().lower()
+                )
         ws_id = db._ws_id()
         # Chunk both lookups: photo_ids has no upstream cap
         # (_parse_highlight_photo_ids just parses the list), so a bulk
         # relabel of >999 photos would blow SQLITE_MAX_VARIABLE_NUMBER
         # on the legacy builds this file already guards against.
+
+        # Snapshot each photo's current taxonomy keywords before the relabel
+        # touches them. Used to skip stale curation rows for species the
+        # photo no longer carries across all three curation tables
+        # (species_highlights, photo_preferences, species_representatives):
+        # untag_photo does not clear any of them, so a photo can retain a
+        # curation row for species A after that keyword was removed. Without
+        # this filter, relabeling the photo's current species B→C would
+        # sweep the stale A rows into A→C renames — losing the preserved A
+        # state and making C look manually selected.
+        current_species_by_pid = {}
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT pk.photo_id, k.name
+                    FROM photo_keywords pk
+                    JOIN keywords k ON k.id = pk.keyword_id
+                    WHERE pk.photo_id IN ({placeholders})
+                      AND (k.is_species = 1 OR k.type = 'taxonomy')""",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                current_species_by_pid.setdefault(row["photo_id"], set()).add(
+                    row["name"].strip().lower()
+                )
+
+        def _accept_curation_source(pid, old_species_name):
+            """Shared filter for the highlight, preference, and rep passes.
+
+            With any current taxonomy keywords, only migrate curation for
+            species the photo currently carries. Without any taxonomy —
+            the prediction-only relabel path (``keyword_add`` instead of
+            ``species_replace``) — only migrate curation whose species
+            matches an active prediction on the photo. That preserves the
+            legitimate prediction-species migration exercised by
+            ``test_highlights_relabel_prediction_only_undo_restores_curation``
+            while blocking stale curation rows for species that were
+            tagged and later untagged.
+            """
+            old_lower = old_species_name.strip().lower()
+            current = current_species_by_pid.get(pid)
+            if current:
+                return old_lower in current
+            predicted = predicted_species_by_pid.get(pid) or set()
+            return old_lower in predicted
+
         highlight_renames = {}
         hl_prev_by_pid = {}
         # Photos that already had a `(species=<target>, photo_id)` row in
@@ -8950,6 +9051,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 old_species_name = row["species"]
                 if old_species_name == species:
                     hl_dst_preexisting.add(row["photo_id"])
+                    continue
+                if not _accept_curation_source(
+                    row["photo_id"], old_species_name
+                ):
                     continue
                 highlight_renames.setdefault(old_species_name, []).append(
                     row["photo_id"]
@@ -8987,6 +9092,41 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 (ws_id, species),
             ).fetchall()
         }
+        # Photos that already had a (species=<target>, photo_id) row in
+        # species_representatives before the relabel.
+        # rename_species_representatives_species uses INSERT OR IGNORE, so
+        # when the destination rep row is already present the relabel does
+        # not create a new one and undo must not delete it. Applies to
+        # both preference-covered moves (via pref_prev.rep_dst_existed
+        # below) and rep-only moves (via rep_prev.dst_existed).
+        rep_dst_preexisting = set()
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            for row in db.conn.execute(
+                f"""SELECT photo_id FROM species_representatives
+                    WHERE species = ? AND photo_id IN ({placeholders})""",
+                (species, *chunk),
+            ).fetchall():
+                rep_dst_preexisting.add(row["photo_id"])
+        # Snapshot the original selected_order for every existing
+        # species_representatives row on the retagged photos. Undo restores
+        # each row at its captured order rather than the fresh MAX+1 that
+        # _set_global_species_representative would assign — so undoing a
+        # relabel of a secondary representative does not promote it above
+        # the pre-existing primary for that species.
+        rep_selected_order_by_pid_species = {}
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            for row in db.conn.execute(
+                f"""SELECT species, photo_id, selected_order
+                    FROM species_representatives
+                    WHERE photo_id IN ({placeholders})""",
+                chunk,
+            ).fetchall():
+                rep_selected_order_by_pid_species[
+                    (row["photo_id"], row["species"])
+                ] = row["selected_order"]
+        pref_covered_by_pid_species = set()
         for chunk in _chunked(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
             rows = db.conn.execute(
@@ -9002,6 +9142,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 old_species_name = row["species"]
                 if old_species_name == species:
                     continue
+                if not _accept_curation_source(
+                    row["photo_id"], old_species_name
+                ):
+                    continue
                 preference_renames.setdefault(old_species_name, []).append(
                     row["photo_id"]
                 )
@@ -9009,6 +9153,53 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "purpose": row["purpose"],
                     "species": old_species_name,
                     "dst_existed": row["purpose"] in pref_dst_taken,
+                    "rep_dst_existed": row["photo_id"] in rep_dst_preexisting,
+                    "rep_selected_order": rep_selected_order_by_pid_species.get(
+                        (row["photo_id"], old_species_name)
+                    ),
+                })
+                pref_covered_by_pid_species.add(
+                    (row["photo_id"], old_species_name)
+                )
+        # Global species_representatives moves. Representatives are global
+        # (no workspace column), so a photo can carry a
+        # (species, photo_id) row picked from a different workspace with
+        # no matching photo_preferences row in the active workspace. In
+        # that case the preference-rename pass above would miss it, and
+        # the retag would strand the representative under the old species
+        # name — leaving both species without a representative. Query
+        # species_representatives directly and enqueue any rep-only moves
+        # the preference pass didn't already cover. The same
+        # current-species filter applies here (see the snapshot comment
+        # above).
+        representative_renames = {}
+        rep_prev_by_pid = {}
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT species, photo_id FROM species_representatives
+                    WHERE photo_id IN ({placeholders})""",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                old_species_name = row["species"]
+                pid = row["photo_id"]
+                if old_species_name == species:
+                    continue
+                # rename_photo_preferences_species already migrates
+                # species_representatives for pids in preference_renames,
+                # so skip anything the preference pass will cover.
+                if (pid, old_species_name) in pref_covered_by_pid_species:
+                    continue
+                if not _accept_curation_source(pid, old_species_name):
+                    continue
+                representative_renames.setdefault(old_species_name, []).append(pid)
+                rep_prev_by_pid.setdefault(pid, []).append({
+                    "species": old_species_name,
+                    "dst_existed": pid in rep_dst_preexisting,
+                    "selected_order": rep_selected_order_by_pid_species.get(
+                        (pid, old_species_name)
+                    ),
                 })
         try:
             kid = db.add_keyword(species, is_species=True, _commit=False)
@@ -9046,11 +9237,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 old_keyword_ids = [old["id"] for old in old_rows]
                 hl_prev = hl_prev_by_pid.get(pid) or []
                 pref_prev = pref_prev_by_pid.get(pid) or []
+                rep_prev = rep_prev_by_pid.get(pid) or []
                 needs_payload = (
                     pred is not None
                     or len(old_keyword_ids) > 1
                     or hl_prev
                     or pref_prev
+                    or rep_prev
                 )
                 if needs_payload:
                     old_payload = {
@@ -9062,11 +9255,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             "prediction_id": pred["id"],
                             "prediction_status": pred["status"],
                         })
-                    if hl_prev or pref_prev:
-                        old_payload["curation"] = {
+                    if hl_prev or pref_prev or rep_prev:
+                        curation = {
                             "hl_prev": hl_prev,
                             "pref_prev": pref_prev,
                         }
+                        if rep_prev:
+                            curation["rep_prev"] = rep_prev
+                        old_payload["curation"] = curation
                     old_value = json.dumps(old_payload, sort_keys=True)
                 items.append({
                     "photo_id": pid,
@@ -9086,6 +9282,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     old_species_name,
                     species,
                     [(pid, ws_id) for pid in pids],
+                    _commit=False,
+                )
+            for old_species_name, pids in representative_renames.items():
+                db.rename_species_representatives_species(
+                    old_species_name,
+                    species,
+                    photo_ids=pids,
                     _commit=False,
                 )
 

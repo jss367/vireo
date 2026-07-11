@@ -7869,6 +7869,510 @@ def test_highlights_relabel_undo_restores_representative_over_collision(app_and_
     assert reps.get("Rep New") == p_incumbent
 
 
+def test_highlights_relabel_undo_preserves_preexisting_target_representative(
+    app_and_db,
+):
+    """When the relabeled photo was already a global representative for
+    the destination species — e.g. a multi-species photo picked as rep
+    for both A and B before relabeling A→B — the relabel's
+    ``INSERT OR IGNORE`` keeps the pre-existing ``(B, photo_id)`` row and
+    only deletes the old-species row. Undo must not erase that
+    pre-existing target-species rep while processing ``pref_prev``."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/prekeep', 'prekeep', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Rep Both A", is_species=True)
+    new_kid = db.add_keyword("Rep Both B", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'both.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, old_kid)
+    db.tag_photo(pid, new_kid)
+    db.set_species_representative("Rep Both A", pid)
+    db.set_species_representative("Rep Both B", pid)
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Rep Both B"},
+    )
+    assert resp.status_code == 200
+    reps_after = db.get_species_representatives()
+    # A has been retagged away and its rep row moved into B (whose row
+    # was pre-existing, so INSERT OR IGNORE was a no-op).
+    assert "Rep Both A" not in reps_after
+    assert reps_after.get("Rep Both B") == pid
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+    reps_undone = db.get_species_representative_lists()
+    # Both reps must be present after undo: A is restored from pref_prev,
+    # and B must survive the pref_prev-driven cleanup because the target
+    # rep row pre-existed the relabel.
+    assert pid in (reps_undone.get("Rep Both A") or [])
+    assert pid in (reps_undone.get("Rep Both B") or [])
+
+
+def test_highlights_relabel_migrates_cross_workspace_representative(app_and_db):
+    """A photo picked as a global representative in a different workspace
+    has no compatibility row in the relabel-workspace's ``photo_preferences``,
+    only a global ``species_representatives`` row. Relabel must still move
+    that global row to the new species; otherwise the representative
+    disappears from both species after the retag."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/xwsrep', 'xwsrep', 'ok')"
+    ).lastrowid
+    ws_a = db._active_workspace_id
+    ws_b = db.create_workspace("XWSRep Other")
+    for ws in (ws_a, ws_b):
+        db.conn.execute(
+            "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+            (ws, fid),
+        )
+    old_kid = db.add_keyword("Bald Eagle", is_species=True)
+    db.add_keyword("Golden Eagle", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'xrep.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, old_kid)
+    # Select the representative from workspace B, so the compatibility
+    # photo_preferences row lives under ws_b — not under ws_a where we
+    # relabel from. The global species_representatives row is workspace-
+    # independent and stays.
+    db.set_active_workspace(ws_b)
+    db.set_species_representative("Bald Eagle", pid)
+    db.set_active_workspace(ws_a)
+
+    # Sanity: no local photo_preferences row for this photo in ws_a.
+    local_pref = db.conn.execute(
+        """SELECT 1 FROM photo_preferences
+           WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+        (ws_a, "Bald Eagle", pid),
+    ).fetchone()
+    assert local_pref is None
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Golden Eagle"},
+    )
+    assert resp.status_code == 200
+
+    reps = db.get_species_representatives()
+    assert reps.get("Golden Eagle") == pid
+    assert "Bald Eagle" not in reps
+
+    # Undo/redo round-trips the global rep even when there's no local
+    # pref row to piggyback on.
+    undone = db.undo_last_edit()
+    assert undone is not None
+    reps_undone = db.get_species_representatives()
+    assert reps_undone.get("Bald Eagle") == pid
+    assert "Golden Eagle" not in reps_undone
+
+    redone = db.redo_last_undo()
+    assert redone is not None
+    reps_redone = db.get_species_representatives()
+    assert reps_redone.get("Golden Eagle") == pid
+    assert "Bald Eagle" not in reps_redone
+
+
+def test_highlights_relabel_ignores_stale_representative_rows(app_and_db):
+    """A photo can retain a global ``species_representatives`` row for a
+    species it no longer carries (untag_photo doesn't clear the global
+    rep row, and a rep picked from another workspace has no active-
+    workspace pref row to sweep it through the preference pass).
+    Relabeling the photo's current species must not renaming that stale
+    rep into the target species — it should stay under the old species,
+    and only the rep for the species actually being replaced should
+    move."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/stalerep', 'stalerep', 'ok')"
+    ).lastrowid
+    ws_a = db._active_workspace_id
+    ws_b = db.create_workspace("StaleRep Other")
+    for ws in (ws_a, ws_b):
+        db.conn.execute(
+            "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+            (ws, fid),
+        )
+    stale_kid = db.add_keyword("Bald Eagle", is_species=True)
+    current_kid = db.add_keyword("Osprey", is_species=True)
+    db.add_keyword("Golden Eagle", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'stale.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, stale_kid)
+    db.tag_photo(pid, current_kid)
+    # Select the Bald Eagle rep from ws_b — the compat pref row lives
+    # under ws_b, so the active workspace ws_a's preference-rename pass
+    # won't sweep this rep during a ws_a relabel. Only the direct rep-
+    # only pass could pick it up, which is the code path under test.
+    db.set_active_workspace(ws_b)
+    db.set_species_representative("Bald Eagle", pid)
+    db.set_active_workspace(ws_a)
+    # The current-species rep is set from the active workspace and has
+    # a local pref row, so its migration goes through the preference
+    # pass and is unrelated to the rep-only filter.
+    db.set_species_representative("Osprey", pid)
+    # Untag Bald Eagle from the photo. The global species_representatives
+    # row remains, so the photo now carries only Osprey as a taxonomy
+    # keyword but still has a stale (Bald Eagle, pid) rep row.
+    db.untag_photo(pid, stale_kid)
+
+    stale_before = db.conn.execute(
+        "SELECT 1 FROM species_representatives WHERE species = ? AND photo_id = ?",
+        ("Bald Eagle", pid),
+    ).fetchone()
+    assert stale_before is not None
+    # And no ws_a pref row exists for Bald Eagle either — confirms the
+    # preference pass won't touch it.
+    local_pref = db.conn.execute(
+        """SELECT 1 FROM photo_preferences
+           WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+        (ws_a, "Bald Eagle", pid),
+    ).fetchone()
+    assert local_pref is None
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Golden Eagle"},
+    )
+    assert resp.status_code == 200
+
+    reps = db.get_species_representatives()
+    # The Osprey rep moved to Golden Eagle (the relabel target).
+    assert reps.get("Golden Eagle") == pid
+    assert "Osprey" not in reps
+    # The stale Bald Eagle rep stays under Bald Eagle — it was never
+    # part of the relabel and must not be renamed to Golden Eagle.
+    assert reps.get("Bald Eagle") == pid
+
+
+def test_highlights_relabel_ignores_stale_representative_with_local_pref(app_and_db):
+    """When a photo has a stale ``photo_preferences`` row for a species it
+    no longer carries (from setting the rep in the active workspace and
+    then untagging that species), a relabel of the photo's current species
+    must not sweep the stale row through ``rename_photo_preferences_species``
+    — which would also rename the matching global ``species_representatives``
+    row into the target species, losing the preserved state and making the
+    target look manually selected."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/stalepref', 'stalepref', 'ok')"
+    ).lastrowid
+    ws_id = db._active_workspace_id
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (ws_id, fid),
+    )
+    stale_kid = db.add_keyword("Bald Eagle", is_species=True)
+    current_kid = db.add_keyword("Osprey", is_species=True)
+    db.add_keyword("Golden Eagle", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'stalepref.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, stale_kid)
+    db.tag_photo(pid, current_kid)
+    # Set both reps from the active workspace so each has a local
+    # compat pref row in ws_id. This makes the stale row travel through
+    # the pref-covered pass rather than the rep-only pass.
+    db.set_species_representative("Bald Eagle", pid)
+    db.set_species_representative("Osprey", pid)
+    # Untag Bald Eagle. The pref row and global rep row for Bald Eagle
+    # both remain (untag_photo does not clear either), so the photo now
+    # carries only Osprey as a taxonomy keyword but retains stale
+    # (Bald Eagle, pid) rows in both tables.
+    db.untag_photo(pid, stale_kid)
+
+    stale_pref = db.conn.execute(
+        """SELECT 1 FROM photo_preferences
+           WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+        (ws_id, "Bald Eagle", pid),
+    ).fetchone()
+    assert stale_pref is not None
+    stale_rep = db.conn.execute(
+        "SELECT 1 FROM species_representatives WHERE species = ? AND photo_id = ?",
+        ("Bald Eagle", pid),
+    ).fetchone()
+    assert stale_rep is not None
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Golden Eagle"},
+    )
+    assert resp.status_code == 200
+
+    reps = db.get_species_representatives()
+    # The Osprey rep moved to Golden Eagle (the relabel target).
+    assert reps.get("Golden Eagle") == pid
+    assert "Osprey" not in reps
+    # The stale Bald Eagle rep stays under Bald Eagle — the pref-covered
+    # rename must not carry it into Golden Eagle.
+    assert reps.get("Bald Eagle") == pid
+    # The stale Bald Eagle pref row is likewise left untouched.
+    stale_pref_after = db.conn.execute(
+        """SELECT 1 FROM photo_preferences
+           WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+        (ws_id, "Bald Eagle", pid),
+    ).fetchone()
+    assert stale_pref_after is not None
+
+
+def test_highlights_relabel_ignores_stale_reps_on_prediction_only_relabel(app_and_db):
+    """A prediction-only relabel (no taxonomy keywords → ``keyword_add``,
+    not ``species_replace``) must not sweep stale global
+    ``species_representatives`` or ``photo_preferences`` rows for species
+    the photo previously carried and then had untagged. Only curation for
+    a species matching the photo's active prediction should migrate to
+    the target species."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/predstale', 'predstale', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    stale_kid = db.add_keyword("Old Bird", is_species=True)
+    db.add_keyword("New Species", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'pred-stale.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    # Photo used to be tagged Old Bird and was picked as its rep; then the
+    # keyword was untagged. The rep/pref rows survive untag_photo, so the
+    # photo now carries no taxonomy but retains stale curation for Old
+    # Bird — a legitimate scenario Codex flagged for prediction-only
+    # relabels.
+    db.tag_photo(pid, stale_kid)
+    db.set_species_representative("Old Bird", pid)
+    db.add_species_highlight("Old Bird", pid)
+    db.untag_photo(pid, stale_kid)
+    # Prediction added AFTER untag so the "predicted-only" relabel path
+    # runs (has_old_species stays False → action_type = "keyword_add").
+    # The prediction is for a *different* species than the stale curation,
+    # so the prediction-species migration guard must skip the stale rows.
+    det = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(det, "Predicted Bird", 0.88, "m")
+    db.conn.commit()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "New Species"},
+    )
+    assert resp.status_code == 200
+    assert db.get_edit_history(limit=1)[0]["action_type"] == "keyword_add"
+
+    reps = db.get_species_representatives()
+    # Stale Old Bird rep survives — it is NOT renamed to New Species.
+    assert reps.get("Old Bird") == pid
+    assert "New Species" not in reps
+    hl = db.get_species_highlights()
+    assert pid in (hl.get("Old Bird") or {})
+    assert "New Species" not in hl
+
+
+def test_highlights_relabel_undo_preserves_representative_order(app_and_db):
+    """Undoing a relabel that moved a secondary representative must
+    restore it at its original ``selected_order`` — otherwise
+    ``_set_global_species_representative`` would assign MAX+1 and promote
+    the restored photo above the pre-existing primary representative for
+    the same species."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/reporder', 'reporder', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Order Bird", is_species=True)
+    db.add_keyword("Other Bird", is_species=True)
+    p_primary = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'primary.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    p_secondary = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'secondary.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(p_primary, old_kid)
+    db.tag_photo(p_secondary, old_kid)
+    # Select secondary first so primary ends up newest and lists first.
+    db.set_species_representative("Order Bird", p_secondary)
+    db.set_species_representative("Order Bird", p_primary)
+    assert db.get_species_representative_lists()["Order Bird"] == [
+        p_primary, p_secondary,
+    ]
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [p_secondary], "species": "Other Bird"},
+    )
+    assert resp.status_code == 200
+    assert db.get_species_representative_lists()["Order Bird"] == [p_primary]
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+    # Before the fix, undo called _set_global_species_representative and
+    # p_secondary landed at MAX(selected_order)+1 — jumping it ahead of
+    # p_primary.
+    restored = db.get_species_representative_lists()["Order Bird"]
+    assert restored == [p_primary, p_secondary]
+
+
+def test_highlights_relabel_redo_preserves_representative_order(app_and_db):
+    """Redoing a previously-undone relabel that moved a secondary
+    representative must restore it at the original ``selected_order``
+    captured before the first relabel. Before the fix, redo called
+    ``_set_global_species_representative`` and pushed the redone
+    representative above pre-existing entries under ``new_species``,
+    changing which photo shows up as the Life List/Highlights primary
+    after an undo/redo round trip."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/reporder-redo', 'reporder-redo', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Redo Order Bird", is_species=True)
+    new_kid = db.add_keyword("Redo Other Bird", is_species=True)
+    p_source = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'source.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    p_target_primary = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'target_primary.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(p_source, old_kid)
+    db.tag_photo(p_target_primary, new_kid)
+    # Select p_source (in the old species) first so p_target_primary
+    # takes the newer selected_order in the shared global counter and
+    # stays the primary of "Redo Other Bird" after the relabel migrates
+    # p_source in at its lower captured order.
+    db.set_species_representative("Redo Order Bird", p_source)
+    db.set_species_representative("Redo Other Bird", p_target_primary)
+    assert db.get_species_representative_lists()["Redo Other Bird"] == [
+        p_target_primary,
+    ]
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [p_source], "species": "Redo Other Bird"},
+    )
+    assert resp.status_code == 200
+    after_relabel = db.get_species_representative_lists()["Redo Other Bird"]
+    # p_target_primary's global order is newer than p_source's, so the
+    # migrated p_source lands as a secondary rep, not the primary.
+    assert after_relabel == [p_target_primary, p_source]
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+    assert db.get_species_representative_lists()["Redo Other Bird"] == [
+        p_target_primary,
+    ]
+
+    redone = db.redo_last_undo()
+    assert redone is not None
+    # Before the fix, redo called _set_global_species_representative and
+    # p_source landed at MAX(selected_order)+1, promoting it above
+    # p_target_primary. With the captured order restored on redo, the
+    # round trip preserves both the list and its primary photo.
+    redone_list = db.get_species_representative_lists()["Redo Other Bird"]
+    assert redone_list == after_relabel
+
+
+def test_rename_species_representatives_species_chunks_large_photo_lists(tmp_path):
+    """``rename_species_representatives_species`` must chunk the IN(...)
+    clause so a species tagged on thousands of photos doesn't blow
+    SQLite's ``SQLITE_MAX_VARIABLE_NUMBER`` on legacy builds. Before the
+    fix, ``rename_photo_preferences_species`` funneled every affected
+    photo through a single unchunked IN clause and raised
+    ``too many SQL variables``."""
+    from vireo.db import Database
+
+    db_path = tmp_path / "chunk-reps.db"
+    db = Database(str(db_path))
+    ws_id = db._ws_id()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/chunk', 'chunk', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (ws_id, fid),
+    )
+    pid_start = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename) VALUES (?, 'p0.jpg')",
+        (fid,),
+    ).lastrowid
+    # 1500 > 999 (legacy SQLITE_MAX_VARIABLE_NUMBER), so an unchunked
+    # IN(...) with new_species, old_species, plus every id would exceed
+    # the parameter cap.
+    photo_ids = [pid_start]
+    for i in range(1, 1500):
+        photo_ids.append(db.conn.execute(
+            "INSERT INTO photos (folder_id, filename) VALUES (?, ?)",
+            (fid, f"p{i}.jpg"),
+        ).lastrowid)
+    for pid in photo_ids:
+        db.conn.execute(
+            """INSERT INTO species_representatives
+                   (species, photo_id, selected_order)
+               VALUES ('Old Species', ?, ?)""",
+            (pid, pid),
+        )
+    db.conn.commit()
+
+    moved = db.rename_species_representatives_species(
+        "Old Species", "New Species", photo_ids=photo_ids,
+    )
+    assert moved == len(photo_ids)
+
+    remaining_old = db.conn.execute(
+        "SELECT COUNT(*) AS c FROM species_representatives WHERE species = ?",
+        ("Old Species",),
+    ).fetchone()["c"]
+    moved_new = db.conn.execute(
+        "SELECT COUNT(*) AS c FROM species_representatives WHERE species = ?",
+        ("New Species",),
+    ).fetchone()["c"]
+    assert remaining_old == 0
+    assert moved_new == len(photo_ids)
+
+
 def test_backfill_species_highlights_from_legacy_preferences(tmp_path):
     """On upgraded databases, legacy photo_preferences rows with
     purpose='highlights' should seed species_highlights so pre-existing
