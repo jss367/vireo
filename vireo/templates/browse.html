@@ -267,6 +267,19 @@ body {
   border-radius: 3px;
   pointer-events: none;
 }
+.representative-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  pointer-events: none;
+}
 .grid-card-info {
   padding: 8px 10px;
 }
@@ -2259,6 +2272,7 @@ function renderPhotoCard(p, idx) {
   }
   var inatBadge = inatSubmitted[String(p.id)] ? '<span class="inat-badge">iNat</span>' : '';
   var wildlifeBadge = p.wildlife_excluded ? '<span class="no-wildlife-badge">No Wildlife</span>' : '';
+  var representativeBadge = p.is_species_representative ? '<span class="representative-badge">Representative</span>' : '';
 
   // Species badges on image overlay (only when NOT in cardFields — if in cardFields, rendered below)
   var speciesBadgeHtml = '';
@@ -2283,6 +2297,7 @@ function renderPhotoCard(p, idx) {
       boxHtml +
       inatBadge +
       wildlifeBadge +
+      representativeBadge +
       speciesBadgeHtml +
     '</div>' +
     '<div class="grid-card-info">' +
@@ -2391,9 +2406,50 @@ function refreshGridCards(photoIds) {
       } else if (!shouldShow && existing) {
         existing.remove();
       }
+      var rep = wrap.querySelector('.representative-badge');
+      if (p.is_species_representative && !rep) {
+        wrap.insertAdjacentHTML('beforeend', '<span class="representative-badge">Representative</span>');
+      } else if (!p.is_species_representative && rep) {
+        rep.remove();
+      }
     }
   });
 }
+
+document.addEventListener('lifelist:changed', function(e) {
+  var detail = e && e.detail ? e.detail : {};
+  var species = detail.species;
+  var photoId = detail.photoId;
+  if (!species || !photoId) return;
+  var changed = [];
+  photos.forEach(function(p) {
+    var entries = Array.isArray(p.life_list) ? p.life_list : [];
+    var touched = false;
+    entries.forEach(function(entry) {
+      if (!entry || entry.species !== species) return;
+      var isCurrent = p.id === photoId;
+      if (entry.is_current_photo !== isCurrent || entry.is_species_representative !== isCurrent) {
+        entry.is_current_photo = isCurrent;
+        entry.is_species_representative = isCurrent;
+        touched = true;
+      }
+    });
+    if (p.id === photoId && !entries.some(function(entry) { return entry && entry.species === species; })) {
+      entries.push({species: species, is_current_photo: true, is_species_representative: true});
+      p.life_list = entries;
+      touched = true;
+    }
+    var isRep = entries.some(function(entry) {
+      return entry && entry.is_species_representative;
+    });
+    if (p.is_species_representative !== isRep) {
+      p.is_species_representative = isRep;
+      touched = true;
+    }
+    if (touched) changed.push(p.id);
+  });
+  if (changed.length) refreshGridCards(changed);
+});
 
 function getGridCard(photoId) {
   return document.querySelector('.grid-card[data-id="' + photoId + '"]');
@@ -2613,6 +2669,7 @@ async function loadKeywords() {
 }
 
 function renderKeywordTree(keywords) {
+  _rememberKeywordNames(keywords);
   var byParent = {};
   keywords.forEach(function(k) {
     var pid = k.parent_id || 'root';
@@ -4816,6 +4873,7 @@ async function removeSelectionKeyword(keywordId) {
       body: JSON.stringify({photo_ids: ids, keyword_id: keywordId}),
     });
   } catch(e) { return; }
+  _clearRepresentativeStateAfterKeywordRemoval(ids, removedName);
   selectionKeywordKey = '';
   loadSelectionKeywordSuggestions(getActiveSelection());
   loadKeywords();
@@ -4860,6 +4918,88 @@ async function batchSetRating(rating) {
   showUndoToast();
 }
 
+// Server-side representative eligibility (see get_species_representatives)
+// hides rejected photos. Mirror that here so the grid badge and the shared
+// representative context menu ("Already representative" hint on the current
+// entry) don't keep treating a just-rejected photo as still representative
+// until a reload. Un-rejecting is left as-is: the client can't know whether
+// the DB preference still points at this photo, so the badge stays hidden
+// until the page reloads rather than lighting up incorrectly.
+function _clearRepresentativeStateIfIneligible(photoId, flag) {
+  if (flag !== 'rejected') return;
+  var p = photos.find(function(x) { return x.id === photoId; });
+  if (!p) return;
+  if (p.is_species_representative) p.is_species_representative = false;
+  if (Array.isArray(p.life_list)) {
+    p.life_list.forEach(function(entry) {
+      if (!entry) return;
+      if (entry.is_current_photo) entry.is_current_photo = false;
+      if (entry.is_species_representative) entry.is_species_representative = false;
+    });
+  }
+}
+
+// Every render path that has (keywordId, name) pairs feeds this map so the
+// single-photo remove path can resolve the name even before the autocomplete
+// field is ever opened. keywordAutocompleteCache starts as null and only
+// populates after that field renders, so on a fresh Browse page the previous
+// lookup returned null and _clearRepresentativeStateAfterKeywordRemoval
+// no-oped — the grid badge/context-menu state stayed stale until reload.
+var _keywordNamesById = {};
+function _rememberKeywordNames(keywords) {
+  if (!Array.isArray(keywords)) return;
+  keywords.forEach(function(k) {
+    if (k && typeof k.id === 'number' && typeof k.name === 'string') {
+      _keywordNamesById[k.id] = k.name;
+    }
+  });
+}
+
+function _keywordNameFromCache(keywordId) {
+  if (Object.prototype.hasOwnProperty.call(_keywordNamesById, keywordId)) {
+    return _keywordNamesById[keywordId];
+  }
+  if (!Array.isArray(keywordAutocompleteCache)) return null;
+  for (var i = 0; i < keywordAutocompleteCache.length; i++) {
+    var k = keywordAutocompleteCache[i];
+    if (k && k.id === keywordId) return k.name;
+  }
+  return null;
+}
+
+// Server-side eligibility requires the photo to still carry the species
+// keyword, so removing a species keyword drops the photo from the eligible
+// representative set. Mirror that locally: strip life_list entries whose
+// species matches the removed keyword name and recompute the badge flag.
+// The context menu reads photo.life_list too, so this also stops the shared
+// "Already representative" hint from lingering on a photo the DB no longer
+// counts. Non-species keywords never appear in life_list, so the filter
+// no-ops for those. If the cache lookup fails to resolve the name, we
+// leave state alone rather than clearing the wrong entry.
+function _clearRepresentativeStateAfterKeywordRemoval(photoIds, keywordName) {
+  if (!Array.isArray(photoIds) || !photoIds.length) return;
+  if (!keywordName) return;
+  var touched = [];
+  photoIds.forEach(function(id) {
+    var p = photos.find(function(x) { return x.id === id; });
+    if (!p || !Array.isArray(p.life_list)) return;
+    var next = p.life_list.filter(function(entry) {
+      return !entry || entry.species !== keywordName;
+    });
+    if (next.length !== p.life_list.length) {
+      p.life_list = next;
+      var isRep = next.some(function(entry) {
+        return entry && entry.is_species_representative;
+      });
+      if (p.is_species_representative !== isRep) {
+        p.is_species_representative = isRep;
+      }
+      touched.push(id);
+    }
+  });
+  if (touched.length) refreshGridCards(touched);
+}
+
 async function batchSetFlag(flag) {
   var ids = getActiveSelection();
   try {
@@ -4871,6 +5011,7 @@ async function batchSetFlag(flag) {
   ids.forEach(function(id) {
     var p = photos.find(function(x) { return x.id === id; });
     if (p) p.flag = flag;
+    _clearRepresentativeStateIfIneligible(id, flag);
   });
   refreshGridCards(ids);
   if (selectedPhotoId != null && ids.indexOf(selectedPhotoId) !== -1) {
@@ -5549,6 +5690,7 @@ function renderDetail(photo) {
   // Keywords
   var kwTypeIcons = {general:'●', taxonomy:'🌿', individual:'👤', location:'📍', genre:'🎭'};
   var kwTypeLabels = {general:'General', taxonomy:'Taxonomy', individual:'Individual', location:'Location', genre:'Genre'};
+  _rememberKeywordNames(photo.keywords || []);
   var kwHtml = '';
   (photo.keywords || []).forEach(function(k) {
     var ktype = k.type || 'general';
@@ -5891,6 +6033,7 @@ async function setFlag(flag) {
     });
     var p = photos.find(function(x) { return x.id === photoId; });
     if (p) p.flag = flag;
+    _clearRepresentativeStateIfIneligible(photoId, flag);
     refreshGridCards([photoId]);
     if (selectedPhotoId === photoId) updateDetailFlagButtons(flag);
     scheduleCollectionCountsRefresh();
@@ -6158,6 +6301,10 @@ async function removeKeyword(photoId, keywordId) {
     await safeFetch('/api/photos/' + photoId + '/keywords/' + keywordId, {
       method: 'DELETE',
     });
+    _clearRepresentativeStateAfterKeywordRemoval(
+      [photoId],
+      _keywordNameFromCache(keywordId),
+    );
     loadDetail(photoId);
     loadKeywords();
     scheduleCollectionCountsRefresh();
@@ -7055,6 +7202,7 @@ async function setFlagFor(photoId, flag) {
   } catch(e) { return false; }
   var p = photos.find(function(x) { return x.id === photoId; });
   if (p) p.flag = flag;
+  _clearRepresentativeStateIfIneligible(photoId, flag);
   refreshGridCards([photoId]);
   _refreshInspectorAfterSinglePhotoEdit(photoId, function() { updateDetailFlagButtons(flag); });
   scheduleCollectionCountsRefresh();

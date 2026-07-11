@@ -29,6 +29,29 @@ def test_api_photos_includes_edit_recipe(app_and_db):
     assert listed[photo["id"]]["edit_recipe"] == {"version": 1, "rotation": 90}
 
 
+def test_api_photos_marks_species_representative(app_and_db):
+    """List payloads expose representative state for card views and menus."""
+    app, db = app_and_db
+    photo = db.get_photos()[0]
+    kid = db.add_keyword("American Robin", is_species=True)
+    db.tag_photo(photo["id"], kid)
+    db.set_species_representative("American Robin", photo["id"])
+
+    client = app.test_client()
+    resp = client.get("/api/photos")
+    assert resp.status_code == 200
+    listed = {p["id"]: p for p in resp.get_json()["photos"]}
+
+    assert listed[photo["id"]]["is_species_representative"] is True
+    assert listed[photo["id"]]["life_list"] == [
+        {
+            "species": "American Robin",
+            "is_current_photo": True,
+            "is_species_representative": True,
+        }
+    ]
+
+
 def test_api_photos_pagination(app_and_db):
     """GET /api/photos supports pagination."""
     app, _ = app_and_db

@@ -3010,6 +3010,46 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             p["species"] = species_map.get(p["id"], [])
         return photo_dicts
 
+    def _attach_species_representatives(db, photo_dicts):
+        """Attach species representative state to photo dicts (in-place)."""
+        if not photo_dicts:
+            return photo_dicts
+        ids = []
+        for p in photo_dicts:
+            pid = p.get("photo_id", p.get("id"))
+            if isinstance(pid, int) and not isinstance(pid, bool):
+                ids.append(pid)
+        species_map = db.get_species_keywords_for_photos(ids)
+        # Gate representatives on current DB eligibility so a stale preference
+        # row (photo later rejected, folder removed from workspace, or species
+        # keyword untagged) doesn't light up a Representative badge on views
+        # whose photo dicts lack the `flag` column (notably /api/predictions,
+        # whose SELECT only pulls filename/timestamp from photos). The
+        # in-loop `p.get("flag") == "rejected"` shortcut still short-circuits
+        # rejected photos for views that DO include flag, so this only shifts
+        # behavior for the payloads that were previously reading raw prefs.
+        representatives = db.get_species_representatives(eligible_only=True)
+        for p in photo_dicts:
+            pid = p.get("photo_id", p.get("id"))
+            if p.get("flag") == "rejected":
+                species = []
+            else:
+                species = species_map.get(pid, [])
+            entries = [
+                {
+                    "species": s,
+                    "is_current_photo": representatives.get(s) == pid,
+                    "is_species_representative": representatives.get(s) == pid,
+                }
+                for s in species
+            ]
+            p["life_list"] = entries
+            p["species_representatives"] = entries
+            p["is_species_representative"] = any(
+                entry["is_species_representative"] for entry in entries
+            )
+        return photo_dicts
+
     def _attach_detections(db, photo_dicts):
         """Attach detection bounding boxes to a list of photo dicts (in-place).
 
@@ -3060,6 +3100,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         recipe_map = db.get_photo_edit_recipes(sorted({pid for _, pid in refs}))
         for photo, pid in refs:
             photo["edit_recipe"] = recipe_map.get(pid)
+        _attach_species_representatives(db, [photo for photo, _pid in refs])
         return payload
 
     def _request_flag_filter():
@@ -3130,6 +3171,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         photo_dicts = [dict(p) for p in photos]
         _attach_species(db, photo_dicts)
+        _attach_species_representatives(db, photo_dicts)
         _attach_detections(db, photo_dicts)
         _attach_edit_recipes(db, photo_dicts)
         collection_dicts = []
@@ -3216,6 +3258,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 f, r = flag_map.get(p["id"], ("none", 0))
                 p["flag"] = f
                 p["rating"] = r
+            # Overlay representative state onto the cached results so
+            # pipeline cards render the badge after a page reload. The
+            # cache is written before eligibility runs (and by pipeline
+            # runs that predate the badge), so is_species_representative
+            # is otherwise absent and every card renders unbadged even
+            # when the DB says the photo is the species rep. The flag
+            # overlay above is what makes this call correct — the shared
+            # attacher short-circuits rejected photos, and the overlay
+            # ensures p["flag"] reflects the live DB, not a stale cache.
+            _attach_species_representatives(db, results["photos"])
 
         effective_cfg = db.get_effective_config(cfg.load())
         pipeline_cfg = effective_cfg.get("pipeline", {})
@@ -4400,6 +4452,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         photo_dicts = [dict(p) for p in photos]
         _attach_species(db, photo_dicts)
+        _attach_species_representatives(db, photo_dicts)
         _attach_detections(db, photo_dicts)
         _attach_edit_recipes(db, photo_dicts)
 
@@ -4604,6 +4657,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if photo:
                 photos.append(dict(photo))
         _attach_species(db, photos)
+        _attach_species_representatives(db, photos)
         _attach_detections(db, photos)
         return jsonify({"photos": photos})
 
@@ -7924,6 +7978,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         total = db.count_collection_photos(collection_id)
         photo_dicts = [dict(p) for p in photos]
         _attach_species(db, photo_dicts)
+        _attach_species_representatives(db, photo_dicts)
         _attach_detections(db, photo_dicts)
         _attach_edit_recipes(db, photo_dicts)
         return jsonify(
@@ -9802,6 +9857,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Enrich predictions and attach alternatives
         results = []
         pred_dicts = [dict(p) for p in preds]
+        _attach_species_representatives(db, pred_dicts)
         recipes_by_photo = db.get_photo_edit_recipes({
             p.get("photo_id") for p in pred_dicts if p.get("photo_id") is not None
         })
@@ -10462,6 +10518,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def _attach_miss_edit_recipes(db, grouped):
         for category in ("no_subject", "clipped", "oof"):
             photos = [dict(p) for p in grouped.get(category, [])]
+            _attach_species_representatives(db, photos)
             _attach_edit_recipes(db, photos)
             grouped[category] = photos
         return grouped
@@ -10482,6 +10539,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if category not in ("no_subject", "clipped", "oof"):
                 return jsonify({"error": "invalid category"}), 400
             photos = [dict(p) for p in db.list_misses(category=category, since=since)]
+            _attach_species_representatives(db, photos)
             _attach_edit_recipes(db, photos)
             return jsonify({"photos": photos, "category": category})
         grouped = {
@@ -21131,7 +21189,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         consensus species keyword applied.
 
         Body: {photo_ids: [int], species: str}
-        Returns: {photos: {pid: {flag, has_species_keyword}}, species_kid: int|None}
+        Returns: {photos: {pid: {flag, has_species_keyword,
+                  is_species_representative}}, species_kid: int|None}
         """
         db = _get_db()
         body = request.get_json(silent=True) or {}
@@ -21155,6 +21214,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if row:
                 species_kid = row["id"]
 
+        # Gate the badge on the same eligibility rules the shared payload
+        # attachers use, so a stale preference row (photo later rejected or
+        # no longer carrying the species keyword) doesn't light up the modal
+        # while browse/highlights hide it.
+        representatives = db.get_species_representatives(eligible_only=True)
         photos = {}
         for pid in photo_ids:
             # Same workspace guard the apply endpoint uses, so a malicious
@@ -21171,6 +21235,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             photos[pid] = {
                 "flag": row["flag"] or "none",
                 "has_species_keyword": has_kw,
+                "is_species_representative": bool(
+                    species and representatives.get(species) == pid
+                ),
             }
         return jsonify({"photos": photos, "species_kid": species_kid})
 
@@ -21569,6 +21636,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     photo_dicts.append(dict(photos_map[pid]))
                     sims_by_pid[pid] = round(sim, 4)
             _attach_species(db, photo_dicts)
+            _attach_species_representatives(db, photo_dicts)
             _attach_detections(db, photo_dicts)
             _attach_edit_recipes(db, photo_dicts)
             results = [
