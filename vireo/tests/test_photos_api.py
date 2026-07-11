@@ -29,6 +29,29 @@ def test_api_photos_includes_edit_recipe(app_and_db):
     assert listed[photo["id"]]["edit_recipe"] == {"version": 1, "rotation": 90}
 
 
+def test_api_photos_marks_species_representative(app_and_db):
+    """List payloads expose representative state for card views and menus."""
+    app, db = app_and_db
+    photo = db.get_photos()[0]
+    kid = db.add_keyword("American Robin", is_species=True)
+    db.tag_photo(photo["id"], kid)
+    db.set_species_representative("American Robin", photo["id"])
+
+    client = app.test_client()
+    resp = client.get("/api/photos")
+    assert resp.status_code == 200
+    listed = {p["id"]: p for p in resp.get_json()["photos"]}
+
+    assert listed[photo["id"]]["is_species_representative"] is True
+    assert listed[photo["id"]]["life_list"] == [
+        {
+            "species": "American Robin",
+            "is_current_photo": True,
+            "is_species_representative": True,
+        }
+    ]
+
+
 def test_api_photos_pagination(app_and_db):
     """GET /api/photos supports pagination."""
     app, _ = app_and_db
@@ -5501,15 +5524,26 @@ def test_edit_math_version_migration_survives_unreadable_preview_dir(
         db3.conn.close()
 
 
-def test_external_edit_handoff_meta_includes_math_version(client_with_photo):
+def test_external_edit_handoff_meta_includes_math_version(
+    client_with_photo, monkeypatch,
+):
     """The external-editor handoff render reuses external-edits/<id>.jpg only
     when its cached metadata matches. That metadata must carry
     EDIT_MATH_VERSION so a math bump (which changes per-pixel output but not
     recipe/source/mtime) invalidates the stale hard-clipped render."""
     import json
     import os
+    import subprocess
 
     from image_edits import EDIT_MATH_VERSION
+
+    # Stub the launcher: with no editor configured this endpoint falls through
+    # to a real `open <handoff>.jpg` on macOS, which pops the render up in
+    # Preview during the test run. The handoff meta is written before launch,
+    # so a no-op launcher doesn't weaken what this test checks.
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a[0] if a else [], 0))
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: None)
 
     app, db, photo_id = client_with_photo
     client = app.test_client()

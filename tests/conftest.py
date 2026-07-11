@@ -14,6 +14,7 @@ def _disable_startup_backfill_timers(monkeypatch):
     the top-level ``tests/`` suite (which also calls ``create_app``) doesn't
     leak Timer-driven backfill jobs across tests."""
     monkeypatch.setenv("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS", "1")
+    monkeypatch.setenv("VIREO_DISABLE_BROWSER_AUTH", "1")
 
 
 @pytest.fixture(autouse=True)

@@ -306,6 +306,13 @@ SCHEMA = {
                 "macOS ships openrsync, which can't do rsync-over-SSH. "
                 "Leave empty to auto-detect.",
     },
+    "ssh_bin": {
+        "type": "path",
+        "category": "Paths", "scope": "global",
+        "label": "OpenSSH client path (remote moves)",
+        "desc": "Optional path to ssh.exe for remote import, archive, and moves. "
+                "Leave empty to auto-detect Windows OpenSSH or PATH.",
+    },
 
     # --- Integrations -----------------------------------------------------
     "inat_token": {

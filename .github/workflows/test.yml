@@ -186,9 +186,11 @@ jobs:
       # intermittent ``The runner has received a shutdown signal`` cancellation
       # rather than a test failure. ``-n 2`` halves peak memory; the canonical
       # run is a few minutes slower but well under the 60-minute job timeout.
+      # Ratcheted to the measured 2026-07-10 baseline. Raise this number when
+      # coverage improves; do not replace it with a low evergreen floor.
       - name: Run tests with coverage (Linux)
         if: needs.changes.outputs.python == 'true' && runner.os == 'Linux'
-        run: python -m pytest tests/ vireo/tests/ -n 2 -v --tb=short --timeout=120 --timeout-method=thread --cov=vireo --cov-report=term-missing --cov-fail-under=40
+        run: python -m pytest tests/ vireo/tests/ -n 2 -v --tb=short --timeout=120 --timeout-method=thread --cov=vireo --cov-report=term-missing --cov-fail-under=87
 
       # macOS/Windows verify platform-specific code paths. The coverage gate is
       # skipped here because POSIX-only tests don't run on Windows, which would
@@ -203,20 +205,28 @@ jobs:
   # require, independent of how many OS legs the matrix above runs. A matrix
   # job reports per-leg checks (``test-os (ubuntu-latest)`` …), so a bare
   # ``test`` required context would never report and would block every PR.
-  # This job collapses the matrix result into one stable ``test`` check.
+  # This job collapses every required validation into one stable ``test`` check.
   test:
-    needs: test-os
+    needs: [test-os, lint, e2e-smoke, rust, performance]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
     steps:
-      - name: Verify all OS test legs succeeded
+      - name: Verify all required checks succeeded
         run: |
-          result='${{ needs.test-os.result }}'
-          echo "test-os matrix result: $result"
-          if [ "$result" != "success" ]; then
-            echo "One or more OS test legs did not succeed."
+          failures=0
+          for check in \
+            'test-os=${{ needs.test-os.result }}' \
+            'lint=${{ needs.lint.result }}' \
+            'e2e-smoke=${{ needs.e2e-smoke.result }}' \
+            'rust=${{ needs.rust.result }}' \
+            'performance=${{ needs.performance.result }}'; do
+            echo "$check"
+            if [ "${check#*=}" != "success" ]; then failures=1; fi
+          done
+          if [ "$failures" -ne 0 ]; then
+            echo "One or more required validation jobs did not succeed."
             exit 1
           fi
 
@@ -246,6 +256,112 @@ jobs:
       - name: Run ruff check
         if: needs.changes.outputs.python == 'true'
         run: ruff check vireo/ tests/
+
+  e2e-smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    needs: changes
+    timeout-minutes: 20
+
+    steps:
+      - name: Skip browser smoke tests
+        if: needs.changes.outputs.python != 'true'
+        run: echo "No application or browser-test files changed."
+
+      - uses: actions/checkout@v4
+        if: needs.changes.outputs.python == 'true'
+
+      - name: Set up Python
+        if: needs.changes.outputs.python == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install Vireo and Chromium
+        shell: bash
+        if: needs.changes.outputs.python == 'true'
+        run: |
+          pip install -e ".[dev]"
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            python -m playwright install --with-deps chromium
+          else
+            python -m playwright install chromium
+          fi
+
+      - name: Run critical browser journeys
+        if: needs.changes.outputs.python == 'true'
+        run: >-
+          python -m pytest -o addopts='' -q
+          tests/e2e/test_navigation.py::test_navbar_links_navigate_to_import
+          tests/e2e/test_pipeline.py::test_pipeline_page_loads_with_stages
+          tests/e2e/test_review.py::test_review_page_loads_with_predictions
+          tests/e2e/test_browse_single_select.py::test_single_click_reveals_batch_bar
+          tests/e2e/test_browse_lightbox.py::test_browse_lightbox_arrows_navigate
+          tests/e2e/test_settings.py::test_settings_system_info_renders
+          tests/e2e/test_browser_security.py::test_browser_transport_authenticates_internal_mutations
+
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    needs: changes
+    timeout-minutes: 20
+
+    steps:
+      - name: Skip Rust checks
+        if: needs.changes.outputs.build != 'true'
+        run: echo "No Tauri or build files changed."
+
+      - uses: actions/checkout@v4
+        if: needs.changes.outputs.build == 'true'
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: needs.changes.outputs.build == 'true'
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        if: needs.changes.outputs.build == 'true'
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+
+      - name: Lint Rust
+        if: needs.changes.outputs.build == 'true'
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Run Rust tests
+        if: needs.changes.outputs.build == 'true'
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+  performance:
+    runs-on: ubuntu-latest
+    needs: changes
+    timeout-minutes: 15
+
+    steps:
+      - name: Skip performance budgets
+        if: needs.changes.outputs.python != 'true'
+        run: echo "No application files changed."
+
+      - uses: actions/checkout@v4
+        if: needs.changes.outputs.python == 'true'
+
+      - uses: actions/setup-python@v5
+        if: needs.changes.outputs.python == 'true'
+        with:
+          python-version: "3.14"
+
+      - name: Install Vireo
+        if: needs.changes.outputs.python == 'true'
+        run: pip install -e .
+
+      - name: Enforce 100,000-photo interactive budgets
+        if: needs.changes.outputs.python == 'true'
+        run: python scripts/benchmark_library.py --photos 100000 --enforce
 
   website:
     runs-on: ubuntu-latest

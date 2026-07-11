@@ -1,11 +1,13 @@
 mod config;
 mod menu;
+mod navigation;
 mod sidecar;
 mod tray;
 mod updater;
 use sidecar::{SidecarStartError, SidecarState};
-use tauri::{Manager, RunEvent};
+use tauri::webview::NewWindowResponse;
 use tauri::window::{ProgressBarState, ProgressBarStatus};
+use tauri::{Manager, RunEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 
@@ -95,15 +97,7 @@ fn set_job_progress(
 
 #[tauri::command]
 fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
-    let url = url.trim();
-    let lower = url.to_ascii_lowercase();
-    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
-        return Err("Only http and https URLs can be opened externally".to_string());
-    }
-
-    app.opener()
-        .open_url(url, None::<&str>)
-        .map_err(|e| e.to_string())
+    navigation::open_external_url(&app, &url)
 }
 
 /// Build the logging plugin used in BOTH dev and release builds.
@@ -143,6 +137,30 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            // Build the main window ourselves so the native shell, rather than
+            // scattered page JavaScript, owns the external-navigation policy.
+            // `create: false` in tauri.conf.json prevents Tauri from building
+            // this same config before setup runs.
+            let main_config = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|config| config.label == "main")
+                .ok_or("main window configuration is missing")?
+                .clone();
+            let navigation_app = app.handle().clone();
+            let popup_app = app.handle().clone();
+            tauri::WebviewWindowBuilder::from_config(app.handle(), &main_config)?
+                .on_navigation(move |url| {
+                    navigation::handle_navigation(&navigation_app, url)
+                })
+                .on_new_window(move |url, _features| {
+                    navigation::handle_new_window(&popup_app, &url);
+                    NewWindowResponse::Deny
+                })
+                .build()?;
+
             // Read the user's launch-time config (~/.vireo/config.json).
             // Failures fall back to defaults — see config::load_launch_config.
             let launch_cfg = config::load_launch_config();
@@ -185,11 +203,16 @@ pub fn run() {
                             "Vireo: Incompatible database at {}: {}",
                             db_path, reason
                         );
+                        let log_dir = app
+                            .path()
+                            .app_log_dir()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|_| "the Vireo application log directory".into());
                         app.handle()
                             .dialog()
                             .message(format!(
-                                "Vireo can't open the database at:\n\n{}\n\nIt's from an incompatible older version of Vireo. To start fresh, move this file aside (for example, rename it with a `.bak` suffix) and relaunch.\n\nDetails: {}",
-                                db_path, reason
+                                "Vireo can't open the database at:\n\n{}\n\nIt's from an incompatible older version of Vireo. To start fresh, move this file aside (for example, rename it with a `.bak` suffix) and relaunch.\n\nDetails: {}\n\nLogs: {}",
+                                db_path, reason, log_dir
                             ))
                             .title("Incompatible Vireo Database")
                             .kind(MessageDialogKind::Error)
@@ -203,13 +226,18 @@ pub fn run() {
                         // into a blank window — the user otherwise has no idea
                         // why Vireo didn't open.
                         let reason = e.to_string();
+                        let log_dir = app
+                            .path()
+                            .app_log_dir()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|_| "the Vireo application log directory".into());
                         log::error!("Failed to start sidecar: {}", reason);
                         eprintln!("Vireo: Failed to start Python backend: {}", reason);
                         app.handle()
                             .dialog()
                             .message(format!(
-                                "Vireo couldn't start its backend.\n\nDetails: {}\n\nTry relaunching. If the problem persists, check Vireo's log file for more information.",
-                                reason
+                                "Vireo couldn't start its backend.\n\nDetails: {}\n\nTry relaunching. If the problem persists, check the logs at:\n{}",
+                                reason, log_dir
                             ))
                             .title("Vireo Couldn't Start")
                             .kind(MessageDialogKind::Error)
@@ -223,8 +251,10 @@ pub fn run() {
             let menu = menu::build_menu(app.handle())?;
             app.set_menu(menu)?;
 
-            let port = app.state::<SidecarState>().port;
-            tray::create_tray(app.handle(), port, browser_mode)?;
+            let sidecar = app.state::<SidecarState>();
+            let port = sidecar.port;
+            let token = sidecar.token.clone();
+            tray::create_tray(app.handle(), port, token, browser_mode)?;
 
             // The main window is created with `visible: false` (see
             // tauri.conf.json) so we can decide here whether to show it
@@ -260,15 +290,12 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            match event {
-                tauri::WindowEvent::CloseRequested { api, .. } => {
-                    if window.label() == "main" {
-                        // Don't close — just hide the window (minimize to tray)
-                        api.prevent_close();
-                        let _ = window.hide();
-                    }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    // Don't close — just hide the window (minimize to tray)
+                    api.prevent_close();
+                    let _ = window.hide();
                 }
-                _ => {}
             }
         })
         .on_menu_event(|app, event| {

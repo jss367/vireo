@@ -112,6 +112,7 @@ def test_keyboard_shortcut_defaults_include_rapid_review():
     assert shortcuts["pipeline_rapid_review"]["reject"] == "x"
     assert shortcuts["pipeline_rapid_review"]["zoom"] == "z"
     assert shortcuts["browse"]["compare"] == "c"
+    assert shortcuts["browse"]["toggle_ui"] == "h"
 
 
 def test_working_copy_defaults(tmp_path, monkeypatch):
@@ -584,6 +585,133 @@ def test_migrate_legacy_miss_thresholds_rewrites_workspace_overrides(
     )
     assert custom_overrides["pipeline"]["miss_det_confidence"] == 0.30
     assert custom_overrides["pipeline"]["miss_det_confidence_burst"] == 0.18
+
+
+def test_migrate_toggle_ui_h_conflict_blanks_when_h_taken(tmp_path, monkeypatch):
+    """A user upgrading with `browse.flag` already bound to `h` gets
+    `browse.toggle_ui` blanked to `""` so the newly added default doesn't
+    silently steal their existing binding."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {
+        "keyboard_shortcuts": {
+            "browse": {
+                "flag": "h",
+                "reject": "x",
+            },
+        },
+    })
+
+    assert cfg.migrate_toggle_ui_h_conflict() is True
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["keyboard_shortcuts"]["browse"]["toggle_ui"] == ""
+    assert raw["keyboard_shortcuts"]["browse"]["flag"] == "h"
+    assert cfg.MIGRATION_TOGGLE_UI_H_CONFLICT in raw["_migrations_applied"]
+
+
+def test_migrate_toggle_ui_h_conflict_case_insensitive(tmp_path, monkeypatch):
+    """A saved config that spells the key `H` still triggers the conflict —
+    `matchesShortcut` lower-cases the event key, so the collision is real."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {
+        "keyboard_shortcuts": {
+            "browse": {
+                "unflag": "H",
+            },
+        },
+    })
+
+    assert cfg.migrate_toggle_ui_h_conflict() is True
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["keyboard_shortcuts"]["browse"]["toggle_ui"] == ""
+
+
+def test_migrate_toggle_ui_h_conflict_no_conflict_leaves_defaults(
+    tmp_path, monkeypatch
+):
+    """No user binding uses `h` — nothing to rewrite. The default merged in
+    from DEFAULTS stays as `h`."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {
+        "keyboard_shortcuts": {
+            "browse": {
+                "flag": "p",
+                "reject": "x",
+            },
+        },
+    })
+
+    assert cfg.migrate_toggle_ui_h_conflict() is False
+    raw = _read_raw(cfg.CONFIG_PATH)
+    # Only the migration marker was added — no toggle_ui override written.
+    assert "toggle_ui" not in raw["keyboard_shortcuts"]["browse"]
+    assert cfg.MIGRATION_TOGGLE_UI_H_CONFLICT in raw["_migrations_applied"]
+    # And the effective config still fills in the DEFAULTS binding.
+    assert cfg.load()["keyboard_shortcuts"]["browse"]["toggle_ui"] == "h"
+
+
+def test_migrate_toggle_ui_h_conflict_preserves_explicit_user_setting(
+    tmp_path, monkeypatch
+):
+    """A user who already set `browse.toggle_ui` explicitly (even to `h`) is
+    left alone — the migration only fills the gap when no explicit choice
+    exists, so it never overrides a deliberate binding."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {
+        "keyboard_shortcuts": {
+            "browse": {
+                "flag": "h",
+                "toggle_ui": "h",
+            },
+        },
+    })
+
+    assert cfg.migrate_toggle_ui_h_conflict() is False
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["keyboard_shortcuts"]["browse"]["toggle_ui"] == "h"
+
+
+def test_migrate_toggle_ui_h_conflict_is_one_time(tmp_path, monkeypatch):
+    """Once the marker is set, a later re-conflict (e.g. user rebinds another
+    action to `h` and clears their `toggle_ui`) is NOT touched — respecting
+    the user's explicit choice on subsequent boots."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {
+        "keyboard_shortcuts": {
+            "browse": {
+                "flag": "h",
+            },
+        },
+    })
+    assert cfg.migrate_toggle_ui_h_conflict() is True
+
+    # User later reverts their toggle_ui override (by removing it from disk)
+    # and picks another binding for `h` — a second migration run must not
+    # silently rewrite anything.
+    raw = _read_raw(cfg.CONFIG_PATH)
+    raw["keyboard_shortcuts"]["browse"].pop("toggle_ui", None)
+    raw["keyboard_shortcuts"]["browse"]["unflag"] = "h"
+    _write_raw(cfg.CONFIG_PATH, raw)
+
+    assert cfg.migrate_toggle_ui_h_conflict() is False
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert "toggle_ui" not in raw["keyboard_shortcuts"]["browse"]
+    assert raw["keyboard_shortcuts"]["browse"]["unflag"] == "h"
+
+
+def test_migrate_toggle_ui_h_conflict_no_config_file(tmp_path, monkeypatch):
+    """Fresh install with no config.json — nothing to rewrite; only the
+    marker gets stamped so future boots skip the check."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    assert cfg.migrate_toggle_ui_h_conflict() is False
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert cfg.MIGRATION_TOGGLE_UI_H_CONFLICT in raw["_migrations_applied"]
 
 
 def test_default_subject_types_includes_taxonomy_individual_genre(tmp_path, monkeypatch):

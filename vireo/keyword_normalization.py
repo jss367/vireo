@@ -32,6 +32,7 @@ _ASCII_LOWER_TABLE = str.maketrans(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
     "abcdefghijklmnopqrstuvwxyz",
 )
+_INTERNAL_ACUTE_SENTINEL = "\ue000"
 
 
 def normalize_keyword_display(name: str) -> str:
@@ -53,7 +54,12 @@ def normalize_keyword_display(name: str) -> str:
     # normalize to `́apapane`, an invisible variant that survives the
     # post-NFKC strip below because U+0301 is not in _EDGE_QUOTES.
     value = value.strip(_EDGE_QUOTES)
+    # Any U+00B4 ACUTE ACCENT left after edge stripping is internal
+    # punctuation. Protect it from NFKC, which would otherwise decompose it
+    # to a spacing combining mark sequence and corrupt names like O´Brien.
+    value = value.replace("\u00b4", _INTERNAL_ACUTE_SENTINEL)
     value = unicodedata.normalize("NFKC", value)
+    value = value.replace(_INTERNAL_ACUTE_SENTINEL, "\u00b4")
     value = "".join(" " if ch.isspace() else ch for ch in value)
     value = re.sub(r" +", " ", value).strip()
     value = value.strip(_EDGE_QUOTES)

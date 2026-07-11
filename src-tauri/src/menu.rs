@@ -1,5 +1,7 @@
 use tauri::{
-    menu::{AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder},
+    menu::{
+        AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder,
+    },
     AppHandle,
 };
 
@@ -177,7 +179,8 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
     // -- macOS app submenu --
     #[cfg(target_os = "macos")]
     let app_menu = {
-        let about = PredefinedMenuItem::about(app, Some("About Vireo"), Some(build_about_metadata()))?;
+        let about =
+            PredefinedMenuItem::about(app, Some("About Vireo"), Some(build_about_metadata()))?;
         let settings_item = MenuItemBuilder::with_id(ids::NAV_SETTINGS, "Settings...")
             .accelerator("CmdOrCtrl+,")
             .build(app)?;
@@ -204,10 +207,7 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
                 .accelerator("CmdOrCtrl+Shift+N")
                 .build(app)?,
         )
-        .item(
-            &MenuItemBuilder::with_id(ids::FILE_OPEN_WORKSPACE, "Open Workspace...")
-                .build(app)?,
-        )
+        .item(&MenuItemBuilder::with_id(ids::FILE_OPEN_WORKSPACE, "Open Workspace...").build(app)?)
         .separator()
         .item(
             &MenuItemBuilder::with_id(ids::FILE_IMPORT_PHOTOS, "Import Photos...")
@@ -264,10 +264,7 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
                 .accelerator("CmdOrCtrl+4")
                 .build(app)?,
         )
-        .item(
-            &MenuItemBuilder::with_id(ids::NAV_PIPELINE_RAPID_REVIEW, "Rapid Review")
-                .build(app)?,
-        )
+        .item(&MenuItemBuilder::with_id(ids::NAV_PIPELINE_RAPID_REVIEW, "Rapid Review").build(app)?)
         .item(
             &MenuItemBuilder::with_id(ids::NAV_REVIEW, "Review")
                 .accelerator("CmdOrCtrl+5")
@@ -278,14 +275,8 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
                 .accelerator("CmdOrCtrl+6")
                 .build(app)?,
         )
-        .item(
-            &MenuItemBuilder::with_id(ids::NAV_MISSES, "Misses")
-                .build(app)?,
-        )
-        .item(
-            &MenuItemBuilder::with_id(ids::NAV_HIGHLIGHTS, "Highlights")
-                .build(app)?,
-        )
+        .item(&MenuItemBuilder::with_id(ids::NAV_MISSES, "Misses").build(app)?)
+        .item(&MenuItemBuilder::with_id(ids::NAV_HIGHLIGHTS, "Highlights").build(app)?)
         .separator()
         .item(
             &MenuItemBuilder::with_id(ids::NAV_MAP, "Map")
@@ -307,10 +298,7 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
                 .accelerator("CmdOrCtrl+0")
                 .build(app)?,
         )
-        .item(
-            &MenuItemBuilder::with_id(ids::NAV_DUPLICATES, "Duplicates")
-                .build(app)?,
-        )
+        .item(&MenuItemBuilder::with_id(ids::NAV_DUPLICATES, "Duplicates").build(app)?)
         .separator()
         .item(
             &MenuItemBuilder::with_id(ids::NAV_JOBS, "Jobs")
@@ -332,14 +320,8 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
                 .accelerator("CmdOrCtrl+Shift+L")
                 .build(app)?,
         )
-        .item(
-            &MenuItemBuilder::with_id(ids::NAV_SHORTCUTS, "Shortcuts")
-                .build(app)?,
-        )
-        .item(
-            &MenuItemBuilder::with_id(ids::NAV_LIGHTROOM, "Lightroom")
-                .build(app)?,
-        );
+        .item(&MenuItemBuilder::with_id(ids::NAV_SHORTCUTS, "Shortcuts").build(app)?)
+        .item(&MenuItemBuilder::with_id(ids::NAV_LIGHTROOM, "Lightroom").build(app)?);
 
     // Settings in View menu only on non-macOS (it is in the app submenu on macOS)
     #[cfg(not(target_os = "macos"))]
@@ -374,18 +356,9 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
 
     // -- Photo menu --
     let photo_menu = SubmenuBuilder::new(app, "Photo")
-        .item(
-            &MenuItemBuilder::with_id(ids::PHOTO_OPEN_LIGHTBOX, "Open in Lightbox")
-                .build(app)?,
-        )
-        .item(
-            &MenuItemBuilder::with_id(ids::PHOTO_OPEN_BROWSE, "Open in Browse")
-                .build(app)?,
-        )
-        .item(
-            &MenuItemBuilder::with_id(ids::PHOTO_REVEAL, reveal_label)
-                .build(app)?,
-        )
+        .item(&MenuItemBuilder::with_id(ids::PHOTO_OPEN_LIGHTBOX, "Open in Lightbox").build(app)?)
+        .item(&MenuItemBuilder::with_id(ids::PHOTO_OPEN_BROWSE, "Open in Browse").build(app)?)
+        .item(&MenuItemBuilder::with_id(ids::PHOTO_REVEAL, reveal_label).build(app)?)
         .item(
             &MenuItemBuilder::with_id(ids::PHOTO_OPEN_EDITOR, "Open in External Editor")
                 .accelerator("CmdOrCtrl+Shift+E")
@@ -402,15 +375,9 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
                 .accelerator("CmdOrCtrl+F")
                 .build(app)?,
         )
-        .item(
-            &MenuItemBuilder::with_id(ids::PHOTO_COMPARE, "Compare Selected")
-                .build(app)?,
-        )
+        .item(&MenuItemBuilder::with_id(ids::PHOTO_COMPARE, "Compare Selected").build(app)?)
         .separator()
-        .item(
-            &MenuItemBuilder::with_id(ids::PHOTO_ADD_KEYWORD, "Add Keyword...")
-                .build(app)?,
-        )
+        .item(&MenuItemBuilder::with_id(ids::PHOTO_ADD_KEYWORD, "Add Keyword...").build(app)?)
         .item(
             &MenuItemBuilder::with_id(ids::PHOTO_ADD_COLLECTION, "Add to Collection...")
                 .build(app)?,
@@ -431,37 +398,25 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
         .item(&MenuItemBuilder::with_id(ids::PHOTO_FLAG_REJECT, "Reject Photo").build(app)?)
         .item(&MenuItemBuilder::with_id(ids::PHOTO_FLAG_CLEAR, "Clear Flag").build(app)?)
         .separator()
-        .item(
-            &MenuItemBuilder::with_id(ids::PHOTO_DELETE, "Delete Selected")
-                .build(app)?,
-        )
+        .item(&MenuItemBuilder::with_id(ids::PHOTO_DELETE, "Delete Selected").build(app)?)
         .build()?;
 
     // -- Review menu --
     let review_menu = SubmenuBuilder::new(app, "Review")
-        .item(
-            &MenuItemBuilder::with_id(ids::REVIEW_ACCEPT, "Accept Prediction")
-                .build(app)?,
-        )
-        .item(
-            &MenuItemBuilder::with_id(ids::REVIEW_REJECT, "Reject Prediction")
-                .build(app)?,
-        )
+        .item(&MenuItemBuilder::with_id(ids::REVIEW_ACCEPT, "Accept Prediction").build(app)?)
+        .item(&MenuItemBuilder::with_id(ids::REVIEW_REJECT, "Reject Prediction").build(app)?)
         .item(&MenuItemBuilder::with_id(ids::REVIEW_ACCEPT_ALL, "Accept All Pending").build(app)?)
         .separator()
-        .item(
-            &MenuItemBuilder::with_id(ids::REVIEW_PREVIOUS, "Previous Photo")
-                .build(app)?,
-        )
-        .item(
-            &MenuItemBuilder::with_id(ids::REVIEW_NEXT, "Next Photo")
-                .build(app)?,
-        )
+        .item(&MenuItemBuilder::with_id(ids::REVIEW_PREVIOUS, "Previous Photo").build(app)?)
+        .item(&MenuItemBuilder::with_id(ids::REVIEW_NEXT, "Next Photo").build(app)?)
         .separator()
         .item(&MenuItemBuilder::with_id(ids::REVIEW_MARK_WILDLIFE, "Mark as Wildlife").build(app)?)
         .item(
-            &MenuItemBuilder::with_id(ids::REVIEW_EXCLUDE_WILDLIFE, "Exclude from Wildlife Classification")
-                .build(app)?,
+            &MenuItemBuilder::with_id(
+                ids::REVIEW_EXCLUDE_WILDLIFE,
+                "Exclude from Wildlife Classification",
+            )
+            .build(app)?,
         )
         .build()?;
 
@@ -472,12 +427,18 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
                 .accelerator("CmdOrCtrl+Return")
                 .build(app)?,
         )
-        .item(&MenuItemBuilder::with_id(ids::TOOLS_REVIEW_PIPELINE, "Review Pipeline Results").build(app)?)
+        .item(
+            &MenuItemBuilder::with_id(ids::TOOLS_REVIEW_PIPELINE, "Review Pipeline Results")
+                .build(app)?,
+        )
         .separator()
         .item(&MenuItemBuilder::with_id(ids::TOOLS_SCAN_LIBRARY, "Scan Library...").build(app)?)
         .item(&MenuItemBuilder::with_id(ids::TOOLS_RESCAN, "Rescan Folders...").build(app)?)
         .item(&MenuItemBuilder::with_id(ids::TOOLS_FIND_DUPLICATES, "Find Duplicates").build(app)?)
-        .item(&MenuItemBuilder::with_id(ids::TOOLS_BUILD_PREVIEWS, "Build/Refresh Previews").build(app)?)
+        .item(
+            &MenuItemBuilder::with_id(ids::TOOLS_BUILD_PREVIEWS, "Build/Refresh Previews")
+                .build(app)?,
+        )
         .separator()
         .item(&MenuItemBuilder::with_id(ids::TOOLS_SYNC_METADATA, "Write XMP Metadata").build(app)?)
         .item(&MenuItemBuilder::with_id(ids::TOOLS_VERIFY_MODELS, "Verify Models").build(app)?)
@@ -486,9 +447,8 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
         .build()?;
 
     // -- Window menu --
-    let mut window_builder = SubmenuBuilder::new(app, "Window")
-        .minimize()
-        .maximize();
+    #[allow(unused_mut)]
+    let mut window_builder = SubmenuBuilder::new(app, "Window").minimize().maximize();
 
     #[cfg(target_os = "macos")]
     {
@@ -501,19 +461,18 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
     #[allow(unused_mut)]
     let mut help_builder = SubmenuBuilder::new(app, "Help");
 
-    let keyboard_shortcuts = MenuItemBuilder::with_id(ids::HELP_KEYBOARD_SHORTCUTS, "Keyboard Shortcuts")
-        .build(app)?;
+    let keyboard_shortcuts =
+        MenuItemBuilder::with_id(ids::HELP_KEYBOARD_SHORTCUTS, "Keyboard Shortcuts").build(app)?;
     let open_help = MenuItemBuilder::with_id(ids::HELP_OPEN_HELP, "Vireo Help")
         .accelerator("F1")
         .build(app)?;
-    let open_logs = MenuItemBuilder::with_id(ids::HELP_OPEN_LOGS, "Open Logs")
-        .build(app)?;
-    let copy_diagnostics = MenuItemBuilder::with_id(ids::HELP_COPY_DIAGNOSTICS, "Copy Diagnostics")
-        .build(app)?;
-    let check_updates = MenuItemBuilder::with_id(ids::CHECK_FOR_UPDATES, "Check for Updates...")
-        .build(app)?;
-    let report_issue = MenuItemBuilder::with_id(ids::REPORT_ISSUE, "Report an Issue...")
-        .build(app)?;
+    let open_logs = MenuItemBuilder::with_id(ids::HELP_OPEN_LOGS, "Open Logs").build(app)?;
+    let copy_diagnostics =
+        MenuItemBuilder::with_id(ids::HELP_COPY_DIAGNOSTICS, "Copy Diagnostics").build(app)?;
+    let check_updates =
+        MenuItemBuilder::with_id(ids::CHECK_FOR_UPDATES, "Check for Updates...").build(app)?;
+    let report_issue =
+        MenuItemBuilder::with_id(ids::REPORT_ISSUE, "Report an Issue...").build(app)?;
     help_builder = help_builder
         .item(&keyboard_shortcuts)
         .item(&open_help)
@@ -527,13 +486,15 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
 
     #[cfg(not(target_os = "macos"))]
     {
-        let about = PredefinedMenuItem::about(app, Some("About Vireo"), Some(build_about_metadata()))?;
+        let about =
+            PredefinedMenuItem::about(app, Some("About Vireo"), Some(build_about_metadata()))?;
         help_builder = help_builder.separator().item(&about);
     }
 
     let help_menu = help_builder.build()?;
 
     // -- Assemble --
+    #[allow(unused_mut)]
     let mut builder = MenuBuilder::new(app);
 
     #[cfg(target_os = "macos")]

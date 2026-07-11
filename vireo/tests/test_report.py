@@ -1,5 +1,7 @@
 """Tests for the issue-reporting endpoint."""
 
+import json
+import logging
 import os
 import sys
 
@@ -121,6 +123,33 @@ class TestReportIssue:
         assert config_in_report.get("inat_token") == "[REDACTED]"
         # Non-sensitive values should not be redacted
         assert config_in_report.get("classification_threshold") == current["classification_threshold"]
+
+    def test_catalog_paths_are_redacted_without_destroying_log_shape(self, app_and_db):
+        """Diagnostics preserve structured logs but never include photo roots."""
+        import config as cfg
+
+        app, _db = app_and_db
+        current = cfg.load()
+        current["scan_roots"] = ["/photos/2024"]
+        current["darktable_bin"] = "/Applications/darktable-cli"
+        current["report_url"] = ""
+        cfg.save(current)
+        app._log_broadcaster.emit(logging.LogRecord(
+            "vireo.test", logging.INFO, __file__, 1,
+            "Scanning /photos/2024/bird1.jpg", (), None,
+        ))
+
+        with app.test_client() as client:
+            response = client.post(
+                "/api/report-issue", json={"description": "path redaction"}
+            )
+        diagnostics = response.get_json()["diagnostics"]
+        serialized = json.dumps(diagnostics)
+
+        assert "/photos/2024" not in serialized
+        assert "[PHOTO_PATH]" in serialized
+        assert isinstance(diagnostics["logs"][-1], dict)
+        assert diagnostics["config"]["scan_roots"] == "[REDACTED_PATH]"
 
     def test_report_with_bad_url_returns_download_fallback(self, client):
         """If the report URL is unreachable, fall back to download."""

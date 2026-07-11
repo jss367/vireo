@@ -93,10 +93,10 @@ async function pickFile(opts) {
 /**
  * Open an external URL in the user's default browser.
  *
- * Inside the Tauri desktop webview a bare `window.open(url, '_blank')` is
- * silently dropped — no tab opens and no error fires — so external links must
- * be routed through the opener plugin instead. In a normal browser we fall
- * back to window.open (which also lets us detect a popup blocker).
+ * The native shell enforces the same rule independently: an external page can
+ * never replace the Vireo document or create another Vireo webview. This
+ * helper is the user-facing path because it can report opener failures and
+ * provide Retry/Copy recovery. In browser mode it opens a new tab only.
  *
  * @param {string} url - The http(s) URL to open
  * @returns {Promise<boolean>} true if the open was dispatched successfully
@@ -112,24 +112,12 @@ async function openExternal(url) {
       logInfo('openExternal: opened ' + url);
       return true;
     } catch (e) {
-      logWarn('openExternal command failed for ' + url + ': ' + (e && e.message ? e.message : e));
-      try {
-        await window.__TAURI_INTERNALS__.invoke('plugin:opener|open_url', { url: url, with: null });
-        logInfo('openExternal: opened ' + url + ' via opener plugin fallback');
-        return true;
-      } catch (fallbackError) {
-        // Surface the *real* opener error (e.g. ForbiddenUrl from a missing
-        // capability scope) to the log file so this stops being a silent no-op.
-        logError('openExternal failed for ' + url + ': ' + (fallbackError && fallbackError.message ? fallbackError.message : fallbackError));
-        return false;
-      }
+      logError('openExternal failed for ' + url + ': ' + (e && e.message ? e.message : e));
+      return false;
     }
   }
-  // Browser fallback. We deliberately omit the 'noopener' window feature: with
-  // it, window.open returns null even on a *successful* open (MDN), which would
-  // make us report a false "could not open". Instead open about:blank first so
-  // we can null the opener same-origin, then navigate — this keeps popup-block
-  // detection (a real null return) and still prevents reverse-tabnabbing.
+  // Browser mode never replaces the Vireo tab. Open a detectable blank tab,
+  // sever its opener, and navigate it only after we know it was not blocked.
   var win = window.open('about:blank', '_blank');
   if (!win) {
     logWarn('openExternal: window.open was blocked (popup blocker?) for ' + url);
@@ -139,6 +127,106 @@ async function openExternal(url) {
   win.location = url;
   return true;
 }
+
+function _ensureExternalOpenModal() {
+  var modal = document.getElementById('externalOpenModal');
+  if (modal) return modal;
+  modal = document.createElement('div');
+  modal.id = 'externalOpenModal';
+  modal.setAttribute('role', 'dialog');
+  modal.setAttribute('aria-modal', 'true');
+  modal.setAttribute('aria-labelledby', 'externalOpenModalTitle');
+  modal.style.cssText = 'display:none;position:fixed;inset:0;z-index:20000;background:rgba(0,0,0,.72);align-items:center;justify-content:center;padding:24px;';
+  modal.innerHTML =
+    '<div style="width:min(620px,100%);background:var(--bg-secondary,#20252b);border:1px solid var(--border-primary,#46515b);border-radius:8px;padding:20px;box-shadow:0 16px 50px rgba(0,0,0,.45);">' +
+      '<h3 id="externalOpenModalTitle" style="margin:0 0 10px;color:var(--text-primary,#fff);">Could not open your browser</h3>' +
+      '<p id="externalOpenModalMessage" style="margin:0 0 12px;color:var(--text-secondary,#c7ced4);line-height:1.45;">Vireo stayed on this page. Retry or copy the URL below.</p>' +
+      '<input id="externalOpenModalUrl" readonly style="box-sizing:border-box;width:100%;padding:9px 10px;background:var(--bg-primary,#15191d);color:var(--text-primary,#fff);border:1px solid var(--border-primary,#46515b);border-radius:4px;" />' +
+      '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;">' +
+        '<button type="button" id="externalOpenCloseBtn" class="modal-btn modal-btn-cancel">Close</button>' +
+        '<button type="button" id="externalOpenCopyBtn" class="modal-btn">Copy URL</button>' +
+        '<button type="button" id="externalOpenRetryBtn" class="modal-btn modal-btn-primary">Retry</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(modal);
+  modal.querySelector('#externalOpenCloseBtn').addEventListener('click', closeExternalOpenFailure);
+  modal.querySelector('#externalOpenCopyBtn').addEventListener('click', function() {
+    copyExternalUrl(document.getElementById('externalOpenModalUrl').value);
+  });
+  modal.querySelector('#externalOpenRetryBtn').addEventListener('click', async function() {
+    var url = document.getElementById('externalOpenModalUrl').value;
+    if (await openExternal(url)) {
+      closeExternalOpenFailure();
+      if (typeof showToast === 'function') showToast('Opened in your browser.', 'success');
+    }
+  });
+  return modal;
+}
+
+function showExternalOpenFailure(url, message) {
+  var modal = _ensureExternalOpenModal();
+  document.getElementById('externalOpenModalUrl').value = url || '';
+  document.getElementById('externalOpenModalMessage').textContent = message || 'Vireo stayed on this page. Retry or copy the URL below.';
+  modal.style.display = 'flex';
+  document.getElementById('externalOpenRetryBtn').focus();
+}
+
+function closeExternalOpenFailure() {
+  var modal = document.getElementById('externalOpenModal');
+  if (modal) modal.style.display = 'none';
+}
+
+async function copyExternalUrl(url) {
+  var copied = false;
+  try {
+    await navigator.clipboard.writeText(url);
+    copied = true;
+  } catch (e) {
+    // Always use a fresh throwaway textarea so non-modal callers (e.g. iNat
+    // batch Copy URL buttons) never end up selecting a stale value left in
+    // #externalOpenModalUrl from an earlier failure modal.
+    var temp = document.createElement('textarea');
+    temp.value = url;
+    temp.setAttribute('readonly', '');
+    temp.style.cssText = 'position:fixed;left:-9999px;top:0;';
+    document.body.appendChild(temp);
+    temp.focus();
+    temp.select();
+    try { copied = document.execCommand('copy'); } catch (copyError) {}
+    temp.remove();
+  }
+  if (typeof showToast === 'function') {
+    showToast(copied ? 'URL copied.' : 'Select and copy the URL shown.', copied ? 'success' : 'warning');
+  }
+  return copied;
+}
+
+async function openExternalWithRecovery(url, message) {
+  var opened = await openExternal(url);
+  if (!opened) showExternalOpenFailure(url, message);
+  return opened;
+}
+
+function _isExternalHttpUrl(rawUrl) {
+  try {
+    var parsed = new URL(rawUrl, window.location.href);
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && parsed.origin !== window.location.origin;
+  } catch (e) {
+    return false;
+  }
+}
+
+// Catch every ordinary external anchor, including future links that forget to
+// opt into a special onclick handler. Existing explicit handlers run first and
+// preventDefault(), so this delegated fallback never opens a URL twice.
+document.addEventListener('click', function(event) {
+  if (event.defaultPrevented || event.button !== 0) return;
+  var target = event.target;
+  var anchor = target && target.closest ? target.closest('a[href]') : null;
+  if (!anchor || !_isExternalHttpUrl(anchor.href)) return;
+  event.preventDefault();
+  openExternalWithRecovery(anchor.href);
+});
 
 /**
  * Check for an available update via the Rust command.

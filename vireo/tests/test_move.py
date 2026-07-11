@@ -2505,21 +2505,25 @@ def test_rsync_streamed_runs_as_long_as_it_progresses(monkeypatch):
     import move as move_mod
 
     def _fake_popen(*_a, **_k):
-        # 8 files, one every 0.1s = 0.8s total — well past the 0.3s stall
-        # window, but never idle for 0.3s, so the watchdog must not fire.
-        return _FakeProc(_StreamingStdout(n=8, gap=0.1))
+        # 12 files, one every 0.1s = 1.2s total — comfortably past the
+        # 1.0s stall window, so the runtime exceeds it and the watchdog
+        # would fire if progress didn't reset the clock. The 10x gap of
+        # per-file jitter margin (0.1s emit vs 1.0s window) keeps the
+        # test robust against CI runner scheduling stalls that pushed
+        # the previous 0.1s-vs-0.3s spacing over the edge on macOS.
+        return _FakeProc(_StreamingStdout(n=12, gap=0.1))
 
     monkeypatch.setattr(move_mod.subprocess, "Popen", _fake_popen)
 
     seen = []
     rc, stderr, timed_out = move_mod._run_rsync_streamed(
-        "/src", "/dst", ["--ignore-existing"], 8,
+        "/src", "/dst", ["--ignore-existing"], 12,
         lambda cur, tot, name, phase: seen.append(name),
-        stall_timeout=0.3,
+        stall_timeout=1.0,
     )
     assert timed_out is False
     assert rc == 0
-    assert len(seen) == 8  # progress reported for every transferred file
+    assert len(seen) == 12  # progress reported for every transferred file
 
 
 @pytest.mark.skipif(not hasattr(os, "openpty"), reason="pty is POSIX-only")

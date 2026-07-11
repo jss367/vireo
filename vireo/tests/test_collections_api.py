@@ -118,6 +118,23 @@ def test_browse_init_marks_manual_photo_targets(app_and_db):
     assert by_name["Smart"]["can_add_photos"] is False
 
 
+def test_browse_init_honors_folder_filter(app_and_db):
+    """Deep-linked Browse loads the target folder's first page, not global page 1."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    january = db.conn.execute(
+        "SELECT id FROM folders WHERE name = 'January'"
+    ).fetchone()["id"]
+
+    resp = client.get(f"/api/browse/init?folder_id={january}&per_page=10")
+    assert resp.status_code == 200
+    data = resp.get_json()
+
+    assert data["total"] == 1
+    assert [p["filename"] for p in data["photos"]] == ["bird2.jpg"]
+
+
 def test_collection_photo_ids_returns_all_matching_ids(app_and_db):
     """Collection select-all support returns all matching IDs without pagination."""
     app, db = app_and_db

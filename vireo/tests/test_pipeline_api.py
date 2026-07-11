@@ -2830,6 +2830,70 @@ def test_pipeline_accepts_source_snapshot_id(setup, tmp_path):
         pipeline_job.run_pipeline_job = original
 
 
+def test_pipeline_endpoint_forwards_missing_originals_invalidator(
+    setup, tmp_path,
+):
+    """POST /api/jobs/pipeline must pass the app-level Missing Originals
+    invalidator through to run_pipeline_job.
+
+    Regression: without this callback the pipeline's finally block only
+    invalidates the new-images cache, so a ready GET /api/photos/missing
+    payload can survive a scan that added or removed photo rows. See
+    Codex review on 63f6ac78. This test spies on run_pipeline_job and
+    asserts the handler forwards a callable so the pipeline_job side
+    (covered by test_pipeline_job.py) can actually fire it.
+    """
+    import threading
+
+    from db import Database
+    app, db_path = setup
+
+    # Prime a source folder so the collection-less pipeline path takes
+    # the scan branch; the spy short-circuits before scanner.scan runs.
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    img_path = folder / "IMG_001.JPG"
+    Image.new("RGB", (1, 1), "white").save(str(img_path), "JPEG")
+    db = Database(db_path)
+    db.add_folder(str(folder))
+    db.conn.close()
+
+    import pipeline_job
+    original = pipeline_job.run_pipeline_job
+    captured = {}
+    called = threading.Event()
+
+    def spy_run(job, runner, db_path_arg, ws_id, params, **kwargs):
+        captured["missing_originals_invalidator"] = kwargs.get(
+            "missing_originals_invalidator"
+        )
+        called.set()
+
+    pipeline_job.run_pipeline_job = spy_run
+    try:
+        with app.test_client() as c:
+            resp = c.post("/api/jobs/pipeline", json={
+                "sources": [str(folder)],
+                "skip_classify": True,
+                "skip_extract_masks": True,
+                "skip_regroup": True,
+            })
+            assert resp.status_code == 200, resp.get_json()
+
+        assert called.wait(timeout=5.0), (
+            "run_pipeline_job spy was not invoked"
+        )
+        # The handler must forward a callable (the create_app closure's
+        # _invalidate_missing_originals_cache), not omit or None it out.
+        assert callable(captured.get("missing_originals_invalidator")), (
+            "POST /api/jobs/pipeline did not forward the "
+            "missing_originals_invalidator kwarg — pipeline scans will not "
+            "drop the GET /api/photos/missing cache after touching disk"
+        )
+    finally:
+        pipeline_job.run_pipeline_job = original
+
+
 def test_pipeline_snapshot_overrides_stale_source_paths(setup, tmp_path):
     """When a valid source_snapshot_id is present, the job overrides any
     source/sources the caller passed. The handler must not preflight-validate

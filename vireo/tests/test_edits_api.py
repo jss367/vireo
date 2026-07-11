@@ -47,6 +47,38 @@ def test_batch_color_label(app_and_db):
     assert db.get_color_label(pids[1]) == 'green'
 
 
+def test_get_color_labels(app_and_db):
+    """GET /api/photos/color_labels returns labels keyed by photo id."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pids = [photo['id'] for photo in photos[:2]]
+    db.set_color_label(pids[0], 'purple')
+
+    resp = client.get(
+        f'/api/photos/color_labels?ids={pids[0]},{pids[1]},not-an-id'
+    )
+
+    assert resp.status_code == 200
+    assert resp.get_json() == {str(pids[0]): 'purple'}
+
+
+def test_color_label_routes_are_owned_by_domain_blueprint(app_and_db):
+    """The extracted route group must not drift back into the app module."""
+    app, _ = app_and_db
+    endpoints = {
+        rule.rule: rule.endpoint
+        for rule in app.url_map.iter_rules()
+        if 'color_label' in rule.rule
+    }
+
+    assert endpoints == {
+        '/api/batch/color_label': 'photo_labels.set_labels',
+        '/api/photos/<int:photo_id>/color_label': 'photo_labels.set_label',
+        '/api/photos/color_labels': 'photo_labels.get_labels',
+    }
+
+
 def test_set_rating(app_and_db):
     """POST /api/photos/<id>/rating updates rating and queues pending change."""
     app, db = app_and_db

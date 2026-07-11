@@ -20,6 +20,7 @@ _UNSET = object()  # sentinel for "not provided" vs explicit None
 AUTO_MATCH_REVIEW_MARKER = "__vireo_auto_match__"
 
 _SQLITE_PARAM_CHUNK_SIZE = 800
+_MISSING_PHOTOS_PROGRESS_INTERVAL = 200
 
 
 class IncompatibleDatabaseError(RuntimeError):
@@ -53,6 +54,10 @@ class IncompatibleDatabaseError(RuntimeError):
         if cause:
             msg += f" ({cause})"
         super().__init__(msg)
+
+
+class MissingPhotosCancelled(RuntimeError):
+    """Raised when a Missing Originals filesystem scan is cancelled."""
 
 
 def _nfc(name: str) -> str:
@@ -317,8 +322,7 @@ ALL_NAV_IDS = frozenset({
 
 DEFAULT_TABS = [
     "import", "browse", "pipeline", "pipeline_review",
-    "review", "cull", "jobs",
-    "highlights", "misses", "storage", "settings",
+    "review", "cull", "jobs", "highlights", "misses", "storage", "settings",
 ]
 
 
@@ -403,7 +407,7 @@ class Database:
         db_path: path to the SQLite database file (created if missing)
     """
 
-    def __init__(self, db_path):
+    def __init__(self, db_path, *, initialize_schema=True):
         db_dir = os.path.dirname(db_path)
         if db_path != ":memory:" and db_dir:
             os.makedirs(db_dir, exist_ok=True)
@@ -441,6 +445,9 @@ class Database:
         self.conn.execute("PRAGMA busy_timeout=30000")  # 30 s — tolerate parallel scan writers
         self._active_workspace_id = None
         self._new_images_cache = get_shared_cache()
+        if not initialize_schema:
+            self._restore_active_workspace()
+            return
         # Schema setup asserts the canonical schema against whatever is on
         # disk. `CREATE TABLE IF NOT EXISTS` silently skips a stale table, so
         # a database from an older Vireo (e.g. a pre-`classifier_model`
@@ -495,10 +502,18 @@ class Database:
         # ordered-highlights UI reads only species_highlights. Gated by
         # db_meta so it runs at most once per DB.
         self.backfill_species_highlights_from_legacy_preferences()
-        # Restore last-used workspace, or fall back to Default
+        # Idempotent, one-shot: seed globally shared species representatives
+        # from the older per-workspace single-preference rows.
+        self.backfill_species_representatives_from_legacy_preferences()
+        self._restore_active_workspace()
+
+    def _restore_active_workspace(self):
+        """Restore the last-used workspace on an already initialized schema."""
         last = self.conn.execute(
             "SELECT id FROM workspaces ORDER BY CASE WHEN last_opened_at IS NULL THEN 0 ELSE 1 END DESC, last_opened_at DESC, id ASC LIMIT 1"
         ).fetchone()
+        if last is None:
+            raise RuntimeError("Vireo database has no workspace after schema initialization")
         self.set_active_workspace(last[0])
 
     def close(self):
@@ -873,6 +888,16 @@ class Database:
                 PRIMARY KEY (workspace_id, purpose, species)
             );
 
+            CREATE TABLE IF NOT EXISTS species_representatives (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                species        TEXT NOT NULL,
+                photo_id       INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                selected_order INTEGER NOT NULL,
+                created_at     TEXT DEFAULT (datetime('now')),
+                updated_at     TEXT DEFAULT (datetime('now')),
+                UNIQUE(species, photo_id)
+            );
+
             CREATE TABLE IF NOT EXISTS species_highlights (
                 workspace_id  INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
                 species       TEXT NOT NULL,
@@ -965,6 +990,10 @@ class Database:
                 ON photo_color_labels(workspace_id);
             CREATE INDEX IF NOT EXISTS idx_photo_preferences_photo
                 ON photo_preferences(photo_id);
+            CREATE INDEX IF NOT EXISTS idx_species_representatives_photo
+                ON species_representatives(photo_id);
+            CREATE INDEX IF NOT EXISTS idx_species_representatives_order
+                ON species_representatives(species, selected_order DESC);
             CREATE INDEX IF NOT EXISTS idx_species_highlights_photo
                 ON species_highlights(photo_id);
             CREATE INDEX IF NOT EXISTS idx_species_highlights_rank
@@ -1105,6 +1134,12 @@ class Database:
                 except (TypeError, ValueError):
                     continue
                 if not isinstance(tabs, list) or "storage" in tabs:
+                    continue
+                # A legacy table that lacked the tabs column was initialized
+                # above with today's compact primary workflow. Do not let this
+                # historical migration append a secondary page to that new
+                # default; Storage remains available under Tools.
+                if tabs == DEFAULT_TABS:
                     continue
                 if "settings" in tabs:
                     tabs.insert(tabs.index("settings"), "storage")
@@ -1706,16 +1741,7 @@ class Database:
         that renders nothing and makes ``adjacentTabId()`` return an id that
         ``pageById`` doesn't know, which throws on close-adjacent.
         """
-        ws = self.get_workspace(self._ws_id())
-        if not ws or not ws["tabs"]:
-            return list(DEFAULT_TABS)
-        try:
-            value = json.loads(ws["tabs"]) if isinstance(ws["tabs"], str) else ws["tabs"]
-        except (json.JSONDecodeError, TypeError):
-            return list(DEFAULT_TABS)
-        if not isinstance(value, list):
-            return list(DEFAULT_TABS)
-        return [t for t in value if isinstance(t, str) and t in ALL_NAV_IDS]
+        return self._workspace_repository().get_tabs()
 
     def set_tabs(self, tabs):
         """Replace the active workspace's tabs with the given ordered list.
@@ -1725,23 +1751,7 @@ class Database:
         the storage layer.
         Returns the new list.
         """
-        if not isinstance(tabs, list):
-            raise ValueError("tabs must be a list")
-        seen = set()
-        for nav_id in tabs:
-            if not isinstance(nav_id, str):
-                raise ValueError(f"tab id must be a string, got {type(nav_id).__name__}")
-            if nav_id not in ALL_NAV_IDS:
-                raise ValueError(f"{nav_id!r} is not a known nav id")
-            if nav_id in seen:
-                raise ValueError(f"{nav_id!r} appears more than once")
-            seen.add(nav_id)
-        self.conn.execute(
-            "UPDATE workspaces SET tabs = ? WHERE id = ?",
-            (json.dumps(tabs), self._ws_id()),
-        )
-        self.conn.commit()
-        return list(tabs)
+        return self._workspace_repository().set_tabs(tabs)
 
     def pin_tab(self, nav_id):
         """Append nav_id to the active workspace's tabs if not present.
@@ -1749,17 +1759,7 @@ class Database:
         Raises ValueError if nav_id is not in ALL_NAV_IDS.
         Returns the new list.
         """
-        if nav_id not in ALL_NAV_IDS:
-            raise ValueError(f"{nav_id!r} is not a known nav id")
-        tabs = self.get_tabs()
-        if nav_id not in tabs:
-            tabs.append(nav_id)
-            self.conn.execute(
-                "UPDATE workspaces SET tabs = ? WHERE id = ?",
-                (json.dumps(tabs), self._ws_id()),
-            )
-            self.conn.commit()
-        return tabs
+        return self._workspace_repository().pin_tab(nav_id)
 
     def unpin_tab(self, nav_id):
         """Remove nav_id from the active workspace's tabs if present.
@@ -1767,17 +1767,17 @@ class Database:
         Raises ValueError if nav_id is not in ALL_NAV_IDS.
         Returns the new list.
         """
-        if nav_id not in ALL_NAV_IDS:
-            raise ValueError(f"{nav_id!r} is not a known nav id")
-        tabs = self.get_tabs()
-        if nav_id in tabs:
-            tabs = [t for t in tabs if t != nav_id]
-            self.conn.execute(
-                "UPDATE workspaces SET tabs = ? WHERE id = ?",
-                (json.dumps(tabs), self._ws_id()),
-            )
-            self.conn.commit()
-        return tabs
+        return self._workspace_repository().unpin_tab(nav_id)
+
+    def _workspace_repository(self):
+        from repositories.workspaces import WorkspaceRepository
+
+        return WorkspaceRepository(
+            self.conn,
+            self._ws_id(),
+            allowed_nav_ids=ALL_NAV_IDS,
+            default_tabs=DEFAULT_TABS,
+        )
 
     def set_workspace_group_state(self, workspace_id, fingerprint, when_ts):
         """Record that grouping completed for `workspace_id` at `when_ts`
@@ -2350,6 +2350,7 @@ class Database:
         self.conn.commit()
 
     _SPECIES_HIGHLIGHTS_BACKFILL_KEY = "species_highlights_from_preferences_backfill"
+    _SPECIES_REPRESENTATIVES_BACKFILL_KEY = "species_representatives_from_preferences_backfill"
 
     def backfill_species_highlights_from_legacy_preferences(self):
         """One-shot backfill: seed ``species_highlights`` from legacy
@@ -2408,6 +2409,72 @@ class Database:
         self.conn.execute(
             "INSERT INTO db_meta(key, value) VALUES (?, '1')",
             (self._SPECIES_HIGHLIGHTS_BACKFILL_KEY,),
+        )
+        self.conn.commit()
+
+    def _next_species_representative_order(self):
+        row = self.conn.execute(
+            "SELECT COALESCE(MAX(selected_order), 0) + 1 AS next_order "
+            "FROM species_representatives"
+        ).fetchone()
+        return int(row["next_order"] or 1)
+
+    def backfill_species_representatives_from_legacy_preferences(self):
+        """One-shot backfill from old per-workspace representative rows.
+
+        The current model stores representative markings globally and allows
+        multiple photos per species. Older databases stored one row per
+        (workspace, purpose, species), with ``species_representative`` taking
+        precedence over ``life_list`` and ``highlights`` fallbacks. Copy those
+        choices into the global list once so curated picks persist across
+        workspaces after upgrade.
+        """
+        marker = self.conn.execute(
+            "SELECT value FROM db_meta WHERE key = ?",
+            (self._SPECIES_REPRESENTATIVES_BACKFILL_KEY,),
+        ).fetchone()
+        if marker is not None:
+            return
+        try:
+            rows = self.conn.execute(
+                """SELECT workspace_id, purpose, species, photo_id,
+                          COALESCE(updated_at, created_at, '') AS ts
+                   FROM photo_preferences
+                   WHERE purpose IN ('species_representative', 'life_list', 'highlights')
+                   ORDER BY CASE purpose
+                              WHEN 'highlights' THEN 0
+                              WHEN 'life_list' THEN 1
+                              ELSE 2
+                            END,
+                            ts,
+                            workspace_id,
+                            species"""
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+        # Rows are ordered so higher-priority purposes are inserted last
+        # (highlights first, then life_list, then species_representative).
+        # Use UPSERT so a later canonical species_representative row for a
+        # (species, photo_id) already inserted by a fallback purpose promotes
+        # its selected_order to the newest value. Otherwise INSERT OR IGNORE
+        # would keep the fallback's low order and the reader (which sorts by
+        # selected_order DESC) could rank an unrelated life_list photo ahead
+        # of the canonical representative — inverting the pre-migration
+        # precedence this backfill is supposed to preserve.
+        for row in rows:
+            order = self._next_species_representative_order()
+            self.conn.execute(
+                """INSERT INTO species_representatives
+                       (species, photo_id, selected_order, created_at, updated_at)
+                   VALUES (?, ?, ?, datetime('now'), datetime('now'))
+                   ON CONFLICT(species, photo_id) DO UPDATE SET
+                       selected_order = excluded.selected_order,
+                       updated_at = excluded.updated_at""",
+                (row["species"], row["photo_id"], order),
+            )
+        self.conn.execute(
+            "INSERT INTO db_meta(key, value) VALUES (?, '1')",
+            (self._SPECIES_REPRESENTATIVES_BACKFILL_KEY,),
         )
         self.conn.commit()
 
@@ -2754,7 +2821,12 @@ class Database:
             (self._ws_id(),),
         ).fetchall()
 
-    def get_missing_photos(self, folder_id=None):
+    def get_missing_photos(
+        self,
+        folder_id=None,
+        progress_callback=None,
+        cancel_callback=None,
+    ):
         """Return photos whose source file is missing from disk.
 
         Scoped to the active workspace. Skips photos in folders flagged
@@ -2782,7 +2854,20 @@ class Database:
         Each row carries ``folder_path``, ``timestamp``, and
         ``working_copy_path`` so the caller can render rich UI without
         joining again.
+
+        ``progress_callback`` is optional. When supplied, it receives dicts
+        containing ``folders_checked``, ``photos_considered``, ``missing_found``,
+        ``total_photos``, and ``current_folder``. Callback exceptions are
+        logged and ignored so progress reporting cannot abort detection.
+
+        ``cancel_callback`` is optional. When supplied, it is polled between
+        filesystem operations and may abort the scan by returning true.
         """
+        def check_cancelled():
+            if cancel_callback is not None and cancel_callback():
+                raise MissingPhotosCancelled("missing photos scan cancelled")
+
+        check_cancelled()
         params = [self._ws_id()]
         subtree_clause = ""
         if folder_id is not None:
@@ -2814,6 +2899,7 @@ class Database:
                 subtree_clause = (
                     " AND f.id IN (SELECT id FROM missing_subtree_ids)"
                 )
+        check_cancelled()
         rows = self.conn.execute(
             f"""SELECT p.id, p.filename, p.extension, p.file_size,
                       p.timestamp, p.working_copy_path,
@@ -2825,6 +2911,7 @@ class Database:
                ORDER BY f.path, p.filename""",
             params,
         ).fetchall()
+        check_cancelled()
         # One readdir per folder instead of one stat per photo. On a 50k-photo
         # library across a network volume the per-photo `os.path.exists` was
         # costing minutes; a single scandir + set-membership check is orders
@@ -2835,18 +2922,49 @@ class Database:
         folder_online: dict[int, bool] = {}
         folder_names: dict[int, set[str] | None] = {}
         missing = []
+        photos_considered = 0
+        folders_checked = 0
+        reported_folders = set()
+        progress_callback_enabled = True
+
+        def report_progress(current_folder):
+            nonlocal progress_callback_enabled
+            if progress_callback is None or not progress_callback_enabled:
+                return
+            try:
+                progress_callback({
+                    "folders_checked": folders_checked,
+                    "photos_considered": photos_considered,
+                    "missing_found": len(missing),
+                    "total_photos": len(rows),
+                    "current_folder": current_folder,
+                })
+            except Exception:
+                progress_callback_enabled = False
+                log.exception("Missing photos progress callback failed")
+
+        def report_photo_progress(current_folder):
+            if photos_considered % _MISSING_PHOTOS_PROGRESS_INTERVAL == 0:
+                report_progress(current_folder)
+
         for row in rows:
+            check_cancelled()
             fid = row["folder_id"]
             if fid not in folder_online:
                 folder_online[fid] = os.path.isdir(row["folder_path"])
             if not folder_online[fid]:
                 # Whole folder is offline — surfaced by missing-folders flow.
+                if fid not in reported_folders:
+                    reported_folders.add(fid)
+                    folders_checked += 1
+                    report_progress(row["folder_path"])
                 continue
             if fid not in folder_names:
                 try:
                     names_set: set[str] = set()
                     with os.scandir(row["folder_path"]) as it:
                         for entry in it:
+                            check_cancelled()
                             # Broken symlinks: scandir returns the basename even
                             # when the target is gone, but the prior os.path.exists
                             # check returned False. Filter them so missing
@@ -2862,17 +2980,28 @@ class Database:
                     # treat the same as "folder offline" so we don't bulk-flag
                     # every photo as a ghost.
                     folder_names[fid] = None
+                if fid not in reported_folders:
+                    reported_folders.add(fid)
+                    folders_checked += 1
+                    report_progress(row["folder_path"])
             names = folder_names[fid]
+            photos_considered += 1
             if names is None:
+                report_photo_progress(row["folder_path"])
                 continue
             if _nfc(row["filename"]) in names:
+                report_photo_progress(row["folder_path"])
                 continue
             # NFC miss: defer to the kernel for case rules. On case-insensitive
             # volumes (APFS default, NTFS) os.path.exists resolves a
             # case-mismatched name; on case-sensitive volumes (most Linux
             # filesystems) it correctly reports the file as absent.
+            check_cancelled()
             if not os.path.exists(os.path.join(row["folder_path"], row["filename"])):
                 missing.append(row)
+            report_photo_progress(row["folder_path"])
+        check_cancelled()
+        report_progress("")
         return missing
 
     def nearest_ancestor_folder_id(self, path, exclude_id=None):
@@ -7040,69 +7169,40 @@ class Database:
             self.conn.rollback()
             raise
 
-    VALID_COLOR_LABELS = ('red', 'yellow', 'green', 'blue', 'purple')
+    from repositories.photo_labels import VALID_COLOR_LABELS
 
     def set_color_label(self, photo_id, color):
         """Set a color label for a photo in the active workspace."""
-        if color not in self.VALID_COLOR_LABELS:
-            raise ValueError(f"Invalid color label: {color}. Must be one of {self.VALID_COLOR_LABELS}")
-        self.conn.execute(
-            "INSERT OR REPLACE INTO photo_color_labels (photo_id, workspace_id, color) VALUES (?, ?, ?)",
-            (photo_id, self._ws_id(), color),
-        )
-        self.conn.commit()
+        self._photo_label_repository().set(photo_id, color)
 
     def remove_color_label(self, photo_id):
         """Remove the color label for a photo in the active workspace."""
-        self.conn.execute(
-            "DELETE FROM photo_color_labels WHERE photo_id = ? AND workspace_id = ?",
-            (photo_id, self._ws_id()),
-        )
-        self.conn.commit()
+        self._photo_label_repository().remove(photo_id)
 
     def get_color_label(self, photo_id):
         """Return the color label for a photo in the active workspace, or None."""
-        row = self.conn.execute(
-            "SELECT color FROM photo_color_labels WHERE photo_id = ? AND workspace_id = ?",
-            (photo_id, self._ws_id()),
-        ).fetchone()
-        return row['color'] if row else None
+        return self._photo_label_repository().get(photo_id)
 
     def get_color_labels_for_photos(self, photo_ids):
         """Return a dict of {photo_id: color} for the active workspace."""
-        if not photo_ids:
-            return {}
-        out = {}
-        for chunk in _chunks(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            rows = self.conn.execute(
-                f"SELECT photo_id, color FROM photo_color_labels WHERE workspace_id = ? AND photo_id IN ({placeholders})",
-                [self._ws_id()] + list(chunk),
-            ).fetchall()
-            out.update({row['photo_id']: row['color'] for row in rows})
-        return out
+        return self._photo_label_repository().get_for_photos(photo_ids)
+
+    def filter_photo_ids_in_workspace(self, photo_ids):
+        """Return existing, active-workspace photo IDs in input order."""
+        return self._photo_label_repository().visible_photo_ids(photo_ids)
 
     def batch_set_color_label(self, photo_ids, color):
         """Set or remove color label for multiple photos in the active workspace."""
-        if not photo_ids:
-            return
-        ws_id = self._ws_id()
-        if color is None:
-            for chunk in _chunks(photo_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                self.conn.execute(
-                    f"DELETE FROM photo_color_labels WHERE workspace_id = ? AND photo_id IN ({placeholders})",
-                    [ws_id] + list(chunk),
-                )
-        else:
-            if color not in self.VALID_COLOR_LABELS:
-                raise ValueError(f"Invalid color label: {color}. Must be one of {self.VALID_COLOR_LABELS}")
-            for pid in photo_ids:
-                self.conn.execute(
-                    "INSERT OR REPLACE INTO photo_color_labels (photo_id, workspace_id, color) VALUES (?, ?, ?)",
-                    (pid, ws_id, color),
-                )
-        self.conn.commit()
+        self._photo_label_repository().set_many(photo_ids, color)
+
+    def _photo_label_repository(self):
+        from repositories.photo_labels import PhotoLabelRepository
+
+        return PhotoLabelRepository(
+            self.conn,
+            self._ws_id(),
+            chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
+        )
 
     def get_photo_edit_recipe(self, photo_id, verify_workspace=False):
         """Return the normalized edit recipe dict for a photo, or None."""
@@ -10028,31 +10128,102 @@ class Database:
         ).fetchall()
         return {r["species"]: r["photo_id"] for r in rows}
 
-    def get_species_representatives(self):
-        """Return representative photo preferences with legacy fallback.
+    def get_species_representative_lists(self, eligible_only=False):
+        """Return {species: [photo_id, ...]} representative photos.
 
-        ``species_representative`` is the canonical purpose. Existing
-        ``life_list`` and ``highlights`` rows are still read as fallbacks so
-        older libraries keep their explicit curation choices.
+        Representative markings are global, but this read is still scoped to
+        the active workspace's folders. Life List callers still apply these
+        rows only to actual species buckets, so a representative row alone
+        does not make an untagged species appear on the list. Lists are
+        newest-selection first, so item 0 is the main representative.
+
+        When ``eligible_only`` is true, omit preferences whose photo is
+        rejected, unavailable, or no longer carries the stored species keyword.
+        The preference row remains intact for undo.
         """
         ws = self._ws_id()
+        eligibility_filter = ""
+        if eligible_only:
+            eligibility_filter = """
+                 AND COALESCE(p.flag, 'none') != 'rejected'
+                 AND f.status IN ('ok', 'partial')
+                 AND EXISTS (
+                     SELECT 1
+                     FROM photo_keywords pk
+                     JOIN keywords k ON k.id = pk.keyword_id
+                      AND (k.is_species = 1 OR k.type = 'taxonomy')
+                     WHERE pk.photo_id = sr.photo_id
+                       AND k.name = sr.species
+                 )"""
         rows = self.conn.execute(
-            """SELECT species, photo_id, purpose
-               FROM photo_preferences
-               WHERE workspace_id = ?
-                 AND purpose IN ('species_representative', 'life_list', 'highlights')
-               ORDER BY species,
-                        CASE purpose
-                          WHEN 'species_representative' THEN 0
-                          WHEN 'life_list' THEN 1
-                          ELSE 2
-                        END""",
+            f"""SELECT sr.species, sr.photo_id
+               FROM species_representatives sr
+               JOIN photos p ON p.id = sr.photo_id
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                AND wf.workspace_id = ?
+               JOIN folders f ON f.id = p.folder_id
+                 {eligibility_filter}
+               ORDER BY sr.species, sr.selected_order DESC, sr.id DESC""",
             (ws,),
         ).fetchall()
         result = {}
-        for r in rows:
-            result.setdefault(r["species"], r["photo_id"])
+        for row in rows:
+            ids = result.setdefault(row["species"], [])
+            if row["photo_id"] not in ids:
+                ids.append(row["photo_id"])
         return result
+
+    def get_species_representatives(self, eligible_only=False):
+        """Return {species: main_photo_id} for compatibility callers."""
+        return {
+            species: photo_ids[0]
+            for species, photo_ids in self.get_species_representative_lists(
+                eligible_only=eligible_only
+            ).items()
+            if photo_ids
+        }
+
+    def _set_global_species_representative(self, species, photo_id):
+        order = self._next_species_representative_order()
+        self.conn.execute(
+            """INSERT INTO species_representatives
+                   (species, photo_id, selected_order, created_at, updated_at)
+               VALUES (?, ?, ?, datetime('now'), datetime('now'))
+               ON CONFLICT(species, photo_id) DO UPDATE SET
+                   selected_order = excluded.selected_order,
+                   updated_at = excluded.updated_at""",
+            (species, photo_id, order),
+        )
+
+    def _restore_species_representative(
+        self, species, photo_id, selected_order=None,
+    ):
+        """Restore a global species_representatives row on undo.
+
+        When ``selected_order`` is None (legacy edit-history payloads
+        recorded before this field was captured), assign a fresh order via
+        :meth:`_set_global_species_representative` — preserving the older
+        promote-to-newest behavior for those undos. Otherwise write the
+        captured order so undoing a relabel of a secondary representative
+        does not push it above the pre-existing primary.
+        """
+        if selected_order is None:
+            self._set_global_species_representative(species, photo_id)
+            return
+        try:
+            order = int(selected_order)
+        except (TypeError, ValueError):
+            self._set_global_species_representative(species, photo_id)
+            return
+        self.conn.execute(
+            """INSERT INTO species_representatives
+                   (species, photo_id, selected_order, created_at, updated_at)
+               VALUES (?, ?, ?, datetime('now'), datetime('now'))
+               ON CONFLICT(species, photo_id) DO UPDATE SET
+                   selected_order = excluded.selected_order,
+                   updated_at = excluded.updated_at""",
+            (species, photo_id, order),
+        )
 
     def set_photo_preference(self, purpose, species, photo_id, _commit=True):
         """Set the preferred photo for a species/purpose in this workspace."""
@@ -10066,11 +10237,19 @@ class Database:
                    updated_at = excluded.updated_at""",
             (ws, purpose, species, photo_id),
         )
+        if purpose in {"species_representative", "life_list", "highlights"}:
+            self._set_global_species_representative(species, photo_id)
         if _commit:
             self.conn.commit()
 
     def set_species_representative(self, species, photo_id, _commit=True):
-        """Set the one-photo representative for a species in this workspace."""
+        """Mark a photo as a representative for a species globally.
+
+        Multiple photos can represent a species. Re-selecting an existing
+        representative promotes it by assigning the newest selection order.
+        A compatibility ``photo_preferences`` row is kept for older callers
+        that still expect one main representative in the active workspace.
+        """
         self.set_photo_preference(
             "species_representative", species, photo_id, _commit=_commit
         )
@@ -10087,8 +10266,12 @@ class Database:
             self.conn.commit()
 
     def clear_species_representative(self, species, _commit=True):
-        """Clear canonical and legacy representative preferences for a species."""
+        """Clear all representative photos for a species globally."""
         ws = self._ws_id()
+        self.conn.execute(
+            "DELETE FROM species_representatives WHERE species = ?",
+            (species,),
+        )
         self.conn.execute(
             """DELETE FROM photo_preferences
                WHERE workspace_id = ?
@@ -10099,26 +10282,78 @@ class Database:
         if _commit:
             self.conn.commit()
 
-    def get_species_highlights(self, species=None):
+    def get_species_highlights(self, species=None, eligible_only=False):
         """Return ordered highlighted photo ids for the active workspace.
+
+        When ``eligible_only`` is true, omit rejected photos and photos that
+        are no longer eligible for the Highlights page. Stored rows are kept
+        intact so un-rejecting a photo restores its selection.
 
         Result shape is ``{species: {photo_id: rank}}``.
         """
         ws = self._ws_id()
+        eligibility_joins = ""
+        eligibility_filter = ""
+        if eligible_only:
+            eligibility_joins = """
+                   JOIN photos p ON p.id = sh.photo_id
+                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                    AND wf.workspace_id = sh.workspace_id
+                   JOIN folders f ON f.id = p.folder_id
+                    AND f.status IN ('ok', 'partial')"""
+            eligibility_filter = """
+                 AND p.quality_score IS NOT NULL
+                 AND COALESCE(p.flag, 'none') != 'rejected'
+                 AND sh.species = COALESCE(
+                     (
+                         SELECT k.name
+                         FROM photo_keywords pk
+                         JOIN keywords k ON k.id = pk.keyword_id
+                          AND (k.is_species = 1 OR k.type = 'taxonomy')
+                         WHERE pk.photo_id = sh.photo_id
+                         ORDER BY pk.rowid DESC
+                         LIMIT 1
+                     ),
+                     (
+                         SELECT pr.species
+                         FROM detections d
+                         JOIN predictions pr ON pr.detection_id = d.id
+                         LEFT JOIN prediction_review pr_rev
+                          ON pr_rev.prediction_id = pr.id
+                         AND pr_rev.workspace_id = sh.workspace_id
+                         WHERE d.photo_id = sh.photo_id
+                           AND pr.species IS NOT NULL
+                           AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                           AND pr.labels_fingerprint = (
+                               SELECT pr2.labels_fingerprint
+                               FROM predictions pr2
+                               WHERE pr2.detection_id = pr.detection_id
+                                 AND pr2.classifier_model = pr.classifier_model
+                               ORDER BY pr2.created_at DESC, pr2.id DESC
+                               LIMIT 1
+                           )
+                         ORDER BY pr.confidence DESC, pr.id DESC
+                         LIMIT 1
+                     )
+                 )"""
         if species:
             rows = self.conn.execute(
-                """SELECT species, photo_id, rank
-                   FROM species_highlights
-                   WHERE workspace_id = ? AND species = ?
-                   ORDER BY rank, created_at, photo_id""",
+                f"""SELECT sh.species, sh.photo_id, sh.rank
+                   FROM species_highlights sh
+                   {eligibility_joins}
+                   WHERE sh.workspace_id = ? AND sh.species = ?
+                   {eligibility_filter}
+                   ORDER BY sh.rank, sh.created_at, sh.photo_id""",
                 (ws, species),
             ).fetchall()
         else:
             rows = self.conn.execute(
-                """SELECT species, photo_id, rank
-                   FROM species_highlights
-                   WHERE workspace_id = ?
-                   ORDER BY species, rank, created_at, photo_id""",
+                f"""SELECT sh.species, sh.photo_id, sh.rank
+                   FROM species_highlights sh
+                   {eligibility_joins}
+                   WHERE sh.workspace_id = ?
+                   {eligibility_filter}
+                   ORDER BY sh.species, sh.rank, sh.created_at, sh.photo_id""",
                 (ws,),
             ).fetchall()
         result = {}
@@ -10246,6 +10481,14 @@ class Database:
         """Rename stored representative-photo preferences across workspaces."""
         if not old_species or not new_species or old_species == new_species:
             return 0
+        global_photo_ids = None
+        if photo_workspace_pairs is not None:
+            global_photo_ids = sorted({
+                photo_id for photo_id, _workspace_id in photo_workspace_pairs
+            })
+        self.rename_species_representatives_species(
+            old_species, new_species, photo_ids=global_photo_ids, _commit=False
+        )
         if photo_workspace_pairs is not None:
             moved = 0
             seen = set()
@@ -10295,6 +10538,64 @@ class Database:
         if _commit:
             self.conn.commit()
         return cur.rowcount
+
+    def rename_species_representatives_species(
+        self, old_species, new_species, photo_ids=None, _commit=True,
+    ):
+        """Rename global representative rows for a species.
+
+        ``photo_ids`` limits the rename to selected photos, used by relabel
+        operations that only retag a subset of a species bucket.
+        """
+        if not old_species or not new_species or old_species == new_species:
+            return 0
+        if photo_ids is None:
+            cur = self.conn.execute(
+                """INSERT OR IGNORE INTO species_representatives
+                       (species, photo_id, selected_order, created_at, updated_at)
+                    SELECT ?, photo_id, selected_order, created_at, datetime('now')
+                    FROM species_representatives
+                    WHERE species = ?""",
+                (new_species, old_species),
+            )
+            moved = cur.rowcount
+            self.conn.execute(
+                "DELETE FROM species_representatives WHERE species = ?",
+                (old_species,),
+            )
+            if _commit:
+                self.conn.commit()
+            return moved
+        ids = [int(pid) for pid in photo_ids]
+        if not ids:
+            return 0
+        # Chunk to stay under SQLite's SQLITE_MAX_VARIABLE_NUMBER (default
+        # 999 on legacy builds). A species can be tagged on tens of
+        # thousands of photos, so a bulk relabel or keyword-rename that
+        # funnels every affected photo through here would otherwise raise
+        # "too many SQL variables" before any rows move.
+        moved = 0
+        for chunk in _chunks(ids):
+            placeholders = ",".join("?" for _ in chunk)
+            cur = self.conn.execute(
+                f"""INSERT OR IGNORE INTO species_representatives
+                       (species, photo_id, selected_order, created_at, updated_at)
+                    SELECT ?, photo_id, selected_order, created_at, datetime('now')
+                    FROM species_representatives
+                    WHERE species = ?
+                      AND photo_id IN ({placeholders})""",
+                [new_species, old_species, *chunk],
+            )
+            moved += cur.rowcount
+            self.conn.execute(
+                f"""DELETE FROM species_representatives
+                    WHERE species = ?
+                      AND photo_id IN ({placeholders})""",
+                [old_species, *chunk],
+            )
+        if _commit:
+            self.conn.commit()
+        return moved
 
     def rename_species_highlights_species(
         self, old_species, new_species, photo_workspace_pairs=None, _commit=True,
@@ -12860,7 +13161,18 @@ class Database:
                 kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?",
                                        (int(entry['new_value']),)).fetchone()
                 if kw:
-                    self.remove_pending_changes(pid, 'keyword_remove', kw['name'])
+                    # Symmetric with `_queue_keyword_remove`: the original
+                    # remove either queued a `keyword_remove` or, when a
+                    # not-yet-synced `keyword_add` was pending, cancelled
+                    # that add. Reversing needs to restore whichever side
+                    # the remove touched — otherwise an add → remove → undo
+                    # flow leaves the tag on the photo with no pending
+                    # sidecar write, and the restored keyword never syncs.
+                    cancelled = self.remove_pending_changes(
+                        pid, 'keyword_remove', kw['name']
+                    )
+                    if cancelled == 0:
+                        self.queue_change(pid, 'keyword_add', kw['name'])
             elif entry['action_type'] == 'species_replace':
                 # Atomic swap: the edit replaced old_value's species with
                 # new_value's. Undo untags the new species and retags the
@@ -12998,7 +13310,14 @@ class Database:
                 kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?",
                                        (int(entry['new_value']),)).fetchone()
                 if kw:
-                    self.queue_change(pid, 'keyword_remove', kw['name'])
+                    # Mirror the undo path: if undo re-queued a
+                    # `keyword_add`, redo should cancel it rather than
+                    # stack a conflicting `keyword_remove` alongside it.
+                    cancelled = self.remove_pending_changes(
+                        pid, 'keyword_add', kw['name']
+                    )
+                    if cancelled == 0:
+                        self.queue_change(pid, 'keyword_remove', kw['name'])
             elif entry['action_type'] == 'species_replace':
                 # Re-apply the swap: untag old, retag new, mirror pending queue.
                 old_meta = self._edit_old_value_meta(item['old_value'])
@@ -13045,14 +13364,18 @@ class Database:
         and re-insert it at the end of the old bucket (unless the photo
         already appears there). For each ``photo_preferences`` row moved
         by the relabel, delete the row at ``(new_species, purpose)`` and
-        re-insert it at ``(old_species, purpose)``. Best-effort: if the
-        target row no longer exists (state has changed since the relabel),
-        the corresponding restore is a no-op.
+        re-insert it at ``(old_species, purpose)``. For each rep-only
+        ``species_representatives`` row moved with no matching
+        ``photo_preferences`` row, delete the row at ``new_species`` and
+        re-insert it at ``old_species``. Best-effort: if the target row no
+        longer exists (state has changed since the relabel), the
+        corresponding restore is a no-op.
         """
         if not curation:
             return
         hl_prev = curation.get("hl_prev") or []
         pref_prev = curation.get("pref_prev") or []
+        rep_prev = curation.get("rep_prev") or []
         for hl in hl_prev:
             # Newer relabels record {species, rank, dst_existed}; entries
             # from older relabels (before PR #1161 landed rank capture)
@@ -13116,6 +13439,8 @@ class Database:
             purpose = pref.get("purpose")
             old_species = pref.get("species")
             dst_existed = bool(pref.get("dst_existed", False))
+            rep_dst_existed = bool(pref.get("rep_dst_existed", False))
+            rep_selected_order = pref.get("rep_selected_order")
             if not purpose or not old_species or old_species == new_species:
                 continue
             # Only delete the (new_species, purpose) row when the relabel
@@ -13131,6 +13456,22 @@ class Database:
                          AND species = ? AND photo_id = ?""",
                     (workspace_id, purpose, new_species, photo_id),
                 )
+            # Only delete the (new_species, photo_id) rep row when the
+            # relabel created it. If the photo was already a global
+            # representative for new_species before the retag — e.g. a
+            # multi-species photo picked as rep for both A and B before
+            # relabeling A→B — rename_species_representatives_species's
+            # INSERT OR IGNORE skipped a duplicate and the destination
+            # rep row is pre-existing; undo must leave it alone.
+            # rep_dst_existed defaults to False for edit-history rows
+            # written before this field was added, preserving the older
+            # (over-eager) behavior for legacy undos.
+            if not rep_dst_existed:
+                self.conn.execute(
+                    """DELETE FROM species_representatives
+                       WHERE species = ? AND photo_id = ?""",
+                    (new_species, photo_id),
+                )
             # Restore the old-species preference unconditionally. The
             # previous gate on finding a `(new_species, purpose,
             # photo_id)` row skipped restore when the relabel collided
@@ -13142,6 +13483,32 @@ class Database:
                         created_at, updated_at)
                    VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
                 (workspace_id, purpose, old_species, photo_id),
+            )
+            self._restore_species_representative(
+                old_species, photo_id, selected_order=rep_selected_order,
+            )
+        for rep in rep_prev:
+            if not isinstance(rep, dict):
+                continue
+            old_species = rep.get("species")
+            dst_existed = bool(rep.get("dst_existed", False))
+            rep_selected_order = rep.get("selected_order")
+            if not old_species or old_species == new_species:
+                continue
+            # Only delete the (new_species, photo_id) rep row when the
+            # relabel actually created it. If the photo was already a
+            # global representative for new_species before the retag,
+            # rename_species_representatives_species's INSERT OR IGNORE
+            # skipped a duplicate and the destination row is pre-existing;
+            # undo must leave it alone.
+            if not dst_existed:
+                self.conn.execute(
+                    """DELETE FROM species_representatives
+                       WHERE species = ? AND photo_id = ?""",
+                    (new_species, photo_id),
+                )
+            self._restore_species_representative(
+                old_species, photo_id, selected_order=rep_selected_order,
             )
 
     def _reapply_relabel_curation(
@@ -13155,6 +13522,7 @@ class Database:
             return
         hl_prev = curation.get("hl_prev") or []
         pref_prev = curation.get("pref_prev") or []
+        rep_prev = curation.get("rep_prev") or []
         for hl in hl_prev:
             # Accept both new dict form ({species, rank}) and legacy
             # string form for compatibility with older edit-history rows.
@@ -13203,6 +13571,7 @@ class Database:
             old_species = pref.get("species")
             if not purpose or not old_species or old_species == new_species:
                 continue
+            rep_selected_order = pref.get("rep_selected_order")
             row = self.conn.execute(
                 """SELECT 1 FROM photo_preferences
                    WHERE workspace_id = ? AND purpose = ?
@@ -13218,11 +13587,47 @@ class Database:
                 (workspace_id, purpose, old_species, photo_id),
             )
             self.conn.execute(
+                """DELETE FROM species_representatives
+                   WHERE species = ? AND photo_id = ?""",
+                (old_species, photo_id),
+            )
+            self.conn.execute(
                 """INSERT OR IGNORE INTO photo_preferences
                        (workspace_id, purpose, species, photo_id,
                         created_at, updated_at)
                    VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
                 (workspace_id, purpose, new_species, photo_id),
+            )
+            # Reuse the captured pre-relabel selected_order rather than
+            # allocating a fresh MAX+1. The original relabel preserved the
+            # source row's order via rename_species_representatives_species,
+            # so redoing must restore that same order — otherwise an
+            # undo/redo round trip can promote a secondary representative
+            # above a pre-existing primary for new_species.
+            self._restore_species_representative(
+                new_species, photo_id, selected_order=rep_selected_order,
+            )
+        for rep in rep_prev:
+            if not isinstance(rep, dict):
+                continue
+            old_species = rep.get("species")
+            if not old_species or old_species == new_species:
+                continue
+            rep_selected_order = rep.get("selected_order")
+            src = self.conn.execute(
+                """SELECT 1 FROM species_representatives
+                   WHERE species = ? AND photo_id = ?""",
+                (old_species, photo_id),
+            ).fetchone()
+            if not src:
+                continue
+            self.conn.execute(
+                """DELETE FROM species_representatives
+                   WHERE species = ? AND photo_id = ?""",
+                (old_species, photo_id),
+            )
+            self._restore_species_representative(
+                new_species, photo_id, selected_order=rep_selected_order,
             )
 
     def _edit_old_value_meta(self, old_value):

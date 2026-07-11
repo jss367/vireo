@@ -1037,6 +1037,16 @@ def test_add_keyword_normalizes_acute_accent_with_leading_whitespace(db):
     assert db.add_keyword("apapane") == kid
 
 
+def test_add_keyword_preserves_internal_acute_accent(db):
+    """U+00B4 should be stripped only at the edges, not inside a keyword."""
+    keyword_id = db.add_keyword("O\u00b4Brien")
+
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
+    ).fetchone()
+    assert row["name"] == "O\u00b4Brien"
+
+
 def test_add_keyword_dedupes_pre_existing_edge_quote_variant(db):
     """When an upgraded database already carries a tagged edge-quote variant
     like '\u2018apapane', a later `add_keyword('apapane')` must reuse that row
