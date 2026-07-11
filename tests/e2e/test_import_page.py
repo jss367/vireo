@@ -507,6 +507,24 @@ def test_use_staging_as_import_source_forces_copy_mode(live_server, page):
     expect(page.locator("#destCard")).to_be_visible()
 
 
+def test_import_menu_deep_link_opens_copy_mode_with_source_picker(live_server, page):
+    # File > Import Folder... in the native menu routes to
+    # /import?mode=copy&pick=source so the two File-menu import commands stay
+    # distinct actions. In browser mode pickDirectory() returns null, so the
+    # in-page folder browser must open instead of the native dialog.
+    url = live_server["url"]
+    page.goto(f"{url}/import?mode=copy&pick=source")
+
+    expect(page.locator("#modeCopy")).to_be_checked()
+    expect(page.locator("#destCard")).to_be_visible()
+    expect(page.locator("[data-testid='import-folder-browser']")).to_have_class(
+        re.compile(r"\bopen\b"))
+    expect(page.locator("#folderBrowserTitle")).to_have_text("Select Source Folders")
+    # pick is a one-shot trigger: it must be stripped from the URL so a manual
+    # reload doesn't reopen the picker, while the mode param survives.
+    page.wait_for_url(f"{url}/import?mode=copy")
+
+
 def test_import_folder_browser_escape_closes_modal(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/import")

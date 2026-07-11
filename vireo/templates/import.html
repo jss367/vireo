@@ -1444,6 +1444,15 @@ function renderModelWarning(res) {
 }
 
 async function initImportPage() {
+  // Native menu deep link: File > Import Folder... routes here as
+  // /import?mode=copy&pick=source so it lands in Copy-to-archive with the
+  // source picker open, while File > Import Photos... gets the page
+  // default (Add in place).
+  const menuParams = new URLSearchParams(window.location.search);
+  if (menuParams.get('mode') === 'copy') {
+    const copyRadio = document.getElementById('modeCopy');
+    if (copyRadio) copyRadio.checked = true;
+  }
   // Volume suggestions for the source input.
   try {
     const resp = await fetch('/api/volumes');
@@ -1526,6 +1535,16 @@ async function initImportPage() {
   loadImportRemoteTargets();
   loadOrphanedStaging();
   updateImportMode();
+  if (menuParams.get('pick') === 'source') {
+    // One-shot trigger: strip it from the URL so a manual reload doesn't
+    // reopen the picker, then open it (native dialog in Tauri, in-page
+    // folder browser otherwise).
+    menuParams.delete('pick');
+    const qs = menuParams.toString();
+    history.replaceState(
+      null, '', window.location.pathname + (qs ? '?' + qs : ''));
+    browseForSource();
+  }
 }
 initImportPage();
 </script>
