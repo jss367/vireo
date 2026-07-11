@@ -10420,7 +10420,7 @@ class Database:
         allowed = {'type', 'taxon_id', 'latitude', 'longitude', 'name'}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
-            return
+            return keyword_id
 
         # Normalize the rename target with the same rules add_keyword
         # applies on insert so PUT /api/keywords/<id> can't sneak stray
@@ -10443,10 +10443,43 @@ class Database:
         if 'name' in updates:
             new_name = updates['name']
             current = self.conn.execute(
-                "SELECT name, type, taxon_id FROM keywords WHERE id = ?",
+                "SELECT name, type, taxon_id, parent_id FROM keywords WHERE id = ?",
                 (keyword_id,),
             ).fetchone()
+            # Merge a rename whose normalized value already belongs to
+            # another keyword in the same slot (same parent_id) into that
+            # peer instead of writing a duplicate. Without this, top-level
+            # renames slip past UNIQUE(name, parent_id) — SQLite treats
+            # NULL parents as distinct — silently producing two peer
+            # `apapane` rows when `Other` is renamed to `‘apapane` and
+            # top-level `apapane` already exists; child renames instead
+            # raise IntegrityError from the UPDATE below and surface as a
+            # 500. Compare via vireo_normalize_keyword so a peer whose
+            # stored spelling still carries edge quotes (imported/upgraded
+            # rows) is also detected, and skip the row being renamed.
+            # Returns the effective keyword id — the peer's id when a
+            # merge happened — so callers (api_update_keyword) can retarget
+            # sidecar/preferences bookkeeping onto the surviving row.
             if current is not None and new_name != current["name"]:
+                parent_id = current["parent_id"]
+                if parent_id is None:
+                    peer = self.conn.execute(
+                        "SELECT id FROM keywords "
+                        "WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE "
+                        "AND parent_id IS NULL AND id != ? LIMIT 1",
+                        (new_name, keyword_id),
+                    ).fetchone()
+                else:
+                    peer = self.conn.execute(
+                        "SELECT id FROM keywords "
+                        "WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE "
+                        "AND parent_id = ? AND id != ? LIMIT 1",
+                        (new_name, parent_id, keyword_id),
+                    ).fetchone()
+                if peer:
+                    self._merge_keyword_into(keyword_id, peer["id"])
+                    self.conn.commit()
+                    return peer["id"]
                 cur_type = current["type"]
                 taxon_id = self._lookup_taxon_id_for_keyword(new_name)
 
@@ -10479,6 +10512,7 @@ class Database:
         values = list(updates.values()) + [keyword_id]
         self.conn.execute(f"UPDATE keywords SET {set_clause} WHERE id = ?", values)
         self.conn.commit()
+        return keyword_id
 
     def get_all_keywords(self):
         """Return keywords used in the active workspace (plus ancestors) with photo counts, type, and taxon info."""

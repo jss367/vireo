@@ -3482,6 +3482,109 @@ def test_rename_keyword_rejects_empty_after_normalization(app_and_db):
     assert row["name"] == "Real"
 
 
+def test_rename_keyword_merges_into_normalized_peer_toplevel(app_and_db):
+    """Renaming a top-level keyword to a name that normalizes to an existing
+    top-level peer must merge into that peer instead of writing a second row.
+    SQLite treats NULL parent_ids as distinct under UNIQUE(name, parent_id),
+    so without the peer check the rename would silently produce two peer
+    `apapane` rows for later duplicate cleanup to mop up."""
+    app, db = app_and_db
+    client = app.test_client()
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    apapane_id = db.add_keyword("apapane")
+    other_id = db.add_keyword("Other")
+    db.tag_photo(p1, other_id)
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    resp = client.put(f"/api/keywords/{other_id}", json={"name": "‘apapane"})
+    assert resp.status_code == 200
+
+    rows = db.conn.execute(
+        "SELECT id FROM keywords WHERE parent_id IS NULL "
+        "AND name = 'apapane'"
+    ).fetchall()
+    assert [row["id"] for row in rows] == [apapane_id]
+    other_row = db.conn.execute(
+        "SELECT id FROM keywords WHERE id = ?", (other_id,)
+    ).fetchone()
+    assert other_row is None
+    tag_ids = {
+        row["keyword_id"]
+        for row in db.conn.execute(
+            "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (p1,)
+        ).fetchall()
+    }
+    assert apapane_id in tag_ids
+    assert other_id not in tag_ids
+
+    changes = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ? "
+        "ORDER BY id",
+        (p1,),
+    ).fetchall()
+    actions = [(c["change_type"], c["value"]) for c in changes]
+    assert ("keyword_remove", "Other") in actions
+    assert ("keyword_add", "apapane") in actions
+    assert ("keyword_add", "‘apapane") not in actions
+
+
+def test_rename_keyword_merges_into_normalized_peer_child(app_and_db):
+    """Same guard for child keywords: without the peer check, two rows under
+    the same parent with normalized-equal names would violate
+    UNIQUE(name, parent_id) at UPDATE time and surface as a 500. The merge
+    turns that into an in-place consolidation instead."""
+    app, db = app_and_db
+    client = app.test_client()
+    parent_id = db.add_keyword("Birds")
+    apapane_id = db.add_keyword("apapane", parent_id=parent_id)
+    other_id = db.add_keyword("Other", parent_id=parent_id)
+
+    resp = client.put(f"/api/keywords/{other_id}", json={"name": "‘apapane"})
+    assert resp.status_code == 200
+
+    rows = db.conn.execute(
+        "SELECT id FROM keywords WHERE parent_id = ? AND name = 'apapane'",
+        (parent_id,),
+    ).fetchall()
+    assert [row["id"] for row in rows] == [apapane_id]
+    other_row = db.conn.execute(
+        "SELECT id FROM keywords WHERE id = ?", (other_id,)
+    ).fetchone()
+    assert other_row is None
+
+
+def test_rename_keyword_detects_stored_edge_quote_peer(app_and_db):
+    """A pre-existing row whose stored spelling still carries edge quotes
+    (imported before normalization landed) must also participate in the
+    peer merge; the check compares via vireo_normalize_keyword so both
+    sides are compared in their cleaned form."""
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT INTO keywords (name) VALUES (?)", ("‘apapane",)
+    )
+    db.conn.commit()
+    legacy_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = '‘apapane'"
+    ).fetchone()["id"]
+    other_id = db.add_keyword("Other")
+
+    resp = client.put(f"/api/keywords/{other_id}", json={"name": "apapane"})
+    assert resp.status_code == 200
+
+    other_row = db.conn.execute(
+        "SELECT id FROM keywords WHERE id = ?", (other_id,)
+    ).fetchone()
+    assert other_row is None
+    # The legacy row survives because the merge target is the peer, not
+    # the renamed row.
+    survived = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (legacy_id,)
+    ).fetchone()
+    assert survived["name"] == "‘apapane"
+
+
 def test_rename_keyword_updates_photo_preferences(app_and_db):
     """Representative-photo preferences follow species keyword renames."""
     app, db = app_and_db

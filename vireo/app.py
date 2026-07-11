@@ -5202,11 +5202,33 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 old_is_species_keyword = (
                     old_row["is_species"] == 1 or old_row["type"] == "taxonomy"
                 )
+        # Snapshot the photo/workspace pairs that carry this keyword before
+        # the update. When the rename target collides with an existing peer
+        # keyword, update_keyword merges this row's photo_keywords into the
+        # peer and deletes the source, so a post-update query for pk.keyword_id
+        # = keyword_id would return nothing and the sidecar remove/add pair
+        # would never queue. Grabbing the pairs up front works for both the
+        # plain-rename and merged paths.
+        pre_affected = []
+        if old_name:
+            pre_affected = db.conn.execute(
+                """SELECT pk.photo_id, wf.workspace_id
+                   FROM photo_keywords pk
+                   JOIN photos p ON p.id = pk.photo_id
+                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                   WHERE pk.keyword_id = ?""",
+                (keyword_id,),
+            ).fetchall()
         # Apply the update first — if it raises, no sidecar changes are queued
         try:
-            db.update_keyword(keyword_id, **body)
+            effective_id = db.update_keyword(keyword_id, **body)
         except ValueError as e:
             return json_error(str(e), 400)
+        # `effective_id` is the surviving keyword row: the input `keyword_id`
+        # for a plain rename, or the peer's id when update_keyword merged this
+        # row into an existing normalized-equal peer.
+        if effective_id is None:
+            effective_id = keyword_id
         # Re-read the stored name so sidecar queue/history and highlights
         # rename use the normalized value that update_keyword actually
         # wrote. Without this, a rename to `‘apapane` would store the
@@ -5215,7 +5237,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # add path.
         if old_name:
             stored = db.conn.execute(
-                "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
+                "SELECT name FROM keywords WHERE id = ?", (effective_id,)
             ).fetchone()
             if stored and stored["name"]:
                 new_name = stored["name"]
@@ -5223,18 +5245,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 old_name = None
         # Queue sidecar updates only after successful DB update, for all affected workspaces
         if old_name:
-            affected = db.conn.execute(
-                """SELECT pk.photo_id, wf.workspace_id
-                   FROM photo_keywords pk
-                   JOIN photos p ON p.id = pk.photo_id
-                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                   WHERE pk.keyword_id = ?""",
-                (keyword_id,),
-            ).fetchall()
+            affected = pre_affected
             new_row = db.conn.execute(
                 """SELECT is_species, type
                    FROM keywords WHERE id = ?""",
-                (keyword_id,),
+                (effective_id,),
             ).fetchone()
             new_is_species_keyword = (
                 new_row is not None
