@@ -6517,6 +6517,79 @@ def test_highlights_relabel_ignores_stale_representative_rows(app_and_db):
     assert reps.get("Bald Eagle") == pid
 
 
+def test_highlights_relabel_ignores_stale_representative_with_local_pref(app_and_db):
+    """When a photo has a stale ``photo_preferences`` row for a species it
+    no longer carries (from setting the rep in the active workspace and
+    then untagging that species), a relabel of the photo's current species
+    must not sweep the stale row through ``rename_photo_preferences_species``
+    — which would also rename the matching global ``species_representatives``
+    row into the target species, losing the preserved state and making the
+    target look manually selected."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/stalepref', 'stalepref', 'ok')"
+    ).lastrowid
+    ws_id = db._active_workspace_id
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (ws_id, fid),
+    )
+    stale_kid = db.add_keyword("Bald Eagle", is_species=True)
+    current_kid = db.add_keyword("Osprey", is_species=True)
+    db.add_keyword("Golden Eagle", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'stalepref.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, stale_kid)
+    db.tag_photo(pid, current_kid)
+    # Set both reps from the active workspace so each has a local
+    # compat pref row in ws_id. This makes the stale row travel through
+    # the pref-covered pass rather than the rep-only pass.
+    db.set_species_representative("Bald Eagle", pid)
+    db.set_species_representative("Osprey", pid)
+    # Untag Bald Eagle. The pref row and global rep row for Bald Eagle
+    # both remain (untag_photo does not clear either), so the photo now
+    # carries only Osprey as a taxonomy keyword but retains stale
+    # (Bald Eagle, pid) rows in both tables.
+    db.untag_photo(pid, stale_kid)
+
+    stale_pref = db.conn.execute(
+        """SELECT 1 FROM photo_preferences
+           WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+        (ws_id, "Bald Eagle", pid),
+    ).fetchone()
+    assert stale_pref is not None
+    stale_rep = db.conn.execute(
+        "SELECT 1 FROM species_representatives WHERE species = ? AND photo_id = ?",
+        ("Bald Eagle", pid),
+    ).fetchone()
+    assert stale_rep is not None
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Golden Eagle"},
+    )
+    assert resp.status_code == 200
+
+    reps = db.get_species_representatives()
+    # The Osprey rep moved to Golden Eagle (the relabel target).
+    assert reps.get("Golden Eagle") == pid
+    assert "Osprey" not in reps
+    # The stale Bald Eagle rep stays under Bald Eagle — the pref-covered
+    # rename must not carry it into Golden Eagle.
+    assert reps.get("Bald Eagle") == pid
+    # The stale Bald Eagle pref row is likewise left untouched.
+    stale_pref_after = db.conn.execute(
+        """SELECT 1 FROM photo_preferences
+           WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+        (ws_id, "Bald Eagle", pid),
+    ).fetchone()
+    assert stale_pref_after is not None
+
+
 def test_rename_species_representatives_species_chunks_large_photo_lists(tmp_path):
     """``rename_species_representatives_species`` must chunk the IN(...)
     clause so a species tagged on thousands of photos doesn't blow

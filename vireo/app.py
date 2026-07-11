@@ -8387,6 +8387,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 (species, *chunk),
             ).fetchall():
                 rep_dst_preexisting.add(row["photo_id"])
+        # Snapshot each photo's current taxonomy keywords before the relabel
+        # touches them. Used to skip stale curation rows for species the
+        # photo no longer carries: untag_photo does not clear
+        # photo_preferences or species_representatives, so a photo can retain
+        # a rep or pref row for species A after that keyword was removed.
+        # Without this filter, relabeling the photo's current species B→C
+        # would sweep the stale A rows into A→C renames — losing the
+        # preserved A state and making C look manually selected.
+        # rename_photo_preferences_species also renames the matching global
+        # species_representatives row, so filtering the preference pass here
+        # is what keeps stale reps out of the pref-covered rename path too.
+        current_species_by_pid = {}
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT pk.photo_id, k.name
+                    FROM photo_keywords pk
+                    JOIN keywords k ON k.id = pk.keyword_id
+                    WHERE pk.photo_id IN ({placeholders})
+                      AND (k.is_species = 1 OR k.type = 'taxonomy')""",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                current_species_by_pid.setdefault(row["photo_id"], set()).add(
+                    row["name"].strip().lower()
+                )
         pref_covered_by_pid_species = set()
         for chunk in _chunked(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
@@ -8402,6 +8428,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             for row in rows:
                 old_species_name = row["species"]
                 if old_species_name == species:
+                    continue
+                # If the photo currently carries any taxonomy keywords,
+                # restrict the pref rename to species among them. Skip the
+                # filter when the photo has no taxonomy keywords at all —
+                # that is the prediction-only relabel path (`keyword_add`
+                # instead of `species_replace`), where the curation being
+                # migrated intentionally belongs to a species the photo
+                # never had tagged.
+                current_species = current_species_by_pid.get(row["photo_id"])
+                if current_species and old_species_name.strip().lower() not in current_species:
                     continue
                 preference_renames.setdefault(old_species_name, []).append(
                     row["photo_id"]
@@ -8423,30 +8459,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # the retag would strand the representative under the old species
         # name — leaving both species without a representative. Query
         # species_representatives directly and enqueue any rep-only moves
-        # the preference pass didn't already cover.
-        #
-        # Restrict rep-only moves to species the photo currently carries
-        # as a taxonomy keyword. untag_photo does not clear
-        # species_representatives, so a photo may retain a stale rep row
-        # for species A after that keyword was removed. Without this
-        # filter, relabeling the photo's current species B→C would also
-        # sweep the stale A rep into an A→C rename — losing the preserved
-        # A rep state and making C look manually selected.
-        current_species_by_pid = {}
-        for chunk in _chunked(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            rows = db.conn.execute(
-                f"""SELECT pk.photo_id, k.name
-                    FROM photo_keywords pk
-                    JOIN keywords k ON k.id = pk.keyword_id
-                    WHERE pk.photo_id IN ({placeholders})
-                      AND (k.is_species = 1 OR k.type = 'taxonomy')""",
-                chunk,
-            ).fetchall()
-            for row in rows:
-                current_species_by_pid.setdefault(row["photo_id"], set()).add(
-                    row["name"].strip().lower()
-                )
+        # the preference pass didn't already cover. The same
+        # current-species filter applies here (see the snapshot comment
+        # above).
         representative_renames = {}
         rep_prev_by_pid = {}
         for chunk in _chunked(photo_ids):
@@ -8469,7 +8484,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # Only migrate rep rows whose species is among the photo's
                 # current taxonomy keywords (about to be untagged). Stale
                 # reps for species the photo no longer carries stay put.
-                if old_species_name.strip().lower() not in current_species_by_pid.get(pid, set()):
+                # Skip the filter when the photo has no taxonomy keywords
+                # at all — that is the prediction-only relabel path
+                # (`keyword_add` instead of `species_replace`), where the
+                # rep being migrated belongs to a species the photo never
+                # had tagged.
+                current_species = current_species_by_pid.get(pid)
+                if current_species and old_species_name.strip().lower() not in current_species:
                     continue
                 representative_renames.setdefault(old_species_name, []).append(pid)
                 rep_prev_by_pid.setdefault(pid, []).append({
