@@ -7148,7 +7148,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("photo_ids required")
 
         keyword_row = db.conn.execute(
-            "SELECT id, name FROM keywords WHERE id = ?", (keyword_id,)
+            "SELECT id, name, parent_id, type FROM keywords WHERE id = ?", (keyword_id,)
         ).fetchone()
         if keyword_row is None:
             return json_error("keyword not found", 404)
@@ -7159,23 +7159,64 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     f"Photo {pid} does not belong to the active workspace", 403
                 )
 
-        tagged_ids = []
+        # Expand the target to include every legacy row that normalizes to
+        # the same (name, parent_id, type). add_keyword() collapses those to
+        # a single canonical row on new inserts, but an upgraded DB can still
+        # carry legacy variants (e.g. `‘apapane` alongside clean `apapane`).
+        # `api_selection_keyword_suggestions` groups by the same match key and
+        # returns a single representative id for the group, so a "Remove from
+        # N" click hits this endpoint with that one id even when some of the
+        # selected photos are tagged with a peer variant instead. Without
+        # this expansion, only photos carrying the exact representative id
+        # get untagged and the others keep the legacy variant.
+        target_key = keyword_match_key(keyword_row["name"])
+        variant_ids = [keyword_id]
+        if target_key:
+            parent_id = keyword_row["parent_id"]
+            if parent_id is None:
+                peer_rows = db.conn.execute(
+                    """SELECT id FROM keywords
+                       WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE
+                         AND parent_id IS NULL
+                         AND type = ?
+                         AND id != ?""",
+                    (normalize_keyword_display(keyword_row["name"]),
+                     keyword_row["type"], keyword_id),
+                ).fetchall()
+            else:
+                peer_rows = db.conn.execute(
+                    """SELECT id FROM keywords
+                       WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE
+                         AND parent_id = ?
+                         AND type = ?
+                         AND id != ?""",
+                    (normalize_keyword_display(keyword_row["name"]),
+                     parent_id, keyword_row["type"], keyword_id),
+                ).fetchall()
+            variant_ids.extend(row["id"] for row in peer_rows)
+
+        # Photo_ids tagged with ANY variant get an untag+remove pair. Track
+        # which specific variant each photo carried so we untag the right row.
+        tagged_by_pid = {}
         batch_size = 800
         for i in range(0, len(clean_ids), batch_size):
             chunk = clean_ids[i:i + batch_size]
-            placeholders = ",".join("?" for _ in chunk)
+            id_placeholders = ",".join("?" for _ in variant_ids)
+            photo_placeholders = ",".join("?" for _ in chunk)
             rows = db.conn.execute(
-                f"""SELECT photo_id FROM photo_keywords
-                    WHERE keyword_id = ? AND photo_id IN ({placeholders})""",
-                [keyword_id] + chunk,
+                f"""SELECT photo_id, keyword_id FROM photo_keywords
+                    WHERE keyword_id IN ({id_placeholders})
+                      AND photo_id IN ({photo_placeholders})""",
+                list(variant_ids) + chunk,
             ).fetchall()
-            tagged_ids.extend(row["photo_id"] for row in rows)
+            for row in rows:
+                tagged_by_pid.setdefault(row["photo_id"], []).append(row["keyword_id"])
 
-        tagged_set = set(tagged_ids)
-        removed_ids = [pid for pid in clean_ids if pid in tagged_set]
+        removed_ids = [pid for pid in clean_ids if pid in tagged_by_pid]
         name = keyword_row["name"]
         for pid in removed_ids:
-            db.untag_photo(pid, keyword_id)
+            for kid in tagged_by_pid[pid]:
+                db.untag_photo(pid, kid)
             _queue_keyword_remove(pid, name)
 
         items = [

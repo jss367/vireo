@@ -85,6 +85,44 @@ def test_sync_to_xmp_keyword_add_canonicalizes_existing_variant(tmp_path):
     assert len(db.get_pending_changes()) == 0
 
 
+def test_sync_to_xmp_keyword_add_preserves_hierarchies_with_matching_segment(
+    tmp_path,
+):
+    """A flat keyword_add must not delete an unrelated hierarchy whose leaf
+    happens to share the added keyword.
+
+    Regression: sync canonicalizes sidecar variants of an added keyword by
+    stripping add-equivalents before writing. Using the default
+    remove_keywords semantics (which drop any hierarchy whose segment
+    matches) would delete `Animals|Birds|Hawk` when the user adds a flat
+    `Hawk`, wiping the entire hierarchical tree from the sidecar.
+    """
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_hierarchical_keywords, read_keywords, write_sidecar
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+    # Seed the sidecar with a hierarchy whose leaf matches what we're about
+    # to add flat. write_sidecar accepts both bags in one call.
+    write_sidecar(
+        xmp_path,
+        flat_keywords=set(),
+        hierarchical_keywords={'Animals|Birds|Hawk'},
+    )
+
+    db.queue_change(pid, 'keyword_add', 'Hawk')
+
+    result = sync_to_xmp(db)
+    assert result['synced'] == 1
+    assert result['failed'] == 0
+
+    assert 'Hawk' in read_keywords(xmp_path)
+    assert 'Animals|Birds|Hawk' in read_hierarchical_keywords(xmp_path)
+
+
 def test_sync_to_xmp_writes_rating(tmp_path):
     """sync_to_xmp writes rating changes to XMP sidecars."""
     from xml.etree import ElementTree as ET

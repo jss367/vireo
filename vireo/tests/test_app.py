@@ -4996,6 +4996,61 @@ def test_batch_keyword_remove_route_removes_existing_keyword_id(app_and_db):
     assert [row["photo_id"] for row in tagged_after_undo] == [ids[0]]
 
 
+def test_batch_keyword_remove_untags_normalized_peer_variants(app_and_db):
+    """Batch remove should untag every normalized-peer keyword variant.
+
+    Regression: `api_selection_keyword_suggestions` collapses variants that
+    share a normalized (name, parent_id, type) key and returns a single
+    representative id. If a selection has one photo tagged with the clean
+    row and another with a legacy edge-quote row, "Remove from N" sends
+    the representative id here. Without peer expansion, only the exact
+    keyword_id gets untagged and the other photo keeps its legacy variant.
+    """
+    app, db = app_and_db
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos ORDER BY filename"
+    ).fetchall()
+    ids = [row["id"] for row in rows]
+
+    # Insert a legacy peer directly so add_keyword's normalization doesn't
+    # merge the two rows on write. The rows have identical normalized
+    # (name, parent_id, type); only the stored spelling differs.
+    clean_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Cardinal'"
+    ).fetchone()["id"]
+    legacy_id = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES (?, NULL, 0, 'general')",
+        ("‘Cardinal",),
+    ).lastrowid
+    db.conn.commit()
+
+    # bird1 already carries Cardinal (from the fixture). Tag bird2 with the
+    # legacy variant so it's in the selection but not covered by clean_id.
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (ids[1], legacy_id),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/batch/keyword-remove",
+        json={"photo_ids": ids, "keyword_id": clean_id},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    # Both bird1 (via clean_id) and bird2 (via legacy peer) get untagged.
+    assert resp.get_json()["updated"] == 2
+
+    still_tagged = db.conn.execute(
+        "SELECT photo_id, keyword_id FROM photo_keywords "
+        "WHERE keyword_id IN (?, ?)",
+        (clean_id, legacy_id),
+    ).fetchall()
+    assert still_tagged == []
+
+
 def test_batch_keyword_remove_undo_restores_pending_add(app_and_db):
     """Add → bulk remove → undo must leave a pending sidecar write.
 

@@ -353,3 +353,22 @@ def test_remove_keywords_ignores_empty_normalized_input(sample_xmp):
     assert read_keywords(sample_xmp) == {"Bird", "Raptor"}
     hier = read_hierarchical_keywords(sample_xmp)
     assert set(hier) == {"Animals|Birds|Raptor", "Location|Forest"}
+
+
+def test_remove_keywords_flat_only_preserves_hierarchies(sample_xmp):
+    """Flat-only mode strips dc:subject matches but leaves hierarchies alone.
+
+    Regression test for the sync path: when the sync engine canonicalizes
+    sidecar variants for a queued keyword_add (e.g. removing a legacy
+    `‘apapane` before writing the clean `apapane`), it must not delete an
+    unrelated hierarchy that happens to share the added keyword as one of
+    its segments. Using the default full-semantics removal would drop
+    `Animals|Birds|Raptor` when the caller "removes" flat `Raptor`.
+    """
+    remove_keywords(sample_xmp, {"Raptor"}, hierarchical=False)
+
+    kw = read_keywords(sample_xmp)
+    assert "Raptor" not in kw
+    hier = read_hierarchical_keywords(sample_xmp)
+    assert "Animals|Birds|Raptor" in hier
+    assert "Location|Forest" in hier
