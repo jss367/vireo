@@ -28,11 +28,9 @@ pub enum SidecarStartError {
 impl std::fmt::Display for SidecarStartError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::IncompatibleDatabase { db_path, reason } => write!(
-                f,
-                "Incompatible database at {}: {}",
-                db_path, reason
-            ),
+            Self::IncompatibleDatabase { db_path, reason } => {
+                write!(f, "Incompatible database at {}: {}", db_path, reason)
+            }
             Self::Generic(msg) => f.write_str(msg),
         }
     }
@@ -78,6 +76,7 @@ fn parse_structured_error(line: &str) -> Option<SidecarStartError> {
 pub struct SidecarState {
     pub child: Mutex<Option<CommandChild>>,
     pub port: u16,
+    pub token: Option<String>,
     shutdown_on_exit: bool,
     client_marker: Option<std::path::PathBuf>,
 }
@@ -87,15 +86,17 @@ impl SidecarState {
         Self {
             child: Mutex::new(None),
             port,
+            token: None,
             shutdown_on_exit: false,
             client_marker: None,
         }
     }
 
-    fn owned(child: CommandChild, port: u16) -> Self {
+    fn owned(child: CommandChild, port: u16, token: String) -> Self {
         Self {
             child: Mutex::new(Some(child)),
             port,
+            token: Some(token),
             shutdown_on_exit: true,
             client_marker: register_gui_client(),
         }
@@ -113,6 +114,7 @@ impl SidecarState {
                 Some(Self {
                     child: Mutex::new(None),
                     port: runtime.port,
+                    token: Some(runtime.token),
                     shutdown_on_exit,
                     client_marker,
                 })
@@ -124,6 +126,7 @@ impl SidecarState {
         Some(Self {
             child: Mutex::new(None),
             port: runtime.port,
+            token: Some(runtime.token),
             shutdown_on_exit,
             client_marker: None,
         })
@@ -164,11 +167,7 @@ fn wait_for_health(
     let start = std::time::Instant::now();
     let url = format!("http://127.0.0.1:{}/api/health", port);
     loop {
-        if let Some(err) = early_exit
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-        {
+        if let Some(err) = early_exit.lock().unwrap_or_else(|e| e.into_inner()).clone() {
             return Err(err);
         }
         if start.elapsed() > timeout {
@@ -231,7 +230,7 @@ fn runtime_lock_is_held(path: &std::path::Path) -> bool {
     };
     match file.try_lock_exclusive() {
         Ok(()) => {
-            let _ = file.unlock();
+            let _ = FileExt::unlock(&file);
             false
         }
         Err(_) => true,
@@ -288,6 +287,7 @@ fn with_gui_clients_lock<T>(f: impl FnOnce() -> T) -> T {
     }
     let Ok(file) = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&path)
@@ -299,7 +299,7 @@ fn with_gui_clients_lock<T>(f: impl FnOnce() -> T) -> T {
         return f();
     }
     let result = f();
-    let _ = file.unlock();
+    let _ = FileExt::unlock(&file);
     result
 }
 
@@ -420,10 +420,9 @@ pub fn start_sidecar(app: &AppHandle) -> Result<SidecarState, SidecarStartError>
         format!("/opt/homebrew/bin:/usr/local/bin:{}", path)
     };
 
-    let mut cmd = app
-        .shell()
-        .sidecar("vireo-server")
-        .map_err(|e| SidecarStartError::Generic(format!("Failed to create sidecar command: {}", e)))?;
+    let mut cmd = app.shell().sidecar("vireo-server").map_err(|e| {
+        SidecarStartError::Generic(format!("Failed to create sidecar command: {}", e))
+    })?;
 
     #[cfg(target_os = "macos")]
     {
@@ -497,7 +496,16 @@ pub fn start_sidecar(app: &AppHandle) -> Result<SidecarState, SidecarStartError>
     // early if the supervisor sees a structured failure or termination.
     wait_for_health(port, Duration::from_secs(30), early_exit)?;
 
-    Ok(SidecarState::owned(child, port))
+    let runtime = runtime_json_path()
+        .and_then(|path| read_runtime_json(&path))
+        .filter(|runtime| runtime.port == port)
+        .ok_or_else(|| {
+            SidecarStartError::Generic(
+                "Backend became healthy without publishing its runtime token".to_string(),
+            )
+        })?;
+
+    Ok(SidecarState::owned(child, port, runtime.token))
 }
 
 /// Send POST /api/shutdown to the sidecar for a clean exit.

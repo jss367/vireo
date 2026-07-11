@@ -3,6 +3,17 @@
 import os
 
 
+def _seed_missing_originals_cache(app, db):
+    key = (db._db_path, db._active_workspace_id, None)
+    with app._missing_originals_lock:
+        app._missing_originals_cache[key] = {
+            "photos": [{"id": 7777, "filename": "stale.jpg"}],
+            "checked_at": "2026-01-01T00:00:00Z",
+            "set_at": 0.0,
+        }
+    return key
+
+
 def test_move_page_returns_200(app_and_db):
     """GET /move returns 200."""
     app, _ = app_and_db
@@ -100,6 +111,38 @@ def test_move_photos_job_starts(app_and_db, tmp_path):
     assert data["job_id"].startswith("move-photos-")
 
 
+def test_move_photos_job_invalidates_missing_originals_cache(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """Successful move-photo jobs must drop cached Missing Originals results."""
+    import move as move_module
+    from wait import wait_for_job_via_client
+
+    app, db = app_and_db
+    dst = tmp_path / "move_dst"
+    dst.mkdir()
+    pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    key = _seed_missing_originals_cache(app, db)
+
+    def fake_move_photos(db, photo_ids, destination, progress_cb=None):
+        assert photo_ids == [pid]
+        assert destination == str(dst)
+        return {"moved": 1, "errors": [], "destination_folder_id": 123}
+
+    monkeypatch.setattr(move_module, "move_photos", fake_move_photos)
+
+    client = app.test_client()
+    resp = client.post("/api/jobs/move-photos", json={
+        "photo_ids": [pid],
+        "destination": str(dst),
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed", job
+    with app._missing_originals_lock:
+        assert key not in app._missing_originals_cache
+
+
 def test_move_photos_requires_params(app_and_db):
     """POST /api/jobs/move-photos without photo_ids returns error."""
     app, _ = app_and_db
@@ -126,6 +169,47 @@ def test_move_folder_job_starts(app_and_db, tmp_path):
     data = resp.get_json()
     assert "job_id" in data
     assert data["job_id"].startswith("move-folder-")
+
+
+def test_move_folder_job_invalidates_missing_originals_cache(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """Successful move-folder jobs must drop cached Missing Originals results."""
+    import move as move_module
+    from wait import wait_for_job_via_client
+
+    app, db = app_and_db
+    dst = tmp_path / "move_folder_dst"
+    dst.mkdir()
+    fid = db.get_folder_tree()[0]["id"]
+    key = _seed_missing_originals_cache(app, db)
+
+    def fake_move_folder(
+        db,
+        folder_id,
+        destination,
+        progress_cb=None,
+        developed_dir=None,
+        merge=False,
+        remote=None,
+    ):
+        assert folder_id == fid
+        assert destination == str(dst)
+        return {"moved": 1, "errors": []}
+
+    monkeypatch.setattr(move_module, "move_folder", fake_move_folder)
+
+    client = app.test_client()
+    resp = client.post("/api/jobs/move-folder", json={
+        "folder_id": fid,
+        "destination": str(dst),
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed", job
+    assert job["result"]["ok"] is True
+    with app._missing_originals_lock:
+        assert key not in app._missing_originals_cache
 
 
 def test_move_folder_failed_move_recorded_as_failed(app_and_db, tmp_path):

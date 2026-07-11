@@ -8,6 +8,8 @@ import time
 from collections import deque
 from datetime import datetime
 
+from job_contract import failure_event
+
 log = logging.getLogger(__name__)
 
 # How long to keep completed/failed jobs in memory before eviction (seconds)
@@ -312,6 +314,7 @@ class JobRunner:
         thread = threading.Thread(
             target=self._run_job, args=(job, work_fn), daemon=True,
         )
+        log.info("Job %s started type=pipeline", job["id"])
         thread.start()
 
     def _schedule_promotion_retry_locked(self):
@@ -428,6 +431,7 @@ class JobRunner:
         thread = threading.Thread(
             target=self._run_job, args=(job, work_fn), daemon=True
         )
+        log.info("Job %s started type=%s", job_id, job_type)
         thread.start()
         return job_id
 
@@ -513,15 +517,30 @@ class JobRunner:
             elapsed = time.time() - start_time
             job["finished_at"] = datetime.now().isoformat()
             job["_ended_at"] = time.time()
+            phase = (job.get("progress") or {}).get("phase")
+            failure = None
+            if job["status"] == "failed":
+                failure = failure_event(
+                    job["errors"][-1] if job["errors"] else "Job failed",
+                    phase=phase,
+                )
             self.push_event(
                 job["id"],
                 "complete",
                 {
+                    "job_id": job["id"],
+                    "job_type": job["type"],
                     "status": job["status"],
+                    "phase": phase,
                     "result": job["result"],
                     "duration": round(elapsed, 1),
                     "errors": job["errors"],
+                    "failure": failure,
                 },
+            )
+            log.info(
+                "Job %s finished type=%s status=%s duration=%.1fs phase=%s",
+                job["id"], job["type"], job["status"], elapsed, phase or "-",
             )
             if self._db_path and not job.get("ephemeral"):
                 self._persist_job(job, elapsed)

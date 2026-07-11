@@ -19,6 +19,7 @@ _UNSET = object()  # sentinel for "not provided" vs explicit None
 AUTO_MATCH_REVIEW_MARKER = "__vireo_auto_match__"
 
 _SQLITE_PARAM_CHUNK_SIZE = 800
+_MISSING_PHOTOS_PROGRESS_INTERVAL = 200
 
 
 class IncompatibleDatabaseError(RuntimeError):
@@ -52,6 +53,10 @@ class IncompatibleDatabaseError(RuntimeError):
         if cause:
             msg += f" ({cause})"
         super().__init__(msg)
+
+
+class MissingPhotosCancelled(RuntimeError):
+    """Raised when a Missing Originals filesystem scan is cancelled."""
 
 
 def _nfc(name: str) -> str:
@@ -315,9 +320,7 @@ ALL_NAV_IDS = frozenset({
 })
 
 DEFAULT_TABS = [
-    "import", "browse", "pipeline", "pipeline_review",
-    "review", "cull", "jobs",
-    "highlights", "misses", "storage", "settings",
+    "import", "pipeline", "review", "browse",
 ]
 
 
@@ -402,7 +405,7 @@ class Database:
         db_path: path to the SQLite database file (created if missing)
     """
 
-    def __init__(self, db_path):
+    def __init__(self, db_path, *, initialize_schema=True):
         db_dir = os.path.dirname(db_path)
         if db_path != ":memory:" and db_dir:
             os.makedirs(db_dir, exist_ok=True)
@@ -430,6 +433,9 @@ class Database:
         self.conn.execute("PRAGMA busy_timeout=30000")  # 30 s — tolerate parallel scan writers
         self._active_workspace_id = None
         self._new_images_cache = get_shared_cache()
+        if not initialize_schema:
+            self._restore_active_workspace()
+            return
         # Schema setup asserts the canonical schema against whatever is on
         # disk. `CREATE TABLE IF NOT EXISTS` silently skips a stale table, so
         # a database from an older Vireo (e.g. a pre-`classifier_model`
@@ -487,10 +493,15 @@ class Database:
         # Idempotent, one-shot: seed globally shared species representatives
         # from the older per-workspace single-preference rows.
         self.backfill_species_representatives_from_legacy_preferences()
-        # Restore last-used workspace, or fall back to Default
+        self._restore_active_workspace()
+
+    def _restore_active_workspace(self):
+        """Restore the last-used workspace on an already initialized schema."""
         last = self.conn.execute(
             "SELECT id FROM workspaces ORDER BY CASE WHEN last_opened_at IS NULL THEN 0 ELSE 1 END DESC, last_opened_at DESC, id ASC LIMIT 1"
         ).fetchone()
+        if last is None:
+            raise RuntimeError("Vireo database has no workspace after schema initialization")
         self.set_active_workspace(last[0])
 
     def close(self):
@@ -1112,6 +1123,12 @@ class Database:
                     continue
                 if not isinstance(tabs, list) or "storage" in tabs:
                     continue
+                # A legacy table that lacked the tabs column was initialized
+                # above with today's compact primary workflow. Do not let this
+                # historical migration append a secondary page to that new
+                # default; Storage remains available under Tools.
+                if tabs == DEFAULT_TABS:
+                    continue
                 if "settings" in tabs:
                     tabs.insert(tabs.index("settings"), "storage")
                 elif "misses" in tabs:
@@ -1712,16 +1729,7 @@ class Database:
         that renders nothing and makes ``adjacentTabId()`` return an id that
         ``pageById`` doesn't know, which throws on close-adjacent.
         """
-        ws = self.get_workspace(self._ws_id())
-        if not ws or not ws["tabs"]:
-            return list(DEFAULT_TABS)
-        try:
-            value = json.loads(ws["tabs"]) if isinstance(ws["tabs"], str) else ws["tabs"]
-        except (json.JSONDecodeError, TypeError):
-            return list(DEFAULT_TABS)
-        if not isinstance(value, list):
-            return list(DEFAULT_TABS)
-        return [t for t in value if isinstance(t, str) and t in ALL_NAV_IDS]
+        return self._workspace_repository().get_tabs()
 
     def set_tabs(self, tabs):
         """Replace the active workspace's tabs with the given ordered list.
@@ -1731,23 +1739,7 @@ class Database:
         the storage layer.
         Returns the new list.
         """
-        if not isinstance(tabs, list):
-            raise ValueError("tabs must be a list")
-        seen = set()
-        for nav_id in tabs:
-            if not isinstance(nav_id, str):
-                raise ValueError(f"tab id must be a string, got {type(nav_id).__name__}")
-            if nav_id not in ALL_NAV_IDS:
-                raise ValueError(f"{nav_id!r} is not a known nav id")
-            if nav_id in seen:
-                raise ValueError(f"{nav_id!r} appears more than once")
-            seen.add(nav_id)
-        self.conn.execute(
-            "UPDATE workspaces SET tabs = ? WHERE id = ?",
-            (json.dumps(tabs), self._ws_id()),
-        )
-        self.conn.commit()
-        return list(tabs)
+        return self._workspace_repository().set_tabs(tabs)
 
     def pin_tab(self, nav_id):
         """Append nav_id to the active workspace's tabs if not present.
@@ -1755,17 +1747,7 @@ class Database:
         Raises ValueError if nav_id is not in ALL_NAV_IDS.
         Returns the new list.
         """
-        if nav_id not in ALL_NAV_IDS:
-            raise ValueError(f"{nav_id!r} is not a known nav id")
-        tabs = self.get_tabs()
-        if nav_id not in tabs:
-            tabs.append(nav_id)
-            self.conn.execute(
-                "UPDATE workspaces SET tabs = ? WHERE id = ?",
-                (json.dumps(tabs), self._ws_id()),
-            )
-            self.conn.commit()
-        return tabs
+        return self._workspace_repository().pin_tab(nav_id)
 
     def unpin_tab(self, nav_id):
         """Remove nav_id from the active workspace's tabs if present.
@@ -1773,17 +1755,17 @@ class Database:
         Raises ValueError if nav_id is not in ALL_NAV_IDS.
         Returns the new list.
         """
-        if nav_id not in ALL_NAV_IDS:
-            raise ValueError(f"{nav_id!r} is not a known nav id")
-        tabs = self.get_tabs()
-        if nav_id in tabs:
-            tabs = [t for t in tabs if t != nav_id]
-            self.conn.execute(
-                "UPDATE workspaces SET tabs = ? WHERE id = ?",
-                (json.dumps(tabs), self._ws_id()),
-            )
-            self.conn.commit()
-        return tabs
+        return self._workspace_repository().unpin_tab(nav_id)
+
+    def _workspace_repository(self):
+        from repositories.workspaces import WorkspaceRepository
+
+        return WorkspaceRepository(
+            self.conn,
+            self._ws_id(),
+            allowed_nav_ids=ALL_NAV_IDS,
+            default_tabs=DEFAULT_TABS,
+        )
 
     def set_workspace_group_state(self, workspace_id, fingerprint, when_ts):
         """Record that grouping completed for `workspace_id` at `when_ts`
@@ -2827,7 +2809,12 @@ class Database:
             (self._ws_id(),),
         ).fetchall()
 
-    def get_missing_photos(self, folder_id=None):
+    def get_missing_photos(
+        self,
+        folder_id=None,
+        progress_callback=None,
+        cancel_callback=None,
+    ):
         """Return photos whose source file is missing from disk.
 
         Scoped to the active workspace. Skips photos in folders flagged
@@ -2855,7 +2842,20 @@ class Database:
         Each row carries ``folder_path``, ``timestamp``, and
         ``working_copy_path`` so the caller can render rich UI without
         joining again.
+
+        ``progress_callback`` is optional. When supplied, it receives dicts
+        containing ``folders_checked``, ``photos_considered``, ``missing_found``,
+        ``total_photos``, and ``current_folder``. Callback exceptions are
+        logged and ignored so progress reporting cannot abort detection.
+
+        ``cancel_callback`` is optional. When supplied, it is polled between
+        filesystem operations and may abort the scan by returning true.
         """
+        def check_cancelled():
+            if cancel_callback is not None and cancel_callback():
+                raise MissingPhotosCancelled("missing photos scan cancelled")
+
+        check_cancelled()
         params = [self._ws_id()]
         subtree_clause = ""
         if folder_id is not None:
@@ -2887,6 +2887,7 @@ class Database:
                 subtree_clause = (
                     " AND f.id IN (SELECT id FROM missing_subtree_ids)"
                 )
+        check_cancelled()
         rows = self.conn.execute(
             f"""SELECT p.id, p.filename, p.extension, p.file_size,
                       p.timestamp, p.working_copy_path,
@@ -2898,6 +2899,7 @@ class Database:
                ORDER BY f.path, p.filename""",
             params,
         ).fetchall()
+        check_cancelled()
         # One readdir per folder instead of one stat per photo. On a 50k-photo
         # library across a network volume the per-photo `os.path.exists` was
         # costing minutes; a single scandir + set-membership check is orders
@@ -2908,18 +2910,49 @@ class Database:
         folder_online: dict[int, bool] = {}
         folder_names: dict[int, set[str] | None] = {}
         missing = []
+        photos_considered = 0
+        folders_checked = 0
+        reported_folders = set()
+        progress_callback_enabled = True
+
+        def report_progress(current_folder):
+            nonlocal progress_callback_enabled
+            if progress_callback is None or not progress_callback_enabled:
+                return
+            try:
+                progress_callback({
+                    "folders_checked": folders_checked,
+                    "photos_considered": photos_considered,
+                    "missing_found": len(missing),
+                    "total_photos": len(rows),
+                    "current_folder": current_folder,
+                })
+            except Exception:
+                progress_callback_enabled = False
+                log.exception("Missing photos progress callback failed")
+
+        def report_photo_progress(current_folder):
+            if photos_considered % _MISSING_PHOTOS_PROGRESS_INTERVAL == 0:
+                report_progress(current_folder)
+
         for row in rows:
+            check_cancelled()
             fid = row["folder_id"]
             if fid not in folder_online:
                 folder_online[fid] = os.path.isdir(row["folder_path"])
             if not folder_online[fid]:
                 # Whole folder is offline — surfaced by missing-folders flow.
+                if fid not in reported_folders:
+                    reported_folders.add(fid)
+                    folders_checked += 1
+                    report_progress(row["folder_path"])
                 continue
             if fid not in folder_names:
                 try:
                     names_set: set[str] = set()
                     with os.scandir(row["folder_path"]) as it:
                         for entry in it:
+                            check_cancelled()
                             # Broken symlinks: scandir returns the basename even
                             # when the target is gone, but the prior os.path.exists
                             # check returned False. Filter them so missing
@@ -2935,17 +2968,28 @@ class Database:
                     # treat the same as "folder offline" so we don't bulk-flag
                     # every photo as a ghost.
                     folder_names[fid] = None
+                if fid not in reported_folders:
+                    reported_folders.add(fid)
+                    folders_checked += 1
+                    report_progress(row["folder_path"])
             names = folder_names[fid]
+            photos_considered += 1
             if names is None:
+                report_photo_progress(row["folder_path"])
                 continue
             if _nfc(row["filename"]) in names:
+                report_photo_progress(row["folder_path"])
                 continue
             # NFC miss: defer to the kernel for case rules. On case-insensitive
             # volumes (APFS default, NTFS) os.path.exists resolves a
             # case-mismatched name; on case-sensitive volumes (most Linux
             # filesystems) it correctly reports the file as absent.
+            check_cancelled()
             if not os.path.exists(os.path.join(row["folder_path"], row["filename"])):
                 missing.append(row)
+            report_photo_progress(row["folder_path"])
+        check_cancelled()
+        report_progress("")
         return missing
 
     def nearest_ancestor_folder_id(self, path, exclude_id=None):
