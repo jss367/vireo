@@ -607,6 +607,66 @@ def test_photo_detail_life_list_current_false_when_other_photo_is_rep(app_and_db
     ]
 
 
+def test_photo_detail_life_list_marks_only_primary_of_multiple_reps(app_and_db):
+    """Secondary reps report is_current_photo=False so the lightbox lifelist
+    panel renders "Set Representative" (re-selecting promotes them) and the
+    shared context menu doesn't disable the item for a secondary rep."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    p1, p2 = photos[0]["id"], photos[1]["id"]
+    kid = db.add_keyword("American Robin", is_species=True)
+    db.tag_photo(p1, kid)
+    db.tag_photo(p2, kid)
+    # p1 selected first, then p2 — get_species_representative_lists is
+    # newest-first, so p2 is the primary (index 0) and p1 is secondary.
+    db.set_species_representative("American Robin", p1)
+    db.set_species_representative("American Robin", p2)
+
+    primary = client.get(f"/api/photos/{p2}").get_json()
+    secondary = client.get(f"/api/photos/{p1}").get_json()
+
+    assert primary["life_list"] == [
+        {
+            "species": "American Robin",
+            "is_current_photo": True,
+            "is_species_representative": True,
+        }
+    ]
+    assert secondary["life_list"] == [
+        {
+            "species": "American Robin",
+            "is_current_photo": False,
+            "is_species_representative": False,
+        }
+    ]
+
+
+def test_photo_detail_life_list_uses_primary_eligible_rep(app_and_db):
+    """If the newest representative is ineligible, the older eligible rep is
+    current so detail menus do not offer a redundant representative action."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    p1, p2 = photos[0]["id"], photos[1]["id"]
+    kid = db.add_keyword("American Robin", is_species=True)
+    db.tag_photo(p1, kid)
+    db.tag_photo(p2, kid)
+    db.set_species_representative("American Robin", p1)
+    db.set_species_representative("American Robin", p2)
+    db.update_photo_flag(p2, "rejected")
+
+    data = client.get(f"/api/photos/{p1}").get_json()
+
+    assert data["life_list"] == [
+        {
+            "species": "American Robin",
+            "is_current_photo": True,
+            "is_species_representative": True,
+        }
+    ]
+
+
 def test_photo_detail_life_list_excludes_non_species_keyword(app_and_db):
     """Plain (non-species) keywords never produce a lifelist entry."""
     app, db = app_and_db

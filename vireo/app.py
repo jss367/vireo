@@ -88,6 +88,7 @@ from render_source import (
 from schema import ensure_schema
 from web.pages import pages_blueprint
 from web.photo_labels import create_photo_labels_blueprint
+from web.photo_review import create_photo_review_blueprint
 from web.system import system_blueprint
 from web.workspaces import create_workspace_blueprint
 from werkzeug.exceptions import BadRequest
@@ -4654,19 +4655,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result["keywords"] = [dict(k) for k in keywords]
 
         # Representative block: the photo's eligible species plus whether this
-        # photo is one of the shared species representatives. Keep the
-        # legacy ``life_list`` key because shared lightbox/menu code reads it.
-        representatives = db.get_species_representative_lists()
+        # photo is the primary species representative. Only the primary (item 0
+        # of get_species_representative_lists, which sorts newest-selection
+        # first) flips these flags — secondary reps stay false so shared UI
+        # code (context menus, panel buttons) can still offer to promote them
+        # via set_species_representative's re-select-to-newest behavior.
+        # Keep the legacy ``life_list`` key because shared lightbox/menu code
+        # reads it.
+        representatives = db.get_species_representative_lists(eligible_only=True)
         life_list_species = db.get_photo_life_list_species(photo_id)
-        representative_sets = {
-            species: set(representatives.get(species) or [])
-            for species in life_list_species
+        primary_by_species = {
+            species: (photo_ids[0] if photo_ids else None)
+            for species, photo_ids in representatives.items()
         }
         result["life_list"] = [
             {
                 "species": s,
-                "is_current_photo": photo_id in representative_sets[s],
-                "is_species_representative": photo_id in representative_sets[s],
+                "is_current_photo": photo_id == primary_by_species.get(s),
+                "is_species_representative": photo_id == primary_by_species.get(s),
             }
             for s in life_list_species
         ]
@@ -5296,42 +5302,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         }, None
 
     # -- Edit API routes --
-
-    @app.route("/api/photos/<int:photo_id>/rating", methods=["POST"])
-    def api_set_rating(photo_id):
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        rating = body.get("rating", 0)
-        if isinstance(rating, bool) or not isinstance(rating, int) or rating < 0 or rating > 5:
-            return json_error("rating must be an integer 0-5")
-        old = db.get_photo(photo_id)
-        old_rating = old["rating"] if old else 0
-        try:
-            db.update_photo_rating(photo_id, rating)
-        except ValueError as e:
-            return json_error(str(e), 403)
-        db.queue_change(photo_id, "rating", str(rating))
-        db.record_edit('rating', f'Set rating to {rating}', str(rating),
-                       [{'photo_id': photo_id, 'old_value': str(old_rating), 'new_value': str(rating)}])
-        return jsonify({"ok": True})
-
-    @app.route("/api/photos/<int:photo_id>/flag", methods=["POST"])
-    def api_set_flag(photo_id):
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        flag = body.get("flag", "none")
-        if flag not in ("none", "flagged", "rejected"):
-            return json_error("flag must be 'none', 'flagged', or 'rejected'")
-        old = db.get_photo(photo_id)
-        old_flag = old["flag"] if old else "none"
-        try:
-            db.update_photo_flag(photo_id, flag)
-        except ValueError as e:
-            return json_error(str(e), 403)
-        db.queue_flag_change_if_enabled(photo_id, flag)
-        db.record_edit('flag', f'Set flag to {flag}', flag,
-                       [{'photo_id': photo_id, 'old_value': old_flag, 'new_value': flag}])
-        return jsonify({"ok": True})
 
     @app.route("/api/photos/<int:photo_id>/wildlife_excluded", methods=["POST"])
     def api_set_wildlife_excluded(photo_id):
@@ -6901,55 +6871,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         })
 
     # -- Batch operations --
-
-    @app.route("/api/batch/rating", methods=["POST"])
-    def api_batch_rating():
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        photo_ids = body.get("photo_ids", [])
-        rating = body.get("rating", 0)
-        if isinstance(rating, bool) or not isinstance(rating, int) or rating < 0 or rating > 5:
-            return json_error("rating must be an integer 0-5")
-        if not photo_ids:
-            return json_error("photo_ids required")
-        photos_map = db.get_photos_by_ids(photo_ids)
-        old_values = {pid: photos_map[pid]["rating"] for pid in photo_ids if pid in photos_map}
-        valid_ids = list(old_values.keys())
-        try:
-            db.batch_update_photo_rating(valid_ids, rating)
-        except ValueError as e:
-            return json_error(str(e), 403)
-        for pid in valid_ids:
-            db.queue_change(pid, "rating", str(rating))
-        items = [{'photo_id': pid, 'old_value': str(old_values[pid]), 'new_value': str(rating)} for pid in old_values]
-        db.record_edit('rating', f'Set rating to {rating} on {len(photo_ids)} photos',
-                       str(rating), items, is_batch=True)
-        return jsonify({"ok": True, "updated": len(old_values)})
-
-    @app.route("/api/batch/flag", methods=["POST"])
-    def api_batch_flag():
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        photo_ids = body.get("photo_ids", [])
-        flag = body.get("flag", "none")
-        if flag not in ("none", "flagged", "rejected"):
-            return json_error("flag must be 'none', 'flagged', or 'rejected'")
-        if not photo_ids:
-            return json_error("photo_ids required")
-        photos_map = db.get_photos_by_ids(photo_ids)
-        old_values = {pid: photos_map[pid]["flag"] for pid in photo_ids if pid in photos_map}
-        valid_ids = list(old_values.keys())
-        try:
-            db.batch_update_photo_flag(valid_ids, flag)
-        except ValueError as e:
-            return json_error(str(e), 403)
-        for pid in valid_ids:
-            db.queue_flag_change_if_enabled(pid, flag, _commit=False)
-        db.conn.commit()
-        items = [{'photo_id': pid, 'old_value': old_values[pid], 'new_value': flag} for pid in old_values]
-        db.record_edit('flag', f'Set flag to {flag} on {len(photo_ids)} photos',
-                       flag, items, is_batch=True)
-        return jsonify({"ok": True, "updated": len(old_values)})
 
     @app.route("/api/batch/best-batch-flags", methods=["POST"])
     def api_batch_best_batch_flags():
@@ -23626,6 +23547,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return send_file(cache_path, mimetype="image/jpeg")
 
     app.register_blueprint(create_photo_labels_blueprint(_get_db, json_error))
+    app.register_blueprint(create_photo_review_blueprint(_get_db, json_error))
 
     # --- /api/v1/* aliases over the stable subset of /api/* ---
     # These are the endpoints advertised to external callers in docs/headless-api.md.
