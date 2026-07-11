@@ -1008,6 +1008,20 @@ def test_add_keyword_preserves_leading_okina(db):
         )
 
 
+def test_add_keyword_normalizes_acute_accent_edge_variant(db):
+    """U+00B4 (ACUTE ACCENT) NFKC-decomposes to U+0020 U+0301, so unless it
+    is stripped before NFKC runs, ``´apapane`` normalizes to a
+    stranded leading combining acute (`́apapane`) that survives the
+    post-NFKC strip and creates a nearly-invisible distinct keyword."""
+    kid = db.add_keyword("´apapane")
+
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "apapane"
+    assert db.add_keyword("apapane") == kid
+
+
 def test_add_keyword_dedupes_pre_existing_edge_quote_variant(db):
     """When an upgraded database already carries a tagged edge-quote variant
     like '\u2018apapane', a later `add_keyword('apapane')` must reuse that row

@@ -26,7 +26,15 @@ _EDGE_QUOTES = (
 
 def normalize_keyword_display(name: str) -> str:
     """Return a cleaned display/storage form for a keyword name."""
-    value = unicodedata.normalize("NFKC", str(name or ""))
+    value = str(name or "")
+    # Strip edge quotes BEFORE NFKC so characters that decompose into a
+    # spacing char plus a combining mark (e.g. U+00B4 ACUTE ACCENT ->
+    # U+0020 U+0301) get removed while they are still a single quote-ish
+    # code point at the edge. Skipping this pre-strip lets `´apapane`
+    # normalize to `́apapane`, an invisible variant that survives the
+    # post-NFKC strip below because U+0301 is not in _EDGE_QUOTES.
+    value = value.strip(_EDGE_QUOTES)
+    value = unicodedata.normalize("NFKC", value)
     value = "".join(" " if ch.isspace() else ch for ch in value)
     value = re.sub(r" +", " ", value).strip()
     value = value.strip(_EDGE_QUOTES)

@@ -4410,6 +4410,99 @@ def test_batch_keyword_route_rejects_name_that_normalizes_to_empty(app_and_db):
     )
 
 
+def test_add_keyword_route_queues_stored_name_after_normalization(app_and_db):
+    """When a stray-quote name is submitted, the pending-change queue must
+    record the stored (normalized) name — not the raw request string —
+    so a later delete (which reads k.name from the DB) queues the same
+    string and the add/remove pair cancels instead of both persisting to
+    XMP."""
+    app, db = app_and_db
+    folder_id = db.add_folder("/tmp/qn")
+    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "qn.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+    client = app.test_client()
+
+    resp = client.post(
+        f"/api/photos/{photo_id}/keywords",
+        json={"name": "‘quailquail"},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    kid = resp.get_json()["keyword_id"]
+    stored = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()["name"]
+    assert stored == "quailquail"
+
+    queued_add = db.conn.execute(
+        "SELECT value FROM pending_changes "
+        "WHERE photo_id = ? AND change_type = 'keyword_add'",
+        (photo_id,),
+    ).fetchall()
+    assert [row["value"] for row in queued_add] == [stored], (
+        "keyword_add queue must record the stored name so it matches what a "
+        "later keyword_remove would queue via k.name"
+    )
+
+    resp = client.delete(f"/api/photos/{photo_id}/keywords/{kid}")
+    assert resp.status_code == 200
+    remaining = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ?",
+        (photo_id,),
+    ).fetchall()
+    assert remaining == [], (
+        f"add/remove should cancel, but pending_changes still has "
+        f"{[dict(r) for r in remaining]}"
+    )
+
+
+def test_batch_keyword_route_queues_stored_name_after_normalization(app_and_db):
+    """Batch endpoint must queue the stored keyword name too, so the
+    per-photo add/remove pair cancels the same way the single endpoint does."""
+    app, db = app_and_db
+    folder_id = db.add_folder("/tmp/qb")
+    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "qb.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/batch/keyword",
+        json={"photo_ids": [photo_id], "name": "‘quailquail"},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    kid = db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (photo_id,)
+    ).fetchone()["keyword_id"]
+    stored = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()["name"]
+    assert stored == "quailquail"
+
+    queued_add = db.conn.execute(
+        "SELECT value FROM pending_changes "
+        "WHERE photo_id = ? AND change_type = 'keyword_add'",
+        (photo_id,),
+    ).fetchall()
+    assert [row["value"] for row in queued_add] == [stored]
+
+    resp = client.delete(f"/api/photos/{photo_id}/keywords/{kid}")
+    assert resp.status_code == 200
+    remaining = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ?",
+        (photo_id,),
+    ).fetchall()
+    assert remaining == []
+
+
 def test_selection_keyword_suggestions_return_partial_keywords(app_and_db):
     """Multi-select suggestions should offer keywords present on only some photos."""
     app, db = app_and_db

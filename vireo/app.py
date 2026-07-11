@@ -5055,6 +5055,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 else None
             )
             kid = db.add_keyword(name, kw_type=kw_type)
+            # Re-read the stored keyword name so the pending-change and
+            # history entries match the row actually tagged. Without this
+            # step, a request like `‘apapane` would tag the normalized
+            # `apapane` row (or match a legacy edge-quote row via the
+            # add_keyword UDF fallback) while still queuing the raw
+            # request string, so a later delete — which reads k.name from
+            # the DB — queues a differently-spelled entry and pending
+            # changes no longer cancel; XMP sync would then persist the
+            # stray-quote spelling even though the in-app keyword is
+            # normalized. Using the stored name also picks up any species
+            # casing convention applied inside add_keyword.
+            stored = db.conn.execute(
+                "SELECT name FROM keywords WHERE id = ?", (kid,)
+            ).fetchone()
+            if stored and stored["name"]:
+                name = stored["name"]
         db.tag_photo(photo_id, kid)
         _queue_keyword_add(photo_id, name)
         db.record_edit('keyword_add', f'Added keyword "{name}"', str(kid),
@@ -6262,6 +6278,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 else None
             )
             kid = db.add_keyword(name, kw_type=kw_type)
+            # Re-read the stored keyword name so queue/history entries
+            # match the row actually tagged; see api_add_keyword for the
+            # full rationale (pending-change cancellation and XMP sync).
+            stored = db.conn.execute(
+                "SELECT name FROM keywords WHERE id = ?", (kid,)
+            ).fetchone()
+            if stored and stored["name"]:
+                name = stored["name"]
 
         already_tagged = set()
         batch_size = 800
