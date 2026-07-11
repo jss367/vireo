@@ -3642,8 +3642,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         scope_label = "workspace" if folder_id is None else f"folder #{folder_id}"
 
         def work(job):
-            thread_db = Database(db_file)
+            thread_db = None
             try:
+                thread_db = Database(db_file)
                 if ws_id is not None:
                     thread_db.set_active_workspace(ws_id)
 
@@ -3727,7 +3728,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         }
                 raise
             finally:
-                thread_db.close()
+                if thread_db is not None:
+                    thread_db.close()
                 with app._missing_originals_lock:
                     if app._missing_originals_inflight.get(key) in (
                         token,

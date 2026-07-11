@@ -4962,6 +4962,44 @@ def test_api_photos_missing_automatic_respects_failure_backoff(app_and_db, monke
     assert data["backoff_seconds"] > 0
 
 
+def test_api_photos_missing_worker_db_open_failure_clears_inflight(
+    app_and_db, monkeypatch,
+):
+    """A worker DB-open failure must not leave the scope permanently pending."""
+    import app as app_module
+
+    app, db = app_and_db
+    client = app.test_client()
+    key = (db._db_path, db._active_workspace_id, None)
+    captured = {}
+
+    real_database = app_module.Database
+
+    class FailingDatabase:
+        def __init__(self, path):
+            raise RuntimeError("open failed")
+
+    def run_with_broken_worker_db(job_type, work, **kwargs):
+        job = {"id": "missing-originals-fail", "progress": {}}
+        app_module.Database = FailingDatabase
+        try:
+            work(job)
+        except RuntimeError as exc:
+            captured["error"] = str(exc)
+        finally:
+            app_module.Database = real_database
+        return job["id"]
+
+    monkeypatch.setattr(app._job_runner, "start", run_with_broken_worker_db)
+
+    resp = client.post("/api/photos/missing/check", json={})
+    assert resp.status_code == 202, resp.get_json()
+    assert captured["error"] == "open failed"
+    with app._missing_originals_lock:
+        assert key not in app._missing_originals_inflight
+        assert app._missing_originals_errors[key]["error"] == "open failed"
+
+
 def test_get_missing_photos_honors_cancel_callback(app_and_db):
     """The low-level missing-originals walk must be cooperatively cancellable."""
     import pytest
