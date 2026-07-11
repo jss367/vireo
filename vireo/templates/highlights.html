@@ -1285,7 +1285,17 @@ document.addEventListener('lightbox:flagchanged', function(e) {
     if (prev === next) return;
     if (prev !== 'flagged' && next !== 'flagged') return;
     var hit = findHighlightPhotoWithContainer(detail.photoId);
-    if (!hit) return;
+    if (!hit) {
+      // Eviction path: a prior unpick's refetchBucketFromZero can drop a
+      // photo out of the loaded window when it was only visible because
+      // picked_first promoted it. If the lightbox is still open on that
+      // photo and the user re-picks, we no longer have a bucket reference
+      // for a targeted refetch — reload everything so the fresh
+      // picked_first ordering brings the photo back into a bucket window
+      // (and the Save-as-Collection payload).
+      loadHighlights();
+      return;
+    }
     // Mutate the shared photo reference immediately so any UI that reads
     // photo.flag between now and the refetch resolving (e.g. the still-open
     // lightbox controls) reflects the new pick state; the refetch then

@@ -648,6 +648,150 @@ def test_highlights_lightbox_pick_refetches_paged_bucket(live_server, page):
     assert len(all_ids) == 28
 
 
+def test_highlights_lightbox_repick_after_eviction_restores_photo(live_server, page):
+    """Re-picking from the lightbox after the photo was evicted from the
+    loaded window must reload highlights, not silently no-op.
+
+    Regression for Codex feedback on PR #1176 (line 1288): the lightbox
+    ``flagchanged`` handler bailed on ``if (!hit) return;`` whenever the
+    photo wasn't in any bucket's loaded window. That happens when a photo
+    is only in the loaded slice because ``picked_first`` promoted it — a
+    prior unpick's ``refetchBucketFromZero`` then replaces the bucket with
+    a server prefix that no longer contains the photo. Pressing ``P``
+    again from the still-open lightbox left the photo flagged on the
+    backend but absent from the visible Highlights grid (and the
+    Save-as-Collection payload) until a full reload.
+    """
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+
+    hawk_kid = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("Red-tailed Hawk",)
+    ).fetchone()["id"]
+    folder_id = data["folders"][0]
+
+    # Seed 25 extra hawks (3 seeded + 25 = 28 > 20) with very low quality
+    # scores so the loaded window's first 20 tail hawks all outrank the
+    # low_hawk below. That guarantees low_hawk is only visible because
+    # picked_first promotes it.
+    for i in range(25):
+        pid = db.add_photo(
+            folder_id=folder_id,
+            filename=f"filler-hawk-{i}.jpg",
+            extension=".jpg",
+            file_size=1000,
+            file_mtime=1.0,
+            timestamp=f"2024-03-11T09:{i:02d}:00",
+        )
+        db.conn.execute(
+            "UPDATE photos SET quality_score = ? WHERE id = ?",
+            (0.7 - i * 0.01, pid),
+        )
+        db.conn.execute(
+            "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (pid, hawk_kid),
+        )
+
+    # The eviction target: a hawk with a much lower base score than every
+    # other hawk. Without picked_first it sits at the bottom of the
+    # sorted-by-score list, past the initial 20-photo window.
+    low_hawk = db.add_photo(
+        folder_id=folder_id,
+        filename="low-score-hawk.jpg",
+        extension=".jpg",
+        file_size=1000,
+        file_mtime=1.0,
+        timestamp="2024-03-11T10:00:00",
+    )
+    db.conn.execute(
+        "UPDATE photos SET quality_score = 0.05, flag = 'flagged' WHERE id = ?",
+        (low_hawk,),
+    )
+    db.conn.execute(
+        "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (low_hawk, hawk_kid),
+    )
+    db.conn.commit()
+
+    page.goto(f"{live_server['url']}/highlights", timeout=5000)
+    hawk_section = page.locator("section.bucket").filter(has_text="Red-tailed Hawk")
+    expect(hawk_section.locator(".highlights-card").first).to_be_visible(timeout=5000)
+
+    # Initial load: picked_first promotes low_hawk into bucket.photos even
+    # though its base score would otherwise put it past position 20.
+    def _bucket_has_photo(pid):
+        return page.evaluate(
+            "pid => {"
+            "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+            "  return !!(b && b.photos.some(p => p.id === pid));"
+            "}",
+            pid,
+        )
+
+    assert _bucket_has_photo(low_hawk) is True
+
+    # Open the lightbox on the picked low_hawk. `attachCardClicks` only
+    # wires the visible slice, so drive the lightbox directly with the
+    # bucket's photo list.
+    low_card = hawk_section.locator(
+        f'.highlights-card[data-photo-id="{low_hawk}"]'
+    )
+    if low_card.count() > 0:
+        low_card.click()
+    else:
+        page.evaluate(
+            "pid => {"
+            "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+            "  openLightbox(pid, '', b.photos);"
+            "}",
+            low_hawk,
+        )
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+    page.wait_for_function(
+        "pid => _lightboxCurrentId === pid",
+        arg=low_hawk,
+        timeout=3000,
+    )
+
+    # Unpick from the lightbox. The refetch that fires after this must
+    # drop low_hawk out of the loaded window (no picked_first bonus and
+    # a much lower score than every other hawk).
+    page.keyboard.press("u")
+    assert _wait_for_flag(db, low_hawk, "none") == "none"
+    page.wait_for_function(
+        "pid => {"
+        "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+        "  return !!(b && !b.photos.some(p => p.id === pid));"
+        "}",
+        arg=low_hawk,
+        timeout=5000,
+    )
+    assert _bucket_has_photo(low_hawk) is False
+    assert page.evaluate("() => _lightboxCurrentId") == low_hawk
+
+    # Re-pick from the still-open lightbox. Before the fix, the handler
+    # would bail because the photo is no longer in any bucket's loaded
+    # window; with the fix, it falls back to loadHighlights() so
+    # picked_first promotes low_hawk back into the visible grid.
+    page.keyboard.press("p")
+    assert _wait_for_flag(db, low_hawk, "flagged") == "flagged"
+    page.wait_for_function(
+        "pid => {"
+        "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+        "  return !!(b && b.photos.some(p => p.id === pid && p.flag === 'flagged'));"
+        "}",
+        arg=low_hawk,
+        timeout=5000,
+    )
+    restored = page.locator(f'.highlights-card[data-photo-id="{low_hawk}"]')
+    expect(restored).to_be_visible(timeout=5000)
+    expect(restored).to_have_class(re.compile(r"\bpick-flag-card\b"))
+
+
 def test_highlights_species_search_filters_buckets(live_server, page):
     db = live_server["db"]
     data = live_server["data"]
