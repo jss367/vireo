@@ -19026,6 +19026,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return run_pipeline_job(
                 job, runner, db_path, workspace_id, params,
                 thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
+                missing_originals_invalidator=_invalidate_missing_originals_cache,
             )
 
         job_config = {
@@ -19707,6 +19708,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return run_pipeline_job(
                 job, runner, db_path, active_ws, params,
                 thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
+                missing_originals_invalidator=_invalidate_missing_originals_cache,
             )
 
         # Enqueue rather than start directly: when SLOT_CAP is 1 and

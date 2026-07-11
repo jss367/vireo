@@ -396,6 +396,144 @@ def test_pipeline_scan_thumbnail_collection_stages(tmp_path, monkeypatch):
     assert len(photos) == 3
 
 
+def test_pipeline_scan_invokes_missing_originals_invalidator(tmp_path, monkeypatch):
+    """Pipeline scans must invalidate the Missing Originals cache too.
+
+    Regression: the standalone /api/jobs/scan and /api/jobs/import-* routes
+    already drop the cached ``GET /api/photos/missing`` payload once their
+    ``do_scan`` runs, but a Process/pipeline scan went through the same
+    scanner.scan() call in pipeline_job without wiring the invalidator.
+    If a ready ghost payload existed and the user restored or deleted an
+    original before running Process, the banner/modal continued to show
+    the pre-pipeline photo list until an unrelated Missing Originals scan
+    replaced the entry. See Codex review on 63f6ac78.
+    """
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    Image.new("RGB", (32, 32), "black").save(str(photo_dir / "keep.jpg"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    invalidator_calls = []
+
+    def fake_invalidator():
+        invalidator_calls.append(True)
+
+    run_pipeline_job(
+        job, runner, db_path, ws_id, params,
+        missing_originals_invalidator=fake_invalidator,
+    )
+
+    # scanner.scan committed a photo row for keep.jpg, so a ready
+    # Missing Originals payload computed before this run is now
+    # potentially stale — the invalidator must fire at least once for
+    # the scanned root. Matches the try/finally in api_job_scan and
+    # api_job_import_full.
+    assert invalidator_calls, (
+        "missing_originals_invalidator was not called after the "
+        "pipeline scan touched disk"
+    )
+
+
+def test_pipeline_scan_invalidator_is_optional(tmp_path, monkeypatch):
+    """Callers that don't pass ``missing_originals_invalidator`` still work.
+
+    The parameter defaults to None so tests and any non-Flask harness can
+    call run_pipeline_job without wiring the app-level invalidator. This
+    guards the default path against a NoneType-not-callable regression.
+    """
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    Image.new("RGB", (32, 32), "black").save(str(photo_dir / "keep.jpg"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    # No missing_originals_invalidator passed — must not raise.
+    result = run_pipeline_job(job=_make_job(), runner=FakeRunner(),
+                              db_path=db_path, workspace_id=ws_id,
+                              params=params)
+    assert isinstance(result, dict)
+
+
+def test_pipeline_scan_swallows_invalidator_exceptions(tmp_path, monkeypatch):
+    """A failing invalidator must not abort the pipeline finally block.
+
+    The finally block also invalidates the new-images cache; if the
+    missing-originals callback raised through, subsequent bookkeeping
+    (SSE sentinel, stage-status update) would be skipped and the
+    pipeline would hang. Mirror the try/except log-and-continue guard
+    already applied to invalidate_new_images_after_scan.
+    """
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    Image.new("RGB", (32, 32), "black").save(str(photo_dir / "keep.jpg"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    def raising_invalidator():
+        raise RuntimeError("boom")
+
+    # The pipeline must finish normally even though the invalidator
+    # raised — the exception is logged and swallowed inside the finally
+    # block, same as the new-images invalidation.
+    result = run_pipeline_job(
+        _make_job(), FakeRunner(), db_path, ws_id, params,
+        missing_originals_invalidator=raising_invalidator,
+    )
+    assert isinstance(result, dict)
+
+
 def test_pipeline_stages_dict_in_progress_events(tmp_path, monkeypatch):
     """Progress events should include a 'stages' dict showing all stage statuses."""
     import config as cfg
