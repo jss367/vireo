@@ -2952,6 +2952,49 @@ document.addEventListener('keydown', function(e) {
   if (e.key && e.key.toLowerCase() === 'x' && !e.ctrlKey && !e.metaKey && !e.altKey) { grmMoveReject(); e.preventDefault(); return; }
 });
 
+// setLifeListPhoto (card context menu / shared lightbox action) only emits a
+// lifelist:changed event and updates its own caches; without this listener the
+// Review cards keep the pre-change value of pred.is_species_representative, so
+// the newly assigned photo stays un-badged and any previously visible former
+// representative keeps its badge until a full reload. Walk allPredictions
+// (predictions is a filtered .slice() over the same object references, so
+// updating in place propagates) and flip the species entry's flags, then
+// re-render.
+document.addEventListener('lifelist:changed', function(e) {
+  var detail = e && e.detail ? e.detail : {};
+  var species = detail.species;
+  var photoId = detail.photoId;
+  if (!species || !photoId) return;
+  var changed = false;
+  allPredictions.forEach(function(pred) {
+    var entries = Array.isArray(pred.life_list) ? pred.life_list : [];
+    var touched = false;
+    entries.forEach(function(entry) {
+      if (!entry || entry.species !== species) return;
+      var isCurrent = pred.photo_id === photoId;
+      if (entry.is_current_photo !== isCurrent || entry.is_species_representative !== isCurrent) {
+        entry.is_current_photo = isCurrent;
+        entry.is_species_representative = isCurrent;
+        touched = true;
+      }
+    });
+    if (pred.photo_id === photoId && !entries.some(function(entry) { return entry && entry.species === species; })) {
+      entries.push({species: species, is_current_photo: true, is_species_representative: true});
+      pred.life_list = entries;
+      touched = true;
+    }
+    var isRep = entries.some(function(entry) {
+      return entry && entry.is_species_representative;
+    });
+    if (pred.is_species_representative !== isRep) {
+      pred.is_species_representative = isRep;
+      touched = true;
+    }
+    if (touched) changed = true;
+  });
+  if (changed) renderAll();
+});
+
 </script>
 
 <!-- Group Review Modal -->
