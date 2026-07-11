@@ -640,11 +640,14 @@ jobs:
       - name: Collect release files
         run: |
           mkdir -p release-files
-          # Drop the signing-input artifact so it can't be scooped into the
-          # release. Its installers share filenames with the SignPath-signed
-          # outputs and would otherwise overwrite them (or leave signed .sig
-          # sidecars paired with unsigned installer bytes).
+          # Drop every unsigned Windows signing-input artifact so it can't be
+          # scooped into the release. The unsigned installers share filenames
+          # with the SignPath-signed outputs and would otherwise overwrite them
+          # (or leave signed .sig sidecars paired with unsigned installer
+          # bytes); the unsigned raw binaries (vireo.exe, vireo-server-*.exe)
+          # would ship alongside the signed installers.
           rm -rf artifacts/vireo-windows-installers-unsigned
+          rm -rf artifacts/vireo-windows-binaries-unsigned
           # Regular installers (unique names across platforms)
           find artifacts -type f \( \
             -name "*.dmg" -o \
