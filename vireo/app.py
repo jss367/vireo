@@ -86,6 +86,7 @@ from render_source import (
 )
 from schema import ensure_schema
 from web.pages import pages_blueprint
+from web.photo_labels import create_photo_labels_blueprint
 from web.system import system_blueprint
 from web.workspaces import create_workspace_blueprint
 from werkzeug.exceptions import BadRequest
@@ -4493,16 +4494,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         )
 
-    @app.route("/api/photos/color_labels")
-    def api_photos_color_labels():
-        db = _get_db()
-        ids_str = request.args.get("ids", "")
-        if not ids_str:
-            return jsonify({})
-        photo_ids = [int(x) for x in ids_str.split(",") if x.strip().isdigit()]
-        labels = db.get_color_labels_for_photos(photo_ids)
-        return jsonify(labels)
-
     @app.route("/api/photos/<int:photo_id>")
     def api_photo_detail(photo_id):
         db = _get_db()
@@ -5225,32 +5216,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             [{"photo_id": photo_id, "old_value": old_value, "new_value": new_value}],
         )
         return jsonify({"ok": True, "wildlife_excluded": excluded})
-
-    @app.route("/api/photos/<int:photo_id>/color_label", methods=["POST"])
-    def api_set_color_label(photo_id):
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        color = body.get("color")
-        if color is not None and color not in db.VALID_COLOR_LABELS:
-            return json_error(f"color must be one of {db.VALID_COLOR_LABELS}")
-        # Existence + workspace checks mirror the rating/flag endpoints. A
-        # stale id from an open browse tab would otherwise hit the
-        # photo_color_labels FK and 500.
-        if db.get_photo(photo_id) is None:
-            return json_error("not found", 404)
-        try:
-            db._verify_photo_in_workspace(photo_id)
-        except ValueError as e:
-            return json_error(str(e), 403)
-        old_color = db.get_color_label(photo_id) or ''
-        new_color = color or ''
-        if color:
-            db.set_color_label(photo_id, color)
-        else:
-            db.remove_color_label(photo_id)
-        db.record_edit('color_label', f'Set color to {color or "none"}', new_color,
-                       [{'photo_id': photo_id, 'old_value': old_color, 'new_value': new_color}])
-        return jsonify({"ok": True})
 
     @app.route("/api/photos/<int:photo_id>/edit-recipe", methods=["GET"])
     def api_get_photo_edit_recipe(photo_id):
@@ -6912,41 +6877,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 for pid in photo_ids
             },
         })
-
-    @app.route("/api/batch/color_label", methods=["POST"])
-    def api_batch_color_label():
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        photo_ids = body.get("photo_ids", [])
-        color = body.get("color")
-        if color is not None and color not in db.VALID_COLOR_LABELS:
-            return json_error(f"color must be one of {db.VALID_COLOR_LABELS}")
-        if not photo_ids:
-            return json_error("photo_ids required")
-        # Filter to photos that exist AND are visible in the active workspace
-        # (mirrors api_batch_rating's stale-id filtering). Stale ids would
-        # otherwise hit the photo_color_labels FK and abort the batch with a
-        # 500 partway through.
-        photos_map = db.get_photos_by_ids(photo_ids)
-        ws_folder_ids = {
-            r["folder_id"] for r in db.conn.execute(
-                "SELECT folder_id FROM workspace_folders WHERE workspace_id = ?",
-                (db._ws_id(),),
-            )
-        }
-        valid_ids = list(dict.fromkeys(
-            pid for pid in photo_ids
-            if pid in photos_map and photos_map[pid]["folder_id"] in ws_folder_ids
-        ))
-        old_labels = db.get_color_labels_for_photos(valid_ids)
-        new_color = color or ''
-        db.batch_set_color_label(valid_ids, color)
-        items = [{'photo_id': pid, 'old_value': old_labels.get(pid, ''), 'new_value': new_color}
-                 for pid in valid_ids]
-        if items:
-            db.record_edit('color_label', f'Set color to {color or "none"} on {len(valid_ids)} photos',
-                           new_color, items, is_batch=True)
-        return jsonify({"ok": True, "updated": len(valid_ids)})
 
     @app.route("/api/batch/keyword", methods=["POST"])
     def api_batch_keyword():
@@ -23158,6 +23088,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         os.makedirs(originals_dir, exist_ok=True)
         img.save(cache_path, format="JPEG", quality=quality)
         return send_file(cache_path, mimetype="image/jpeg")
+
+    app.register_blueprint(create_photo_labels_blueprint(_get_db, json_error))
 
     # --- /api/v1/* aliases over the stable subset of /api/* ---
     # These are the endpoints advertised to external callers in docs/headless-api.md.
