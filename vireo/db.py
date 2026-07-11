@@ -7073,69 +7073,40 @@ class Database:
             self.conn.rollback()
             raise
 
-    VALID_COLOR_LABELS = ('red', 'yellow', 'green', 'blue', 'purple')
+    from repositories.photo_labels import VALID_COLOR_LABELS
 
     def set_color_label(self, photo_id, color):
         """Set a color label for a photo in the active workspace."""
-        if color not in self.VALID_COLOR_LABELS:
-            raise ValueError(f"Invalid color label: {color}. Must be one of {self.VALID_COLOR_LABELS}")
-        self.conn.execute(
-            "INSERT OR REPLACE INTO photo_color_labels (photo_id, workspace_id, color) VALUES (?, ?, ?)",
-            (photo_id, self._ws_id(), color),
-        )
-        self.conn.commit()
+        self._photo_label_repository().set(photo_id, color)
 
     def remove_color_label(self, photo_id):
         """Remove the color label for a photo in the active workspace."""
-        self.conn.execute(
-            "DELETE FROM photo_color_labels WHERE photo_id = ? AND workspace_id = ?",
-            (photo_id, self._ws_id()),
-        )
-        self.conn.commit()
+        self._photo_label_repository().remove(photo_id)
 
     def get_color_label(self, photo_id):
         """Return the color label for a photo in the active workspace, or None."""
-        row = self.conn.execute(
-            "SELECT color FROM photo_color_labels WHERE photo_id = ? AND workspace_id = ?",
-            (photo_id, self._ws_id()),
-        ).fetchone()
-        return row['color'] if row else None
+        return self._photo_label_repository().get(photo_id)
 
     def get_color_labels_for_photos(self, photo_ids):
         """Return a dict of {photo_id: color} for the active workspace."""
-        if not photo_ids:
-            return {}
-        out = {}
-        for chunk in _chunks(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            rows = self.conn.execute(
-                f"SELECT photo_id, color FROM photo_color_labels WHERE workspace_id = ? AND photo_id IN ({placeholders})",
-                [self._ws_id()] + list(chunk),
-            ).fetchall()
-            out.update({row['photo_id']: row['color'] for row in rows})
-        return out
+        return self._photo_label_repository().get_for_photos(photo_ids)
+
+    def filter_photo_ids_in_workspace(self, photo_ids):
+        """Return existing, active-workspace photo IDs in input order."""
+        return self._photo_label_repository().visible_photo_ids(photo_ids)
 
     def batch_set_color_label(self, photo_ids, color):
         """Set or remove color label for multiple photos in the active workspace."""
-        if not photo_ids:
-            return
-        ws_id = self._ws_id()
-        if color is None:
-            for chunk in _chunks(photo_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                self.conn.execute(
-                    f"DELETE FROM photo_color_labels WHERE workspace_id = ? AND photo_id IN ({placeholders})",
-                    [ws_id] + list(chunk),
-                )
-        else:
-            if color not in self.VALID_COLOR_LABELS:
-                raise ValueError(f"Invalid color label: {color}. Must be one of {self.VALID_COLOR_LABELS}")
-            for pid in photo_ids:
-                self.conn.execute(
-                    "INSERT OR REPLACE INTO photo_color_labels (photo_id, workspace_id, color) VALUES (?, ?, ?)",
-                    (pid, ws_id, color),
-                )
-        self.conn.commit()
+        self._photo_label_repository().set_many(photo_ids, color)
+
+    def _photo_label_repository(self):
+        from repositories.photo_labels import PhotoLabelRepository
+
+        return PhotoLabelRepository(
+            self.conn,
+            self._ws_id(),
+            chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
+        )
 
     def get_photo_edit_recipe(self, photo_id, verify_workspace=False):
         """Return the normalized edit recipe dict for a photo, or None."""
