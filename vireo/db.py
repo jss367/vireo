@@ -9465,6 +9465,25 @@ class Database:
                  AND value = ?""",
             (cleaned, old_name),
         )
+        # Species curation tables (species_highlights, photo_preferences,
+        # species_representatives) key rows by the species name string,
+        # which is compared exact against ``keywords.name`` when the
+        # highlight/life-list/representative queries join back to the
+        # keyword row. Now that the UPDATE above rewrote this row to the
+        # canonical spelling, rows still keyed on the legacy spelling
+        # would drop out of those queries even though the tag was
+        # retained — a highlighted or life-list representative photo
+        # under the kept spelling silently disappears after cleanup.
+        # Rename them for the same old→clean mapping.
+        # ``rename_photo_preferences_species`` also retargets
+        # ``species_representatives`` in its global branch, so a
+        # separate representatives rename isn't needed here.
+        self.rename_species_highlights_species(
+            old_name, cleaned, _commit=False,
+        )
+        self.rename_photo_preferences_species(
+            old_name, cleaned, _commit=False,
+        )
 
     def _merge_keyword_into(self, src_id, dst_id):
         """Merge keyword ``src_id`` into ``dst_id`` and delete the source.

@@ -1211,6 +1211,97 @@ def test_merge_duplicate_keywords_normalizes_stray_edge_quotes(db):
     assert tagged == {clean}
 
 
+def test_merge_duplicate_keywords_retargets_species_curation_for_survivor_rename(db):
+    """When cleanup canonicalizes the surviving keyword row from a legacy
+    spelling to a clean one, ``species_highlights``, ``photo_preferences``,
+    and ``species_representatives`` rows keyed on the legacy string must
+    follow. Otherwise a highlighted or life-list representative photo under
+    the kept spelling silently drops out of the eligible/highlight queries
+    (which compare ``sh.species``/``sr.species`` exact against ``k.name``)
+    even though the tag itself was retained.
+    """
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos/a", name="a")
+    db.add_workspace_folder(ws, fid)
+    pid_a = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    pid_b = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    # Legacy variant is the only surviving row (no clean sibling), so
+    # ``_normalize_keyword_row_name`` rewrites its ``name`` in place.
+    db.conn.execute("INSERT INTO keywords (name) VALUES (?)", ("‘apapane",))
+    db.conn.execute("INSERT INTO keywords (name) VALUES (?)", ("'apapane",))
+    db.conn.commit()
+    quoted = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("‘apapane",)
+    ).fetchone()[0]
+    ascii_variant = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("'apapane",)
+    ).fetchone()[0]
+    db.tag_photo(pid_a, quoted)
+    db.tag_photo(pid_b, ascii_variant)
+
+    # Seed curation under the legacy spelling on both variants: a
+    # highlight rank, a life-list preference, and a global representative
+    # pick. The keep_id will end up being one of these rows and must
+    # carry its curation with it when the name is canonicalized.
+    db.conn.execute(
+        """INSERT INTO species_highlights
+              (workspace_id, species, photo_id, rank,
+               created_at, updated_at)
+           VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))""",
+        (ws, "‘apapane", pid_a),
+    )
+    db.conn.execute(
+        """INSERT INTO photo_preferences
+              (workspace_id, purpose, species, photo_id,
+               created_at, updated_at)
+           VALUES (?, 'representative', ?, ?, datetime('now'), datetime('now'))""",
+        (ws, "‘apapane", pid_a),
+    )
+    db.conn.execute(
+        """INSERT INTO species_representatives
+              (species, photo_id, selected_order,
+               created_at, updated_at)
+           VALUES (?, ?, 1, datetime('now'), datetime('now'))""",
+        ("‘apapane", pid_a),
+    )
+    db.conn.commit()
+
+    merged = db.merge_duplicate_keywords()
+
+    assert merged == 1
+    # Surviving keyword row was canonicalized to the clean spelling.
+    remaining = db.conn.execute(
+        "SELECT name FROM keywords WHERE name LIKE '%apapane'"
+    ).fetchall()
+    assert [row["name"] for row in remaining] == ["apapane"]
+
+    # All three curation tables must now key the row on the clean
+    # spelling — no rows left under the legacy spelling, and each
+    # migrated entry preserved its photo association.
+    hl = db.conn.execute(
+        "SELECT species, photo_id FROM species_highlights"
+    ).fetchall()
+    assert [(row["species"], row["photo_id"]) for row in hl] == [
+        ("apapane", pid_a),
+    ]
+    pref = db.conn.execute(
+        "SELECT species, purpose, photo_id FROM photo_preferences"
+    ).fetchall()
+    assert [(row["species"], row["purpose"], row["photo_id"]) for row in pref] == [
+        ("apapane", "representative", pid_a),
+    ]
+    rep = db.conn.execute(
+        "SELECT species, photo_id FROM species_representatives"
+    ).fetchall()
+    assert [(row["species"], row["photo_id"]) for row in rep] == [
+        ("apapane", pid_a),
+    ]
+
+
 def test_merge_duplicate_keywords_does_not_fold_distinct_non_ascii(db):
     """``keyword_match_key`` must use ``str.lower()``, not ``str.casefold()``.
 
