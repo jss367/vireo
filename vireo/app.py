@@ -343,7 +343,7 @@ def _bucket_best_score(photos):
 
 
 def _apply_highlight_preferences(db, buckets):
-    preferences = db.get_species_representatives()
+    preferences = db.get_species_representatives(eligible_only=True)
     for bucket in buckets:
         preferred_id = preferences.get(bucket["species"])
         applied = False

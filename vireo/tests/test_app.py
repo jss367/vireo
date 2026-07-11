@@ -5422,6 +5422,15 @@ def test_highlights_curation_filters_combine_independently(app_and_db):
         "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
         (alpha_alternate, keyword_ids["Alpha Bird"]),
     )
+    beta_alternate = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'beta-alternate.jpg', 0.6, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (beta_alternate, keyword_ids["Beta Bird"]),
+    )
     db.conn.commit()
 
     # Alpha has only a highlight, Beta only a representative, Gamma has both,
@@ -5464,6 +5473,17 @@ def test_highlights_curation_filters_combine_independently(app_and_db):
     db.update_photo_flag(photo_ids["Alpha Bird"], "none")
     assert species_for(highlight_selection="yes") == {"Alpha Bird", "Gamma Bird"}
 
+    # Representative preferences follow the same active-state rule while
+    # keeping their stored row available for an un-reject.
+    db.update_photo_flag(photo_ids["Beta Bird"], "rejected")
+    assert species_for(species_representative="yes") == {"Gamma Bird"}
+    assert db.get_species_representatives() == {
+        "Beta Bird": photo_ids["Beta Bird"],
+        "Gamma Bird": photo_ids["Gamma Bird"],
+    }
+    db.update_photo_flag(photo_ids["Beta Bird"], "none")
+    assert species_for(species_representative="yes") == {"Beta Bird", "Gamma Bird"}
+
     response = client.get(
         "/api/highlights",
         query_string={
@@ -5474,6 +5494,65 @@ def test_highlights_curation_filters_combine_independently(app_and_db):
     )
     assert response.get_json()["meta"]["highlight_selection"] == "all"
     assert response.get_json()["meta"]["species_representative"] == "all"
+
+
+def test_highlights_curation_filter_ignores_rejected_selected_prediction(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/pred-filter', 'pred-filter', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+
+    photo_ids = []
+    prediction_ids = []
+    for index in range(2):
+        photo_id = db.conn.execute(
+            "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+            "VALUES (?, ?, ?, 'none')",
+            (fid, f"predicted-{index}.jpg", 0.9 - index * 0.1),
+        ).lastrowid
+        detection_id = db.conn.execute(
+            "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.95)",
+            (photo_id,),
+        ).lastrowid
+        prediction_id = db.conn.execute(
+            "INSERT INTO predictions "
+            "(detection_id, classifier_model, labels_fingerprint, species, confidence) "
+            "VALUES (?, 'test-model', 'test-labels', 'Prediction Bird', ?)",
+            (detection_id, 0.95 - index * 0.05),
+        ).lastrowid
+        photo_ids.append(photo_id)
+        prediction_ids.append(prediction_id)
+    db.conn.commit()
+    db.add_species_highlight("Prediction Bird", photo_ids[0])
+
+    response = client.get(
+        "/api/highlights",
+        query_string={"folder_id": fid, "highlight_selection": "yes"},
+    )
+    assert {b["species"] for b in response.get_json()["buckets"]} == {
+        "Prediction Bird"
+    }
+
+    # Rejecting the selected photo's prediction removes that photo from the
+    # species bucket, but the second prediction keeps the species visible.
+    db.update_prediction_status(prediction_ids[0], "rejected")
+    response = client.get(
+        "/api/highlights",
+        query_string={"folder_id": fid, "highlight_selection": "yes"},
+    )
+    assert response.get_json()["buckets"] == []
+    response = client.get(
+        "/api/highlights",
+        query_string={"folder_id": fid, "highlight_selection": "no"},
+    )
+    assert {b["species"] for b in response.get_json()["buckets"]} == {
+        "Prediction Bird"
+    }
 
 
 def test_highlights_predictions_above_threshold_populate_buckets(app_and_db):
