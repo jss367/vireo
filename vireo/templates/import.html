@@ -46,6 +46,20 @@ body { display: flex; flex-direction: column; height: 100vh; }
 }
 .input-fixed { max-width: 240px; flex: 0 1 240px; }
 .preview-summary { font-size: 12px; color: var(--text-secondary); margin-top: 6px; }
+.dest-structure { margin-top: 8px; }
+.dest-structure .structure-headline { font-size: 12px; color: var(--text-primary); font-weight: 600; }
+.managed-archive-callout {
+  font-size: 12px; color: var(--text-secondary); margin-top: 6px;
+  padding: 8px 10px; border-radius: 6px; overflow-wrap: anywhere;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.structure-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+.structure-table td { padding: 3px 8px; border-bottom: 1px solid var(--border-primary); color: var(--text-primary); }
+.structure-table td.num { text-align: right; color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.structure-table td.tag { text-align: right; white-space: nowrap; }
+.tag-new { color: var(--success, #2da44e); }
+.tag-existing { color: var(--text-secondary); }
 .progress-bar { height: 8px; background: var(--bg-tertiary); border-radius: 4px; overflow: hidden; }
 .progress-bar > div { height: 100%; background: var(--accent); width: 0; transition: width 0.2s; }
 .folder-progress { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
@@ -215,9 +229,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
         <div class="option-stack">
           <label><input type="checkbox" id="chkSkipDuplicates" checked> Skip duplicates</label>
           <label><input type="checkbox" id="chkVerifyByHash"> Verify copied files with full content hashes</label>
-          <label><input type="checkbox" id="chkLocalProcessing" disabled> Use local staging while processing</label>
         </div>
-        <div class="hint">Local staging is temporarily unavailable in the split Import flow; old staging folders can still be recovered above.</div>
       </div>
     </div>
 
@@ -242,6 +254,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
         <button class="btn btn-primary" id="btnStart" onclick="startImport()">Start import</button>
       </div>
       <div class="preview-summary" id="previewSummary"></div>
+      <div id="destStructure" class="dest-structure" style="display:none;"></div>
       <div id="importError"></div>
     </div>
 
@@ -327,6 +340,7 @@ function updateImportMode() {
   document.getElementById('btnPreview').textContent =
     copyMode ? 'Check for duplicates' : 'Preview import';
   document.getElementById('previewSummary').textContent = '';
+  hideDestStructure();
   showError('');
   updateFileTypeControls();
   updateWorkspaceMode();
@@ -1216,8 +1230,111 @@ function useStagingAsImportSource(result) {
   document.getElementById('sourceCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
+function hideDestStructure() {
+  const el = document.getElementById('destStructure');
+  if (!el) return;
+  el.style.display = 'none';
+  el.innerHTML = '';
+}
+
+// Resolve the absolute local path files will be cataloged at, for the
+// destination-structure preview. Local mode: the destination field. Remote
+// (SSH) mode: the target's local mount path joined with the subpath — the
+// same path the import job catalogs at (mount_final). Returns '' when the
+// path isn't known/absolute yet, in which case the structure preview is
+// skipped (the duplicate summary still stands).
+function resolvedCopyDestination() {
+  if (importRemoteTargetId()) {
+    const t = importRemoteTarget();
+    if (!t || !t.mount_path || !importIsAbsolutePath(t.mount_path)) return '';
+    const sub = normalizeRemoteSubpath(document.getElementById('remoteSubpath').value);
+    if (sub.error) return '';
+    const base = t.mount_path.replace(/\/+$/, '');
+    return sub.value ? base + '/' + sub.value : base;
+  }
+  const local = (document.getElementById('destInput').value || '').trim();
+  return importIsAbsolutePath(local) ? local : '';
+}
+
+// Preview the destination folder structure (new vs existing folders) and,
+// when the destination sits in a folder Vireo already manages, a callout
+// naming that archive and how many photos it already holds. Best-effort:
+// any failure leaves the destination unknown and simply shows nothing, so
+// the duplicate summary above is never clobbered. ``excludePaths`` are the
+// source files that will be skipped as duplicates — excluding them keeps the
+// new/existing folder counts matching the files that actually land.
+async function renderDestStructure(excludePaths) {
+  hideDestStructure();
+  const destination = resolvedCopyDestination();
+  if (!destination) return;
+  let data;
+  try {
+    const resp = await fetch('/api/import/destination-preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sources: sources,
+        destination: destination,
+        folder_template: (document.getElementById('folderTemplate').value || '').trim(),
+        file_types: selectedFileTypes(),
+        recursive: document.getElementById('chkRecursive').checked,
+        exclude_paths: excludePaths || [],
+      }),
+    });
+    if (!resp.ok) return;
+    data = await resp.json();
+  } catch (e) {
+    return;  // structure preview is optional; keep the summary intact
+  }
+  const el = document.getElementById('destStructure');
+  const folders = data.folders || [];
+  if (!folders.length && !data.managed_archive) return;
+
+  const headline = document.createElement('div');
+  headline.className = 'structure-headline';
+  headline.textContent = data.total_photos + ' photos → ' + data.total_folders +
+    ' folder' + (data.total_folders === 1 ? '' : 's') +
+    ' (' + data.new_folders + ' new, ' + data.existing_folders + ' existing)';
+  el.appendChild(headline);
+
+  if (data.managed_archive) {
+    const callout = document.createElement('div');
+    callout.className = 'managed-archive-callout';
+    const label = document.createElement('span');
+    label.textContent = 'Merging into a managed archive at ';
+    const path = document.createElement('span');
+    path.style.fontFamily = 'monospace';
+    path.textContent = data.managed_archive.path;
+    const tail = document.createElement('span');
+    tail.textContent = ' — ' + data.managed_archive.photo_count +
+      ' photo' + (data.managed_archive.photo_count === 1 ? '' : 's') +
+      ' already cataloged there.';
+    callout.append(label, path, tail);
+    el.appendChild(callout);
+  }
+
+  const table = document.createElement('table');
+  table.className = 'structure-table';
+  folders.forEach((f) => {
+    const tr = document.createElement('tr');
+    const name = document.createElement('td');
+    name.textContent = f.path === '.' ? '(archive root)' : f.path;
+    const count = document.createElement('td');
+    count.className = 'num';
+    count.textContent = f.count + ' photo' + (f.count === 1 ? '' : 's');
+    const tag = document.createElement('td');
+    tag.className = 'tag ' + (f.exists ? 'tag-existing' : 'tag-new');
+    tag.textContent = f.exists ? 'existing' : 'new';
+    tr.append(name, count, tag);
+    table.appendChild(tr);
+  });
+  el.appendChild(table);
+  el.style.display = '';
+}
+
 async function previewImport() {
   showError('');
+  hideDestStructure();
   if (!sources.length) { showError('Add at least one source folder.'); return; }
   const copyMode = selectedImportMode() === 'copy';
   const fileTypes = copyMode ? selectedFileTypes() : 'both';
@@ -1247,10 +1364,13 @@ async function previewImport() {
     }
     if (!document.getElementById('chkSkipDuplicates').checked) {
       summary.textContent = files.length + ' files found · duplicates will be copied';
+      // No dedup gate, so every discovered file lands — pass no exclusions
+      // so the folder-structure counts match the full copy set.
+      await renderDestStructure([]);
       return;
     }
     summary.textContent = files.length + ' files found — checking for duplicates…';
-    // check-duplicates streams results; count flagged paths as they arrive.
+    // check-duplicates streams results; collect flagged paths as they arrive.
     // Pass verify_by_hash so the preview and the import agree on which files
     // are duplicates — otherwise a renamed/metadata-colliding file counted
     // as "to copy" in the preview would be skipped by the hash-based import.
@@ -1266,7 +1386,7 @@ async function previewImport() {
     const reader = dupResp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    let dupCount = 0;
+    const duplicatePaths = [];
     for (;;) {
       const r = await reader.read();
       if (r.done) break;
@@ -1278,13 +1398,18 @@ async function previewImport() {
         if (!m) continue;
         try {
           const d = JSON.parse(m[1]);
-          if (d.duplicates) dupCount += d.duplicates.length;
+          if (d.duplicates) duplicatePaths.push(...d.duplicates);
         } catch (e) { /* partial frame */ }
       }
     }
+    const dupCount = duplicatePaths.length;
     summary.textContent = files.length + ' files found · ' + dupCount +
       ' already in your library (will be skipped) · ' +
       (files.length - dupCount) + ' to copy';
+    // Skipped duplicates aren't copied, so exclude them from the
+    // folder-structure preview — the new/existing folder counts must
+    // reflect the files that will actually land in the archive.
+    await renderDestStructure(duplicatePaths);
   } catch (e) {
     summary.textContent = '';
     showError(String(e.message || e));
