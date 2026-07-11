@@ -363,6 +363,21 @@ function updateFileTypeControls() {
   custom.style.display = preset.value === 'custom' ? '' : 'none';
 }
 
+function wireDestStructureInvalidation() {
+  [
+    'chkRecursive', 'fileTypePreset', 'destMode', 'remoteSubpath',
+    'chkSkipDuplicates', 'chkVerifyByHash', 'destInput', 'folderTemplate',
+  ].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('change', hideDestStructure);
+    el.addEventListener('input', hideDestStructure);
+  });
+  document.querySelectorAll('.file-ext').forEach((el) => {
+    el.addEventListener('change', hideDestStructure);
+  });
+}
+
 function updateWorkspaceMode() {
   const newMode = !!document.getElementById('workspaceNew')?.checked;
   const row = document.getElementById('newWorkspaceRow');
@@ -1265,8 +1280,24 @@ function destStructureSignature(destination, fileTypes, recursive, excludePaths)
     folder_template: (document.getElementById('folderTemplate').value || '').trim(),
     file_types: fileTypes,
     recursive: recursive,
+    skip_duplicates: document.getElementById('chkSkipDuplicates').checked,
+    verify_by_hash: document.getElementById('chkVerifyByHash').checked,
     exclude_paths: (excludePaths || []).slice().sort(),
   });
+}
+
+function importPreviewSignature(fileTypes) {
+  return JSON.stringify({
+    sources: sources.slice(),
+    file_types: fileTypes,
+    recursive: document.getElementById('chkRecursive').checked,
+    skip_duplicates: document.getElementById('chkSkipDuplicates').checked,
+    verify_by_hash: document.getElementById('chkVerifyByHash').checked,
+  });
+}
+
+function importPreviewSignatureChanged(signature, fileTypes) {
+  return signature !== importPreviewSignature(fileTypes);
 }
 
 // Preview the destination folder structure (new vs existing folders) and,
@@ -1368,6 +1399,7 @@ async function previewImport() {
     showError('Choose at least one file extension.');
     return;
   }
+  const requestSignature = importPreviewSignature(fileTypes);
   const summary = document.getElementById('previewSummary');
   summary.textContent = 'Discovering files…';
   try {
@@ -1382,6 +1414,10 @@ async function previewImport() {
     });
     if (!resp.ok) throw new Error((await resp.json()).error || 'preview failed');
     const data = await resp.json();
+    if (importPreviewSignatureChanged(requestSignature, fileTypes)) {
+      summary.textContent = '';
+      return;
+    }
     const files = data.files || [];
     if (!files.length) { summary.textContent = 'No importable files found.'; return; }
     if (!copyMode) {
@@ -1427,6 +1463,10 @@ async function previewImport() {
           if (d.duplicates) duplicatePaths.push(...d.duplicates);
         } catch (e) { /* partial frame */ }
       }
+    }
+    if (importPreviewSignatureChanged(requestSignature, fileTypes)) {
+      summary.textContent = '';
+      return;
     }
     const dupCount = duplicatePaths.length;
     summary.textContent = files.length + ' files found · ' + dupCount +
@@ -1761,6 +1801,7 @@ async function initImportPage() {
   // dropdown value.
   _afterImportConfigLoaded = cfgOk && overridesOk;
   updateAdvancedImportOptions();
+  wireDestStructureInvalidation();
   loadImportRemoteTargets();
   loadOrphanedStaging();
   updateImportMode();
