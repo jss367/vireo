@@ -2719,12 +2719,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                  time.time() - _t1)
 
     def _mark_species():
+        bg_db = None
         try:
             bg_db = Database(db_path)
         except Exception:
             log.debug("Could not open background db for species marking", exc_info=True)
             return
-        _mark_species_and_maybe_backfill(bg_db, "background")
+        try:
+            _mark_species_and_maybe_backfill(bg_db, "background")
+        finally:
+            bg_db.close()
 
     threading.Thread(target=_mark_species, daemon=True).start()
 
@@ -2733,6 +2737,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         import time as _time
         _time.sleep(30)  # Initial delay
         while True:
+            health_db = None
             try:
                 health_db = Database(db_path)
                 changed = health_db.check_folder_health()
@@ -2747,6 +2752,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     _invalidate_missing_originals_cache()
             except Exception:
                 log.debug("Folder health check failed", exc_info=True)
+            finally:
+                if health_db is not None:
+                    health_db.close()
             _time.sleep(600)  # 10 minutes
 
     # Suppressed in tests via ``VIREO_DISABLE_STARTUP_BACKFILL_TIMERS``: the
@@ -2768,6 +2776,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     app._sync_job_lock = threading.Lock()
     app._log_broadcaster = LogBroadcaster(buffer_size=500)
     app._log_broadcaster.install()
+
+    def _cleanup_app_resources():
+        with contextlib.suppress(Exception):
+            app._log_broadcaster.uninstall()
+        with contextlib.suppress(Exception):
+            init_db.close()
+
+    app._cleanup_app_resources = _cleanup_app_resources
 
     # Live progress of the most recent new-images walk, keyed by
     # (db_path, workspace_id). Written by the walk's progress callback and
@@ -2807,6 +2823,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             working_copy_backfill_candidate_count,
         )
 
+        wcdb = None
         try:
             wcdb = Database(db_path)
             # Defer to scanner's own predicate so the gate matches what
@@ -2819,6 +2836,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except Exception:
             log.exception("Working-copy backfill: candidate check failed")
             return
+        finally:
+            if wcdb is not None:
+                wcdb.close()
         if candidate_count == 0:
             log.debug("Working-copy backfill: no candidates, skipping")
             return
@@ -2828,43 +2848,46 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         def work(job):
             thread_db = Database(db_path)
-            # Working-copy backfill is workspace-agnostic (photos are
-            # global), but the JobRunner path leans on having an active
-            # workspace for some bookkeeping. Mirror the active workspace
-            # of init_db so any incidental ws-scoped helpers stay valid.
-            active_ws = init_db._active_workspace_id
-            if active_ws is not None:
-                thread_db.set_active_workspace(active_ws)
+            try:
+                # Working-copy backfill is workspace-agnostic (photos are
+                # global), but the JobRunner path leans on having an active
+                # workspace for some bookkeeping. Mirror the active workspace
+                # of init_db so any incidental ws-scoped helpers stay valid.
+                active_ws = init_db._active_workspace_id
+                if active_ws is not None:
+                    thread_db.set_active_workspace(active_ws)
 
-            def progress_cb(current, total):
-                job["progress"]["current"] = current
-                job["progress"]["total"] = total
-                runner.push_event(
-                    job["id"],
-                    "progress",
-                    {
-                        "current": current,
-                        "total": total,
-                        "phase": f"{current:,} / {total:,} working copies",
-                    },
+                def progress_cb(current, total):
+                    job["progress"]["current"] = current
+                    job["progress"]["total"] = total
+                    runner.push_event(
+                        job["id"],
+                        "progress",
+                        {
+                            "current": current,
+                            "total": total,
+                            "phase": f"{current:,} / {total:,} working copies",
+                        },
+                    )
+
+                def status_cb(message, **_phase):
+                    runner.push_event(job["id"], "progress", {
+                        "phase": message,
+                        "current": job["progress"].get("current", 0),
+                        "total": job["progress"].get("total", 0),
+                    })
+
+                def cancel_check():
+                    return runner.is_cancelled(job["id"])
+
+                return backfill_working_copies(
+                    thread_db, vireo_dir,
+                    progress_callback=progress_cb,
+                    status_callback=status_cb,
+                    cancel_check=cancel_check,
                 )
-
-            def status_cb(message, **_phase):
-                runner.push_event(job["id"], "progress", {
-                    "phase": message,
-                    "current": job["progress"].get("current", 0),
-                    "total": job["progress"].get("total", 0),
-                })
-
-            def cancel_check():
-                return runner.is_cancelled(job["id"])
-
-            return backfill_working_copies(
-                thread_db, vireo_dir,
-                progress_callback=progress_cb,
-                status_callback=status_cb,
-                cancel_check=cancel_check,
-            )
+            finally:
+                thread_db.close()
 
         try:
             runner.start(
@@ -2917,6 +2940,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             thumb_path_backfill_candidate_count,
         )
 
+        tpdb = None
         try:
             tpdb = Database(db_path)
             candidate_count = thumb_path_backfill_candidate_count(
@@ -2925,6 +2949,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except Exception:
             log.exception("thumb_path backfill: candidate check failed")
             return
+        finally:
+            if tpdb is not None:
+                tpdb.close()
         if candidate_count == 0:
             log.debug("thumb_path backfill: no candidates, skipping")
             return
@@ -2934,39 +2961,42 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         def work(job):
             thread_db = Database(db_path)
-            active_ws = init_db._active_workspace_id
-            if active_ws is not None:
-                thread_db.set_active_workspace(active_ws)
+            try:
+                active_ws = init_db._active_workspace_id
+                if active_ws is not None:
+                    thread_db.set_active_workspace(active_ws)
 
-            def progress_cb(current, total):
-                job["progress"]["current"] = current
-                job["progress"]["total"] = total
-                runner.push_event(
-                    job["id"],
-                    "progress",
-                    {
-                        "current": current,
-                        "total": total,
-                        "phase": f"{current:,} / {total:,} photos reconciled",
-                    },
+                def progress_cb(current, total):
+                    job["progress"]["current"] = current
+                    job["progress"]["total"] = total
+                    runner.push_event(
+                        job["id"],
+                        "progress",
+                        {
+                            "current": current,
+                            "total": total,
+                            "phase": f"{current:,} / {total:,} photos reconciled",
+                        },
+                    )
+
+                def status_cb(message, **_phase):
+                    runner.push_event(job["id"], "progress", {
+                        "phase": message,
+                        "current": job["progress"].get("current", 0),
+                        "total": job["progress"].get("total", 0),
+                    })
+
+                def cancel_check():
+                    return runner.is_cancelled(job["id"])
+
+                return backfill_thumb_paths(
+                    thread_db, cache_dir,
+                    progress_callback=progress_cb,
+                    status_callback=status_cb,
+                    cancel_check=cancel_check,
                 )
-
-            def status_cb(message, **_phase):
-                runner.push_event(job["id"], "progress", {
-                    "phase": message,
-                    "current": job["progress"].get("current", 0),
-                    "total": job["progress"].get("total", 0),
-                })
-
-            def cancel_check():
-                return runner.is_cancelled(job["id"])
-
-            return backfill_thumb_paths(
-                thread_db, cache_dir,
-                progress_callback=progress_cb,
-                status_callback=status_cb,
-                cancel_check=cancel_check,
-            )
+            finally:
+                thread_db.close()
 
         try:
             runner.start(
