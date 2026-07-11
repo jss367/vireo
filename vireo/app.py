@@ -4661,7 +4661,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # via set_species_representative's re-select-to-newest behavior.
         # Keep the legacy ``life_list`` key because shared lightbox/menu code
         # reads it.
-        representatives = db.get_species_representative_lists()
+        representatives = db.get_species_representative_lists(eligible_only=True)
         life_list_species = db.get_photo_life_list_species(photo_id)
         primary_by_species = {
             species: (photo_ids[0] if photo_ids else None)
