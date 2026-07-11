@@ -4739,7 +4739,7 @@ async function loadSelectionKeywordSuggestions(ids) {
       body: JSON.stringify({photo_ids: ids}),
     }, { toast: false });
     if (seq !== selectionKeywordRequestSeq) return;
-    renderSelectionKeywordSuggestions(data.keywords || data.suggestions || [], data.selected_count || ids.length);
+    renderSelectionKeywordSuggestions(data.suggestions || [], data.selected_count || ids.length);
   } catch(e) {
     if (seq === selectionKeywordRequestSeq && list) {
       list.innerHTML = '<div class="selection-empty">Could not load keyword suggestions.</div>';
