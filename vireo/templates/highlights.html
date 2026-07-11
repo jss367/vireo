@@ -47,7 +47,8 @@
   .highlight-order button { padding:2px 6px; border-radius:999px; border:1px solid rgba(255,255,255,.45); background:rgba(0,0,0,.62); color:#fff; font-size:10px; cursor:pointer; }
   .highlight-order button:hover { border-color:#fff; }
   .highlights-card img { width:100%; aspect-ratio:3/2; object-fit:cover; display:block; background:var(--bg-tertiary); }
-  .card-info { padding:6px 8px; font-size:11px; color:var(--text-secondary); display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:4px; min-height:28px; }
+  .card-filename { padding:6px 8px 0; color:var(--text-primary); font-size:12px; line-height:1.35; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .card-info { padding:4px 8px 6px; font-size:11px; color:var(--text-secondary); display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:4px; min-height:26px; }
   .card-chip { padding:1px 5px; border-radius:999px; background:var(--bg-tertiary); white-space:nowrap; }
   .card-chip.score { color:var(--text-primary); font-weight:600; }
   .card-chip.conf { color:var(--text-secondary); }
@@ -438,6 +439,7 @@ function renderCard(p, idx) {
     + ribbon
     + order
     + '<img src="' + thumbSrc + '" alt="' + escapeAttr(p.filename) + '" loading="lazy">'
+    + '<div class="card-filename" title="' + escapeAttr(p.filename) + '">' + escapeAttr(p.filename) + '</div>'
     + '<div class="card-info">' + scoreChip + conf + rep + reasons + '</div>'
     + '</div>';
 }
