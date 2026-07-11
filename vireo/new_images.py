@@ -387,6 +387,23 @@ class NewImagesCache:
         """
         key = (db_path, workspace_id)
         with self._lock:
+            # Race guard: a worker finishing between the caller's
+            # ``cache.get()`` (which returned None) and this call would
+            # write the result to ``_entries`` and then clear
+            # ``_inflight`` — under separate lock acquires — so by the
+            # time we arrive both are visible but the ``_inflight`` slot
+            # is gone. Without this check we would spawn a redundant walk
+            # that duplicates the just-finished one. If a fresh entry is
+            # already cached, return an already-set event so the caller's
+            # follow-up ``cache.get()`` picks it up.
+            entry = self._entries.get(key)
+            if entry is not None:
+                _result, set_at = entry
+                if time.monotonic() - set_at <= self._ttl:
+                    done = threading.Event()
+                    done.set()
+                    return done
+
             err_entry = self._errors.get(key)
             if err_entry is not None:
                 _err_msg, set_at = err_entry
