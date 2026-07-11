@@ -627,6 +627,12 @@ def test_rapid_review_click_main_image_opens_original_at_one_to_one(live_server,
     img = page.locator("#currentPhoto")
     stage = page.locator("#photoStage")
 
+    # currentPhoto() returns null until the mocked results + state responses
+    # hydrate the session, so an immediate stage.click() can fall through
+    # toggleRapidZoom() and leave .zoomed unset. Wait for the preview src to
+    # land — same hydration signal used later in this test — before clicking.
+    expect(img).to_have_attribute("src", re.compile(r"/photos/1/preview\?size=2560$"))
+
     stage.click(position={"x": 12, "y": 12})
 
     expect(stage).to_have_class(re.compile(r"\bzoomed\b"))
