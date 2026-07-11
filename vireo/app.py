@@ -8163,6 +8163,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         species = species.strip() if isinstance(species, str) else ""
         if not species:
             return json_error("species required")
+        # Normalize species BEFORE snapshotting existing highlight/preference
+        # rows for the undo payload. add_keyword() below normalizes on insert
+        # (see line ~8255), and rename_* helpers below use the normalized
+        # name, so the "did a target-species row already exist?" queries at
+        # `WHERE species = ?` must compare on the same normalized value.
+        # Without this, a request like `‘apapane` snapshots against the raw
+        # spelling, misses an existing clean `apapane` highlight/preference
+        # row, records `dst_existed=False`, and undo then deletes the
+        # pre-existing curation row it never created. Reject inputs that
+        # normalize to empty for the same reason api_add_keyword does.
+        species = normalize_keyword_display(species)
+        if not species:
+            return json_error("species required")
         error, status = _validate_highlight_photo_ids(db, photo_ids)
         if error:
             return json_error(error, status)

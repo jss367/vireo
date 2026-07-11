@@ -174,17 +174,26 @@ def _import_keywords_for_photo(db, photo_id, xmp_path_str):
         # Tag with the leaf keyword
         db.tag_photo(photo_id, parent_id)
 
-    # Also add any flat keywords not already covered by hierarchy. Same
-    # empty-normalized filter as above — a lone smart-quote entry would
-    # otherwise raise inside add_keyword() and abort the scan.
-    existing_kw_names = {k["name"] for k in db.get_photo_keywords(photo_id)}
+    # Also add any flat keywords not already covered by hierarchy. Compare
+    # via the normalized match key on both sides: DB names are stored in
+    # their cleaned form (add_keyword normalizes on insert), so a raw
+    # `dc:subject` value like `‘apapane` that matches an existing clean
+    # `apapane` on this photo would otherwise fall through to add_keyword
+    # and get tagged again as a redundant top-level row. Same empty-key
+    # filter as above — a lone smart-quote entry would raise inside
+    # add_keyword() and abort the scan.
+    existing_keys = {
+        keyword_match_key(k["name"]) for k in db.get_photo_keywords(photo_id)
+    }
     for kw in flat_keywords:
-        if kw in existing_kw_names:
+        key = keyword_match_key(kw)
+        if not key:
             continue
-        if not keyword_match_key(kw):
+        if key in existing_keys:
             continue
         kid = db.add_keyword(kw)
         db.tag_photo(photo_id, kid)
+        existing_keys.add(key)
 
 
 def _extract_dimensions(exif_group, file_group, extension=None):
