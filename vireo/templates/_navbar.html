@@ -3752,7 +3752,7 @@ window.buildSpeciesRepresentativeMenuItems = function(photoIds, opts) {
   var entries = _lifeListMenuEntriesForPhotoId(photoId, opts);
   if (entries.length) {
     return entries.map(function(entry) {
-      var isCurrent = !!(entry.is_current_photo || entry.is_species_representative);
+      var isCurrent = !!entry.is_current_photo;
       return {
         label: 'Set Representative \u2014 ' + entry.species,
         disabled: isCurrent,
