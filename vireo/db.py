@@ -13297,6 +13297,7 @@ class Database:
             old_species = pref.get("species")
             if not purpose or not old_species or old_species == new_species:
                 continue
+            rep_selected_order = pref.get("rep_selected_order")
             row = self.conn.execute(
                 """SELECT 1 FROM photo_preferences
                    WHERE workspace_id = ? AND purpose = ?
@@ -13323,13 +13324,22 @@ class Database:
                    VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
                 (workspace_id, purpose, new_species, photo_id),
             )
-            self._set_global_species_representative(new_species, photo_id)
+            # Reuse the captured pre-relabel selected_order rather than
+            # allocating a fresh MAX+1. The original relabel preserved the
+            # source row's order via rename_species_representatives_species,
+            # so redoing must restore that same order — otherwise an
+            # undo/redo round trip can promote a secondary representative
+            # above a pre-existing primary for new_species.
+            self._restore_species_representative(
+                new_species, photo_id, selected_order=rep_selected_order,
+            )
         for rep in rep_prev:
             if not isinstance(rep, dict):
                 continue
             old_species = rep.get("species")
             if not old_species or old_species == new_species:
                 continue
+            rep_selected_order = rep.get("selected_order")
             src = self.conn.execute(
                 """SELECT 1 FROM species_representatives
                    WHERE species = ? AND photo_id = ?""",
@@ -13342,7 +13352,9 @@ class Database:
                    WHERE species = ? AND photo_id = ?""",
                 (old_species, photo_id),
             )
-            self._set_global_species_representative(new_species, photo_id)
+            self._restore_species_representative(
+                new_species, photo_id, selected_order=rep_selected_order,
+            )
 
     def _edit_old_value_meta(self, old_value):
         """Parse edit item old_value, including newer JSON metadata payloads."""

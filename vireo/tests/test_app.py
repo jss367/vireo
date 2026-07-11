@@ -8248,6 +8248,73 @@ def test_highlights_relabel_undo_preserves_representative_order(app_and_db):
     assert restored == [p_primary, p_secondary]
 
 
+def test_highlights_relabel_redo_preserves_representative_order(app_and_db):
+    """Redoing a previously-undone relabel that moved a secondary
+    representative must restore it at the original ``selected_order``
+    captured before the first relabel. Before the fix, redo called
+    ``_set_global_species_representative`` and pushed the redone
+    representative above pre-existing entries under ``new_species``,
+    changing which photo shows up as the Life List/Highlights primary
+    after an undo/redo round trip."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/reporder-redo', 'reporder-redo', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Redo Order Bird", is_species=True)
+    new_kid = db.add_keyword("Redo Other Bird", is_species=True)
+    p_source = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'source.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    p_target_primary = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'target_primary.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(p_source, old_kid)
+    db.tag_photo(p_target_primary, new_kid)
+    # Select p_source (in the old species) first so p_target_primary
+    # takes the newer selected_order in the shared global counter and
+    # stays the primary of "Redo Other Bird" after the relabel migrates
+    # p_source in at its lower captured order.
+    db.set_species_representative("Redo Order Bird", p_source)
+    db.set_species_representative("Redo Other Bird", p_target_primary)
+    assert db.get_species_representative_lists()["Redo Other Bird"] == [
+        p_target_primary,
+    ]
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [p_source], "species": "Redo Other Bird"},
+    )
+    assert resp.status_code == 200
+    after_relabel = db.get_species_representative_lists()["Redo Other Bird"]
+    # p_target_primary's global order is newer than p_source's, so the
+    # migrated p_source lands as a secondary rep, not the primary.
+    assert after_relabel == [p_target_primary, p_source]
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+    assert db.get_species_representative_lists()["Redo Other Bird"] == [
+        p_target_primary,
+    ]
+
+    redone = db.redo_last_undo()
+    assert redone is not None
+    # Before the fix, redo called _set_global_species_representative and
+    # p_source landed at MAX(selected_order)+1, promoting it above
+    # p_target_primary. With the captured order restored on redo, the
+    # round trip preserves both the list and its primary photo.
+    redone_list = db.get_species_representative_lists()["Redo Other Bird"]
+    assert redone_list == after_relabel
+
+
 def test_rename_species_representatives_species_chunks_large_photo_lists(tmp_path):
     """``rename_species_representatives_species`` must chunk the IN(...)
     clause so a species tagged on thousands of photos doesn't blow
