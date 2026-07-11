@@ -10080,6 +10080,36 @@ class Database:
             (species, photo_id, order),
         )
 
+    def _restore_species_representative(
+        self, species, photo_id, selected_order=None,
+    ):
+        """Restore a global species_representatives row on undo.
+
+        When ``selected_order`` is None (legacy edit-history payloads
+        recorded before this field was captured), assign a fresh order via
+        :meth:`_set_global_species_representative` — preserving the older
+        promote-to-newest behavior for those undos. Otherwise write the
+        captured order so undoing a relabel of a secondary representative
+        does not push it above the pre-existing primary.
+        """
+        if selected_order is None:
+            self._set_global_species_representative(species, photo_id)
+            return
+        try:
+            order = int(selected_order)
+        except (TypeError, ValueError):
+            self._set_global_species_representative(species, photo_id)
+            return
+        self.conn.execute(
+            """INSERT INTO species_representatives
+                   (species, photo_id, selected_order, created_at, updated_at)
+               VALUES (?, ?, ?, datetime('now'), datetime('now'))
+               ON CONFLICT(species, photo_id) DO UPDATE SET
+                   selected_order = excluded.selected_order,
+                   updated_at = excluded.updated_at""",
+            (species, photo_id, order),
+        )
+
     def set_photo_preference(self, purpose, species, photo_id, _commit=True):
         """Set the preferred photo for a species/purpose in this workspace."""
         ws = self._ws_id()
@@ -13136,6 +13166,7 @@ class Database:
             old_species = pref.get("species")
             dst_existed = bool(pref.get("dst_existed", False))
             rep_dst_existed = bool(pref.get("rep_dst_existed", False))
+            rep_selected_order = pref.get("rep_selected_order")
             if not purpose or not old_species or old_species == new_species:
                 continue
             # Only delete the (new_species, purpose) row when the relabel
@@ -13179,12 +13210,15 @@ class Database:
                    VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
                 (workspace_id, purpose, old_species, photo_id),
             )
-            self._set_global_species_representative(old_species, photo_id)
+            self._restore_species_representative(
+                old_species, photo_id, selected_order=rep_selected_order,
+            )
         for rep in rep_prev:
             if not isinstance(rep, dict):
                 continue
             old_species = rep.get("species")
             dst_existed = bool(rep.get("dst_existed", False))
+            rep_selected_order = rep.get("selected_order")
             if not old_species or old_species == new_species:
                 continue
             # Only delete the (new_species, photo_id) rep row when the
@@ -13199,7 +13233,9 @@ class Database:
                        WHERE species = ? AND photo_id = ?""",
                     (new_species, photo_id),
                 )
-            self._set_global_species_representative(old_species, photo_id)
+            self._restore_species_representative(
+                old_species, photo_id, selected_order=rep_selected_order,
+            )
 
     def _reapply_relabel_curation(
         self, workspace_id, photo_id, new_species, curation,

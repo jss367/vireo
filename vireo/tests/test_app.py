@@ -8136,6 +8136,118 @@ def test_highlights_relabel_ignores_stale_representative_with_local_pref(app_and
     assert stale_pref_after is not None
 
 
+def test_highlights_relabel_ignores_stale_reps_on_prediction_only_relabel(app_and_db):
+    """A prediction-only relabel (no taxonomy keywords → ``keyword_add``,
+    not ``species_replace``) must not sweep stale global
+    ``species_representatives`` or ``photo_preferences`` rows for species
+    the photo previously carried and then had untagged. Only curation for
+    a species matching the photo's active prediction should migrate to
+    the target species."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/predstale', 'predstale', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    stale_kid = db.add_keyword("Old Bird", is_species=True)
+    db.add_keyword("New Species", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'pred-stale.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    # Photo used to be tagged Old Bird and was picked as its rep; then the
+    # keyword was untagged. The rep/pref rows survive untag_photo, so the
+    # photo now carries no taxonomy but retains stale curation for Old
+    # Bird — a legitimate scenario Codex flagged for prediction-only
+    # relabels.
+    db.tag_photo(pid, stale_kid)
+    db.set_species_representative("Old Bird", pid)
+    db.add_species_highlight("Old Bird", pid)
+    db.untag_photo(pid, stale_kid)
+    # Prediction added AFTER untag so the "predicted-only" relabel path
+    # runs (has_old_species stays False → action_type = "keyword_add").
+    # The prediction is for a *different* species than the stale curation,
+    # so the prediction-species migration guard must skip the stale rows.
+    det = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(det, "Predicted Bird", 0.88, "m")
+    db.conn.commit()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "New Species"},
+    )
+    assert resp.status_code == 200
+    assert db.get_edit_history(limit=1)[0]["action_type"] == "keyword_add"
+
+    reps = db.get_species_representatives()
+    # Stale Old Bird rep survives — it is NOT renamed to New Species.
+    assert reps.get("Old Bird") == pid
+    assert "New Species" not in reps
+    hl = db.get_species_highlights()
+    assert pid in (hl.get("Old Bird") or {})
+    assert "New Species" not in hl
+
+
+def test_highlights_relabel_undo_preserves_representative_order(app_and_db):
+    """Undoing a relabel that moved a secondary representative must
+    restore it at its original ``selected_order`` — otherwise
+    ``_set_global_species_representative`` would assign MAX+1 and promote
+    the restored photo above the pre-existing primary representative for
+    the same species."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/reporder', 'reporder', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Order Bird", is_species=True)
+    db.add_keyword("Other Bird", is_species=True)
+    p_primary = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'primary.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    p_secondary = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'secondary.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(p_primary, old_kid)
+    db.tag_photo(p_secondary, old_kid)
+    # Select secondary first so primary ends up newest and lists first.
+    db.set_species_representative("Order Bird", p_secondary)
+    db.set_species_representative("Order Bird", p_primary)
+    assert db.get_species_representative_lists()["Order Bird"] == [
+        p_primary, p_secondary,
+    ]
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [p_secondary], "species": "Other Bird"},
+    )
+    assert resp.status_code == 200
+    assert db.get_species_representative_lists()["Order Bird"] == [p_primary]
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+    # Before the fix, undo called _set_global_species_representative and
+    # p_secondary landed at MAX(selected_order)+1 — jumping it ahead of
+    # p_primary.
+    restored = db.get_species_representative_lists()["Order Bird"]
+    assert restored == [p_primary, p_secondary]
+
+
 def test_rename_species_representatives_species_chunks_large_photo_lists(tmp_path):
     """``rename_species_representatives_species`` must chunk the IN(...)
     clause so a species tagged on thousands of photos doesn't blow
