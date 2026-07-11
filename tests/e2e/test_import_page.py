@@ -1,3 +1,4 @@
+import json
 import re
 
 from playwright.sync_api import expect
@@ -64,45 +65,40 @@ def test_import_destination_browse_button_sets_destination(live_server, page):
 
 def test_import_destination_preview_shows_final_folders(live_server, page):
     url = live_server["url"]
+
+    def destination_preview(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "total_photos": 1431,
+                "total_folders": 1,
+                "new_folders": 1,
+                "existing_folders": 0,
+                "managed_archive": {
+                    "path": "/Volumes/Photography/Raw Files/USA",
+                    "photo_count": 45302,
+                },
+                "folders": [{
+                    "path": "2026/07/11",
+                    "full_path": (
+                        "/Volumes/Photography/Raw Files/USA/2026/2026/07/11"
+                    ),
+                    "count": 1431,
+                    "exists": False,
+                }],
+            }),
+        )
+
+    page.route("**/api/import/destination-preview", destination_preview)
     page.goto(f"{url}/import")
     page.locator("#modeCopy").check()
     page.evaluate(
         """
         () => {
-          const originalFetch = window.fetch.bind(window);
-          window.fetch = (input, init) => {
-            const target = typeof input === 'string' ? input : input.url;
-            if (target && target.indexOf('/api/import/folder-preview') === 0) {
-              return Promise.resolve(new Response(JSON.stringify({
-                total_count: 1431,
-                total_size: 0,
-                type_breakdown: {'.nef': 1431},
-                duplicate_count: 0,
-                files: [],
-              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
-            }
-            if (target && target.indexOf('/api/import/destination-preview') === 0) {
-              return Promise.resolve(new Response(JSON.stringify({
-                total_photos: 1431,
-                total_folders: 1,
-                new_folders: 1,
-                existing_folders: 0,
-                managed_archive: {
-                  path: '/Volumes/Photography/Raw Files/USA',
-                  photo_count: 45302,
-                },
-                folders: [{
-                  path: '2026/07/11',
-                  full_path: '/Volumes/Photography/Raw Files/USA/2026/2026/07/11',
-                  count: 1431,
-                  exists: false,
-                }],
-              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
-            }
-            return originalFetch(input, init);
-          };
           addSourcePath('/Volumes/NIKON Z 8/DCIM');
-          document.getElementById('destInput').value = '/Volumes/Photography/Raw Files/USA/2026';
+          document.getElementById('destInput').value =
+            '/Volumes/Photography/Raw Files/USA/2026';
           document.getElementById('folderTemplate').value = '%Y/%m/%d';
         }
         """
@@ -124,47 +120,42 @@ def test_import_destination_preview_shows_final_folders(live_server, page):
 
 def test_copy_import_start_requires_current_destination_preview(live_server, page):
     url = live_server["url"]
+    captured = {"started": False}
+
+    def destination_preview(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "total_photos": 1,
+                "total_folders": 1,
+                "new_folders": 1,
+                "existing_folders": 0,
+                "managed_archive": None,
+                "folders": [{
+                    "path": "2026/2026-07-11",
+                    "full_path": "/archive/2026/2026-07-11",
+                    "count": 1,
+                    "exists": False,
+                }],
+            }),
+        )
+
+    def start_import(route):
+        captured["started"] = True
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"job_id": "import-photos-test"}),
+        )
+
+    page.route("**/api/import/destination-preview", destination_preview)
+    page.route("**/api/jobs/import-photos", start_import)
     page.goto(f"{url}/import")
     page.locator("#modeCopy").check()
     page.evaluate(
         """
         () => {
-          window.__importStarted = false;
-          const originalFetch = window.fetch.bind(window);
-          window.fetch = (input, init) => {
-            const target = typeof input === 'string' ? input : input.url;
-            if (target && target.indexOf('/api/import/folder-preview') === 0) {
-              return Promise.resolve(new Response(JSON.stringify({
-                total_count: 1,
-                total_size: 0,
-                type_breakdown: {'.jpg': 1},
-                duplicate_count: 0,
-                files: [],
-              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
-            }
-            if (target && target.indexOf('/api/import/destination-preview') === 0) {
-              return Promise.resolve(new Response(JSON.stringify({
-                total_photos: 1,
-                total_folders: 1,
-                new_folders: 1,
-                existing_folders: 0,
-                managed_archive: null,
-                folders: [{
-                  path: '2026/2026-07-11',
-                  full_path: '/archive/2026/2026-07-11',
-                  count: 1,
-                  exists: false,
-                }],
-              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
-            }
-            if (target && target.indexOf('/api/jobs/import-photos') === 0) {
-              window.__importStarted = true;
-              return Promise.resolve(new Response(JSON.stringify({
-                job_id: 'import-photos-test',
-              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
-            }
-            return originalFetch(input, init);
-          };
           addSourcePath('/card');
           document.getElementById('destInput').value = '/archive';
         }
@@ -177,7 +168,343 @@ def test_copy_import_start_requires_current_destination_preview(live_server, pag
     expect(page.locator("#importError")).to_contain_text(
         "Review the destination preview"
     )
-    assert page.evaluate("() => window.__importStarted") is False
+    assert captured["started"] is False
+
+
+def test_import_destination_preview_ignores_stale_response(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/import")
+    page.locator("#modeCopy").check()
+    page.evaluate(
+        """
+        () => {
+          const originalFetch = window.fetch.bind(window);
+          window.__resolvePreview = null;
+          window.fetch = (input, init) => {
+            const target = typeof input === 'string' ? input : input.url;
+            if (target && target.indexOf('/api/import/destination-preview') === 0) {
+              return new Promise((resolve) => {
+                window.__resolvePreview = () => resolve(new Response(JSON.stringify({
+                  total_photos: 1,
+                  total_folders: 1,
+                  new_folders: 1,
+                  existing_folders: 0,
+                  managed_archive: null,
+                  folders: [{
+                    path: '2026/07/11',
+                    full_path: '/archive/2026/07/11',
+                    count: 1,
+                    exists: false,
+                  }],
+                }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+              });
+            }
+            return originalFetch(input, init);
+          };
+          addSourcePath('/card');
+          document.getElementById('destInput').value = '/archive';
+        }
+        """
+    )
+
+    page.locator("[data-testid='import-preview-folders-btn']").click()
+    page.wait_for_function("window.__resolvePreview !== null")
+    page.locator("#folderTemplate").fill("%Y/%Y-%m-%d")
+    page.evaluate("() => window.__resolvePreview()")
+
+    expect(page.locator("[data-testid='import-folder-preview-results']")).to_be_hidden()
+    expect(page.locator("[data-testid='import-preview-folders-btn']")).to_have_text(
+        "Preview folder structure"
+    )
+
+
+def test_import_custom_extensions_feed_preview(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/import")
+    page.evaluate(
+        """
+        () => {
+          const originalFetch = window.fetch.bind(window);
+          window.__previewBody = null;
+          window.fetch = (input, init) => {
+            const target = typeof input === 'string' ? input : input.url;
+            if (target && target.indexOf('/api/import/folder-preview') === 0) {
+              window.__previewBody = JSON.parse(init.body);
+              return Promise.resolve(new Response(JSON.stringify({
+                total_count: 0,
+                total_size: 0,
+                type_breakdown: {},
+                duplicate_count: 0,
+                files: [],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            return originalFetch(input, init);
+          };
+        }
+        """
+    )
+
+    page.locator("#modeCopy").check()
+    page.locator("#sourceInput").fill("/tmp/card-a")
+    page.locator("#btnAddSource").click()
+    page.locator("#fileTypePreset").select_option("custom")
+    page.evaluate(
+        """
+        () => {
+          document.querySelectorAll('.file-ext').forEach(el => { el.checked = false; });
+          document.querySelector('.file-ext[value=".jpg"]').checked = true;
+          document.querySelector('.file-ext[value=".nef"]').checked = true;
+        }
+        """
+    )
+    page.locator("#btnPreview").click()
+    page.wait_for_function("window.__previewBody !== null")
+
+    body = page.evaluate("window.__previewBody")
+    assert body["folders"] == ["/tmp/card-a"]
+    assert body["file_types"] == [".jpg", ".nef"]
+
+
+def test_import_preview_passes_verify_by_hash_to_duplicate_check(live_server, page):
+    """The preview and the actual import must use the same duplicate mode so
+    the counts don't disagree for renamed / metadata-colliding files."""
+    url = live_server["url"]
+    page.goto(f"{url}/import")
+    page.evaluate(
+        """
+        () => {
+          const originalFetch = window.fetch.bind(window);
+          window.__dupBody = null;
+          window.fetch = (input, init) => {
+            const target = typeof input === 'string' ? input : input.url;
+            if (target && target.indexOf('/api/import/folder-preview') === 0) {
+              return Promise.resolve(new Response(JSON.stringify({
+                total_count: 1,
+                total_size: 0,
+                type_breakdown: {'.jpg': 1},
+                duplicate_count: 0,
+                files: [{path: '/tmp/card-a/IMG_0001.jpg'}],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            if (target && target.indexOf('/api/import/check-duplicates') === 0) {
+              window.__dupBody = JSON.parse(init.body);
+              const frame = 'data: ' + JSON.stringify({
+                done: true, duplicate_count: 0, checked: 1, total: 1,
+              }) + '\\n\\n';
+              return Promise.resolve(new Response(frame, {
+                status: 200,
+                headers: {'Content-Type': 'text/event-stream'},
+              }));
+            }
+            return originalFetch(input, init);
+          };
+        }
+        """
+    )
+
+    page.locator("#modeCopy").check()
+    page.locator("#sourceInput").fill("/tmp/card-a")
+    page.locator("#btnAddSource").click()
+    page.locator("#chkSkipDuplicates").check()
+    page.locator("#chkVerifyByHash").check()
+    page.locator("#btnPreview").click()
+    page.wait_for_function("window.__dupBody !== null")
+
+    body = page.evaluate("window.__dupBody")
+    assert body["paths"] == ["/tmp/card-a/IMG_0001.jpg"]
+    assert body["verify_by_hash"] is True
+
+
+def test_import_copy_start_sends_restored_options(live_server, page):
+    url = live_server["url"]
+    captured = {}
+
+    def remote_targets(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "rsync_available": True,
+                "targets": [{
+                    "id": "nas1",
+                    "name": "Photo NAS",
+                    "user": "photo",
+                    "host": "nas.local",
+                    "remote_path": "/srv/photos",
+                    "mount_path": "/Volumes/photos",
+                }],
+            }),
+        )
+
+    def start_import(route):
+        captured["body"] = json.loads(route.request.post_data or "{}")
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "job_id": "import-test",
+                "workspace": {"id": 22, "name": "Kenya 2026"},
+            }),
+        )
+
+    page.route("**/api/remote-targets", remote_targets)
+    page.route("**/api/jobs/import-photos", start_import)
+    page.goto(f"{url}/import")
+
+    page.locator("#modeCopy").check()
+    page.locator("#sourceInput").fill("/tmp/card-a")
+    page.locator("#btnAddSource").click()
+    page.locator("#workspaceNew").check()
+    page.locator("#newWorkspaceName").fill("Kenya 2026")
+    page.locator("#destMode").select_option("remote:nas1")
+    page.locator("#remoteSubpath").fill("2026/kenya")
+    page.locator("#fileTypePreset").select_option("custom")
+    page.evaluate(
+        """
+        () => {
+          document.querySelectorAll('.file-ext').forEach(el => { el.checked = false; });
+          document.querySelector('.file-ext[value=".jpg"]').checked = true;
+          document.querySelector('.file-ext[value=".nef"]').checked = true;
+        }
+        """
+    )
+    page.locator("#chkSkipDuplicates").uncheck()
+    page.locator("#chkVerifyByHash").check()
+
+    page.locator("#btnStart").click()
+    expect(page.locator("#progressCard")).to_be_visible()
+
+    body = captured["body"]
+    assert body["sources"] == ["/tmp/card-a"]
+    assert body["new_workspace_name"] == "Kenya 2026"
+    assert body["remote_target_id"] == "nas1"
+    assert body["remote_subpath"] == "2026/kenya"
+    assert "destination" not in body
+    assert body["file_types"] == [".jpg", ".nef"]
+    assert body["skip_duplicates"] is False
+    assert body["verify_by_hash"] is True
+    # The After Import dropdown was untouched, and this is a new-workspace
+    # import — the client must omit after_import so the server resolves the
+    # default against the newly-created workspace instead of leaking the
+    # previously-active workspace's pipeline.default_strategy.
+    assert "after_import" not in body
+
+
+def test_import_new_workspace_forwards_explicit_after_import(live_server, page):
+    """When the user actively picks a strategy for a new-workspace import,
+    the client must forward that pick — only the untouched-dropdown case is
+    omitted so the server can apply the new workspace's default."""
+    url = live_server["url"]
+    captured = {}
+
+    def start_import(route):
+        captured["body"] = json.loads(route.request.post_data or "{}")
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "job_id": "import-test",
+                "workspace": {"id": 23, "name": "Serengeti"},
+            }),
+        )
+
+    def destination_preview(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "total_photos": 1,
+                "total_folders": 1,
+                "new_folders": 1,
+                "existing_folders": 0,
+                "managed_archive": None,
+                "folders": [{
+                    "path": "2026/2026-07-11",
+                    "full_path": "/tmp/archive/2026/2026-07-11",
+                    "count": 1,
+                    "exists": False,
+                }],
+            }),
+        )
+
+    page.route("**/api/import/destination-preview", destination_preview)
+    page.route("**/api/jobs/import-photos", start_import)
+    page.goto(f"{url}/import")
+
+    page.locator("#modeCopy").check()
+    page.locator("#sourceInput").fill("/tmp/card-a")
+    page.locator("#btnAddSource").click()
+    page.locator("#workspaceNew").check()
+    page.locator("#newWorkspaceName").fill("Serengeti")
+    page.locator("#destInput").fill("/tmp/archive")
+    page.locator("#afterImportSelect").select_option("identify")
+    page.locator("[data-testid='import-preview-folders-btn']").click()
+    expect(page.locator("[data-testid='import-folder-preview-results']")).to_be_visible()
+
+    page.locator("#btnStart").click()
+    expect(page.locator("#progressCard")).to_be_visible()
+
+    body = captured["body"]
+    assert body["new_workspace_name"] == "Serengeti"
+    assert body["after_import"] == "identify"
+
+
+def test_import_new_workspace_shows_target_default_in_after_import_display(
+    live_server, page
+):
+    """When 'New workspace' is picked and the After Import dropdown is
+    untouched, the visible label must describe what the server will
+    actually do — the global default that the freshly-created workspace
+    inherits — rather than leaking the currently-active workspace's
+    (possibly-overridden) prefilled selection."""
+    url = live_server["url"]
+
+    def config_route(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "pipeline": {"default_strategy": "identify"},
+            }),
+        )
+
+    def active_workspace_route(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "id": 1,
+                "name": "Existing",
+                "config_overrides": {
+                    "pipeline": {"default_strategy": "quick_look"},
+                },
+            }),
+        )
+
+    page.route("**/api/config", config_route)
+    page.route("**/api/workspaces/active", active_workspace_route)
+    page.goto(f"{url}/import")
+
+    # Before touching workspaceNew, the dropdown reflects the CURRENT
+    # workspace's default (quick_look) — the source of the misleading
+    # signal that this fix addresses.
+    expect(page.locator("#afterImportSelect")).to_have_value("quick_look")
+
+    page.locator("#workspaceNew").check()
+
+    # After switching to new-workspace mode, the visible selection swaps
+    # to a placeholder that names the GLOBAL default (identify) — matching
+    # what the server will actually apply to the freshly-created workspace.
+    expect(page.locator("#afterImportSelect")).to_have_value("__hidden_default__")
+    placeholder = page.locator("#afterImportHiddenDefault")
+    expect(placeholder).to_contain_text("New workspace default")
+    expect(placeholder).to_contain_text("Identify birds")
+
+    # Switching back to current-workspace mode without touching the
+    # dropdown restores the current workspace's default rather than
+    # sticking on the placeholder.
+    page.locator("#workspaceCurrent").check()
+    expect(page.locator("#afterImportSelect")).to_have_value("quick_look")
 
 
 def test_import_browse_button_opens_folder_browser_fallback(live_server, page):
@@ -413,6 +740,24 @@ def test_use_staging_as_import_source_forces_copy_mode(live_server, page):
     expect(page.locator("#sourceList")).to_contain_text("/tmp/staging-src")
     # updateImportMode() must have run so the destination card is visible again.
     expect(page.locator("#destCard")).to_be_visible()
+
+
+def test_import_menu_deep_link_opens_copy_mode_with_source_picker(live_server, page):
+    # File > Import Folder... in the native menu routes to
+    # /import?mode=copy&pick=source so the two File-menu import commands stay
+    # distinct actions. In browser mode pickDirectory() returns null, so the
+    # in-page folder browser must open instead of the native dialog.
+    url = live_server["url"]
+    page.goto(f"{url}/import?mode=copy&pick=source")
+
+    expect(page.locator("#modeCopy")).to_be_checked()
+    expect(page.locator("#destCard")).to_be_visible()
+    expect(page.locator("[data-testid='import-folder-browser']")).to_have_class(
+        re.compile(r"\bopen\b"))
+    expect(page.locator("#folderBrowserTitle")).to_have_text("Select Source Folders")
+    # pick is a one-shot trigger: it must be stripped from the URL so a manual
+    # reload doesn't reopen the picker, while the mode param survives.
+    page.wait_for_url(f"{url}/import?mode=copy")
 
 
 def test_import_folder_browser_escape_closes_modal(live_server, page):

@@ -22,7 +22,6 @@ pub mod ids {
     pub const NAV_COMPARE: &str = "nav_compare";
     pub const NAV_JOBS: &str = "nav_jobs";
     pub const NAV_DUPLICATES: &str = "nav_duplicates";
-    pub const NAV_LIGHTROOM: &str = "nav_lightroom";
     pub const NAV_SHORTCUTS: &str = "nav_shortcuts";
     pub const NAV_DASHBOARD: &str = "nav_dashboard";
     pub const NAV_WORKSPACE: &str = "nav_workspace";
@@ -101,7 +100,6 @@ pub fn route_for_id(id: &str) -> Option<&'static str> {
         ids::NAV_COMPARE => Some("/compare"),
         ids::NAV_JOBS => Some("/jobs"),
         ids::NAV_DUPLICATES => Some("/duplicates"),
-        ids::NAV_LIGHTROOM => Some("/lightroom"),
         ids::NAV_SHORTCUTS => Some("/shortcuts"),
         ids::NAV_DASHBOARD => Some("/dashboard"),
         ids::NAV_WORKSPACE => Some("/workspace"),
@@ -320,8 +318,7 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
                 .accelerator("CmdOrCtrl+Shift+L")
                 .build(app)?,
         )
-        .item(&MenuItemBuilder::with_id(ids::NAV_SHORTCUTS, "Shortcuts").build(app)?)
-        .item(&MenuItemBuilder::with_id(ids::NAV_LIGHTROOM, "Lightroom").build(app)?);
+        .item(&MenuItemBuilder::with_id(ids::NAV_SHORTCUTS, "Shortcuts").build(app)?);
 
     // Settings in View menu only on non-macOS (it is in the app submenu on macOS)
     #[cfg(not(target_os = "macos"))]

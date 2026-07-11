@@ -12,7 +12,6 @@ def test_dependency_readiness_requires_both_remote_tools(monkeypatch):
     )
     monkeypatch.setattr(platform_support, "find_darktable", lambda _path: None)
     monkeypatch.setattr(platform_support, "find_dng_converter", lambda _path: None)
-    monkeypatch.setattr(platform_support, "find_lightroom", lambda: None)
     monkeypatch.setattr(platform_support, "find_ssh", lambda _path="": "ssh.exe")
     monkeypatch.setattr(platform_support, "_probe", lambda _binary, _args: (True, "OpenSSH_9"))
     monkeypatch.setattr(platform_support, "resolve_rsync_bin", lambda _path="": None)

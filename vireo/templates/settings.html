@@ -2221,7 +2221,7 @@ function renderPlatformReadiness(support) {
   var deps = support.dependencies || {};
   var names = {
     exiftool: 'ExifTool', darktable: 'Darktable', dng_converter: 'Adobe DNG Converter',
-    lightroom: 'Lightroom Classic', openssh: 'OpenSSH Client', rsync: 'GNU rsync',
+    openssh: 'OpenSSH Client', rsync: 'GNU rsync',
     remote_transfer: 'Remote transfers'
   };
   var keys = Object.keys(names).filter(function(key) { return deps[key]; });
