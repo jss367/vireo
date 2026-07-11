@@ -3109,7 +3109,14 @@ window.NAV_ALL_PAGES = [
       if (action === 'unflag') return browse2.unflag || browseDefaults2.unflag || SC_DEFAULTS.lightbox.unflag;
       if (action === 'zoom') return browse2.zoom || browseDefaults2.zoom || SC_DEFAULTS.lightbox.zoom;
       if (action === 'toggle_boxes') return browse2.toggle_boxes || browseDefaults2.toggle_boxes || SC_DEFAULTS.lightbox.toggle_boxes;
-      if (action === 'toggle_ui') return browse2.toggle_ui || browseDefaults2.toggle_ui || SC_DEFAULTS.lightbox.toggle_ui;
+      if (action === 'toggle_ui') {
+        // Presence-checked so an explicit '' (migrated on install to resolve
+        // a pre-existing 'h' binding conflict) reads as Unassigned instead
+        // of silently falling through to the 'h' default.
+        if ('toggle_ui' in browse2) return browse2.toggle_ui;
+        if ('toggle_ui' in browseDefaults2) return browseDefaults2.toggle_ui;
+        return SC_DEFAULTS.lightbox.toggle_ui;
+      }
     }
     var values = (shortcuts && shortcuts[ctx]) || {};
     var defaults = SC_DEFAULTS[ctx] || {};
@@ -7699,7 +7706,11 @@ document.addEventListener('keydown', function(e) {
       return;
     }
   }
-  var uiKey = (window._vireoShortcuts && window._vireoShortcuts.browse && window._vireoShortcuts.browse.toggle_ui) || 'h';
+  // Presence check: `''` means the migration blanked this to avoid stealing
+  // an existing user binding on 'h'. Only fall back to the 'h' default when
+  // the key is genuinely absent from config (shortcuts not yet loaded).
+  var browseSc = window._vireoShortcuts && window._vireoShortcuts.browse;
+  var uiKey = browseSc && 'toggle_ui' in browseSc ? browseSc.toggle_ui : 'h';
   if (matchesShortcut(e, uiKey)) {
     var tagUi = e.target && e.target.tagName;
     var editableUi = tagUi === 'INPUT' || tagUi === 'TEXTAREA' || tagUi === 'SELECT' ||

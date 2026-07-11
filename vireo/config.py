@@ -293,6 +293,7 @@ def set(key, value):
 # 25% via the slider) keeps that setting on future loads.
 
 MIGRATION_MISS_THRESHOLDS = "miss_thresholds_2026_05"
+MIGRATION_TOGGLE_UI_H_CONFLICT = "toggle_ui_h_conflict_2026_07"
 
 _LEGACY_MISS_DET_CONFIDENCE = 0.25
 _LEGACY_MISS_DET_CONFIDENCE_BURST = 0.15
@@ -355,6 +356,50 @@ def migrate_legacy_miss_thresholds(db=None):
             if ws_rewrites:
                 rewrote = True
         applied.append(MIGRATION_MISS_THRESHOLDS)
+        raw["_migrations_applied"] = applied
+        save(raw)
+        return rewrote
+
+
+def migrate_toggle_ui_h_conflict():
+    """One-time resolution of the browse.toggle_ui="h" default vs. a user
+    binding that already uses ``h``.
+
+    ``h`` was newly added as the default binding for the lightbox
+    "toggle UI controls" action. For an install that had already customized
+    another browse action to ``h`` (for example ``browse.flag: "h"``),
+    ``load()`` would deep-merge the new default in and produce two browse
+    bindings on the same key. The lightbox key handler checks ``toggle_ui``
+    before flag/reject/unflag, so ``h`` would silently start toggling the
+    chrome instead of firing the user's existing binding.
+
+    This migration inspects the raw on-disk config. If the user has a
+    ``keyboard_shortcuts.browse`` block that already binds ``h`` to some
+    other action AND does NOT already have an explicit ``toggle_ui``
+    setting, it writes ``browse.toggle_ui: ""`` to disk so the effective
+    config leaves the user's existing binding alone. Users can pick a
+    non-conflicting key from the shortcuts editor to re-enable it.
+    Gated by a marker so it runs at most once per install; a user who
+    later explicitly rebinds ``toggle_ui`` keeps that setting.
+    """
+    with _lock:
+        raw = _read_raw()
+        applied = _migrations_applied(raw)
+        if MIGRATION_TOGGLE_UI_H_CONFLICT in applied:
+            return False
+        rewrote = False
+        shortcuts = raw.get("keyboard_shortcuts")
+        if isinstance(shortcuts, dict):
+            browse = shortcuts.get("browse")
+            if isinstance(browse, dict) and "toggle_ui" not in browse:
+                for action, key in browse.items():
+                    if action == "toggle_ui":
+                        continue
+                    if isinstance(key, str) and key.lower() == "h":
+                        browse["toggle_ui"] = ""
+                        rewrote = True
+                        break
+        applied.append(MIGRATION_TOGGLE_UI_H_CONFLICT)
         raw["_migrations_applied"] = applied
         save(raw)
         return rewrote
