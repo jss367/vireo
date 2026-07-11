@@ -629,6 +629,72 @@ def test_encounter_species_confirm(app_and_db):
     assert len(kw_adds) == len(photo_ids)
 
 
+def test_encounter_species_canonicalizes_legacy_variant_rows(app_and_db):
+    """Photos tagged with a legacy edge-quote species row get migrated to the
+    clean row instead of ending up with duplicate normalized-equivalent tags.
+
+    Regression for the case where an upgraded DB carries BOTH a legacy quoted
+    row (e.g. `‘apapane`) AND a clean row (`apapane`) as separate taxonomy
+    keywords. add_keyword('apapane', is_species=True) picks the clean row
+    (exact match), the replacement path is skipped because the normalized
+    match_key of previous_species equals the requested species, and without
+    canonicalization the legacy tag is left in place, giving the photo two
+    normalized-equivalent species tags.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    # Insert both rows directly to bypass add_keyword's normalization — mimics
+    # an upgraded DB with a legacy variant alongside a clean row.
+    legacy_kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('‘apapane', 'taxonomy', 1)"
+    ).lastrowid
+    clean_kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('apapane', 'taxonomy', 1)"
+    ).lastrowid
+    db.conn.commit()
+
+    photos = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 2").fetchall()
+    p_legacy, p_other = photos[0]["id"], photos[1]["id"]
+    db.tag_photo(p_legacy, legacy_kid)
+
+    resp = client.post(
+        '/api/encounters/species',
+        json={"species": "apapane", "photo_ids": [p_legacy, p_other]},
+    )
+    assert resp.status_code == 200
+
+    # Both photos should carry exactly one apapane taxonomy tag (the clean
+    # row) — no duplicate legacy row alongside.
+    for pid in (p_legacy, p_other):
+        species_tags = db.conn.execute(
+            """SELECT k.id, k.name FROM keywords k
+               JOIN photo_keywords pk ON pk.keyword_id = k.id
+               WHERE pk.photo_id = ? AND k.is_species = 1""",
+            (pid,),
+        ).fetchall()
+        assert len(species_tags) == 1, (
+            f"photo {pid} should have exactly one species tag after canonicalization, "
+            f"got {[dict(t) for t in species_tags]!r}"
+        )
+        assert species_tags[0]["id"] == clean_kid
+        assert species_tags[0]["name"] == "apapane"
+
+    # The legacy stored spelling must be queued for XMP removal so the
+    # sidecar drops the quoted entry.
+    pending = db.get_pending_changes()
+    legacy_removes = [
+        c for c in pending
+        if c["change_type"] == "keyword_remove"
+        and c["photo_id"] == p_legacy
+        and c["value"] == "‘apapane"
+    ]
+    assert legacy_removes, (
+        f"expected a keyword_remove for the legacy '‘apapane' spelling on photo {p_legacy}; "
+        f"pending: {pending!r}"
+    )
+
+
 def test_encounter_species_confirm_ignores_corrupt_pipeline_cache(app_and_db):
     """A bad pipeline cache must not turn species confirmation into a 500."""
     app, db = app_and_db

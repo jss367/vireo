@@ -20945,6 +20945,59 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if stored and stored["name"]:
                 species = stored["name"]
 
+            # Precheck which submitted photos already carry a given keyword.
+            # Only photos that get a *new* tag should generate edit-history
+            # items and sidecar adds — otherwise confirming an already-tagged
+            # photo would push a no-op onto the undo stack, and undoing it
+            # would destructively remove the pre-existing keyword. Mirrors
+            # the precheck pattern in api_batch_keyword. Chunked so the
+            # IN-clause stays under SQLite's bound-parameter cap.
+            def _photos_with_keyword(keyword_id):
+                hits = set()
+                for chunk in _chunked(photo_ids):
+                    placeholders_ids = ",".join("?" for _ in chunk)
+                    hits.update(
+                        row["photo_id"]
+                        for row in db.conn.execute(
+                            f"""SELECT photo_id FROM photo_keywords
+                                WHERE keyword_id = ? AND photo_id IN ({placeholders_ids})""",
+                            [keyword_id] + list(chunk),
+                        ).fetchall()
+                    )
+                return hits
+
+            # Canonicalize any legacy species-keyword rows that normalize to
+            # the same species we just resolved. On an upgraded DB a photo
+            # can still carry a quoted variant like `‘apapane` under a
+            # different keyword_id than the clean `apapane` above. Without
+            # this pass, when `previous_species` matches (normalized) — so
+            # the replacement path below is skipped — `_photos_with_keyword(kid)`
+            # treats those photos as missing the tag and adds kid alongside
+            # the legacy row, leaving duplicate taxonomy tags for the same
+            # normalized species. Untag the legacy row and queue a sidecar
+            # remove for its stored name; the normal tagging path below then
+            # adds the clean row and queues the clean sidecar entry.
+            canonical_target = normalize_keyword_display(species)
+            if canonical_target:
+                legacy_rows = db.conn.execute(
+                    """SELECT id, name FROM keywords
+                       WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE
+                         AND parent_id IS NULL
+                         AND is_species = 1
+                         AND id != ?""",
+                    (canonical_target, kid),
+                ).fetchall()
+                for legacy_row in legacy_rows:
+                    legacy_id = legacy_row["id"]
+                    legacy_name = legacy_row["name"]
+                    for pid in _photos_with_keyword(legacy_id):
+                        db.untag_photo(pid, legacy_id, _commit=False)
+                        if legacy_name:
+                            _queue_keyword_remove(
+                                pid, legacy_name,
+                                workspace_id=ws_id, _commit=False,
+                            )
+
             # Compare previous vs new species with a normalized match key so
             # a legacy cache/sidecar spelling like `‘apapane` is recognized
             # as the same species as a new `apapane` and doesn't spuriously
@@ -20980,27 +21033,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     # the sidecar.
                     if old_kid_row["name"]:
                         previous_species = old_kid_row["name"]
-
-            # Precheck which submitted photos already carry the new species
-            # keyword. Only photos that get a *new* tag should generate
-            # edit-history items and sidecar adds — otherwise confirming an
-            # already-tagged photo would push a no-op onto the undo stack, and
-            # undoing it would destructively remove the pre-existing keyword.
-            # Mirrors the precheck pattern in api_batch_keyword. Chunked so
-            # the IN-clause stays under SQLite's bound-parameter cap.
-            def _photos_with_keyword(keyword_id):
-                hits = set()
-                for chunk in _chunked(photo_ids):
-                    placeholders_ids = ",".join("?" for _ in chunk)
-                    hits.update(
-                        row["photo_id"]
-                        for row in db.conn.execute(
-                            f"""SELECT photo_id FROM photo_keywords
-                                WHERE keyword_id = ? AND photo_id IN ({placeholders_ids})""",
-                            [keyword_id] + list(chunk),
-                        ).fetchall()
-                    )
-                return hits
 
             already_has_new = _photos_with_keyword(kid)
             newly_tagged = [pid for pid in photo_ids if pid not in already_has_new]
