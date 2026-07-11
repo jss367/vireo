@@ -4872,6 +4872,7 @@ async function removeSelectionKeyword(keywordId) {
       body: JSON.stringify({photo_ids: ids, keyword_id: keywordId}),
     });
   } catch(e) { return; }
+  _clearRepresentativeStateAfterKeywordRemoval(ids, removedName);
   selectionKeywordKey = '';
   loadSelectionKeywordSuggestions(getActiveSelection());
   loadKeywords();
@@ -4935,6 +4936,48 @@ function _clearRepresentativeStateIfIneligible(photoId, flag) {
       if (entry.is_species_representative) entry.is_species_representative = false;
     });
   }
+}
+
+function _keywordNameFromCache(keywordId) {
+  if (!Array.isArray(keywordAutocompleteCache)) return null;
+  for (var i = 0; i < keywordAutocompleteCache.length; i++) {
+    var k = keywordAutocompleteCache[i];
+    if (k && k.id === keywordId) return k.name;
+  }
+  return null;
+}
+
+// Server-side eligibility requires the photo to still carry the species
+// keyword, so removing a species keyword drops the photo from the eligible
+// representative set. Mirror that locally: strip life_list entries whose
+// species matches the removed keyword name and recompute the badge flag.
+// The context menu reads photo.life_list too, so this also stops the shared
+// "Already representative" hint from lingering on a photo the DB no longer
+// counts. Non-species keywords never appear in life_list, so the filter
+// no-ops for those. If the cache lookup fails to resolve the name, we
+// leave state alone rather than clearing the wrong entry.
+function _clearRepresentativeStateAfterKeywordRemoval(photoIds, keywordName) {
+  if (!Array.isArray(photoIds) || !photoIds.length) return;
+  if (!keywordName) return;
+  var touched = [];
+  photoIds.forEach(function(id) {
+    var p = photos.find(function(x) { return x.id === id; });
+    if (!p || !Array.isArray(p.life_list)) return;
+    var next = p.life_list.filter(function(entry) {
+      return !entry || entry.species !== keywordName;
+    });
+    if (next.length !== p.life_list.length) {
+      p.life_list = next;
+      var isRep = next.some(function(entry) {
+        return entry && entry.is_species_representative;
+      });
+      if (p.is_species_representative !== isRep) {
+        p.is_species_representative = isRep;
+      }
+      touched.push(id);
+    }
+  });
+  if (touched.length) refreshGridCards(touched);
 }
 
 async function batchSetFlag(flag) {
@@ -6237,6 +6280,10 @@ async function removeKeyword(photoId, keywordId) {
     await safeFetch('/api/photos/' + photoId + '/keywords/' + keywordId, {
       method: 'DELETE',
     });
+    _clearRepresentativeStateAfterKeywordRemoval(
+      [photoId],
+      _keywordNameFromCache(keywordId),
+    );
     loadDetail(photoId);
     loadKeywords();
     scheduleCollectionCountsRefresh();

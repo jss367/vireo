@@ -3252,6 +3252,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 f, r = flag_map.get(p["id"], ("none", 0))
                 p["flag"] = f
                 p["rating"] = r
+            # Overlay representative state onto the cached results so
+            # pipeline cards render the badge after a page reload. The
+            # cache is written before eligibility runs (and by pipeline
+            # runs that predate the badge), so is_species_representative
+            # is otherwise absent and every card renders unbadged even
+            # when the DB says the photo is the species rep. The flag
+            # overlay above is what makes this call correct — the shared
+            # attacher short-circuits rejected photos, and the overlay
+            # ensures p["flag"] reflects the live DB, not a stale cache.
+            _attach_species_representatives(db, results["photos"])
 
         effective_cfg = db.get_effective_config(cfg.load())
         pipeline_cfg = effective_cfg.get("pipeline", {})
