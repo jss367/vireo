@@ -379,3 +379,51 @@ def test_accept_alternative_prediction(app_and_db):
     keywords = db.get_photo_keywords(photos[0]['id'])
     kw_names = {k['name'] for k in keywords}
     assert 'Sparrow' in kw_names
+
+
+def test_list_predictions_gates_representative_on_current_eligibility(app_and_db):
+    """A stale representative preference must not light up the Review-card
+    badge for a photo that is now rejected or no longer carries the stored
+    species keyword. get_predictions() only pulls filename/timestamp from
+    photos, so _attach_species_representatives can't see p.flag on prediction
+    dicts — this test protects the eligible-representative lookup that
+    replaces the missing-column check.
+    """
+    app, db = app_and_db
+    photos = _seed_predictions(db)
+
+    live_pid = photos[0]['id']
+    rejected_pid = photos[1]['id']
+    det_untagged = _make_detection(db, photos[2]['id'])
+    db.add_prediction(detection_id=det_untagged, species='Coyote Untagged',
+                      confidence=0.90, model='test-model', category='new',
+                      group_id=None)
+
+    # Tag each photo with its own species so failure modes are independent.
+    kid_live = db.add_keyword('Coyote Live', is_species=True)
+    kid_rejected = db.add_keyword('Coyote Rejected', is_species=True)
+    kid_untagged = db.add_keyword('Coyote Untagged', is_species=True)
+    db.tag_photo(live_pid, kid_live)
+    db.tag_photo(rejected_pid, kid_rejected)
+    db.tag_photo(photos[2]['id'], kid_untagged)
+    db.set_species_representative('Coyote Live', live_pid)
+    db.set_species_representative('Coyote Rejected', rejected_pid)
+    db.set_species_representative('Coyote Untagged', photos[2]['id'])
+
+    # Make each stale in one of the two ways the eligibility gate covers.
+    # Preference rows themselves remain intact (undo-friendly).
+    db.update_photo_flag(rejected_pid, 'rejected')
+    db.untag_photo(photos[2]['id'], kid_untagged)
+
+    client = app.test_client()
+    resp = client.get('/api/predictions')
+    assert resp.status_code == 200
+    by_photo = {p['photo_id']: p for p in resp.get_json()}
+
+    # Eligible representative still lights up on the review card.
+    assert by_photo[live_pid]['is_species_representative'] is True
+    # Rejected photo no longer counts as a representative even though the
+    # preference row still points at it.
+    assert by_photo[rejected_pid]['is_species_representative'] is False
+    # Photo whose species keyword was untagged no longer counts either.
+    assert by_photo[photos[2]['id']]['is_species_representative'] is False

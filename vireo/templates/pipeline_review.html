@@ -4673,12 +4673,16 @@ function grmRefreshSpeciesKeywordState() {
     if (grmState.sessionId !== sessionId) return;
     if (token !== _grmSpeciesRefetchToken) return;
     var fresh = (data && data.photos) || {};
-    // Only update the keyword field — the flag field is owned by the user's
+    // Only update DB-owned fields — the flag field is owned by the user's
     // in-modal moves at this point and would be wrong to overwrite from DB.
+    // The representative field is species-scoped, so it has to move with
+    // the typed species or the badge would show the previous species'
+    // representative state on the newly typed one.
     Object.keys(fresh).forEach(function(pidStr) {
       var pid = parseInt(pidStr, 10);
       if (!grmState.dbState[pid]) grmState.dbState[pid] = { flag: 'none' };
       grmState.dbState[pid].has_species_keyword = !!fresh[pidStr].has_species_keyword;
+      grmState.dbState[pid].is_species_representative = !!fresh[pidStr].is_species_representative;
     });
     grmState.keywordStateSpecies = species;
     renderGroupModal();

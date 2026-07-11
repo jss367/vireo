@@ -3014,7 +3014,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if isinstance(pid, int) and not isinstance(pid, bool):
                 ids.append(pid)
         species_map = db.get_species_keywords_for_photos(ids)
-        representatives = db.get_species_representatives()
+        # Gate representatives on current DB eligibility so a stale preference
+        # row (photo later rejected, folder removed from workspace, or species
+        # keyword untagged) doesn't light up a Representative badge on views
+        # whose photo dicts lack the `flag` column (notably /api/predictions,
+        # whose SELECT only pulls filename/timestamp from photos). The
+        # in-loop `p.get("flag") == "rejected"` shortcut still short-circuits
+        # rejected photos for views that DO include flag, so this only shifts
+        # behavior for the payloads that were previously reading raw prefs.
+        representatives = db.get_species_representatives(eligible_only=True)
         for p in photo_dicts:
             pid = p.get("photo_id", p.get("id"))
             if p.get("flag") == "rejected":
