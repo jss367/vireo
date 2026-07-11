@@ -10457,30 +10457,65 @@ class Database:
             # 500. Compare via vireo_normalize_keyword so a peer whose
             # stored spelling still carries edge quotes (imported/upgraded
             # rows) is also detected, and skip the row being renamed.
+            # Restrict to same-type peers: the dedup boundary elsewhere in
+            # this file is (name, parent_id, type), so a
+            # 'general'/'individual' keyword renamed to a name already
+            # used by a 'taxonomy' or 'location' peer at the same parent
+            # must NOT silently retag its photos across types. Cross-type
+            # matches fall through to the plain UPDATE — for NULL parents
+            # SQLite allows the coexisting cross-type row (mirrors
+            # add_keyword), and for non-NULL parents UNIQUE(name,
+            # parent_id) surfaces the collision as an IntegrityError so
+            # the caller sees a real failure instead of a silent
+            # cross-type merge.
             # Returns the effective keyword id — the peer's id when a
             # merge happened — so callers (api_update_keyword) can retarget
             # sidecar/preferences bookkeeping onto the surviving row.
             if current is not None and new_name != current["name"]:
                 parent_id = current["parent_id"]
+                cur_type = current["type"]
                 if parent_id is None:
                     peer = self.conn.execute(
                         "SELECT id FROM keywords "
                         "WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE "
-                        "AND parent_id IS NULL AND id != ? LIMIT 1",
-                        (new_name, keyword_id),
+                        "AND parent_id IS NULL AND type = ? AND id != ? LIMIT 1",
+                        (new_name, cur_type, keyword_id),
                     ).fetchone()
                 else:
                     peer = self.conn.execute(
                         "SELECT id FROM keywords "
                         "WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE "
-                        "AND parent_id = ? AND id != ? LIMIT 1",
-                        (new_name, parent_id, keyword_id),
+                        "AND parent_id = ? AND type = ? AND id != ? LIMIT 1",
+                        (new_name, parent_id, cur_type, keyword_id),
                     ).fetchone()
                 if peer:
                     self._merge_keyword_into(keyword_id, peer["id"])
                     self.conn.commit()
                     return peer["id"]
-                cur_type = current["type"]
+                # No same-type peer, but a DIFFERENT-type peer at the
+                # same (name, parent_id) would hit the table-level
+                # UNIQUE(name, parent_id) constraint at UPDATE time for a
+                # non-NULL parent and surface as an uncaught
+                # IntegrityError/500. Detect it here and raise ValueError
+                # so api_update_keyword returns a documented 400. For
+                # NULL parents, UNIQUE(name, parent_id) treats each row
+                # as distinct, so a cross-type peer at the top level is
+                # allowed to coexist (mirrors add_keyword's behavior
+                # where non-'general' typed rows are intentionally
+                # separate even when named the same).
+                if parent_id is not None:
+                    cross = self.conn.execute(
+                        "SELECT id, type FROM keywords "
+                        "WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE "
+                        "AND parent_id = ? AND id != ? LIMIT 1",
+                        (new_name, parent_id, keyword_id),
+                    ).fetchone()
+                    if cross is not None:
+                        raise ValueError(
+                            f"cannot rename to {new_name!r}: a "
+                            f"{cross['type']!r} keyword with that name "
+                            f"already exists under this parent"
+                        )
                 taxon_id = self._lookup_taxon_id_for_keyword(new_name)
 
                 if cur_type == 'general':

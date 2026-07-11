@@ -3585,6 +3585,73 @@ def test_rename_keyword_detects_stored_edge_quote_peer(app_and_db):
     assert survived["name"] == "‘apapane"
 
 
+def test_rename_keyword_does_not_merge_across_types_toplevel(app_and_db):
+    """Cross-type collisions at the top level must not be merged into a
+    peer. Silently moving photos from an 'individual' keyword onto a
+    same-named 'taxonomy' peer would rewrite the tag's semantics; the
+    dedup boundary elsewhere is (name, parent_id, type). SQLite treats
+    NULL parent_ids as distinct under UNIQUE(name, parent_id), so a
+    cross-type rename at the top level is allowed to produce a
+    coexisting row rather than a silent merge."""
+    app, db = app_and_db
+    client = app.test_client()
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    taxonomy_id = db.add_keyword("apapane", kw_type="taxonomy")
+    other_id = db.add_keyword("Other", kw_type="individual")
+    db.tag_photo(p1, other_id)
+
+    resp = client.put(f"/api/keywords/{other_id}", json={"name": "‘apapane"})
+    assert resp.status_code == 200
+
+    # The individual row survives with its normalized name; the taxonomy
+    # peer is untouched.
+    survivor = db.conn.execute(
+        "SELECT id, name, type FROM keywords WHERE id = ?", (other_id,)
+    ).fetchone()
+    assert survivor is not None
+    assert survivor["name"] == "apapane"
+    assert survivor["type"] == "individual"
+    taxonomy_row = db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (taxonomy_id,)
+    ).fetchone()
+    assert taxonomy_row["type"] == "taxonomy"
+    # The individual tag must NOT have silently retargeted onto the
+    # taxonomy peer.
+    tag_ids = {
+        row["keyword_id"]
+        for row in db.conn.execute(
+            "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (p1,)
+        ).fetchall()
+    }
+    assert other_id in tag_ids
+    assert taxonomy_id not in tag_ids
+
+
+def test_rename_keyword_does_not_merge_across_types_child(app_and_db):
+    """Cross-type collisions under the same parent surface as an error
+    rather than silently retagging photos across types. UNIQUE(name,
+    parent_id) fires when the plain UPDATE lands on a cross-type peer."""
+    app, db = app_and_db
+    client = app.test_client()
+    parent_id = db.add_keyword("Birds")
+    db.add_keyword("apapane", parent_id=parent_id, kw_type="taxonomy")
+    other_id = db.add_keyword("Other", parent_id=parent_id, kw_type="individual")
+
+    resp = client.put(f"/api/keywords/{other_id}", json={"name": "‘apapane"})
+    # A cross-type same-name collision under a shared parent hits the
+    # table-level UNIQUE(name, parent_id) at UPDATE time and surfaces to
+    # the caller, rather than being silently absorbed into the wrong-typed
+    # peer.
+    assert resp.status_code >= 400
+    # The original individual keyword is preserved with its old name.
+    survivor = db.conn.execute(
+        "SELECT name, type FROM keywords WHERE id = ?", (other_id,)
+    ).fetchone()
+    assert survivor is not None
+    assert survivor["name"] == "Other"
+    assert survivor["type"] == "individual"
+
+
 def test_rename_keyword_updates_photo_preferences(app_and_db):
     """Representative-photo preferences follow species keyword renames."""
     app, db = app_and_db
