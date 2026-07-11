@@ -12940,12 +12940,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         body = request.get_json(silent=True) or {}
         folders = body.get("folders", [])
         file_types = body.get("file_types", [])
+        summary_only = bool(body.get("summary_only"))
         if not folders:
             return json_error("folders required", 400)
 
         from ingest import discover_source_files
 
         all_files = []
+        type_breakdown = {}
+        total_size = 0
         multi_source = len(folders) > 1
 
         # Compute unique display names for each source folder.
@@ -12970,6 +12973,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             discovered = discover_source_files(folder, file_types=file_types if file_types else "both", recursive=body.get("recursive", True))
             for f in discovered:
                 stat = f.stat()
+                ext = f.suffix.lower()
+                type_breakdown[ext] = type_breakdown.get(ext, 0) + 1
+                total_size += stat.st_size
+                if summary_only:
+                    continue
                 # Determine subfolder relative to the source root
                 try:
                     rel = f.parent.relative_to(folder)
@@ -12986,21 +12994,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "filename": f.name,
                     "subfolder": subfolder,
                     "size": stat.st_size,
-                    "extension": f.suffix.lower(),
+                    "extension": ext,
                     "mtime": stat.st_mtime,
                     "thumb_url": "/api/import/folder-preview/thumbnail?path=" + quote(str(f)),
                 })
 
-        # Build summary
-        type_breakdown = {}
-        total_size = 0
-        for f in all_files:
-            ext = f["extension"]
-            type_breakdown[ext] = type_breakdown.get(ext, 0) + 1
-            total_size += f["size"]
-
         return jsonify({
-            "total_count": len(all_files),
+            "total_count": sum(type_breakdown.values()) if summary_only else len(all_files),
             "total_size": total_size,
             "type_breakdown": type_breakdown,
             "duplicate_count": 0,

@@ -17,6 +17,38 @@ def test_import_source_browse_button_adds_source_folder(live_server, page):
     expect(source_list).to_contain_text("/tmp/card-b")
 
 
+def test_import_source_browse_button_shows_quick_photo_count(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/import")
+    page.evaluate(
+        """
+        () => {
+          const originalFetch = window.fetch.bind(window);
+          window.fetch = (input, init) => {
+            const target = typeof input === 'string' ? input : input.url;
+            if (target && target.indexOf('/api/import/folder-preview') === 0) {
+              return Promise.resolve(new Response(JSON.stringify({
+                total_count: 42,
+                total_size: 0,
+                type_breakdown: {'.jpg': 42},
+                duplicate_count: 0,
+                files: [],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            return originalFetch(input, init);
+          };
+          window.pickDirectory = async () => ['/tmp/card-a'];
+        }
+        """
+    )
+
+    page.locator("[data-testid='import-source-browse-btn']").click()
+
+    source_list = page.locator("#sourceList")
+    expect(source_list).to_contain_text("/tmp/card-a")
+    expect(source_list.locator(".source-meta")).to_have_text("42 photos")
+
+
 def test_import_destination_browse_button_sets_destination(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/import")
