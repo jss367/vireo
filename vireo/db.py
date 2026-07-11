@@ -10422,6 +10422,19 @@ class Database:
         if not updates:
             return
 
+        # Normalize the rename target with the same rules add_keyword
+        # applies on insert so PUT /api/keywords/<id> can't sneak stray
+        # edge quotes or an empty-after-normalization string back into a
+        # row that add_keyword would have rejected/deduped. Without this,
+        # renaming an existing keyword to `‘apapane` (or to a quote-only
+        # value like `'`) would store the raw text and queue that raw
+        # rename to sidecars, bypassing both the duplicate-prevention
+        # contract and the empty-name rejection enforced in add_keyword.
+        if 'name' in updates:
+            updates['name'] = normalize_keyword_display(updates['name'])
+            if not updates['name']:
+                raise ValueError("keyword name is empty after normalization")
+
         # Auto-retype on rename: same logic as add_keyword. Only fires
         # on an actual name change so idempotent PUT-style updates
         # (client re-sending the existing name) don't unexpectedly

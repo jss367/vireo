@@ -5207,6 +5207,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db.update_keyword(keyword_id, **body)
         except ValueError as e:
             return json_error(str(e), 400)
+        # Re-read the stored name so sidecar queue/history and highlights
+        # rename use the normalized value that update_keyword actually
+        # wrote. Without this, a rename to `‘apapane` would store the
+        # normalized `apapane` but queue the raw stray-quote value to
+        # sidecars, defeating the same-name invariant enforced on the
+        # add path.
+        if old_name:
+            stored = db.conn.execute(
+                "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
+            ).fetchone()
+            if stored and stored["name"]:
+                new_name = stored["name"]
+            if old_name == new_name:
+                old_name = None
         # Queue sidecar updates only after successful DB update, for all affected workspaces
         if old_name:
             affected = db.conn.execute(

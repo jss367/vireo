@@ -3433,6 +3433,55 @@ def test_rename_keyword_queues_sidecar_changes(app_and_db):
     assert ("keyword_add", "NewBird") in actions
 
 
+def test_rename_keyword_normalizes_edge_quotes_and_queues_clean_name(app_and_db):
+    """A rename request with stray edge quotes must store the normalized
+    value AND queue that normalized value to sidecars. Otherwise the DB
+    holds the clean spelling while pending changes and history reference
+    the raw quoted variant, and XMP sync would then write the wrong name.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("OldBird")
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.tag_photo(p1, kid)
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    resp = client.put(f"/api/keywords/{kid}", json={"name": "‘apapane"})
+    assert resp.status_code == 200
+
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "apapane"
+
+    changes = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ? ORDER BY id",
+        (p1,),
+    ).fetchall()
+    actions = [(c["change_type"], c["value"]) for c in changes]
+    assert ("keyword_remove", "OldBird") in actions
+    assert ("keyword_add", "apapane") in actions
+    assert ("keyword_add", "‘apapane") not in actions
+
+
+def test_rename_keyword_rejects_empty_after_normalization(app_and_db):
+    """PUT /api/keywords/<id> with a quote-only name must be rejected at
+    the boundary — same contract as add_keyword — instead of storing an
+    invisible empty-string keyword row."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("Real")
+
+    resp = client.put(f"/api/keywords/{kid}", json={"name": "'"})
+    assert resp.status_code == 400
+
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "Real"
+
+
 def test_rename_keyword_updates_photo_preferences(app_and_db):
     """Representative-photo preferences follow species keyword renames."""
     app, db = app_and_db

@@ -237,8 +237,19 @@ def sync_from_xmp(db, photo_ids):
         # the add-side an INSERT-OR-IGNORE no-op and then prune the DB tag
         # because the raw DB name is not in the raw XMP set -- leaving the
         # photo untagged.
+        #
+        # Skip XMP entries whose normalized match key is empty (e.g. a
+        # lone ASCII or smart quote). add_keyword() now raises ValueError
+        # for names that normalize to empty, so keeping such entries would
+        # abort the whole sidecar reconcile on a malformed edge-quote
+        # keyword instead of ignoring it and processing the rest.
         xmp_keywords = read_keywords(xmp_path)
-        xmp_keywords_by_key = {keyword_match_key(kw): kw for kw in xmp_keywords}
+        xmp_keywords_by_key = {}
+        for kw in xmp_keywords:
+            key = keyword_match_key(kw)
+            if not key:
+                continue
+            xmp_keywords_by_key.setdefault(key, kw)
 
         # Get current DB keywords
         db_keywords = db.get_photo_keywords(photo_id)

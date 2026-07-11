@@ -13227,6 +13227,59 @@ def test_update_keyword_idempotent_name_update_does_not_auto_retype(tmp_path):
     assert row["taxon_id"] is None
 
 
+def test_update_keyword_rename_normalizes_edge_quotes(tmp_path):
+    """Rename must apply the same normalization as add_keyword so a
+    request like `‘apapane` stores `apapane`. Without this the PUT path
+    bypasses the duplicate-prevention contract enforced on insert."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+
+    kid = db.add_keyword("apapane")
+    db.update_keyword(kid, name="‘apapane")
+
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "apapane"
+
+
+def test_update_keyword_rename_rejects_empty_after_normalization(tmp_path):
+    """A rename whose normalized value is empty (quote-only input) must
+    raise ValueError, mirroring add_keyword. Otherwise the PUT path
+    would store an invisible/invalid keyword row."""
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    kid = db.add_keyword("Real Keyword")
+
+    with pytest.raises(ValueError):
+        db.update_keyword(kid, name="'")
+    with pytest.raises(ValueError):
+        db.update_keyword(kid, name="“”")
+
+    # Original name still in place.
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "Real Keyword"
+
+
+def test_update_keyword_rename_preserves_okina(tmp_path):
+    """Legitimate leading okina (U+02BB) must survive rename normalization
+    the same way it does through add_keyword — species names such as
+    'ʻApapane' are the point of that carve-out."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+
+    kid = db.add_keyword("Placeholder")
+    db.update_keyword(kid, name="ʻApapane")
+
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "ʻApapane"
+
+
 def test_add_photo_retries_on_database_is_locked(tmp_path):
     """The INSERT inside add_photo must retry transient 'database is locked'.
 

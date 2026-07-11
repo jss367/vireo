@@ -260,6 +260,41 @@ def test_sync_from_xmp_preserves_tag_when_only_edge_quote_differs(tmp_path):
     assert {k['name'] for k in keywords} == {'apapane'}
 
 
+def test_sync_from_xmp_skips_xmp_keywords_that_normalize_to_empty(tmp_path):
+    """A sidecar keyword that normalizes to empty (e.g. a lone quote) must
+    be ignored, not aborted. add_keyword now raises ValueError on
+    empty-after-normalization input, so without the pre-filter one
+    malformed edge-quote entry would kill the entire sidecar reconcile
+    and leave every other keyword unsynced.
+    """
+    from db import Database
+    from sync import sync_from_xmp
+    from xmp import write_sidecar
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={'Sparrow'})
+
+    kid = db.add_keyword('Sparrow')
+    db.tag_photo(pid, kid)
+
+    os.remove(xmp_path)
+    # A lone smart quote normalizes to empty; a real second keyword sits
+    # alongside it. The malformed entry must be silently skipped and the
+    # real one still applied.
+    write_sidecar(
+        xmp_path,
+        flat_keywords={'Sparrow', 'Cardinal', '“”'},
+        hierarchical_keywords=set(),
+    )
+
+    sync_from_xmp(db, [pid])
+
+    keywords = db.get_photo_keywords(pid)
+    assert {k['name'] for k in keywords} == {'Sparrow', 'Cardinal'}
+
+
 def test_sync_to_xmp_reports_unsupported_flag_changes_when_disabled(tmp_path, monkeypatch):
     """Flag pending changes remain queued when XMP flag sync is disabled."""
     from xml.etree import ElementTree as ET
