@@ -6323,6 +6323,131 @@ def test_highlights_relabel_undo_restores_representative_over_collision(app_and_
     assert reps.get("Rep New") == p_incumbent
 
 
+def test_highlights_relabel_migrates_cross_workspace_representative(app_and_db):
+    """A photo picked as a global representative in a different workspace
+    has no compatibility row in the relabel-workspace's ``photo_preferences``,
+    only a global ``species_representatives`` row. Relabel must still move
+    that global row to the new species; otherwise the representative
+    disappears from both species after the retag."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/xwsrep', 'xwsrep', 'ok')"
+    ).lastrowid
+    ws_a = db._active_workspace_id
+    ws_b = db.create_workspace("XWSRep Other")
+    for ws in (ws_a, ws_b):
+        db.conn.execute(
+            "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+            (ws, fid),
+        )
+    old_kid = db.add_keyword("Bald Eagle", is_species=True)
+    db.add_keyword("Golden Eagle", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'xrep.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, old_kid)
+    # Select the representative from workspace B, so the compatibility
+    # photo_preferences row lives under ws_b — not under ws_a where we
+    # relabel from. The global species_representatives row is workspace-
+    # independent and stays.
+    db.set_active_workspace(ws_b)
+    db.set_species_representative("Bald Eagle", pid)
+    db.set_active_workspace(ws_a)
+
+    # Sanity: no local photo_preferences row for this photo in ws_a.
+    local_pref = db.conn.execute(
+        """SELECT 1 FROM photo_preferences
+           WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+        (ws_a, "Bald Eagle", pid),
+    ).fetchone()
+    assert local_pref is None
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Golden Eagle"},
+    )
+    assert resp.status_code == 200
+
+    reps = db.get_species_representatives()
+    assert reps.get("Golden Eagle") == pid
+    assert "Bald Eagle" not in reps
+
+    # Undo/redo round-trips the global rep even when there's no local
+    # pref row to piggyback on.
+    undone = db.undo_last_edit()
+    assert undone is not None
+    reps_undone = db.get_species_representatives()
+    assert reps_undone.get("Bald Eagle") == pid
+    assert "Golden Eagle" not in reps_undone
+
+    redone = db.redo_last_undo()
+    assert redone is not None
+    reps_redone = db.get_species_representatives()
+    assert reps_redone.get("Golden Eagle") == pid
+    assert "Bald Eagle" not in reps_redone
+
+
+def test_rename_species_representatives_species_chunks_large_photo_lists(tmp_path):
+    """``rename_species_representatives_species`` must chunk the IN(...)
+    clause so a species tagged on thousands of photos doesn't blow
+    SQLite's ``SQLITE_MAX_VARIABLE_NUMBER`` on legacy builds. Before the
+    fix, ``rename_photo_preferences_species`` funneled every affected
+    photo through a single unchunked IN clause and raised
+    ``too many SQL variables``."""
+    from vireo.db import Database
+
+    db_path = tmp_path / "chunk-reps.db"
+    db = Database(str(db_path))
+    ws_id = db._ws_id()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/chunk', 'chunk', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (ws_id, fid),
+    )
+    pid_start = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename) VALUES (?, 'p0.jpg')",
+        (fid,),
+    ).lastrowid
+    # 1500 > 999 (legacy SQLITE_MAX_VARIABLE_NUMBER), so an unchunked
+    # IN(...) with new_species, old_species, plus every id would exceed
+    # the parameter cap.
+    photo_ids = [pid_start]
+    for i in range(1, 1500):
+        photo_ids.append(db.conn.execute(
+            "INSERT INTO photos (folder_id, filename) VALUES (?, ?)",
+            (fid, f"p{i}.jpg"),
+        ).lastrowid)
+    for pid in photo_ids:
+        db.conn.execute(
+            """INSERT INTO species_representatives
+                   (species, photo_id, selected_order)
+               VALUES ('Old Species', ?, ?)""",
+            (pid, pid),
+        )
+    db.conn.commit()
+
+    moved = db.rename_species_representatives_species(
+        "Old Species", "New Species", photo_ids=photo_ids,
+    )
+    assert moved == len(photo_ids)
+
+    remaining_old = db.conn.execute(
+        "SELECT COUNT(*) AS c FROM species_representatives WHERE species = ?",
+        ("Old Species",),
+    ).fetchone()["c"]
+    moved_new = db.conn.execute(
+        "SELECT COUNT(*) AS c FROM species_representatives WHERE species = ?",
+        ("New Species",),
+    ).fetchone()["c"]
+    assert remaining_old == 0
+    assert moved_new == len(photo_ids)
+
+
 def test_backfill_species_highlights_from_legacy_preferences(tmp_path):
     """On upgraded databases, legacy photo_preferences rows with
     purpose='highlights' should seed species_highlights so pre-existing

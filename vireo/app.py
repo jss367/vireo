@@ -8356,6 +8356,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 (ws_id, species),
             ).fetchall()
         }
+        pref_covered_by_pid_species = set()
         for chunk in _chunked(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
             rows = db.conn.execute(
@@ -8378,6 +8379,51 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "purpose": row["purpose"],
                     "species": old_species_name,
                     "dst_existed": row["purpose"] in pref_dst_taken,
+                })
+                pref_covered_by_pid_species.add(
+                    (row["photo_id"], old_species_name)
+                )
+        # Global species_representatives moves. Representatives are global
+        # (no workspace column), so a photo can carry a
+        # (species, photo_id) row picked from a different workspace with
+        # no matching photo_preferences row in the active workspace. In
+        # that case the preference-rename pass above would miss it, and
+        # the retag would strand the representative under the old species
+        # name — leaving both species without a representative. Query
+        # species_representatives directly and enqueue any rep-only moves
+        # the preference pass didn't already cover.
+        representative_renames = {}
+        rep_prev_by_pid = {}
+        rep_dst_preexisting = set()
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            for row in db.conn.execute(
+                f"""SELECT photo_id FROM species_representatives
+                    WHERE species = ? AND photo_id IN ({placeholders})""",
+                (species, *chunk),
+            ).fetchall():
+                rep_dst_preexisting.add(row["photo_id"])
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT species, photo_id FROM species_representatives
+                    WHERE photo_id IN ({placeholders})""",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                old_species_name = row["species"]
+                pid = row["photo_id"]
+                if old_species_name == species:
+                    continue
+                # rename_photo_preferences_species already migrates
+                # species_representatives for pids in preference_renames,
+                # so skip anything the preference pass will cover.
+                if (pid, old_species_name) in pref_covered_by_pid_species:
+                    continue
+                representative_renames.setdefault(old_species_name, []).append(pid)
+                rep_prev_by_pid.setdefault(pid, []).append({
+                    "species": old_species_name,
+                    "dst_existed": pid in rep_dst_preexisting,
                 })
         try:
             kid = db.add_keyword(species, is_species=True, _commit=False)
@@ -8415,11 +8461,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 old_keyword_ids = [old["id"] for old in old_rows]
                 hl_prev = hl_prev_by_pid.get(pid) or []
                 pref_prev = pref_prev_by_pid.get(pid) or []
+                rep_prev = rep_prev_by_pid.get(pid) or []
                 needs_payload = (
                     pred is not None
                     or len(old_keyword_ids) > 1
                     or hl_prev
                     or pref_prev
+                    or rep_prev
                 )
                 if needs_payload:
                     old_payload = {
@@ -8431,11 +8479,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             "prediction_id": pred["id"],
                             "prediction_status": pred["status"],
                         })
-                    if hl_prev or pref_prev:
-                        old_payload["curation"] = {
+                    if hl_prev or pref_prev or rep_prev:
+                        curation = {
                             "hl_prev": hl_prev,
                             "pref_prev": pref_prev,
                         }
+                        if rep_prev:
+                            curation["rep_prev"] = rep_prev
+                        old_payload["curation"] = curation
                     old_value = json.dumps(old_payload, sort_keys=True)
                 items.append({
                     "photo_id": pid,
@@ -8455,6 +8506,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     old_species_name,
                     species,
                     [(pid, ws_id) for pid in pids],
+                    _commit=False,
+                )
+            for old_species_name, pids in representative_renames.items():
+                db.rename_species_representatives_species(
+                    old_species_name,
+                    species,
+                    photo_ids=pids,
                     _commit=False,
                 )
 

@@ -10348,37 +10348,53 @@ class Database:
         """
         if not old_species or not new_species or old_species == new_species:
             return 0
-        params = [new_species, old_species]
-        where = "species = ?"
-        if photo_ids is not None:
-            ids = [int(pid) for pid in photo_ids]
-            if not ids:
-                return 0
-            placeholders = ",".join("?" for _ in ids)
-            where += f" AND photo_id IN ({placeholders})"
-            params.extend(ids)
-        cur = self.conn.execute(
-            f"""INSERT OR IGNORE INTO species_representatives
-                   (species, photo_id, selected_order, created_at, updated_at)
-                SELECT ?, photo_id, selected_order, created_at, datetime('now')
-                FROM species_representatives
-                WHERE {where}""",
-            params,
-        )
-        delete_params = [old_species]
-        delete_where = "species = ?"
-        if photo_ids is not None:
-            ids = [int(pid) for pid in photo_ids]
-            placeholders = ",".join("?" for _ in ids)
-            delete_where += f" AND photo_id IN ({placeholders})"
-            delete_params.extend(ids)
-        self.conn.execute(
-            f"DELETE FROM species_representatives WHERE {delete_where}",
-            delete_params,
-        )
+        if photo_ids is None:
+            cur = self.conn.execute(
+                """INSERT OR IGNORE INTO species_representatives
+                       (species, photo_id, selected_order, created_at, updated_at)
+                    SELECT ?, photo_id, selected_order, created_at, datetime('now')
+                    FROM species_representatives
+                    WHERE species = ?""",
+                (new_species, old_species),
+            )
+            moved = cur.rowcount
+            self.conn.execute(
+                "DELETE FROM species_representatives WHERE species = ?",
+                (old_species,),
+            )
+            if _commit:
+                self.conn.commit()
+            return moved
+        ids = [int(pid) for pid in photo_ids]
+        if not ids:
+            return 0
+        # Chunk to stay under SQLite's SQLITE_MAX_VARIABLE_NUMBER (default
+        # 999 on legacy builds). A species can be tagged on tens of
+        # thousands of photos, so a bulk relabel or keyword-rename that
+        # funnels every affected photo through here would otherwise raise
+        # "too many SQL variables" before any rows move.
+        moved = 0
+        for chunk in _chunks(ids):
+            placeholders = ",".join("?" for _ in chunk)
+            cur = self.conn.execute(
+                f"""INSERT OR IGNORE INTO species_representatives
+                       (species, photo_id, selected_order, created_at, updated_at)
+                    SELECT ?, photo_id, selected_order, created_at, datetime('now')
+                    FROM species_representatives
+                    WHERE species = ?
+                      AND photo_id IN ({placeholders})""",
+                [new_species, old_species, *chunk],
+            )
+            moved += cur.rowcount
+            self.conn.execute(
+                f"""DELETE FROM species_representatives
+                    WHERE species = ?
+                      AND photo_id IN ({placeholders})""",
+                [old_species, *chunk],
+            )
         if _commit:
             self.conn.commit()
-        return cur.rowcount
+        return moved
 
     def rename_species_highlights_species(
         self, old_species, new_species, photo_workspace_pairs=None, _commit=True,
@@ -12988,14 +13004,18 @@ class Database:
         and re-insert it at the end of the old bucket (unless the photo
         already appears there). For each ``photo_preferences`` row moved
         by the relabel, delete the row at ``(new_species, purpose)`` and
-        re-insert it at ``(old_species, purpose)``. Best-effort: if the
-        target row no longer exists (state has changed since the relabel),
-        the corresponding restore is a no-op.
+        re-insert it at ``(old_species, purpose)``. For each rep-only
+        ``species_representatives`` row moved with no matching
+        ``photo_preferences`` row, delete the row at ``new_species`` and
+        re-insert it at ``old_species``. Best-effort: if the target row no
+        longer exists (state has changed since the relabel), the
+        corresponding restore is a no-op.
         """
         if not curation:
             return
         hl_prev = curation.get("hl_prev") or []
         pref_prev = curation.get("pref_prev") or []
+        rep_prev = curation.get("rep_prev") or []
         for hl in hl_prev:
             # Newer relabels record {species, rank, dst_existed}; entries
             # from older relabels (before PR #1161 landed rank capture)
@@ -13092,6 +13112,26 @@ class Database:
                 (workspace_id, purpose, old_species, photo_id),
             )
             self._set_global_species_representative(old_species, photo_id)
+        for rep in rep_prev:
+            if not isinstance(rep, dict):
+                continue
+            old_species = rep.get("species")
+            dst_existed = bool(rep.get("dst_existed", False))
+            if not old_species or old_species == new_species:
+                continue
+            # Only delete the (new_species, photo_id) rep row when the
+            # relabel actually created it. If the photo was already a
+            # global representative for new_species before the retag,
+            # rename_species_representatives_species's INSERT OR IGNORE
+            # skipped a duplicate and the destination row is pre-existing;
+            # undo must leave it alone.
+            if not dst_existed:
+                self.conn.execute(
+                    """DELETE FROM species_representatives
+                       WHERE species = ? AND photo_id = ?""",
+                    (new_species, photo_id),
+                )
+            self._set_global_species_representative(old_species, photo_id)
 
     def _reapply_relabel_curation(
         self, workspace_id, photo_id, new_species, curation,
@@ -13104,6 +13144,7 @@ class Database:
             return
         hl_prev = curation.get("hl_prev") or []
         pref_prev = curation.get("pref_prev") or []
+        rep_prev = curation.get("rep_prev") or []
         for hl in hl_prev:
             # Accept both new dict form ({species, rank}) and legacy
             # string form for compatibility with older edit-history rows.
@@ -13177,6 +13218,25 @@ class Database:
                         created_at, updated_at)
                    VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
                 (workspace_id, purpose, new_species, photo_id),
+            )
+            self._set_global_species_representative(new_species, photo_id)
+        for rep in rep_prev:
+            if not isinstance(rep, dict):
+                continue
+            old_species = rep.get("species")
+            if not old_species or old_species == new_species:
+                continue
+            src = self.conn.execute(
+                """SELECT 1 FROM species_representatives
+                   WHERE species = ? AND photo_id = ?""",
+                (old_species, photo_id),
+            ).fetchone()
+            if not src:
+                continue
+            self.conn.execute(
+                """DELETE FROM species_representatives
+                   WHERE species = ? AND photo_id = ?""",
+                (old_species, photo_id),
             )
             self._set_global_species_representative(new_species, photo_id)
 
