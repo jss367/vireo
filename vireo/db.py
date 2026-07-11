@@ -10474,19 +10474,40 @@ class Database:
             if current is not None and new_name != current["name"]:
                 parent_id = current["parent_id"]
                 cur_type = current["type"]
+                # Resolve taxon match once so it can drive both the peer lookup
+                # (effective-type auto-promotion) and the auto-retype block
+                # below without a second query.
+                taxon_id = self._lookup_taxon_id_for_keyword(new_name)
+                # Peer lookup must use the EFFECTIVE type, not the pre-update
+                # row type. Two ways the effective type can diverge from
+                # cur_type inside this same call:
+                #   1. Explicit combined rename+retype: PUT /api/keywords/<id>
+                #      with {name: "‘apapane", type: "taxonomy"} on an
+                #      individual/general row. Filtering by cur_type would
+                #      miss the top-level taxonomy `apapane` peer, and
+                #      UNIQUE(name, parent_id) doesn't gate NULL parents, so
+                #      the UPDATE would produce two clean taxonomy rows.
+                #   2. Auto-promotion below: a cur_type='general' row being
+                #      renamed to a name that matches a taxon gets promoted
+                #      to taxonomy (setdefault('type', 'taxonomy')). The
+                #      peer lookup must anticipate that promotion or it
+                #      misses an existing taxonomy peer at the same slot.
+                effective_type = updates.get('type', cur_type)
+                if 'type' not in updates and cur_type == 'general' and taxon_id:
+                    effective_type = 'taxonomy'
                 if parent_id is None:
                     peer = self.conn.execute(
                         "SELECT id FROM keywords "
                         "WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE "
                         "AND parent_id IS NULL AND type = ? AND id != ? LIMIT 1",
-                        (new_name, cur_type, keyword_id),
+                        (new_name, effective_type, keyword_id),
                     ).fetchone()
                 else:
                     peer = self.conn.execute(
                         "SELECT id FROM keywords "
                         "WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE "
                         "AND parent_id = ? AND type = ? AND id != ? LIMIT 1",
-                        (new_name, parent_id, cur_type, keyword_id),
+                        (new_name, parent_id, effective_type, keyword_id),
                     ).fetchone()
                 if peer:
                     self._merge_keyword_into(keyword_id, peer["id"])
@@ -10516,7 +10537,8 @@ class Database:
                             f"{cross['type']!r} keyword with that name "
                             f"already exists under this parent"
                         )
-                taxon_id = self._lookup_taxon_id_for_keyword(new_name)
+                # taxon_id was already resolved above so the peer lookup
+                # could compute the effective type; reuse it here.
 
                 if cur_type == 'general':
                     # Only promote to taxonomy if a match exists; otherwise

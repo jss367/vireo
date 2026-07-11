@@ -8253,6 +8253,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 })
         try:
             kid = db.add_keyword(species, is_species=True, _commit=False)
+            # Re-read the stored keyword name so subsequent queue/history
+            # entries, highlight/preference renames, and the "did this photo
+            # already carry the target species?" comparison all reflect the
+            # row actually tagged. Without this, `‘apapane` from the request
+            # tags the normalized `apapane` row but queues the raw stray-
+            # quote value for XMP sync, and the old-name comparison below
+            # spuriously sees `apapane` (stored on the photo) as different
+            # from `‘apapane` (request), producing a remove/add pair that
+            # rewrites the sidecar to the stray-quote spelling. Same
+            # rationale as api_add_keyword / api_batch_keyword.
+            stored = db.conn.execute(
+                "SELECT name FROM keywords WHERE id = ?", (kid,)
+            ).fetchone()
+            if stored and stored["name"]:
+                species = stored["name"]
             items = []
             rejected_prediction_ids = []
             has_old_species = False
@@ -8276,7 +8291,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     has_old_species = True
                 for old in old_rows:
                     db.untag_photo(pid, old["id"], _commit=False)
-                    if old["name"].strip().lower() != species.lower():
+                    # Compare by id: the untagged row is the SAME keyword as
+                    # the target when a photo already carries the new
+                    # species (e.g. a re-confirm). Comparing names would
+                    # miss a case where `species` normalized to the stored
+                    # name but the comparison is now against a different
+                    # spelling; comparing ids is exact.
+                    if old["id"] != kid:
                         _queue_keyword_remove(
                             pid, old["name"], workspace_id=ws_id, _commit=False,
                         )
@@ -9620,6 +9641,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             if species:
                 kid = db.add_keyword(species, is_species=True)
+                # Re-read the stored keyword name so the sidecar queue and
+                # history record the row actually tagged. See api_add_keyword
+                # for the full rationale: a request like `‘apapane` tags the
+                # normalized `apapane` row but would otherwise queue the raw
+                # stray-quote spelling for XMP, and a later delete of the
+                # stored keyword wouldn't cancel the pending add.
+                stored = db.conn.execute(
+                    "SELECT name FROM keywords WHERE id = ?", (kid,)
+                ).fetchone()
+                if stored and stored["name"]:
+                    species = stored["name"]
                 for pid in picks:
                     db.update_photo_flag(pid, "flagged")
                     db.tag_photo(pid, kid)
@@ -19607,26 +19639,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         ws_id = db._ws_id()
 
-        old_kid = None
-        is_replacement = (
-            previous_species is not None
-            and previous_species.strip().lower() != species.lower()
-        )
-        if is_replacement:
-            # Match add_keyword's write path: species keywords live as root
-            # keywords (parent_id IS NULL) with is_species=1. Looking up by
-            # name alone could collide with a non-species homonym nested under
-            # another keyword (schema allows UNIQUE(name, parent_id)).
-            old_kid_row = db.conn.execute(
-                """SELECT id FROM keywords
-                   WHERE name = ? COLLATE NOCASE
-                     AND parent_id IS NULL
-                     AND is_species = 1""",
-                (previous_species,),
-            ).fetchone()
-            if old_kid_row:
-                old_kid = old_kid_row["id"]
-
         # Run all mutations in a single transaction so that a mid-loop failure
         # (SQLite lock, disk error, etc.) can't leave half the photos retagged
         # while the other half still carry the old species.
@@ -19635,6 +19647,43 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # which photos already carry it. add_keyword is idempotent and
             # returns the existing id when the species already exists.
             kid = db.add_keyword(species, is_species=True, _commit=False)
+            # Re-read the stored keyword name so the sidecar queue, response,
+            # and cache override reflect the row actually tagged. Without
+            # this, a request like `‘apapane` tags the normalized `apapane`
+            # row but would queue the raw stray-quote value for XMP sync,
+            # and the pipeline cache's `confirmed_species` would be written
+            # with a spelling that no longer matches the DB keyword. Same
+            # rationale as api_add_keyword.
+            stored = db.conn.execute(
+                "SELECT name FROM keywords WHERE id = ?", (kid,)
+            ).fetchone()
+            if stored and stored["name"]:
+                species = stored["name"]
+
+            # Compare previous vs new species with a normalized match key so
+            # a legacy cache/sidecar spelling like `‘apapane` is recognized
+            # as the same species as a new `apapane` and doesn't spuriously
+            # trigger the replacement path (which would remove the
+            # already-correct tag and queue a stray-quote add).
+            old_kid = None
+            is_replacement = (
+                previous_species is not None
+                and keyword_match_key(previous_species) != keyword_match_key(species)
+            )
+            if is_replacement:
+                # Match add_keyword's write path: species keywords live as
+                # root keywords (parent_id IS NULL) with is_species=1.
+                # Compare via vireo_normalize_keyword so a legacy row whose
+                # stored spelling still carries edge quotes is also found.
+                old_kid_row = db.conn.execute(
+                    """SELECT id FROM keywords
+                       WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE
+                         AND parent_id IS NULL
+                         AND is_species = 1""",
+                    (normalize_keyword_display(previous_species),),
+                ).fetchone()
+                if old_kid_row:
+                    old_kid = old_kid_row["id"]
 
             # Precheck which submitted photos already carry the new species
             # keyword. Only photos that get a *new* tag should generate
@@ -19739,9 +19788,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 enc_species = target_enc.get("confirmed_species") or (
                     target_enc["species"][0] if target_enc.get("species") else None
                 )
+                # Compare via keyword_match_key so a legacy cache spelling
+                # like `‘apapane` isn't treated as a different species from
+                # the normalized `apapane` we just tagged (which would
+                # spuriously detach and re-merge bursts on every confirm).
                 if (
                     enc_species is not None
-                    and enc_species != species
+                    and keyword_match_key(enc_species) != keyword_match_key(species)
                     and len(target_enc["bursts"]) > 1
                 ):
                     _auto_detach_burst_for_species(
@@ -19754,7 +19807,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         replaced = (
             previous_species
-            if previous_species and previous_species.strip().lower() != species.lower()
+            if previous_species
+            and keyword_match_key(previous_species) != keyword_match_key(species)
             else None
         )
         response = {
