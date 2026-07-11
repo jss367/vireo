@@ -6775,6 +6775,130 @@ def test_highlights_buckets_by_accepted_species(app_and_db):
     assert qs == sorted(qs, reverse=True)
 
 
+def test_highlights_expose_pre_pick_base_score(app_and_db):
+    """Each photo carries `highlight_base_score` = pre-pick-bonus baseline.
+
+    Regression for Codex feedback on PR #1176 (line 874): the client-side
+    lightbox pick handler must recompute highlight_score without losing
+    precision to clamping. A flagged photo whose raw score is 0.97 gets
+    +0.08 → 1.05, clamped and cached as highlight_score=1.0; subtracting
+    the bonus on unpick would give 0.92 while the correct value is 0.97.
+    Exposing the pre-bonus baseline lets the client compute the exact same
+    value the backend would on a full reload.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/b', 'b', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    robin_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('Robin', 'taxonomy', 1)"
+    ).lastrowid
+    picked_id = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'picked.jpg', 0.97, 'flagged')",
+        (fid,),
+    ).lastrowid
+    unpicked_id = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'unpicked.jpg', 0.60, 'none')",
+        (fid,),
+    ).lastrowid
+    for pid in (picked_id, unpicked_id):
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (pid, robin_kw),
+        )
+    db.conn.commit()
+
+    resp = client.get(f"/api/highlights?folder_id={fid}")
+    assert resp.status_code == 200
+    photos = {p["id"]: p for p in resp.get_json()["buckets"][0]["photos"]}
+    # Picked photo: 0.97 + 0.08 = 1.05, clamped to 1.0 for highlight_score.
+    # highlight_base_score keeps the pre-bonus 0.97 so the client can
+    # reverse the pick without under-counting.
+    assert photos[picked_id]["highlight_score"] == 1.0
+    assert photos[picked_id]["highlight_base_score"] == 0.97
+    # Unpicked photo: no bonus, so base == score.
+    assert photos[unpicked_id]["highlight_score"] == 0.60
+    assert photos[unpicked_id]["highlight_base_score"] == 0.60
+
+
+def test_highlights_bucket_returns_full_bucket_ordering_keys(app_and_db):
+    """/api/highlights/bucket returns full-bucket best_score/best_timestamp
+    so a client refetch of a paged bucket doesn't shrink the ordering
+    keys to just the loaded window.
+
+    Regression for Codex feedback on PR #1176 (line 923): after a
+    lightbox pick, the client calls refetchBucketFromZero to mirror the
+    server's post-pick order. When has_more is still true (large bucket
+    with a low limit) the response was only the first page, so the
+    client recomputed bucket.best_score from that partial slice — if the
+    highest-scored photo lives past the loaded window, the bucket's
+    Recommended/Best sort key would silently shrink and the species
+    would drop below its true position until a full reload.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/pg', 'pg', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('Robin', 'taxonomy', 1)"
+    ).lastrowid
+    # Three photos; the highest-scored one (0.9) sits at offset 2 so
+    # a limit=1 request would miss it and a naive client recompute
+    # from the loaded window would land on 0.7, not 0.9.
+    photo_ids = []
+    for filename, quality, ts in [
+        ("hi.jpg", 0.7, 3000),
+        ("mid.jpg", 0.5, 2000),
+        ("top.jpg", 0.9, 1000),
+    ]:
+        pid = db.conn.execute(
+            "INSERT INTO photos (folder_id, filename, quality_score, flag, timestamp) "
+            "VALUES (?, ?, ?, 'none', ?)",
+            (fid, filename, quality, ts),
+        ).lastrowid
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (pid, kw),
+        )
+        photo_ids.append(pid)
+    db.conn.commit()
+
+    resp = client.get(
+        "/api/highlights/bucket",
+        query_string={
+            "folder_id": fid,
+            "species": "Robin",
+            "offset": 0,
+            "limit": 1,
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Only the first page came back...
+    assert data["has_more"] is True
+    assert len(data["photos"]) == 1
+    # ...but the ordering keys reflect the ENTIRE filtered bucket, so
+    # the client can copy them onto bucket.best_score / best_timestamp
+    # without shrinking the sort key to whatever the loaded window
+    # happens to hold.
+    assert data["best_score"] == 0.9
+    # best_timestamp mirrors the backend `top.get("timestamp")` on
+    # photos[0] of the full ordered bucket, not the loaded slice.
+    assert data["best_timestamp"] == data["photos"][0]["timestamp"]
+
+
 def test_highlights_bucket_mixed_accepted_predicted_is_not_accepted(app_and_db):
     """A bucket whose photos are a mix of accepted-tag and prediction-only
     must report is_accepted=False. The "Keyword confirmed" badge means every

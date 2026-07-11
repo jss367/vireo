@@ -40,8 +40,11 @@
   .highlights-card:hover { border-color:var(--accent); }
   .highlights-card.highlight-card,
   html[data-advanced-mode="true"] .highlights-card.best-card { border-color:var(--accent); }
+  .highlights-card.pick-flag-card { border-color:var(--accent); box-shadow:0 0 0 2px color-mix(in srgb, var(--accent) 50%, transparent); }
   .best-ribbon { position:absolute; top:6px; left:6px; padding:2px 6px; border-radius:999px; background:var(--accent); color:var(--accent-text); font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; }
+  .pick-flag-badge { position:absolute; top:6px; right:6px; z-index:2; padding:3px 8px; border-radius:999px; background:var(--accent); color:var(--accent-text); border:1px solid color-mix(in srgb, var(--accent-text) 65%, transparent); box-shadow:0 1px 6px rgba(0,0,0,0.45); font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:0.5px; pointer-events:none; }
   .highlight-order { position:absolute; top:6px; right:6px; display:flex; gap:4px; opacity:0; transition:opacity .12s; }
+  .pick-flag-card .highlight-order { top:34px; }
   .highlights-card:hover .highlight-order,
   .highlights-card:focus-within .highlight-order { opacity:1; }
   .highlight-order button { padding:2px 6px; border-radius:999px; border:1px solid rgba(255,255,255,.45); background:rgba(0,0,0,.62); color:#fff; font-size:10px; cursor:pointer; }
@@ -243,6 +246,11 @@ var lastHighlightReject = null;
 // out-of-band (another tab, Undo panel), which it must be trusted to include.
 var highlightsLoadSeq = 0;
 var rejectedAtLoadSeq = {};
+// Per-bucket monotonic counter for refetchBucketFromZero. Rapid Pick/Unpick
+// cycles on the same bucket can leave two /api/highlights/bucket refetches in
+// flight; without a stamp, an older response can arrive after a newer one and
+// overwrite the fresher photos/ordering keys.
+var bucketRefetchSeq = {};
 
 function escapeAttr(s) {
   if (s === null || s === undefined) return '';
@@ -422,6 +430,9 @@ function renderCard(p, idx) {
     : (p.is_species_representative
       ? '<div class="best-ribbon">Representative</div>'
       : (advanced && idx === 0 ? '<div class="best-ribbon">Best</div>' : ''));
+  var flagBadge = p.flag === 'flagged'
+    ? '<div class="pick-flag-badge" title="Flagged as pick">Pick</div>'
+    : '';
   var rep = p.is_species_representative
     ? '<span class="card-chip reason">Representative</span>'
     : '';
@@ -435,8 +446,10 @@ function renderCard(p, idx) {
   return '<div class="highlights-card'
     + (p.is_highlighted ? ' highlight-card' : '')
     + (idx === 0 ? ' best-card' : '')
+    + (p.flag === 'flagged' ? ' pick-flag-card' : '')
     + '" data-photo-id="' + p.id + '" title="' + escapeAttr(title) + '">'
     + ribbon
+    + flagBadge
     + order
     + '<img src="' + thumbSrc + '" alt="' + escapeAttr(p.filename) + '" loading="lazy">'
     + '<div class="card-filename" title="' + escapeAttr(p.filename) + '">' + escapeAttr(p.filename) + '</div>'
@@ -858,14 +871,107 @@ function render() {
 }
 
 function findHighlightPhoto(photoId) {
+  var hit = findHighlightPhotoWithContainer(photoId);
+  return hit ? hit.photo : null;
+}
+
+function findHighlightPhotoWithContainer(photoId) {
   if (!currentData || photoId == null) return null;
   var buckets = currentData.buckets || [];
   for (var i = 0; i < buckets.length; i++) {
-    var match = (buckets[i].photos || []).find(function(p) { return p.id === photoId; });
-    if (match) return match;
+    var photos = buckets[i].photos || [];
+    var match = photos.find(function(p) { return p.id === photoId; });
+    if (match) return { photo: match, photos: photos, bucket: buckets[i] };
   }
   var unid = currentData.unidentified && currentData.unidentified.photos || [];
-  return unid.find(function(p) { return p.id === photoId; }) || null;
+  var match = unid.find(function(p) { return p.id === photoId; });
+  return match ? { photo: match, photos: unid, bucket: null } : null;
+}
+
+// Copy the authoritative full-bucket ordering keys from a bucket-endpoint
+// page onto the client-side bucket so sortedBuckets() ranks species the
+// same way a reload would. Prefer the endpoint's `best_score` /
+// `best_timestamp` (computed over the entire filtered bucket) over
+// recomputing from `bucket.photos`, because a paged refetch (has_more
+// still true) only loads a prefix — recomputing would drop a species
+// below its true Recommended/Best position when the highest-scored photo
+// lives past the loaded window. Falls back to a local scan only if the
+// endpoint didn't return the keys (older server, defensive).
+function applyBucketOrderingKeysFromPage(bucket, page) {
+  if (!bucket) return;
+  if (page && Object.prototype.hasOwnProperty.call(page, 'best_score')) {
+    bucket.best_score = page.best_score;
+  } else if (Array.isArray(bucket.photos)) {
+    var best = null;
+    for (var i = 0; i < bucket.photos.length; i++) {
+      var s = bucket.photos[i].highlight_score;
+      if (typeof s !== 'number') continue;
+      if (best === null || s > best) best = s;
+    }
+    bucket.best_score = best;
+  }
+  if (page && Object.prototype.hasOwnProperty.call(page, 'best_timestamp')) {
+    bucket.best_timestamp = page.best_timestamp;
+  } else {
+    var top = Array.isArray(bucket.photos) ? bucket.photos[0] : null;
+    bucket.best_timestamp = top ? (top.timestamp || null) : null;
+  }
+}
+
+// Refetch a bucket (or the unidentified section) from offset 0 so the loaded
+// window matches the backend's post-pick ordering. A pick mutates
+// highlight_score (the +0.08 bonus, clamped to [0, 1]) and can flip ordering
+// against representatives, curated species_highlights, or the has_more tail;
+// rather than mirror `_highlight_score_bucket` / `_apply_ordered_highlights` /
+// `_apply_highlight_preferences` in JS (repeatedly getting it wrong on subtle
+// edge cases), let the server compute the authoritative order and copy it
+// back. Pages in up-to-500-row chunks so the final iteration only asks for
+// the remainder of the loaded window (`targetLen - offset`) — a full 500-row
+// last page would silently expand the loaded slice past what the user
+// actually loaded (e.g. 520 loaded would become 1000). The endpoint clamps
+// `limit` to 500, so the per-request cap is preserved automatically.
+// Refetch size mirrors the user's currently loaded window (`currentLen`) —
+// forcing it up to 500 would silently expand an unexpanded 20-row bucket to
+// 500 rows, and the next "Load more" (which offsets by `target.photos.length`)
+// would then start at 500 and render up to 1000 cards the user never paged
+// through, plus bloat every pick's Save-as-Collection payload.
+// Returns a promise so callers can await the refresh before rendering.
+async function refetchBucketFromZero(target, isUnidentified) {
+  if (!target) return;
+  var currentLen = Array.isArray(target.photos) ? target.photos.length : 0;
+  var speciesKey = isUnidentified ? '__unidentified__' : target.species;
+  var targetLen = currentLen;
+  if (targetLen <= 0) return;
+  // Stamp this refetch so a slower earlier one for the same bucket can't
+  // clobber a newer response (Pick → Unpick before the first GET resolves).
+  var seq = (bucketRefetchSeq[speciesKey] || 0) + 1;
+  bucketRefetchSeq[speciesKey] = seq;
+  var allPhotos = [];
+  var lastPage = null;
+  for (var offset = 0; offset < targetLen; offset += 500) {
+    var params = requestScopeParams();
+    appendHighlightFilterParams(params);
+    // appendHighlightFilterParams may set 'species' for the species-search
+    // filter; force it back to the target species/unidentified sentinel so
+    // the endpoint returns the right bucket, not whatever the search box holds.
+    params.set('species', speciesKey);
+    params.set('offset', offset);
+    params.set('limit', Math.min(500, targetLen - offset));
+    var page = await safeFetch('/api/highlights/bucket?' + params);
+    if (bucketRefetchSeq[speciesKey] !== seq) return;
+    if (!page || !Array.isArray(page.photos)) return;
+    lastPage = page;
+    if (page.photos.length === 0) break;
+    allPhotos = allPhotos.concat(page.photos);
+    if (!page.has_more) break;
+  }
+  if (!lastPage) return;
+  if (bucketRefetchSeq[speciesKey] !== seq) return;
+  target.photos = allPhotos;
+  target.loaded_count = allPhotos.length;
+  target.has_more = !!lastPage.has_more;
+  if (typeof lastPage.photo_count === 'number') target.photo_count = lastPage.photo_count;
+  applyBucketOrderingKeysFromPage(target, lastPage);
 }
 
 function lightboxIsOpenOnPhoto(photoId) {
@@ -1243,6 +1349,45 @@ document.addEventListener('lightbox:flagchanged', function(e) {
     rejectedFromGrid.delete(detail.photoId);
     delete rejectedAtLoadSeq[detail.photoId];
     loadHighlights();
+  } else {
+    // Pick/Unpick from the lightbox: the visible row is a slice(0, perRow)
+    // of bucket.photos, and the backend applies the +0.08 highlight_score
+    // bonus + picked_first ordering + `_apply_ordered_highlights` +
+    // `_apply_highlight_preferences` before serving that ordering. Rather
+    // than mirror all of that in JS (which has already produced a stream
+    // of ordering bugs against representatives, curated highlights, the
+    // score clamp, best_timestamp, and the has_more offset), refetch the
+    // bucket authoritatively so the client window is always what a full
+    // reload would produce.
+    var prev = detail.previousFlag || 'none';
+    var next = detail.flag || 'none';
+    if (prev === next) return;
+    if (prev !== 'flagged' && next !== 'flagged') return;
+    var hit = findHighlightPhotoWithContainer(detail.photoId);
+    if (!hit) {
+      // Eviction path: a prior unpick's refetchBucketFromZero can drop a
+      // photo out of the loaded window when it was only visible because
+      // picked_first promoted it. If the lightbox is still open on that
+      // photo and the user re-picks, we no longer have a bucket reference
+      // for a targeted refetch — reload everything so the fresh
+      // picked_first ordering brings the photo back into a bucket window
+      // (and the Save-as-Collection payload).
+      loadHighlights();
+      return;
+    }
+    // Mutate the shared photo reference immediately so any UI that reads
+    // photo.flag between now and the refetch resolving (e.g. the still-open
+    // lightbox controls) reflects the new pick state; the refetch then
+    // replaces the bucket's photo array with the server-authoritative order.
+    hit.photo.flag = next;
+    var isUnidentified = hit.bucket === null;
+    var target = isUnidentified ? currentData.unidentified : hit.bucket;
+    if (!target) { render(); return; }
+    // Render once immediately so the Pick badge/outline appears without
+    // waiting for the refetch's network round-trip; render again after the
+    // refetch so the reordered bucket window replaces the stale one.
+    render();
+    refetchBucketFromZero(target, isUnidentified).then(render);
   }
 });
 

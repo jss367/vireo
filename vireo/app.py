@@ -272,12 +272,19 @@ def _highlight_score_bucket(photos, picked_first=False):
             score = p.get("quality_score") if p.get("quality_score") is not None else 0.0
 
         rating = p.get("rating") or 0
-        if p.get("flag") == "flagged":
-            score += 0.08
         if rating >= 4:
             score += 0.04 + 0.02 * (rating - 4)
         elif rating == 3:
             score += 0.015
+        # Baseline BEFORE the pick bonus, so the client can recompute
+        # highlight_score on a lightbox pick/unpick via clamp(base + bonus)
+        # instead of subtracting the bonus from the already-clamped value —
+        # which loses precision when the raw score exceeded 1.0 pre-clamp
+        # (e.g. base 0.97 → cached 1.0 → subtract 0.08 → 0.92, but the
+        # correct unpicked value is 0.97).
+        base_score_pre_pick = score
+        if p.get("flag") == "flagged":
+            score += 0.08
 
         reasons = []
         if p.get("flag") == "flagged":
@@ -303,6 +310,9 @@ def _highlight_score_bucket(photos, picked_first=False):
             reasons.append("legacy quality")
 
         p["highlight_score"] = round(max(0.0, min(1.0, score)), 4)
+        p["highlight_base_score"] = round(
+            max(0.0, min(1.0, base_score_pre_pick)), 4
+        )
         p["score_parts"] = {
             "focus": round(focus, 3),
             "exposure": round(exposure, 3),
@@ -9376,12 +9386,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         chunk = photos[offset: offset + limit]
         _attach_edit_recipes(db, chunk)
+        # Include the full-bucket ordering keys so a client refetch of a
+        # paged bucket (has_more still true after the loaded window) can
+        # keep bucket.best_score / best_timestamp anchored to the actual
+        # tail. Recomputing them from only the loaded slice would drop
+        # a large species below its true Recommended/Best sort position
+        # when the highest-scored photo lives past the loaded window.
+        top = photos[0] if photos else {}
         return jsonify({
             "species": label,
             "photos": chunk,
             "photo_count": len(photos),
             "loaded_count": min(len(photos), offset + len(chunk)),
             "has_more": offset + len(chunk) < len(photos),
+            "best_score": _bucket_best_score(photos),
+            "best_timestamp": top.get("timestamp") if top else None,
         })
 
     @app.route("/api/highlights/save", methods=["POST"])
