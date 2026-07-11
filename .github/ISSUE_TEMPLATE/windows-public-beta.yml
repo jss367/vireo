@@ -1,0 +1,48 @@
+name: Windows public beta problem
+description: Report a Vireo installation, update, storage, integration, or workflow problem on Windows 11.
+title: "Windows: "
+labels:
+  - windows
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please use Help → Report an Issue when Vireo can open; its diagnostic bundle redacts catalog paths and credentials.
+  - type: input
+    id: version
+    attributes:
+      label: Vireo version
+      placeholder: 0.19.0
+    validations:
+      required: true
+  - type: input
+    id: windows-build
+    attributes:
+      label: Windows edition and build
+      placeholder: Windows 11 24H2, build 26100
+    validations:
+      required: true
+  - type: dropdown
+    id: storage
+    attributes:
+      label: Photo storage involved
+      options:
+        - Local NTFS drive
+        - Removable drive or memory card
+        - Mapped network drive
+        - Universal Naming Convention (UNC) network path
+        - No photo storage involved
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Include the action, expected result, actual result, and whether originals remained intact.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostic details
+      description: Attach the downloaded diagnostic JSON or paste relevant log lines after checking them for information you do not want to share.

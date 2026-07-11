@@ -258,7 +258,11 @@ jobs:
         run: ruff check vireo/ tests/
 
   e2e-smoke:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     needs: changes
     timeout-minutes: 20
 
@@ -277,10 +281,15 @@ jobs:
           python-version: "3.14"
 
       - name: Install Vireo and Chromium
+        shell: bash
         if: needs.changes.outputs.python == 'true'
         run: |
           pip install -e ".[dev]"
-          python -m playwright install --with-deps chromium
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            python -m playwright install --with-deps chromium
+          else
+            python -m playwright install chromium
+          fi
 
       - name: Run critical browser journeys
         if: needs.changes.outputs.python == 'true'
@@ -295,7 +304,11 @@ jobs:
           tests/e2e/test_browser_security.py::test_browser_transport_authenticates_internal_mutations
 
   rust:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     needs: changes
     timeout-minutes: 20
 

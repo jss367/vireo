@@ -447,6 +447,7 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
         .build()?;
 
     // -- Window menu --
+    #[allow(unused_mut)]
     let mut window_builder = SubmenuBuilder::new(app, "Window").minimize().maximize();
 
     #[cfg(target_os = "macos")]
@@ -493,6 +494,7 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
     let help_menu = help_builder.build()?;
 
     // -- Assemble --
+    #[allow(unused_mut)]
     let mut builder = MenuBuilder::new(app);
 
     #[cfg(target_os = "macos")]

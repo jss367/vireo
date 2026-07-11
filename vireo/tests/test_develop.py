@@ -195,6 +195,21 @@ def test_find_darktable_resolves_symlink(tmp_path):
         assert develop.find_darktable("") == str(real)
 
 
+def test_find_darktable_detects_standard_windows_install(monkeypatch, tmp_path):
+    import develop
+
+    binary = tmp_path / "darktable" / "bin" / "darktable-cli.exe"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"exe")
+    monkeypatch.setattr(develop.os, "name", "nt")
+    monkeypatch.setenv("PROGRAMFILES", str(tmp_path))
+    monkeypatch.delenv("PROGRAMFILES(X86)", raising=False)
+    monkeypatch.delenv("PROGRAMW6432", raising=False)
+    monkeypatch.setattr(develop.shutil, "which", lambda _name: None)
+
+    assert develop.find_darktable("") == str(binary.resolve())
+
+
 def test_is_nikon_high_efficiency_nef_from_metadata(tmp_path):
     """ExifTool NEFCompression values 13/14 are Nikon HE/HE*."""
     import develop
