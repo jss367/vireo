@@ -1,5 +1,20 @@
 /* Vireo shared utilities — loaded by _navbar.html on every page. */
 
+window.Vireo = window.Vireo || {};
+window.Vireo.dom = window.Vireo.dom || {
+  setStatus: function(element, state, message) {
+    if (!element) return;
+    element.classList.remove('ok', 'warning', 'error', 'loading');
+    if (state) element.classList.add(state);
+    element.textContent = message || '';
+    element.setAttribute('role', state === 'error' ? 'alert' : 'status');
+    element.setAttribute('aria-live', state === 'error' ? 'assertive' : 'polite');
+  },
+  clear: function(element) {
+    if (element) element.replaceChildren();
+  },
+};
+
 function escapeHtml(str) {
   if (str == null) return '';
   var div = document.createElement('div');

@@ -70,15 +70,13 @@ mod tests {
 
     #[test]
     fn explicit_true_round_trips() {
-        let cfg: LaunchConfig =
-            serde_json::from_str(r#"{"open_in_browser": true}"#).unwrap();
+        let cfg: LaunchConfig = serde_json::from_str(r#"{"open_in_browser": true}"#).unwrap();
         assert!(cfg.open_in_browser());
     }
 
     #[test]
     fn explicit_false_round_trips() {
-        let cfg: LaunchConfig =
-            serde_json::from_str(r#"{"open_in_browser": false}"#).unwrap();
+        let cfg: LaunchConfig = serde_json::from_str(r#"{"open_in_browser": false}"#).unwrap();
         assert!(!cfg.open_in_browser());
     }
 

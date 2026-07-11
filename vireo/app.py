@@ -16,15 +16,17 @@ import math
 import os
 import queue
 import re
+import secrets
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import uuid
 import webbrowser
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 
 import places
 from db import (
@@ -82,6 +84,10 @@ from render_source import (
 from render_source import (
     working_copy_path_if_satisfies as _working_copy_path_if_satisfies,
 )
+from schema import ensure_schema
+from web.pages import pages_blueprint
+from web.system import system_blueprint
+from web.workspaces import create_workspace_blueprint
 from werkzeug.exceptions import BadRequest
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -1831,6 +1837,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         "~/.vireo/thumbnails"
     )
     app.config["API_TOKEN"] = api_token
+    app.config["TRUSTED_HOSTS"] = ["localhost", "127.0.0.1", "::1"]
+    app.config["BROWSER_SESSION_COOKIE"] = "vireo_session"
+    app.config["BROWSER_SESSION_TOKEN"] = secrets.token_urlsafe(32)
+    app.config["BROWSER_AUTH_ENABLED"] = (
+        os.environ.get("VIREO_DISABLE_BROWSER_AUTH") != "1"
+    )
+
+    # Schema creation and migrations are startup work, never request work.
+    # `:memory:` is the development exception because each SQLite connection
+    # owns a distinct database and therefore must initialize itself.
+    ensure_schema(db_path)
 
     _migrate_legacy_preview_cache(app)
     _migrate_edit_math_render_caches(app)
@@ -1840,6 +1857,90 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.before_request
     def _start_timer():
         request._start_time = time.time()
+        supplied_request_id = request.headers.get("X-Request-ID", "")
+        if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", supplied_request_id):
+            g.request_id = supplied_request_id
+        else:
+            g.request_id = uuid.uuid4().hex
+
+    @app.before_request
+    def _protect_browser_surface():
+        """Keep hostile web pages away from Vireo's localhost interface.
+
+        `/api/v1` remains token-authenticated for automation.  The internal
+        browser API and photo responses use an HttpOnly, SameSite-strict
+        session established by a Vireo HTML page.  Unsafe browser requests
+        additionally carry a header that cross-origin forms cannot emit.
+        """
+        if not app.config["BROWSER_AUTH_ENABLED"]:
+            return None
+
+        path = request.path
+        if path.startswith("/api/v1/") or path in {
+            "/api/health",
+            "/api/shutdown",
+        }:
+            return None
+
+        protected = (
+            path.startswith("/api/")
+            or path.startswith("/photos/")
+            or path.startswith("/thumbnails/")
+        )
+        if not protected:
+            return None
+
+        # Native desktop clients cannot use the HttpOnly browser cookie.
+        # They authenticate with the same per-runtime secret as /api/v1.
+        expected_api_token = app.config.get("API_TOKEN")
+        supplied_api_token = request.headers.get("X-Vireo-Token", "")
+        if (
+            expected_api_token
+            and supplied_api_token
+            and secrets.compare_digest(supplied_api_token, expected_api_token)
+        ):
+            return None
+
+        fetch_site = request.headers.get("Sec-Fetch-Site", "").lower()
+        if fetch_site and fetch_site not in {"same-origin", "none"}:
+            return json_error(
+                "Non-origin requests are not allowed",
+                403,
+                code="cross_site_request",
+            )
+
+        origin = request.headers.get("Origin")
+        if origin:
+            parsed = urlsplit(origin)
+            expected = urlsplit(request.host_url)
+            if (parsed.scheme, parsed.netloc) != (expected.scheme, expected.netloc):
+                return json_error(
+                    "Cross-origin requests are not allowed",
+                    403,
+                    code="cross_origin_request",
+                )
+
+        cookie_name = app.config["BROWSER_SESSION_COOKIE"]
+        expected_token = app.config["BROWSER_SESSION_TOKEN"]
+        if not secrets.compare_digest(
+            request.cookies.get(cookie_name, ""), expected_token,
+        ):
+            return json_error(
+                "Browser session required",
+                401,
+                code="browser_session_required",
+            )
+
+        if (
+            request.method not in {"GET", "HEAD", "OPTIONS"}
+            and request.headers.get("X-Vireo-Client") != "browser"
+        ):
+            return json_error(
+                "Missing browser request header",
+                403,
+                code="browser_header_required",
+            )
+        return None
 
     @app.after_request
     def _log_requests(response):
@@ -1871,29 +1972,59 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 elif "/scan" in path:
                     detail = f" root={body.get('root', '')}"
                 log.info(
-                    "Action: %s %s → %s (%.1fs)%s",
+                    "Action: %s %s → %s (%.1fs)%s request_id=%s",
                     request.method,
                     path,
                     response.status_code,
                     elapsed,
                     detail,
+                    getattr(g, "request_id", "-"),
                 )
             elif elapsed > 0.5:
                 log.warning(
-                    "Slow request: %s %s took %.1fs",
+                    "Slow request: %s %s took %.1fs request_id=%s",
                     request.method,
                     request.path,
                     elapsed,
+                    getattr(g, "request_id", "-"),
                 )
             if request.path.startswith("/api/"):
                 _quiet = request.method == "GET" and request.path == "/api/jobs"
                 (log.debug if _quiet else log.info)(
-                    "API: %s %s → %s (%.3fs)",
+                    "API: %s %s → %s (%.3fs) request_id=%s",
                     request.method,
                     request.path,
                     response.status_code,
                     elapsed,
+                    getattr(g, "request_id", "-"),
                 )
+        request_id = getattr(g, "request_id", None)
+        if request_id:
+            response.headers["X-Request-ID"] = request_id
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "same-origin"
+        response.headers["Content-Security-Policy-Report-Only"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://unpkg.com; "
+            "style-src 'self' 'unsafe-inline' https://unpkg.com; "
+            "img-src 'self' data: blob: https:; "
+            "connect-src 'self' https:; frame-ancestors 'none'; "
+            "base-uri 'self'; form-action 'self'"
+        )
+        if (
+            app.config["BROWSER_AUTH_ENABLED"]
+            and response.mimetype == "text/html"
+            and 200 <= response.status_code < 400
+        ):
+            response.set_cookie(
+                app.config["BROWSER_SESSION_COOKIE"],
+                app.config["BROWSER_SESSION_TOKEN"],
+                httponly=True,
+                samesite="Strict",
+                secure=request.is_secure,
+                path="/",
+            )
         return response
 
     # Catch uncaught exceptions so they don't disappear silently
@@ -1903,13 +2034,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if isinstance(e, HTTPException):
             return e
         log.exception("Unhandled error: %s %s", request.method, request.path)
-        return jsonify({"error": "Internal server error"}), 500
+        return jsonify({
+            "error": "Internal server error",
+            "code": "internal_error",
+            "request_id": getattr(g, "request_id", None),
+        }), 500
 
     _MAX_PER_PAGE = 500
 
-    def json_error(msg, status=400):
+    def json_error(msg, status=400, *, code=None):
         """Return a JSON error response. Standard shape: {"error": "msg"}."""
-        return jsonify({"error": msg}), status
+        if code is None:
+            code = {
+                400: "invalid_request",
+                401: "unauthorized",
+                403: "forbidden",
+                404: "not_found",
+                409: "conflict",
+            }.get(status, "request_failed")
+        payload = {
+            "error": msg,
+            "code": code,
+            "request_id": getattr(g, "request_id", None),
+        }
+        return jsonify(payload), status
 
     def _resolve_remote_archive_target(remote_target_id, remote_subpath):
         """Shared remote-archive-target resolution for the import-photos
@@ -1981,7 +2129,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def _get_db():
         """Get a Database instance. One connection per request via Flask g."""
         if "db" not in g:
-            g.db = Database(db_path)
+            g.db = Database(
+                db_path,
+                initialize_schema=(db_path == ":memory:"),
+            )
         return g.db
 
     _invalid_preview_cache_paths = set()
@@ -2304,22 +2455,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("Invalid or missing X-Vireo-Token", 401)
         return None
 
-    @app.route("/api/health")
-    def api_health():
-        return jsonify({"status": "ok"})
-
-    @app.route("/api/v1/health")
-    def api_v1_health():
-        # The "service" field is a Vireo-specific marker the single-instance
-        # guard's probe checks for. An unrelated local service that happens
-        # to return 200 on /api/v1/health (catch-all) would not carry it,
-        # so Vireo can distinguish a live peer from a port-reusing stranger.
-        from runtime import SERVICE_MARKER
-        return jsonify({"service": SERVICE_MARKER, "status": "ok"})
-
-    @app.route("/api/v1/version")
-    def api_v1_version():
-        return api_version()  # reuse existing implementation
+    app.register_blueprint(system_blueprint)
 
     @app.route("/api/v1/shutdown", methods=["POST"])
     def api_v1_shutdown():
@@ -2457,7 +2593,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     # Initialize job runner, log broadcaster, and default collections
     _t0 = time.time()
-    init_db = Database(db_path)
+    init_db = Database(
+        db_path,
+        initialize_schema=(db_path == ":memory:"),
+    )
     log.info("Database init took %.2fs (workspace: %s)", time.time() - _t0,
              init_db.get_workspace(init_db._active_workspace_id)["name"])
     # Migrate the legacy 'Needs Classification' default collection BEFORE
@@ -2851,104 +2990,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             cfg.save(raw)
         return jsonify({"ok": True})
 
-    @app.route("/browse")
-    def browse():
-        return render_template("browse.html")
-
-    @app.route("/best-batch")
-    def best_batch_page():
-        return render_template("best_batch.html")
-
-    @app.route("/review")
-    def review():
-        return render_template("review.html")
-
-    @app.route("/edit/<int:photo_id>")
-    def photo_editor_page(photo_id):
-        return render_template("photo_editor.html")
-
-    @app.route("/edit")
-    def photo_editor_page_current():
-        # No photo id in the URL: the editor resolves the last-viewed photo
-        # from localStorage client-side (see initEditor in photo_editor.html)
-        # and rewrites the URL to /edit/<id>, or shows an empty state.
-        return render_template("photo_editor.html")
-
-    @app.route("/lightroom")
-    def lightroom_page():
-        return render_template("lightroom.html")
-
-    @app.route("/audit")
-    def audit():
-        return render_template("audit.html")
-
-    @app.route("/cull")
-    def cull_page():
-        return render_template("cull.html")
-
-    @app.route("/pipeline")
-    def pipeline_page():
-        return render_template("pipeline.html")
-
-    @app.route("/pipeline/review")
-    def pipeline_review_page():
-        return render_template("pipeline_review.html")
-
-    @app.route("/pipeline/rapid-review")
-    def pipeline_rapid_review_page():
-        return render_template("pipeline_rapid_review.html")
-
-    @app.route("/variants")
-    def variants_page():
-        return render_template("variants.html")
-
-    @app.route("/workspace")
-    def workspace_page():
-        return render_template("workspace.html")
-
-    @app.route("/compare")
-    def compare():
-        return render_template("compare.html")
-
-    @app.route("/settings")
-    def settings():
-        return render_template("settings.html")
-
-    @app.route("/storage")
-    def storage_page():
-        return render_template("storage.html")
-
-    @app.route("/shortcuts")
-    def shortcuts_page():
-        return render_template("shortcuts.html")
-
-    @app.route("/keywords")
-    def keywords_page():
-        return render_template("keywords.html")
-
-    @app.route("/jobs")
-    def jobs_page():
-        return render_template("jobs.html")
-
-    @app.route("/duplicates")
-    def duplicates_page():
-        return render_template("duplicates.html")
-
-    @app.route("/move")
-    def move_page():
-        return render_template("move.html")
-
-    @app.route("/highlights")
-    def highlights_page():
-        return render_template("highlights.html")
-
-    @app.route("/life-list")
-    def life_list_page():
-        return render_template("life_list.html")
-
-    @app.route("/misses")
-    def misses_page():
-        return render_template("misses.html")
+    app.register_blueprint(pages_blueprint)
 
     # -- API routes --
 
@@ -9512,54 +9554,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db.update_workspace(ws_id, config_overrides=existing)
         return jsonify({"types": cleaned})
 
-    @app.route("/api/workspace/tabs/pin", methods=["POST"])
-    def api_pin_tab():
-        from db import ALL_NAV_IDS
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        nav_id = body.get("nav_id")
-        if not isinstance(nav_id, str):
-            return json_error("nav_id must be a string", 400)
-        if nav_id not in ALL_NAV_IDS:
-            return json_error("nav_id is not a known page", 400)
-        tabs = db.pin_tab(nav_id)
-        return jsonify({"ok": True, "tabs": tabs})
-
-    @app.route("/api/workspace/tabs/unpin", methods=["POST"])
-    def api_unpin_tab():
-        from db import ALL_NAV_IDS
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        nav_id = body.get("nav_id")
-        if not isinstance(nav_id, str):
-            return json_error("nav_id must be a string", 400)
-        if nav_id not in ALL_NAV_IDS:
-            return json_error("nav_id is not a known page", 400)
-        tabs = db.unpin_tab(nav_id)
-        return jsonify({"ok": True, "tabs": tabs})
-
-    @app.route("/api/workspace/tabs/reorder", methods=["POST"])
-    def api_reorder_tabs():
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        tabs = body.get("tabs")
-        if not isinstance(tabs, list):
-            return json_error("tabs must be a list", 400)
-        try:
-            result = db.set_tabs(tabs)
-        except ValueError as e:
-            return json_error(str(e), 400)
-        return jsonify({"ok": True, "tabs": result})
-
-    @app.route("/api/workspace/tabs", methods=["GET"])
-    def api_get_tabs():
-        db = _get_db()
-        try:
-            tabs = db.get_tabs()
-        except Exception:
-            from db import DEFAULT_TABS
-            tabs = list(DEFAULT_TABS)
-        return jsonify({"tabs": tabs, "all_pages": ALL_PAGES})
+    app.register_blueprint(
+        create_workspace_blueprint(_get_db, json_error, ALL_PAGES)
+    )
 
     def _new_images_walk_fns(db, ws_id):
         """Return ``(compute, on_spawn)`` for a transparent background
@@ -12407,20 +12404,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             shutil.rmtree(CACHE_DIR)
             log.info("Embedding cache cleared")
         return jsonify({"ok": True})
-
-    @app.route("/api/version")
-    def api_version():
-        try:
-            from importlib.metadata import version as pkg_version
-            ver = pkg_version("vireo")
-        except Exception:
-            import tomllib
-            try:
-                with open(os.path.join(os.path.dirname(__file__), "..", "pyproject.toml"), "rb") as f:
-                    ver = tomllib.load(f)["project"]["version"]
-            except Exception:
-                ver = "0.0.0"
-        return jsonify({"version": ver})
 
     @app.route("/api/volumes", methods=["GET"])
     def api_volumes():
@@ -23175,34 +23158,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         os.makedirs(originals_dir, exist_ok=True)
         img.save(cache_path, format="JPEG", quality=quality)
         return send_file(cache_path, mimetype="image/jpeg")
-
-    # -- Logs page --
-
-    @app.route("/logs")
-    def logs_page():
-        return render_template("logs.html")
-
-    @app.route("/import")
-    def import_page():
-        """Import page: add folders in place or copy card → archive.
-
-        Templates are Jinja-free by convention — defaults (workspace
-        strategy, recents, template) resolve client-side from /api/config +
-        /api/workspaces/active.
-        """
-        return render_template("import.html")
-
-    @app.route("/map")
-    def map_page():
-        return render_template("map.html", active_page="map")
-
-    @app.route("/dashboard")
-    def dashboard_page():
-        return render_template("stats.html")
-
-    @app.route("/stats")
-    def stats_redirect():
-        return redirect("/dashboard")
 
     # --- /api/v1/* aliases over the stable subset of /api/* ---
     # These are the endpoints advertised to external callers in docs/headless-api.md.

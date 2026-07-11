@@ -241,8 +241,10 @@ pub fn run() {
             let menu = menu::build_menu(app.handle())?;
             app.set_menu(menu)?;
 
-            let port = app.state::<SidecarState>().port;
-            tray::create_tray(app.handle(), port, browser_mode)?;
+            let sidecar = app.state::<SidecarState>();
+            let port = sidecar.port;
+            let token = sidecar.token.clone();
+            tray::create_tray(app.handle(), port, token, browser_mode)?;
 
             // The main window is created with `visible: false` (see
             // tauri.conf.json) so we can decide here whether to show it
@@ -278,15 +280,12 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            match event {
-                tauri::WindowEvent::CloseRequested { api, .. } => {
-                    if window.label() == "main" {
-                        // Don't close — just hide the window (minimize to tray)
-                        api.prevent_close();
-                        let _ = window.hide();
-                    }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    // Don't close — just hide the window (minimize to tray)
+                    api.prevent_close();
+                    let _ = window.hide();
                 }
-                _ => {}
             }
         })
         .on_menu_event(|app, event| {
