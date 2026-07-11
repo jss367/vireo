@@ -3657,7 +3657,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     job["progress"]["current"] = current
                     job["progress"]["total"] = total
                     job["progress"]["current_file"] = current_folder
-                    job["progress"]["phase"] = (
+                    phase = (
                         f"{folders_checked:,} folders checked, "
                         f"{current:,} photos considered, "
                         f"{missing_found:,} missing"
@@ -3668,7 +3668,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         "current_file": current_folder,
                         "folders_checked": folders_checked,
                         "missing_found": missing_found,
-                        "phase": job["progress"]["phase"],
+                        "phase": phase,
                     })
 
                 def cancel_check():

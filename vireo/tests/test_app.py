@@ -5000,6 +5000,61 @@ def test_api_photos_missing_worker_db_open_failure_clears_inflight(
         assert app._missing_originals_errors[key]["error"] == "open failed"
 
 
+def test_api_photos_missing_progress_phase_only_sent_via_runner(
+    app_and_db, monkeypatch,
+):
+    """Missing Originals progress must not resize job["progress"] directly."""
+    from db import Database
+
+    app, _db = app_and_db
+    client = app.test_client()
+    pushed = []
+
+    class GuardedProgress(dict):
+        def __setitem__(self, key, value):
+            if key not in self:
+                raise AssertionError(f"unexpected progress key resize: {key}")
+            super().__setitem__(key, value)
+
+    def fake_missing_photos(self, folder_id=None, progress_callback=None, **kwargs):
+        if progress_callback is not None:
+            progress_callback({
+                "photos_considered": 7,
+                "total_photos": 10,
+                "missing_found": 2,
+                "folders_checked": 1,
+                "current_folder": "/photos",
+            })
+        return []
+
+    def fake_start(job_type, work, **kwargs):
+        job = {
+            "id": "missing-progress",
+            "progress": GuardedProgress({
+                "current": 0,
+                "total": 0,
+                "current_file": "",
+            }),
+        }
+        work(job)
+        return job["id"]
+
+    def fake_push_event(job_id, event_type, data):
+        pushed.append((job_id, event_type, data))
+
+    monkeypatch.setattr(Database, "get_missing_photos", fake_missing_photos)
+    monkeypatch.setattr(app._job_runner, "start", fake_start)
+    monkeypatch.setattr(app._job_runner, "push_event", fake_push_event)
+
+    resp = client.post("/api/photos/missing/check", json={})
+    assert resp.status_code == 200, resp.get_json()
+    progress_events = [data for _jid, typ, data in pushed if typ == "progress"]
+    assert progress_events
+    assert progress_events[-1]["phase"] == (
+        "1 folders checked, 7 photos considered, 2 missing"
+    )
+
+
 def test_get_missing_photos_honors_cancel_callback(app_and_db):
     """The low-level missing-originals walk must be cooperatively cancellable."""
     import pytest
