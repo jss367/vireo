@@ -1417,12 +1417,44 @@ function setReviewRating(photoId, rating) {
   }, { toast: false }).catch(function() {});
 }
 
+// Server-side representative eligibility (see get_species_representatives)
+// hides rejected photos. Mirror that here so a card loaded with the badge
+// stops rendering Representative the moment the user rejects it from the
+// same page — without the walk below, pred.is_species_representative stays
+// true until a full reload. Un-rejecting is intentionally left alone: the
+// client can't know whether the DB preference still points at this photo,
+// so the badge stays hidden until reload rather than lighting up incorrectly.
+function _clearPredictionRepresentativeStateIfIneligible(photoId, flag) {
+  if (flag !== 'rejected') return false;
+  var changed = false;
+  allPredictions.forEach(function(pred) {
+    if (!pred || pred.photo_id !== photoId) return;
+    if (pred.is_species_representative) {
+      pred.is_species_representative = false;
+      changed = true;
+    }
+    if (Array.isArray(pred.life_list)) {
+      pred.life_list.forEach(function(entry) {
+        if (!entry) return;
+        if (entry.is_current_photo) { entry.is_current_photo = false; changed = true; }
+        if (entry.is_species_representative) { entry.is_species_representative = false; changed = true; }
+      });
+    }
+  });
+  return changed;
+}
+
 function setReviewFlag(photoId, flag) {
   return safeFetch('/api/batch/flag', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ photo_ids: [photoId], flag: flag }),
-  }, { toast: false }).then(function() { return true; }).catch(function() { return false; });
+  }, { toast: false }).then(function() {
+    if (_clearPredictionRepresentativeStateIfIneligible(photoId, flag)) {
+      renderAll();
+    }
+    return true;
+  }).catch(function() { return false; });
 }
 
 function revealReviewPhoto(photoId) {
