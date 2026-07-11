@@ -77,6 +77,31 @@ def test_v1_token_api_does_not_require_browser_session(app_and_db):
     assert response.status_code == 200
 
 
+def test_native_token_can_access_internal_api_without_browser_session(app_and_db):
+    app, _ = app_and_db
+    _enable_browser_auth(app)
+
+    response = app.test_client().get(
+        "/api/jobs",
+        headers={"X-Vireo-Token": "test-token-123"},
+    )
+
+    assert response.status_code == 200
+
+
+def test_invalid_native_token_does_not_bypass_browser_session(app_and_db):
+    app, _ = app_and_db
+    _enable_browser_auth(app)
+
+    response = app.test_client().get(
+        "/api/jobs",
+        headers={"X-Vireo-Token": "wrong-token"},
+    )
+
+    assert response.status_code == 401
+    assert response.get_json()["code"] == "browser_session_required"
+
+
 def test_photo_media_requires_browser_session(app_and_db):
     app, db = app_and_db
     _enable_browser_auth(app)

@@ -241,8 +241,10 @@ pub fn run() {
             let menu = menu::build_menu(app.handle())?;
             app.set_menu(menu)?;
 
-            let port = app.state::<SidecarState>().port;
-            tray::create_tray(app.handle(), port, browser_mode)?;
+            let sidecar = app.state::<SidecarState>();
+            let port = sidecar.port;
+            let token = sidecar.token.clone();
+            tray::create_tray(app.handle(), port, token, browser_mode)?;
 
             // The main window is created with `visible: false` (see
             // tauri.conf.json) so we can decide here whether to show it

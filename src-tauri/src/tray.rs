@@ -77,7 +77,12 @@ const QUIT: &str = "quit";
 /// `browser_mode` swaps the "Show / Hide Window" pair for a single
 /// "Open in browser" item, since the WKWebView window is intentionally
 /// hidden in that mode and showing it would be confusing.
-pub fn create_tray(app: &AppHandle, port: u16, browser_mode: bool) -> tauri::Result<()> {
+pub fn create_tray(
+    app: &AppHandle,
+    port: u16,
+    token: Option<String>,
+    browser_mode: bool,
+) -> tauri::Result<()> {
     let initial_status = "No active jobs";
     app.manage(TrayMode {
         browser_mode: AtomicBool::new(browser_mode),
@@ -113,7 +118,7 @@ pub fn create_tray(app: &AppHandle, port: u16, browser_mode: bool) -> tauri::Res
     // Start the background polling thread
     let stop = Arc::new(AtomicBool::new(false));
     app.manage(TrayPollState { stop: stop.clone() });
-    start_job_polling(app.clone(), port, stop);
+    start_job_polling(app.clone(), port, token, stop);
 
     Ok(())
 }
@@ -243,13 +248,17 @@ pub fn is_browser_mode(app: &AppHandle) -> bool {
 }
 
 /// Query the Flask backend for jobs known to the in-memory runner.
-fn fetch_jobs(port: u16) -> Vec<JobInfo> {
+fn fetch_jobs(port: u16, token: Option<&str>) -> Vec<JobInfo> {
     let url = format!("http://127.0.0.1:{}/api/jobs", port);
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(2))
         .timeout_read(Duration::from_secs(5))
         .build();
-    match agent.get(&url).call() {
+    let mut request = agent.get(&url);
+    if let Some(token) = token {
+        request = request.set("X-Vireo-Token", token);
+    }
+    match request.call() {
         Ok(resp) => match resp.into_string() {
             Ok(body) => match serde_json::from_str::<JobsResponse>(&body) {
                 Ok(data) => data.active,
@@ -356,12 +365,12 @@ fn update_tray_menu(app: &AppHandle, job_status: &str) {
 
 /// Start a background thread that polls /api/jobs every 5 seconds
 /// and updates the tray menu with the current job count.
-pub fn start_job_polling(app: AppHandle, port: u16, stop: Arc<AtomicBool>) {
+pub fn start_job_polling(app: AppHandle, port: u16, token: Option<String>, stop: Arc<AtomicBool>) {
     std::thread::spawn(move || {
         let mut last_count: Option<usize> = None;
         let mut last_dock_progress: Option<DockProgress> = None;
         while !stop.load(Ordering::Relaxed) {
-            let jobs = fetch_jobs(port);
+            let jobs = fetch_jobs(port, token.as_deref());
             let running: Vec<&JobInfo> = jobs
                 .iter()
                 .filter(|j| j.status == "running" && j.counts_for_badge)

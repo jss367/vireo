@@ -76,6 +76,7 @@ fn parse_structured_error(line: &str) -> Option<SidecarStartError> {
 pub struct SidecarState {
     pub child: Mutex<Option<CommandChild>>,
     pub port: u16,
+    pub token: Option<String>,
     shutdown_on_exit: bool,
     client_marker: Option<std::path::PathBuf>,
 }
@@ -85,15 +86,17 @@ impl SidecarState {
         Self {
             child: Mutex::new(None),
             port,
+            token: None,
             shutdown_on_exit: false,
             client_marker: None,
         }
     }
 
-    fn owned(child: CommandChild, port: u16) -> Self {
+    fn owned(child: CommandChild, port: u16, token: String) -> Self {
         Self {
             child: Mutex::new(Some(child)),
             port,
+            token: Some(token),
             shutdown_on_exit: true,
             client_marker: register_gui_client(),
         }
@@ -111,6 +114,7 @@ impl SidecarState {
                 Some(Self {
                     child: Mutex::new(None),
                     port: runtime.port,
+                    token: Some(runtime.token),
                     shutdown_on_exit,
                     client_marker,
                 })
@@ -122,6 +126,7 @@ impl SidecarState {
         Some(Self {
             child: Mutex::new(None),
             port: runtime.port,
+            token: Some(runtime.token),
             shutdown_on_exit,
             client_marker: None,
         })
@@ -491,7 +496,16 @@ pub fn start_sidecar(app: &AppHandle) -> Result<SidecarState, SidecarStartError>
     // early if the supervisor sees a structured failure or termination.
     wait_for_health(port, Duration::from_secs(30), early_exit)?;
 
-    Ok(SidecarState::owned(child, port))
+    let runtime = runtime_json_path()
+        .and_then(|path| read_runtime_json(&path))
+        .filter(|runtime| runtime.port == port)
+        .ok_or_else(|| {
+            SidecarStartError::Generic(
+                "Backend became healthy without publishing its runtime token".to_string(),
+            )
+        })?;
+
+    Ok(SidecarState::owned(child, port, runtime.token))
 }
 
 /// Send POST /api/shutdown to the sidecar for a clean exit.

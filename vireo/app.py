@@ -1890,6 +1890,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not protected:
             return None
 
+        # Native desktop clients cannot use the HttpOnly browser cookie.
+        # They authenticate with the same per-runtime secret as /api/v1.
+        expected_api_token = app.config.get("API_TOKEN")
+        supplied_api_token = request.headers.get("X-Vireo-Token", "")
+        if (
+            expected_api_token
+            and supplied_api_token
+            and secrets.compare_digest(supplied_api_token, expected_api_token)
+        ):
+            return None
+
         if request.headers.get("Sec-Fetch-Site", "").lower() == "cross-site":
             return json_error(
                 "Cross-site requests are not allowed",
