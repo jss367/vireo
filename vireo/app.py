@@ -56,6 +56,7 @@ from preview_cache import (
 from preview_cache import (
     reconcile_preview_cache,
 )
+from proc import no_window_kwargs
 from render_source import (
     companion_image_can_replace_raw_result as _companion_image_can_replace_raw_result,
 )
@@ -1144,6 +1145,7 @@ def _trash_via_finder(filepath):
         ],
         capture_output=True,
         text=True,
+        **no_window_kwargs(),
     )
     if result.returncode != 0:
         raise OSError(result.stderr.strip() or f"Finder trash failed ({result.returncode})")
@@ -2099,11 +2101,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             rsync_bin = None
         if not rsync_bin:
             return None, None, json_error(
-                "No GNU rsync found for remote archiving — macOS's "
-                "built-in rsync can't drive rsync-over-SSH. Install GNU "
-                "rsync (e.g. `brew install rsync`) or set its path under "
+                "No usable GNU rsync was found for remote archiving. Install "
+                "GNU rsync for your platform or set its executable under "
                 "Settings → Paths."
             )
+        ssh_bin = move_mod.resolve_ssh_bin(effective_cfg.get("ssh_bin", "") or "")
+        if not ssh_bin:
+            return None, None, json_error(
+                "OpenSSH Client was not found. On Windows, install the OpenSSH "
+                "Client optional feature or set ssh.exe under Settings → Paths."
+            )
+        remote_archive_config["target"] = dict(remote_archive_config["target"])
+        remote_archive_config["target"]["ssh_bin"] = ssh_bin
         return remote_archive_config, rsync_bin, None
 
     def _coerce_collection_id(raw):
@@ -5645,6 +5654,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     check=False,
                     capture_output=True,
                     text=True,
+                    **no_window_kwargs(),
                 )
             elif sys.platform.startswith("win"):
                 # explorer.exe's exit status is not a reliable success signal
@@ -5663,6 +5673,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         check=False,
                         capture_output=True,
                         text=True,
+                        **no_window_kwargs(),
                     )
                 else:
                     if not os.path.isfile(path):
@@ -5673,6 +5684,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         check=False,
                         capture_output=True,
                         text=True,
+                        **no_window_kwargs(),
                     )
             else:
                 # xdg-open on a file has inconsistent behavior across desktops
@@ -5699,6 +5711,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     check=False,
                     capture_output=True,
                     text=True,
+                    **no_window_kwargs(),
                 )
             # explorer.exe's exit status is not a reliable success signal:
             # `explorer /select,<path>` (and `explorer <folder>`) routinely
@@ -10630,8 +10643,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         import shutil
 
+        from metadata import exiftool_status as get_exiftool_status
+
+        exiftool_probe = get_exiftool_status()
         exiftool_status = {
-            "installed": shutil.which("exiftool") is not None,
+            "installed": exiftool_probe["available"],
+            "version": exiftool_probe["version"],
+            "bundled": bool(
+                sys.platform.startswith("win") and exiftool_probe["available"]
+            ),
             "brew_available": shutil.which("brew") is not None,
         }
 
@@ -10759,13 +10779,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/system/install-exiftool", methods=["POST"])
     def api_install_exiftool():
-        """Install exiftool via Homebrew."""
-        import shutil
+        """Install ExifTool where Vireo can safely automate installation."""
         import subprocess
 
-        if shutil.which("exiftool"):
+        from metadata import exiftool_status
+
+        status = exiftool_status()
+        if status["available"]:
             return jsonify({"success": True, "message": "exiftool is already installed"})
 
+        if sys.platform.startswith("win"):
+            return jsonify({
+                "success": False,
+                "error": (
+                    "The Windows desktop build includes ExifTool. Repair or reinstall "
+                    "Vireo if the bundled copy is unavailable."
+                ),
+            })
+        if sys.platform != "darwin":
+            return jsonify({
+                "success": False,
+                "error": "Install ExifTool with your Linux package manager, then restart Vireo.",
+            })
+
+        import shutil
         if not shutil.which("brew"):
             return jsonify({
                 "success": False,
@@ -10776,6 +10813,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             result = subprocess.run(
                 ["brew", "install", "exiftool"],
                 capture_output=True, text=True, timeout=300,
+                **no_window_kwargs(),
             )
             if result.returncode == 0:
                 return jsonify({"success": True, "message": "exiftool installed successfully"})
@@ -11654,17 +11692,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 result = subprocess.run(
                     ["open", "-a", app_bundle] + file_paths,
                     capture_output=True, text=True, timeout=30,
+                    **no_window_kwargs(),
                 )
                 if result.returncode != 0:
                     err = (result.stderr or result.stdout or "open failed").strip()
                     log.warning("open -a %s failed: %s", app_bundle, err)
                     return json_error(err, 500)
             elif editor_path:
-                subprocess.Popen([editor_path] + file_paths)
+                subprocess.Popen([editor_path] + file_paths, **no_window_kwargs())
             elif sys.platform == "darwin":
                 result = subprocess.run(
                     ["open"] + file_paths,
                     capture_output=True, text=True, timeout=30,
+                    **no_window_kwargs(),
                 )
                 if result.returncode != 0:
                     err = (result.stderr or result.stdout or "open failed").strip()
@@ -11675,7 +11715,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     os.startfile(fp)
             else:
                 for fp in file_paths:
-                    subprocess.Popen(["xdg-open", fp])
+                    subprocess.Popen(["xdg-open", fp], **no_window_kwargs())
         except Exception as e:
             log.warning("Failed to open external editor: %s", e)
             return json_error(str(e), 500)
@@ -14118,6 +14158,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_system_info():
         """Return system information: ONNX Runtime, hardware."""
         info = _runtime_execution_info()
+        import config as cfg
+        from platform_support import platform_support_info
+
+        try:
+            effective = _get_db().get_effective_config(cfg.load())
+        except Exception:
+            effective = cfg.load()
+        info["platform_support"] = platform_support_info(effective)
 
         # "installed" requires both module AND weights — module-only
         # lets classify silently fall back to full-image classification.
@@ -15137,12 +15185,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             try:
                 if sys.platform == "darwin":
                     proc = subprocess.run(["open", "-R", "--", path],
-                                          timeout=5, check=False)
+                                          timeout=5, check=False,
+                                          **no_window_kwargs())
                 elif sys.platform.startswith("win"):
                     # Folder reveal opens the folder itself (no /select,)
                     # so the user sees its contents.
                     proc = subprocess.run(["explorer", path],
-                                          timeout=5, check=False)
+                                          timeout=5, check=False,
+                                          **no_window_kwargs())
                 else:
                     # xdg-open doesn't honor `--`; abspath guarantees a
                     # leading slash so a crafted leading-dash path can't
@@ -15150,6 +15200,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     proc = subprocess.run(
                         ["xdg-open", os.path.abspath(path)],
                         timeout=5, check=False,
+                        **no_window_kwargs(),
                     )
                 # check=False returns a CompletedProcess for every exit
                 # code; classify non-zero as failed so the UI doesn't
@@ -16299,14 +16350,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 effective_cfg.get("rsync_bin", "") or "")
             if not rsync_bin:
                 return json_error(
-                    "No GNU rsync found for remote moves — macOS's "
-                    "built-in rsync can't drive rsync-over-SSH. Install GNU "
-                    "rsync (e.g. `brew install rsync`) or set its path under "
+                    "No usable GNU rsync was found for remote moves. Install "
+                    "GNU rsync for your platform or set its executable under "
                     "Settings → Paths."
+                )
+            ssh_bin = move_mod.resolve_ssh_bin(
+                effective_cfg.get("ssh_bin", "") or "")
+            if not ssh_bin:
+                return json_error(
+                    "OpenSSH Client was not found. Install the Windows "
+                    "OpenSSH Client optional feature or configure ssh.exe in Settings."
                 )
             try:
                 remote = move_mod.build_remote_move_spec(
-                    target, subpath, rsync_bin)
+                    target, subpath, rsync_bin, ssh_bin)
             except ValueError as exc:
                 return json_error(str(exc))
             # Pass the mount path as `destination` for informational use; the
@@ -16488,8 +16545,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             target = cfg.get_remote_target(remote_target_id)
             if not target:
                 return json_error("Remote target not found", status=404)
+            effective_cfg = _get_db().get_effective_config(cfg.load())
+            ssh_bin = move_mod.resolve_ssh_bin(
+                effective_cfg.get("ssh_bin", "") or "")
+            if not ssh_bin:
+                return json_error(
+                    "OpenSSH Client was not found. Install it or configure ssh.exe in Settings."
+                )
+            target = dict(target)
+            target["ssh_bin"] = ssh_bin
             try:
-                spec = move_mod.build_remote_move_spec(target, subpath, "")
+                spec = move_mod.build_remote_move_spec(target, subpath, "", ssh_bin)
             except ValueError as exc:
                 return json_error(str(exc))
             # The NAS path is POSIX, so the preview/probe path must join with
@@ -16566,10 +16632,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         rsync_bin = move_mod.resolve_rsync_bin(
             effective_cfg.get("rsync_bin", "") or "")
         usable = bool(rsync_bin and move_mod.is_gnu_rsync(rsync_bin))
+        ssh_bin = move_mod.resolve_ssh_bin(
+            effective_cfg.get("ssh_bin", "") or "")
         return jsonify({
             "targets": cfg.get_remote_targets(),
             "rsync_available": usable,
             "rsync_bin": rsync_bin if usable else None,
+            "ssh_available": bool(ssh_bin),
+            "ssh_bin": ssh_bin,
+            "remote_available": bool(usable and ssh_bin),
         })
 
     @app.route("/api/remote-targets/test", methods=["POST"])
@@ -16591,11 +16662,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Apple openrsync resolves but can't drive SSH — treat as unusable.
         if rsync_bin and not move_mod.is_gnu_rsync(rsync_bin):
             rsync_bin = ""
+        ssh_bin = move_mod.resolve_ssh_bin(
+            effective_cfg.get("ssh_bin", "") or "")
+        target["ssh_bin"] = ssh_bin
         res = move_mod.test_remote_connection(target, rsync_bin)
         mount = target.get("mount_path")
         res["mount_path"] = mount
         res["mount_present"] = bool(mount and os.path.isdir(mount))
         res["rsync_bin"] = rsync_bin or None
+        res["ssh_bin"] = ssh_bin
+        if not ssh_bin:
+            res["ok"] = False
+            res["message"] = (
+                "OpenSSH Client was not found. Install the Windows optional "
+                "feature or configure ssh.exe under Settings → Paths."
+            )
         return jsonify(res)
 
     @app.route("/api/jobs/import-full", methods=["POST"])
@@ -18205,8 +18286,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if isinstance(obj, dict):
                 out = {}
                 for k, v in obj.items():
-                    if any(s in k.lower() for s in ("token", "key", "secret", "password")):
+                    key = k.lower()
+                    if any(s in key for s in ("token", "secret", "password")) or key.endswith("_key"):
                         out[k] = "[REDACTED]"
+                    elif any(s in key for s in ("path", "root", "_bin", "directory", "editor")):
+                        out[k] = "[REDACTED_PATH]" if v else v
                     else:
                         out[k] = _redact(v)
                 return out
@@ -18215,6 +18299,54 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return obj
 
         sanitized_config = _redact(cfg.load())
+
+        # Exact catalog roots are private and can also appear in logs. Issue
+        # reports retain the diagnostic message while replacing those values;
+        # the user can paste a path into the description when it is relevant.
+        private_paths = []
+        if db is not None:
+            with contextlib.suppress(Exception):
+                private_paths = [
+                    row[0] for row in db.conn.execute("SELECT path FROM folders")
+                    if row[0]
+                ]
+
+        def _sanitize_text(value):
+            text = str(value)
+            for private_path in sorted(private_paths, key=len, reverse=True):
+                text = text.replace(private_path, "[PHOTO_PATH]")
+            home = os.path.expanduser("~")
+            if home:
+                text = text.replace(home, "~")
+            return text
+
+        def _sanitize_private_values(value):
+            if isinstance(value, dict):
+                return {key: _sanitize_private_values(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [_sanitize_private_values(item) for item in value]
+            if isinstance(value, str):
+                return _sanitize_text(value)
+            return value
+
+        sanitized_logs = _sanitize_private_values(
+            app._log_broadcaster.get_recent(200)
+        )
+
+        try:
+            from platform_support import filesystem_type, platform_support_info
+
+            filesystems = sorted({
+                kind for path in private_paths
+                if (kind := filesystem_type(path))
+            })
+            support_info = _redact(platform_support_info(cfg.load()))
+        except Exception:
+            filesystems = []
+            support_info = {}
+        execution_info = {}
+        with contextlib.suppress(Exception):
+            execution_info = _runtime_execution_info()
 
         # --- Build the bundle ---
         from datetime import datetime
@@ -18227,15 +18359,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "platform": platform.platform(),
                 "python": sys.version,
                 "architecture": platform.machine(),
+                "inference_device": execution_info.get("device"),
+                "inference_providers": execution_info.get("onnxruntime_providers", []),
+                "platform_support": support_info,
+                "library_filesystems": filesystems,
             },
-            "logs": app._log_broadcaster.get_recent(200),
+            "logs": sanitized_logs,
             "app_state": {
                 "workspace": ws_name,
                 "folders": folder_count,
                 "photos": photo_count,
                 "predictions": pred_count,
             },
-            "recent_jobs": recent_jobs,
+            "recent_jobs": _sanitize_private_values(_redact(recent_jobs)),
             "config": sanitized_config,
         }
 

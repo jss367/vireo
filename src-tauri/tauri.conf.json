@@ -49,6 +49,16 @@
       "signingIdentity": null,
       "providerShortName": null,
       "minimumSystemVersion": "11.0"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "allowDowngrades": false,
+      "nsis": {
+        "installMode": "currentUser"
+      }
     }
   },
   "plugins": {

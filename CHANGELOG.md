@@ -4,6 +4,12 @@ All notable changes to Vireo are documented in this file.
 
 ## Unreleased
 
+### Added
+- **Windows 11 public beta.** Windows releases now include ExifTool, report
+  optional integration readiness, support long-path-aware packaging, require
+  signed release installers, and run Windows browser, native-shell, installer,
+  updater, and uninstall-preservation gates before publication.
+
 ### Fixed
 - Miss detection now aligns its default no-subject threshold with the default
   detector confidence floor, avoiding "no subject" misses for photos whose

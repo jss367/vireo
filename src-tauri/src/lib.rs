@@ -203,11 +203,16 @@ pub fn run() {
                             "Vireo: Incompatible database at {}: {}",
                             db_path, reason
                         );
+                        let log_dir = app
+                            .path()
+                            .app_log_dir()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|_| "the Vireo application log directory".into());
                         app.handle()
                             .dialog()
                             .message(format!(
-                                "Vireo can't open the database at:\n\n{}\n\nIt's from an incompatible older version of Vireo. To start fresh, move this file aside (for example, rename it with a `.bak` suffix) and relaunch.\n\nDetails: {}",
-                                db_path, reason
+                                "Vireo can't open the database at:\n\n{}\n\nIt's from an incompatible older version of Vireo. To start fresh, move this file aside (for example, rename it with a `.bak` suffix) and relaunch.\n\nDetails: {}\n\nLogs: {}",
+                                db_path, reason, log_dir
                             ))
                             .title("Incompatible Vireo Database")
                             .kind(MessageDialogKind::Error)
@@ -221,13 +226,18 @@ pub fn run() {
                         // into a blank window — the user otherwise has no idea
                         // why Vireo didn't open.
                         let reason = e.to_string();
+                        let log_dir = app
+                            .path()
+                            .app_log_dir()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|_| "the Vireo application log directory".into());
                         log::error!("Failed to start sidecar: {}", reason);
                         eprintln!("Vireo: Failed to start Python backend: {}", reason);
                         app.handle()
                             .dialog()
                             .message(format!(
-                                "Vireo couldn't start its backend.\n\nDetails: {}\n\nTry relaunching. If the problem persists, check Vireo's log file for more information.",
-                                reason
+                                "Vireo couldn't start its backend.\n\nDetails: {}\n\nTry relaunching. If the problem persists, check the logs at:\n{}",
+                                reason, log_dir
                             ))
                             .title("Vireo Couldn't Start")
                             .kind(MessageDialogKind::Error)

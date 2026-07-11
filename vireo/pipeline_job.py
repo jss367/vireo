@@ -1269,12 +1269,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     rsync_bin = ""
                                 if not rsync_bin:
                                     _bail_storage(
-                                        "No GNU rsync found for the remote "
-                                        "archive — macOS's built-in rsync "
-                                        "can't drive rsync-over-SSH. Install "
-                                        "GNU rsync (e.g. `brew install "
-                                        "rsync`) or set its path under "
-                                        "Settings → Paths."
+                                        "No usable GNU rsync was found for the "
+                                        "remote archive. Install GNU rsync for "
+                                        "your platform or set its executable "
+                                        "under Settings → Paths."
                                     )
                                     return
                                 conn = move_mod.test_remote_connection(

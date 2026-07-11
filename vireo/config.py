@@ -37,6 +37,9 @@ DEFAULTS = {
     # then a few known install paths) via move.resolve_rsync_bin(). Local
     # moves are unaffected and keep using whatever `rsync` is on PATH.
     "rsync_bin": "",
+    # Optional explicit Windows OpenSSH path. Empty uses PATH and then the
+    # standard Windows optional-feature location.
+    "ssh_bin": "",
     # Saved remote (NAS) destinations for folder moves over SSH. Each entry:
     #   {"id", "name", "host", "user", "port", "ssh_key",
     #    "remote_path", "mount_path", "bwlimit_kbps"}
