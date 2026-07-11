@@ -3050,7 +3050,25 @@ function setPipelineReviewFlag(photoId, flag) {
     body: JSON.stringify({ flag: flag }),
   }).then(function() {
     var photo = findPhotoInResults(photoId);
-    if (photo) photo.flag = flag;
+    if (photo) {
+      photo.flag = flag;
+      // Rejected photos lose representative eligibility server-side
+      // (get_species_representatives(eligible_only=True) filters them out),
+      // so drop the cached representative fields — the pipeline grid renders
+      // the Representative badge from photo.is_species_representative and
+      // would otherwise keep displaying it on a photo that's just been
+      // rejected via the inspect shortcut or the shared lightbox reject.
+      if (flag === 'rejected') {
+        if (photo.is_species_representative) photo.is_species_representative = false;
+        if (Array.isArray(photo.life_list)) {
+          photo.life_list.forEach(function(entry) {
+            if (!entry) return;
+            if (entry.is_current_photo) entry.is_current_photo = false;
+            if (entry.is_species_representative) entry.is_species_representative = false;
+          });
+        }
+      }
+    }
     renderResults();
     if (inspectPhotoId === photoId && document.getElementById('inspectOverlay').classList.contains('open')) {
       openInspect(photoId);
