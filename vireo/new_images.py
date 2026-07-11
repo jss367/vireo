@@ -398,6 +398,26 @@ class NewImagesCache:
                 # Backoff window elapsed — let a fresh attempt run.
                 del self._errors[key]
 
+            # Skip the spawn if a fresh, complete walk already sits in the
+            # cache. Without this, a caller that saw an empty cache moments
+            # ago can race the in-flight worker's finally block: worker
+            # populates the cache, then clears its in-flight slot; the
+            # caller then arrives here and sees no in-flight, so we'd fan
+            # out a second walk over the same directories. All async walks
+            # run with sample_limit=None (so sample_complete=True), so
+            # gating on that flag is a precise "a completed walk exists"
+            # check — sync ``get_new_images_for_workspace`` writes at
+            # sample_limit=5 (sample_complete potentially False) and must
+            # still fall through to spawn a real walk.
+            entry = self._entries.get(key)
+            if entry is not None:
+                cached_result, set_at = entry
+                if (time.monotonic() - set_at <= self._ttl
+                        and cached_result.get("sample_complete")):
+                    done = threading.Event()
+                    done.set()
+                    return done
+
             generation = self._generations.get(key, 0)
             existing = self._inflight.get(key)
             if existing is not None:
