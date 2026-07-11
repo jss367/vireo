@@ -352,6 +352,10 @@ function updateWorkspaceMode() {
   const newMode = !!document.getElementById('workspaceNew')?.checked;
   const row = document.getElementById('newWorkspaceRow');
   if (row) row.style.display = newMode ? '' : 'none';
+  // Flipping between "current workspace" and "new workspace" changes
+  // which default (workspace-scoped vs global) the server will resolve
+  // after_import against, so the After Import display must resync.
+  updateAdvancedImportOptions();
 }
 
 function importRemoteTargetId() {
@@ -874,6 +878,15 @@ function retireHiddenDefaultOption(sel) {
   if (sel && sel.value === '__hidden_default__') sel.value = '__none__';
 }
 
+function afterImportOptionLabel(strategy) {
+  const sel = document.getElementById('afterImportSelect');
+  const value = strategy || '__none__';
+  if (!sel) return strategy || 'None — import only';
+  const opt = Array.from(sel.options).find(
+    (o) => o.value === value && o.id !== 'afterImportHiddenDefault');
+  return opt ? (opt.textContent || '').trim() : (strategy || 'None — import only');
+}
+
 function updateAdvancedImportOptions() {
   const sel = document.getElementById('afterImportSelect');
   if (!sel) return;
@@ -883,22 +896,58 @@ function updateAdvancedImportOptions() {
     opt.disabled = !advanced;
   });
   const placeholder = document.getElementById('afterImportHiddenDefault');
-  if (advanced) {
-    // Advanced mode is back on — reveal whichever advanced strategy the
-    // placeholder was masking so the visible selection matches what
-    // Start Import will send, then retire the placeholder.
-    if (placeholder && sel.value === '__hidden_default__') {
-      const masked = placeholder.dataset.maskedValue;
-      sel.value = masked || '__none__';
-      _afterImportHidingDefault = false;
-    }
+  if (!placeholder) return;
+
+  // Once the user actively picks an option, that pick is authoritative
+  // and no placeholder mode should override it.
+  if (_afterImportUserTouched) {
     retireHiddenDefaultOption(sel);
+    _afterImportHidingDefault = false;
     return;
   }
+
+  const newMode = !!document.getElementById('workspaceNew')?.checked;
+
+  // "New workspace" untouched: startImport() omits after_import so the
+  // server resolves it against the freshly-created workspace (which
+  // inherits the GLOBAL default, since a brand-new workspace has no
+  // overrides yet). The visible dropdown, prefilled from the currently-
+  // active workspace's default, would otherwise lie about what the
+  // server is going to do — show a placeholder that names the real
+  // target strategy.
+  if (newMode && _afterImportConfigLoaded) {
+    const label = afterImportOptionLabel(_globalDefaultStrategy);
+    placeholder.textContent =
+      'New workspace default: ' + label + ' (applied to the new workspace)';
+    placeholder.dataset.maskedValue = _globalDefaultStrategy || '';
+    placeholder.hidden = false;
+    placeholder.disabled = false;
+    _afterImportHidingDefault = true;
+    sel.value = '__hidden_default__';
+    return;
+  }
+
+  // Not new-workspace mode: the visible selection should track the
+  // workspace's own default (or the HTML fallback if config didn't
+  // load). Re-derive it every call so switching workspaceNew off
+  // restores the workspace default rather than sticking on whatever
+  // placeholder we were showing.
+  const wsDef = _afterImportConfigLoaded
+    ? (_workspaceDefaultStrategy || '__none__')
+    : '__none__';
+  sel.value = wsDef;
+  if (sel.selectedIndex === -1) sel.value = '__none__';
+
+  if (advanced) {
+    retireHiddenDefaultOption(sel);
+    _afterImportHidingDefault = false;
+    return;
+  }
+
   const current = sel.selectedOptions[0];
   const currentIsHiddenAdvanced =
     !!(current && current.disabled && current.hasAttribute('data-advanced-strategy'));
-  if (currentIsHiddenAdvanced && placeholder) {
+  if (currentIsHiddenAdvanced) {
     // The workspace's default is an advanced-only strategy (full,
     // cull_ready) but advanced mode is off. If we silently fell the
     // display back to __none__, startImport() would omit after_import so
@@ -915,8 +964,9 @@ function updateAdvancedImportOptions() {
     placeholder.disabled = false;
     _afterImportHidingDefault = true;
     sel.value = '__hidden_default__';
-  } else if (sel.value !== '__hidden_default__') {
+  } else {
     retireHiddenDefaultOption(sel);
+    _afterImportHidingDefault = false;
   }
 }
 
@@ -955,6 +1005,23 @@ let _afterImportHidingDefault = false;
 // (including "None — import only") flips this flag and gets forwarded
 // verbatim.
 let _afterImportUserTouched = false;
+
+// The unscoped global pipeline.default_strategy from /api/config, captured
+// during initImportPage. A brand-new workspace has no config_overrides yet,
+// so this is the strategy the server will apply when the new-workspace
+// import path omits `after_import`. Used to populate the honest "New
+// workspace default: X" placeholder so the visible dropdown selection
+// isn't misled by whatever was prefilled from the currently-active
+// workspace's (possibly-overridden) default.
+let _globalDefaultStrategy = null;
+
+// The effective pipeline.default_strategy for the CURRENTLY-active
+// workspace (global config merged with the workspace's overrides). Used
+// so updateAdvancedImportOptions() can re-derive the visible dropdown
+// selection when the user toggles "New workspace" off without touching
+// the dropdown — the underlying target reverts to the current workspace's
+// default rather than sticking on whatever placeholder was showing.
+let _workspaceDefaultStrategy = null;
 
 function showError(msg) {
   const el = document.getElementById('importError');
@@ -1512,6 +1579,14 @@ async function initImportPage() {
   const def = pipelineCfg.default_strategy;
   sel.value = def ? def : '__none__';
   if (sel.selectedIndex === -1) sel.value = '__none__';
+  // Capture the unscoped global default so the "New workspace default"
+  // placeholder can name the strategy the server will actually apply
+  // to a freshly-created workspace (which starts with no overrides).
+  _globalDefaultStrategy = (cfg && cfg.pipeline && cfg.pipeline.default_strategy) || null;
+  // Capture the effective (workspace-scoped) default so switching out of
+  // "New workspace" mode without touching the dropdown restores this
+  // value rather than sticking on the placeholder.
+  _workspaceDefaultStrategy = def || null;
   // updateAdvancedImportOptions() may flip _afterImportHidingDefault
   // when the resolved default is an advanced-only strategy the current
   // mode hides. Wire the change listener first so a user-driven change
@@ -1526,12 +1601,15 @@ async function initImportPage() {
     if (sel.value !== '__hidden_default__') retireHiddenDefaultOption(sel);
   });
   _afterImportHidingDefault = false;
-  updateAdvancedImportOptions();
   // Only mark the resolved default as trustworthy when BOTH config
   // fetches actually succeeded. Otherwise the select value reflects the
   // HTML placeholder rather than the workspace default, and startImport
   // should omit the key so the server applies pipeline.default_strategy.
+  // Set this BEFORE the initial updateAdvancedImportOptions() call so
+  // that call can use _workspaceDefaultStrategy to derive the visible
+  // dropdown value.
   _afterImportConfigLoaded = cfgOk && overridesOk;
+  updateAdvancedImportOptions();
   loadImportRemoteTargets();
   loadOrphanedStaging();
   updateImportMode();

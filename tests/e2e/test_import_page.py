@@ -272,6 +272,64 @@ def test_import_new_workspace_forwards_explicit_after_import(live_server, page):
     assert body["after_import"] == "identify"
 
 
+def test_import_new_workspace_shows_target_default_in_after_import_display(
+    live_server, page
+):
+    """When 'New workspace' is picked and the After Import dropdown is
+    untouched, the visible label must describe what the server will
+    actually do — the global default that the freshly-created workspace
+    inherits — rather than leaking the currently-active workspace's
+    (possibly-overridden) prefilled selection."""
+    url = live_server["url"]
+
+    def config_route(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "pipeline": {"default_strategy": "identify"},
+            }),
+        )
+
+    def active_workspace_route(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "id": 1,
+                "name": "Existing",
+                "config_overrides": {
+                    "pipeline": {"default_strategy": "quick_look"},
+                },
+            }),
+        )
+
+    page.route("**/api/config", config_route)
+    page.route("**/api/workspaces/active", active_workspace_route)
+    page.goto(f"{url}/import")
+
+    # Before touching workspaceNew, the dropdown reflects the CURRENT
+    # workspace's default (quick_look) — the source of the misleading
+    # signal that this fix addresses.
+    expect(page.locator("#afterImportSelect")).to_have_value("quick_look")
+
+    page.locator("#workspaceNew").check()
+
+    # After switching to new-workspace mode, the visible selection swaps
+    # to a placeholder that names the GLOBAL default (identify) — matching
+    # what the server will actually apply to the freshly-created workspace.
+    expect(page.locator("#afterImportSelect")).to_have_value("__hidden_default__")
+    placeholder = page.locator("#afterImportHiddenDefault")
+    expect(placeholder).to_contain_text("New workspace default")
+    expect(placeholder).to_contain_text("Identify birds")
+
+    # Switching back to current-workspace mode without touching the
+    # dropdown restores the current workspace's default rather than
+    # sticking on the placeholder.
+    page.locator("#workspaceCurrent").check()
+    expect(page.locator("#afterImportSelect")).to_have_value("quick_look")
+
+
 def test_import_browse_button_opens_folder_browser_fallback(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/import")
