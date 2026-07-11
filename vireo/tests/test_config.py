@@ -112,6 +112,7 @@ def test_keyboard_shortcut_defaults_include_rapid_review():
     assert shortcuts["pipeline_rapid_review"]["reject"] == "x"
     assert shortcuts["pipeline_rapid_review"]["zoom"] == "z"
     assert shortcuts["browse"]["compare"] == "c"
+    assert shortcuts["browse"]["toggle_ui"] == "h"
 
 
 def test_working_copy_defaults(tmp_path, monkeypatch):

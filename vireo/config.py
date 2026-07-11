@@ -200,6 +200,7 @@ DEFAULTS = {
             "compare": "c",
             "zoom": "z",
             "toggle_boxes": "b",
+            "toggle_ui": "h",
         },
     },
 }
