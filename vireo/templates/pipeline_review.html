@@ -6059,12 +6059,29 @@ async function grmApply() {
 
     // Sync the in-memory pipeline cache's per-photo `flag` with what the
     // server just wrote, so the badges in the main grid (which read p.flag)
-    // refresh without a full reload.
+    // refresh without a full reload. Rejected photos also lose eligibility
+    // as species representatives (get_species_representatives(eligible_only)
+    // filters them out), so clear the cached representative fields too — the
+    // main pipeline grid renders its Representative badge from
+    // p.is_species_representative and would otherwise keep displaying it on
+    // a rejected photo until a full reload.
     if (applyResp && applyResp.photos) {
       Object.keys(applyResp.photos).forEach(function(pidStr) {
         var pid = parseInt(pidStr, 10);
         var p = photoMap[pid];
-        if (p) p.flag = applyResp.photos[pidStr].flag;
+        if (!p) return;
+        var newFlag = applyResp.photos[pidStr].flag;
+        p.flag = newFlag;
+        if (newFlag === 'rejected') {
+          if (p.is_species_representative) p.is_species_representative = false;
+          if (Array.isArray(p.life_list)) {
+            p.life_list.forEach(function(entry) {
+              if (!entry) return;
+              if (entry.is_current_photo) entry.is_current_photo = false;
+              if (entry.is_species_representative) entry.is_species_representative = false;
+            });
+          }
+        }
       });
     }
 

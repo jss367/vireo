@@ -4916,6 +4916,27 @@ async function batchSetRating(rating) {
   showUndoToast();
 }
 
+// Server-side representative eligibility (see get_species_representatives)
+// hides rejected photos. Mirror that here so the grid badge and the shared
+// representative context menu ("Already representative" hint on the current
+// entry) don't keep treating a just-rejected photo as still representative
+// until a reload. Un-rejecting is left as-is: the client can't know whether
+// the DB preference still points at this photo, so the badge stays hidden
+// until the page reloads rather than lighting up incorrectly.
+function _clearRepresentativeStateIfIneligible(photoId, flag) {
+  if (flag !== 'rejected') return;
+  var p = photos.find(function(x) { return x.id === photoId; });
+  if (!p) return;
+  if (p.is_species_representative) p.is_species_representative = false;
+  if (Array.isArray(p.life_list)) {
+    p.life_list.forEach(function(entry) {
+      if (!entry) return;
+      if (entry.is_current_photo) entry.is_current_photo = false;
+      if (entry.is_species_representative) entry.is_species_representative = false;
+    });
+  }
+}
+
 async function batchSetFlag(flag) {
   var ids = getActiveSelection();
   try {
@@ -4927,6 +4948,7 @@ async function batchSetFlag(flag) {
   ids.forEach(function(id) {
     var p = photos.find(function(x) { return x.id === id; });
     if (p) p.flag = flag;
+    _clearRepresentativeStateIfIneligible(id, flag);
   });
   refreshGridCards(ids);
   if (selectedPhotoId != null && ids.indexOf(selectedPhotoId) !== -1) {
@@ -5947,6 +5969,7 @@ async function setFlag(flag) {
     });
     var p = photos.find(function(x) { return x.id === photoId; });
     if (p) p.flag = flag;
+    _clearRepresentativeStateIfIneligible(photoId, flag);
     refreshGridCards([photoId]);
     if (selectedPhotoId === photoId) updateDetailFlagButtons(flag);
     scheduleCollectionCountsRefresh();
@@ -7111,6 +7134,7 @@ async function setFlagFor(photoId, flag) {
   } catch(e) { return false; }
   var p = photos.find(function(x) { return x.id === photoId; });
   if (p) p.flag = flag;
+  _clearRepresentativeStateIfIneligible(photoId, flag);
   refreshGridCards([photoId]);
   _refreshInspectorAfterSinglePhotoEdit(photoId, function() { updateDetailFlagButtons(flag); });
   scheduleCollectionCountsRefresh();
