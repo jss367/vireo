@@ -320,7 +320,8 @@ ALL_NAV_IDS = frozenset({
 })
 
 DEFAULT_TABS = [
-    "import", "pipeline", "review", "browse",
+    "import", "browse", "pipeline", "pipeline_review",
+    "review", "cull", "jobs", "highlights", "misses", "storage", "settings",
 ]
 
 

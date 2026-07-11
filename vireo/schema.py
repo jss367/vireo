@@ -72,6 +72,33 @@ def _consolidate_default_navigation(conn):
         )
 
 
+def _restore_direct_default_navigation(conn):
+    """Restore the direct tabs changed by migration 6; preserve custom sets."""
+    import json
+
+    marker = conn.execute(
+        "SELECT value FROM db_meta WHERE key='navigation_consolidated'"
+    ).fetchone()
+    if marker is None or marker[0] != "1":
+        return
+
+    rows = conn.execute("SELECT id, tabs FROM workspaces").fetchall()
+    for workspace_id, raw_tabs in rows:
+        try:
+            tabs = json.loads(raw_tabs) if raw_tabs else None
+        except (TypeError, ValueError):
+            continue
+        if tabs == _PRIMARY_WORKFLOW_TABS:
+            conn.execute(
+                "UPDATE workspaces SET tabs=? WHERE id=?",
+                (json.dumps(_LEGACY_DEFAULT_TABS), workspace_id),
+            )
+    conn.execute(
+        "INSERT OR REPLACE INTO db_meta(key, value) VALUES (?, ?)",
+        ("navigation_consolidated", "0"),
+    )
+
+
 MIGRATIONS = (
     Migration(
         version=5,
@@ -83,6 +110,11 @@ MIGRATIONS = (
         version=6,
         name="consolidate-untouched-default-navigation",
         apply=_consolidate_default_navigation,
+    ),
+    Migration(
+        version=7,
+        name="restore-direct-default-navigation",
+        apply=_restore_direct_default_navigation,
     ),
 )
 

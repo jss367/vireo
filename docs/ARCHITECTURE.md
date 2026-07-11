@@ -26,8 +26,8 @@ that information for interactive use.
 - `/api/v1` is the stable automation API and retains token authentication.
 - Internal browser endpoints may evolve with the bundled interface but retain
   route and response compatibility during domain extraction.
-- Existing page links remain valid while secondary review, library, and tool
-  pages move behind grouped navigation.
+- Direct workspace tabs remain the primary navigation model. Existing page
+  links and user-selected tab sets remain valid as workflows evolve.
 - Customized workspace tabs are user data. Migrations may update only a known,
   untouched historical default unless a separate user-facing migration exists.
 
