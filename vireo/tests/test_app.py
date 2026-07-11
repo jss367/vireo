@@ -6323,6 +6323,57 @@ def test_highlights_relabel_undo_restores_representative_over_collision(app_and_
     assert reps.get("Rep New") == p_incumbent
 
 
+def test_highlights_relabel_undo_preserves_preexisting_target_representative(
+    app_and_db,
+):
+    """When the relabeled photo was already a global representative for
+    the destination species — e.g. a multi-species photo picked as rep
+    for both A and B before relabeling A→B — the relabel's
+    ``INSERT OR IGNORE`` keeps the pre-existing ``(B, photo_id)`` row and
+    only deletes the old-species row. Undo must not erase that
+    pre-existing target-species rep while processing ``pref_prev``."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/prekeep', 'prekeep', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Rep Both A", is_species=True)
+    new_kid = db.add_keyword("Rep Both B", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'both.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, old_kid)
+    db.tag_photo(pid, new_kid)
+    db.set_species_representative("Rep Both A", pid)
+    db.set_species_representative("Rep Both B", pid)
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Rep Both B"},
+    )
+    assert resp.status_code == 200
+    reps_after = db.get_species_representatives()
+    # A has been retagged away and its rep row moved into B (whose row
+    # was pre-existing, so INSERT OR IGNORE was a no-op).
+    assert "Rep Both A" not in reps_after
+    assert reps_after.get("Rep Both B") == pid
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+    reps_undone = db.get_species_representative_lists()
+    # Both reps must be present after undo: A is restored from pref_prev,
+    # and B must survive the pref_prev-driven cleanup because the target
+    # rep row pre-existed the relabel.
+    assert pid in (reps_undone.get("Rep Both A") or [])
+    assert pid in (reps_undone.get("Rep Both B") or [])
+
+
 def test_highlights_relabel_migrates_cross_workspace_representative(app_and_db):
     """A photo picked as a global representative in a different workspace
     has no compatibility row in the relabel-workspace's ``photo_preferences``,

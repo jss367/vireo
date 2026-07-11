@@ -8356,6 +8356,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 (ws_id, species),
             ).fetchall()
         }
+        # Photos that already had a (species=<target>, photo_id) row in
+        # species_representatives before the relabel.
+        # rename_species_representatives_species uses INSERT OR IGNORE, so
+        # when the destination rep row is already present the relabel does
+        # not create a new one and undo must not delete it. Applies to
+        # both preference-covered moves (via pref_prev.rep_dst_existed
+        # below) and rep-only moves (via rep_prev.dst_existed).
+        rep_dst_preexisting = set()
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            for row in db.conn.execute(
+                f"""SELECT photo_id FROM species_representatives
+                    WHERE species = ? AND photo_id IN ({placeholders})""",
+                (species, *chunk),
+            ).fetchall():
+                rep_dst_preexisting.add(row["photo_id"])
         pref_covered_by_pid_species = set()
         for chunk in _chunked(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
@@ -8379,6 +8395,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "purpose": row["purpose"],
                     "species": old_species_name,
                     "dst_existed": row["purpose"] in pref_dst_taken,
+                    "rep_dst_existed": row["photo_id"] in rep_dst_preexisting,
                 })
                 pref_covered_by_pid_species.add(
                     (row["photo_id"], old_species_name)
@@ -8394,15 +8411,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # the preference pass didn't already cover.
         representative_renames = {}
         rep_prev_by_pid = {}
-        rep_dst_preexisting = set()
-        for chunk in _chunked(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            for row in db.conn.execute(
-                f"""SELECT photo_id FROM species_representatives
-                    WHERE species = ? AND photo_id IN ({placeholders})""",
-                (species, *chunk),
-            ).fetchall():
-                rep_dst_preexisting.add(row["photo_id"])
         for chunk in _chunked(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
             rows = db.conn.execute(
