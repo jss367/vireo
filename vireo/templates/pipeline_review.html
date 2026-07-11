@@ -855,6 +855,14 @@ input[type="range"]::-moz-range-thumb {
   border-color: var(--accent);
   color: var(--accent);
 }
+.species-confirm-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.species-confirm-btn:disabled:hover {
+  border-color: var(--border-primary);
+  color: var(--text-dim);
+}
 
 /* Species dropdown */
 .species-dropdown {
@@ -3651,6 +3659,22 @@ function refreshMissesReviewBtn() {
 // -- Species confirmation --
 
 var activeDropdown = null;
+var speciesConfirmInFlight = {};
+
+function speciesConfirmPhotoKey(photoIds) {
+  return 'photos:' + (photoIds || []).slice().sort(function(a, b) { return a - b; }).join(',');
+}
+
+function speciesConfirmPendingFor(enc, burstIdx) {
+  if (!enc) return false;
+  var photoIds = null;
+  if (burstIdx != null && enc.bursts && enc.bursts[burstIdx]) {
+    photoIds = enc.bursts[burstIdx].photo_ids;
+  } else {
+    photoIds = enc.photo_ids;
+  }
+  return !!speciesConfirmInFlight[speciesConfirmPhotoKey(photoIds)];
+}
 
 function renderSpeciesWidget(enc, encIdx, level, burstIdx, pos) {
   // level: 'encounter' or 'burst'
@@ -3679,16 +3703,19 @@ function renderSpeciesWidget(enc, encIdx, level, burstIdx, pos) {
   }
 
   var hasCandidate = !!candidateSpecies;
+  var isPending = speciesConfirmPendingFor(enc, burstIdx);
   var cls = isConfirmed ? 'confirmed' : (hasCandidate ? 'unconfirmed' : 'missing');
   var badge = isConfirmed ? '&#10003;' : (hasCandidate ? '?' : '+');
   var widgetCls = level === 'burst' ? 'burst-species-widget' : 'species-widget';
 
   var idKey = (burstIdx != null ? burstIdx : 'enc') + '_' + pos;
   var html = '<span class="' + widgetCls + '" data-species-widget="1" data-level="' + level + '" data-enc="' + encIdx + '" data-burst="' + (burstIdx != null ? burstIdx : '') + '" data-pos="' + pos + '">';
-  html += '<span class="species-name ' + cls + '" title="' + (hasCandidate ? 'Change species' : 'Add species') + '" onclick="toggleSpeciesDropdown(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',\'' + pos + '\')">' + escapeHtml(displayName) + '</span>';
+  html += '<span class="species-name ' + cls + '" title="' + (isPending ? 'Confirming species...' : (hasCandidate ? 'Change species' : 'Add species')) + '"'
+    + (isPending ? '' : ' onclick="toggleSpeciesDropdown(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',\'' + pos + '\')"')
+    + '>' + escapeHtml(displayName) + '</span>';
   html += '<span class="species-badge ' + cls + '">' + badge + '</span>';
   if (!isConfirmed && hasCandidate) {
-    html += '<button class="species-confirm-btn" onclick="confirmSpecies(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',null)" title="Confirm as ' + escapeHtml(displayName) + '">&#10003;</button>';
+    html += '<button class="species-confirm-btn" onclick="confirmSpecies(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',null)" title="' + (isPending ? 'Confirming species...' : 'Confirm as ' + escapeHtml(displayName)) + '"' + (isPending ? ' disabled aria-busy="true"' : '') + '>&#10003;</button>';
   }
 
   // Dropdown — bottom-bar widget opens upward to stay inside the card
@@ -3726,6 +3753,7 @@ function renderSpeciesWidget(enc, encIdx, level, burstIdx, pos) {
 
 function toggleSpeciesDropdown(event, encIdx, burstIdx, pos) {
   event.stopPropagation();
+  if (pipelineResults && pipelineResults.encounters && speciesConfirmPendingFor(pipelineResults.encounters[encIdx], burstIdx)) return;
   pos = pos || 'top';
   var id = 'spDrop_' + encIdx + '_' + (burstIdx != null ? burstIdx : 'enc') + '_' + pos;
   var el = document.getElementById(id);
@@ -3888,7 +3916,7 @@ function refreshAfterSpeciesConfirm(encIdx, burstIdx, forceFullRender) {
 }
 
 async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
-  event.stopPropagation();
+  if (event && event.stopPropagation) event.stopPropagation();
   closeAllDropdowns();
 
   // /api/encounters/species reloads and rewrites the saved cache on the
@@ -3922,6 +3950,10 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
   } else {
     photoIds = enc.photo_ids;
   }
+  var pendingKey = speciesConfirmPhotoKey(photoIds);
+  if (speciesConfirmInFlight[pendingKey]) return;
+  speciesConfirmInFlight[pendingKey] = true;
+  rerenderSpeciesWidgets(encIdx, burstIdx);
 
   var body = { species: speciesName, photo_ids: photoIds };
   if (burstIdx != null) body.burst_index = burstIdx;
@@ -3936,9 +3968,15 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
       body: JSON.stringify(body),
     });
   } catch (e) {
+    delete speciesConfirmInFlight[pendingKey];
+    rerenderSpeciesWidgets(encIdx, burstIdx);
     return;
   }
-  if (!resp || !resp.ok) return;
+  delete speciesConfirmInFlight[pendingKey];
+  if (!resp || !resp.ok) {
+    rerenderSpeciesWidgets(encIdx, burstIdx);
+    return;
+  }
 
   // Prefer the server's encounter list — the endpoint may auto-detach a burst
   // into a new or adjacent encounter when its confirmed species differs from
