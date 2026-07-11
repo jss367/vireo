@@ -10493,52 +10493,32 @@ class Database:
             if not updates['name']:
                 raise ValueError("keyword name is empty after normalization")
 
-        # Auto-retype on rename: same logic as add_keyword. Only fires
-        # on an actual name change so idempotent PUT-style updates
-        # (client re-sending the existing name) don't unexpectedly
-        # reclassify a 'general' keyword once the taxa table is
-        # populated.
+        # On a rename/retype, resolve the effective (name, type) and, if
+        # they diverge from the stored row, look for a same-slot peer to
+        # merge into instead of writing a duplicate. Auto-retype (taxonomy
+        # promotion, taxon_id refresh) still fires only on an actual name
+        # change so idempotent PUT-style updates don't reclassify a
+        # 'general' keyword once the taxa table is populated.
         if 'name' in updates:
             new_name = updates['name']
             current = self.conn.execute(
                 "SELECT name, type, taxon_id, parent_id FROM keywords WHERE id = ?",
                 (keyword_id,),
             ).fetchone()
-            # Merge a rename whose normalized value already belongs to
-            # another keyword in the same slot (same parent_id) into that
-            # peer instead of writing a duplicate. Without this, top-level
-            # renames slip past UNIQUE(name, parent_id) — SQLite treats
-            # NULL parents as distinct — silently producing two peer
-            # `apapane` rows when `Other` is renamed to `‘apapane` and
-            # top-level `apapane` already exists; child renames instead
-            # raise IntegrityError from the UPDATE below and surface as a
-            # 500. Compare via vireo_normalize_keyword so a peer whose
-            # stored spelling still carries edge quotes (imported/upgraded
-            # rows) is also detected, and skip the row being renamed.
-            # Restrict to same-type peers: the dedup boundary elsewhere in
-            # this file is (name, parent_id, type), so a
-            # 'general'/'individual' keyword renamed to a name already
-            # used by a 'taxonomy' or 'location' peer at the same parent
-            # must NOT silently retag its photos across types. Cross-type
-            # matches fall through to the plain UPDATE — for NULL parents
-            # SQLite allows the coexisting cross-type row (mirrors
-            # add_keyword), and for non-NULL parents UNIQUE(name,
-            # parent_id) surfaces the collision as an IntegrityError so
-            # the caller sees a real failure instead of a silent
-            # cross-type merge.
-            # Returns the effective keyword id — the peer's id when a
-            # merge happened — so callers (api_update_keyword) can retarget
-            # sidecar/preferences bookkeeping onto the surviving row.
-            if current is not None and new_name != current["name"]:
+            if current is not None:
                 parent_id = current["parent_id"]
                 cur_type = current["type"]
-                # Resolve taxon match once so it can drive both the peer lookup
-                # (effective-type auto-promotion) and the auto-retype block
-                # below without a second query.
-                taxon_id = self._lookup_taxon_id_for_keyword(new_name)
+                name_changed = new_name != current["name"]
+                # Resolve taxon match lazily. Only rename actually needs it
+                # (both for auto-promotion below and for effective_type when
+                # no explicit type is passed).
+                taxon_id = (
+                    self._lookup_taxon_id_for_keyword(new_name)
+                    if name_changed else None
+                )
                 # Peer lookup must use the EFFECTIVE type, not the pre-update
-                # row type. Two ways the effective type can diverge from
-                # cur_type inside this same call:
+                # row type. Ways the effective type can diverge from cur_type
+                # inside this same call:
                 #   1. Explicit combined rename+retype: PUT /api/keywords/<id>
                 #      with {name: "‘apapane", type: "taxonomy"} on an
                 #      individual/general row. Filtering by cur_type would
@@ -10550,78 +10530,120 @@ class Database:
                 #      to taxonomy (setdefault('type', 'taxonomy')). The
                 #      peer lookup must anticipate that promotion or it
                 #      misses an existing taxonomy peer at the same slot.
+                #   3. Same-name retype: {name: "‘apapane", type: "taxonomy"}
+                #      on a general `apapane` row normalizes new_name back to
+                #      the current stored name, so name_changed is False, but
+                #      the effective type still moves general -> taxonomy.
+                #      Without running the peer check on retype, a top-level
+                #      taxonomy `apapane` peer is missed and the UPDATE
+                #      leaves two taxonomy rows that normalize to the same
+                #      key at the same slot.
                 effective_type = updates.get('type', cur_type)
                 if 'type' not in updates and cur_type == 'general' and taxon_id:
                     effective_type = 'taxonomy'
-                if parent_id is None:
-                    peer = self.conn.execute(
-                        "SELECT id FROM keywords "
-                        "WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE "
-                        "AND parent_id IS NULL AND type = ? AND id != ? LIMIT 1",
-                        (new_name, effective_type, keyword_id),
-                    ).fetchone()
-                else:
-                    peer = self.conn.execute(
-                        "SELECT id FROM keywords "
-                        "WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE "
-                        "AND parent_id = ? AND type = ? AND id != ? LIMIT 1",
-                        (new_name, parent_id, effective_type, keyword_id),
-                    ).fetchone()
-                if peer:
-                    self._merge_keyword_into(keyword_id, peer["id"])
-                    self.conn.commit()
-                    return peer["id"]
-                # No same-type peer, but a DIFFERENT-type peer at the
-                # same (name, parent_id) would hit the table-level
-                # UNIQUE(name, parent_id) constraint at UPDATE time for a
-                # non-NULL parent and surface as an uncaught
-                # IntegrityError/500. Detect it here and raise ValueError
-                # so api_update_keyword returns a documented 400. For
-                # NULL parents, UNIQUE(name, parent_id) treats each row
-                # as distinct, so a cross-type peer at the top level is
-                # allowed to coexist (mirrors add_keyword's behavior
-                # where non-'general' typed rows are intentionally
-                # separate even when named the same).
-                if parent_id is not None:
-                    cross = self.conn.execute(
-                        "SELECT id, type FROM keywords "
-                        "WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE "
-                        "AND parent_id = ? AND id != ? LIMIT 1",
-                        (new_name, parent_id, keyword_id),
-                    ).fetchone()
-                    if cross is not None:
-                        raise ValueError(
-                            f"cannot rename to {new_name!r}: a "
-                            f"{cross['type']!r} keyword with that name "
-                            f"already exists under this parent"
-                        )
-                # taxon_id was already resolved above so the peer lookup
-                # could compute the effective type; reuse it here.
+                type_changed = effective_type != cur_type
+                if name_changed or type_changed:
+                    # Merge a rename/retype whose effective (name, type) already
+                    # belongs to another keyword in the same slot into that
+                    # peer instead of writing a duplicate. Without this,
+                    # top-level renames slip past UNIQUE(name, parent_id) —
+                    # SQLite treats NULL parents as distinct — silently
+                    # producing two peer rows; child renames instead raise
+                    # IntegrityError from the UPDATE below and surface as a
+                    # 500. Compare via vireo_normalize_keyword so a peer whose
+                    # stored spelling still carries edge quotes
+                    # (imported/upgraded rows) is also detected, and skip the
+                    # row being renamed. Restrict to same-type peers: the
+                    # dedup boundary elsewhere in this file is
+                    # (name, parent_id, type), so a 'general'/'individual'
+                    # keyword renamed to a name already used by a 'taxonomy'
+                    # or 'location' peer at the same parent must NOT silently
+                    # retag its photos across types. Cross-type matches fall
+                    # through to the plain UPDATE — for NULL parents SQLite
+                    # allows the coexisting cross-type row (mirrors
+                    # add_keyword), and for non-NULL parents UNIQUE(name,
+                    # parent_id) surfaces the collision as an IntegrityError
+                    # so the caller sees a real failure instead of a silent
+                    # cross-type merge.
+                    # Returns the effective keyword id — the peer's id when a
+                    # merge happened — so callers (api_update_keyword) can
+                    # retarget sidecar/preferences bookkeeping onto the
+                    # surviving row.
+                    if parent_id is None:
+                        peer = self.conn.execute(
+                            "SELECT id FROM keywords "
+                            "WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE "
+                            "AND parent_id IS NULL AND type = ? AND id != ? LIMIT 1",
+                            (new_name, effective_type, keyword_id),
+                        ).fetchone()
+                    else:
+                        peer = self.conn.execute(
+                            "SELECT id FROM keywords "
+                            "WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE "
+                            "AND parent_id = ? AND type = ? AND id != ? LIMIT 1",
+                            (new_name, parent_id, effective_type, keyword_id),
+                        ).fetchone()
+                    if peer:
+                        self._merge_keyword_into(keyword_id, peer["id"])
+                        self.conn.commit()
+                        return peer["id"]
+                    # No same-type peer, but a DIFFERENT-type peer at the
+                    # same (name, parent_id) would hit the table-level
+                    # UNIQUE(name, parent_id) constraint at UPDATE time for a
+                    # non-NULL parent and surface as an uncaught
+                    # IntegrityError/500. Detect it here and raise ValueError
+                    # so api_update_keyword returns a documented 400. For
+                    # NULL parents, UNIQUE(name, parent_id) treats each row
+                    # as distinct, so a cross-type peer at the top level is
+                    # allowed to coexist (mirrors add_keyword's behavior
+                    # where non-'general' typed rows are intentionally
+                    # separate even when named the same).
+                    if parent_id is not None:
+                        cross = self.conn.execute(
+                            "SELECT id, type FROM keywords "
+                            "WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE "
+                            "AND parent_id = ? AND id != ? LIMIT 1",
+                            (new_name, parent_id, keyword_id),
+                        ).fetchone()
+                        if cross is not None:
+                            raise ValueError(
+                                f"cannot rename to {new_name!r}: a "
+                                f"{cross['type']!r} keyword with that name "
+                                f"already exists under this parent"
+                            )
 
-                if cur_type == 'general':
-                    # Only promote to taxonomy if a match exists; otherwise
-                    # leave type/taxon_id alone.
-                    if taxon_id:
-                        updates.setdefault('type', 'taxonomy')
-                        # Gate taxon_id on the EFFECTIVE type so an
-                        # explicit non-taxonomy type kwarg (e.g.
-                        # type='location') doesn't end up with a
-                        # taxonomy link. Mirror add_keyword's invariant
-                        # for the auto-promoted case: type='taxonomy'
-                        # backed by a matched taxon implies is_species=1.
-                        if updates.get('type') == 'taxonomy':
-                            updates.setdefault('taxon_id', taxon_id)
-                            updates['is_species'] = 1
-                elif (cur_type == 'taxonomy' and taxon_id
-                      and updates.get('type', 'taxonomy') == 'taxonomy'):
-                    # Already taxonomy: refresh taxon_id only if the new
-                    # name matches a (possibly different) taxon AND the
-                    # effective type stays 'taxonomy' (caller may demote
-                    # to 'location' etc.). If no match, leave the existing
-                    # link in place.
-                    updates.setdefault('taxon_id', taxon_id)
-                # Other manual types ('location', 'people', etc.) are
-                # preserved — user intent wins.
+                # Auto-retype block only fires on an actual name change so
+                # idempotent PUT-style updates (client re-sending the existing
+                # name) don't unexpectedly reclassify a 'general' keyword
+                # once the taxa table is populated. taxon_id was resolved
+                # above (only when name_changed) so the peer lookup could
+                # compute the effective type; reuse it here.
+                if name_changed:
+                    if cur_type == 'general':
+                        # Only promote to taxonomy if a match exists;
+                        # otherwise leave type/taxon_id alone.
+                        if taxon_id:
+                            updates.setdefault('type', 'taxonomy')
+                            # Gate taxon_id on the EFFECTIVE type so an
+                            # explicit non-taxonomy type kwarg (e.g.
+                            # type='location') doesn't end up with a
+                            # taxonomy link. Mirror add_keyword's invariant
+                            # for the auto-promoted case: type='taxonomy'
+                            # backed by a matched taxon implies
+                            # is_species=1.
+                            if updates.get('type') == 'taxonomy':
+                                updates.setdefault('taxon_id', taxon_id)
+                                updates['is_species'] = 1
+                    elif (cur_type == 'taxonomy' and taxon_id
+                          and updates.get('type', 'taxonomy') == 'taxonomy'):
+                        # Already taxonomy: refresh taxon_id only if the new
+                        # name matches a (possibly different) taxon AND the
+                        # effective type stays 'taxonomy' (caller may demote
+                        # to 'location' etc.). If no match, leave the
+                        # existing link in place.
+                        updates.setdefault('taxon_id', taxon_id)
+                    # Other manual types ('location', 'people', etc.) are
+                    # preserved — user intent wins.
 
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         values = list(updates.values()) + [keyword_id]

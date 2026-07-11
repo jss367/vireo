@@ -13233,14 +13233,16 @@ def test_update_keyword_rename_normalizes_edge_quotes(tmp_path):
     bypasses the duplicate-prevention contract enforced on insert."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
+    try:
+        kid = db.add_keyword("apapane")
+        db.update_keyword(kid, name="‘apapane")
 
-    kid = db.add_keyword("apapane")
-    db.update_keyword(kid, name="‘apapane")
-
-    row = db.conn.execute(
-        "SELECT name FROM keywords WHERE id = ?", (kid,)
-    ).fetchone()
-    assert row["name"] == "apapane"
+        row = db.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (kid,)
+        ).fetchone()
+        assert row["name"] == "apapane"
+    finally:
+        db.close()
 
 
 def test_update_keyword_rename_rejects_empty_after_normalization(tmp_path):
@@ -13250,18 +13252,21 @@ def test_update_keyword_rename_rejects_empty_after_normalization(tmp_path):
     import pytest
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    kid = db.add_keyword("Real Keyword")
+    try:
+        kid = db.add_keyword("Real Keyword")
 
-    with pytest.raises(ValueError):
-        db.update_keyword(kid, name="'")
-    with pytest.raises(ValueError):
-        db.update_keyword(kid, name="“”")
+        with pytest.raises(ValueError):
+            db.update_keyword(kid, name="'")
+        with pytest.raises(ValueError):
+            db.update_keyword(kid, name="“”")
 
-    # Original name still in place.
-    row = db.conn.execute(
-        "SELECT name FROM keywords WHERE id = ?", (kid,)
-    ).fetchone()
-    assert row["name"] == "Real Keyword"
+        # Original name still in place.
+        row = db.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (kid,)
+        ).fetchone()
+        assert row["name"] == "Real Keyword"
+    finally:
+        db.close()
 
 
 def test_update_keyword_rename_preserves_okina(tmp_path):
@@ -13270,14 +13275,63 @@ def test_update_keyword_rename_preserves_okina(tmp_path):
     'ʻApapane' are the point of that carve-out."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
+    try:
+        kid = db.add_keyword("Placeholder")
+        db.update_keyword(kid, name="ʻApapane")
 
-    kid = db.add_keyword("Placeholder")
-    db.update_keyword(kid, name="ʻApapane")
+        row = db.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (kid,)
+        ).fetchone()
+        assert row["name"] == "ʻApapane"
+    finally:
+        db.close()
 
-    row = db.conn.execute(
-        "SELECT name FROM keywords WHERE id = ?", (kid,)
-    ).fetchone()
-    assert row["name"] == "ʻApapane"
+
+def test_update_keyword_same_name_retype_merges_into_peer(tmp_path):
+    """A PUT that normalizes the name back to the current stored value but
+    changes the type (e.g. `{name: "‘apapane", type: "taxonomy"}` on a
+    general `apapane` row) must run the same peer/collision check that a
+    real rename does. Otherwise the UPDATE silently produces two
+    taxonomy rows that normalize to the same key at the same slot,
+    because UNIQUE(name, parent_id) doesn't constrain NULL parents.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        # Top-level taxonomy `apapane` already exists.
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type) "
+            "VALUES (?, NULL, 1, 'taxonomy')",
+            ("apapane",),
+        )
+        taxonomy_id = cur.lastrowid
+        # A separate top-level general `apapane` row also exists.
+        general_id = db.add_keyword("apapane", kw_type="general")
+        assert general_id != taxonomy_id
+
+        # PUT-style retype whose name normalizes back to the current stored
+        # value (`‘apapane` → `apapane`) but whose type moves to
+        # 'taxonomy'. Must merge into the existing taxonomy peer rather
+        # than promoting the general row and leaving two taxonomy rows.
+        effective_id = db.update_keyword(
+            general_id, name="‘apapane", type="taxonomy"
+        )
+        assert effective_id == taxonomy_id
+
+        # Exactly one top-level taxonomy `apapane` row must remain.
+        rows = db.conn.execute(
+            "SELECT id FROM keywords "
+            "WHERE vireo_normalize_keyword(name) = 'apapane' COLLATE NOCASE "
+            "AND parent_id IS NULL AND type = 'taxonomy'"
+        ).fetchall()
+        assert [r["id"] for r in rows] == [taxonomy_id]
+        # The old general row must be gone (merged away).
+        gone = db.conn.execute(
+            "SELECT id FROM keywords WHERE id = ?", (general_id,)
+        ).fetchone()
+        assert gone is None
+    finally:
+        db.close()
 
 
 def test_add_keyword_species_prefers_taxonomy_peer_over_general_exact_match(tmp_path):
@@ -13291,35 +13345,38 @@ def test_add_keyword_species_prefers_taxonomy_peer_over_general_exact_match(tmp_
     """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    # Legacy edge-quoted taxonomy row that survived normalization on
-    # insert (the UDF fallback is only consulted for casing/quote variants
-    # of the requested name; here we insert directly to simulate the
-    # imported-DB shape Codex flagged).
-    cur = db.conn.execute(
-        "INSERT INTO keywords (name, parent_id, is_species, type) "
-        "VALUES (?, NULL, 1, 'taxonomy')",
-        ("‘apapane",),
-    )
-    taxonomy_id = cur.lastrowid
-    # A clean general row also exists at the same slot.
-    general_id = db.add_keyword("apapane", kw_type='general')
-    assert general_id != taxonomy_id
+    try:
+        # Legacy edge-quoted taxonomy row that survived normalization on
+        # insert (the UDF fallback is only consulted for casing/quote
+        # variants of the requested name; here we insert directly to
+        # simulate the imported-DB shape Codex flagged).
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type) "
+            "VALUES (?, NULL, 1, 'taxonomy')",
+            ("‘apapane",),
+        )
+        taxonomy_id = cur.lastrowid
+        # A clean general row also exists at the same slot.
+        general_id = db.add_keyword("apapane", kw_type='general')
+        assert general_id != taxonomy_id
 
-    resolved = db.add_keyword("apapane", is_species=True)
-    assert resolved == taxonomy_id
+        resolved = db.add_keyword("apapane", is_species=True)
+        assert resolved == taxonomy_id
 
-    # Guard against the silent-duplicate: we must NOT have promoted the
-    # general row into a second taxonomy row.
-    rows = db.conn.execute(
-        "SELECT id, type FROM keywords "
-        "WHERE vireo_normalize_keyword(name) = 'apapane' COLLATE NOCASE "
-        "AND parent_id IS NULL AND type = 'taxonomy'"
-    ).fetchall()
-    assert [r["id"] for r in rows] == [taxonomy_id]
-    general_row = db.conn.execute(
-        "SELECT type FROM keywords WHERE id = ?", (general_id,)
-    ).fetchone()
-    assert general_row["type"] == "general"
+        # Guard against the silent-duplicate: we must NOT have promoted the
+        # general row into a second taxonomy row.
+        rows = db.conn.execute(
+            "SELECT id, type FROM keywords "
+            "WHERE vireo_normalize_keyword(name) = 'apapane' COLLATE NOCASE "
+            "AND parent_id IS NULL AND type = 'taxonomy'"
+        ).fetchall()
+        assert [r["id"] for r in rows] == [taxonomy_id]
+        general_row = db.conn.execute(
+            "SELECT type FROM keywords WHERE id = ?", (general_id,)
+        ).fetchone()
+        assert general_row["type"] == "general"
+    finally:
+        db.close()
 
 
 def test_add_keyword_untyped_prefers_taxonomy_peer_over_general_auto_promote(
@@ -13336,39 +13393,43 @@ def test_add_keyword_untyped_prefers_taxonomy_peer_over_general_auto_promote(
     """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    # Seed a taxon so `_lookup_taxon_id_for_keyword('apapane')` matches
-    # and would otherwise trigger the auto-promote path.
-    db.conn.execute(
-        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
-        "VALUES (1, 'Himatione sanguinea', 'apapane', 'species', 'Animalia')"
-    )
-    # Legacy edge-quoted taxonomy row (imported/upgraded DB shape).
-    cur = db.conn.execute(
-        "INSERT INTO keywords (name, parent_id, is_species, type) "
-        "VALUES (?, NULL, 1, 'taxonomy')",
-        ("‘apapane",),
-    )
-    taxonomy_id = cur.lastrowid
-    # A clean general row exists at the same slot.
-    general_id = db.add_keyword("apapane", kw_type='general')
-    assert general_id != taxonomy_id
+    try:
+        # Seed a taxon so `_lookup_taxon_id_for_keyword('apapane')` matches
+        # and would otherwise trigger the auto-promote path.
+        db.conn.execute(
+            "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+            "VALUES (1, 'Himatione sanguinea', 'apapane', 'species', 'Animalia')"
+        )
+        # Legacy edge-quoted taxonomy row (imported/upgraded DB shape).
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type) "
+            "VALUES (?, NULL, 1, 'taxonomy')",
+            ("‘apapane",),
+        )
+        taxonomy_id = cur.lastrowid
+        # A clean general row exists at the same slot.
+        general_id = db.add_keyword("apapane", kw_type='general')
+        assert general_id != taxonomy_id
 
-    # Untyped call from a generic keyword path — no is_species, no kw_type.
-    resolved = db.add_keyword("apapane")
-    assert resolved == taxonomy_id
+        # Untyped call from a generic keyword path — no is_species, no
+        # kw_type.
+        resolved = db.add_keyword("apapane")
+        assert resolved == taxonomy_id
 
-    # Guard against the silent-duplicate: the general row must NOT have
-    # been promoted into a second taxonomy row.
-    taxonomy_rows = db.conn.execute(
-        "SELECT id FROM keywords "
-        "WHERE vireo_normalize_keyword(name) = 'apapane' COLLATE NOCASE "
-        "AND parent_id IS NULL AND type = 'taxonomy'"
-    ).fetchall()
-    assert [r["id"] for r in taxonomy_rows] == [taxonomy_id]
-    general_row = db.conn.execute(
-        "SELECT type FROM keywords WHERE id = ?", (general_id,)
-    ).fetchone()
-    assert general_row["type"] == "general"
+        # Guard against the silent-duplicate: the general row must NOT
+        # have been promoted into a second taxonomy row.
+        taxonomy_rows = db.conn.execute(
+            "SELECT id FROM keywords "
+            "WHERE vireo_normalize_keyword(name) = 'apapane' COLLATE NOCASE "
+            "AND parent_id IS NULL AND type = 'taxonomy'"
+        ).fetchall()
+        assert [r["id"] for r in taxonomy_rows] == [taxonomy_id]
+        general_row = db.conn.execute(
+            "SELECT type FROM keywords WHERE id = ?", (general_id,)
+        ).fetchone()
+        assert general_row["type"] == "general"
+    finally:
+        db.close()
 
 
 def test_add_keyword_untyped_prefers_higher_priority_peer_over_individual_exact(
@@ -13385,27 +13446,32 @@ def test_add_keyword_untyped_prefers_higher_priority_peer_over_individual_exact(
     """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    # Legacy edge-quoted taxonomy row (imported/upgraded DB shape).
-    cur = db.conn.execute(
-        "INSERT INTO keywords (name, parent_id, is_species, type) "
-        "VALUES (?, NULL, 1, 'taxonomy')",
-        ("‘apapane",),
-    )
-    taxonomy_id = cur.lastrowid
-    # A clean individual row also exists at the same slot (e.g. a person
-    # tag). This is a deliberate lower-priority type.
-    individual_id = db.add_keyword("apapane", kw_type='individual')
-    assert individual_id != taxonomy_id
+    try:
+        # Legacy edge-quoted taxonomy row (imported/upgraded DB shape).
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type) "
+            "VALUES (?, NULL, 1, 'taxonomy')",
+            ("‘apapane",),
+        )
+        taxonomy_id = cur.lastrowid
+        # A clean individual row also exists at the same slot (e.g. a
+        # person tag). This is a deliberate lower-priority type.
+        individual_id = db.add_keyword("apapane", kw_type='individual')
+        assert individual_id != taxonomy_id
 
-    # Untyped call from a generic keyword path — no is_species, no kw_type.
-    resolved = db.add_keyword("apapane")
-    assert resolved == taxonomy_id
+        # Untyped call from a generic keyword path — no is_species, no
+        # kw_type.
+        resolved = db.add_keyword("apapane")
+        assert resolved == taxonomy_id
 
-    # The individual row must remain individual — no silent type rewrite.
-    individual_row = db.conn.execute(
-        "SELECT type FROM keywords WHERE id = ?", (individual_id,)
-    ).fetchone()
-    assert individual_row["type"] == "individual"
+        # The individual row must remain individual — no silent type
+        # rewrite.
+        individual_row = db.conn.execute(
+            "SELECT type FROM keywords WHERE id = ?", (individual_id,)
+        ).fetchone()
+        assert individual_row["type"] == "individual"
+    finally:
+        db.close()
 
 
 def test_add_photo_retries_on_database_is_locked(tmp_path):
