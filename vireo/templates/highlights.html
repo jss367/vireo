@@ -935,13 +935,16 @@ function applyBucketOrderingKeysFromPage(bucket, page) {
 // 500 rows, and the next "Load more" (which offsets by `target.photos.length`)
 // would then start at 500 and render up to 1000 cards the user never paged
 // through, plus bloat every pick's Save-as-Collection payload.
-// Returns a promise so callers can await the refresh before rendering.
+// Returns a promise resolving to true only when this call actually wrote to
+// `target.photos` — a superseded (older) refetch resolves to false so its
+// caller can skip rendering the stale locally-mutated flag against the old
+// bucket order and let the winning refetch's render fire instead.
 async function refetchBucketFromZero(target, isUnidentified) {
-  if (!target) return;
+  if (!target) return true;
   var currentLen = Array.isArray(target.photos) ? target.photos.length : 0;
   var speciesKey = isUnidentified ? '__unidentified__' : target.species;
   var targetLen = currentLen;
-  if (targetLen <= 0) return;
+  if (targetLen <= 0) return true;
   // Stamp this refetch so a slower earlier one for the same bucket can't
   // clobber a newer response (Pick → Unpick before the first GET resolves).
   var seq = (bucketRefetchSeq[speciesKey] || 0) + 1;
@@ -958,20 +961,21 @@ async function refetchBucketFromZero(target, isUnidentified) {
     params.set('offset', offset);
     params.set('limit', Math.min(500, targetLen - offset));
     var page = await safeFetch('/api/highlights/bucket?' + params);
-    if (bucketRefetchSeq[speciesKey] !== seq) return;
-    if (!page || !Array.isArray(page.photos)) return;
+    if (bucketRefetchSeq[speciesKey] !== seq) return false;
+    if (!page || !Array.isArray(page.photos)) return true;
     lastPage = page;
     if (page.photos.length === 0) break;
     allPhotos = allPhotos.concat(page.photos);
     if (!page.has_more) break;
   }
-  if (!lastPage) return;
-  if (bucketRefetchSeq[speciesKey] !== seq) return;
+  if (!lastPage) return true;
+  if (bucketRefetchSeq[speciesKey] !== seq) return false;
   target.photos = allPhotos;
   target.loaded_count = allPhotos.length;
   target.has_more = !!lastPage.has_more;
   if (typeof lastPage.photo_count === 'number') target.photo_count = lastPage.photo_count;
   applyBucketOrderingKeysFromPage(target, lastPage);
+  return true;
 }
 
 function lightboxIsOpenOnPhoto(photoId) {
@@ -1388,7 +1392,7 @@ document.addEventListener('lightbox:flagchanged', function(e) {
     // refetch exposes a transient stale order: tests and collection saves can
     // observe the picked class while the photo is still in its old position.
     refetchBucketFromZero(target, isUnidentified)
-      .then(render)
+      .then(function(applied) { if (applied) render(); })
       .catch(function() { render(); });
   }
 });
