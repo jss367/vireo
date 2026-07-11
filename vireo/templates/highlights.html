@@ -229,6 +229,11 @@ var lastHighlightReject = null;
 // out-of-band (another tab, Undo panel), which it must be trusted to include.
 var highlightsLoadSeq = 0;
 var rejectedAtLoadSeq = {};
+// Per-bucket monotonic counter for refetchBucketFromZero. Rapid Pick/Unpick
+// cycles on the same bucket can leave two /api/highlights/bucket refetches in
+// flight; without a stamp, an older response can arrive after a newer one and
+// overwrite the fresher photos/ordering keys.
+var bucketRefetchSeq = {};
 
 function escapeAttr(s) {
   if (s === null || s === undefined) return '';
@@ -911,6 +916,10 @@ async function refetchBucketFromZero(target, isUnidentified) {
   var speciesKey = isUnidentified ? '__unidentified__' : target.species;
   var targetLen = currentLen;
   if (targetLen <= 0) return;
+  // Stamp this refetch so a slower earlier one for the same bucket can't
+  // clobber a newer response (Pick → Unpick before the first GET resolves).
+  var seq = (bucketRefetchSeq[speciesKey] || 0) + 1;
+  bucketRefetchSeq[speciesKey] = seq;
   var allPhotos = [];
   var lastPage = null;
   for (var offset = 0; offset < targetLen; offset += 500) {
@@ -923,6 +932,7 @@ async function refetchBucketFromZero(target, isUnidentified) {
     params.set('offset', offset);
     params.set('limit', Math.min(500, targetLen - offset));
     var page = await safeFetch('/api/highlights/bucket?' + params);
+    if (bucketRefetchSeq[speciesKey] !== seq) return;
     if (!page || !Array.isArray(page.photos)) return;
     lastPage = page;
     if (page.photos.length === 0) break;
@@ -930,6 +940,7 @@ async function refetchBucketFromZero(target, isUnidentified) {
     if (!page.has_more) break;
   }
   if (!lastPage) return;
+  if (bucketRefetchSeq[speciesKey] !== seq) return;
   target.photos = allPhotos;
   target.loaded_count = allPhotos.length;
   target.has_more = !!lastPage.has_more;
