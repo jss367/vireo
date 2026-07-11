@@ -537,10 +537,10 @@ jobs:
         if: runner.os == 'Windows' && (startsWith(github.ref, 'refs/tags/v') || inputs.tag_name != '' || inputs.sign_windows_candidate)
         shell: pwsh
         env:
-          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          if (-not $env:TAURI_PRIVATE_KEY) { throw "TAURI_SIGNING_PRIVATE_KEY is required" }
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { throw "TAURI_SIGNING_PRIVATE_KEY is required" }
           Get-ChildItem signed-windows -Recurse -File |
             Where-Object { $_.Extension -in '.exe', '.msi' } |
             ForEach-Object {
@@ -640,6 +640,11 @@ jobs:
       - name: Collect release files
         run: |
           mkdir -p release-files
+          # Drop the signing-input artifact so it can't be scooped into the
+          # release. Its installers share filenames with the SignPath-signed
+          # outputs and would otherwise overwrite them (or leave signed .sig
+          # sidecars paired with unsigned installer bytes).
+          rm -rf artifacts/vireo-windows-installers-unsigned
           # Regular installers (unique names across platforms)
           find artifacts -type f \( \
             -name "*.dmg" -o \
