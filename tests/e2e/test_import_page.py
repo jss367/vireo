@@ -63,221 +63,6 @@ def test_import_destination_browse_button_sets_destination(live_server, page):
     expect(page.locator("#destInput")).to_have_value("/tmp/archive")
 
 
-def test_import_destination_preview_shows_final_folders(live_server, page):
-    url = live_server["url"]
-
-    def destination_preview(route):
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps({
-                "total_photos": 1431,
-                "total_folders": 1,
-                "new_folders": 1,
-                "existing_folders": 0,
-                "managed_archive": {
-                    "path": "/Volumes/Photography/Raw Files/USA",
-                    "photo_count": 45302,
-                },
-                "folders": [{
-                    "path": "2026/07/11",
-                    "full_path": (
-                        "/Volumes/Photography/Raw Files/USA/2026/2026/07/11"
-                    ),
-                    "count": 1431,
-                    "exists": False,
-                }],
-            }),
-        )
-
-    page.route("**/api/import/destination-preview", destination_preview)
-    page.goto(f"{url}/import")
-    page.locator("#modeCopy").check()
-    page.evaluate(
-        """
-        () => {
-          addSourcePath('/Volumes/NIKON Z 8/DCIM');
-          document.getElementById('destInput').value =
-            '/Volumes/Photography/Raw Files/USA/2026';
-          document.getElementById('folderTemplate').value = '%Y/%m/%d';
-        }
-        """
-    )
-
-    page.locator("[data-testid='import-preview-folders-btn']").click()
-
-    expect(page.locator("[data-testid='import-folder-preview-results']")).to_be_visible()
-    expect(page.locator("#folderPreviewList")).to_contain_text(
-        "/Volumes/Photography/Raw Files/USA/2026/2026/07/11"
-    )
-    expect(page.locator("[data-testid='import-managed-archive-callout']")).to_contain_text(
-        "/Volumes/Photography/Raw Files/USA"
-    )
-
-    page.locator("#folderTemplate").fill("%Y/%Y-%m-%d")
-    expect(page.locator("#folderPreviewStale")).to_be_visible()
-
-
-def test_copy_import_start_requires_current_destination_preview(live_server, page):
-    url = live_server["url"]
-    captured = {"started": False}
-
-    def destination_preview(route):
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps({
-                "total_photos": 1,
-                "total_folders": 1,
-                "new_folders": 1,
-                "existing_folders": 0,
-                "managed_archive": None,
-                "folders": [{
-                    "path": "2026/2026-07-11",
-                    "full_path": "/archive/2026/2026-07-11",
-                    "count": 1,
-                    "exists": False,
-                }],
-            }),
-        )
-
-    def start_import(route):
-        captured["started"] = True
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps({"job_id": "import-photos-test"}),
-        )
-
-    page.route("**/api/import/destination-preview", destination_preview)
-    page.route("**/api/jobs/import-photos", start_import)
-    page.goto(f"{url}/import")
-    page.locator("#modeCopy").check()
-    page.evaluate(
-        """
-        () => {
-          addSourcePath('/card');
-          document.getElementById('destInput').value = '/archive';
-        }
-        """
-    )
-
-    page.locator("#btnStart").click()
-
-    expect(page.locator("[data-testid='import-folder-preview-results']")).to_be_visible()
-    expect(page.locator("#importError")).to_contain_text(
-        "Review the destination preview"
-    )
-    assert captured["started"] is False
-
-
-def test_import_destination_preview_ignores_stale_response(live_server, page):
-    url = live_server["url"]
-    page.goto(f"{url}/import")
-    page.locator("#modeCopy").check()
-    page.evaluate(
-        """
-        () => {
-          const originalFetch = window.fetch.bind(window);
-          window.__resolvePreview = null;
-          window.fetch = (input, init) => {
-            const target = typeof input === 'string' ? input : input.url;
-            if (target && target.indexOf('/api/import/destination-preview') === 0) {
-              return new Promise((resolve) => {
-                window.__resolvePreview = () => resolve(new Response(JSON.stringify({
-                  total_photos: 1,
-                  total_folders: 1,
-                  new_folders: 1,
-                  existing_folders: 0,
-                  managed_archive: null,
-                  folders: [{
-                    path: '2026/07/11',
-                    full_path: '/archive/2026/07/11',
-                    count: 1,
-                    exists: false,
-                  }],
-                }), {status: 200, headers: {'Content-Type': 'application/json'}}));
-              });
-            }
-            return originalFetch(input, init);
-          };
-          addSourcePath('/card');
-          document.getElementById('destInput').value = '/archive';
-        }
-        """
-    )
-
-    page.locator("[data-testid='import-preview-folders-btn']").click()
-    page.wait_for_function("window.__resolvePreview !== null")
-    page.locator("#folderTemplate").fill("%Y/%Y-%m-%d")
-    page.evaluate("() => window.__resolvePreview()")
-
-    expect(page.locator("[data-testid='import-folder-preview-results']")).to_be_hidden()
-    expect(page.locator("[data-testid='import-preview-folders-btn']")).to_have_text(
-        "Preview folder structure"
-    )
-
-
-def test_import_destination_preview_keeps_stale_warning_after_failed_refresh(live_server, page):
-    url = live_server["url"]
-
-    successful_body = json.dumps({
-        "total_photos": 1,
-        "total_folders": 1,
-        "new_folders": 1,
-        "existing_folders": 0,
-        "managed_archive": None,
-        "folders": [{
-            "path": "2026/07/11",
-            "full_path": "/archive/2026/07/11",
-            "count": 1,
-            "exists": False,
-        }],
-    })
-    state = {"calls": 0}
-
-    def destination_preview(route):
-        state["calls"] += 1
-        if state["calls"] == 1:
-            route.fulfill(
-                status=200,
-                content_type="application/json",
-                body=successful_body,
-            )
-        else:
-            route.fulfill(
-                status=500,
-                content_type="application/json",
-                body=json.dumps({"error": "preview blew up"}),
-            )
-
-    page.route("**/api/import/destination-preview", destination_preview)
-    page.goto(f"{url}/import")
-    page.locator("#modeCopy").check()
-    page.evaluate(
-        """
-        () => {
-          addSourcePath('/card');
-          document.getElementById('destInput').value = '/archive';
-          document.getElementById('folderTemplate').value = '%Y/%m/%d';
-        }
-        """
-    )
-
-    page.locator("[data-testid='import-preview-folders-btn']").click()
-    expect(page.locator("[data-testid='import-folder-preview-results']")).to_be_visible()
-    expect(page.locator("#folderPreviewList")).to_contain_text("/archive/2026/07/11")
-
-    page.locator("#folderTemplate").fill("%Y/%Y-%m-%d")
-    expect(page.locator("#folderPreviewStale")).to_be_visible()
-
-    page.locator("[data-testid='import-preview-folders-btn']").click()
-
-    expect(page.locator("#folderPreviewStale")).to_be_visible()
-    expect(page.locator("#folderPreviewList")).to_contain_text("/archive/2026/07/11")
-    expect(page.locator("#previewFoldersHint")).to_contain_text("preview blew up")
-
-
 def test_import_custom_extensions_feed_preview(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/import")
@@ -375,40 +160,112 @@ def test_import_preview_passes_verify_by_hash_to_duplicate_check(live_server, pa
     assert body["verify_by_hash"] is True
 
 
-def test_import_destination_preview_excludes_skipped_duplicates(live_server, page):
+def test_import_preview_shows_destination_folder_structure(live_server, page):
+    """Copy-mode preview surfaces the destination folder structure (new vs
+    existing folders) and a managed-archive callout, wired to
+    /api/import/destination-preview. Skipped duplicates are excluded so the
+    folder counts match the files that will actually land."""
+    url = live_server["url"]
+    captured = {}
+
+    def folder_preview(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "files": [
+                    {"path": "/tmp/card-a/IMG_0001.jpg"},
+                    {"path": "/tmp/card-a/IMG_0002.jpg"},
+                ],
+            }),
+        )
+
+    def check_duplicates(route):
+        frame = (
+            "data: " + json.dumps({
+                "duplicates": ["/tmp/card-a/IMG_0002.jpg"],
+                "checked": 2, "total": 2,
+            }) + "\n\n"
+            + "data: " + json.dumps({
+                "done": True, "duplicate_count": 1, "checked": 2, "total": 2,
+            }) + "\n\n"
+        )
+        route.fulfill(
+            status=200, content_type="text/event-stream", body=frame,
+        )
+
+    def destination_preview(route):
+        captured["body"] = json.loads(route.request.post_data or "{}")
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "folders": [
+                    {"path": "2026/2026-07-01",
+                     "full_path": "/archive/2026/2026-07-01",
+                     "count": 1, "exists": False},
+                    {"path": "2026/2026-07-02",
+                     "full_path": "/archive/2026/2026-07-02",
+                     "count": 1, "exists": True},
+                ],
+                "total_photos": 2,
+                "total_folders": 2,
+                "new_folders": 1,
+                "existing_folders": 1,
+                "managed_archive": {"path": "/archive", "photo_count": 1284},
+            }),
+        )
+
+    page.route("**/api/import/folder-preview", folder_preview)
+    page.route("**/api/import/check-duplicates", check_duplicates)
+    page.route("**/api/import/destination-preview", destination_preview)
+    page.goto(f"{url}/import")
+
+    page.locator("#modeCopy").check()
+    page.locator("#sourceInput").fill("/tmp/card-a")
+    page.locator("#btnAddSource").click()
+    page.locator("#destInput").fill("/archive")
+    page.locator("#btnPreview").click()
+
+    structure = page.locator("#destStructure")
+    expect(structure).to_be_visible()
+    expect(structure).to_contain_text(
+        "2 photos → 2 folders (1 new, 1 existing)"
+    )
+    expect(structure).to_contain_text("Merging into a managed archive at")
+    expect(structure).to_contain_text("/archive")
+    expect(structure).to_contain_text("1284 photos already cataloged")
+    expect(structure).to_contain_text("2026/2026-07-01")
+    expect(structure).to_contain_text("new")
+    expect(structure).to_contain_text("existing")
+
+    # The structure block is only made visible after destination-preview
+    # resolves, so captured["body"] is populated by the time we get here.
+    # The skipped duplicate is excluded from the structure preview so the
+    # new/existing folder counts reflect the copy set, not every file found.
+    assert captured["body"]["exclude_paths"] == ["/tmp/card-a/IMG_0002.jpg"]
+    assert captured["body"]["destination"] == "/archive"
+    assert captured["body"]["file_types"] == "both"
+
+
+def test_import_destination_structure_ignores_stale_response(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/import")
     page.evaluate(
         """
         () => {
           const originalFetch = window.fetch.bind(window);
-          window.__dupBody = null;
-          window.__destPreviewBody = null;
+          window.__resolveDestStructure = null;
           window.fetch = (input, init) => {
             const target = typeof input === 'string' ? input : input.url;
             if (target && target.indexOf('/api/import/folder-preview') === 0) {
               return Promise.resolve(new Response(JSON.stringify({
-                total_count: 2,
-                total_size: 0,
-                type_breakdown: {'.jpg': 2},
-                duplicate_count: 0,
-                files: [
-                  {path: '/tmp/card-a/DUP.jpg'},
-                  {path: '/tmp/card-a/NEW.jpg'},
-                ],
+                files: [{path: '/tmp/card-a/IMG_0001.jpg'}],
               }), {status: 200, headers: {'Content-Type': 'application/json'}}));
             }
             if (target && target.indexOf('/api/import/check-duplicates') === 0) {
-              window.__dupBody = JSON.parse(init.body);
               const frame = 'data: ' + JSON.stringify({
-                duplicates: ['/tmp/card-a/DUP.jpg'],
-                checked: 2,
-                total: 2,
-              }) + '\\n\\n' + 'data: ' + JSON.stringify({
-                done: true,
-                duplicate_count: 1,
-                checked: 2,
-                total: 2,
+                done: true, duplicate_count: 0, checked: 1, total: 1,
               }) + '\\n\\n';
               return Promise.resolve(new Response(frame, {
                 status: 200,
@@ -416,37 +273,37 @@ def test_import_destination_preview_excludes_skipped_duplicates(live_server, pag
               }));
             }
             if (target && target.indexOf('/api/import/destination-preview') === 0) {
-              window.__destPreviewBody = JSON.parse(init.body);
-              return Promise.resolve(new Response(JSON.stringify({
-                total_photos: 1,
-                total_folders: 1,
-                new_folders: 1,
-                existing_folders: 0,
-                managed_archive: null,
-                folders: [{
-                  path: '2026/07/11',
-                  full_path: '/archive/2026/07/11',
-                  count: 1,
-                  exists: false,
-                }],
-              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+              return new Promise((resolve) => {
+                window.__resolveDestStructure = () => resolve(new Response(JSON.stringify({
+                  folders: [{
+                    path: '2026/07/11',
+                    full_path: '/archive/2026/07/11',
+                    count: 1,
+                    exists: false,
+                  }],
+                  total_photos: 1,
+                  total_folders: 1,
+                  new_folders: 1,
+                  existing_folders: 0,
+                  managed_archive: null,
+                }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+              });
             }
             return originalFetch(input, init);
           };
           addSourcePath('/tmp/card-a');
-          document.getElementById('destInput').value = '/archive';
         }
         """
     )
 
     page.locator("#modeCopy").check()
-    page.locator("[data-testid='import-preview-folders-btn']").click()
-    page.wait_for_function("window.__destPreviewBody !== null")
+    page.locator("#destInput").fill("/archive")
+    page.locator("#btnPreview").click()
+    page.wait_for_function("window.__resolveDestStructure !== null")
+    page.locator("#destInput").fill("/new-archive")
+    page.evaluate("() => window.__resolveDestStructure()")
 
-    dup_body = page.evaluate("window.__dupBody")
-    dest_body = page.evaluate("window.__destPreviewBody")
-    assert dup_body["paths"] == ["/tmp/card-a/DUP.jpg", "/tmp/card-a/NEW.jpg"]
-    assert dest_body["exclude_paths"] == ["/tmp/card-a/DUP.jpg"]
+    expect(page.locator("#destStructure")).to_be_hidden()
 
 
 def test_import_copy_start_sends_restored_options(live_server, page):
@@ -542,26 +399,6 @@ def test_import_new_workspace_forwards_explicit_after_import(live_server, page):
             }),
         )
 
-    def destination_preview(route):
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps({
-                "total_photos": 1,
-                "total_folders": 1,
-                "new_folders": 1,
-                "existing_folders": 0,
-                "managed_archive": None,
-                "folders": [{
-                    "path": "2026/2026-07-11",
-                    "full_path": "/tmp/archive/2026/2026-07-11",
-                    "count": 1,
-                    "exists": False,
-                }],
-            }),
-        )
-
-    page.route("**/api/import/destination-preview", destination_preview)
     page.route("**/api/jobs/import-photos", start_import)
     page.goto(f"{url}/import")
 
@@ -572,8 +409,6 @@ def test_import_new_workspace_forwards_explicit_after_import(live_server, page):
     page.locator("#newWorkspaceName").fill("Serengeti")
     page.locator("#destInput").fill("/tmp/archive")
     page.locator("#afterImportSelect").select_option("identify")
-    page.locator("[data-testid='import-preview-folders-btn']").click()
-    expect(page.locator("[data-testid='import-folder-preview-results']")).to_be_visible()
 
     page.locator("#btnStart").click()
     expect(page.locator("#progressCard")).to_be_visible()
@@ -764,7 +599,7 @@ def test_import_folder_browser_selects_volumes_from_synthetic_root(live_server, 
           const originalFetch = window.fetch.bind(window);
           window.fetch = (input, init) => {
             const target = typeof input === 'string' ? input : input.url;
-            if (target && target.indexOf('/api/volumes') === 0) {
+            if (target && target.indexOf('/api/volumes') >= 0) {
               return Promise.resolve(new Response(JSON.stringify([
                 {name: 'Volume A', path: '/Volumes/A'},
                 {name: 'Volume B', path: '/Volumes/B'},
