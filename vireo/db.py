@@ -6989,12 +6989,9 @@ class Database:
                 lists, or from undo/redo where the edit history is already
                 workspace-scoped.
         """
-        if verify_workspace:
-            self._verify_photo_in_workspace(photo_id)
-        self.conn.execute(
-            "UPDATE photos SET rating = ? WHERE id = ?", (rating, photo_id)
+        self._photo_review_repository().set_rating(
+            photo_id, rating, verify_workspace=verify_workspace
         )
-        self.conn.commit()
 
     def batch_update_photo_rating(self, photo_ids, rating, verify_workspace=True):
         """Set rating for multiple photos in a single transaction.
@@ -7003,28 +7000,9 @@ class Database:
             verify_workspace: when True, raises ValueError if any photo is
                 not in the active workspace.
         """
-        if not photo_ids:
-            return
-        if verify_workspace:
-            for pid in photo_ids:
-                self._verify_photo_in_workspace(pid)
-        # Chunked: a select-all on a large library exceeds SQLite's
-        # bound-parameter cap (999 on legacy builds) in one IN clause.
-        # Rolled back on error: sqlite3 leaves earlier DML pending in
-        # the open transaction after an exception, so a subsequent
-        # unrelated commit() on this connection would persist a
-        # half-applied batch.
-        try:
-            for chunk in _chunks(photo_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                self.conn.execute(
-                    f"UPDATE photos SET rating = ? WHERE id IN ({placeholders})",
-                    [rating] + list(chunk),
-                )
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
+        self._photo_review_repository().set_ratings(
+            photo_ids, rating, verify_workspace=verify_workspace
+        )
 
     def update_photo_flag(self, photo_id, flag, verify_workspace=True):
         """Set photo flag ('none', 'flagged', 'rejected').
@@ -7033,10 +7011,9 @@ class Database:
             verify_workspace: when True (the default), raises ValueError if
                 the photo is not in the active workspace's folders.
         """
-        if verify_workspace:
-            self._verify_photo_in_workspace(photo_id)
-        self.conn.execute("UPDATE photos SET flag = ? WHERE id = ?", (flag, photo_id))
-        self.conn.commit()
+        self._photo_review_repository().set_flag(
+            photo_id, flag, verify_workspace=verify_workspace
+        )
 
     def update_photo_wildlife_excluded(self, photo_id, excluded, verify_workspace=True):
         """Set whether a photo is excluded from wildlife detection/classification."""
@@ -7055,23 +7032,18 @@ class Database:
             verify_workspace: when True, raises ValueError if any photo is
                 not in the active workspace.
         """
-        if not photo_ids:
-            return
-        if verify_workspace:
-            for pid in photo_ids:
-                self._verify_photo_in_workspace(pid)
-        # Chunked + rolled back on error: see batch_update_photo_rating.
-        try:
-            for chunk in _chunks(photo_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                self.conn.execute(
-                    f"UPDATE photos SET flag = ? WHERE id IN ({placeholders})",
-                    [flag] + list(chunk),
-                )
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
+        self._photo_review_repository().set_flags(
+            photo_ids, flag, verify_workspace=verify_workspace
+        )
+
+    def _photo_review_repository(self):
+        from repositories.photo_review import PhotoReviewRepository
+
+        return PhotoReviewRepository(
+            self.conn,
+            self._active_workspace_id,
+            chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
+        )
 
     from repositories.photo_labels import VALID_COLOR_LABELS
 

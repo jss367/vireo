@@ -79,6 +79,85 @@ def test_color_label_routes_are_owned_by_domain_blueprint(app_and_db):
     }
 
 
+def test_photo_review_routes_are_owned_by_domain_blueprint(app_and_db):
+    """Rating and flag routes stay outside the legacy app module."""
+    app, _ = app_and_db
+    review_routes = {
+        "/api/photos/<int:photo_id>/rating",
+        "/api/photos/<int:photo_id>/flag",
+        "/api/batch/rating",
+        "/api/batch/flag",
+    }
+    endpoints = {
+        rule.rule: rule.endpoint
+        for rule in app.url_map.iter_rules()
+        if rule.rule in review_routes
+    }
+
+    assert endpoints == {
+        "/api/photos/<int:photo_id>/rating": "photo_review.set_rating",
+        "/api/photos/<int:photo_id>/flag": "photo_review.set_flag",
+        "/api/batch/rating": "photo_review.set_ratings",
+        "/api/batch/flag": "photo_review.set_flags",
+    }
+
+
+def test_photo_review_routes_preserve_workspace_isolation(app_and_db):
+    """Individual and batch review edits reject hidden photos atomically."""
+    app, db = app_and_db
+    visible_id = db.get_photos()[0]["id"]
+    active_workspace_id = db._active_workspace_id
+    other_workspace_id = db.create_workspace("Other review workspace")
+    db.set_active_workspace(other_workspace_id)
+    folder_id = db.add_folder("/photos/other-review", name="other-review")
+    hidden_id = db.add_photo(
+        folder_id=folder_id,
+        filename="hidden-review.jpg",
+        extension=".jpg",
+        file_size=10,
+        file_mtime=1.0,
+    )
+    db.set_active_workspace(active_workspace_id)
+    client = app.test_client()
+
+    for field, value in (("rating", 4), ("flag", "flagged")):
+        individual = client.post(
+            f"/api/photos/{hidden_id}/{field}", json={field: value}
+        )
+        assert individual.status_code == 403
+
+        batch = client.post(
+            f"/api/batch/{field}",
+            json={"photo_ids": [visible_id, hidden_id], field: value},
+        )
+        assert batch.status_code == 403
+
+    assert db.get_photo(visible_id)["rating"] == 3
+    assert db.get_photo(visible_id)["flag"] == "none"
+    assert db.get_photo(hidden_id)["rating"] == 0
+    assert db.get_photo(hidden_id)["flag"] == "none"
+
+
+def test_photo_review_batches_skip_stale_ids_and_keep_requested_history_count(
+    app_and_db,
+):
+    """Batch review edits retain their stale-ID and audit-description contract."""
+    app, db = app_and_db
+    photo_id = db.get_photos()[0]["id"]
+    client = app.test_client()
+
+    response = client.post(
+        "/api/batch/rating",
+        json={"photo_ids": [photo_id, 999999], "rating": 2},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True, "updated": 1}
+    assert db.get_photo(photo_id)["rating"] == 2
+    history = db.get_edit_history()
+    assert history[0]["description"] == "Set rating to 2 on 2 photos"
+
+
 def test_set_rating(app_and_db):
     """POST /api/photos/<id>/rating updates rating and queues pending change."""
     app, db = app_and_db
