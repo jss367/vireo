@@ -204,6 +204,52 @@ def test_execute_import_skips_empty_normalized_keywords(tmp_path):
     assert "'" not in kw_names
 
 
+def test_execute_import_writes_normalized_keywords_to_xmp(tmp_path):
+    """When write_xmp=True the sidecar must be built from the same
+    normalized keyword set the DB got. Otherwise a catalog value like
+    `‘apapane` stores a clean `apapane` DB row but writes a stray-quote
+    `<rdf:li>` to XMP, and a later sync/import diff would treat the two
+    as different keywords.
+    """
+    from db import Database
+    from importer import execute_import
+
+    root = str(tmp_path / "photos") + '/'
+    os.makedirs(root)
+    with open(os.path.join(root, 'DSC_0001.NEF'), 'wb') as f:
+        f.write(b'\x00' * 100)
+
+    cat_path = str(tmp_path / "test.lrcat")
+    # Edge-quote flat + hierarchical keywords and a lone `'` that
+    # normalizes to `""` (must be dropped from the sidecar too).
+    _create_test_catalog(cat_path, root, [
+        ('DSC_0001.NEF', '', [
+            ('‘apapane', None),
+            ("'", None),
+            ('juvenile', '‘apapane'),
+        ]),
+    ])
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(root, name='photos')
+    db.add_photo(folder_id=fid, filename='DSC_0001.NEF', extension='.nef',
+                 file_size=100, file_mtime=1.0)
+
+    result = execute_import([cat_path], db, write_xmp=True)
+    assert result['imported'] >= 1
+
+    xmp_path = os.path.join(root, 'DSC_0001.xmp')
+    assert os.path.exists(xmp_path)
+    with open(xmp_path, encoding='utf-8') as f:
+        xmp_body = f.read()
+    # The clean normalized spelling reaches the sidecar…
+    assert 'apapane' in xmp_body
+    # …and the stray-quote and empty-normalized variants do not.
+    assert '‘apapane' not in xmp_body
+    assert '<rdf:li></rdf:li>' not in xmp_body
+    assert "<rdf:li>'</rdf:li>" not in xmp_body
+
+
 def test_preview_import_detects_conflicts(tmp_path):
     """preview_import flags files that appear in multiple catalogs."""
     from db import Database

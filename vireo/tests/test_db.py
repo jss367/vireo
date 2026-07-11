@@ -13371,6 +13371,43 @@ def test_add_keyword_untyped_prefers_taxonomy_peer_over_general_auto_promote(
     assert general_row["type"] == "general"
 
 
+def test_add_keyword_untyped_prefers_higher_priority_peer_over_individual_exact(
+    tmp_path,
+):
+    """Untyped `add_keyword('apapane')` must not bind to an exact clean
+    lower-priority typed row when a legacy edge-quote higher-priority peer
+    exists at the same slot. The fast exact-match query returns the
+    individual row (raw name matches under COLLATE NOCASE) and the earlier
+    fix only checked for a taxonomy peer when the exact match was
+    'general' — leaving the individual/location/genre exact-match case
+    silently binding to the wrong row and contradicting the
+    taxonomy > genre > individual > location > general priority.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    # Legacy edge-quoted taxonomy row (imported/upgraded DB shape).
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES (?, NULL, 1, 'taxonomy')",
+        ("‘apapane",),
+    )
+    taxonomy_id = cur.lastrowid
+    # A clean individual row also exists at the same slot (e.g. a person
+    # tag). This is a deliberate lower-priority type.
+    individual_id = db.add_keyword("apapane", kw_type='individual')
+    assert individual_id != taxonomy_id
+
+    # Untyped call from a generic keyword path — no is_species, no kw_type.
+    resolved = db.add_keyword("apapane")
+    assert resolved == taxonomy_id
+
+    # The individual row must remain individual — no silent type rewrite.
+    individual_row = db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (individual_id,)
+    ).fetchone()
+    assert individual_row["type"] == "individual"
+
+
 def test_add_photo_retries_on_database_is_locked(tmp_path):
     """The INSERT inside add_photo must retry transient 'database is locked'.
 
