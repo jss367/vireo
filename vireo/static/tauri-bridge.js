@@ -182,20 +182,18 @@ async function copyExternalUrl(url) {
     await navigator.clipboard.writeText(url);
     copied = true;
   } catch (e) {
-    var input = document.getElementById('externalOpenModalUrl');
-    var temporaryInput = false;
-    if (!input) {
-      input = document.createElement('textarea');
-      input.value = url;
-      input.setAttribute('readonly', '');
-      input.style.cssText = 'position:fixed;left:-9999px;top:0;';
-      document.body.appendChild(input);
-      temporaryInput = true;
-    }
-    input.focus();
-    input.select();
+    // Always use a fresh throwaway textarea so non-modal callers (e.g. iNat
+    // batch Copy URL buttons) never end up selecting a stale value left in
+    // #externalOpenModalUrl from an earlier failure modal.
+    var temp = document.createElement('textarea');
+    temp.value = url;
+    temp.setAttribute('readonly', '');
+    temp.style.cssText = 'position:fixed;left:-9999px;top:0;';
+    document.body.appendChild(temp);
+    temp.focus();
+    temp.select();
     try { copied = document.execCommand('copy'); } catch (copyError) {}
-    if (temporaryInput) input.remove();
+    temp.remove();
   }
   if (typeof showToast === 'function') {
     showToast(copied ? 'URL copied.' : 'Select and copy the URL shown.', copied ? 'success' : 'warning');

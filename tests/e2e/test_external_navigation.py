@@ -200,6 +200,51 @@ def test_batch_quick_open_preserves_preparation_failures(live_server, page):
     )
 
 
+def test_copy_url_fallback_does_not_reuse_stale_failure_modal_value(live_server, page):
+    """Codex P2 regression: after the external-open failure modal has been shown
+    once with URL A, a subsequent copyExternalUrl(URL_B) call whose clipboard
+    write rejects must copy URL_B — not the stale value still sitting in
+    #externalOpenModalUrl."""
+    page.goto(f"{live_server['url']}/browse")
+    stale_url = "https://www.inaturalist.org/observations/upload?taxon_name=Stale"
+    fresh_url = "https://www.inaturalist.org/observations/upload?taxon_name=Fresh"
+
+    # Prime the failure modal so #externalOpenModalUrl exists with the stale URL.
+    page.evaluate("url => showExternalOpenFailure(url)", stale_url)
+    expect(page.locator("#externalOpenModalUrl")).to_have_value(stale_url)
+    page.evaluate("() => closeExternalOpenFailure()")
+
+    # Force the clipboard fallback and capture what document.execCommand would copy.
+    page.evaluate(
+        """
+        () => {
+          Object.defineProperty(navigator, 'clipboard', {
+            configurable: true,
+            value: { writeText: () => Promise.reject(new Error('denied')) }
+          });
+          window.__copyProbe = { selection: null, executed: false };
+          document.execCommand = command => {
+            if (command === 'copy') {
+              window.__copyProbe.selection = String(document.getSelection() || '');
+              window.__copyProbe.executed = true;
+            }
+            return true;
+          };
+        }
+        """
+    )
+
+    page.evaluate("url => copyExternalUrl(url)", fresh_url)
+    page.wait_for_function("window.__copyProbe.executed === true")
+
+    probe = page.evaluate("window.__copyProbe")
+    assert probe["selection"] == fresh_url, (
+        f"Expected fresh URL to be copied, got {probe['selection']!r}"
+    )
+    # Stale modal input must be left untouched — no one should be reading from it.
+    expect(page.locator("#externalOpenModalUrl")).to_have_value(stale_url)
+
+
 def test_duplicate_quick_upload_does_not_auto_open(live_server, page):
     page.goto(f"{live_server['url']}/browse")
     _mock_tauri(page)
