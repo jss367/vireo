@@ -2611,6 +2611,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # workspace overrides. Gated by a marker so it runs once; re-saved
     # legacy values are preserved on subsequent boots.
     cfg.migrate_legacy_miss_thresholds(init_db)
+    # One-time resolution of the browse.toggle_ui="h" default clashing with
+    # any pre-existing browse binding on ``h``. Writes an explicit "" so the
+    # user's existing action keeps working; they can re-bind toggle_ui from
+    # the shortcuts editor.
+    cfg.migrate_toggle_ui_h_conflict()
     init_db.create_default_collections_for_all_workspaces()
 
     # Wildlife backfill timing:

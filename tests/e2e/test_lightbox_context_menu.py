@@ -197,6 +197,20 @@ def test_lightbox_overlay_toggles_persist_and_context_restores(live_server, page
     assert page.evaluate("localStorage.getItem('vireo.lb.infoVisible')") == "0"
     assert page.evaluate("localStorage.getItem('vireo.lb.chromeVisible')") == "0"
 
+    page.keyboard.press("h")
+    page.wait_for_function(
+        "!document.getElementById('lightboxOverlay').classList.contains('lb-hide-chrome')",
+        timeout=2000,
+    )
+    assert page.evaluate("localStorage.getItem('vireo.lb.chromeVisible')") == "1"
+
+    page.keyboard.press("h")
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('lb-hide-chrome')",
+        timeout=2000,
+    )
+    assert page.evaluate("localStorage.getItem('vireo.lb.chromeVisible')") == "0"
+
     _fire_contextmenu_on_lightbox(page)
     menu = page.locator(".vireo-ctx-menu")
     expect(menu).to_be_visible()
