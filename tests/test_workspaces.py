@@ -1181,6 +1181,51 @@ def test_merge_duplicate_keywords_does_not_fold_distinct_non_ascii(db):
     assert tagged == {(pid_a, masse_id), (pid_b, masze_id)}
 
 
+def test_merge_duplicate_keywords_does_not_fold_non_ascii_case_pairs(db):
+    """``keyword_match_key`` must ignore non-ASCII case pairs.
+
+    ``"Éclair".lower() == "éclair"`` in Python, but SQLite's
+    ``LOWER()``/``COLLATE NOCASE`` used by ``add_keyword()`` is
+    ASCII-only and treats them as distinct. If cleanup grouped on
+    ``str.lower()``, the merge path would silently retag and delete one
+    of two distinct keywords that ``add_keyword()`` kept separate.
+    """
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos/a", name="a")
+    db.add_workspace_folder(ws, fid)
+    pid_a = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    pid_b = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    upper_id = db.add_keyword("Éclair")
+    lower_id = db.add_keyword("éclair")
+    assert upper_id != lower_id
+    db.tag_photo(pid_a, upper_id)
+    db.tag_photo(pid_b, lower_id)
+
+    merged = db.merge_duplicate_keywords()
+
+    assert merged == 0
+    remaining = {
+        row["id"]: row["name"] for row in db.conn.execute(
+            "SELECT id, name FROM keywords WHERE id IN (?, ?)",
+            (upper_id, lower_id),
+        ).fetchall()
+    }
+    assert remaining == {upper_id: "Éclair", lower_id: "éclair"}
+    tagged = {
+        (row["photo_id"], row["keyword_id"])
+        for row in db.conn.execute(
+            "SELECT photo_id, keyword_id FROM photo_keywords "
+            "WHERE photo_id IN (?, ?)",
+            (pid_a, pid_b),
+        ).fetchall()
+    }
+    assert tagged == {(pid_a, upper_id), (pid_b, lower_id)}
+
+
 def test_merge_duplicate_keywords_respects_parent_and_type(db):
     """Same-name keywords under different parents (Springfield, IL vs MO) or
     with different types are distinct by design and must NOT merge; only

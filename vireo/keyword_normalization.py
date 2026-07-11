@@ -23,6 +23,16 @@ _EDGE_QUOTES = (
     "\u275b\u275c\u275d\u275e"
 )
 
+# ASCII-only lowercase table. SQLite's built-in ``LOWER()``/``COLLATE
+# NOCASE`` only folds A-Z, leaving non-ASCII letters such as ``\u00c9`` alone.
+# ``add_keyword()`` relies on that behavior, so ``keyword_match_key`` uses
+# the same fold to avoid the dedupe/merge path folding distinct non-ASCII
+# case pairs that the DB would treat as different keywords.
+_ASCII_LOWER_TABLE = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    "abcdefghijklmnopqrstuvwxyz",
+)
+
 
 def normalize_keyword_display(name: str) -> str:
     """Return a cleaned display/storage form for a keyword name."""
@@ -54,16 +64,16 @@ def normalize_keyword_display(name: str) -> str:
 def keyword_match_key(name: str) -> str:
     """Return the key used when comparing keyword names for equivalence.
 
-    Uses ``str.lower()`` rather than ``str.casefold()`` so distinct user
-    keywords are not silently folded together on the merge/dedupe path.
-    ``casefold`` is more aggressive than the previous SQLite
-    ``LOWER(name)``/``COLLATE NOCASE`` behavior: for example
-    ``"Maße".casefold() == "Masse".casefold() == "masse"``, so grouping
-    duplicates by that key would let ``merge_duplicate_keywords()`` retag
-    and delete one of two unrelated German keywords even though
-    ``add_keyword()`` and the table constraints would treat them as
-    distinct. ``str.lower()`` keeps ``ß`` as ``ß`` (its lowercase form),
-    which lines up with SQLite's ASCII-only ``COLLATE NOCASE`` comparison
-    used everywhere else in this codebase.
+    Applies an ASCII-only case fold that matches SQLite's built-in
+    ``LOWER(name)``/``COLLATE NOCASE`` used by ``add_keyword()`` and the
+    ``keywords`` table constraints. Python's ``str.lower()`` and
+    ``str.casefold()`` are both more aggressive than SQLite's ASCII
+    ``LOWER``: ``"Éclair".lower() == "éclair"`` and
+    ``"Maße".casefold() == "masse"``, so grouping duplicates by either of
+    those keys would let ``merge_duplicate_keywords()`` retag and delete
+    one of two distinct keywords that the DB constraint layer treats as
+    separate. Restricting the fold to A-Z leaves non-ASCII letters such
+    as ``É`` / ``é`` and ``ß`` alone, keeping the equivalence class in
+    lockstep with the SQL side.
     """
-    return normalize_keyword_display(name).lower()
+    return normalize_keyword_display(name).translate(_ASCII_LOWER_TABLE)
