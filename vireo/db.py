@@ -9449,14 +9449,26 @@ class Database:
         Non-link metadata (is_species, coordinates, taxon_id) folds into
         the destination when it lacks its own, so deleting the source can't
         silently drop species/location info that only the duplicate carried.
+
+        Rewrites pending_changes so an unsynced keyword_add/keyword_remove
+        queued under the source spelling (e.g. legacy ``‘apapane``) points
+        at the surviving canonical name after the merge. Without this, the
+        merge deletes the source row but leaves the pending change referring
+        to the stray-quote spelling, so the next ``sync_to_xmp`` writes the
+        legacy variant back into the sidecar even though the DB has been
+        canonicalized.
+
         Returns the number of keyword rows merged away (>= 1). Caller
         commits.
         """
         merged = 1
         src = self.conn.execute(
-            "SELECT is_species, latitude, longitude, taxon_id "
+            "SELECT name, is_species, latitude, longitude, taxon_id "
             "FROM keywords WHERE id = ?",
             (src_id,),
+        ).fetchone()
+        dst = self.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (dst_id,),
         ).fetchone()
         if src is not None:
             self.conn.execute(
@@ -9469,6 +9481,40 @@ class Database:
                 (src["is_species"], src["latitude"], src["longitude"],
                  src["taxon_id"], dst_id),
             )
+        # Retarget pending keyword_add/keyword_remove rows queued under the
+        # source name onto the destination name so a still-unsynced sidecar
+        # write can't leak the legacy spelling. Skip when the caller can't
+        # tell us the src/dst names (defensive; both rows exist in normal
+        # flow because merge_duplicate_keywords / update_keyword select
+        # them just before calling this). A pending row that would collide
+        # with an existing (photo_id, change_type, dst_name) row is dropped
+        # rather than duplicated — matches the (photo_id, change_type,
+        # value, workspace_id) dedupe contract queue_change enforces.
+        if src is not None and dst is not None:
+            src_name = src["name"]
+            dst_name = dst["name"]
+            if src_name and dst_name and src_name != dst_name:
+                self.conn.execute(
+                    """DELETE FROM pending_changes
+                       WHERE change_type IN ('keyword_add', 'keyword_remove')
+                         AND value = ?
+                         AND EXISTS (
+                             SELECT 1 FROM pending_changes pc2
+                             WHERE pc2.photo_id = pending_changes.photo_id
+                               AND pc2.change_type = pending_changes.change_type
+                               AND pc2.value = ?
+                               AND COALESCE(pc2.workspace_id, -1)
+                                   = COALESCE(pending_changes.workspace_id, -1)
+                         )""",
+                    (src_name, dst_name),
+                )
+                self.conn.execute(
+                    """UPDATE pending_changes
+                       SET value = ?
+                       WHERE change_type IN ('keyword_add', 'keyword_remove')
+                         AND value = ?""",
+                    (dst_name, src_name),
+                )
         # Move photo associations (ignore if already exists for dst_id),
         # then drop the leftovers.
         self.conn.execute(

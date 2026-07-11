@@ -1047,6 +1047,73 @@ def test_add_keyword_preserves_internal_acute_accent(db):
     assert row["name"] == "O\u00b4Brien"
 
 
+def test_add_keyword_preserves_private_use_area_character(db):
+    """U+E000 is a valid Private Use Area code point that users may include
+    in a keyword. Prior implementations reserved it as an internal sentinel
+    for U+00B4 protection, which meant a lone U+E000 in the input round-tripped
+    as U+00B4 (data corruption)."""
+    keyword_id = db.add_keyword("a\ue000b")
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
+    ).fetchone()
+    assert row["name"] == "a\ue000b"
+
+    # A lone U+E000 keyword should also survive intact (no accidental
+    # substitution to U+00B4 by the sentinel round-trip).
+    keyword_id = db.add_keyword("\ue000")
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
+    ).fetchone()
+    assert row["name"] == "\ue000"
+
+
+def test_merge_keyword_rewrites_pending_changes_to_dst_name(db):
+    """When keyword rename/dedupe collapses a legacy variant into the clean
+    spelling, any still-unsynced ``keyword_add``/``keyword_remove`` queued
+    under the source name must be rewritten to the destination name so the
+    next XMP sync writes/removes the canonical text instead of leaking the
+    stray-quote spelling back into the sidecar."""
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos/a", name="a")
+    db.add_workspace_folder(ws, fid)
+    pid_a = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    pid_b = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    db.conn.execute("INSERT INTO keywords (name) VALUES (?)", ("\u2018apapane",))
+    db.conn.execute("INSERT INTO keywords (name) VALUES ('apapane')")
+    db.conn.commit()
+    quoted = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("\u2018apapane",)
+    ).fetchone()[0]
+    clean = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'apapane'"
+    ).fetchone()[0]
+    db.tag_photo(pid_a, quoted)
+    db.tag_photo(pid_b, clean)
+
+    # Queue an unsynced keyword_add under the legacy spelling. Simulates a
+    # tag applied before this normalization pass landed.
+    db.queue_change(pid_a, "keyword_add", "\u2018apapane")
+    # Also queue a duplicate under the destination name so we exercise the
+    # dedupe branch (the merge must drop the source row without producing
+    # two identical pending entries).
+    db.queue_change(pid_b, "keyword_add", "apapane")
+    db.queue_change(pid_b, "keyword_add", "\u2018apapane")
+
+    db.merge_duplicate_keywords()
+
+    add_values = sorted(
+        (row["photo_id"], row["value"]) for row in db.conn.execute(
+            """SELECT photo_id, value FROM pending_changes
+               WHERE change_type = 'keyword_add'"""
+        ).fetchall()
+    )
+    assert add_values == [(pid_a, "apapane"), (pid_b, "apapane")]
+
+
 def test_add_keyword_dedupes_pre_existing_edge_quote_variant(db):
     """When an upgraded database already carries a tagged edge-quote variant
     like '\u2018apapane', a later `add_keyword('apapane')` must reuse that row

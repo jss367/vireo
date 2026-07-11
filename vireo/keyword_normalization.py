@@ -16,15 +16,15 @@ import unicodedata
 # quote.
 _EDGE_QUOTES = (
     "\"'`"
-    "\u00b4"
-    "\u2018\u2019\u201a\u201b"
-    "\u201c\u201d\u201e\u201f"
-    "\u2032\u2033"
-    "\u275b\u275c\u275d\u275e"
+    "´"
+    "‘’‚‛"
+    "“”„‟"
+    "′″"
+    "❛❜❝❞"
 )
 
 # ASCII-only lowercase table. SQLite's built-in ``LOWER()``/``COLLATE
-# NOCASE`` only folds A-Z, leaving non-ASCII letters such as ``\u00c9`` alone.
+# NOCASE`` only folds A-Z, leaving non-ASCII letters such as ``É`` alone.
 # ``add_keyword()`` relies on that behavior, so ``keyword_match_key`` uses
 # the same fold to avoid the dedupe/merge path folding distinct non-ASCII
 # case pairs that the DB would treat as different keywords.
@@ -32,7 +32,25 @@ _ASCII_LOWER_TABLE = str.maketrans(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
     "abcdefghijklmnopqrstuvwxyz",
 )
-_INTERNAL_ACUTE_SENTINEL = "\ue000"
+
+
+def _nfkc_preserving_internal_acute(value: str) -> str:
+    """Apply NFKC while leaving internal U+00B4 ACUTE ACCENT intact.
+
+    NFKC decomposes U+00B4 into space + combining acute (U+0020 U+0301),
+    which corrupts internal punctuation in names like ``O´Brien``. A
+    prior implementation reserved U+E000 as a temporary sentinel, but
+    U+E000 is a valid Private Use Area code point that users may include
+    in a keyword; a lone ```` would then round-trip as ``´``.
+    Splitting the string at U+00B4 boundaries, NFKC-normalizing each
+    segment, and rejoining with U+00B4 avoids any sentinel collision
+    while preserving the acute wherever it survived edge stripping.
+    """
+    if "´" not in value:
+        return unicodedata.normalize("NFKC", value)
+    return "´".join(
+        unicodedata.normalize("NFKC", seg) for seg in value.split("´")
+    )
 
 
 def normalize_keyword_display(name: str) -> str:
@@ -44,7 +62,7 @@ def normalize_keyword_display(name: str) -> str:
     # ` ´apapane` (space + U+00B4 ACUTE ACCENT) leaves the acute in
     # place; NFKC then decomposes it to a leading combining mark
     # (U+0301) that is not in _EDGE_QUOTES, and the result is
-    # `́apapane` — a nearly invisible variant that no longer matches
+    # `́apapane` -- a nearly invisible variant that no longer matches
     # `apapane`.
     value = value.strip()
     # Strip edge quotes BEFORE NFKC so characters that decompose into a
@@ -54,12 +72,10 @@ def normalize_keyword_display(name: str) -> str:
     # normalize to `́apapane`, an invisible variant that survives the
     # post-NFKC strip below because U+0301 is not in _EDGE_QUOTES.
     value = value.strip(_EDGE_QUOTES)
-    # Any U+00B4 ACUTE ACCENT left after edge stripping is internal
-    # punctuation. Protect it from NFKC, which would otherwise decompose it
-    # to a spacing combining mark sequence and corrupt names like O´Brien.
-    value = value.replace("\u00b4", _INTERNAL_ACUTE_SENTINEL)
-    value = unicodedata.normalize("NFKC", value)
-    value = value.replace(_INTERNAL_ACUTE_SENTINEL, "\u00b4")
+    # Preserve any internal U+00B4 across NFKC -- see helper for rationale
+    # (segment-and-rejoin, no sentinel character that could collide with
+    # legitimate input such as U+E000).
+    value = _nfkc_preserving_internal_acute(value)
     value = "".join(" " if ch.isspace() else ch for ch in value)
     value = re.sub(r" +", " ", value).strip()
     value = value.strip(_EDGE_QUOTES)
