@@ -899,12 +899,18 @@ function applyBucketOrderingKeysFromPage(bucket, page) {
 // last page would silently expand the loaded slice past what the user
 // actually loaded (e.g. 520 loaded would become 1000). The endpoint clamps
 // `limit` to 500, so the per-request cap is preserved automatically.
+// Refetch size mirrors the user's currently loaded window (`currentLen`) —
+// forcing it up to 500 would silently expand an unexpanded 20-row bucket to
+// 500 rows, and the next "Load more" (which offsets by `target.photos.length`)
+// would then start at 500 and render up to 1000 cards the user never paged
+// through, plus bloat every pick's Save-as-Collection payload.
 // Returns a promise so callers can await the refresh before rendering.
 async function refetchBucketFromZero(target, isUnidentified) {
   if (!target) return;
   var currentLen = Array.isArray(target.photos) ? target.photos.length : 0;
   var speciesKey = isUnidentified ? '__unidentified__' : target.species;
-  var targetLen = Math.max(500, currentLen);
+  var targetLen = currentLen;
+  if (targetLen <= 0) return;
   var allPhotos = [];
   var lastPage = null;
   for (var offset = 0; offset < targetLen; offset += 500) {
@@ -1304,6 +1310,10 @@ document.addEventListener('lightbox:flagchanged', function(e) {
     var isUnidentified = hit.bucket === null;
     var target = isUnidentified ? currentData.unidentified : hit.bucket;
     if (!target) { render(); return; }
+    // Render once immediately so the Pick badge/outline appears without
+    // waiting for the refetch's network round-trip; render again after the
+    // refetch so the reordered bucket window replaces the stale one.
+    render();
     refetchBucketFromZero(target, isUnidentified).then(render);
   }
 });

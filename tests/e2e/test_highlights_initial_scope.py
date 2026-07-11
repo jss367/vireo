@@ -648,6 +648,114 @@ def test_highlights_lightbox_pick_refetches_paged_bucket(live_server, page):
     assert len(all_ids) == 28
 
 
+def test_highlights_lightbox_pick_preserves_loaded_window(live_server, page):
+    """Picking must refetch only the currently-loaded window, not inflate it.
+
+    Regression for Codex feedback on PR #1176 (line 907): the refetch
+    forced ``targetLen = Math.max(500, currentLen)`` on every lightbox
+    pick/unpick. For an unexpanded bucket with the default 20-row initial
+    load, that silently pulled the bucket up to 500 photos in one request;
+    the next "Load more" click then used ``target.photos.length`` (now 500)
+    as its offset and appended photos 500-999, so the expanded grid — and
+    the Save-as-Collection payload — suddenly included hundreds of photos
+    the user never paged through, and each pick downloaded far more data
+    than necessary.
+    """
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+
+    hawk_kid = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("Red-tailed Hawk",)
+    ).fetchone()["id"]
+    folder_id = data["folders"][0]
+
+    # 3 seeded + 25 extras = 28 hawks; the initial /api/highlights load
+    # caps at 20 per bucket, so has_more starts true and the loaded window
+    # is exactly 20.
+    for i in range(25):
+        pid = db.add_photo(
+            folder_id=folder_id,
+            filename=f"windowed-hawk-{i}.jpg",
+            extension=".jpg",
+            file_size=1000,
+            file_mtime=1.0,
+            timestamp=f"2024-03-11T09:{i:02d}:00",
+        )
+        db.conn.execute(
+            "UPDATE photos SET quality_score = ? WHERE id = ?",
+            (0.5 - i * 0.005, pid),
+        )
+        db.conn.execute(
+            "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (pid, hawk_kid),
+        )
+    db.conn.commit()
+
+    page.goto(f"{live_server['url']}/highlights", timeout=5000)
+    hawk_section = page.locator("section.bucket").filter(has_text="Red-tailed Hawk")
+    expect(hawk_section.locator(".highlights-card").first).to_be_visible(timeout=5000)
+
+    initial = page.evaluate(
+        "() => {"
+        "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+        "  return { len: b.photos.length, hasMore: b.has_more };"
+        "}"
+    )
+    assert initial["len"] == 20
+    assert initial["hasMore"] is True
+
+    first_card = hawk_section.locator(".highlights-card").nth(0)
+    first_pid = int(first_card.get_attribute("data-photo-id"))
+    first_card.click()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+    page.wait_for_function(
+        "pid => _lightboxCurrentId === pid",
+        arg=first_pid,
+        timeout=3000,
+    )
+
+    # Capture the refetch request URL to prove the limit matches the loaded
+    # window (20), not the old 500 floor.
+    with page.expect_response(
+        lambda r: (
+            "/api/highlights/bucket" in r.url
+            and "offset=0" in r.url
+            and "species=Red-tailed" in r.url
+        ),
+        timeout=5000,
+    ) as refetch:
+        page.keyboard.press("p")
+
+    assert _wait_for_flag(db, first_pid, "flagged") == "flagged"
+    assert "limit=20" in refetch.value.url, (
+        f"refetch limit must match loaded window (20); got {refetch.value.url}"
+    )
+    assert "limit=500" not in refetch.value.url
+
+    # After the refetch, the client-side loaded window must still be 20 —
+    # not silently expanded to 28 (the whole bucket). has_more must remain
+    # true so the Load-more path still targets offset=20 next.
+    page.wait_for_function(
+        "() => {"
+        "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+        "  return b && b.photos.length === 20 && b.photos[0].flag === 'flagged';"
+        "}",
+        timeout=5000,
+    )
+    after = page.evaluate(
+        "() => {"
+        "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+        "  return { len: b.photos.length, hasMore: b.has_more };"
+        "}"
+    )
+    assert after["len"] == 20
+    assert after["hasMore"] is True
+
+
 def test_highlights_lightbox_repick_after_eviction_restores_photo(live_server, page):
     """Re-picking from the lightbox after the photo was evicted from the
     loaded window must reload highlights, not silently no-op.
