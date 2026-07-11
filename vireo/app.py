@@ -78,6 +78,9 @@ from render_source import (
 from render_source import (
     scaled_recipe_source_dimensions as _scaled_recipe_source_dimensions,
 )
+from render_source import (
+    working_copy_path_if_satisfies as _working_copy_path_if_satisfies,
+)
 from werkzeug.exceptions import BadRequest
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -350,7 +353,7 @@ def _bucket_best_score(photos):
 
 
 def _apply_highlight_preferences(db, buckets):
-    preferences = db.get_species_representative_lists()
+    preferences = db.get_species_representative_lists(eligible_only=True)
     for bucket in buckets:
         representative_ids = preferences.get(bucket["species"]) or []
         representative_set = set(representative_ids)
@@ -362,6 +365,9 @@ def _apply_highlight_preferences(db, buckets):
             applied = applied or is_rep
         top = bucket["photos"][0] if bucket["photos"] else {}
         bucket["preferred_photo_id"] = preferred_id
+        # Species-level state stays true even when the representative photo is
+        # outside the current folder or search result.
+        bucket["has_species_representative"] = preferred_id is not None
         bucket["has_preferred_photo"] = applied
         bucket["best_quality"] = top.get("quality_score")
         # Rank by the highest-scored photo in the bucket, not photos[0].
@@ -374,9 +380,12 @@ def _apply_highlight_preferences(db, buckets):
 
 
 def _apply_ordered_highlights(db, buckets):
-    highlights = db.get_species_highlights()
+    highlights = db.get_species_highlights(eligible_only=True)
     for bucket in buckets:
         ranks = highlights.get(bucket["species"], {})
+        # Species-level state stays true even when every selected highlight is
+        # outside the current folder or search result.
+        bucket["has_highlight_selection"] = bool(ranks)
         photos = bucket.get("photos") or []
         matched = False
         for p in photos:
@@ -457,6 +466,13 @@ def _highlight_confidence_label(confidence, is_accepted):
 def _normalize_highlight_confirmation_filter(value):
     value = (value or "all").strip().lower()
     if value not in {"all", "confirmed", "unconfirmed"}:
+        return "all"
+    return value
+
+
+def _normalize_highlight_presence_filter(value):
+    value = (value or "all").strip().lower()
+    if value not in {"all", "yes", "no"}:
         return "all"
     return value
 
@@ -667,6 +683,38 @@ def _filter_highlight_sections(
         if _highlight_photo_matches_query(p, query, match_case, whole_word)
     ]
     return filtered_buckets, unidentified
+
+
+def _filter_highlight_curation_state(
+    buckets,
+    unidentified_photos,
+    highlight_filter="all",
+    representative_filter="all",
+):
+    highlight_filter = _normalize_highlight_presence_filter(highlight_filter)
+    representative_filter = _normalize_highlight_presence_filter(
+        representative_filter
+    )
+
+    def matches(bucket, filter_value, field):
+        if filter_value == "all":
+            return True
+        return bool(bucket.get(field)) == (filter_value == "yes")
+
+    filtered = [
+        bucket for bucket in buckets
+        if matches(bucket, highlight_filter, "has_highlight_selection")
+        and matches(
+            bucket,
+            representative_filter,
+            "has_species_representative",
+        )
+    ]
+    # These two states only apply to named species. Unidentified photos have
+    # neither a species highlight list nor a species representative assignment.
+    if highlight_filter != "all" or representative_filter != "all":
+        unidentified_photos = []
+    return filtered, unidentified_photos
 
 
 # Maximum number of bound parameters per SQL statement. SQLite's
@@ -2981,9 +3029,47 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         default_per_page = cfg.load().get("photos_per_page", 50)
         per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), _MAX_PER_PAGE))
         sort = request.args.get("sort", "date")
+        folder_id = request.args.get("folder_id", None, type=int)
+        rating_min = request.args.get("rating_min", None, type=int)
+        date_from = request.args.get("date_from", None)
+        date_to = request.args.get("date_to", None)
+        keyword = request.args.get("keyword", None)
+        keyword_match_case = _request_bool_arg("keyword_match_case")
+        keyword_whole_word = _request_bool_arg("keyword_whole_word")
+        color_label = request.args.get("color_label", None)
+        try:
+            flag = _request_flag_filter()
+        except ValueError as e:
+            return json_error(str(e), 400)
 
-        photos = db.get_photos(page=page, per_page=per_page, sort=sort)
-        total = db.count_photos()
+        photos = db.get_photos(
+            folder_id=folder_id,
+            page=page,
+            per_page=per_page,
+            sort=sort,
+            rating_min=rating_min,
+            date_from=date_from,
+            date_to=date_to,
+            keyword=keyword,
+            keyword_match_case=keyword_match_case,
+            keyword_whole_word=keyword_whole_word,
+            color_label=color_label,
+            flag=flag,
+        )
+        if not any([folder_id, rating_min, date_from, date_to, keyword, color_label, flag]):
+            total = db.count_photos()
+        else:
+            total = db.count_filtered_photos(
+                folder_id=folder_id,
+                rating_min=rating_min,
+                date_from=date_from,
+                date_to=date_to,
+                keyword=keyword,
+                keyword_match_case=keyword_match_case,
+                keyword_whole_word=keyword_whole_word,
+                color_label=color_label,
+                flag=flag,
+            )
         folders = db.get_folder_tree()
         keywords = db.get_keyword_tree()
         collections = db.get_collections()
@@ -5083,7 +5169,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/selection/keyword-suggestions", methods=["POST"])
     def api_selection_keyword_suggestions():
-        """Return selected keywords that are present on some, but not all photos."""
+        """Return selected keywords and which selected photos carry each one."""
         db = _get_db()
         body = request.get_json(silent=True) or {}
         raw_ids = body.get("photo_ids", [])
@@ -5137,26 +5223,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
             entry["photo_ids"].add(row["photo_id"])
 
-        suggestions = []
+        keywords = []
         for entry in by_keyword.values():
             count = len(entry["photo_ids"])
             missing_count = selected_count - count
-            if 0 < count < selected_count:
-                missing_photo_ids = [
-                    pid for pid in photo_ids if pid not in entry["photo_ids"]
-                ]
-                suggestions.append({
-                    "id": entry["id"],
-                    "name": entry["name"],
-                    "type": entry["type"],
-                    "count": count,
-                    "missing_count": missing_count,
-                    "missing_photo_ids": missing_photo_ids,
-                })
-        suggestions.sort(
+            present_photo_ids = [
+                pid for pid in photo_ids if pid in entry["photo_ids"]
+            ]
+            missing_photo_ids = [
+                pid for pid in photo_ids if pid not in entry["photo_ids"]
+            ]
+            item = {
+                "id": entry["id"],
+                "name": entry["name"],
+                "type": entry["type"],
+                "count": count,
+                "missing_count": missing_count,
+                "present_photo_ids": present_photo_ids,
+                "missing_photo_ids": missing_photo_ids,
+            }
+            keywords.append(item)
+        keywords.sort(
             key=lambda item: (-item["count"], item["name"].lower(), item["id"])
         )
-        return jsonify({"selected_count": selected_count, "suggestions": suggestions})
+        suggestions = [item for item in keywords if 0 < item["count"] < selected_count]
+        return jsonify({
+            "selected_count": selected_count,
+            "keywords": keywords,
+            "suggestions": suggestions,
+        })
 
     @app.route("/api/keywords/<int:keyword_id>", methods=["PUT"])
     def api_update_keyword(keyword_id):
@@ -6274,6 +6369,73 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db.record_edit('keyword_add', f'Added "{name}" to {len(added_ids)} photos',
                            str(kid), items, is_batch=True)
         return jsonify({"ok": True, "updated": len(added_ids)})
+
+    @app.route("/api/batch/keyword-remove", methods=["POST"])
+    def api_batch_keyword_remove():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids", [])
+        keyword_id = body.get("keyword_id")
+        if not isinstance(photo_ids, list) or not photo_ids:
+            return json_error("photo_ids required")
+        if isinstance(keyword_id, bool) or not isinstance(keyword_id, int):
+            return json_error("keyword_id must be an integer")
+
+        clean_ids = []
+        seen = set()
+        for raw in photo_ids:
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                return json_error("photo_ids must be integers")
+            if raw not in seen:
+                clean_ids.append(raw)
+                seen.add(raw)
+        if not clean_ids:
+            return json_error("photo_ids required")
+
+        keyword_row = db.conn.execute(
+            "SELECT id, name FROM keywords WHERE id = ?", (keyword_id,)
+        ).fetchone()
+        if keyword_row is None:
+            return json_error("keyword not found", 404)
+
+        for pid in clean_ids:
+            if not db._photo_in_workspace(pid):
+                return json_error(
+                    f"Photo {pid} does not belong to the active workspace", 403
+                )
+
+        tagged_ids = []
+        batch_size = 800
+        for i in range(0, len(clean_ids), batch_size):
+            chunk = clean_ids[i:i + batch_size]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT photo_id FROM photo_keywords
+                    WHERE keyword_id = ? AND photo_id IN ({placeholders})""",
+                [keyword_id] + chunk,
+            ).fetchall()
+            tagged_ids.extend(row["photo_id"] for row in rows)
+
+        tagged_set = set(tagged_ids)
+        removed_ids = [pid for pid in clean_ids if pid in tagged_set]
+        name = keyword_row["name"]
+        for pid in removed_ids:
+            db.untag_photo(pid, keyword_id)
+            _queue_keyword_remove(pid, name)
+
+        items = [
+            {"photo_id": pid, "old_value": str(keyword_id), "new_value": ""}
+            for pid in removed_ids
+        ]
+        if items:
+            db.record_edit(
+                "keyword_remove",
+                f'Removed "{name}" from {len(removed_ids)} photos',
+                str(keyword_id),
+                items,
+                is_batch=True,
+            )
+        return jsonify({"ok": True, "updated": len(removed_ids)})
 
     def _run_batch_delete(
         db, photo_ids, mode="vireo", include_companions=False, paths=None,
@@ -7512,6 +7674,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         search_match_case=False,
         search_whole_word=False,
         confirmation_filter="all",
+        highlight_filter="all",
+        representative_filter="all",
     ):
         folders = db.get_folders_with_quality_data()
         if scope == "workspace":
@@ -7522,6 +7686,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         species_filter = (species_filter or "").strip()
         confirmation_filter = _normalize_highlight_confirmation_filter(
             confirmation_filter
+        )
+        highlight_filter = _normalize_highlight_presence_filter(highlight_filter)
+        representative_filter = _normalize_highlight_presence_filter(
+            representative_filter
         )
 
         candidates = db.get_highlights_candidates(folder_id, min_quality=min_quality)
@@ -7560,6 +7728,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         _apply_ordered_highlights(db, buckets)
         _apply_highlight_preferences(db, buckets)
+        buckets, unidentified_photos = _filter_highlight_curation_state(
+            buckets,
+            unidentified_photos,
+            highlight_filter,
+            representative_filter,
+        )
 
         def limited_bucket(bucket):
             photos = bucket["photos"]
@@ -7596,6 +7770,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "eligible": eligible_count,
                 "limit_per_bucket": limit_per_bucket,
                 "confirmation": confirmation_filter,
+                "highlight_selection": highlight_filter,
+                "species_representative": representative_filter,
                 "search": (search_query or "").strip(),
             },
             "scope": "workspace" if folder_id is None else "folder",
@@ -7620,6 +7796,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             search_match_case=_request_bool_arg("q_match_case"),
             search_whole_word=_request_bool_arg("q_whole_word"),
             confirmation_filter=request.args.get("confirmation") or "all",
+            highlight_filter=request.args.get("highlight_selection") or "all",
+            representative_filter=(
+                request.args.get("species_representative") or "all"
+            ),
         )
         return jsonify(payload)
 
@@ -8344,6 +8524,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         _apply_ordered_highlights(db, buckets)
         _apply_highlight_preferences(db, buckets)
+        buckets, unidentified_photos = _filter_highlight_curation_state(
+            buckets,
+            unidentified_photos,
+            request.args.get("highlight_selection") or "all",
+            request.args.get("species_representative") or "all",
+        )
         if species == "__unidentified__":
             photos = unidentified_photos
             label = "Unidentified"
@@ -17600,7 +17786,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # decode (the working copy was extracted from the embedded JPEG
         # at scan time).
         import config as cfg
-        from thumbnails import generate_thumbnail
+        from thumbnails import (
+            _retry_thumbnail_with_working_copy,
+            generate_thumbnail,
+        )
         vireo_dir = os.path.dirname(thumb_dir)
         # Look up the photo's folder path directly rather than via
         # ``get_folder_tree()``: the tree filter excludes folders whose
@@ -17707,6 +17896,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         )
                         if result:
                             source = companion_abs
+            if (
+                not result
+                and recipe
+                and os.path.splitext(source)[1].lower() in RAW_EXTENSIONS
+            ):
+                result = _retry_thumbnail_with_working_copy(
+                    db,
+                    photo,
+                    source,
+                    thumb_dir,
+                    thumb_size,
+                    cfg.load().get("thumbnail_quality", 85),
+                    recipe,
+                    vireo_dir,
+                )
+                if result:
+                    source = result
         except Exception:
             log.exception(
                 "Thumbnail self-heal failed for photo %s (source=%s)",
@@ -21323,6 +21529,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     img = load_image(companion_abs, max_size=load_max_size)
                     if img is not None:
                         canonical = companion_abs
+            if img is None:
+                wc_path = _working_copy_path_if_satisfies(
+                    photo, recipe, size, vireo_dir, rel_slack=0.01,
+                )
+                if wc_path and os.path.abspath(wc_path) != os.path.abspath(canonical):
+                    log.info(
+                        "RAW decode failed for photo %s preview at size=%s; "
+                        "falling back to JPEG working copy",
+                        photo_id, size,
+                    )
+                    _record_working_copy_failure(db, photo, canonical)
+                    img = load_image(wc_path, max_size=load_max_size)
+                    if img is not None:
+                        canonical = wc_path
         if img is None:
             _record_working_copy_failure(db, photo, canonical)
             return "Could not load image", 500

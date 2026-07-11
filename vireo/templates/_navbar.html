@@ -8485,6 +8485,11 @@ function showToast(msg, type) {
 function openExternalLink(event, url) {
   if (event) event.preventDefault();
   function fallbackOpen() {
+    // In the desktop app, falling back to window.location.href navigates the
+    // WKWebView itself, which makes external sites look like they opened inside
+    // Vireo. If the native opener fails, leave the app in place and let the
+    // caller surface the link/error instead.
+    if (typeof isTauri === 'function' && isTauri()) return false;
     var opened = null;
     try {
       opened = window.open('about:blank', '_blank');

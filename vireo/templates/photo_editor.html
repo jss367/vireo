@@ -519,6 +519,7 @@ body {
       <div class="panel-title">Crop</div>
       <div class="button-row">
         <button class="editor-btn" type="button" onclick="resetCrop()">Full Frame</button>
+        <button class="editor-btn" type="button" id="aspectLockBtn" onclick="toggleAspectLock()" title="Keep the current crop aspect ratio while resizing">Lock Ratio</button>
         <button class="editor-btn" type="button" id="aspect32Btn" onclick="setAspect(1.5)" title="Set a 3:2 crop and lock the ratio; click again to unlock">3:2</button>
         <button class="editor-btn" type="button" id="aspect43Btn" onclick="setAspect(1.3333333333)" title="Set a 4:3 crop and lock the ratio; click again to unlock">4:3</button>
         <button class="editor-btn" type="button" id="aspect11Btn" onclick="setAspect(1)" title="Set a 1:1 crop and lock the ratio; click again to unlock">1:1</button>
@@ -731,6 +732,7 @@ function setEditorLoading(loading) {
   if (resetAll) resetAll.disabled = !!loading;
   var copyBtn = document.getElementById('copySettingsBtn');
   if (copyBtn) copyBtn.disabled = !!loading;
+  updateAspectButtons();
 }
 
 function isEditorDirty() {
@@ -755,6 +757,11 @@ function setButtonActive(id, active) {
   if (btn) btn.classList.toggle('active', !!active);
 }
 
+function setButtonDisabled(id, disabled) {
+  var btn = document.getElementById(id);
+  if (btn) btn.disabled = !!disabled;
+}
+
 function updateFeedbackControls() {
   setButtonActive('beforeBtn', editorState.showBefore);
   setButtonActive('fitBtn', editorState.zoomMode === 'fit');
@@ -767,6 +774,7 @@ function updateFeedbackControls() {
   if (note) {
     note.textContent = editorState.showBefore ? 'Approximate saved preview' : 'Approximate current preview';
   }
+  updateAspectButtons();
 }
 
 function setZoomMode(mode) {
@@ -1045,6 +1053,7 @@ function syncControls() {
   document.getElementById('straightenValue').textContent = straight.toFixed(1);
   syncLocalControls();
   renderCropBox();
+  updateAspectButtons();
   updateDirtyState();
 }
 
@@ -1311,6 +1320,14 @@ function setCropField(key, raw) {
   renderCropBox(true);
 }
 
+function currentCropAspect() {
+  var img = document.getElementById('editorImg');
+  if (!img || !img.clientWidth || !img.clientHeight) return null;
+  var crop = ensureCrop(editorState.recipe);
+  var aspect = (crop.w * img.clientWidth) / (crop.h * img.clientHeight);
+  return Number.isFinite(aspect) && aspect > 0 ? aspect : null;
+}
+
 function markChanged(render) {
   if (editorState.loading) return;
   var wasShowingBefore = editorState.showBefore;
@@ -1365,8 +1382,11 @@ function setStraighten(value) {
 
 function updateAspectButtons() {
   var map = { aspect32Btn: 1.5, aspect43Btn: 1.3333333333, aspect11Btn: 1 };
+  setButtonActive('aspectLockBtn', !!editorState.cropAspect);
+  setButtonDisabled('aspectLockBtn', !!editorState.showBefore || !!editorState.loading);
   Object.keys(map).forEach(function(id) {
-    setButtonActive(id, editorState.cropAspect === map[id]);
+    setButtonActive(id, Math.abs(Number(editorState.cropAspect || 0) - map[id]) < 0.0001);
+    setButtonDisabled(id, !!editorState.showBefore || !!editorState.loading);
   });
 }
 
@@ -1378,9 +1398,10 @@ function resetCrop() {
 }
 
 function setAspect(aspect) {
+  if (editorState.loading || editorState.showBefore) return;
   var img = document.getElementById('editorImg');
   if (!img || !img.clientWidth || !img.clientHeight) return;
-  if (editorState.cropAspect === aspect) {
+  if (Math.abs(Number(editorState.cropAspect || 0) - aspect) < 0.0001) {
     // Second click on the active ratio unlocks it and leaves the crop alone.
     editorState.cropAspect = null;
     updateAspectButtons();
@@ -1398,6 +1419,18 @@ function setAspect(aspect) {
   }
   editorState.recipe.crop = { x: (1 - w) / 2, y: (1 - h) / 2, w: w, h: h };
   markChanged(false);
+}
+
+function toggleAspectLock() {
+  if (editorState.loading || editorState.showBefore) return;
+  if (editorState.cropAspect) {
+    editorState.cropAspect = null;
+  } else {
+    var aspect = currentCropAspect();
+    if (!aspect) return;
+    editorState.cropAspect = aspect;
+  }
+  updateAspectButtons();
 }
 
 function setAdjustment(key, value) {

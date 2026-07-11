@@ -9957,7 +9957,7 @@ class Database:
         ).fetchall()
         return {r["species"]: r["photo_id"] for r in rows}
 
-    def get_species_representative_lists(self):
+    def get_species_representative_lists(self, eligible_only=False):
         """Return {species: [photo_id, ...]} representative photos.
 
         Representative markings are global, but this read is still scoped to
@@ -9966,10 +9966,25 @@ class Database:
         rows only to actual species buckets, so a representative row alone
         does not make an untagged species appear on the list. Lists are
         newest-selection first, so item 0 is the main representative.
+
+        When ``eligible_only`` is true, omit preferences whose photo is
+        rejected, unavailable to the workspace, or no longer carries the
+        stored species keyword. The preference row remains intact for undo.
         """
         ws = self._ws_id()
+        eligibility_filter = ""
+        if eligible_only:
+            eligibility_filter = """
+                 AND EXISTS (
+                     SELECT 1
+                     FROM photo_keywords pk
+                     JOIN keywords k ON k.id = pk.keyword_id
+                      AND (k.is_species = 1 OR k.type = 'taxonomy')
+                     WHERE pk.photo_id = sr.photo_id
+                       AND k.name = sr.species
+                 )"""
         rows = self.conn.execute(
-            """SELECT sr.species, sr.photo_id
+            f"""SELECT sr.species, sr.photo_id
                FROM species_representatives sr
                JOIN photos p ON p.id = sr.photo_id
                 AND COALESCE(p.flag, 'none') != 'rejected'
@@ -9977,6 +9992,7 @@ class Database:
                 AND wf.workspace_id = ?
                JOIN folders f ON f.id = p.folder_id
                 AND f.status IN ('ok', 'partial')
+                 {eligibility_filter}
                ORDER BY sr.species, sr.selected_order DESC, sr.id DESC""",
             (ws,),
         ).fetchall()
@@ -9987,11 +10003,13 @@ class Database:
                 ids.append(row["photo_id"])
         return result
 
-    def get_species_representatives(self):
+    def get_species_representatives(self, eligible_only=False):
         """Return {species: main_photo_id} for compatibility callers."""
         return {
             species: photo_ids[0]
-            for species, photo_ids in self.get_species_representative_lists().items()
+            for species, photo_ids in self.get_species_representative_lists(
+                eligible_only=eligible_only
+            ).items()
             if photo_ids
         }
 
@@ -10064,26 +10082,78 @@ class Database:
         if _commit:
             self.conn.commit()
 
-    def get_species_highlights(self, species=None):
+    def get_species_highlights(self, species=None, eligible_only=False):
         """Return ordered highlighted photo ids for the active workspace.
+
+        When ``eligible_only`` is true, omit rejected photos and photos that
+        are no longer eligible for the Highlights page. Stored rows are kept
+        intact so un-rejecting a photo restores its selection.
 
         Result shape is ``{species: {photo_id: rank}}``.
         """
         ws = self._ws_id()
+        eligibility_joins = ""
+        eligibility_filter = ""
+        if eligible_only:
+            eligibility_joins = """
+                   JOIN photos p ON p.id = sh.photo_id
+                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                    AND wf.workspace_id = sh.workspace_id
+                   JOIN folders f ON f.id = p.folder_id
+                    AND f.status IN ('ok', 'partial')"""
+            eligibility_filter = """
+                 AND p.quality_score IS NOT NULL
+                 AND COALESCE(p.flag, 'none') != 'rejected'
+                 AND sh.species = COALESCE(
+                     (
+                         SELECT k.name
+                         FROM photo_keywords pk
+                         JOIN keywords k ON k.id = pk.keyword_id
+                          AND (k.is_species = 1 OR k.type = 'taxonomy')
+                         WHERE pk.photo_id = sh.photo_id
+                         ORDER BY pk.rowid DESC
+                         LIMIT 1
+                     ),
+                     (
+                         SELECT pr.species
+                         FROM detections d
+                         JOIN predictions pr ON pr.detection_id = d.id
+                         LEFT JOIN prediction_review pr_rev
+                          ON pr_rev.prediction_id = pr.id
+                         AND pr_rev.workspace_id = sh.workspace_id
+                         WHERE d.photo_id = sh.photo_id
+                           AND pr.species IS NOT NULL
+                           AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                           AND pr.labels_fingerprint = (
+                               SELECT pr2.labels_fingerprint
+                               FROM predictions pr2
+                               WHERE pr2.detection_id = pr.detection_id
+                                 AND pr2.classifier_model = pr.classifier_model
+                               ORDER BY pr2.created_at DESC, pr2.id DESC
+                               LIMIT 1
+                           )
+                         ORDER BY pr.confidence DESC, pr.id DESC
+                         LIMIT 1
+                     )
+                 )"""
         if species:
             rows = self.conn.execute(
-                """SELECT species, photo_id, rank
-                   FROM species_highlights
-                   WHERE workspace_id = ? AND species = ?
-                   ORDER BY rank, created_at, photo_id""",
+                f"""SELECT sh.species, sh.photo_id, sh.rank
+                   FROM species_highlights sh
+                   {eligibility_joins}
+                   WHERE sh.workspace_id = ? AND sh.species = ?
+                   {eligibility_filter}
+                   ORDER BY sh.rank, sh.created_at, sh.photo_id""",
                 (ws, species),
             ).fetchall()
         else:
             rows = self.conn.execute(
-                """SELECT species, photo_id, rank
-                   FROM species_highlights
-                   WHERE workspace_id = ?
-                   ORDER BY species, rank, created_at, photo_id""",
+                f"""SELECT sh.species, sh.photo_id, sh.rank
+                   FROM species_highlights sh
+                   {eligibility_joins}
+                   WHERE sh.workspace_id = ?
+                   {eligibility_filter}
+                   ORDER BY sh.species, sh.rank, sh.created_at, sh.photo_id""",
                 (ws,),
             ).fetchall()
         result = {}
@@ -12716,7 +12786,18 @@ class Database:
                 kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?",
                                        (int(entry['new_value']),)).fetchone()
                 if kw:
-                    self.remove_pending_changes(pid, 'keyword_remove', kw['name'])
+                    # Symmetric with `_queue_keyword_remove`: the original
+                    # remove either queued a `keyword_remove` or, when a
+                    # not-yet-synced `keyword_add` was pending, cancelled
+                    # that add. Reversing needs to restore whichever side
+                    # the remove touched — otherwise an add → remove → undo
+                    # flow leaves the tag on the photo with no pending
+                    # sidecar write, and the restored keyword never syncs.
+                    cancelled = self.remove_pending_changes(
+                        pid, 'keyword_remove', kw['name']
+                    )
+                    if cancelled == 0:
+                        self.queue_change(pid, 'keyword_add', kw['name'])
             elif entry['action_type'] == 'species_replace':
                 # Atomic swap: the edit replaced old_value's species with
                 # new_value's. Undo untags the new species and retags the
@@ -12854,7 +12935,14 @@ class Database:
                 kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?",
                                        (int(entry['new_value']),)).fetchone()
                 if kw:
-                    self.queue_change(pid, 'keyword_remove', kw['name'])
+                    # Mirror the undo path: if undo re-queued a
+                    # `keyword_add`, redo should cancel it rather than
+                    # stack a conflicting `keyword_remove` alongside it.
+                    cancelled = self.remove_pending_changes(
+                        pid, 'keyword_add', kw['name']
+                    )
+                    if cancelled == 0:
+                        self.queue_change(pid, 'keyword_remove', kw['name'])
             elif entry['action_type'] == 'species_replace':
                 # Re-apply the swap: untag old, retag new, mirror pending queue.
                 old_meta = self._edit_old_value_meta(item['old_value'])
