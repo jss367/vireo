@@ -228,6 +228,38 @@ def test_sync_from_xmp_preserves_keyword_when_only_case_differs(tmp_path):
     assert {k['name'] for k in keywords} == {'Sparrow'}
 
 
+def test_sync_from_xmp_preserves_tag_when_only_edge_quote_differs(tmp_path):
+    """A stray edge-quote variant in XMP should match the clean DB spelling.
+
+    Regression: prior to normalizing both sides of the diff, an XMP file
+    containing '‘apapane' compared against a DB row stored as 'apapane'
+    would land in "add ‘apapane" (a no-op via add_keyword's normalize
+    fallback) followed by "remove apapane" (the DB name isn't in the raw
+    XMP set), leaving the photo untagged.
+    """
+    from db import Database
+    from sync import sync_from_xmp
+    from xmp import write_sidecar
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={'apapane'})
+
+    kid = db.add_keyword('apapane')
+    db.tag_photo(pid, kid)
+
+    os.remove(xmp_path)
+    write_sidecar(
+        xmp_path, flat_keywords={'‘apapane'}, hierarchical_keywords=set(),
+    )
+
+    sync_from_xmp(db, [pid])
+
+    keywords = db.get_photo_keywords(pid)
+    assert {k['name'] for k in keywords} == {'apapane'}
+
+
 def test_sync_to_xmp_reports_unsupported_flag_changes_when_disabled(tmp_path, monkeypatch):
     """Flag pending changes remain queued when XMP flag sync is disabled."""
     from xml.etree import ElementTree as ET

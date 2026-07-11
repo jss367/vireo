@@ -4,6 +4,7 @@ import logging
 import os
 from collections import defaultdict
 
+from keyword_normalization import keyword_match_key
 from xmp import (
     read_keywords,
     remove_keywords,
@@ -229,23 +230,29 @@ def sync_from_xmp(db, photo_ids):
         if not os.path.exists(xmp_path):
             continue
 
-        # Read current XMP keywords
+        # Read current XMP keywords. Compare with a normalized match key on
+        # both sides so an XMP variant like `‘apapane` matches a DB row
+        # stored as `apapane` (add_keyword normalizes on insert). A plain
+        # `.lower()` comparison would treat them as different names, making
+        # the add-side an INSERT-OR-IGNORE no-op and then prune the DB tag
+        # because the raw DB name is not in the raw XMP set -- leaving the
+        # photo untagged.
         xmp_keywords = read_keywords(xmp_path)
-        xmp_keywords_lower = {kw.lower(): kw for kw in xmp_keywords}
+        xmp_keywords_by_key = {keyword_match_key(kw): kw for kw in xmp_keywords}
 
         # Get current DB keywords
         db_keywords = db.get_photo_keywords(photo_id)
-        db_keywords_lower = {k["name"].lower(): k for k in db_keywords}
+        db_keywords_by_key = {keyword_match_key(k["name"]): k for k in db_keywords}
 
         # Reconcile DB keyword associations to match the current XMP file.
-        for kw_lower, kw_name in xmp_keywords_lower.items():
-            if kw_lower in db_keywords_lower:
+        for kw_key, kw_name in xmp_keywords_by_key.items():
+            if kw_key in db_keywords_by_key:
                 continue
             kid = db.add_keyword(kw_name)
             db.tag_photo(photo_id, kid)
 
         for kw in db_keywords:
-            if kw["name"].lower() not in xmp_keywords_lower:
+            if keyword_match_key(kw["name"]) not in xmp_keywords_by_key:
                 db.untag_photo(photo_id, kw["id"])
 
         # Update xmp_mtime

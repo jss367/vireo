@@ -17960,6 +17960,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("photo_ids and label required")
 
         kid = db.add_keyword(label)
+        # Re-read the stored keyword name so the queued sidecar change and
+        # history entry match the row actually tagged. Without this, a
+        # request like `‘juvenile` tags the normalized `juvenile` row but
+        # queues the raw stray-quote value, so XMP sync writes the wrong
+        # spelling and a later removal of the stored keyword does not
+        # cancel the pending add. Same reasoning as api_add_keyword.
+        stored = db.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (kid,)
+        ).fetchone()
+        if stored and stored["name"]:
+            label = stored["name"]
         for pid in photo_ids:
             db.tag_photo(pid, kid)
             db.queue_change(pid, "keyword_add", label)
