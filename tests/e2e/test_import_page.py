@@ -160,6 +160,94 @@ def test_import_preview_passes_verify_by_hash_to_duplicate_check(live_server, pa
     assert body["verify_by_hash"] is True
 
 
+def test_import_preview_shows_destination_folder_structure(live_server, page):
+    """Copy-mode preview surfaces the destination folder structure (new vs
+    existing folders) and a managed-archive callout, wired to
+    /api/import/destination-preview. Skipped duplicates are excluded so the
+    folder counts match the files that will actually land."""
+    url = live_server["url"]
+    captured = {}
+
+    def folder_preview(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "files": [
+                    {"path": "/tmp/card-a/IMG_0001.jpg"},
+                    {"path": "/tmp/card-a/IMG_0002.jpg"},
+                ],
+            }),
+        )
+
+    def check_duplicates(route):
+        frame = (
+            "data: " + json.dumps({
+                "duplicates": ["/tmp/card-a/IMG_0002.jpg"],
+                "checked": 2, "total": 2,
+            }) + "\n\n"
+            + "data: " + json.dumps({
+                "done": True, "duplicate_count": 1, "checked": 2, "total": 2,
+            }) + "\n\n"
+        )
+        route.fulfill(
+            status=200, content_type="text/event-stream", body=frame,
+        )
+
+    def destination_preview(route):
+        captured["body"] = json.loads(route.request.post_data or "{}")
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "folders": [
+                    {"path": "2026/2026-07-01",
+                     "full_path": "/archive/2026/2026-07-01",
+                     "count": 1, "exists": False},
+                    {"path": "2026/2026-07-02",
+                     "full_path": "/archive/2026/2026-07-02",
+                     "count": 1, "exists": True},
+                ],
+                "total_photos": 2,
+                "total_folders": 2,
+                "new_folders": 1,
+                "existing_folders": 1,
+                "managed_archive": {"path": "/archive", "photo_count": 1284},
+            }),
+        )
+
+    page.route("**/api/import/folder-preview", folder_preview)
+    page.route("**/api/import/check-duplicates", check_duplicates)
+    page.route("**/api/import/destination-preview", destination_preview)
+    page.goto(f"{url}/import")
+
+    page.locator("#modeCopy").check()
+    page.locator("#sourceInput").fill("/tmp/card-a")
+    page.locator("#btnAddSource").click()
+    page.locator("#destInput").fill("/archive")
+    page.locator("#btnPreview").click()
+
+    structure = page.locator("#destStructure")
+    expect(structure).to_be_visible()
+    expect(structure).to_contain_text(
+        "2 photos → 2 folders (1 new, 1 existing)"
+    )
+    expect(structure).to_contain_text("Merging into a managed archive at")
+    expect(structure).to_contain_text("/archive")
+    expect(structure).to_contain_text("1284 photos already cataloged")
+    expect(structure).to_contain_text("2026/2026-07-01")
+    expect(structure).to_contain_text("new")
+    expect(structure).to_contain_text("existing")
+
+    # The structure block is only made visible after destination-preview
+    # resolves, so captured["body"] is populated by the time we get here.
+    # The skipped duplicate is excluded from the structure preview so the
+    # new/existing folder counts reflect the copy set, not every file found.
+    assert captured["body"]["exclude_paths"] == ["/tmp/card-a/IMG_0002.jpg"]
+    assert captured["body"]["destination"] == "/archive"
+    assert captured["body"]["file_types"] == "both"
+
+
 def test_import_copy_start_sends_restored_options(live_server, page):
     url = live_server["url"]
     captured = {}
