@@ -2337,7 +2337,6 @@ window.NAV_ALL_PAGES = [
   {id: 'compare',         label: 'Compare',         href: '/compare'},
   {id: 'settings',        label: 'Settings',        href: '/settings'},
   {id: 'workspace',       label: 'Workspace',       href: '/workspace'},
-  {id: 'lightroom',       label: 'Lightroom',       href: '/lightroom'},
   {id: 'shortcuts',       label: 'Shortcuts',       href: '/shortcuts'},
   {id: 'keywords',        label: 'Keywords',        href: '/keywords'},
   {id: 'duplicates',      label: 'Duplicates',      href: '/duplicates'},
@@ -2764,7 +2763,7 @@ window.NAV_ALL_PAGES = [
 (function() {
   // Map from navigation shortcut key → href path
   var NAV_ROUTES = {
-    pipeline: '/pipeline', lightroom: '/lightroom', pipeline_review: '/pipeline/review',
+    pipeline: '/pipeline', pipeline_review: '/pipeline/review',
     review: '/review', cull: '/cull', browse: '/browse', map: '/map',
     variants: '/variants', dashboard: '/dashboard', storage: '/storage', audit: '/audit',
     compare: '/compare', workspace: '/workspace', shortcuts: '/shortcuts',
@@ -2772,7 +2771,7 @@ window.NAV_ALL_PAGES = [
   };
 
   var NAV_DEFAULTS = {
-    pipeline: '', lightroom: '', pipeline_review: '', review: '',
+    pipeline: '', pipeline_review: '', review: '',
     cull: '', browse: '', map: '', variants: '',
     dashboard: '', storage: '', audit: '', compare: '', workspace: '',
     shortcuts: '', settings: '', keywords: ''

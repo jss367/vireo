@@ -180,12 +180,6 @@ def dependency_readiness(config: dict | None = None) -> dict:
             "path": dng,
             "hint": "Install Adobe DNG Converter or configure its executable under Settings → Paths.",
         },
-        "lightroom": {
-            "required": False,
-            "state": "ready" if (lightroom := find_lightroom()) else "missing",
-            "path": lightroom,
-            "hint": "Lightroom Classic is optional; catalog import remains available when installed.",
-        },
         "openssh": {
             "required": False,
             "state": "ready" if ssh_ok else ("misconfigured" if ssh else "missing"),
