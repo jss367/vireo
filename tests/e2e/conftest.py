@@ -144,12 +144,17 @@ def live_server(tmp_path, monkeypatch):
     thread.daemon = True
     thread.start()
 
-    yield {
-        "url": f"http://127.0.0.1:{port}",
-        "app": app,
-        "db": db,
-        "data": seed_data,
-    }
-
-    server.shutdown()
-    thread.join(timeout=5)
+    try:
+        yield {
+            "url": f"http://127.0.0.1:{port}",
+            "app": app,
+            "db": db,
+            "data": seed_data,
+        }
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+        if hasattr(app, "_cleanup_app_resources"):
+            app._cleanup_app_resources()
+        db.close()
