@@ -1022,6 +1022,21 @@ def test_add_keyword_normalizes_acute_accent_edge_variant(db):
     assert db.add_keyword("apapane") == kid
 
 
+def test_add_keyword_normalizes_acute_accent_with_leading_whitespace(db):
+    """When an imported/synced XMP keyword has whitespace before U+00B4
+    (e.g. `` ´apapane`` from an XMP element with pretty-printed text),
+    the pre-NFKC edge-quote strip must still see the acute. Otherwise
+    NFKC decomposes it to a leading combining mark U+0301 that survives
+    the later strip and produces a nearly-invisible variant."""
+    kid = db.add_keyword(" ´apapane")
+
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "apapane"
+    assert db.add_keyword("apapane") == kid
+
+
 def test_add_keyword_dedupes_pre_existing_edge_quote_variant(db):
     """When an upgraded database already carries a tagged edge-quote variant
     like '\u2018apapane', a later `add_keyword('apapane')` must reuse that row

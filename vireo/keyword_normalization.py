@@ -27,6 +27,15 @@ _EDGE_QUOTES = (
 def normalize_keyword_display(name: str) -> str:
     """Return a cleaned display/storage form for a keyword name."""
     value = str(name or "")
+    # Trim whitespace BEFORE stripping edge quotes so a leading/trailing
+    # space doesn't shield an edge-quote character from the pre-NFKC
+    # strip below. Without this, an imported XMP value like
+    # ` ´apapane` (space + U+00B4 ACUTE ACCENT) leaves the acute in
+    # place; NFKC then decomposes it to a leading combining mark
+    # (U+0301) that is not in _EDGE_QUOTES, and the result is
+    # `́apapane` — a nearly invisible variant that no longer matches
+    # `apapane`.
+    value = value.strip()
     # Strip edge quotes BEFORE NFKC so characters that decompose into a
     # spacing char plus a combining mark (e.g. U+00B4 ACUTE ACCENT ->
     # U+0020 U+0301) get removed while they are still a single quote-ish
