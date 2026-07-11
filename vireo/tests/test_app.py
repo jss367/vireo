@@ -5837,6 +5837,54 @@ def test_api_photos_missing_delete_sidecars_skips_offline_folder(app_and_db, tmp
     assert data["skipped"] == 1
 
 
+def test_api_photos_missing_delete_sidecars_skips_unreadable_folder(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """Present-but-unreadable folder must not have its sidecars deleted.
+
+    Regression: ``os.path.isdir`` returns True for a NAS/local folder the
+    process cannot traverse; in that state ``os.path.exists(child)`` may
+    return false for every original even though the file is still there,
+    so unlinking the paired .xmp would remove a valid sidecar. Mirrors
+    the ``/api/photos/missing/remove`` accessibility check.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    fid = db.add_folder(str(real_dir), name="live")
+    pid = db.add_photo(
+        folder_id=fid,
+        filename="ghost.NEF",
+        extension=".nef",
+        file_size=1,
+        file_mtime=1.0,
+    )
+    sidecar = real_dir / "ghost.xmp"
+    sidecar.write_text("<x:xmpmeta/>")
+
+    import app as app_module
+
+    real_scandir = app_module.os.scandir
+
+    def unreadable_scandir(path):
+        if os.fspath(path) == str(real_dir):
+            raise PermissionError("permission denied")
+        return real_scandir(path)
+
+    monkeypatch.setattr(app_module.os, "scandir", unreadable_scandir)
+
+    resp = client.post("/api/photos/missing/delete-sidecars", json={
+        "photo_ids": [pid],
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    data = resp.get_json()
+    assert data["deleted"] == 0
+    assert data["skipped"] == 1
+    assert sidecar.exists()
+
+
 def test_api_photos_missing_remove_rejects_ids_outside_workspace(app_and_db, tmp_path):
     """Unknown or out-of-workspace photo_ids must not affect anything.
 

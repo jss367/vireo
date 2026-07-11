@@ -1107,6 +1107,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             )
                             unreachable += 1
                             continue
+                        # Track the repair folder so the outer finally
+                        # invalidates the Missing Originals cache for it —
+                        # scanner.scan touches the folder on disk and can
+                        # revalidate a restored original that a ready
+                        # /api/photos/missing payload still lists as a
+                        # ghost. Matches the append pattern used by the
+                        # normal ingest/scan-in-place paths below.
+                        scanned_roots.append(folder_path)
                         try:
                             # restrict_files limits discovery to the known
                             # broken photos in this folder. Without it, new

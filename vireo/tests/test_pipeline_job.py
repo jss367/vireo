@@ -454,6 +454,81 @@ def test_pipeline_scan_invokes_missing_originals_invalidator(tmp_path, monkeypat
     )
 
 
+def test_pipeline_collection_repair_scan_invokes_missing_originals_invalidator(
+    tmp_path, monkeypatch,
+):
+    """Collection-mode metadata repair scans must invalidate the cache too.
+
+    Regression: when ``skip_scan`` is on (a collection-scoped Process run)
+    and ``_find_broken_metadata_folders`` flags rows, the pipeline runs a
+    targeted ``do_scan()`` against the affected folder to repair metadata.
+    That call touches disk and can revalidate a restored original that a
+    ready ``/api/photos/missing`` payload still lists as a ghost, but the
+    repair path did not append its folder to ``scanned_roots`` — so the
+    outer finally's Missing Originals invalidation never fired for repair
+    scans. Codex review on 7fec89bd.
+    """
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    photo_path = photo_dir / "broken.jpg"
+    Image.new("RGB", (32, 32), "black").save(str(photo_path))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    folder_id = db.add_folder(str(photo_dir), name="photos")
+    photo_id = db.add_photo(
+        folder_id=folder_id,
+        filename="broken.jpg",
+        extension=".jpg",
+        file_size=os.path.getsize(photo_path),
+        file_mtime=os.path.getmtime(photo_path),
+        width=32,
+        height=32,
+    )
+    # Force _find_broken_metadata_folders to flag this row so the pipeline
+    # takes the repair branch instead of the "Skipped (using collection)"
+    # early return.
+    db.conn.execute(
+        "UPDATE photos SET timestamp=NULL WHERE id=?", (photo_id,),
+    )
+    db.conn.commit()
+
+    collection_id = db.add_collection(
+        "Repair me",
+        json.dumps([{"field": "photo_ids", "op": "in", "value": [photo_id]}]),
+    )
+
+    params = PipelineParams(
+        collection_id=collection_id,
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    invalidator_calls = []
+
+    def fake_invalidator():
+        invalidator_calls.append(True)
+
+    run_pipeline_job(
+        _make_job(), FakeRunner(), db_path, ws_id, params,
+        missing_originals_invalidator=fake_invalidator,
+    )
+
+    assert invalidator_calls, (
+        "missing_originals_invalidator was not called after the "
+        "collection-mode metadata repair scan"
+    )
+
+
 def test_pipeline_scan_invalidator_is_optional(tmp_path, monkeypatch):
     """Callers that don't pass ``missing_originals_invalidator`` still work.
 

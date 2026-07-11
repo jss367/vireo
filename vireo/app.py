@@ -3853,7 +3853,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             folder_path = row["folder_path"]
             folder_online = folder_online_cache.get(folder_path)
             if folder_online is None:
-                folder_online = os.path.isdir(folder_path)
+                # Match /api/photos/missing/remove: a path that stats as a
+                # directory but can't be enumerated (NAS/share ACL denial,
+                # missing search permission) makes ``os.path.exists(src)``
+                # unreliable for every child, so we'd otherwise unlink
+                # sidecars belonging to originals we couldn't actually
+                # verify were missing.
+                folder_online = False
+                if os.path.isdir(folder_path):
+                    try:
+                        with os.scandir(folder_path):
+                            folder_online = True
+                    except OSError:
+                        folder_online = False
                 folder_online_cache[folder_path] = folder_online
             if not folder_online:
                 # Folder is currently unreachable — we can't tell whether
