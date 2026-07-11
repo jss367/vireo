@@ -13,6 +13,31 @@ body {
   min-height: 100vh;
 }
 
+/* ---------- Grouped application navigation ---------- */
+.nav-section-menus { display: flex; align-items: center; gap: 2px; }
+.nav-section { position: relative; }
+.nav-section-button {
+  border: 0; background: transparent; color: var(--text-muted);
+  padding: 8px 7px; font-size: 12px; cursor: pointer; white-space: nowrap;
+}
+.nav-section-button:hover, .nav-section-button.active { color: var(--text-primary); }
+.nav-section-menu {
+  display: none; position: absolute; z-index: 500; top: calc(100% + 6px); right: 0;
+  min-width: 170px; padding: 6px; background: var(--bg-secondary);
+  border: 1px solid var(--border-primary); border-radius: 7px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28);
+}
+.nav-section-menu.open { display: flex; flex-direction: column; }
+.navbar .nav-section-menu a {
+  padding: 8px 10px; border: 0; border-radius: 4px; color: var(--text-secondary);
+  text-decoration: none; font-size: 12px;
+}
+.navbar .nav-section-menu a:hover,
+.navbar .nav-section-menu a:focus,
+.navbar .nav-section-menu a.active {
+  color: var(--text-primary); background: var(--bg-tertiary); outline: none;
+}
+
 /* ---------- Content container ---------- */
 /* Each page sets its own max-width via inline style or page CSS.
    This class provides the shared centering and padding. */

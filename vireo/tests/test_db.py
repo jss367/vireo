@@ -13457,12 +13457,10 @@ def test_all_nav_ids_covers_every_page():
     assert expected == ALL_NAV_IDS
 
 
-def test_default_tabs_is_the_curated_ten():
+def test_default_tabs_are_the_primary_workflow():
     from db import DEFAULT_TABS
     assert DEFAULT_TABS == [
-        "import", "browse", "pipeline", "pipeline_review",
-        "review", "cull", "jobs",
-        "highlights", "misses", "storage", "settings",
+        "import", "pipeline", "review", "browse",
     ]
 
 

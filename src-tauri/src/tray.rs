@@ -3,10 +3,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{
-    AppHandle, Manager,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     window::{ProgressBarState, ProgressBarStatus},
+    AppHandle, Manager,
 };
 use tauri_plugin_opener::OpenerExt;
 
@@ -133,24 +133,12 @@ pub fn build_menu(
         // Browser-launch mode: there is no app window to show or hide, so
         // we offer a single "Open in browser" item that re-opens the URL
         // (handy if the user closed the tab).
-        let open = MenuItem::with_id(
-            app,
-            OPEN_IN_BROWSER,
-            "Open in browser",
-            true,
-            None::<&str>,
-        )?;
+        let open = MenuItem::with_id(app, OPEN_IN_BROWSER, "Open in browser", true, None::<&str>)?;
         Menu::with_items(app, &[&open, &sep1, &jobs, &sep2, &quit])
     } else {
         let show = MenuItem::with_id(app, SHOW_WINDOW, "Show Window", true, None::<&str>)?;
         let hide = MenuItem::with_id(app, HIDE_WINDOW, "Hide Window", true, None::<&str>)?;
-        let open = MenuItem::with_id(
-            app,
-            OPEN_IN_BROWSER,
-            "Open in Browser",
-            true,
-            None::<&str>,
-        )?;
+        let open = MenuItem::with_id(app, OPEN_IN_BROWSER, "Open in Browser", true, None::<&str>)?;
         Menu::with_items(app, &[&show, &hide, &open, &sep1, &jobs, &sep2, &quit])
     }
 }
@@ -296,8 +284,16 @@ fn dock_progress_for_jobs(running: &[&JobInfo]) -> DockProgress {
         }
     }
 
-    let total = longest.progress.as_ref().and_then(|p| p.total).unwrap_or(0.0);
-    let current = longest.progress.as_ref().and_then(|p| p.current).unwrap_or(0.0);
+    let total = longest
+        .progress
+        .as_ref()
+        .and_then(|p| p.total)
+        .unwrap_or(0.0);
+    let current = longest
+        .progress
+        .as_ref()
+        .and_then(|p| p.current)
+        .unwrap_or(0.0);
     if total > 0.0 {
         let pct = ((current / total) * 100.0).round().clamp(0.0, 100.0) as u64;
         DockProgress::Normal(pct)

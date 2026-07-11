@@ -21,6 +21,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from db import Database, commit_with_retry
+from job_contract import progress_event
 from model_cache import get_default_cache
 from pipeline_locks import (
     acquire_photo_mask,
@@ -565,12 +566,12 @@ def _progress_event(stages, stage_id, phase, **extra):
     eta_seconds, step_id). Per-stage counts still live in `stages[...]` and
     reach the UI via the `stages` snapshot, so step-level bars are unaffected."""
     current, total = _weighted_progress(stages)
-    data = {
-        "phase": phase,
-        "stage_id": stage_id,
-        "current": current,
-        "total": total,
-        "stages": {k: dict(v) for k, v in stages.items()},
+    data = progress_event(
+        phase,
+        current,
+        total,
+        stage_id=stage_id,
+        stages={k: dict(v) for k, v in stages.items()},
         # JobRunner.push_event merges progress payloads into job["progress"]
         # rather than replacing them, so a sub-phase (e.g. "Extracting metadata"
         # with phase_current/phase_total set) would otherwise linger through
@@ -579,10 +580,10 @@ def _progress_event(stages, stage_id, phase, **extra):
         # a stale phase. Default the triple to None here so callers with no
         # active sub-phase actively clear it; the update() below lets callers
         # with a real sub-phase override.
-        "phase_current": None,
-        "phase_total": None,
-        "phase_label": None,
-    }
+        phase_current=None,
+        phase_total=None,
+        phase_label=None,
+    )
     data.update(extra)
     return data
 
