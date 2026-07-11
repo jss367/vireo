@@ -176,6 +176,30 @@ def test_batch_quick_uploads_require_explicit_per_item_open(live_server, page):
     page.wait_for_function("window.__externalTest.execCopyCalls === 1")
 
 
+def test_batch_quick_open_preserves_preparation_failures(live_server, page):
+    page.goto(f"{live_server['url']}/browse")
+    _mock_tauri(page)
+
+    failures = [
+        {"photo_id": 42, "error": "Missing GPS coordinates"},
+        {"photo_id": 43, "error": "No identifiable taxon"},
+    ]
+    page.evaluate(
+        "args => openInatQuickModal([args.item], args.failures)",
+        {"item": _item(1), "failures": failures},
+    )
+
+    # The batch had preparation failures, so the auto-open shortcut must be
+    # skipped and the modal must render both the prepared upload and the
+    # failure summary — otherwise those dropped photos are silently lost.
+    assert _open_commands(page) == []
+    expect(page.locator("#inatModal")).to_have_class("modal-overlay open")
+    expect(page.locator("#inatCards", has_text="Open Upload Page")).to_be_visible()
+    expect(page.locator("#inatCards")).to_contain_text(
+        "2 photos could not be prepared."
+    )
+
+
 def test_duplicate_quick_upload_does_not_auto_open(live_server, page):
     page.goto(f"{live_server['url']}/browse")
     _mock_tauri(page)

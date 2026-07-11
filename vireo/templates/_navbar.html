@@ -7403,7 +7403,10 @@ async function submitToInatBatch(photoIds) {
 
 async function openInatQuickModal(items, failures) {
   var skipAutoOpenForDuplicate = items.length === 1 && !!items[0].already_submitted;
-  if (items.length === 1 && items[0].upload_url && !skipAutoOpenForDuplicate) {
+  var hasFailures = !!(failures && failures.length);
+  // When batch preparation left other photos in a failure state, always render
+  // the modal so the failure summary is visible instead of silently dropping it.
+  if (items.length === 1 && items[0].upload_url && !skipAutoOpenForDuplicate && !hasFailures) {
     var opened = await _inatOpenUrl(items[0].upload_url);
     if (opened) {
       showToast('Opened iNaturalist in your browser.', 'success');
