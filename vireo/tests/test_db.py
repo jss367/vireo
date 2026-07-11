@@ -13280,6 +13280,48 @@ def test_update_keyword_rename_preserves_okina(tmp_path):
     assert row["name"] == "ʻApapane"
 
 
+def test_add_keyword_species_prefers_taxonomy_peer_over_general_exact_match(tmp_path):
+    """When both a clean `general` row `apapane` and a legacy `taxonomy`
+    edge-quote row `‘apapane` exist at the same slot, add_keyword('apapane',
+    is_species=True) must resolve to the taxonomy peer. Otherwise the fast
+    exact-match query returns the general row and the promotion path stamps
+    a second taxonomy row with the same normalized name — silently
+    duplicating the species keyword and letting later calls bind to either
+    id at random.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    # Legacy edge-quoted taxonomy row that survived normalization on
+    # insert (the UDF fallback is only consulted for casing/quote variants
+    # of the requested name; here we insert directly to simulate the
+    # imported-DB shape Codex flagged).
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES (?, NULL, 1, 'taxonomy')",
+        ("‘apapane",),
+    )
+    taxonomy_id = cur.lastrowid
+    # A clean general row also exists at the same slot.
+    general_id = db.add_keyword("apapane", kw_type='general')
+    assert general_id != taxonomy_id
+
+    resolved = db.add_keyword("apapane", is_species=True)
+    assert resolved == taxonomy_id
+
+    # Guard against the silent-duplicate: we must NOT have promoted the
+    # general row into a second taxonomy row.
+    rows = db.conn.execute(
+        "SELECT id, type FROM keywords "
+        "WHERE vireo_normalize_keyword(name) = 'apapane' COLLATE NOCASE "
+        "AND parent_id IS NULL AND type = 'taxonomy'"
+    ).fetchall()
+    assert [r["id"] for r in rows] == [taxonomy_id]
+    general_row = db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (general_id,)
+    ).fetchone()
+    assert general_row["type"] == "general"
+
+
 def test_add_photo_retries_on_database_is_locked(tmp_path):
     """The INSERT inside add_photo must retry transient 'database is locked'.
 

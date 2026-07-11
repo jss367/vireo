@@ -8480,6 +8480,12 @@ class Database:
                     "ORDER BY (type = ?) DESC, id ASC LIMIT 1",
                     (name, parent_id, kw_type, kw_type),
                 ).fetchone()
+        if parent_id is None:
+            parent_clause = "parent_id IS NULL"
+            parent_args = ()
+        else:
+            parent_clause = "parent_id = ?"
+            parent_args = (parent_id,)
         if not existing:
             # Fallback: the fast query above compares against the raw stored
             # name, so an imported/upgraded row whose spelling still carries
@@ -8488,12 +8494,6 @@ class Database:
             # inserted. Re-query using the normalize UDF so both sides are
             # compared in their cleaned form. Runs only on the miss path,
             # so the common case still hits idx_keywords_name.
-            if parent_id is None:
-                parent_clause = "parent_id IS NULL"
-                parent_args = ()
-            else:
-                parent_clause = "parent_id = ?"
-                parent_args = (parent_id,)
             if kw_type is None:
                 existing = self.conn.execute(
                     f"SELECT id, type FROM keywords "
@@ -8510,6 +8510,29 @@ class Database:
                     f"ORDER BY (type = ?) DESC, id ASC LIMIT 1",
                     (name, *parent_args, kw_type, kw_type),
                 ).fetchone()
+        elif kw_type and kw_type != 'general' and existing["type"] == 'general':
+            # The fast exact-match query returned a 'general' row, but the
+            # caller preferred a specific higher-priority type (e.g.
+            # 'taxonomy' via is_species=True). A distinct legacy row whose
+            # stored spelling still carries edge quotes and IS of the
+            # preferred type could exist at the same parent slot — the fast
+            # query missed it (raw name mismatches under COLLATE NOCASE) and
+            # the fallback above only runs on a total miss. Without this
+            # check, we would promote the general row to the preferred type
+            # and silently produce two same-parent rows that normalize to
+            # the same name and share the requested type (e.g. two
+            # top-level 'taxonomy' `apapane` rows, one clean and one
+            # `‘apapane`), and later add_keyword calls could bind to either.
+            # Prefer the preferred-type peer when it exists so the mapping
+            # stays stable and the accidental promotion doesn't happen.
+            preferred = self.conn.execute(
+                f"SELECT id, type FROM keywords "
+                f"WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE "
+                f"AND {parent_clause} AND type = ? AND id != ? LIMIT 1",
+                (name, *parent_args, kw_type, existing["id"]),
+            ).fetchone()
+            if preferred is not None:
+                existing = preferred
         if existing:
             if kw_type is None and not is_species and existing["type"] == "general":
                 taxon_id = self._lookup_taxon_id_for_keyword(name)

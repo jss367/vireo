@@ -569,3 +569,32 @@ def test_sync_to_xmp_location_cleanup_does_not_write_exif_fallback(tmp_path, mon
     assert "GPSLatitude" not in content
     assert "GPSLongitude" not in content
     assert "vireo:gpsSource" not in content
+
+
+def test_sync_to_xmp_add_survives_normalized_remove_for_same_photo(tmp_path):
+    """A rename queues both remove `‘apapane` and add `apapane` on the same
+    photo. remove_keywords compares by normalized match key, so the newly
+    written clean `<rdf:li>` and the pre-existing quoted variant BOTH match
+    the remove key. sync_to_xmp must apply the remove BEFORE the add so the
+    resulting sidecar carries the clean spelling instead of ending up empty.
+    """
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_keywords
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={"‘apapane"})
+
+    db.queue_change(pid, "keyword_remove", "‘apapane")
+    db.queue_change(pid, "keyword_add", "apapane")
+
+    result = sync_to_xmp(db)
+    assert result["synced"] == 1
+    assert result["failed"] == 0
+
+    kw = read_keywords(xmp_path)
+    assert "apapane" in kw
+    assert "‘apapane" not in kw
+    assert len(db.get_pending_changes()) == 0

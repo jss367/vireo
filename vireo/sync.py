@@ -142,15 +142,25 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
                     edit_recipe_json = c["value"] or ""
                     supported_ids.append(c["id"])
 
-            # Write keywords
+            # Apply keyword removals BEFORE additions. remove_keywords()
+            # compares by normalized match key, so a remove of `‘apapane`
+            # matches any `<rdf:li>` whose text normalizes to `apapane` --
+            # including a clean `apapane` we would otherwise have just added.
+            # A rename that queues remove `‘apapane` and add `apapane` for
+            # the same photo would then have its newly-written clean entry
+            # stripped along with the old quoted one, clearing pending
+            # changes and leaving the sidecar without the keyword. Applying
+            # the remove first strips only the pre-existing quoted variant;
+            # the subsequent write_sidecar then adds the clean spelling.
+            if keywords_to_remove:
+                remove_keywords(xmp_path, keywords_to_remove)
+
+            # Write keyword additions after removals so a same-photo
+            # remove+add pair does not race (see above).
             if keywords_to_add:
                 write_sidecar(
                     xmp_path, flat_keywords=keywords_to_add, hierarchical_keywords=set()
                 )
-
-            # Handle keyword removals: remove matching li elements from bags
-            if keywords_to_remove:
-                remove_keywords(xmp_path, keywords_to_remove)
 
             # Write flag before rating: write_pick_flag creates a sidecar if
             # needed, while write_rating intentionally only updates existing
