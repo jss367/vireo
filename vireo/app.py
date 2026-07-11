@@ -1901,9 +1901,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ):
             return None
 
-        if request.headers.get("Sec-Fetch-Site", "").lower() == "cross-site":
+        fetch_site = request.headers.get("Sec-Fetch-Site", "").lower()
+        if fetch_site and fetch_site not in {"same-origin", "none"}:
             return json_error(
-                "Cross-site requests are not allowed",
+                "Non-origin requests are not allowed",
                 403,
                 code="cross_site_request",
             )

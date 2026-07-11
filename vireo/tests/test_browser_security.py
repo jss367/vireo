@@ -65,6 +65,35 @@ def test_cross_origin_request_is_rejected_even_with_session(app_and_db):
     assert response.get_json()["code"] == "cross_origin_request"
 
 
+def test_same_site_request_from_another_localhost_port_is_rejected(app_and_db):
+    app, _ = app_and_db
+    _enable_browser_auth(app)
+    client = app.test_client()
+    client.get("/browse")
+
+    response = client.get(
+        "/api/folders",
+        headers={"Sec-Fetch-Site": "same-site"},
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "cross_site_request"
+
+
+def test_same_origin_request_with_session_is_allowed(app_and_db):
+    app, _ = app_and_db
+    _enable_browser_auth(app)
+    client = app.test_client()
+    client.get("/browse")
+
+    response = client.get(
+        "/api/folders",
+        headers={"Sec-Fetch-Site": "same-origin"},
+    )
+
+    assert response.status_code == 200
+
+
 def test_v1_token_api_does_not_require_browser_session(app_and_db):
     app, _ = app_and_db
     _enable_browser_auth(app)
