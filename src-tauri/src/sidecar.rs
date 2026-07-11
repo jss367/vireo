@@ -420,6 +420,7 @@ pub fn start_sidecar(app: &AppHandle) -> Result<SidecarState, SidecarStartError>
         format!("/opt/homebrew/bin:/usr/local/bin:{}", path)
     };
 
+    #[allow(unused_mut)]
     let mut cmd = app.shell().sidecar("vireo-server").map_err(|e| {
         SidecarStartError::Generic(format!("Failed to create sidecar command: {}", e))
     })?;

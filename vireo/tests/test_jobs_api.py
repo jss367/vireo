@@ -2248,6 +2248,12 @@ def _save_remote_target(monkeypatch, tmp_path, **overrides):
     # check so happy-path tests don't depend on a real GNU rsync being
     # installed in the CI environment.
     monkeypatch.setattr(move_mod, "is_gnu_rsync", lambda _rb: True)
+    # The remote-archive preflight also probes for an OpenSSH client
+    # (added for Windows). Stub so happy-path tests don't require ssh
+    # in the CI environment.
+    monkeypatch.setattr(
+        move_mod, "resolve_ssh_bin", lambda configured="": "/usr/bin/ssh",
+    )
     return entry
 
 
