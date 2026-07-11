@@ -1383,11 +1383,13 @@ document.addEventListener('lightbox:flagchanged', function(e) {
     var isUnidentified = hit.bucket === null;
     var target = isUnidentified ? currentData.unidentified : hit.bucket;
     if (!target) { render(); return; }
-    // Render once immediately so the Pick badge/outline appears without
-    // waiting for the refetch's network round-trip; render again after the
-    // refetch so the reordered bucket window replaces the stale one.
-    render();
-    refetchBucketFromZero(target, isUnidentified).then(render);
+    // Render after the authoritative refetch settles so the Pick badge/outline
+    // and the bucket ordering become visible together. Rendering before the
+    // refetch exposes a transient stale order: tests and collection saves can
+    // observe the picked class while the photo is still in its old position.
+    refetchBucketFromZero(target, isUnidentified)
+      .then(render)
+      .catch(function() { render(); });
   }
 });
 
