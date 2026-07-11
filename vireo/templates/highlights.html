@@ -879,111 +879,46 @@ function refreshBucketOrderingKeys(bucket) {
   bucket.best_timestamp = top ? (top.timestamp || null) : null;
 }
 
-// Backend `_highlight_score_bucket` adds this bonus to `highlight_score`
-// when flag === 'flagged' before clamping to [0, 1] (see vireo/app.py).
-// The API also sends `highlight_base_score`: the same computation with the
-// pick bonus omitted, clamped and rounded. On a lightbox pick/unpick we
-// recompute `highlight_score = clamp(base + bonus_if_flagged)` from that
-// baseline so the client mirrors what a reload would produce — subtracting
-// the bonus from the already-clamped cached score would under-count when
-// the raw pre-clamp score exceeded 1.0 (e.g. base 0.97 → cached 1.0 →
-// subtract 0.08 → 0.92, but the correct unpicked value is 0.97).
-var PICK_HIGHLIGHT_SCORE_BONUS = 0.08;
-
-function applyPickBonusOnFlagChange(photo, previousFlag, nextFlag) {
-  if (!photo) return;
-  var wasFlagged = previousFlag === 'flagged';
-  var isFlagged = nextFlag === 'flagged';
-  if (wasFlagged === isFlagged) return;
-  if (typeof photo.highlight_base_score === 'number') {
-    var next = photo.highlight_base_score + (isFlagged ? PICK_HIGHLIGHT_SCORE_BONUS : 0);
-    photo.highlight_score = Math.max(0, Math.min(1, next));
-    return;
-  }
-  // Fallback for payloads that predate highlight_base_score — apply the
-  // delta to the cached (clamped) score. Ordering may drift by up to the
-  // bonus in the rare case where the raw score exceeded 1.0 pre-clamp.
-  if (typeof photo.highlight_score !== 'number') return;
-  var delta = isFlagged ? PICK_HIGHLIGHT_SCORE_BONUS : -PICK_HIGHLIGHT_SCORE_BONUS;
-  photo.highlight_score = Math.max(0, Math.min(1, photo.highlight_score + delta));
-}
-
 // Refetch a bucket (or the unidentified section) from offset 0 so the loaded
-// window matches the backend's post-pick ordering. Used when `has_more` is
-// true — a client-only resort of the loaded slice can't be trusted because
-// the picked-first bonus can push a previously-visible photo past the loaded
-// window or promote a hidden one into it, and `loadMoreBucket` uses
-// `photos.length` as its next offset. That would append duplicates and skip
-// photos that newly entered the first page. Returns a promise so callers can
-// await the refresh before rendering.
-async function refetchBucketFromZero(bucket, isUnidentified) {
-  var target = bucket;
+// window matches the backend's post-pick ordering. A pick mutates
+// highlight_score (the +0.08 bonus, clamped to [0, 1]) and can flip ordering
+// against representatives, curated species_highlights, or the has_more tail;
+// rather than mirror `_highlight_score_bucket` / `_apply_ordered_highlights` /
+// `_apply_highlight_preferences` in JS (repeatedly getting it wrong on subtle
+// edge cases), let the server compute the authoritative order and copy it
+// back. Pages in 500-row chunks up to the currently-loaded length because the
+// endpoint clamps `limit` to 500 — a single fetch with limit>500 would drop
+// cards from an expanded bucket (>500 loaded) and shrink Save-as-Collection.
+// Returns a promise so callers can await the refresh before rendering.
+async function refetchBucketFromZero(target, isUnidentified) {
   if (!target) return;
   var currentLen = Array.isArray(target.photos) ? target.photos.length : 0;
-  var params = requestScopeParams();
   var speciesKey = isUnidentified ? '__unidentified__' : target.species;
-  appendHighlightFilterParams(params);
-  // appendHighlightFilterParams may set 'species' for the species-search
-  // filter; force it back to the target species/unidentified sentinel so
-  // the endpoint returns the right bucket, not whatever the search box holds.
-  params.set('species', speciesKey);
-  params.set('offset', 0);
-  params.set('limit', Math.max(500, currentLen));
-  var data = await safeFetch('/api/highlights/bucket?' + params);
-  if (!data || !Array.isArray(data.photos)) return;
-  target.photos = data.photos;
-  target.loaded_count = data.loaded_count;
-  target.has_more = data.has_more;
-  if (typeof data.photo_count === 'number') target.photo_count = data.photo_count;
-  refreshBucketOrderingKeys(target);
-}
-
-// Sort a bucket's photos to match the backend's ordering after a client-side
-// flag mutation. If any visible photo maps to a stored species highlight the
-// backend runs `_apply_ordered_highlights` after `_highlight_score_bucket`,
-// which places highlighted photos (by highlight_rank) ahead of unhighlighted
-// ones regardless of flag; otherwise only `_highlight_score_bucket(...,
-// picked_first=True)` applies and flagged photos lead. Without this dispatch,
-// picking an unhighlighted photo in a curated bucket would demote the stored
-// highlight until reload — changing the visible slice and the Save-as-
-// Collection payload that reads from it.
-function sortBucketAfterFlagChange(photos) {
-  if (!photos || photos.length < 2) return;
-  var hasHighlights = photos.some(function(p) { return p.is_highlighted; });
-  if (hasHighlights) {
-    photos.sort(function(a, b) {
-      var ah = a.is_highlighted ? 0 : 1;
-      var bh = b.is_highlighted ? 0 : 1;
-      if (ah !== bh) return ah - bh;
-      var ar = a.highlight_rank != null ? a.highlight_rank : Number.MAX_SAFE_INTEGER;
-      var br = b.highlight_rank != null ? b.highlight_rank : Number.MAX_SAFE_INTEGER;
-      if (ar !== br) return ar - br;
-      var as = a.highlight_score || 0, bs = b.highlight_score || 0;
-      if (as !== bs) return bs - as;
-      var ac = a.predicted_confidence || 0, bc = b.predicted_confidence || 0;
-      if (ac !== bc) return bc - ac;
-      var aq = a.quality_score || 0, bq = b.quality_score || 0;
-      if (aq !== bq) return bq - aq;
-      var art = a.rating || 0, brt = b.rating || 0;
-      if (art !== brt) return brt - art;
-      return (a.id || 0) - (b.id || 0);
-    });
-    return;
+  var targetLen = Math.max(500, currentLen);
+  var allPhotos = [];
+  var lastPage = null;
+  for (var offset = 0; offset < targetLen; offset += 500) {
+    var params = requestScopeParams();
+    appendHighlightFilterParams(params);
+    // appendHighlightFilterParams may set 'species' for the species-search
+    // filter; force it back to the target species/unidentified sentinel so
+    // the endpoint returns the right bucket, not whatever the search box holds.
+    params.set('species', speciesKey);
+    params.set('offset', offset);
+    params.set('limit', 500);
+    var page = await safeFetch('/api/highlights/bucket?' + params);
+    if (!page || !Array.isArray(page.photos)) return;
+    lastPage = page;
+    if (page.photos.length === 0) break;
+    allPhotos = allPhotos.concat(page.photos);
+    if (!page.has_more) break;
   }
-  photos.sort(function(a, b) {
-    var ap = a.flag === 'flagged' ? 1 : 0;
-    var bp = b.flag === 'flagged' ? 1 : 0;
-    if (ap !== bp) return bp - ap;
-    var ah = a.highlight_score || 0, bh = b.highlight_score || 0;
-    if (ah !== bh) return bh - ah;
-    var ac = a.predicted_confidence || 0, bc = b.predicted_confidence || 0;
-    if (ac !== bc) return bc - ac;
-    var aq = a.quality_score || 0, bq = b.quality_score || 0;
-    if (aq !== bq) return bq - aq;
-    var ar = a.rating || 0, br = b.rating || 0;
-    if (ar !== br) return br - ar;
-    return (a.id || 0) - (b.id || 0);
-  });
+  if (!lastPage) return;
+  target.photos = allPhotos;
+  target.loaded_count = allPhotos.length;
+  target.has_more = !!lastPage.has_more;
+  if (typeof lastPage.photo_count === 'number') target.photo_count = lastPage.photo_count;
+  refreshBucketOrderingKeys(target);
 }
 
 function lightboxIsOpenOnPhoto(photoId) {
@@ -1326,36 +1261,30 @@ document.addEventListener('lightbox:flagchanged', function(e) {
     delete rejectedAtLoadSeq[detail.photoId];
     loadHighlights();
   } else {
-    // Pick/Unpick from the lightbox: the badge/outline are derived from
-    // p.flag inside renderCard, and the visible row is a slice(0, perRow)
-    // of bucket.photos, so we must both mutate the flag AND re-sort the
-    // containing bucket to match what the backend would render on reload —
-    // otherwise a photo picked from the preloaded-but-hidden tail would
-    // keep its Pick badge invisible, or a pick in a curated bucket would
-    // shove a stored highlight out of the visible slice.
+    // Pick/Unpick from the lightbox: the visible row is a slice(0, perRow)
+    // of bucket.photos, and the backend applies the +0.08 highlight_score
+    // bonus + picked_first ordering + `_apply_ordered_highlights` +
+    // `_apply_highlight_preferences` before serving that ordering. Rather
+    // than mirror all of that in JS (which has already produced a stream
+    // of ordering bugs against representatives, curated highlights, the
+    // score clamp, best_timestamp, and the has_more offset), refetch the
+    // bucket authoritatively so the client window is always what a full
+    // reload would produce.
     var prev = detail.previousFlag || 'none';
     var next = detail.flag || 'none';
     if (prev === next) return;
     if (prev !== 'flagged' && next !== 'flagged') return;
     var hit = findHighlightPhotoWithContainer(detail.photoId);
     if (!hit) return;
-    applyPickBonusOnFlagChange(hit.photo, prev, next);
+    // Mutate the shared photo reference immediately so any UI that reads
+    // photo.flag between now and the refetch resolving (e.g. the still-open
+    // lightbox controls) reflects the new pick state; the refetch then
+    // replaces the bucket's photo array with the server-authoritative order.
     hit.photo.flag = next;
-    // When the bucket has `has_more`, the loaded window is a subset of
-    // the server's ordered list. A local resort of that window can't
-    // reconcile a pick that promotes a hidden photo into the slice or
-    // demotes a visible one past it, and `loadMoreBucket` would then
-    // append duplicates / skip newly-first-page photos. Refetch instead
-    // so pagination stays aligned with the server's picked-first order.
     var isUnidentified = hit.bucket === null;
     var target = isUnidentified ? currentData.unidentified : hit.bucket;
-    if (target && target.has_more) {
-      refetchBucketFromZero(target, isUnidentified).then(render);
-      return;
-    }
-    sortBucketAfterFlagChange(hit.photos);
-    refreshBucketOrderingKeys(hit.bucket);
-    render();
+    if (!target) { render(); return; }
+    refetchBucketFromZero(target, isUnidentified).then(render);
   }
 });
 
