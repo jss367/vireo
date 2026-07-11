@@ -3883,27 +3883,7 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
   var body = { species: speciesName, photo_ids: photoIds };
   if (burstIdx != null) body.burst_index = burstIdx;
 
-  var rollback;
-  var optimisticStructure = null;
-  if (burstIdx != null && enc.bursts && enc.bursts[burstIdx]) {
-    var burst = enc.bursts[burstIdx];
-    var previousOverride = burst.species_override
-      ? Object.assign({}, burst.species_override)
-      : burst.species_override;
-    rollback = function() { burst.species_override = previousOverride; };
-    burst.species_override = { species: speciesName, confirmed: true };
-  } else {
-    var previousConfirmed = enc.species_confirmed;
-    var previousSpecies = enc.confirmed_species;
-    rollback = function() {
-      enc.species_confirmed = previousConfirmed;
-      enc.confirmed_species = previousSpecies;
-    };
-    enc.species_confirmed = true;
-    enc.confirmed_species = speciesName;
-  }
-  refreshAfterSpeciesConfirm(encIdx, burstIdx, false);
-  optimisticStructure = encounterStructureSignature(pipelineResults.encounters);
+  var previousStructure = encounterStructureSignature(pipelineResults.encounters);
 
   var resp;
   try {
@@ -3913,8 +3893,6 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
       body: JSON.stringify(body),
     });
   } catch (e) {
-    if (rollback) rollback();
-    refreshAfterSpeciesConfirm(encIdx, burstIdx, false);
     return;
   }
   if (!resp || !resp.ok) return;
@@ -3925,7 +3903,7 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
   // next save-cache POST.
   var forceFullRender = false;
   if (resp.encounters) {
-    forceFullRender = encounterStructureSignature(resp.encounters) !== optimisticStructure;
+    forceFullRender = encounterStructureSignature(resp.encounters) !== previousStructure;
     pipelineResults.encounters = resp.encounters;
     if (resp.summary) {
       pipelineResults.summary = resp.summary;
