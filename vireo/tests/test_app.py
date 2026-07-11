@@ -10181,7 +10181,11 @@ def test_native_import_commands_route_to_import_page():
 
     assert "ids::NAV_IMPORT => Some(\"/import\")" in menu
     assert "case 'import_photos':\n        nativeMenuRoute('/import');" in navbar
-    assert "case 'import_folder':\n        nativeMenuRoute('/import');" in navbar
+    # Import Folder... must stay a distinct action from Import Photos...:
+    # it deep-links into Copy-to-archive with the source picker open.
+    assert (
+        "nativeMenuRoute('/import?mode=copy&pick=source');" in navbar
+    )
 
 
 def test_native_shell_owns_external_navigation_policy():

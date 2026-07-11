@@ -8835,7 +8835,11 @@ window.handleNativeMenuCommand = async function(command) {
         nativeMenuRoute('/import');
         break;
       case 'import_folder':
-        nativeMenuRoute('/import');
+        // Unlike import_photos (which lands on the Import page default),
+        // Import Folder... deep-links into Copy-to-archive with the source
+        // folder picker open — the two File-menu commands must stay
+        // distinct actions.
+        nativeMenuRoute('/import?mode=copy&pick=source');
         break;
       case 'export_selected':
         if (typeof openExportModal === 'function') openExportModal();
