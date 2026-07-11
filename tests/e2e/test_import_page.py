@@ -62,6 +62,124 @@ def test_import_destination_browse_button_sets_destination(live_server, page):
     expect(page.locator("#destInput")).to_have_value("/tmp/archive")
 
 
+def test_import_destination_preview_shows_final_folders(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/import")
+    page.locator("#modeCopy").check()
+    page.evaluate(
+        """
+        () => {
+          const originalFetch = window.fetch.bind(window);
+          window.fetch = (input, init) => {
+            const target = typeof input === 'string' ? input : input.url;
+            if (target && target.indexOf('/api/import/folder-preview') === 0) {
+              return Promise.resolve(new Response(JSON.stringify({
+                total_count: 1431,
+                total_size: 0,
+                type_breakdown: {'.nef': 1431},
+                duplicate_count: 0,
+                files: [],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            if (target && target.indexOf('/api/import/destination-preview') === 0) {
+              return Promise.resolve(new Response(JSON.stringify({
+                total_photos: 1431,
+                total_folders: 1,
+                new_folders: 1,
+                existing_folders: 0,
+                managed_archive: {
+                  path: '/Volumes/Photography/Raw Files/USA',
+                  photo_count: 45302,
+                },
+                folders: [{
+                  path: '2026/07/11',
+                  full_path: '/Volumes/Photography/Raw Files/USA/2026/2026/07/11',
+                  count: 1431,
+                  exists: false,
+                }],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            return originalFetch(input, init);
+          };
+          addSourcePath('/Volumes/NIKON Z 8/DCIM');
+          document.getElementById('destInput').value = '/Volumes/Photography/Raw Files/USA/2026';
+          document.getElementById('folderTemplate').value = '%Y/%m/%d';
+        }
+        """
+    )
+
+    page.locator("[data-testid='import-preview-folders-btn']").click()
+
+    expect(page.locator("[data-testid='import-folder-preview-results']")).to_be_visible()
+    expect(page.locator("#folderPreviewList")).to_contain_text(
+        "/Volumes/Photography/Raw Files/USA/2026/2026/07/11"
+    )
+    expect(page.locator("[data-testid='import-managed-archive-callout']")).to_contain_text(
+        "/Volumes/Photography/Raw Files/USA"
+    )
+
+    page.locator("#folderTemplate").fill("%Y/%Y-%m-%d")
+    expect(page.locator("#folderPreviewStale")).to_be_visible()
+
+
+def test_copy_import_start_requires_current_destination_preview(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/import")
+    page.locator("#modeCopy").check()
+    page.evaluate(
+        """
+        () => {
+          window.__importStarted = false;
+          const originalFetch = window.fetch.bind(window);
+          window.fetch = (input, init) => {
+            const target = typeof input === 'string' ? input : input.url;
+            if (target && target.indexOf('/api/import/folder-preview') === 0) {
+              return Promise.resolve(new Response(JSON.stringify({
+                total_count: 1,
+                total_size: 0,
+                type_breakdown: {'.jpg': 1},
+                duplicate_count: 0,
+                files: [],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            if (target && target.indexOf('/api/import/destination-preview') === 0) {
+              return Promise.resolve(new Response(JSON.stringify({
+                total_photos: 1,
+                total_folders: 1,
+                new_folders: 1,
+                existing_folders: 0,
+                managed_archive: null,
+                folders: [{
+                  path: '2026/2026-07-11',
+                  full_path: '/archive/2026/2026-07-11',
+                  count: 1,
+                  exists: false,
+                }],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            if (target && target.indexOf('/api/jobs/import-photos') === 0) {
+              window.__importStarted = true;
+              return Promise.resolve(new Response(JSON.stringify({
+                job_id: 'import-photos-test',
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            return originalFetch(input, init);
+          };
+          addSourcePath('/card');
+          document.getElementById('destInput').value = '/archive';
+        }
+        """
+    )
+
+    page.locator("#btnStart").click()
+
+    expect(page.locator("[data-testid='import-folder-preview-results']")).to_be_visible()
+    expect(page.locator("#importError")).to_contain_text(
+        "Review the destination preview"
+    )
+    assert page.evaluate("() => window.__importStarted") is False
+
+
 def test_import_browse_button_opens_folder_browser_fallback(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/import")

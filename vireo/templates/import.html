@@ -30,6 +30,32 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .source-meta { color: var(--text-secondary); white-space: nowrap; }
 .hint { font-size: 11px; color: var(--text-secondary); }
 .preview-summary { font-size: 12px; color: var(--text-secondary); margin-top: 6px; }
+.folder-preview-results {
+  margin-top: 10px; padding: 10px; border: 1px solid var(--border-primary);
+  border-radius: 6px; background: var(--bg-tertiary); font-size: 12px;
+}
+.folder-preview-callout {
+  margin-bottom: 8px; padding: 8px 10px; border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--text-primary); overflow-wrap: anywhere;
+}
+.folder-preview-summary { color: var(--text-primary); margin-bottom: 8px; }
+.folder-preview-list { display: flex; flex-direction: column; gap: 4px; }
+.folder-preview-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.folder-preview-path {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--text-secondary);
+}
+.folder-preview-count { color: var(--text-secondary); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.folder-preview-tag {
+  font-size: 10px; padding: 1px 5px; border-radius: 3px; color: #fff;
+  white-space: nowrap;
+}
+.folder-preview-tag-existing { background: var(--accent); }
+.folder-preview-tag-new { background: var(--success, #28a745); }
+.folder-preview-stale { margin-top: 8px; color: var(--warning, #bf8700); }
+.folder-preview-actions { align-items: center; margin-top: 8px; }
 .progress-bar { height: 8px; background: var(--bg-tertiary); border-radius: 4px; overflow: hidden; }
 .progress-bar > div { height: 100%; background: var(--accent); width: 0; transition: width 0.2s; }
 .folder-progress { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
@@ -116,9 +142,9 @@ body { display: flex; flex-direction: column; height: 100vh; }
       </div>
       <div class="source-list" id="sourceList"></div>
       <div class="row" style="margin-top:8px;">
-        <label><input type="checkbox" id="chkRecursive" checked onchange="refreshSourceCounts()"> Include subfolders</label>
+        <label><input type="checkbox" id="chkRecursive" checked onchange="refreshSourceCounts(); markDestinationPreviewStale()"> Include subfolders</label>
         <label id="fileTypesWrap">File types
-          <select id="fileTypes" style="min-width:100px;" onchange="refreshSourceCounts()">
+          <select id="fileTypes" style="min-width:100px;" onchange="refreshSourceCounts(); markDestinationPreviewStale()">
             <option value="both" selected>RAW + JPEG</option>
             <option value="raw">RAW only</option>
             <option value="jpeg">JPEG only</option>
@@ -133,13 +159,30 @@ body { display: flex; flex-direction: column; height: 100vh; }
         <button class="btn btn-primary" id="btnBrowseDestination" data-testid="import-destination-browse-btn" onclick="browseForDestination()">Browse...</button>
         <input type="text" id="destInput" list="recentDestinations"
                placeholder="Archive folder"
+               oninput="markDestinationPreviewStale()"
                value="">
         <datalist id="recentDestinations"></datalist>
       </div>
       <div class="row">
         <label>Folder template</label>
-        <input type="text" id="folderTemplate" value="%Y/%Y-%m-%d" style="max-width:200px;flex:0 1 auto;">
+        <input type="text" id="folderTemplate" value="%Y/%Y-%m-%d"
+               oninput="markDestinationPreviewStale()"
+               style="max-width:200px;flex:0 1 auto;">
         <span class="hint">strftime of each photo's capture time, e.g. %Y/%Y-%m-%d</span>
+      </div>
+      <div class="row folder-preview-actions">
+        <button class="btn" id="btnPreviewFolders" data-testid="import-preview-folders-btn" onclick="previewDestinationFolders()">Preview folder structure</button>
+        <span class="hint" id="previewFoldersHint"></span>
+      </div>
+      <div class="folder-preview-results" id="folderPreviewResults"
+           data-testid="import-folder-preview-results" style="display:none;">
+        <div class="folder-preview-callout" id="folderPreviewManagedArchive"
+             data-testid="import-managed-archive-callout" style="display:none;"></div>
+        <div class="folder-preview-summary" id="folderPreviewSummary"></div>
+        <div class="folder-preview-list" id="folderPreviewList"></div>
+        <div class="folder-preview-stale" id="folderPreviewStale" style="display:none;">
+          Destination preview is stale. Refresh before importing.
+        </div>
       </div>
     </div>
 
@@ -233,6 +276,9 @@ let browserEscHandler = null;
 let browserSelectedPaths = [];
 let browserSelectAnchorPath = '';
 let activeImportMode = 'in_place';
+let _folderPreviewShown = false;
+let _folderPreviewCurrent = false;
+let _managedArchive = null;
 
 function selectedImportMode() {
   const checked = document.querySelector('input[name="importMode"]:checked');
@@ -248,6 +294,7 @@ function updateImportMode() {
     copyMode ? 'Check for duplicates' : 'Preview import';
   document.getElementById('previewSummary').textContent = '';
   showError('');
+  markDestinationPreviewStale();
   refreshSourceCounts();
 }
 
@@ -282,6 +329,7 @@ function renderSources() {
       sources.splice(i, 1);
       delete sourceCounts[s];
       renderSources();
+      markDestinationPreviewStale();
     };
     div.appendChild(span);
     div.appendChild(meta);
@@ -369,6 +417,7 @@ function addSourcePath(path) {
     sources.push(v);
     renderSources();
     refreshSourceCount(v);
+    markDestinationPreviewStale();
     return true;
   }
   return false;
@@ -406,7 +455,10 @@ async function browseForDestination() {
     const result = await pickDirectory('Select archive folder');
     if (result) {
       const path = Array.isArray(result) ? result[0] : result;
-      if (path) document.getElementById('destInput').value = path;
+      if (path) {
+        document.getElementById('destInput').value = path;
+        markDestinationPreviewStale();
+      }
       return;
     }
     if (typeof isTauri === 'function' && isTauri()) return;
@@ -625,6 +677,7 @@ function selectImportBrowserFolder() {
   if (browserMode === 'destination') {
     if (!browserPath) return;
     document.getElementById('destInput').value = browserPath;
+    markDestinationPreviewStale();
   } else {
     const paths = browserSelectedPaths.length
       ? browserSelectedPaths
@@ -913,7 +966,140 @@ function useStagingAsImportSource(result) {
   if (result.inferred_destination) {
     document.getElementById('destInput').value = result.inferred_destination;
   }
+  markDestinationPreviewStale();
   document.getElementById('sourceCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function renderManagedArchiveCallout() {
+  const el = document.getElementById('folderPreviewManagedArchive');
+  if (!el) return;
+  el.textContent = '';
+  if (!_managedArchive || !_managedArchive.path) {
+    el.style.display = 'none';
+    return;
+  }
+  const count = Number(_managedArchive.photo_count || 0);
+  el.appendChild(document.createTextNode('Destination is an existing Vireo archive ('));
+  const path = document.createElement('code');
+  path.textContent = _managedArchive.path;
+  el.appendChild(path);
+  el.appendChild(document.createTextNode(
+    ', ' + count.toLocaleString() + ' photo' + (count === 1 ? '' : 's') +
+    '). New files will be merged in.'
+  ));
+  el.style.display = '';
+}
+
+function renderDestinationFolderPreview(data, destination) {
+  const results = document.getElementById('folderPreviewResults');
+  const summary = document.getElementById('folderPreviewSummary');
+  const list = document.getElementById('folderPreviewList');
+  const stale = document.getElementById('folderPreviewStale');
+
+  const newCount = Number(data.new_folders || 0);
+  const existingCount = Number(data.existing_folders || 0);
+  const totalPhotos = Number(data.total_photos || 0);
+  const totalFolders = Number(data.total_folders || 0);
+  const details = [];
+  if (newCount) details.push(newCount + ' new folder' + (newCount === 1 ? '' : 's'));
+  if (existingCount) details.push(existingCount + ' existing folder' + (existingCount === 1 ? '' : 's'));
+  summary.textContent = totalPhotos + ' photo' + (totalPhotos === 1 ? '' : 's') +
+    ' -> ' + totalFolders + ' folder' + (totalFolders === 1 ? '' : 's') +
+    (details.length ? ' (' + details.join(', ') + ')' : '');
+
+  list.innerHTML = '';
+  (data.folders || []).forEach((folder) => {
+    const row = document.createElement('div');
+    row.className = 'folder-preview-row';
+
+    const fullPath = folder.full_path ||
+      (folder.path === '.' ? destination : destination.replace(/\/$/, '') + '/' + folder.path);
+    const path = document.createElement('span');
+    path.className = 'folder-preview-path';
+    path.title = fullPath;
+    path.textContent = fullPath;
+
+    const tag = document.createElement('span');
+    tag.className = 'folder-preview-tag ' +
+      (folder.exists ? 'folder-preview-tag-existing' : 'folder-preview-tag-new');
+    tag.textContent = folder.exists ? 'Existing folder' : 'New folder';
+
+    const count = document.createElement('span');
+    count.className = 'folder-preview-count';
+    const photoCount = Number(folder.count || 0);
+    count.textContent = photoCount + ' photo' + (photoCount === 1 ? '' : 's');
+
+    row.append(path, tag, count);
+    list.appendChild(row);
+  });
+
+  _managedArchive = data.managed_archive || null;
+  renderManagedArchiveCallout();
+  stale.style.display = 'none';
+  results.style.display = '';
+  _folderPreviewShown = true;
+  _folderPreviewCurrent = true;
+}
+
+function markDestinationPreviewStale() {
+  _folderPreviewCurrent = false;
+  _managedArchive = null;
+  renderManagedArchiveCallout();
+  if (!_folderPreviewShown) return;
+  const stale = document.getElementById('folderPreviewStale');
+  if (stale) stale.style.display = '';
+  const btn = document.getElementById('btnPreviewFolders');
+  if (btn) btn.textContent = 'Refresh preview';
+}
+
+async function previewDestinationFolders() {
+  showError('');
+  const hint = document.getElementById('previewFoldersHint');
+  const btn = document.getElementById('btnPreviewFolders');
+  const stale = document.getElementById('folderPreviewStale');
+  const destination = (document.getElementById('destInput').value || '').trim();
+  if (!sources.length) {
+    showError('Add at least one source folder.');
+    return false;
+  }
+  if (!destination) {
+    showError('Choose a destination folder.');
+    return false;
+  }
+  hint.textContent = '';
+  if (stale) stale.style.display = 'none';
+  btn.disabled = true;
+  btn.textContent = 'Loading...';
+  try {
+    const resp = await fetch('/api/import/destination-preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sources: sources,
+        destination: destination,
+        folder_template: (document.getElementById('folderTemplate').value || '').trim(),
+        file_types: document.getElementById('fileTypes').value,
+        recursive: document.getElementById('chkRecursive').checked,
+      }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.error) {
+      const msg = data.error || 'Preview failed';
+      hint.textContent = msg;
+      showError(msg);
+      return false;
+    }
+    renderDestinationFolderPreview(data, destination);
+    btn.textContent = 'Refresh preview';
+    return true;
+  } catch (e) {
+    hint.textContent = 'Preview failed';
+    showError(String(e.message || e));
+    return false;
+  } finally {
+    btn.disabled = false;
+    if (!_folderPreviewCurrent) btn.textContent = 'Preview folder structure';
+  }
 }
 
 async function previewImport() {
@@ -970,6 +1156,7 @@ async function previewImport() {
     summary.textContent = files.length + ' files found · ' + dupCount +
       ' already in your library (will be skipped) · ' +
       (files.length - dupCount) + ' to copy';
+    await previewDestinationFolders();
   } catch (e) {
     summary.textContent = '';
     showError(String(e.message || e));
@@ -1004,6 +1191,11 @@ async function startImport() {
   const copyMode = selectedImportMode() === 'copy';
   const destination = (document.getElementById('destInput').value || '').trim();
   if (copyMode && !destination) { showError('Choose a destination folder.'); return; }
+  if (copyMode && !_folderPreviewCurrent) {
+    const previewOk = await previewDestinationFolders();
+    if (previewOk) showError('Review the destination preview, then click Start import again.');
+    return;
+  }
   const body = {
     sources: sources,
     recursive: document.getElementById('chkRecursive').checked,
