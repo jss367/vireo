@@ -9414,7 +9414,18 @@ class Database:
         return total_merged
 
     def _normalize_keyword_row_name(self, keyword_id):
-        """Trim stray edge punctuation from a surviving keyword row name."""
+        """Trim stray edge punctuation from a surviving keyword row name.
+
+        Retargeting of pending changes and species curation rows is scoped to
+        photos that actually carry ``keyword_id`` (and, for pending changes,
+        the workspaces those (photo, keyword) tags belong to). A separate
+        legacy keyword row with the same stored spelling can exist elsewhere
+        in the DB — for example a taxonomy row `‘apapane` that only workspace
+        B has tagged. A global rename by name string would rewrite B's
+        highlight/preference/pending rows even though B's keyword row was
+        never touched, leaving its curation queries dangling against a
+        canonical name it doesn't have tagged.
+        """
         row = self.conn.execute(
             "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
         ).fetchone()
@@ -9424,6 +9435,23 @@ class Database:
         cleaned = normalize_keyword_display(old_name)
         if not cleaned or cleaned == old_name:
             return
+        # Collect (photo_id, workspace_id) for photos actually tagged with this
+        # keyword row, scoped through workspace_folders so we don't retarget
+        # curation for workspaces that share no folder with any tagged photo.
+        # Captured before the keywords UPDATE, so a downstream _merge_keyword_into
+        # can still see the same tags via photo_keywords.
+        tag_rows = self.conn.execute(
+            """SELECT DISTINCT pk.photo_id, wf.workspace_id
+               FROM photo_keywords pk
+               JOIN photos p ON p.id = pk.photo_id
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               WHERE pk.keyword_id = ?""",
+            (keyword_id,),
+        ).fetchall()
+        photo_workspace_pairs = [
+            (r["photo_id"], r["workspace_id"]) for r in tag_rows
+        ]
+        affected_photo_ids = sorted({r["photo_id"] for r in tag_rows})
         # A same-name row in a different dedupe boundary can still occupy the
         # table-level UNIQUE(name, parent_id) slot. In that case the links
         # still merge correctly; keep the stored spelling unchanged.
@@ -9443,28 +9471,36 @@ class Database:
         # would then write the stray-quote entry the cleanup was supposed
         # to eliminate. A pending row that would collide with an existing
         # (photo_id, change_type, cleaned) row is dropped rather than
-        # duplicated to match queue_change's dedupe contract.
-        self.conn.execute(
-            """DELETE FROM pending_changes
-               WHERE change_type IN ('keyword_add', 'keyword_remove')
-                 AND value = ?
-                 AND EXISTS (
-                     SELECT 1 FROM pending_changes pc2
-                     WHERE pc2.photo_id = pending_changes.photo_id
-                       AND pc2.change_type = pending_changes.change_type
-                       AND pc2.value = ?
-                       AND COALESCE(pc2.workspace_id, -1)
-                           = COALESCE(pending_changes.workspace_id, -1)
-                 )""",
-            (old_name, cleaned),
-        )
-        self.conn.execute(
-            """UPDATE pending_changes
-               SET value = ?
-               WHERE change_type IN ('keyword_add', 'keyword_remove')
-                 AND value = ?""",
-            (cleaned, old_name),
-        )
+        # duplicated to match queue_change's dedupe contract. Scope to the
+        # photos actually tagged with this keyword so a separate legacy row
+        # sharing the same stored spelling in an unrelated workspace isn't
+        # rewritten by side effect.
+        if affected_photo_ids:
+            for chunk in _chunks(affected_photo_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                self.conn.execute(
+                    f"""DELETE FROM pending_changes
+                        WHERE change_type IN ('keyword_add', 'keyword_remove')
+                          AND value = ?
+                          AND photo_id IN ({placeholders})
+                          AND EXISTS (
+                              SELECT 1 FROM pending_changes pc2
+                              WHERE pc2.photo_id = pending_changes.photo_id
+                                AND pc2.change_type = pending_changes.change_type
+                                AND pc2.value = ?
+                                AND COALESCE(pc2.workspace_id, -1)
+                                    = COALESCE(pending_changes.workspace_id, -1)
+                          )""",
+                    [old_name, *chunk, cleaned],
+                )
+                self.conn.execute(
+                    f"""UPDATE pending_changes
+                        SET value = ?
+                        WHERE change_type IN ('keyword_add', 'keyword_remove')
+                          AND value = ?
+                          AND photo_id IN ({placeholders})""",
+                    [cleaned, old_name, *chunk],
+                )
         # Species curation tables (species_highlights, photo_preferences,
         # species_representatives) key rows by the species name string,
         # which is compared exact against ``keywords.name`` when the
@@ -9474,16 +9510,22 @@ class Database:
         # would drop out of those queries even though the tag was
         # retained — a highlighted or life-list representative photo
         # under the kept spelling silently disappears after cleanup.
-        # Rename them for the same old→clean mapping.
-        # ``rename_photo_preferences_species`` also retargets
-        # ``species_representatives`` in its global branch, so a
+        # Rename them for the same old→clean mapping, scoped to the
+        # (photo, workspace) pairs actually tagged with this row so a
+        # separate legacy keyword row keyed by the same species string in
+        # another workspace isn't retargeted onto a canonical name it
+        # doesn't have tagged. ``rename_photo_preferences_species`` also
+        # retargets ``species_representatives`` in its scoped branch, so a
         # separate representatives rename isn't needed here.
-        self.rename_species_highlights_species(
-            old_name, cleaned, _commit=False,
-        )
-        self.rename_photo_preferences_species(
-            old_name, cleaned, _commit=False,
-        )
+        if photo_workspace_pairs:
+            self.rename_species_highlights_species(
+                old_name, cleaned,
+                photo_workspace_pairs=photo_workspace_pairs, _commit=False,
+            )
+            self.rename_photo_preferences_species(
+                old_name, cleaned,
+                photo_workspace_pairs=photo_workspace_pairs, _commit=False,
+            )
 
     def _merge_keyword_into(self, src_id, dst_id):
         """Merge keyword ``src_id`` into ``dst_id`` and delete the source.
@@ -9544,31 +9586,54 @@ class Database:
         # with an existing (photo_id, change_type, dst_name) row is dropped
         # rather than duplicated — matches the (photo_id, change_type,
         # value, workspace_id) dedupe contract queue_change enforces.
+        # Scope the rewrite to photos actually tagged with either the
+        # source or destination keyword row. Without this scoping, a
+        # value-only rewrite affects every workspace whose pending_changes
+        # carry the same name string, so cleaning workspace A's `‘Cardinal`
+        # duplicate could silently rewrite workspace B's unrelated pending
+        # `keyword_add('‘Cardinal')` for a photo tagged with a separate
+        # legacy row that was not merged. Photos tagged with the destination
+        # are included so a pending under the source spelling on a photo
+        # that already reached the survivor row (e.g. queued before the
+        # merge from a different session) is still canonicalized to
+        # dst_name. Captured before the photo_keywords UPDATE below so the
+        # query still sees the src tags.
         if src is not None and dst is not None:
             src_name = src["name"]
             dst_name = dst["name"]
             if src_name and dst_name and src_name != dst_name:
-                self.conn.execute(
-                    """DELETE FROM pending_changes
-                       WHERE change_type IN ('keyword_add', 'keyword_remove')
-                         AND value = ?
-                         AND EXISTS (
-                             SELECT 1 FROM pending_changes pc2
-                             WHERE pc2.photo_id = pending_changes.photo_id
-                               AND pc2.change_type = pending_changes.change_type
-                               AND pc2.value = ?
-                               AND COALESCE(pc2.workspace_id, -1)
-                                   = COALESCE(pending_changes.workspace_id, -1)
-                         )""",
-                    (src_name, dst_name),
-                )
-                self.conn.execute(
-                    """UPDATE pending_changes
-                       SET value = ?
-                       WHERE change_type IN ('keyword_add', 'keyword_remove')
-                         AND value = ?""",
-                    (dst_name, src_name),
-                )
+                affected_pcx = [
+                    r["photo_id"] for r in self.conn.execute(
+                        "SELECT DISTINCT photo_id FROM photo_keywords WHERE keyword_id IN (?, ?)",
+                        (src_id, dst_id),
+                    ).fetchall()
+                ]
+                if affected_pcx:
+                    for chunk in _chunks(affected_pcx):
+                        placeholders = ",".join("?" for _ in chunk)
+                        self.conn.execute(
+                            f"""DELETE FROM pending_changes
+                                WHERE change_type IN ('keyword_add', 'keyword_remove')
+                                  AND value = ?
+                                  AND photo_id IN ({placeholders})
+                                  AND EXISTS (
+                                      SELECT 1 FROM pending_changes pc2
+                                      WHERE pc2.photo_id = pending_changes.photo_id
+                                        AND pc2.change_type = pending_changes.change_type
+                                        AND pc2.value = ?
+                                        AND COALESCE(pc2.workspace_id, -1)
+                                            = COALESCE(pending_changes.workspace_id, -1)
+                                  )""",
+                            [src_name, *chunk, dst_name],
+                        )
+                        self.conn.execute(
+                            f"""UPDATE pending_changes
+                                SET value = ?
+                                WHERE change_type IN ('keyword_add', 'keyword_remove')
+                                  AND value = ?
+                                  AND photo_id IN ({placeholders})""",
+                            [dst_name, src_name, *chunk],
+                        )
         # Move photo associations (ignore if already exists for dst_id),
         # then drop the leftovers.
         self.conn.execute(
