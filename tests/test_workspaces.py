@@ -1134,6 +1134,53 @@ def test_merge_duplicate_keywords_normalizes_stray_edge_quotes(db):
     assert tagged == {clean}
 
 
+def test_merge_duplicate_keywords_does_not_fold_distinct_non_ascii(db):
+    """``keyword_match_key`` must use ``str.lower()``, not ``str.casefold()``.
+
+    ``str.casefold()`` folds ``ß`` to ``ss``, so ``"Maße".casefold() ==
+    "Masse".casefold() == "masse"``. If cleanup grouped on that key, it
+    would silently retag and delete one of two distinct German keywords
+    even though ``add_keyword()`` and the table constraints treat them as
+    distinct — a data-loss regression. Using ``str.lower()`` (which
+    leaves ``ß`` alone, matching SQLite's ASCII ``COLLATE NOCASE``) keeps
+    them as separate keywords.
+    """
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos/a", name="a")
+    db.add_workspace_folder(ws, fid)
+    pid_a = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    pid_b = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    masse_id = db.add_keyword("Masse")
+    masze_id = db.add_keyword("Maße")
+    assert masse_id != masze_id
+    db.tag_photo(pid_a, masse_id)
+    db.tag_photo(pid_b, masze_id)
+
+    merged = db.merge_duplicate_keywords()
+
+    assert merged == 0
+    remaining = {
+        row["id"]: row["name"] for row in db.conn.execute(
+            "SELECT id, name FROM keywords WHERE id IN (?, ?)",
+            (masse_id, masze_id),
+        ).fetchall()
+    }
+    assert remaining == {masse_id: "Masse", masze_id: "Maße"}
+    tagged = {
+        (row["photo_id"], row["keyword_id"])
+        for row in db.conn.execute(
+            "SELECT photo_id, keyword_id FROM photo_keywords "
+            "WHERE photo_id IN (?, ?)",
+            (pid_a, pid_b),
+        ).fetchall()
+    }
+    assert tagged == {(pid_a, masse_id), (pid_b, masze_id)}
+
+
 def test_merge_duplicate_keywords_respects_parent_and_type(db):
     """Same-name keywords under different parents (Springfield, IL vs MO) or
     with different types are distinct by design and must NOT merge; only

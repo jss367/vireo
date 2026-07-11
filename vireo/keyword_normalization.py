@@ -52,5 +52,18 @@ def normalize_keyword_display(name: str) -> str:
 
 
 def keyword_match_key(name: str) -> str:
-    """Return the key used when comparing keyword names for equivalence."""
-    return normalize_keyword_display(name).casefold()
+    """Return the key used when comparing keyword names for equivalence.
+
+    Uses ``str.lower()`` rather than ``str.casefold()`` so distinct user
+    keywords are not silently folded together on the merge/dedupe path.
+    ``casefold`` is more aggressive than the previous SQLite
+    ``LOWER(name)``/``COLLATE NOCASE`` behavior: for example
+    ``"Maße".casefold() == "Masse".casefold() == "masse"``, so grouping
+    duplicates by that key would let ``merge_duplicate_keywords()`` retag
+    and delete one of two unrelated German keywords even though
+    ``add_keyword()`` and the table constraints would treat them as
+    distinct. ``str.lower()`` keeps ``ß`` as ``ß`` (its lowercase form),
+    which lines up with SQLite's ASCII-only ``COLLATE NOCASE`` comparison
+    used everywhere else in this codebase.
+    """
+    return normalize_keyword_display(name).lower()
