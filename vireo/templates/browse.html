@@ -2669,6 +2669,7 @@ async function loadKeywords() {
 }
 
 function renderKeywordTree(keywords) {
+  _rememberKeywordNames(keywords);
   var byParent = {};
   keywords.forEach(function(k) {
     var pid = k.parent_id || 'root';
@@ -4938,7 +4939,26 @@ function _clearRepresentativeStateIfIneligible(photoId, flag) {
   }
 }
 
+// Every render path that has (keywordId, name) pairs feeds this map so the
+// single-photo remove path can resolve the name even before the autocomplete
+// field is ever opened. keywordAutocompleteCache starts as null and only
+// populates after that field renders, so on a fresh Browse page the previous
+// lookup returned null and _clearRepresentativeStateAfterKeywordRemoval
+// no-oped — the grid badge/context-menu state stayed stale until reload.
+var _keywordNamesById = {};
+function _rememberKeywordNames(keywords) {
+  if (!Array.isArray(keywords)) return;
+  keywords.forEach(function(k) {
+    if (k && typeof k.id === 'number' && typeof k.name === 'string') {
+      _keywordNamesById[k.id] = k.name;
+    }
+  });
+}
+
 function _keywordNameFromCache(keywordId) {
+  if (Object.prototype.hasOwnProperty.call(_keywordNamesById, keywordId)) {
+    return _keywordNamesById[keywordId];
+  }
   if (!Array.isArray(keywordAutocompleteCache)) return null;
   for (var i = 0; i < keywordAutocompleteCache.length; i++) {
     var k = keywordAutocompleteCache[i];
@@ -5670,6 +5690,7 @@ function renderDetail(photo) {
   // Keywords
   var kwTypeIcons = {general:'●', taxonomy:'🌿', individual:'👤', location:'📍', genre:'🎭'};
   var kwTypeLabels = {general:'General', taxonomy:'Taxonomy', individual:'Individual', location:'Location', genre:'Genre'};
+  _rememberKeywordNames(photo.keywords || []);
   var kwHtml = '';
   (photo.keywords || []).forEach(function(k) {
     var ktype = k.type || 'general';

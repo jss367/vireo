@@ -6235,6 +6235,68 @@ async function grmApply() {
   }
 }
 
+// setLifeListPhoto (card context menu / shared lightbox action) only emits a
+// lifelist:changed event and updates its own caches. Without this listener the
+// pipeline cards keep the pre-change value of p.is_species_representative, so
+// the newly assigned photo stays un-badged and any previously visible former
+// representative keeps its badge until a full reload. Walk pipelineResults.photos
+// in place and flip the species entry's flags, then rerender the grid. If the
+// burst modal happens to be open on the matching species, also update its
+// dbState so the modal's Representative badge stays honest.
+document.addEventListener('lifelist:changed', function(e) {
+  var detail = e && e.detail ? e.detail : {};
+  var species = detail.species;
+  var photoId = detail.photoId;
+  if (!species || !photoId) return;
+  if (!pipelineResults || !Array.isArray(pipelineResults.photos)) return;
+  var changed = false;
+  pipelineResults.photos.forEach(function(p) {
+    var entries = Array.isArray(p.life_list) ? p.life_list : [];
+    var touched = false;
+    entries.forEach(function(entry) {
+      if (!entry || entry.species !== species) return;
+      var isCurrent = p.id === photoId;
+      if (entry.is_current_photo !== isCurrent || entry.is_species_representative !== isCurrent) {
+        entry.is_current_photo = isCurrent;
+        entry.is_species_representative = isCurrent;
+        touched = true;
+      }
+    });
+    if (p.id === photoId && !entries.some(function(entry) { return entry && entry.species === species; })) {
+      entries.push({species: species, is_current_photo: true, is_species_representative: true});
+      p.life_list = entries;
+      touched = true;
+    }
+    var isRep = entries.some(function(entry) {
+      return entry && entry.is_species_representative;
+    });
+    if (p.is_species_representative !== isRep) {
+      p.is_species_representative = isRep;
+      touched = true;
+    }
+    if (touched) changed = true;
+  });
+  if (grmState && grmState.dbState && grmState.keywordStateSpecies === species) {
+    Object.keys(grmState.dbState).forEach(function(pidStr) {
+      var pid = parseInt(pidStr, 10);
+      var st = grmState.dbState[pid];
+      if (!st) return;
+      var next = (pid === photoId);
+      if (st.is_species_representative !== next) {
+        st.is_species_representative = next;
+        changed = true;
+      }
+    });
+  }
+  if (changed) {
+    renderResults();
+    if (typeof renderGroupModal === 'function') {
+      var overlay = document.getElementById('grmOverlay');
+      if (overlay && overlay.classList.contains('open')) renderGroupModal();
+    }
+  }
+});
+
 initPipelineReviewPage();
 </script>
 </body>
