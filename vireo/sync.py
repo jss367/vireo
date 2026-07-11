@@ -152,8 +152,16 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
             # changes and leaving the sidecar without the keyword. Applying
             # the remove first strips only the pre-existing quoted variant;
             # the subsequent write_sidecar then adds the clean spelling.
-            if keywords_to_remove:
-                remove_keywords(xmp_path, keywords_to_remove)
+            #
+            # Additionally strip any sidecar entry that normalizes to a
+            # keyword we're about to add. write_sidecar() dedupes with an
+            # exact-string set difference, so a pure keyword_add for
+            # `apapane` against a legacy sidecar `‘apapane` would append a
+            # second <rdf:li>. Canonicalizing first collapses variants into
+            # the clean spelling that write_sidecar writes below.
+            keys_to_strip = set(keywords_to_remove) | set(keywords_to_add)
+            if keys_to_strip:
+                remove_keywords(xmp_path, keys_to_strip)
 
             # Write keyword additions after removals so a same-photo
             # remove+add pair does not race (see above).

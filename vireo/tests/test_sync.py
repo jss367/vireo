@@ -53,6 +53,38 @@ def test_sync_to_xmp_writes_keyword_add(tmp_path):
     assert len(db.get_pending_changes()) == 0
 
 
+def test_sync_to_xmp_keyword_add_canonicalizes_existing_variant(tmp_path):
+    """A keyword_add against a sidecar that already contains a normalized-
+    equivalent variant should end up with one clean <rdf:li>, not two.
+
+    Regression: write_sidecar() dedupes by exact-string set difference, so
+    queuing ``keyword_add: apapane`` for a photo whose sidecar carries a
+    legacy ``‘apapane`` used to append a second entry that sync_from_xmp
+    would then never clean up. sync_to_xmp now strips add-equivalent
+    variants first so the sidecar canonicalizes to the clean spelling.
+    """
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_keywords
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(
+        tmp_path, db, keywords={'‘apapane'},
+    )
+
+    db.queue_change(pid, 'keyword_add', 'apapane')
+
+    result = sync_to_xmp(db)
+    assert result['synced'] == 1
+    assert result['failed'] == 0
+
+    keywords = read_keywords(xmp_path)
+    assert keywords == {'apapane'}
+    assert len(db.get_pending_changes()) == 0
+
+
 def test_sync_to_xmp_writes_rating(tmp_path):
     """sync_to_xmp writes rating changes to XMP sidecars."""
     from xml.etree import ElementTree as ET
