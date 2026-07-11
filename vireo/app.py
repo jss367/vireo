@@ -20996,6 +20996,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # remove for its stored name; the normal tagging path below then
             # adds the clean row and queues the clean sidecar entry.
             canonical_target = normalize_keyword_display(species)
+            # Track legacy species-keyword ids untagged per photo by the
+            # canonicalization pass below. When the confirm is not a
+            # replacement (same normalized species as previous_species) but
+            # still removed one or more legacy variants, the edit needs to
+            # carry those ids so undo can retag them -- otherwise undoing a
+            # same-species confirm leaves those photos with no species tag.
+            canonicalized_by_pid: dict[int, list[int]] = {}
             if canonical_target:
                 # Species membership here matches the rest of the endpoint's
                 # semantics: a row is a species tag if is_species=1 OR
@@ -21018,6 +21025,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     legacy_name = legacy_row["name"]
                     for pid in _photos_with_keyword(legacy_id):
                         db.untag_photo(pid, legacy_id, _commit=False)
+                        canonicalized_by_pid.setdefault(pid, []).append(legacy_id)
                         if legacy_name:
                             _queue_keyword_remove(
                                 pid, legacy_name,
@@ -21083,18 +21091,44 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     pid, species, workspace_id=ws_id, _commit=False,
                 )
 
+            def _species_old_value(pid, include_old_kid):
+                # Build the edit-history `old_value` for one photo, folding
+                # in any legacy species-keyword ids the canonicalization
+                # pass untagged. Uses the JSON payload shape recognized by
+                # `_edit_old_value_meta` so `species_replace` undo can
+                # re-tag every removed row (not just the primary old_kid).
+                ids: list[int] = []
+                if include_old_kid and old_kid is not None:
+                    ids.append(old_kid)
+                ids.extend(canonicalized_by_pid.get(pid, []))
+                if not ids:
+                    return ""
+                if len(ids) == 1:
+                    return str(ids[0])
+                return json.dumps(
+                    {"keyword_id": str(ids[0]), "keyword_ids": ids},
+                    sort_keys=True,
+                )
+
+            newly_set = set(newly_tagged)
             if is_replacement and old_kid is not None and had_old:
                 # Photos that actually changed: had the old keyword (so the
-                # remove side fired) and/or newly gained the new one. Use the
-                # union so undo restores the exact state we mutated.
-                newly_set = set(newly_tagged)
+                # remove side fired), newly gained the new one, or had a
+                # legacy same-species variant untagged by canonicalization
+                # above. Use the union so undo restores the exact state we
+                # mutated.
                 changed = [
-                    pid for pid in photo_ids if pid in had_old or pid in newly_set
+                    pid for pid in photo_ids
+                    if pid in had_old
+                    or pid in newly_set
+                    or pid in canonicalized_by_pid
                 ]
                 items = [
                     {
                         "photo_id": pid,
-                        "old_value": str(old_kid) if pid in had_old else "",
+                        "old_value": _species_old_value(
+                            pid, include_old_kid=pid in had_old,
+                        ),
                         "new_value": str(kid) if pid in newly_set else "",
                     }
                     for pid in changed
@@ -21102,6 +21136,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 db.record_edit(
                     "species_replace",
                     f'Replaced species "{previous_species}" with "{species}" on {len(changed)} photos',
+                    str(kid),
+                    items,
+                    is_batch=len(changed) > 1,
+                    _commit=False,
+                )
+            elif canonicalized_by_pid:
+                # Same normalized species as before but a legacy variant row
+                # was untagged (e.g. cache/DB carried `‘apapane` and the
+                # request was `apapane`). Route through species_replace so
+                # undo restores the legacy tag(s); recording this as
+                # `keyword_add` would only untag the clean kid on undo and
+                # leave the photos with no species tag at all.
+                changed = [
+                    pid for pid in photo_ids
+                    if pid in newly_set or pid in canonicalized_by_pid
+                ]
+                items = [
+                    {
+                        "photo_id": pid,
+                        "old_value": _species_old_value(
+                            pid, include_old_kid=False,
+                        ),
+                        "new_value": str(kid) if pid in newly_set else "",
+                    }
+                    for pid in changed
+                ]
+                db.record_edit(
+                    "species_replace",
+                    f'Canonicalized species "{species}" on {len(changed)} photos',
                     str(kid),
                     items,
                     is_batch=len(changed) > 1,

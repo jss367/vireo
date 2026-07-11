@@ -647,6 +647,72 @@ def test_encounter_species_records_history(app_and_db):
     assert 'Red-tailed Hawk' in history[0]['description']
 
 
+def test_encounter_species_canonicalization_undo_restores_legacy(app_and_db):
+    """A confirm that only canonicalizes a legacy same-species variant
+    (e.g. cache/DB carries `‘apapane` and the request is `apapane`) must
+    record a species_replace edit so undo re-tags the legacy row.
+
+    Regression: the canonicalization pass untags legacy species rows
+    matching the target's normalized name so photos don't end up
+    double-tagged with two spellings of the same species. Recording that
+    as a plain `keyword_add` would leave undo's `keyword_add` branch --
+    which only untags the clean kid and knows nothing about the legacy
+    kid we just removed -- unable to restore anything, so undoing a
+    same-species confirm would leave the photos with no species tag.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pids = [p['id'] for p in photos[:2]]
+
+    # Simulate an upgraded DB where a legacy edge-quote taxonomy row and a
+    # clean spelling of the same species both exist. add_keyword would
+    # normally fold these together via its normalized-peer fallback, so we
+    # insert both rows directly to reproduce the split-catalog scenario
+    # the review comment describes.
+    with db.conn:
+        cursor = db.conn.execute(
+            """INSERT INTO keywords (name, parent_id, type, is_species)
+               VALUES (?, NULL, 'taxonomy', 1)""",
+            ("‘apapane",),
+        )
+        legacy_kid = cursor.lastrowid
+        cursor = db.conn.execute(
+            """INSERT INTO keywords (name, parent_id, type, is_species)
+               VALUES (?, NULL, 'taxonomy', 1)""",
+            ("apapane",),
+        )
+        clean_kid_seeded = cursor.lastrowid
+    for pid in pids:
+        db.tag_photo(pid, legacy_kid)
+
+    resp = client.post('/api/encounters/species',
+                       json={'species': 'apapane', 'photo_ids': pids})
+    assert resp.status_code == 200
+
+    history = db.get_edit_history()
+    assert len(history) == 1
+    # Recorded as species_replace (not keyword_add) so undo re-tags the
+    # legacy kids we untagged in the canonicalization pass.
+    assert history[0]['action_type'] == 'species_replace'
+
+    # After the confirm, photos carry the clean `apapane` kid and the
+    # legacy `‘apapane` kid is gone from them.
+    for pid in pids:
+        kids = {k['id'] for k in db.get_photo_keywords(pid)}
+        assert clean_kid_seeded in kids
+        assert legacy_kid not in kids
+
+    # Undo restores the legacy kid on every affected photo and clears the
+    # clean kid the confirm added.
+    resp = client.post('/api/undo')
+    assert resp.status_code == 200
+    for pid in pids:
+        kids = {k['id'] for k in db.get_photo_keywords(pid)}
+        assert legacy_kid in kids
+        assert clean_kid_seeded not in kids
+
+
 def test_sync_discard_records_history(app_and_db):
     """Discarding pending changes records discard in edit history."""
     app, db = app_and_db

@@ -71,6 +71,30 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
     changes = db.get_pending_changes()
     if change_ids is not None:
         selected_ids = {int(cid) for cid in change_ids}
+        # Auto-include any unselected pending keyword_add / keyword_remove
+        # changes that share a (photo_id, normalized key) with a selected
+        # one. Both remove_keywords() (for keyword_remove) and the
+        # add-canonicalization pass below match by normalized key, so a
+        # rename's paired add(clean) + remove(legacy variant) split across
+        # two syncs lets each half clobber the sidecar entry the other
+        # half writes -- the add-only sync strips the legacy `<rdf:li>`
+        # before writing the clean spelling, and a later remove-only sync
+        # strips the clean spelling under the same normalized match. Sync
+        # both sides together whenever the user picks either.
+        kw_index = defaultdict(list)
+        for c in changes:
+            if c["change_type"] in ("keyword_add", "keyword_remove") and c["value"]:
+                key = (c["photo_id"], keyword_match_key(c["value"]))
+                kw_index[key].append(c["id"])
+        for c in changes:
+            if c["id"] not in selected_ids:
+                continue
+            if c["change_type"] not in ("keyword_add", "keyword_remove"):
+                continue
+            if not c["value"]:
+                continue
+            key = (c["photo_id"], keyword_match_key(c["value"]))
+            selected_ids.update(kw_index[key])
         changes = [c for c in changes if c["id"] in selected_ids]
     if not changes:
         return {"synced": 0, "failed": 0, "failures": []}

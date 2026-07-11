@@ -668,3 +668,40 @@ def test_sync_to_xmp_add_survives_normalized_remove_for_same_photo(tmp_path):
     assert "apapane" in kw
     assert "‘apapane" not in kw
     assert len(db.get_pending_changes()) == 0
+
+
+def test_sync_to_xmp_selected_add_pulls_in_paired_legacy_remove(tmp_path):
+    """When the sync panel filters change_ids to only the keyword_add half
+    of a rename (add `apapane` + legacy remove `‘apapane` for the same
+    photo), sync_to_xmp must pull the paired remove into the same batch.
+
+    Regression: both remove_keywords() (for the paired remove) and the
+    add-canonicalization pass compare by normalized match key. Syncing
+    only the add still runs add-canonicalization -- stripping the legacy
+    `<rdf:li>` before writing the clean spelling. If the paired remove is
+    left pending and later synced on its own, normalized removal matches
+    the clean `<rdf:li>` too and the keyword disappears entirely even
+    though both syncs reported success.
+    """
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_keywords
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={"‘apapane"})
+
+    db.queue_change(pid, "keyword_remove", "‘apapane")
+    db.queue_change(pid, "keyword_add", "apapane")
+    pending = db.get_pending_changes()
+    ids_by_type = {c["change_type"]: c["id"] for c in pending}
+
+    result = sync_to_xmp(db, change_ids=[ids_by_type["keyword_add"]])
+    assert result["failed"] == 0
+
+    kw = read_keywords(xmp_path)
+    assert kw == {"apapane"}
+
+    remaining = db.get_pending_changes()
+    assert remaining == []
