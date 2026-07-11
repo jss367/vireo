@@ -228,6 +228,48 @@ def test_import_copy_start_sends_restored_options(live_server, page):
     assert body["file_types"] == [".jpg", ".nef"]
     assert body["skip_duplicates"] is False
     assert body["verify_by_hash"] is True
+    # The After Import dropdown was untouched, and this is a new-workspace
+    # import — the client must omit after_import so the server resolves the
+    # default against the newly-created workspace instead of leaking the
+    # previously-active workspace's pipeline.default_strategy.
+    assert "after_import" not in body
+
+
+def test_import_new_workspace_forwards_explicit_after_import(live_server, page):
+    """When the user actively picks a strategy for a new-workspace import,
+    the client must forward that pick — only the untouched-dropdown case is
+    omitted so the server can apply the new workspace's default."""
+    url = live_server["url"]
+    captured = {}
+
+    def start_import(route):
+        captured["body"] = json.loads(route.request.post_data or "{}")
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "job_id": "import-test",
+                "workspace": {"id": 23, "name": "Serengeti"},
+            }),
+        )
+
+    page.route("**/api/jobs/import-photos", start_import)
+    page.goto(f"{url}/import")
+
+    page.locator("#modeCopy").check()
+    page.locator("#sourceInput").fill("/tmp/card-a")
+    page.locator("#btnAddSource").click()
+    page.locator("#workspaceNew").check()
+    page.locator("#newWorkspaceName").fill("Serengeti")
+    page.locator("#destInput").fill("/tmp/archive")
+    page.locator("#afterImportSelect").select_option("identify")
+
+    page.locator("#btnStart").click()
+    expect(page.locator("#progressCard")).to_be_visible()
+
+    body = captured["body"]
+    assert body["new_workspace_name"] == "Serengeti"
+    assert body["after_import"] == "identify"
 
 
 def test_import_browse_button_opens_folder_browser_fallback(live_server, page):

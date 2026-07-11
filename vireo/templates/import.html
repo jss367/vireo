@@ -944,6 +944,18 @@ let _afterImportConfigLoaded = false;
 // actively changes the select.
 let _afterImportHidingDefault = false;
 
+// True once the user actively picks something in the After Import
+// dropdown. Until then the visible selection is whatever
+// initImportPage() prefilled from the CURRENTLY-active workspace's
+// default — which is the wrong basis for a new-workspace import, where
+// the server should apply the new workspace's (or global) default
+// instead. startImport() omits the after_import key for new-workspace
+// imports that this flag hasn't been set on, so the resolution happens
+// server-side after the workspace switch. An explicit user pick
+// (including "None — import only") flips this flag and gets forwarded
+// verbatim.
+let _afterImportUserTouched = false;
+
 function showError(msg) {
   const el = document.getElementById('importError');
   el.textContent = msg;
@@ -1272,7 +1284,19 @@ async function startImport() {
     body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
     body.verify_by_hash = document.getElementById('chkVerifyByHash').checked;
   }
-  if (_afterImportConfigLoaded && !_afterImportHidingDefault) {
+  // For new-workspace imports where the user hasn't touched the After
+  // Import dropdown, the visible selection was prefilled from the
+  // currently-active workspace's default — posting it would make the
+  // server apply that old default instead of the new workspace's (or
+  // global) one. Omit the key so the server resolves it against the
+  // freshly-created workspace after the switch.
+  const newWorkspaceUntouched =
+    !!body.new_workspace_name && !_afterImportUserTouched;
+  if (
+    _afterImportConfigLoaded
+    && !_afterImportHidingDefault
+    && !newWorkspaceUntouched
+  ) {
     body.after_import = selectedAfterImport();
   }
   document.getElementById('btnStart').disabled = true;
@@ -1486,6 +1510,7 @@ async function initImportPage() {
   // it) is always tracked.
   sel.addEventListener('change', () => {
     _afterImportHidingDefault = false;
+    _afterImportUserTouched = true;
     // Once the user actively picks a real option, the "Workspace
     // default (hidden)" placeholder is no longer relevant — retire it
     // so it doesn't clutter the dropdown on the next open.
