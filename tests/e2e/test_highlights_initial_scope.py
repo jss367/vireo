@@ -274,6 +274,7 @@ def test_highlights_general_search_filters_by_filename_folder_and_keyword(live_s
         search.fill("hawk1")
     expect(page.locator(".highlights-card")).to_have_count(1)
     expect(page.locator(".highlights-card img")).to_have_attribute("alt", "hawk1.jpg")
+    expect(page.locator(".highlights-card .card-filename")).to_have_text("hawk1.jpg")
 
     with page.expect_response(
         lambda r: "/api/highlights?" in r.url and "q=yard" in r.url.lower()
