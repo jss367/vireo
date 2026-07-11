@@ -11579,6 +11579,21 @@ class Database:
                     pass
 
             kid = self.add_keyword(species, is_species=True, _commit=False)
+            # Re-read the stored keyword name so the queued sidecar changes,
+            # curation renames, and returned history payload all reflect the
+            # row actually tagged. Without this, a prediction spelled like
+            # `‘apapane` tags the normalized `apapane` row but everything
+            # downstream (`queue_change`, `rename_species_highlights_species`,
+            # `rename_photo_preferences_species`, the response payload) would
+            # use the raw stray-quote value, so pending add/remove pairs no
+            # longer cancel and XMP sync writes the stray-quote label. Mirrors
+            # the same re-read pattern in api_add_keyword and the highlights
+            # relabel route.
+            stored = self.conn.execute(
+                "SELECT name FROM keywords WHERE id = ?", (kid,)
+            ).fetchone()
+            if stored and stored["name"]:
+                species = stored["name"]
             # list of {"photo_id", "prediction_id", "old_species"}
             affected = []
 
