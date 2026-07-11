@@ -7986,25 +7986,26 @@ def test_native_import_commands_route_to_import_page():
     assert "case 'import_folder':\n        nativeMenuRoute('/import');" in navbar
 
 
-def test_external_link_fallback_does_not_navigate_tauri_webview():
-    """If the native browser opener fails, don't load iNat inside Vireo."""
+def test_native_shell_owns_external_navigation_policy():
+    """The native shell must deny external and child-webview navigation."""
     import os
 
     repo_root = os.path.normpath(
         os.path.join(os.path.dirname(__file__), "..", "..")
     )
-    navbar_path = os.path.join(repo_root, "vireo", "templates", "_navbar.html")
+    lib_path = os.path.join(repo_root, "src-tauri", "src", "lib.rs")
+    config_path = os.path.join(repo_root, "src-tauri", "tauri.conf.json")
 
-    with open(navbar_path, encoding="utf-8") as f:
-        navbar = f.read()
+    with open(lib_path, encoding="utf-8") as f:
+        lib = f.read()
+    with open(config_path, encoding="utf-8") as f:
+        config = f.read()
 
-    fallback_start = navbar.index("function fallbackOpen()")
-    location_fallback = navbar.index("window.location.href = url", fallback_start)
-    tauri_guard = navbar.index(
-        "if (typeof isTauri === 'function' && isTauri()) return false;",
-        fallback_start,
-    )
-    assert tauri_guard < location_fallback
+    assert '"create": false' in config
+    assert ".on_navigation(move |url|" in lib
+    assert "navigation::handle_navigation(&navigation_app, url)" in lib
+    assert ".on_new_window(" in lib
+    assert "NewWindowResponse::Deny" in lib
 
 
 def test_pipeline_plan_accepts_folder_scope(app_and_db):

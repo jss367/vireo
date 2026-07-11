@@ -7346,8 +7346,6 @@ async function _inatOpenUrl(url) {
     if (typeof openExternal === 'function') {
       return await openExternal(url);
     }
-    var opened = window.open(url, '_blank', 'noopener');
-    return !!opened;
   } catch(e) {}
   return false;
 }
@@ -7404,6 +7402,25 @@ async function submitToInatBatch(photoIds) {
 }
 
 async function openInatQuickModal(items, failures) {
+  var skipAutoOpenForDuplicate = items.length === 1 && !!items[0].already_submitted;
+  var hasFailures = !!(failures && failures.length);
+  // When batch preparation left other photos in a failure state, always render
+  // the modal so the failure summary is visible instead of silently dropping it.
+  if (items.length === 1 && items[0].upload_url && !skipAutoOpenForDuplicate && !hasFailures) {
+    var opened = await _inatOpenUrl(items[0].upload_url);
+    if (opened) {
+      showToast('Opened iNaturalist in your browser.', 'success');
+      return;
+    }
+    if (typeof showExternalOpenFailure === 'function') {
+      showExternalOpenFailure(
+        items[0].upload_url,
+        'Vireo could not open iNaturalist. Retry or copy the prepared upload URL below.'
+      );
+      return;
+    }
+  }
+
   if (window._inatEscToken) Keymap.popEsc(window._inatEscToken);
   window._inatEscToken = Keymap.pushEsc(function() { closeInatModal(); });
 
@@ -7418,12 +7435,6 @@ async function openInatQuickModal(items, failures) {
 
   var cancelBtn = document.querySelector('#inatActions .modal-btn-cancel');
   if (cancelBtn) cancelBtn.textContent = 'Close';
-
-  var opened = false;
-  var skipAutoOpenForDuplicate = items.length === 1 && !!items[0].already_submitted;
-  if (items.length === 1 && items[0].upload_url && !skipAutoOpenForDuplicate) {
-    opened = await _inatOpenUrl(items[0].upload_url);
-  }
 
   function _inatAlreadySubmittedWarning(item) {
     if (!item.already_submitted) return '';
@@ -7440,12 +7451,10 @@ async function openInatQuickModal(items, failures) {
         '<img class="inat-card-thumb" src="/thumbnails/' + items[0].photo_id + '.jpg" alt="">' +
         '<div style="flex:1;min-width:0;">' +
           '<div style="font-size:13px;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(items[0].filename) + '</div>' +
-          '<div class="inat-card-status ' + (opened ? 'success' : 'warning') + '">' +
-            (opened
-              ? 'Opened iNaturalist in your browser.'
-              : (skipAutoOpenForDuplicate
-                  ? 'Did not auto-open — this photo appears already submitted. Review the warning below before opening a new upload.'
-                  : 'iNaturalist did not visibly open. Use the link below.')) +
+          '<div class="inat-card-status warning">' +
+            (skipAutoOpenForDuplicate
+              ? 'Did not auto-open — this photo appears already submitted. Review the warning below before opening a new upload.'
+              : 'Use the prepared link below.') +
           '</div>' +
           _inatAlreadySubmittedWarning(items[0]) +
         '</div>' +
@@ -7455,6 +7464,7 @@ async function openInatQuickModal(items, failures) {
       '</div>' +
       '<div style="margin-top:12px;">' +
         '<a class="modal-btn modal-btn-primary" href="' + escapeAttr(items[0].upload_url) + '" target="_blank" rel="noopener" onclick="return openExternalLink(event, this.href)" style="display:inline-block;text-decoration:none;">Open Upload Page</a>' +
+        '<button type="button" class="modal-btn" data-external-url="' + escapeAttr(items[0].upload_url) + '" onclick="copyExternalUrl(this.getAttribute(\'data-external-url\'))" style="margin-left:8px;">Copy URL</button>' +
       '</div>' +
     '</div>';
   } else {
@@ -7466,7 +7476,10 @@ async function openInatQuickModal(items, failures) {
       html += '<div style="display:flex;flex-direction:column;gap:4px;padding:8px 0;border-top:1px solid var(--border-primary);">' +
         '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">' +
           '<span style="font-size:13px;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(item.filename) + '</span>' +
-          '<a href="' + escapeAttr(item.upload_url) + '" target="_blank" rel="noopener" onclick="return openExternalLink(event, this.href)" style="color:var(--accent);font-size:12px;white-space:nowrap;">Open Upload</a>' +
+          '<span style="display:flex;align-items:center;gap:8px;white-space:nowrap;">' +
+            '<a href="' + escapeAttr(item.upload_url) + '" target="_blank" rel="noopener" onclick="return openExternalLink(event, this.href)" style="color:var(--accent);font-size:12px;">Open Upload</a>' +
+            '<button type="button" data-external-url="' + escapeAttr(item.upload_url) + '" onclick="copyExternalUrl(this.getAttribute(\'data-external-url\'))" style="border:0;background:none;color:var(--text-secondary);font-size:12px;cursor:pointer;padding:0;">Copy URL</button>' +
+          '</span>' +
         '</div>' +
         _inatAlreadySubmittedWarning(item) +
       '</div>';
@@ -8487,51 +8500,11 @@ function showToast(msg, type) {
 // navigation. Use on <a> tags as: onclick="return openExternalLink(event, this.href)".
 function openExternalLink(event, url) {
   if (event) event.preventDefault();
-  function fallbackOpen() {
-    // In the desktop app, falling back to window.location.href navigates the
-    // WKWebView itself, which makes external sites look like they opened inside
-    // Vireo. If the native opener fails, leave the app in place and let the
-    // caller surface the link/error instead.
-    if (typeof isTauri === 'function' && isTauri()) return false;
-    var opened = null;
-    try {
-      opened = window.open('about:blank', '_blank');
-    } catch(e) {}
-    if (opened) {
-      try { opened.opener = null; } catch(e) {}
-      opened.location = url;
-      return true;
-    }
-    if (!opened && url) {
-      try {
-        window.location.href = url;
-        return true;
-      } catch(e) {}
-    }
+  if (typeof openExternalWithRecovery !== 'function') {
+    showToast('Could not open link: ' + url, 'error');
     return false;
   }
-
-  if (typeof openExternal !== 'function') {
-    if (!fallbackOpen()) showToast('Could not open link: ' + url, 'error');
-    return false;
-  }
-
-  openExternal(url).then(function(ok) {
-    // openExternal catches Tauri command/opener failures internally and
-    // resolves `false` rather than rejecting, so the .catch() below never runs
-    // in the packaged-desktop failure path (ACL denial, opener error, popup
-    // block). Try fallbackOpen here too so the click doesn't silently die.
-    if (!ok && !fallbackOpen()) {
-      showToast('Could not open link: ' + url, 'error');
-    }
-  }).catch(function(e) {
-    if (!fallbackOpen()) {
-      showToast('Could not open link: ' + url, 'error');
-    }
-    if (typeof logError === 'function') {
-      logError('openExternalLink failed for ' + url + ': ' + (e && e.message ? e.message : e));
-    }
-  });
+  openExternalWithRecovery(url);
   return false;
 }
 
