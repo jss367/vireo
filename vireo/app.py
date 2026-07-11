@@ -7195,6 +7195,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 ).fetchall()
             variant_ids.extend(row["id"] for row in peer_rows)
 
+        # Look up each variant's stored name so pending-change cancellation
+        # matches on the legacy value the queue was recorded under (e.g. a
+        # `keyword_add` queued as `‘Cardinal` needs a `keyword_remove` with
+        # the same spelling to cancel, not the canonical `Cardinal`).
+        variant_names = {}
+        for row in db.conn.execute(
+            f"""SELECT id, name FROM keywords
+                WHERE id IN ({",".join("?" for _ in variant_ids)})""",
+            variant_ids,
+        ).fetchall():
+            variant_names[row["id"]] = row["name"]
+
         # Photo_ids tagged with ANY variant get an untag+remove pair. Track
         # which specific variant each photo carried so we untag the right row.
         tagged_by_pid = {}
@@ -7215,9 +7227,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         removed_ids = [pid for pid in clean_ids if pid in tagged_by_pid]
         name = keyword_row["name"]
         for pid in removed_ids:
+            queued_names = set()
             for kid in tagged_by_pid[pid]:
                 db.untag_photo(pid, kid)
-            _queue_keyword_remove(pid, name)
+                variant_name = variant_names.get(kid, name)
+                if variant_name not in queued_names:
+                    _queue_keyword_remove(pid, variant_name)
+                    queued_names.add(variant_name)
+            if name not in queued_names:
+                _queue_keyword_remove(pid, name)
 
         items = [
             {"photo_id": pid, "old_value": str(keyword_id), "new_value": ""}

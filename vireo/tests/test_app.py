@@ -5117,6 +5117,61 @@ def test_batch_keyword_remove_untags_normalized_peer_variants(app_and_db):
     assert still_tagged == []
 
 
+def test_batch_keyword_remove_cancels_legacy_pending_add(app_and_db):
+    """Batch remove must cancel pending adds queued under legacy peer names.
+
+    Regression: when a photo carries a legacy edge-quote peer of a
+    normalized keyword (e.g. `‘Cardinal` alongside clean `Cardinal`) and
+    still has an unsynced `keyword_add` under that legacy spelling, the
+    representative-id remove path used to queue only a `keyword_remove`
+    for the canonical `Cardinal` and leave the legacy pending add in
+    place, so the next XMP sync would write the quoted variant back.
+    """
+    app, db = app_and_db
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos ORDER BY filename"
+    ).fetchall()
+    ids = [row["id"] for row in rows]
+
+    clean_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Cardinal'"
+    ).fetchone()["id"]
+    legacy_id = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES (?, NULL, 0, 'general')",
+        ("‘Cardinal",),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (ids[1], legacy_id),
+    )
+    db.queue_change(ids[1], "keyword_add", "‘Cardinal")
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/batch/keyword-remove",
+        json={"photo_ids": ids, "keyword_id": clean_id},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["updated"] == 2
+
+    still_tagged = db.conn.execute(
+        "SELECT photo_id, keyword_id FROM photo_keywords "
+        "WHERE keyword_id IN (?, ?)",
+        (clean_id, legacy_id),
+    ).fetchall()
+    assert still_tagged == []
+
+    legacy_pending = db.conn.execute(
+        """SELECT change_type FROM pending_changes
+           WHERE photo_id = ? AND value = '‘Cardinal'""",
+        (ids[1],),
+    ).fetchall()
+    assert legacy_pending == []
+
+
 def test_batch_keyword_remove_undo_restores_pending_add(app_and_db):
     """Add → bulk remove → undo must leave a pending sidecar write.
 
