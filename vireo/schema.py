@@ -53,7 +53,7 @@ def _consolidate_default_navigation(conn):
     import json
 
     rows = conn.execute("SELECT id, tabs FROM workspaces").fetchall()
-    changed = False
+    changed_ids = []
     for workspace_id, raw_tabs in rows:
         try:
             tabs = json.loads(raw_tabs) if raw_tabs else None
@@ -64,12 +64,65 @@ def _consolidate_default_navigation(conn):
                 "UPDATE workspaces SET tabs=? WHERE id=?",
                 (json.dumps(_PRIMARY_WORKFLOW_TABS), workspace_id),
             )
-            changed = True
-    if changed:
+            changed_ids.append(workspace_id)
+    if changed_ids:
         conn.execute(
             "INSERT OR REPLACE INTO db_meta(key, value) VALUES (?, ?)",
             ("navigation_consolidated", "1"),
         )
+        # Record exactly which workspaces this migration rewrote so the
+        # reversal in migration 7 can restore only those rows and leave
+        # any workspace the user later customized to the same tab set alone.
+        conn.execute(
+            "INSERT OR REPLACE INTO db_meta(key, value) VALUES (?, ?)",
+            ("navigation_consolidated_ids", json.dumps(changed_ids)),
+        )
+
+
+def _restore_direct_default_navigation(conn):
+    """Restore the direct tabs changed by migration 6; preserve custom sets."""
+    import json
+
+    marker = conn.execute(
+        "SELECT value FROM db_meta WHERE key='navigation_consolidated'"
+    ).fetchone()
+    if marker is None or marker[0] != "1":
+        return
+
+    tracked_row = conn.execute(
+        "SELECT value FROM db_meta WHERE key='navigation_consolidated_ids'"
+    ).fetchone()
+    tracked_ids = None
+    if tracked_row is not None:
+        try:
+            tracked_ids = {int(x) for x in json.loads(tracked_row[0])}
+        except (TypeError, ValueError):
+            tracked_ids = None
+
+    rows = conn.execute("SELECT id, tabs FROM workspaces").fetchall()
+    for workspace_id, raw_tabs in rows:
+        # When the consolidation migration recorded which rows it changed,
+        # only revert those specific workspaces. Workspaces the user later
+        # customized to the compact tab set (or that already matched it
+        # before v6 ran) were never touched by v6 and must be preserved.
+        if tracked_ids is not None and workspace_id not in tracked_ids:
+            continue
+        try:
+            tabs = json.loads(raw_tabs) if raw_tabs else None
+        except (TypeError, ValueError):
+            continue
+        if tabs == _PRIMARY_WORKFLOW_TABS:
+            conn.execute(
+                "UPDATE workspaces SET tabs=? WHERE id=?",
+                (json.dumps(_LEGACY_DEFAULT_TABS), workspace_id),
+            )
+    conn.execute(
+        "INSERT OR REPLACE INTO db_meta(key, value) VALUES (?, ?)",
+        ("navigation_consolidated", "0"),
+    )
+    conn.execute(
+        "DELETE FROM db_meta WHERE key='navigation_consolidated_ids'"
+    )
 
 
 MIGRATIONS = (
@@ -83,6 +136,11 @@ MIGRATIONS = (
         version=6,
         name="consolidate-untouched-default-navigation",
         apply=_consolidate_default_navigation,
+    ),
+    Migration(
+        version=7,
+        name="restore-direct-default-navigation",
+        apply=_restore_direct_default_navigation,
     ),
 )
 

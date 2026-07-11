@@ -1,6 +1,5 @@
 <link rel="stylesheet" href="/static/vireo-theme.css">
 <script src="/static/vireo-api.js"></script>
-<script src="/static/vireo-navigation.js"></script>
 <script src="/config-defaults.js"></script>
 <style>
 /* ---------- Global Overrides ---------- */
@@ -1777,7 +1776,6 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   <span id="navTabStrip" class="nav-tab-strip"></span>
   <button type="button" class="nav-overflow-btn" id="navOverflowBtn" hidden onclick="toggleOverflowMenu(event)">&hellip;</button>
   <div class="nav-overflow-menu" id="navOverflowMenu" hidden></div>
-  <span id="navSectionMenus" class="nav-section-menus"></span>
   <span class="nav-spacer"></span>
   <span class="nav-icon" onclick="openReportModal()" title="Report Issue" id="reportToggle">&#9888;</span>
   <span class="nav-icon" onclick="openHelpModal()" title="Help (F1)" id="helpToggle">&#63;</span>
@@ -2311,7 +2309,9 @@ function sendReport() {
 //   - vireo/app.py:ALL_PAGES        (page registry)
 //   - vireo/db.py:DEFAULT_TABS      (default pinned-tabs list)
 window.NAV_DEFAULT_TABS = [
-  'import', 'pipeline', 'review', 'browse'
+  'import', 'browse', 'pipeline', 'pipeline_review',
+  'review', 'cull', 'jobs',
+  'highlights', 'misses', 'storage', 'settings'
 ];
 window.NAV_ALL_PAGES = [
   {id: 'import',          label: 'Import',          href: '/import',
@@ -2581,15 +2581,6 @@ window.NAV_ALL_PAGES = [
         ALL_PAGES = (state && state.all_pages) || [];
         pageById = {};
         ALL_PAGES.forEach(p => { pageById[p.id] = p; });
-        if (state && state.navigation_migrated &&
-            !localStorage.getItem('vireo-navigation-consolidated-seen')) {
-          localStorage.setItem('vireo-navigation-consolidated-seen', '1');
-          setTimeout(function() {
-            if (typeof showToast === 'function') {
-              showToast('Navigation is simpler now. Review, Library, Tools, and App contain your existing pages.', 'info');
-            }
-          }, 0);
-        }
         renderStrip();
         return state;
       })
