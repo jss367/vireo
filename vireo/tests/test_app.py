@@ -5136,6 +5136,85 @@ def test_batch_keyword_route_accepts_existing_keyword_id(app_and_db):
     assert [row["photo_id"] for row in tagged_after_undo] == [ids[0]]
 
 
+def test_batch_keyword_route_skips_normalized_peer_variants(app_and_db):
+    """Batch add should treat photos tagged with any normalized peer as done.
+
+    Regression: `api_selection_keyword_suggestions` collapses variants that
+    share a normalized (name, parent_id, type) key and returns a single
+    representative id. If one selected photo already carries a legacy
+    edge-quote peer of the chosen keyword (e.g. `‘Cardinal` alongside
+    clean `Cardinal`), "Add to N missing" would stack the clean row on
+    top of the legacy variant, leaving duplicate in-app tags and a
+    duplicate `<rdf:li>` in the sidecar. The endpoint must expand the
+    same normalized peer ids used by the remove path.
+    """
+    app, db = app_and_db
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos ORDER BY filename"
+    ).fetchall()
+    ids = [row["id"] for row in rows]
+
+    clean_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Cardinal'"
+    ).fetchone()["id"]
+    legacy_id = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES (?, NULL, 0, 'general')",
+        ("‘Cardinal",),
+    ).lastrowid
+    # Untag the fixture link so bird1 carries only the LEGACY variant; that
+    # way the endpoint's variant expansion is what makes it look "already
+    # tagged" rather than a stray exact-id match.
+    db.conn.execute(
+        "DELETE FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (ids[0], clean_id),
+    )
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (ids[0], legacy_id),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/batch/keyword",
+        json={"photo_ids": ids, "keyword_id": clean_id},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    # bird2 and bird3 had no variant tag, so both get the clean row.
+    # bird1 (with the legacy variant) must be treated as already tagged —
+    # updated == 2, NOT 3.
+    assert resp.get_json()["updated"] == 2
+
+    # bird1 should still carry ONLY the legacy variant — no clean row
+    # stacked on top.
+    bird1_tags = db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords "
+        "WHERE photo_id = ? AND keyword_id IN (?, ?)",
+        (ids[0], clean_id, legacy_id),
+    ).fetchall()
+    assert sorted(row["keyword_id"] for row in bird1_tags) == [legacy_id]
+
+    # bird2 and bird3 got the clean row.
+    for bird_pid in (ids[1], ids[2]):
+        bird_tags = db.conn.execute(
+            "SELECT keyword_id FROM photo_keywords "
+            "WHERE photo_id = ? AND keyword_id = ?",
+            (bird_pid, clean_id),
+        ).fetchall()
+        assert len(bird_tags) == 1
+
+    # No pending sidecar add gets queued for bird1 — it already carries a
+    # normalized-equivalent tag.
+    pending = db.conn.execute(
+        """SELECT photo_id FROM pending_changes
+           WHERE change_type = 'keyword_add' AND value = 'Cardinal'
+           ORDER BY photo_id"""
+    ).fetchall()
+    assert [row["photo_id"] for row in pending] == sorted([ids[1], ids[2]])
+
+
 def test_batch_keyword_remove_route_removes_existing_keyword_id(app_and_db):
     """Selected-keyword removal should only affect selected photos that have it."""
     app, db = app_and_db

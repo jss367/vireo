@@ -7103,15 +7103,53 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if stored and stored["name"]:
                 name = stored["name"]
 
+        # Expand the "already tagged" check to include every legacy row that
+        # normalizes to the same (name, parent_id, type). Mirrors the peer
+        # expansion in api_batch_keyword_remove. api_selection_keyword_suggestions
+        # collapses variants that share a match key and returns a single
+        # representative id, so an "Add to N missing" click can hit here with
+        # that one id even when some of the selected photos are tagged with a
+        # legacy peer (e.g. `‘Cardinal` alongside clean `Cardinal`). Without
+        # this expansion, tag_photo stacks the clean row on top of the legacy
+        # variant instead of canonicalizing to a single tag.
+        target_row = db.conn.execute(
+            "SELECT id, name, parent_id, type FROM keywords WHERE id = ?", (kid,)
+        ).fetchone()
+        variant_ids = [kid]
+        if target_row is not None and keyword_match_key(target_row["name"]):
+            target_norm = normalize_keyword_display(target_row["name"])
+            parent_id = target_row["parent_id"]
+            if parent_id is None:
+                peer_rows = db.conn.execute(
+                    """SELECT id FROM keywords
+                       WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE
+                         AND parent_id IS NULL
+                         AND type = ?
+                         AND id != ?""",
+                    (target_norm, target_row["type"], kid),
+                ).fetchall()
+            else:
+                peer_rows = db.conn.execute(
+                    """SELECT id FROM keywords
+                       WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE
+                         AND parent_id = ?
+                         AND type = ?
+                         AND id != ?""",
+                    (target_norm, parent_id, target_row["type"], kid),
+                ).fetchall()
+            variant_ids.extend(row["id"] for row in peer_rows)
+
         already_tagged = set()
         batch_size = 800
         for i in range(0, len(photo_ids), batch_size):
             chunk = list(photo_ids[i:i + batch_size])
-            placeholders = ",".join("?" for _ in chunk)
+            id_placeholders = ",".join("?" for _ in variant_ids)
+            photo_placeholders = ",".join("?" for _ in chunk)
             existing_rows = db.conn.execute(
-                f"""SELECT photo_id FROM photo_keywords
-                    WHERE keyword_id = ? AND photo_id IN ({placeholders})""",
-                [kid] + chunk,
+                f"""SELECT DISTINCT photo_id FROM photo_keywords
+                    WHERE keyword_id IN ({id_placeholders})
+                      AND photo_id IN ({photo_placeholders})""",
+                list(variant_ids) + chunk,
             ).fetchall()
             already_tagged.update(row["photo_id"] for row in existing_rows)
         added_ids = [pid for pid in photo_ids if pid not in already_tagged]
