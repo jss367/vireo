@@ -13334,6 +13334,50 @@ def test_update_keyword_same_name_retype_merges_into_peer(tmp_path):
         db.close()
 
 
+def test_update_keyword_type_only_put_merges_into_normalized_peer(tmp_path):
+    """A type-only PUT (no `name` kwarg) must still run the same-slot peer
+    check. Otherwise, changing a clean general `apapane` row's type to
+    `taxonomy` via the Browse/Keywords type dropdown while a legacy
+    edge-quoted `‘apapane` taxonomy peer exists leaves two normalized-equal
+    taxonomy rows at the top level (UNIQUE(name, parent_id) treats NULL
+    parents as distinct), so later calls bind to either id at random.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        # Legacy edge-quoted taxonomy row at the top level (imported/
+        # upgraded DB shape).
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type) "
+            "VALUES (?, NULL, 1, 'taxonomy')",
+            ("‘apapane",),
+        )
+        taxonomy_id = cur.lastrowid
+        # Clean general peer at the same slot.
+        general_id = db.add_keyword("apapane", kw_type="general")
+        assert general_id != taxonomy_id
+
+        # Type-only PUT: the dropdown changes just the type, no name.
+        effective_id = db.update_keyword(general_id, type="taxonomy")
+        assert effective_id == taxonomy_id
+
+        # Exactly one top-level taxonomy row must remain for the normalized
+        # name, and it must be the pre-existing taxonomy row.
+        rows = db.conn.execute(
+            "SELECT id FROM keywords "
+            "WHERE vireo_normalize_keyword(name) = 'apapane' COLLATE NOCASE "
+            "AND parent_id IS NULL AND type = 'taxonomy'"
+        ).fetchall()
+        assert [r["id"] for r in rows] == [taxonomy_id]
+        # The old general row must be gone (merged away).
+        gone = db.conn.execute(
+            "SELECT id FROM keywords WHERE id = ?", (general_id,)
+        ).fetchone()
+        assert gone is None
+    finally:
+        db.close()
+
+
 def test_add_keyword_species_prefers_taxonomy_peer_over_general_exact_match(tmp_path):
     """When both a clean `general` row `apapane` and a legacy `taxonomy`
     edge-quote row `‘apapane` exist at the same slot, add_keyword('apapane',

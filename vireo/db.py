@@ -10499,8 +10499,13 @@ class Database:
         # promotion, taxon_id refresh) still fires only on an actual name
         # change so idempotent PUT-style updates don't reclassify a
         # 'general' keyword once the taxa table is populated.
-        if 'name' in updates:
-            new_name = updates['name']
+        # Also enter this block for a type-only PUT: the Browse/Keywords
+        # type dropdown sends `{type: newType}` with no `name`, so without
+        # this the same-slot peer check would be skipped and changing a
+        # clean `general apapane` to `taxonomy` while a legacy quoted
+        # `‘apapane` taxonomy peer exists would leave two normalized-equal
+        # taxonomy rows (NULL parents bypass UNIQUE(name, parent_id)).
+        if 'name' in updates or 'type' in updates:
             current = self.conn.execute(
                 "SELECT name, type, taxon_id, parent_id FROM keywords WHERE id = ?",
                 (keyword_id,),
@@ -10508,7 +10513,20 @@ class Database:
             if current is not None:
                 parent_id = current["parent_id"]
                 cur_type = current["type"]
-                name_changed = new_name != current["name"]
+                # For a type-only PUT, the peer lookup still needs a
+                # normalized name to compare against. Use the normalized
+                # current stored name so an upgraded row whose stored
+                # spelling still carries an edge quote (e.g. `‘apapane`)
+                # is matched against a clean `apapane` peer. name_changed
+                # stays False in that case so the auto-retype block below
+                # doesn't rewrite the stored spelling as a side effect of
+                # a type-only change.
+                if 'name' in updates:
+                    new_name = updates['name']
+                    name_changed = new_name != current["name"]
+                else:
+                    new_name = normalize_keyword_display(current['name'])
+                    name_changed = False
                 # Resolve taxon match lazily. Only rename actually needs it
                 # (both for auto-promotion below and for effective_type when
                 # no explicit type is passed).
