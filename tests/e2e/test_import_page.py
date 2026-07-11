@@ -278,6 +278,59 @@ def test_import_destination_preview_keeps_stale_warning_after_failed_refresh(liv
     expect(page.locator("#previewFoldersHint")).to_contain_text("preview blew up")
 
 
+def test_import_destination_preview_stale_on_duplicate_control_toggle(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/import")
+    page.locator("#modeCopy").check()
+    page.evaluate(
+        """
+        () => {
+          const originalFetch = window.fetch.bind(window);
+          window.fetch = (input, init) => {
+            const target = typeof input === 'string' ? input : input.url;
+            if (target && target.indexOf('/api/import/destination-preview') === 0) {
+              return Promise.resolve(new Response(JSON.stringify({
+                total_photos: 1,
+                total_folders: 1,
+                new_folders: 1,
+                existing_folders: 0,
+                managed_archive: null,
+                folders: [{
+                  path: '2026/07/11',
+                  full_path: '/archive/2026/07/11',
+                  count: 1,
+                  exists: false,
+                }],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            return originalFetch(input, init);
+          };
+          addSourcePath('/card');
+          document.getElementById('destInput').value = '/archive';
+        }
+        """
+    )
+
+    page.locator("[data-testid='import-preview-folders-btn']").click()
+    expect(page.locator("[data-testid='import-folder-preview-results']")).to_be_visible()
+    expect(page.locator("#folderPreviewStale")).to_be_hidden()
+
+    page.locator("#chkSkipDuplicates").uncheck()
+    expect(page.locator("#folderPreviewStale")).to_be_visible()
+    expect(page.locator("[data-testid='import-preview-folders-btn']")).to_have_text(
+        "Refresh preview"
+    )
+
+    page.locator("[data-testid='import-preview-folders-btn']").click()
+    expect(page.locator("#folderPreviewStale")).to_be_hidden()
+
+    page.locator("#chkVerifyByHash").check()
+    expect(page.locator("#folderPreviewStale")).to_be_visible()
+    expect(page.locator("[data-testid='import-preview-folders-btn']")).to_have_text(
+        "Refresh preview"
+    )
+
+
 def test_import_custom_extensions_feed_preview(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/import")

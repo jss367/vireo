@@ -397,7 +397,8 @@ function updateFileTypeControls() {
 }
 
 function wireDestinationPreviewInvalidation() {
-  ['chkRecursive', 'fileTypePreset', 'destMode', 'remoteSubpath'].forEach((id) => {
+  ['chkRecursive', 'fileTypePreset', 'destMode', 'remoteSubpath',
+   'chkSkipDuplicates', 'chkVerifyByHash'].forEach((id) => {
     const el = document.getElementById(id);
     if (!el) return;
     el.addEventListener('change', markDestinationPreviewStale);
