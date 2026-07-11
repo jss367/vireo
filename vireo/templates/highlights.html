@@ -886,9 +886,11 @@ function refreshBucketOrderingKeys(bucket) {
 // rather than mirror `_highlight_score_bucket` / `_apply_ordered_highlights` /
 // `_apply_highlight_preferences` in JS (repeatedly getting it wrong on subtle
 // edge cases), let the server compute the authoritative order and copy it
-// back. Pages in 500-row chunks up to the currently-loaded length because the
-// endpoint clamps `limit` to 500 — a single fetch with limit>500 would drop
-// cards from an expanded bucket (>500 loaded) and shrink Save-as-Collection.
+// back. Pages in up-to-500-row chunks so the final iteration only asks for
+// the remainder of the loaded window (`targetLen - offset`) — a full 500-row
+// last page would silently expand the loaded slice past what the user
+// actually loaded (e.g. 520 loaded would become 1000). The endpoint clamps
+// `limit` to 500, so the per-request cap is preserved automatically.
 // Returns a promise so callers can await the refresh before rendering.
 async function refetchBucketFromZero(target, isUnidentified) {
   if (!target) return;
@@ -905,7 +907,7 @@ async function refetchBucketFromZero(target, isUnidentified) {
     // the endpoint returns the right bucket, not whatever the search box holds.
     params.set('species', speciesKey);
     params.set('offset', offset);
-    params.set('limit', 500);
+    params.set('limit', Math.min(500, targetLen - offset));
     var page = await safeFetch('/api/highlights/bucket?' + params);
     if (!page || !Array.isArray(page.photos)) return;
     lastPage = page;
