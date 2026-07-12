@@ -5503,10 +5503,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result["tagging"] = summary
 
         def cancel_requested():
-            return result.get("cancelled") or (
+            cancelled = result.get("cancelled") or (
                 job is not None and runner is not None
                 and runner.is_cancelled(job["id"])
             )
+            if cancelled:
+                # The cancellation may arrive after the importer itself has
+                # returned a successful result. Persist it on the shared
+                # result so downstream after-import chaining also stops.
+                result["cancelled"] = True
+            return cancelled
 
         if cancel_requested():
             summary["skipped"] = "import cancelled"

@@ -3414,13 +3414,16 @@ def test_import_gps_tagging_stops_when_cancelled_during_resolution(
     resp = client.post("/api/jobs/import-photos", json={
         "sources": [_import_card(tmp_path)],
         "destination": str(tmp_path / "archive"),
-        "after_import": None,
+        "after_import": "quick_look",
         "location_from_gps": True,
     })
     assert resp.status_code == 200, resp.get_json()
     job = wait_for_job_via_client(client, resp.get_json()["job_id"])
     assert job["status"] == "cancelled", job
+    assert job["result"]["cancelled"] is True
     assert job["result"]["tagging"]["skipped"] == "import cancelled"
+    assert job["result"]["after_import_skipped"] == "import cancelled"
+    assert "process_job_id" not in job["result"]
     assert db.get_assigned_photo_location(photo_id) is None
 
 
