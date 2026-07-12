@@ -3585,6 +3585,9 @@ var _lbFlagPendingByPhoto = {};  // count of in-flight flag writes PER photo; li
 var _lbConfirmedFlags = {};   // last server-confirmed flag per photo, isolated from optimistic page helpers
 var _lbViewportByPhotoId = {};  // per-session lightbox viewport cache keyed by photo id
 var _lbPendingViewportState = null;
+var _lbVisualTransitionPending = false; // keep the outgoing bitmap/transform frozen until the incoming image is decoded
+var _lbDeferredOverlayApply = null; // detections/eye render withheld while _lbVisualTransitionPending; drained when the transition clears
+var _lbAdjacentPreloads = {}; // decoded immediate neighbors, keyed by photo id + source URL
 var _lbEditRecipeByPhoto = {};
 var _lbEditRecipeKnownByPhoto = {};
 var _lbEditRecipeWriteSeq = 0;
@@ -5302,6 +5305,22 @@ function _lbViewportStateFromCurrent() {
 
 function _lbSaveViewportState(photoId) {
   if (photoId == null) return null;
+  // Mid-navigation the DOM transform still belongs to the outgoing photo but
+  // _lightboxCurrentId has already advanced to the incoming id. Reading from
+  // the DOM here would misattribute the frozen bitmap to the incoming photo
+  // and stomp its intended inspection point. Prefer the pending restore
+  // state (what handleInitialImageLoad is about to apply), and otherwise
+  // leave any previously saved state alone.
+  if (_lbVisualTransitionPending && String(photoId) === String(_lightboxCurrentId)) {
+    var pending = _lbPendingViewportState;
+    if (pending) {
+      var pendingClone = _lbCloneViewportState(pending);
+      _lbViewportByPhotoId[String(photoId)] = pendingClone;
+      return _lbCloneViewportState(pendingClone);
+    }
+    var existing = _lbViewportByPhotoId[String(photoId)];
+    return existing ? _lbCloneViewportState(existing) : null;
+  }
   var state = _lbViewportStateFromCurrent();
   _lbViewportByPhotoId[String(photoId)] = state;
   return _lbCloneViewportState(state);
@@ -5359,6 +5378,21 @@ function _lbApplyViewportState(state) {
   _lbApplyTransform();
   _lbScheduleSourceSwap();
   return true;
+}
+
+function _lbFlushDeferredOverlayApply() {
+  // Called from handleInitialImageLoad and the terminal handleInitialImageError
+  // branch, i.e. wherever _lbVisualTransitionPending flips back to false. The
+  // metadata callback stashes the detection/eye render here so overlays don't
+  // paint against the still-frozen outgoing transform. Re-apply the mask
+  // overlay too because _lbApplyMaskVisibility only adds the `show` class when
+  // the transition is clear, so an in-flight mask load could have been gated.
+  var pending = _lbDeferredOverlayApply;
+  _lbDeferredOverlayApply = null;
+  if (typeof pending === 'function') {
+    try { pending(); } catch (_) {}
+  }
+  _lbApplyMaskVisibility();
 }
 
 function _lbClearPendingViewportRestore() {
@@ -5889,17 +5923,26 @@ function _lbApplyMaskVisibility() {
   };
   img.onload = function() {
     // Re-check the toggle: the user may have hidden masks between
-    // src assignment and the load resolving.
-    if (seq === _lbMaskLoadSeq && _lbMasksVisible && _lbMaskCurrentUrl === expectedUrl) {
+    // src assignment and the load resolving. Also re-check the visual
+    // transition: while the outgoing bitmap is still frozen on screen,
+    // painting the incoming photo's mask would show it over the previous
+    // image. handleInitialImageLoad re-runs _lbApplyMaskVisibility once
+    // the transition clears, so the mask surfaces as soon as it is safe.
+    if (
+      seq === _lbMaskLoadSeq
+      && _lbMasksVisible
+      && _lbMaskCurrentUrl === expectedUrl
+      && !_lbVisualTransitionPending
+    ) {
       img.classList.add('show');
     }
   };
   if (img.getAttribute('src') !== expectedUrl) {
     img.classList.remove('show');
     img.src = expectedUrl;
-  } else if (img.naturalWidth > 0) {
+  } else if (img.naturalWidth > 0 && !_lbVisualTransitionPending) {
     // Same URL and we know it loaded successfully — safe to re-show
-    // without re-fetching.
+    // without re-fetching, once the visual transition has cleared.
     img.classList.add('show');
   }
   // If src matches but naturalWidth is 0, the previous load either failed
@@ -6480,6 +6523,17 @@ function openLightbox(photoId, filename, photoList, options) {
   var transitionZoom = restoreViewportState
     ? Math.max(1.0, restoreViewportState.zoom || 1.0)
     : 1.0;
+  // During arrow navigation the <img> still paints the outgoing bitmap until
+  // the replacement has decoded. Keep its transform frozen too. The incoming
+  // photo's dimensions, true 1:1 scale, and normalized viewport center are
+  // applied together from handleInitialImageLoad, before the browser's next
+  // paint, so an off-center view never flashes through a centered state.
+  _lbVisualTransitionPending = alreadyOpen;
+  // A previous open's deferred overlay closure captured the previous photo id
+  // and metadata. If this open's image resolves before its own metadata does,
+  // draining that stale closure would render the previous photo's detections
+  // and eye marker over the incoming bitmap.
+  _lbDeferredOverlayApply = null;
 
   _lightboxCurrentId = photoId;
   if (photoList) _lightboxPhotoList = photoList;
@@ -6565,7 +6619,9 @@ function openLightbox(photoId, filename, photoList, options) {
   _lbSetAdjustmentStatus('');
   if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
   _lbDesiredSrcKey = null;
-  _lbApplyTransform();  // Clear stale pan while preserving 1:1 scale when requested.
+  if (!_lbVisualTransitionPending) {
+    _lbApplyTransform();
+  }
 
   // Fetch original dimensions (async, non-blocking for image display)
   var flagFetchSeq = _lbFlagEditSeq;
@@ -6619,14 +6675,36 @@ function openLightbox(photoId, filename, photoList, options) {
       }
       _lbApplyWildlifeExcludedButton();
       _lbRecordFetchedFlag(photoId, data.flag, flagFetchSeq);
-      _lbRecomputeNativeZoom();
-      if (!_lbTryApplyPendingViewportState()) _lbApplyPendingOneToOneZoom();
-      _lbLoadDetections(photoId);
-      _lbRenderEyeCrosshair(data);
+      // Metadata commonly wins the race with image decoding. Updating the
+      // transform here would lay out the still-visible outgoing bitmap using
+      // the incoming photo's dimensions, producing the navigation jerk. Let
+      // the image-load handler commit image + viewport atomically instead.
+      if (!_lbVisualTransitionPending) {
+        _lbRecomputeNativeZoom();
+        if (!_lbTryApplyPendingViewportState()) _lbApplyPendingOneToOneZoom();
+      }
+      // Detection boxes, the eye marker, and the mask overlay are children of
+      // lightboxTransform. While _lbVisualTransitionPending is true the
+      // transform is intentionally frozen on the outgoing bitmap, so painting
+      // the incoming photo's overlays now would layer them over the previous
+      // image until handleInitialImageLoad swaps in the new bitmap. Defer the
+      // render calls that actually inject DOM content until the transition
+      // clears; the visibility/toggle helpers are safe to run either way
+      // because they only touch empty containers or button labels.
+      var applyOverlays = function() {
+        _lbLoadDetections(photoId);
+        _lbRenderEyeCrosshair(data);
+      };
       _lbApplyBoxesVisibility();
       _lbApplyEyeVisibility();
       _lbApplyMaskToggleButton();
       _lbApplyMaskVisibility();
+      if (_lbVisualTransitionPending) {
+        _lbDeferredOverlayApply = applyOverlays;
+      } else {
+        _lbDeferredOverlayApply = null;
+        applyOverlays();
+      }
     })
     .catch(function() {
       if (_lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
@@ -6636,6 +6714,7 @@ function openLightbox(photoId, filename, photoList, options) {
   function handleInitialImageLoad() {
     img.onload = null;
     img.onerror = null;
+    if (_lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
     // Only record the /full tier size if the currently loaded source is still /full.
     // A quick user zoom can trigger a debounced swap to a higher tier before /full
     // finishes loading, which would otherwise make us record the swapped source's
@@ -6648,6 +6727,7 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbPhotoW = img.naturalWidth;
       _lbPhotoH = img.naturalHeight;
     }
+    _lbVisualTransitionPending = false;
     _lbRecomputeNativeZoom();
     if (
       _lbCurrentSrcKey === 'full' &&
@@ -6663,12 +6743,25 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbApplyPendingOneToOneZoom();
     }
     _lbApplyTransform();
+    _lbFlushDeferredOverlayApply();
+    _lbPrimeAdjacentPhotos(_lbCurrentSrcKey);
   }
   function handleInitialImageError() {
     if (_lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
     if (_lbCurrentSrcKey !== 'original') {
       img.onload = null;
       img.onerror = null;
+      // No further fallback tier is available. Clear the pending visual
+      // transition — otherwise the metadata callback would keep skipping
+      // layout updates and _lbSaveViewportState would keep treating the
+      // incoming photo as mid-transition even though the UI already points
+      // at it. Apply any deferred viewport state so the layout reflects
+      // the incoming photo instead of the frozen outgoing bitmap.
+      _lbVisualTransitionPending = false;
+      _lbRecomputeNativeZoom();
+      if (!_lbTryApplyPendingViewportState()) _lbApplyPendingOneToOneZoom();
+      _lbApplyTransform();
+      _lbFlushDeferredOverlayApply();
       return;
     }
     _lbOriginalUnavailable = true;
@@ -6945,9 +7038,12 @@ function closeLightbox(e) {
   _lbZoom = 1.0;
   _lbPanX = 0;
   _lbPanY = 0;
+  _lbVisualTransitionPending = false;
+  _lbDeferredOverlayApply = null;
   _lbClearPendingViewportRestore();
   if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
   _lbDesiredSrcKey = null;
+  _lbClearAdjacentPreloads();
   _lbClearAdjustmentPreview();
   var adjustPanel = document.getElementById('lightboxAdjustPanel');
   if (adjustPanel) adjustPanel.classList.remove('open');
@@ -8098,11 +8194,80 @@ function _lbSrcUrl(photoId, key) {
   return url;
 }
 
+function _lbClearAdjacentPreloads() {
+  Object.keys(_lbAdjacentPreloads).forEach(function(cacheKey) {
+    var entry = _lbAdjacentPreloads[cacheKey];
+    if (entry && entry.img) {
+      entry.img.onload = null;
+      entry.img.onerror = null;
+      entry.img.removeAttribute('src');
+    }
+  });
+  _lbAdjacentPreloads = {};
+}
+
+function _lbPrimeAdjacentPhotos(sourceKey) {
+  if (_lightboxPhotoList.length < 2 || _lightboxCurrentId == null) {
+    _lbClearAdjacentPreloads();
+    return;
+  }
+  var currentIdx = _lightboxPhotoList.findIndex(function(photo) {
+    return photo.id === _lightboxCurrentId;
+  });
+  if (currentIdx === -1) return;
+
+  var keep = {};
+  [currentIdx - 1, currentIdx + 1].forEach(function(idx) {
+    if (idx < 0 || idx >= _lightboxPhotoList.length) return;
+    var photo = _lightboxPhotoList[idx];
+    if (Object.prototype.hasOwnProperty.call(photo, 'edit_recipe')) {
+      _lbRememberEditRecipe(photo.id, photo.edit_recipe);
+    }
+    var key = sourceKey || 'full';
+    var url = _lbSrcUrl(photo.id, key);
+    var cacheKey = String(photo.id) + '|' + url;
+    keep[cacheKey] = true;
+    if (_lbAdjacentPreloads[cacheKey]) return;
+
+    var preload = new Image();
+    var entry = { img: preload, photoId: photo.id, sourceKey: key, status: 'loading' };
+    _lbAdjacentPreloads[cacheKey] = entry;
+    preload.fetchPriority = 'low';
+    var supportsDecode = typeof preload.decode === 'function';
+    preload.onload = function() {
+      if (!supportsDecode) entry.status = 'decoded';
+    };
+    preload.onerror = function() { entry.status = 'failed'; };
+    preload.src = url;
+    if (supportsDecode) {
+      preload.decode().then(function() {
+        entry.status = 'decoded';
+      }).catch(function() {
+        // onload/onerror remains the fallback for WebViews with incomplete decode support.
+      });
+    }
+  });
+
+  Object.keys(_lbAdjacentPreloads).forEach(function(cacheKey) {
+    if (keep[cacheKey]) return;
+    var stale = _lbAdjacentPreloads[cacheKey];
+    if (stale && stale.img) {
+      stale.img.onload = null;
+      stale.img.onerror = null;
+      stale.img.removeAttribute('src');
+    }
+    delete _lbAdjacentPreloads[cacheKey];
+  });
+}
+
 function _lbScheduleSourceSwap(targetZoom) {
   if (!_lightboxCurrentId) return;
   var desired = _lbPickSourceKey(targetZoom);
   _lbDesiredSrcKey = desired;
-  if (desired === _lbCurrentSrcKey) return;
+  if (desired === _lbCurrentSrcKey) {
+    _lbPrimeAdjacentPhotos(desired);
+    return;
+  }
 
   if (_lbSwapTimer) clearTimeout(_lbSwapTimer);
   _lbSwapTimer = setTimeout(function() {
@@ -8148,6 +8313,7 @@ function _lbScheduleSourceSwap(targetZoom) {
       });
       img.src = url;
       _lbCurrentSrcKey = key;
+      _lbPrimeAdjacentPhotos(key);
     };
     preloader.onerror = function() {
       if (_lightboxCurrentId !== photoId) return;
