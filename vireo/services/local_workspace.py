@@ -531,6 +531,13 @@ def status(db, workspace_id: int, vireo_dir: str) -> dict:
     if result["state"] == "activating":
         result["state"] = "recovery"
         return result
+    if result["state"] == "syncing":
+        # A prior sync-back was interrupted after publishing at least one
+        # source file. Discard would silently leave those edits behind, so
+        # surface a recovery state that only sync-back can clear.
+        result["state"] = "recovery"
+        result["recovery_kind"] = "sync"
+        return result
     if result["state"] != "active":
         return result
 
@@ -619,8 +626,12 @@ def sync_back(
     """Publish local changes, restore source paths, and remove the local copy."""
     with _LOCK:
         manifest = _load_manifest(vireo_dir, workspace_id)
-        if not manifest or manifest.get("state") != "active":
+        if not manifest or manifest.get("state") not in {"active", "syncing"}:
             raise LocalWorkspaceError("This workspace is not working locally")
+        # A resumed sync inherits the deletion confirmation from the original
+        # attempt: entering "syncing" required deletions to be confirmed then.
+        if manifest.get("state") == "syncing":
+            allow_deletions = True
         for root in manifest["roots"]:
             if not os.path.isdir(root["source_path"]):
                 raise LocalWorkspaceError(f"Source storage is unavailable: {root['source_path']}")
@@ -670,6 +681,15 @@ def sync_back(
             raise LocalWorkspaceCancelled("Local workspace sync cancelled")
         if begin_commit and not begin_commit():
             raise LocalWorkspaceCancelled("Local workspace sync cancelled")
+
+        # Persist a recovery boundary before the first source mutation. If
+        # Vireo exits between here and the catalog restore below, Discard
+        # would silently strip the managed copy without undoing already-
+        # published edits; status() surfaces this state as recovery-sync so
+        # only sync_back can clear it.
+        if manifest.get("state") != "syncing":
+            manifest["state"] = "syncing"
+            _write_manifest(manifest_path(vireo_dir, workspace_id), manifest)
 
         total = len(changed) + len(deleted)
         done = 0
@@ -726,6 +746,11 @@ def discard_local(db, workspace_id: int, vireo_dir: str) -> dict:
         if manifest.get("state") == "staging":
             shutil.rmtree(workspace_dir(vireo_dir, workspace_id), ignore_errors=True)
             return {"ok": True, "discarded": True}
+        if manifest.get("state") == "syncing":
+            raise LocalWorkspaceError(
+                "A sync-back was interrupted after some files were already published to the source. "
+                "Finish the sync-back to preserve those edits; discard cannot undo published changes."
+            )
         if manifest.get("state") not in {"active", "activating"}:
             raise LocalWorkspaceError("Local workspace is not in a recoverable state")
 

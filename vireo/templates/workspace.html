@@ -144,6 +144,12 @@ function renderLocalWorkspace(data) {
   }
 
   if (data.state === 'staging' || data.state === 'recovery') {
+    if (data.recovery_kind === 'sync') {
+      container.innerHTML =
+        '<div style="font-size:13px;color:var(--warning);margin-bottom:10px;">A sync-back was interrupted after some files were already published to the original storage. Finish syncing back to preserve those edits — discarding cannot undo published changes.</div>' +
+        '<button class="btn btn-secondary" data-local-action="sync">Finish Sync-back</button>';
+      return;
+    }
     container.innerHTML =
       '<div style="font-size:13px;color:var(--warning);margin-bottom:10px;">A previous local copy was interrupted and needs cleanup before you continue.</div>' +
       '<button class="btn btn-secondary" data-local-action="cleanup">Clean Up Incomplete Copy</button>';

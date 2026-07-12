@@ -287,6 +287,79 @@ def test_sync_temp_file_cannot_overwrite_real_sibling(local_workspace_env):
     assert sibling.read_bytes() == b"legitimate sibling"
 
 
+def test_sync_recovery_persists_before_first_publish_and_resumes_cleanly(local_workspace_env, monkeypatch):
+    env = local_workspace_env
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    local_child = Path(_folder_path(env["db"], env["child_id"]))
+    (local_child / "bird.jpg").write_bytes(b"edited-locally")
+    (local_child / "bird.xmp").write_text("edited metadata", encoding="utf-8")
+
+    real_publish = local_workspace._atomic_publish
+    published = {"count": 0}
+
+    def crashing_publish(local_path, remote_path):
+        # Perform the real publish first so the source truly gets mutated,
+        # then simulate a mid-sync process death after the first file.
+        real_publish(local_path, remote_path)
+        published["count"] += 1
+        if published["count"] == 1:
+            raise RuntimeError("simulated crash after first source publish")
+
+    monkeypatch.setattr(local_workspace, "_atomic_publish", crashing_publish)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        sync_back(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+
+    # The manifest must record the interruption before any source mutation
+    # so a plain Discard cannot silently strip the managed copy without
+    # undoing the already-published edit.
+    current = status(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    assert current["state"] == "recovery"
+    assert current.get("recovery_kind") == "sync"
+    with pytest.raises(LocalWorkspaceError, match="Finish the sync-back"):
+        discard_local(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+
+    # A second sync_back call must resume, publish the remaining edits, and
+    # leave the source with every local change.
+    monkeypatch.setattr(local_workspace, "_atomic_publish", real_publish)
+    sync_back(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+
+    assert (env["child"] / "bird.jpg").read_bytes() == b"edited-locally"
+    assert (env["child"] / "bird.xmp").read_text(encoding="utf-8") == "edited metadata"
+    assert _folder_path(env["db"], env["child_id"]) == str(env["child"])
+    assert status(env["db"], env["workspace_id"], str(env["vireo_dir"]))["state"] == "remote"
+
+
+def test_sync_recovery_resumes_deletions_without_reconfirmation(local_workspace_env, monkeypatch):
+    env = local_workspace_env
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    local_child = Path(_folder_path(env["db"], env["child_id"]))
+    (local_child / "bird.jpg").write_bytes(b"edited-locally")
+    os.unlink(local_child / "bird.xmp")
+
+    real_publish = local_workspace._atomic_publish
+
+    def crashing_publish(local_path, remote_path):
+        real_publish(local_path, remote_path)
+        raise RuntimeError("simulated crash mid-sync")
+
+    monkeypatch.setattr(local_workspace, "_atomic_publish", crashing_publish)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        sync_back(
+            env["db"],
+            env["workspace_id"],
+            str(env["vireo_dir"]),
+            allow_deletions=True,
+        )
+
+    # Recovery must not require the caller to re-confirm the same deletion
+    # the user already approved when the interrupted sync began.
+    monkeypatch.setattr(local_workspace, "_atomic_publish", real_publish)
+    sync_back(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+
+    assert (env["child"] / "bird.jpg").read_bytes() == b"edited-locally"
+    assert not (env["child"] / "bird.xmp").exists()
+
+
 def test_discard_restores_catalog_without_changing_source(local_workspace_env):
     env = local_workspace_env
     stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))

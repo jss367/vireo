@@ -227,7 +227,9 @@ def create_local_workspace_blueprint(get_db, json_error, get_runner, db_path, vi
                 current = status(db, workspace_id, vireo_dir)
             except LocalWorkspaceError as exc:
                 return json_error(str(exc), 409)
-            if current["state"] != "active":
+            state = current["state"]
+            is_sync_recovery = state == "recovery" and current.get("recovery_kind") == "sync"
+            if state != "active" and not is_sync_recovery:
                 return json_error("This workspace is not working locally", 409)
             deletion_count = (current.get("changes") or {}).get("deleted", 0)
             if deletion_count and not allow_deletions:
