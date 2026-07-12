@@ -714,6 +714,120 @@ def test_migrate_toggle_ui_h_conflict_no_config_file(tmp_path, monkeypatch):
     assert cfg.MIGRATION_TOGGLE_UI_H_CONFLICT in raw["_migrations_applied"]
 
 
+def test_migrate_default_strategy_to_process_id_rewrites_global(
+    tmp_path, monkeypatch
+):
+    """The global config file's legacy ``pipeline.default_strategy`` is
+    rewritten to ``pipeline.default_process_id`` at the matching seed id.
+
+    Without this rewrite, an upgraded install with a global after-import
+    default set the old way silently falls back to import-only because the
+    import endpoints and ``get_effective_config`` now only read
+    ``pipeline.default_process_id``.
+    """
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {
+        "pipeline": {"default_strategy": "identify"},
+    })
+    from db import Database
+
+    db = Database(str(tmp_path / "vireo.db"))
+    try:
+        identify_id = next(
+            p["id"] for p in db.get_saved_processes()
+            if p["name"] == "Identify birds"
+        )
+        assert cfg.migrate_default_strategy_to_process_id(db) is True
+    finally:
+        db.close()
+
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["pipeline"]["default_process_id"] == identify_id
+    assert "default_strategy" not in raw["pipeline"]
+    assert (
+        cfg.MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID in raw["_migrations_applied"]
+    )
+
+
+def test_migrate_default_strategy_to_process_id_unknown_name_becomes_null(
+    tmp_path, monkeypatch
+):
+    """An unknown/removed legacy strategy name maps to null (import only).
+    The old key is still dropped and the marker is stamped so we don't try
+    again on the next boot."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {
+        "pipeline": {"default_strategy": "some_deleted_preset"},
+    })
+    from db import Database
+
+    db = Database(str(tmp_path / "vireo.db"))
+    try:
+        assert cfg.migrate_default_strategy_to_process_id(db) is True
+    finally:
+        db.close()
+
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert "default_strategy" not in raw["pipeline"]
+    assert "default_process_id" not in raw["pipeline"]
+    assert (
+        cfg.MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID in raw["_migrations_applied"]
+    )
+
+
+def test_migrate_default_strategy_to_process_id_is_one_time(
+    tmp_path, monkeypatch
+):
+    """After the marker is stamped, a user who later hand-adds
+    ``default_strategy`` back is not silently rewritten — respecting a
+    deliberate manual edit."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {
+        "pipeline": {"default_strategy": "full"},
+    })
+    from db import Database
+
+    db = Database(str(tmp_path / "vireo.db"))
+    try:
+        assert cfg.migrate_default_strategy_to_process_id(db) is True
+
+        # User hand-edits the (now-legacy) key back in after upgrade.
+        raw = _read_raw(cfg.CONFIG_PATH)
+        raw["pipeline"]["default_strategy"] = "cull_ready"
+        _write_raw(cfg.CONFIG_PATH, raw)
+
+        assert cfg.migrate_default_strategy_to_process_id(db) is False
+    finally:
+        db.close()
+
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["pipeline"]["default_strategy"] == "cull_ready"
+
+
+def test_migrate_default_strategy_to_process_id_no_config_file(
+    tmp_path, monkeypatch
+):
+    """Fresh install (no config.json yet) — nothing to rewrite; just the
+    marker gets stamped."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+
+    db = Database(str(tmp_path / "vireo.db"))
+    try:
+        assert cfg.migrate_default_strategy_to_process_id(db) is False
+    finally:
+        db.close()
+
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert (
+        cfg.MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID in raw["_migrations_applied"]
+    )
+
+
 def test_default_subject_types_includes_taxonomy_individual_genre(tmp_path, monkeypatch):
     """Default subject_types is the set of keyword types that count as
     'identifying' a photo — taxonomy + individual + genre by default."""

@@ -167,17 +167,55 @@ def test_workspace_default_accepts_valid_id(app_and_db):
 
 def test_settings_schema_injects_process_picker(app_and_db):
     """The settings widget renders as a picker: api_settings_schema swaps the
-    stored int spec for an enum populated from the live process list."""
+    stored int spec for an enum populated from the live process list.
+
+    Enum values are numeric ids (not stringified) so the settings renderer,
+    which selects the active option via strict equality against the effective
+    value, matches when the stored ``default_process_id`` is an ``int``.
+    Label keys survive JSON serialization as strings regardless, so lookups
+    on the wire use ``str(id)``.
+    """
     app, db = app_and_db
     client = app.test_client()
     schema = client.get("/api/settings/schema").get_json()["schema"]
     spec = schema["pipeline.default_process_id"]
     assert spec["type"] == "enum"
-    ids = {str(p["id"]) for p in db.get_saved_processes()}
+    ids = {p["id"] for p in db.get_saved_processes()}
     assert set(spec["enum"]) == ids
+    assert all(isinstance(x, int) for x in spec["enum"])
     identify = next(
         p for p in db.get_saved_processes() if p["name"] == "Identify birds")
     assert spec["enum_labels"][str(identify["id"])] == "Identify birds"
+
+
+def test_settings_schema_enum_matches_effective_default_by_strict_equality(
+    app_and_db
+):
+    """Once a workspace default is set, the effective value and the picker's
+    enum entry must be the *same* type: the settings-page widget selects the
+    active option via strict equality, so a mismatch would silently drop
+    through to ``(unset)`` and misrepresent an active default.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    pid = next(
+        p["id"] for p in db.get_saved_processes()
+        if p["name"] == "Identify birds"
+    )
+    resp = client.patch("/api/settings/workspace", json={
+        "key": "pipeline.default_process_id", "value": pid,
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+    schema = client.get("/api/settings/schema").get_json()["schema"]
+    values = client.get("/api/settings/values").get_json()
+    effective = values["effective"]["pipeline.default_process_id"]
+    enum = schema["pipeline.default_process_id"]["enum"]
+
+    # The mirror of what settings.html:renderSettingWidget does: opt === effective.
+    matching = [opt for opt in enum if opt == effective and type(opt) is type(effective)]
+    assert matching == [effective]
 
 
 def test_create_workspace_rejects_unknown_default_process(app_and_db):

@@ -2693,6 +2693,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # user's existing action keeps working; they can re-bind toggle_ui from
     # the shortcuts editor.
     cfg.migrate_toggle_ui_h_conflict()
+    # One-time rewrite of the global pipeline.default_strategy (legacy
+    # hardcoded strategy name) to pipeline.default_process_id (saved_processes
+    # id). The workspace-side rewrite happens inside Database(); this covers
+    # the global config file so workspaces that inherit the global default
+    # don't silently fall back to import-only after upgrade.
+    cfg.migrate_default_strategy_to_process_id(init_db)
     init_db.create_default_collections_for_all_workspaces()
 
     # Wildlife backfill timing:
@@ -11566,10 +11572,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if spec:
             procs = db.get_saved_processes()
             spec["type"] = "enum"
-            # <option> values serialize as strings; the PATCH endpoint coerces
-            # them back to int via the static int spec.
-            spec["enum"] = [str(p["id"]) for p in procs]
-            spec["enum_labels"] = {str(p["id"]): p["name"] for p in procs}
+            # Return numeric ids so the settings renderer, which selects the
+            # active option via strict equality against the effective value,
+            # matches. The stored/effective value is an ``int`` (validated by
+            # the static ``int`` spec), so string-typed enum values would
+            # never match and the picker would silently fall through to the
+            # nullable "Import only" option, misrepresenting an active
+            # default and resetting it on the next save. <option> values in
+            # the DOM still serialize to strings; the PATCH endpoint coerces
+            # them back to int via the static int spec on the way in.
+            spec["enum"] = [p["id"] for p in procs]
+            spec["enum_labels"] = {p["id"]: p["name"] for p in procs}
             out["pipeline.default_process_id"] = spec
         return jsonify({
             "schema": out,
