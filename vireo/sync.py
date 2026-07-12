@@ -321,37 +321,51 @@ def sync_from_xmp(db, photo_ids):
                 continue
             xmp_keywords_by_key.setdefault(key, kw)
 
-        # Get current DB keywords, grouped by normalized match key so we
-        # can detect and prune duplicate normalized-equivalent rows that a
-        # single XMP entry should map to (e.g. an upgraded photo tagged
-        # with both legacy `‘apapane` and clean `apapane` when the sidecar
-        # only carries `apapane`). Without grouping, both DB rows pass the
-        # "match key is in the XMP set" check and both survive, leaving
-        # duplicate in-app tags that the sidecar does not contain.
+        # Get current DB keywords, grouped by (normalized match key,
+        # parent_id, type) so we can detect and prune duplicate
+        # normalized-equivalent rows that a single XMP entry should map
+        # to (e.g. an upgraded photo tagged with both legacy `‘apapane`
+        # and clean `apapane` when the sidecar only carries `apapane`).
+        #
+        # Include parent_id and type in the slot key so different-slot
+        # homonyms — e.g. a taxonomy `Robin` and an individual `Robin`,
+        # or the same leaf name under different hierarchical parents —
+        # do NOT collapse into a single keep-one/untag-the-rest group.
+        # The dedup boundary elsewhere in this codebase (add_keyword,
+        # update_keyword peer lookup, keyword cleanup) is
+        # (name, parent_id, type); a single flat `Robin` in the sidecar
+        # cannot disambiguate between the two homonym DB rows, so both
+        # legitimate tags must survive here rather than have one
+        # arbitrarily untagged.
         db_keywords = db.get_photo_keywords(photo_id)
-        db_keywords_by_key = defaultdict(list)
+        db_slot_groups = defaultdict(list)
         for k in db_keywords:
-            db_keywords_by_key[keyword_match_key(k["name"])].append(k)
+            slot = (keyword_match_key(k["name"]), k["parent_id"], k["type"])
+            db_slot_groups[slot].append(k)
+        db_key_set = {slot[0] for slot in db_slot_groups}
 
         # Reconcile DB keyword associations to match the current XMP file.
         for kw_key, kw_name in xmp_keywords_by_key.items():
-            if kw_key in db_keywords_by_key:
+            if kw_key in db_key_set:
                 continue
             kid = db.add_keyword(kw_name)
             db.tag_photo(photo_id, kid)
 
-        for kw_key, rows in db_keywords_by_key.items():
+        for slot, rows in db_slot_groups.items():
+            kw_key = slot[0]
             if kw_key not in xmp_keywords_by_key:
                 for kw in rows:
                     db.untag_photo(photo_id, kw["id"])
                 continue
             if len(rows) <= 1:
                 continue
-            # Multiple DB rows collapse to the same XMP entry: keep one
-            # and untag the rest. Prefer the row whose stored spelling
-            # matches what add_keyword() would produce for the sidecar
-            # value (the canonical form), then an exact stored=XMP text
-            # match, then the lowest id for a deterministic tie-break.
+            # Multiple DB rows in the SAME slot (same normalized text,
+            # parent_id, and type) collapse to the same XMP entry: keep
+            # one and untag the rest. Prefer the row whose stored
+            # spelling matches what add_keyword() would produce for the
+            # sidecar value (the canonical form), then an exact
+            # stored=XMP text match, then the lowest id for a
+            # deterministic tie-break.
             xmp_name = xmp_keywords_by_key[kw_key]
             canonical_name = normalize_keyword_display(xmp_name)
             keeper = min(

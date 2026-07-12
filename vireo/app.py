@@ -6064,7 +6064,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                    FROM keywords WHERE id = ?""",
                 (keyword_id,),
             ).fetchone()
-            if old_row and old_row["name"] != new_name:
+            # Capture the pre-update stored name unconditionally when a
+            # name is submitted -- even if the raw submitted value matches
+            # the current stored spelling. db.update_keyword() normalizes
+            # the rename target, so a PUT of `{"name": "‘apapane"}` against
+            # an upgraded row still stored as `‘apapane` rewrites the row
+            # to `apapane`; the earlier raw-string guard skipped this case
+            # and left the sidecar/curation keyed to the legacy spelling.
+            # The post-update guard below (`if old_name == new_name:
+            # old_name = None`) uses the resolved stored name, so a true
+            # idempotent PUT still no-ops.
+            if old_row:
                 old_name = old_row["name"]
                 old_is_species_keyword = (
                     old_row["is_species"] == 1 or old_row["type"] == "taxonomy"

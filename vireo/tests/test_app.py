@@ -3801,6 +3801,48 @@ def test_rename_keyword_normalizes_edge_quotes_and_queues_clean_name(app_and_db)
     assert ("keyword_add", "‘apapane") not in actions
 
 
+def test_rename_keyword_queues_normalization_only_change_for_stored_edge_quote(
+    app_and_db,
+):
+    """When the PUT body's name matches the current legacy stored spelling
+    verbatim (e.g. an upgraded row still stored as `‘apapane` and a client
+    that faithfully re-sent `‘apapane`), db.update_keyword() still normalizes
+    the row to the clean spelling `apapane`. The route must queue the
+    remove(old_raw) + add(clean) sidecar pair for affected photos and
+    rename species curation accordingly, otherwise the DB row is
+    canonicalized while XMP/highlight rows stay keyed to the legacy
+    spelling."""
+    app, db = app_and_db
+    client = app.test_client()
+    # Insert a legacy quoted row directly so it survives add_keyword's
+    # normalization, then tag a photo with it.
+    db.conn.execute("INSERT INTO keywords (name) VALUES (?)", ("‘apapane",))
+    db.conn.commit()
+    kid = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("‘apapane",)
+    ).fetchone()["id"]
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.tag_photo(p1, kid)
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    resp = client.put(f"/api/keywords/{kid}", json={"name": "‘apapane"})
+    assert resp.status_code == 200
+
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "apapane"
+
+    changes = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ? ORDER BY id",
+        (p1,),
+    ).fetchall()
+    actions = [(c["change_type"], c["value"]) for c in changes]
+    assert ("keyword_remove", "‘apapane") in actions
+    assert ("keyword_add", "apapane") in actions
+
+
 def test_rename_keyword_rejects_empty_after_normalization(app_and_db):
     """PUT /api/keywords/<id> with a quote-only name must be rejected at
     the boundary — same contract as add_keyword — instead of storing an
