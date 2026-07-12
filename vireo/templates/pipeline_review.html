@@ -1074,6 +1074,34 @@ input[type="range"]::-moz-range-thumb {
   transform-origin: 0 0;
   /* Inline style.width / style.height set per-card in JS to natural size. */
 }
+.grm-card-kw-dot,
+.grm-card-needs-tag {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 4;
+  pointer-events: none;
+}
+.grm-card.has-offset .grm-card-kw-dot,
+.grm-card.has-offset .grm-card-needs-tag {
+  top: 18px;
+}
+.grm-card-kw-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.55);
+}
+.grm-card-needs-tag {
+  background: var(--warning, #e0a800);
+  color: var(--bg-primary);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.4;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
 .grm-card-info {
   padding: 6px 8px;
   font-size: 11px;
@@ -1163,6 +1191,14 @@ input[type="range"]::-moz-range-thumb {
   color: var(--text-muted); cursor:pointer; user-select:none; }
 .grm-commit-toggle input { cursor:pointer; }
 .grm-dirty-hint { font-size:11px; color: var(--warning, #e0a800); }
+.grm-keyword-summary {
+  min-width: 132px;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.grm-keyword-summary.ok { color: var(--accent); }
+.grm-keyword-summary.warn { color: var(--warning, #e0a800); }
 .grm-res-control,
 .grm-loupe-zoom-control {
   display: flex;
@@ -1636,6 +1672,7 @@ input[type="range"]::-moz-range-thumb {
   <div class="grm-header">
     <h3 id="grmTitle">Review Burst Group</h3>
     <span id="grmCount" style="font-size:12px;color:var(--text-dim);"></span>
+    <span class="grm-keyword-summary" id="grmSpeciesKeywordSummary"></span>
     <button class="grm-close" onclick="closeGroupReview()">&times;</button>
   </div>
   <div class="grm-body">
@@ -4557,8 +4594,61 @@ function closeGroupReview() {
   grmRefreshResetAllVisibility();
 }
 
+function grmHasSpeciesKeyword(photoId, species) {
+  if (!species || !grmState || grmState.keywordStateSpecies !== species) return false;
+  var st = (grmState.dbState && grmState.dbState[photoId]) || {};
+  return !!st.has_species_keyword;
+}
+
+function grmKeywordStats(items) {
+  var speciesEl = document.getElementById('grmSpecies');
+  var species = speciesEl ? (speciesEl.value || '').trim() : '';
+  var stats = {
+    species: species,
+    total: species ? items.length : 0,
+    applied: 0,
+    missing: 0
+  };
+  if (!species) return stats;
+
+  items.forEach(function(p) {
+    if (grmHasSpeciesKeyword(p.id, species)) stats.applied++;
+    else stats.missing++;
+  });
+  return stats;
+}
+
+function grmUpdateKeywordSummary(stats) {
+  var summary = document.getElementById('grmSpeciesKeywordSummary');
+  if (!summary) return;
+  summary.className = 'grm-keyword-summary';
+  if (!grmState || !grmState.seeded) {
+    summary.textContent = 'Loading keyword state';
+    return;
+  }
+  if (!stats.species) {
+    summary.textContent = 'No species keyword';
+    return;
+  }
+  summary.textContent = 'Species keyword: ' + stats.applied + '/' + stats.total + ' applied';
+  if (stats.total > 0 && stats.missing === 0) summary.classList.add('ok');
+  else if (stats.missing > 0) summary.classList.add('warn');
+}
+
+function grmKeywordBadgeHtml(p, stats) {
+  if (!stats.species || !grmState || !grmState.seeded || stats.total === 0) return '';
+  var hasKw = grmHasSpeciesKeyword(p.id, stats.species);
+  if (stats.missing === 0) return '';
+  if (stats.applied === 0) return '';
+  if (hasKw) {
+    return '<span class="grm-card-kw-dot" title="Species keyword already applied"></span>';
+  }
+  return '<span class="grm-card-needs-tag" title="Missing species keyword; Apply will add it if Confirm species is checked">Needs tag</span>';
+}
+
 function renderGroupModal() {
   var items = grmState.items.filter(function(p) { return !grmState.removed.has(p.id); });
+  var keywordStats = grmKeywordStats(items);
 
   function renderCard(p) {
     var isSelected = grmState.selectedIds && grmState.selectedIds.has(p.id);
@@ -4573,15 +4663,12 @@ function renderGroupModal() {
     // pipeline cache hasn't been refreshed.
     var dbSt = (grmState.dbState && grmState.dbState[p.id]) || {};
     var dbFlag = dbSt.flag || 'none';
-    var hasKw = !!dbSt.has_species_keyword;
 
     var flagHtml = '';
     if (dbFlag === 'flagged') flagHtml = '<span class="photo-flag-badge flag-flagged" title="Already flagged in library" style="bottom:auto;top:4px;left:4px;">P</span>';
     else if (dbFlag === 'rejected') flagHtml = '<span class="photo-flag-badge flag-rejected" title="Already rejected in library" style="bottom:auto;top:4px;left:4px;">X</span>';
 
-    var kwHtml = hasKw
-      ? '<span class="grm-card-kw-badge" title="Species keyword already applied" style="position:absolute;top:4px;right:4px;background:var(--accent);color:var(--accent-text);font-size:10px;font-weight:600;padding:2px 6px;border-radius:3px;letter-spacing:0.04em;">TAG</span>'
-      : '';
+    var kwHtml = grmKeywordBadgeHtml(p, keywordStats);
 
     var nat = grmNaturalDims(p);
     var imgStyle = 'width:' + nat.w + 'px;height:' + nat.h + 'px;';
@@ -4620,6 +4707,7 @@ function renderGroupModal() {
   }
 
   document.getElementById('grmCount').textContent = pickItems.length + ' picks, ' + rejectItems.length + ' rejects, ' + candidateItems.length + ' unsorted';
+  grmUpdateKeywordSummary(keywordStats);
 
   // Re-apply offset indicators and the per-card transforms (cover-fit always
   // needs an explicit transform now that <img>s are laid out at natural
@@ -4638,11 +4726,13 @@ function renderGroupModal() {
 var _grmSpeciesRefetchTimer = null;
 var _grmSpeciesRefetchToken = 0;
 
-// Called from the species <input>'s oninput. Refresh the Apply label
-// immediately (the diff uses the typed value), and schedule a debounced
-// refetch of has_species_keyword so the TAG markers + Tag-N preview reflect
-// the *currently typed* species, not the one the modal opened with.
+// Called from the species <input>'s oninput. Refresh the Apply label and
+// visible keyword summary immediately (the diff uses the typed value), and
+// schedule a debounced refetch of has_species_keyword so missing-keyword
+// markers + Tag-N preview reflect the *currently typed* species, not the one
+// the modal opened with.
 function grmOnSpeciesInput() {
+  renderGroupModal();
   grmUpdateApplyLabel();
   if (_grmSpeciesRefetchTimer) clearTimeout(_grmSpeciesRefetchTimer);
   _grmSpeciesRefetchTimer = setTimeout(grmRefreshSpeciesKeywordState, 250);
@@ -4842,9 +4932,7 @@ function grmSpeciesMemberItems(checks) {
 function grmSpeciesTagCount(checks, species) {
   if (!species) return 0;
   return grmSpeciesMemberItems(checks).filter(function(p) {
-    var st = (grmState.dbState && grmState.dbState[p.id]) || {};
-    var hasKw = grmState.keywordStateSpecies === species && !!st.has_species_keyword;
-    return !hasKw;
+    return !grmHasSpeciesKeyword(p.id, species);
   }).length;
 }
 

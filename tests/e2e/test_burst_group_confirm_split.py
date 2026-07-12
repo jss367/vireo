@@ -288,6 +288,11 @@ def test_smart_default_species_checked_on_new_species(live_server, page):
     # Field opens pre-filled with the confirmed species → no change → unchecked.
     expect(page.locator("#grmSpecies")).to_have_value("Red-tailed Hawk")
     expect(page.locator("#grmConfirmSpeciesChk")).not_to_be_checked()
+    expect(page.locator("#grmSpeciesKeywordSummary")).to_contain_text(
+        "Species keyword: 3/3 applied"
+    )
+    expect(page.locator("#grmOverlay .grm-card-needs-tag")).to_have_count(0)
+    expect(page.locator("#grmOverlay .grm-card-kw-dot")).to_have_count(0)
 
     page.locator("#grmSpecies").fill("Cooper's Hawk")
     expect(page.locator("#grmConfirmSpeciesChk")).to_be_checked()
@@ -385,6 +390,12 @@ def test_smart_default_species_checked_when_frame_missing_keyword(live_server, p
     # Smart default flips ON because a frame still needs the keyword, even
     # though the confirmed species itself is unchanged.
     expect(page.locator("#grmConfirmSpeciesChk")).to_be_checked()
+    expect(page.locator("#grmSpeciesKeywordSummary")).to_contain_text(
+        "Species keyword: 2/3 applied"
+    )
+    expect(page.locator("#grmOverlay .grm-card-needs-tag")).to_have_count(1)
+    expect(page.locator("#grmOverlay .grm-card-kw-dot")).to_have_count(2)
+    expect(page.locator("#grmOverlay .grm-card-kw-badge")).to_have_count(0)
 
     with page.expect_response("**/api/encounters/species"):
         page.locator("#grmApplyBtn").click()
