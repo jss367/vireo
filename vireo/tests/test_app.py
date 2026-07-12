@@ -4830,7 +4830,11 @@ def test_highlights_candidates_include_unscored_picks_and_order(app_and_db):
     """Unscored photos now flow into Highlights: all three picks appear (the
     real bug was two vanishing), ordered picks -> scored -> unscored, with
     is_analyzed flags and unanalyzed_count set for the divider."""
-    from app import _apply_ordered_highlights, _collect_highlight_buckets
+    from app import (
+        _apply_highlight_preferences,
+        _apply_ordered_highlights,
+        _collect_highlight_buckets,
+    )
 
     app, db = app_and_db
     fid, ids = _seed_anianiau_bucket(db)
@@ -4838,6 +4842,10 @@ def test_highlights_candidates_include_unscored_picks_and_order(app_and_db):
     candidates = db.get_highlights_candidates(fid, min_quality=0.0)
     buckets, _unid = _collect_highlight_buckets(candidates, 0.70)
     _apply_ordered_highlights(db, buckets)
+    # unanalyzed_count is assigned in _apply_highlight_preferences (which
+    # always runs after ordering in the real flow) so its tail count
+    # reflects any curated promotion. Mirror the full pipeline here.
+    _apply_highlight_preferences(db, buckets)
     bucket = next(b for b in buckets if b["species"] == "Anianiau")
 
     order = [p["filename"] for p in bucket["photos"]]
@@ -4876,6 +4884,137 @@ def test_highlights_candidates_exclude_unscored_when_quality_floor_raised(app_an
 
     # Only np_high (0.90) clears the 0.5 floor; the rejected 0.99 stays excluded.
     assert names == {"np_high.jpg"}
+
+
+def test_highlights_unscored_only_workspace_returns_content_with_empty_folders(app_and_db):
+    """Unscored-only workspaces must not silently blank the Highlights page.
+
+    ``get_folders_with_quality_data`` is scored-only, so the payload's
+    ``folders`` list is empty when nothing has been analyzed. But the
+    highlights payload can still return eligible content (buckets and
+    unidentified photos) via the min_quality<=0 admission of unscored
+    candidates. The frontend gate must key off actual content, not folder
+    presence — this test pins the API contract so a future regression that
+    drops content when ``folders == []`` is caught here.
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/highlights")
+    assert resp.status_code == 200
+    data = resp.get_json()
+
+    # The scored-only folder dropdown is legitimately empty in this fixture.
+    assert data["folders"] == []
+    # ...but the payload still carries eligible content — the workspace has
+    # three unscored, unrejected photos in the unidentified section.
+    assert data["unidentified"]["photo_count"] == 3
+    assert data["meta"]["eligible"] == 3
+
+
+def test_highlights_unanalyzed_count_reflects_tail_after_representative_promotion(app_and_db):
+    """Curated promotion of an unscored photo must not misplace the divider.
+
+    ``_apply_highlight_preferences`` runs after the initial bucket sort and
+    can promote an unscored, non-flagged photo to the front when it's saved
+    as the species representative. The tail count anchors the "Not yet
+    analyzed" divider, so under the old (total-unscored-non-picks) semantic
+    a promoted unscored rep would inflate the count and the frontend divider
+    would misfire above analyzed photos. The tail semantic (trailing
+    contiguous run of unscored non-picks) fixes that: after promotion, the
+    count is the number of unscored non-picks that remain at the actual
+    tail, not the total in the bucket.
+    """
+    from app import (
+        _apply_highlight_preferences,
+        _apply_ordered_highlights,
+        _collect_highlight_buckets,
+    )
+
+    _app, db = app_and_db
+    fid = db.add_folder('/photos/curate', name='curate')
+    kid = db.add_keyword('Iiwi', is_species=True)
+    scored_a = db.add_photo(
+        folder_id=fid, filename='scored_a.jpg', extension='.jpg',
+        file_size=1000, file_mtime=1.0, timestamp='2024-01-01T10:00:00',
+    )
+    scored_b = db.add_photo(
+        folder_id=fid, filename='scored_b.jpg', extension='.jpg',
+        file_size=1001, file_mtime=2.0, timestamp='2024-01-02T10:00:00',
+    )
+    unscored_rep = db.add_photo(
+        folder_id=fid, filename='unscored_rep.jpg', extension='.jpg',
+        file_size=1002, file_mtime=3.0, timestamp='2024-01-03T10:00:00',
+    )
+    unscored_tail = db.add_photo(
+        folder_id=fid, filename='unscored_tail.jpg', extension='.jpg',
+        file_size=1003, file_mtime=4.0, timestamp='2024-01-04T10:00:00',
+    )
+    for pid in (scored_a, scored_b, unscored_rep, unscored_tail):
+        db.tag_photo(pid, kid)
+    _set_photo_quality_flag(db, scored_a, quality=0.9)
+    _set_photo_quality_flag(db, scored_b, quality=0.4)
+    # unscored_rep and unscored_tail deliberately left with quality_score=NULL.
+
+    # Sanity-check the pre-curation ordering: unscored non-picks form a
+    # contiguous tail, so the tail count equals the total unscored non-pick
+    # count (2). This is the state the divider was designed for.
+    candidates = db.get_highlights_candidates(fid, min_quality=0.0)
+    buckets, _unid = _collect_highlight_buckets(candidates, 0.70)
+    _apply_ordered_highlights(db, buckets)
+    _apply_highlight_preferences(db, buckets)
+    bucket = next(b for b in buckets if b["species"] == "Iiwi")
+    assert [p["filename"] for p in bucket["photos"]] == [
+        "scored_a.jpg", "scored_b.jpg",
+        "unscored_rep.jpg", "unscored_tail.jpg",
+    ]
+    assert bucket["unanalyzed_count"] == 2
+
+    # Now promote unscored_rep to species representative. Preferences run
+    # after the initial sort and push it to the front, so the tail shrinks
+    # to just unscored_tail — anything else would place the divider above
+    # analyzed content.
+    db.set_species_representative("Iiwi", unscored_rep)
+
+    candidates = db.get_highlights_candidates(fid, min_quality=0.0)
+    buckets, _unid = _collect_highlight_buckets(candidates, 0.70)
+    _apply_ordered_highlights(db, buckets)
+    _apply_highlight_preferences(db, buckets)
+    bucket = next(b for b in buckets if b["species"] == "Iiwi")
+
+    order = [p["filename"] for p in bucket["photos"]]
+    assert order[0] == "unscored_rep.jpg"  # rep promoted to the front
+    assert order[-1] == "unscored_tail.jpg"  # tail intact
+    assert bucket["unanalyzed_count"] == 1  # tail-only, not 2
+
+
+def test_bucket_unanalyzed_count_ignores_non_trailing_unscored():
+    """Only the trailing contiguous run of unscored non-picks counts.
+
+    Curated ordering can leave an unscored, non-flagged photo above analyzed
+    content; those interior unscored photos must NOT be counted, or the
+    frontend divider would misfire on the first one and leave analyzed
+    photos below the label.
+    """
+    from app import _bucket_unanalyzed_count
+
+    # Interior unscored rep, then a contiguous analyzed run, then two tail
+    # photos: only the trailing pair counts.
+    photos = [
+        {"id": 1, "quality_score": None, "flag": "none"},   # promoted, interior
+        {"id": 2, "quality_score": 0.9, "flag": "none"},
+        {"id": 3, "quality_score": 0.5, "flag": "none"},
+        {"id": 4, "quality_score": None, "flag": "none"},   # tail
+        {"id": 5, "quality_score": None, "flag": "none"},   # tail
+    ]
+    assert _bucket_unanalyzed_count(photos) == 2
+
+    # No trailing tail at all — an analyzed photo at the end means the
+    # divider must not fire.
+    photos = [
+        {"id": 1, "quality_score": None, "flag": "none"},
+        {"id": 2, "quality_score": 0.9, "flag": "none"},
+    ]
+    assert _bucket_unanalyzed_count(photos) == 0
 
 
 def test_rename_homonym_non_species_keyword_leaves_species_preferences(app_and_db):

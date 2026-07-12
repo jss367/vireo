@@ -675,20 +675,32 @@ async function moveSpeciesHighlight(species, photoId, direction, button) {
 }
 
 // Render a strip's cards, inserting the "Not yet analyzed" divider before the
-// first unscored non-pick photo. The ordering guarantees those photos form one
-// contiguous tail, so the divider fires exactly once. Unscored picks (flagged,
-// at the front) are skipped so no stray divider appears up top.
-function renderStripCards(photos, unanalyzedCount) {
-  var html = '';
-  var dividerShown = false;
-  for (var i = 0; i < photos.length; i++) {
-    var p = photos[i];
-    if (!dividerShown && unanalyzedCount && !p.is_analyzed && p.flag !== 'flagged') {
-      html += '<div class="analyzed-divider">Not yet analyzed — ' + unanalyzedCount
-        + ' photo' + (unanalyzedCount === 1 ? '' : 's') + '</div>';
-      dividerShown = true;
+// trailing contiguous run of unscored non-pick photos. Walking backward from
+// the end anchors the divider to the actual tail boundary even after curated
+// ordering (species highlights, representatives) has promoted an unscored,
+// non-flagged photo to the front — a first-encountered check would have
+// misfired on that promoted card and left analyzed photos below the label.
+// If the visible slice ends on an analyzed photo (or on a flagged photo),
+// there is no tail and no divider fires. Unscored picks (flagged, at the
+// front) are always excluded from the tail.
+function renderStripCards(photos, _unanalyzedCount) {
+  var tailStart = photos.length;
+  for (var j = photos.length - 1; j >= 0; j--) {
+    var q = photos[j];
+    if (!q.is_analyzed && q.flag !== 'flagged') {
+      tailStart = j;
+    } else {
+      break;
     }
-    html += renderCard(p);
+  }
+  var tailCount = photos.length - tailStart;
+  var html = '';
+  for (var i = 0; i < photos.length; i++) {
+    if (i === tailStart && tailCount) {
+      html += '<div class="analyzed-divider">Not yet analyzed — ' + tailCount
+        + ' photo' + (tailCount === 1 ? '' : 's') + '</div>';
+    }
+    html += renderCard(photos[i]);
   }
   return html;
 }
@@ -784,7 +796,17 @@ function render() {
   var meta = document.getElementById('meta');
   var controls = document.getElementById('controlsBar');
 
-  if (!currentData.folders.length) {
+  // Only bail to the empty state when NOTHING is renderable. Gating on
+  // folders alone would hide unscored-only workspaces (or subtrees): the
+  // folder dropdown is sourced from get_folders_with_quality_data, which is
+  // scored-only, but the highlights payload can still return eligible
+  // buckets and unidentified photos from unscored candidates. The workspace
+  // scope option is prepended unconditionally, so an empty folder list
+  // remains navigable via that entry.
+  var hasBuckets = (currentData.buckets || []).length > 0;
+  var hasUnidentified = !!(currentData.unidentified
+    && currentData.unidentified.photo_count);
+  if (!currentData.folders.length && !hasBuckets && !hasUnidentified) {
     content.innerHTML = '';
     empty.style.display = 'block';
     meta.textContent = '';
