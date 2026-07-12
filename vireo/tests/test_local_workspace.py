@@ -115,6 +115,20 @@ def test_sync_refuses_source_changes_and_preserves_local_workspace(local_workspa
     assert status(env["db"], env["workspace_id"], str(env["vireo_dir"]))["state"] == "active"
 
 
+def test_sync_detects_source_change_with_preserved_size_and_mtime(local_workspace_env):
+    env = local_workspace_env
+    source_file = env["child"] / "bird.jpg"
+    original_stat = source_file.stat()
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    source_file.write_bytes(b"BIRD-EXTERNAL")
+    os.utime(source_file, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+
+    with pytest.raises(LocalWorkspaceConflict) as exc_info:
+        sync_back(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+
+    assert str(source_file) in exc_info.value.paths
+
+
 def test_sync_requires_explicit_confirmation_for_deletions(local_workspace_env):
     env = local_workspace_env
     stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
@@ -147,6 +161,36 @@ def test_stage_rejects_folders_shared_with_another_workspace(local_workspace_env
 
     with pytest.raises(LocalWorkspaceError, match="also used by another workspace"):
         stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+
+
+def test_stage_rejects_folder_covered_by_another_workspace_root(tmp_path):
+    source_root = tmp_path / "nas" / "photos"
+    source_root.mkdir(parents=True)
+    db = Database(str(tmp_path / "vireo.db"))
+    first_workspace = db._active_workspace_id
+    db.set_active_workspace(None)
+    root_id = db.add_folder(str(source_root), name="photos")
+    db.set_active_workspace(first_workspace)
+    db.add_workspace_folder(first_workspace, root_id)
+
+    nested = source_root / "2026"
+    nested.mkdir()
+    (nested / "bird.jpg").write_bytes(b"bird")
+    second_workspace = db.create_workspace("Nested")
+    db.set_active_workspace(second_workspace)
+    nested_id = db.add_folder(str(nested), name="2026")
+
+    # The ancestor workspace was linked before the nested folder existed, so
+    # it has no exact workspace_folders row for nested_id.
+    exact_link = db.conn.execute(
+        "SELECT 1 FROM workspace_folders WHERE workspace_id=? AND folder_id=?",
+        (first_workspace, nested_id),
+    ).fetchone()
+    assert exact_link is None
+
+    with pytest.raises(LocalWorkspaceError, match="overlaps a root used by another workspace"):
+        stage_workspace(db, second_workspace, str(tmp_path / "local-data"))
+    db.close()
 
 
 def test_work_locally_http_job_flow(tmp_path, monkeypatch):

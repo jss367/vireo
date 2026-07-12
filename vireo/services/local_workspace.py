@@ -249,6 +249,26 @@ def _root_records(db, workspace_id: int, local_base: Path) -> tuple[list[dict], 
             "Remove the shared folder there before working locally."
         )
 
+    # A recursive root in another workspace may cover one of these folders
+    # without having materialized the exact workspace_folders row yet. Since
+    # folders.path is global, rebasing that covered folder would still break
+    # the other workspace. Check path coverage in both directions as well as
+    # the exact-ID links above.
+    other_roots = db.conn.execute(
+        """SELECT f.path
+           FROM workspace_folders wf
+           JOIN folders f ON f.id = wf.folder_id
+           WHERE wf.workspace_id != ? AND wf.is_root = 1""",
+        (workspace_id,),
+    ).fetchall()
+    for folder in folders:
+        for other_root in other_roots:
+            if _is_within(folder["path"], other_root["path"]) or _is_within(other_root["path"], folder["path"]):
+                raise LocalWorkspaceError(
+                    f"Folder overlaps a root used by another workspace: {other_root['path']}. "
+                    "Remove the overlapping folder there before working locally."
+                )
+
     root_records = []
     for index, row in enumerate(roots):
         name = Path(row["path"].rstrip("/\\")).name or f"root-{row['id']}"
@@ -538,7 +558,7 @@ def sync_back(
         for key, original in baseline.items():
             root_index, rel = key
             remote_path = os.path.join(manifest["roots"][root_index]["source_path"], rel)
-            if _same_as_baseline(remote_path, original, cancel_check):
+            if _same_as_baseline(remote_path, original, cancel_check, force_hash=True):
                 continue
             local_path = local.get(key)
             # A prior interrupted sync may already have published this exact
