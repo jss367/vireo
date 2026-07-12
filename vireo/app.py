@@ -324,17 +324,41 @@ def _highlight_score_bucket(photos, picked_first=False):
         }
         p["reasons"] = reasons[:3]
 
-    photos.sort(
-        key=lambda p: (
-            (1 if p.get("flag") == "flagged" else 0) if picked_first else 0,
-            p.get("highlight_score") or 0,
-            p.get("predicted_confidence") or 0,
-            p.get("quality_score") or 0,
-            p.get("rating") or 0,
-            -p.get("id", 0),
-        ),
-        reverse=True,
-    )
+    if picked_first:
+        # Highlights page ordering: three contiguous regions —
+        #   1. picks (flagged): analyzed first (by score desc), then
+        #      unanalyzed picks in capture order;
+        #   2. analyzed non-picks: by highlight_score desc;
+        #   3. unanalyzed non-picks: capture order (earliest first).
+        # The analyzed-before-unanalyzed tier separates the groups so the
+        # score term only reorders analyzed rows and the timestamp term only
+        # reorders unanalyzed rows — they never compete. Timestamps are ISO
+        # text, so lexicographic order is chronological; missing timestamps
+        # sort to the end of their group. This is an ascending sort (no
+        # reverse), negating the score to rank analyzed rows high-first.
+        def _bucket_sort_key(p):
+            analyzed = p.get("quality_score") is not None
+            ts = p.get("timestamp")
+            return (
+                0 if p.get("flag") == "flagged" else 1,
+                0 if analyzed else 1,
+                -(p.get("highlight_score") or 0) if analyzed else 0.0,
+                (ts is None, ts),
+                p.get("id", 0),
+            )
+
+        photos.sort(key=_bucket_sort_key)
+    else:
+        photos.sort(
+            key=lambda p: (
+                p.get("highlight_score") or 0,
+                p.get("predicted_confidence") or 0,
+                p.get("quality_score") or 0,
+                p.get("rating") or 0,
+                -p.get("id", 0),
+            ),
+            reverse=True,
+        )
 
 
 def _apply_preferred_photo(photos, preferred_photo_id, marker_key):
@@ -371,6 +395,32 @@ def _bucket_best_score(photos):
     """
     scores = [p.get("highlight_score") for p in photos if p.get("highlight_score") is not None]
     return max(scores) if scores else None
+
+
+def _bucket_unanalyzed_count(photos):
+    """Length of the trailing "Not yet analyzed" tail of a bucket.
+
+    Counts only the contiguous run of unscored non-pick photos at the END of
+    ``photos``. This is what the divider labels, so callers can trust that a
+    non-zero value marks a real tail below the divider.
+
+    Only the trailing run is counted (not every unscored non-pick in the
+    bucket) so that curated ordering — where
+    :func:`_apply_ordered_highlights` or :func:`_apply_highlight_preferences`
+    can promote an unscored, non-flagged photo to the front as a species
+    highlight or representative — doesn't inflate the count with photos that
+    now live above the divider. Unscored picks are excluded because they
+    stay grouped with the other picks at the front regardless.
+    """
+    if not photos:
+        return 0
+    tail = 0
+    for p in reversed(photos):
+        if p.get("quality_score") is None and p.get("flag") != "flagged":
+            tail += 1
+        else:
+            break
+    return tail
 
 
 def _apply_highlight_preferences(db, buckets):
@@ -413,6 +463,10 @@ def _apply_highlight_preferences(db, buckets):
         # photos.
         bucket["best_score"] = _bucket_best_score(bucket["photos"])
         bucket["best_timestamp"] = top.get("timestamp")
+        # Run last so curated promotion (an unscored rep pushed to the front)
+        # doesn't leave a stale tail count that anchors the divider above
+        # analyzed content.
+        bucket["unanalyzed_count"] = _bucket_unanalyzed_count(bucket.get("photos"))
 
 
 def _apply_ordered_highlights(db, buckets):
@@ -451,6 +505,9 @@ def _apply_ordered_highlights(db, buckets):
         bucket["highlight_count"] = sum(
             1 for p in bucket.get("photos") or [] if p.get("is_highlighted")
         )
+        # unanalyzed_count is assigned in _apply_highlight_preferences instead:
+        # that runs after this pass and can still reorder photos, so anchoring
+        # the tail count here would be stale under curated ordering.
         bucket["best_quality"] = best.get("quality_score")
         bucket["best_score"] = best.get("highlight_score")
         bucket["best_timestamp"] = best.get("timestamp")
@@ -556,6 +613,7 @@ def _collect_highlight_buckets(
             "rating": r.get("rating") or 0,
             "flag": r.get("flag") or "none",
             "quality_score": r.get("quality_score"),
+            "is_analyzed": r.get("quality_score") is not None,
             "subject_sharpness": r.get("subject_sharpness"),
             "subject_size": r.get("subject_size"),
             "sharpness": r.get("sharpness"),
@@ -8716,6 +8774,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "photos": unidentified_limited,
                 "loaded_count": len(unidentified_limited),
                 "has_more": len(unidentified_photos) > len(unidentified_limited),
+                "unanalyzed_count": _bucket_unanalyzed_count(unidentified_photos),
             },
             "folders": [
                 {"id": f["id"], "name": f["name"], "photo_count": f["photo_count"]}

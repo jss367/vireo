@@ -195,11 +195,11 @@ def test_representative_preference_promotes_existing_highlight_to_top(life_app):
     }
 
 
-def test_representative_preference_skips_highlight_when_ineligible(life_app):
-    # p3 (sparrow) is life-list eligible but has no quality_score, so it
-    # can't appear in Highlights. Setting it as representative must not
-    # create an invisible species_highlights row the user can't see or
-    # remove from the Highlights page.
+def test_representative_preference_promotes_unscored_pick_to_highlight(life_app):
+    # p3 (sparrow) has no quality_score, but Highlights now admits
+    # unscored photos at min_quality=0 so users can curate a pick before
+    # analysis. Setting an unscored photo as representative must create
+    # the species_highlights row so it shows up on the Highlights page.
     app, db, ids = life_app
 
     resp = app.test_client().post("/api/photo-preferences", json={
@@ -209,9 +209,43 @@ def test_representative_preference_skips_highlight_when_ineligible(life_app):
     })
     assert resp.status_code == 200
     body = resp.get_json()
-    assert body["highlight_rank"] is None
+    assert body["highlight_rank"] == 1
 
-    assert db.get_species_highlights("House Sparrow") == {}
+    assert db.get_species_highlights("House Sparrow") == {
+        "House Sparrow": {ids["p3"]: 1},
+    }
+
+
+def test_unscored_species_highlight_renders_as_highlighted(life_app):
+    # An unscored photo saved as a species highlight must render as a chosen
+    # highlight. get_species_highlights(eligible_only=True) — used by the
+    # render/order path — has to admit unscored rows the widened write path
+    # now accepts, otherwise the just-saved highlight is silently dropped and
+    # the highlight-selection filters misclassify it until analysis runs.
+    app, db, ids = life_app
+    client = app.test_client()
+
+    resp = client.post("/api/species-highlights", json={
+        "species": "House Sparrow",
+        "photo_id": ids["p3"],
+    })
+    assert resp.status_code == 200
+
+    # The eligibility-filtered read (what _apply_ordered_highlights uses) must
+    # include the unscored row.
+    assert db.get_species_highlights("House Sparrow", eligible_only=True) == {
+        "House Sparrow": {ids["p3"]: 1},
+    }
+
+    # And the rendered bucket marks it as a highlight.
+    data = client.get("/api/highlights?scope=workspace").get_json()
+    sparrow = next(
+        b for b in data["buckets"] if b["species"] == "House Sparrow"
+    )
+    assert sparrow["has_highlight_selection"] is True
+    p3_card = next(p for p in sparrow["photos"] if p["id"] == ids["p3"])
+    assert p3_card["is_highlighted"] is True
+    assert p3_card["highlight_rank"] == 1
 
 
 def test_representatives_are_global_but_filtered_to_workspace(life_app):
