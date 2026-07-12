@@ -327,24 +327,64 @@ def test_pipeline_failed_status_clears_running_pill(live_server, page):
     expect(page.locator("#pillClassify")).not_to_contain_text("Running")
 
 
-def test_pipeline_eye_keypoints_pill_will_run_by_default(live_server, page):
-    """SuperAnimal weights are auto-downloaded by pipeline_job on first run,
-    so the pill defaults to 'Will run' even on a fresh fixture with no
-    keypoint models on disk — the user is no longer expected to click a
-    Download button before starting the pipeline."""
+def test_pipeline_eye_keypoints_pill_will_skip_by_default(live_server, page):
+    """Eye-keypoint detection is opt-in, so a fresh fixture skips it.
+
+    Model readiness does not control this state: SuperAnimal weights are
+    downloaded automatically if the user explicitly enables the stage.
+    """
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
-    expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will run")
+    # Wait for /api/pipeline/page-init to settle so the checkbox reflects
+    # cfg.eye_detect_enabled (not the HTML default), then wait for the
+    # initial /api/pipeline/plan. Without the page-init wait the checkbox
+    # could still flip during the assertions; without the plan wait the
+    # pill could read "Will skip" from the fallback (checkbox unchecked)
+    # even if the server-side plan has flipped Eye Keypoints back to
+    # opt-in-by-default — the very regression this test guards.
+    page.wait_for_function("() => window._pageInitPending === false")
+    page.wait_for_function(
+        "() => window._pipelinePlan && window._pipelinePlan.stages "
+        "&& window._pipelinePlan.stages.EyeKeypoints "
+        "&& window._pipelinePlan.stages.EyeKeypoints.state === 'will-skip' "
+        "&& !window._planRefreshPending"
+    )
+    expect(page.locator("#enableEyeKeypoints")).not_to_be_checked()
+    expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will skip")
 
 
 def test_pipeline_eye_keypoints_toggle_off_marks_will_skip(live_server, page):
-    """Unchecking the Eye Keypoints enable checkbox flips its pill to
-    'Will skip' without affecting Group, which doesn't depend on it."""
+    """Explicitly enabling then disabling Eye Keypoints updates its pill.
+
+    Group remains runnable because it does not depend on eye keypoints.
+    """
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
-    expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will run")
+    # Wait for /api/pipeline/page-init to settle first. Its success handler
+    # assigns enableEyeKeypoints.checked from cfg.eye_detect_enabled; if it
+    # ran after page.check() below, it would silently overwrite the opt-in
+    # and the later "will-run" wait would time out.
+    page.wait_for_function("() => window._pageInitPending === false")
     page.click("#card-eyekeypoints .stage-header")
+    page.check("#enableEyeKeypoints")
+    # Wait for the debounced plan refresh to confirm 'will-run'. Reading
+    # only the pill would pass from the null-plan fallback in
+    # _stageStateFor, so a broken eye_detect_override wiring (plan comes
+    # back "will-skip" after opt-in) would be masked here.
+    page.wait_for_function(
+        "() => window._pipelinePlan && window._pipelinePlan.stages "
+        "&& window._pipelinePlan.stages.EyeKeypoints "
+        "&& window._pipelinePlan.stages.EyeKeypoints.state === 'will-run' "
+        "&& !window._planRefreshPending"
+    )
+    expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will run")
     page.uncheck("#enableEyeKeypoints")
+    page.wait_for_function(
+        "() => window._pipelinePlan && window._pipelinePlan.stages "
+        "&& window._pipelinePlan.stages.EyeKeypoints "
+        "&& window._pipelinePlan.stages.EyeKeypoints.state === 'will-skip' "
+        "&& !window._planRefreshPending"
+    )
     expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will skip")
     # Group does not depend on eye keypoints — it must still be runnable.
     expect(page.locator("#pillGroup")).not_to_contain_text("Will skip")
