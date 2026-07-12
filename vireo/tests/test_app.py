@@ -11807,7 +11807,7 @@ def test_review_switch_collection_does_not_silently_widen_scope():
     """
     from pathlib import Path
     src = Path(__file__).parent.parent / "templates" / "review.html"
-    text = src.read_text()
+    text = src.read_text(encoding="utf-8")
     # Locate the switchCollection function and the catch branch inside it.
     fn_start = text.find("async function switchCollection")
     assert fn_start != -1, "switchCollection function not found"
