@@ -111,6 +111,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .pill { display: inline-flex; align-items: center; gap: 6px; border-radius: 12px; padding: 3px 10px; font-size: 12px; font-weight: 600; }
 .pill-ok { background: color-mix(in srgb, var(--success, #2da44e) 18%, transparent); color: var(--success, #2da44e); }
 .pill-bad { background: color-mix(in srgb, var(--danger, #cf222e) 18%, transparent); color: var(--danger, #cf222e); }
+.pill-warn { background: color-mix(in srgb, var(--warning, #bf8700) 18%, transparent); color: var(--warning, #9a6700); }
 .unsafe-list { margin: 6px 0 0 0; padding-left: 18px; font-size: 12px; color: var(--text-secondary); }
 .result-links a { color: var(--accent); font-size: 12px; }
 #importError { color: var(--danger); font-size: 12px; margin-top: 6px; display: none; }
@@ -326,7 +327,10 @@ body { display: flex; flex-direction: column; height: 100vh; }
       <div class="section-divider">
         <div class="option-stack">
           <label><input type="checkbox" id="chkSkipDuplicates" checked> Skip duplicates</label>
-          <label><input type="checkbox" id="chkVerifyByHash"> Verify copied files with full content hashes</label>
+          <label><input type="radio" name="duplicateVerification" id="chkTrustLikelyDuplicates" checked> Trust likely duplicates</label>
+          <div class="hint">Fast — matches filename, byte size, and EXIF capture time to the second. Existing files are not read again.</div>
+          <label><input type="radio" name="duplicateVerification" id="chkVerifyByHash"> Verify duplicates byte-for-byte</label>
+          <div class="hint">Slower — reads the complete source and existing archive copy to confirm their contents are identical.</div>
         </div>
       </div>
     </div>
@@ -337,10 +341,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
         <select id="afterImportSelect" style="max-width:280px;">
           <option id="afterImportHiddenDefault" value="__hidden_default__" hidden disabled></option>
           <option value="__none__">None — import only</option>
-          <option value="identify">Identify birds</option>
-          <option value="quick_look">Quick look (thumbnails + previews)</option>
-          <option value="cull_ready" data-advanced-strategy>Cull-ready (+ quality review)</option>
-          <option value="full" data-advanced-strategy>Full pipeline (everything)</option>
+          <!-- Saved processes are appended here by loadAfterImportProcesses(). -->
         </select>
       </div>
       <div class="hint">Processing runs as its own job when the import finishes — a processing failure never touches imported photos.</div>
@@ -580,7 +581,7 @@ function renderRecentDestinations(recents) {
 function wireDestStructureInvalidation() {
   [
     'chkRecursive', 'fileTypePreset', 'destMode', 'remoteSubpath',
-    'chkSkipDuplicates', 'chkVerifyByHash', 'destInput',
+    'chkSkipDuplicates', 'chkTrustLikelyDuplicates', 'chkVerifyByHash', 'destInput',
     'folderTemplatePreset', 'folderTemplate',
   ].forEach((id) => {
     const el = document.getElementById(id);
@@ -1190,12 +1191,35 @@ function selectImportBrowserFolder() {
   closeImportFolderBrowser();
 }
 
+// Populate the After Import dropdown from the saved-process library. Keeps
+// the two static options (hidden default + None) and appends one option per
+// saved process, value = its id.
+async function loadAfterImportProcesses() {
+  const sel = document.getElementById('afterImportSelect');
+  if (!sel) return;
+  try {
+    const resp = await fetch('/api/processes');
+    if (!resp.ok) return;
+    const procs = await resp.json();
+    Array.from(sel.querySelectorAll('option[data-process]')).forEach(
+      (o) => o.remove());
+    (procs || []).forEach((p) => {
+      const opt = document.createElement('option');
+      opt.value = String(p.id);
+      opt.textContent = p.name;
+      opt.dataset.process = '1';
+      sel.appendChild(opt);
+    });
+  } catch (e) { /* leave with just "None — import only" */ }
+}
+
 function selectedAfterImport() {
   const v = document.getElementById('afterImportSelect').value;
   // __hidden_default__ is a display-only placeholder — the request path
   // omits after_import in that state, so callers never read this value.
   if (v === '__none__' || v === '__hidden_default__') return null;
-  return v;
+  const n = parseInt(v, 10);
+  return Number.isNaN(n) ? null : n;
 }
 
 function retireHiddenDefaultOption(sel) {
@@ -1208,23 +1232,23 @@ function retireHiddenDefaultOption(sel) {
   if (sel && sel.value === '__hidden_default__') sel.value = '__none__';
 }
 
-function afterImportOptionLabel(strategy) {
+function afterImportOptionLabel(processId) {
   const sel = document.getElementById('afterImportSelect');
-  const value = strategy || '__none__';
-  if (!sel) return strategy || 'None — import only';
+  const value = processId == null ? '__none__' : String(processId);
+  const fallback = processId == null ? 'None — import only' : String(processId);
+  if (!sel) return fallback;
   const opt = Array.from(sel.options).find(
     (o) => o.value === value && o.id !== 'afterImportHiddenDefault');
-  return opt ? (opt.textContent || '').trim() : (strategy || 'None — import only');
+  return opt ? (opt.textContent || '').trim() : fallback;
 }
 
+// Keep the After Import display honest about what a Start Import will do.
+// (Named for the advanced-mode listener it's still wired to; saved processes
+// no longer have an "advanced" tier, so there's nothing to hide/show — the
+// only remaining job is the new-workspace default placeholder.)
 function updateAdvancedImportOptions() {
   const sel = document.getElementById('afterImportSelect');
   if (!sel) return;
-  const advanced = !!(window.isAdvancedMode && window.isAdvancedMode());
-  sel.querySelectorAll('[data-advanced-strategy]').forEach((opt) => {
-    opt.hidden = !advanced;
-    opt.disabled = !advanced;
-  });
   const placeholder = document.getElementById('afterImportHiddenDefault');
   if (!placeholder) return;
 
@@ -1243,13 +1267,13 @@ function updateAdvancedImportOptions() {
   // inherits the GLOBAL default, since a brand-new workspace has no
   // overrides yet). The visible dropdown, prefilled from the currently-
   // active workspace's default, would otherwise lie about what the
-  // server is going to do — show a placeholder that names the real
-  // target strategy.
+  // server is going to do — show a placeholder that names the real target.
   if (newMode && _afterImportConfigLoaded) {
-    const label = afterImportOptionLabel(_globalDefaultStrategy);
+    const label = afterImportOptionLabel(_globalDefaultProcessId);
     placeholder.textContent =
       'New workspace default: ' + label + ' (applied to the new workspace)';
-    placeholder.dataset.maskedValue = _globalDefaultStrategy || '';
+    placeholder.dataset.maskedValue =
+      _globalDefaultProcessId == null ? '' : String(_globalDefaultProcessId);
     placeholder.hidden = false;
     placeholder.disabled = false;
     _afterImportHidingDefault = true;
@@ -1257,47 +1281,18 @@ function updateAdvancedImportOptions() {
     return;
   }
 
-  // Not new-workspace mode: the visible selection should track the
-  // workspace's own default (or the HTML fallback if config didn't
-  // load). Re-derive it every call so switching workspaceNew off
-  // restores the workspace default rather than sticking on whatever
-  // placeholder we were showing.
+  // Not new-workspace mode: track the workspace's own default (or the HTML
+  // fallback if config didn't load). Re-derive it every call so switching
+  // workspaceNew off restores the workspace default rather than sticking on
+  // whatever placeholder we were showing.
   const wsDef = _afterImportConfigLoaded
-    ? (_workspaceDefaultStrategy || '__none__')
+    ? (_workspaceDefaultProcessId == null
+        ? '__none__' : String(_workspaceDefaultProcessId))
     : '__none__';
   sel.value = wsDef;
   if (sel.selectedIndex === -1) sel.value = '__none__';
-
-  if (advanced) {
-    retireHiddenDefaultOption(sel);
-    _afterImportHidingDefault = false;
-    return;
-  }
-
-  const current = sel.selectedOptions[0];
-  const currentIsHiddenAdvanced =
-    !!(current && current.disabled && current.hasAttribute('data-advanced-strategy'));
-  if (currentIsHiddenAdvanced) {
-    // The workspace's default is an advanced-only strategy (full,
-    // cull_ready) but advanced mode is off. If we silently fell the
-    // display back to __none__, startImport() would omit after_import so
-    // the server still runs the hidden default while the dropdown reads
-    // "None — import only" — the exact mismatch the reviewer flagged.
-    // Instead, surface an honest placeholder that names the masked
-    // strategy so the visible selection tells the truth about what a
-    // Start Import will do.
-    const maskedLabel = (current.textContent || '').trim();
-    placeholder.textContent =
-      'Workspace default: ' + maskedLabel + ' (enable Advanced mode to change)';
-    placeholder.dataset.maskedValue = current.value;
-    placeholder.hidden = false;
-    placeholder.disabled = false;
-    _afterImportHidingDefault = true;
-    sel.value = '__hidden_default__';
-  } else {
-    retireHiddenDefaultOption(sel);
-    _afterImportHidingDefault = false;
-  }
+  retireHiddenDefaultOption(sel);
+  _afterImportHidingDefault = false;
 }
 
 window.addEventListener('advancedmodechange', updateAdvancedImportOptions);
@@ -1308,7 +1303,7 @@ window.addEventListener('devmodechange', updateAdvancedImportOptions);
 // initial value (__none__), which selectedAfterImport() would surface as
 // an explicit null. Posting `after_import: null` tells the import
 // endpoint to run import-only and skip the workspace's
-// pipeline.default_strategy — the exact race the reviewer flagged.
+// pipeline.default_process_id — the exact race the reviewer flagged.
 // Guarding the body key with this flag makes an unresolved default
 // fall back to the endpoint's "key omitted → apply workspace default"
 // branch, which is what the user actually expects.
@@ -1336,22 +1331,22 @@ let _afterImportHidingDefault = false;
 // verbatim.
 let _afterImportUserTouched = false;
 
-// The unscoped global pipeline.default_strategy from /api/config, captured
+// The unscoped global pipeline.default_process_id from /api/config, captured
 // during initImportPage. A brand-new workspace has no config_overrides yet,
 // so this is the strategy the server will apply when the new-workspace
 // import path omits `after_import`. Used to populate the honest "New
 // workspace default: X" placeholder so the visible dropdown selection
 // isn't misled by whatever was prefilled from the currently-active
 // workspace's (possibly-overridden) default.
-let _globalDefaultStrategy = null;
+let _globalDefaultProcessId = null;
 
-// The effective pipeline.default_strategy for the CURRENTLY-active
+// The effective pipeline.default_process_id for the CURRENTLY-active
 // workspace (global config merged with the workspace's overrides). Used
 // so updateAdvancedImportOptions() can re-derive the visible dropdown
 // selection when the user toggles "New workspace" off without touching
 // the dropdown — the underlying target reverts to the current workspace's
 // default rather than sticking on whatever placeholder was showing.
-let _workspaceDefaultStrategy = null;
+let _workspaceDefaultProcessId = null;
 
 function showError(msg) {
   const el = document.getElementById('importError');
@@ -1755,6 +1750,7 @@ function destStructureSignature(destination, fileTypes, recursive, excludePaths)
     recursive: recursive,
     skip_duplicates: document.getElementById('chkSkipDuplicates').checked,
     verify_by_hash: document.getElementById('chkVerifyByHash').checked,
+    trust_likely_duplicates: document.getElementById('chkTrustLikelyDuplicates').checked,
     exclude_paths: (excludePaths || []).slice().sort(),
   });
 }
@@ -1768,6 +1764,7 @@ function importPreviewSignature() {
     recursive: document.getElementById('chkRecursive').checked,
     skip_duplicates: document.getElementById('chkSkipDuplicates').checked,
     verify_by_hash: document.getElementById('chkVerifyByHash').checked,
+    trust_likely_duplicates: document.getElementById('chkTrustLikelyDuplicates').checked,
   });
 }
 
@@ -2076,6 +2073,8 @@ async function startImport() {
     body.file_types = fileTypes;
     body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
     body.verify_by_hash = document.getElementById('chkVerifyByHash').checked;
+    body.trust_likely_duplicates =
+      document.getElementById('chkTrustLikelyDuplicates').checked;
   }
   // For new-workspace imports where the user hasn't touched the After
   // Import dropdown, the visible selection was prefilled from the
@@ -2189,6 +2188,25 @@ function renderResult(res, status) {
     pill.className = 'pill pill-ok';
     pill.textContent = 'Safe to format the card — every file is verified in the archive';
     unsafe.style.display = 'none';
+  } else if (
+    res.unverified_duplicates_only
+    && (!status || status === 'completed')
+  ) {
+    pill.className = 'pill pill-warn';
+    pill.textContent = 'Import complete — keep the card until likely duplicates are verified';
+    const files = res.unsafe_files || [];
+    unsafe.style.display = '';
+    if (!files.length) {
+      const li = document.createElement('li');
+      li.textContent = res.unverified_duplicate +
+        ' likely duplicates matched by filename, byte size, and capture time, but were not compared byte-for-byte.';
+      unsafe.appendChild(li);
+    }
+    files.forEach((u) => {
+      const item = document.createElement('li');
+      item.textContent = u.path + ' — ' + u.reason;
+      unsafe.appendChild(item);
+    });
   } else {
     pill.className = 'pill pill-bad';
     pill.textContent = 'Do NOT format the card yet';
@@ -2351,19 +2369,25 @@ async function initImportPage() {
     setFolderTemplate(ingestCfg.folder_template);
   }
 
-  // Preselect the workspace's default strategy (null -> import only).
+  // Populate the dropdown from the saved-process library before resolving
+  // any default id into a selected option.
+  await loadAfterImportProcesses();
+
+  // Preselect the workspace's default process (null -> import only).
   const sel = document.getElementById('afterImportSelect');
-  const def = pipelineCfg.default_strategy;
-  sel.value = def ? def : '__none__';
+  const def = pipelineCfg.default_process_id;
+  sel.value = (def != null) ? String(def) : '__none__';
   if (sel.selectedIndex === -1) sel.value = '__none__';
   // Capture the unscoped global default so the "New workspace default"
-  // placeholder can name the strategy the server will actually apply
+  // placeholder can name the process the server will actually apply
   // to a freshly-created workspace (which starts with no overrides).
-  _globalDefaultStrategy = (cfg && cfg.pipeline && cfg.pipeline.default_strategy) || null;
+  _globalDefaultProcessId =
+    (cfg && cfg.pipeline && cfg.pipeline.default_process_id != null)
+      ? cfg.pipeline.default_process_id : null;
   // Capture the effective (workspace-scoped) default so switching out of
   // "New workspace" mode without touching the dropdown restores this
   // value rather than sticking on the placeholder.
-  _workspaceDefaultStrategy = def || null;
+  _workspaceDefaultProcessId = (def != null) ? def : null;
   // updateAdvancedImportOptions() may flip _afterImportHidingDefault
   // when the resolved default is an advanced-only strategy the current
   // mode hides. Wire the change listener first so a user-driven change
@@ -2381,9 +2405,9 @@ async function initImportPage() {
   // Only mark the resolved default as trustworthy when BOTH config
   // fetches actually succeeded. Otherwise the select value reflects the
   // HTML placeholder rather than the workspace default, and startImport
-  // should omit the key so the server applies pipeline.default_strategy.
+  // should omit the key so the server applies pipeline.default_process_id.
   // Set this BEFORE the initial updateAdvancedImportOptions() call so
-  // that call can use _workspaceDefaultStrategy to derive the visible
+  // that call can use _workspaceDefaultProcessId to derive the visible
   // dropdown value.
   _afterImportConfigLoaded = cfgOk && overridesOk;
   updateAdvancedImportOptions();

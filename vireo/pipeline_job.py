@@ -137,7 +137,7 @@ class PipelineParams:
     # explicitly checks the Eye Keypoints stage box — that box is a
     # per-run opt-in that must override the (default-off) Settings value
     # so preflight and scoring see the enabled state. Left None by
-    # strategy expansion (``process_strategies.resolve_strategy``) so a
+    # strategy expansion (the saved-process flag expansion) so a
     # ``full`` strategy chain from after-import respects the user's
     # Settings default instead of silently forcing eye detection on.
     eye_detect_override: bool | None = None
@@ -4913,7 +4913,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
                 # Apply the per-run eye-detect override only when the caller
                 # sent an explicit signal. ``skip_eye_keypoints=False`` alone
-                # is not proof of opt-in: ``resolve_strategy('full')`` sets it
+                # is not proof of opt-in: ``the "Full" saved process`` sets it
                 # to False as a base default, so an after-import ``full``
                 # chain would otherwise force ``eye_detect_enabled=True``
                 # against a workspace whose Settings default is False (the
@@ -5269,7 +5269,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 # pass, not the culling result the user actually sees.
                 # Gated on ``eye_detect_override`` (an explicit per-run
                 # signal), NOT on ``not skip_eye_keypoints``, because the
-                # latter is False by default in ``resolve_strategy('full')``
+                # latter is False by default in ``the "Full" saved process``
                 # too — using it would force eye scoring on for any chained
                 # ``full`` run regardless of workspace Settings.
                 if params.eye_detect_override is not None:

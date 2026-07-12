@@ -26,12 +26,43 @@ body {
 /* ---------- Sidebar ---------- */
 .sidebar {
   width: 260px;
-  min-width: 260px;
+  min-width: 200px;
+  max-width: 600px;
   background: var(--bg-secondary);
   border-right: 1px solid var(--border-primary);
   overflow-y: auto;
   padding: 12px 0;
   flex-shrink: 0;
+}
+.sidebar-resizer {
+  width: 7px;
+  margin-left: -4px;
+  flex: 0 0 7px;
+  position: relative;
+  z-index: 3;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+.sidebar-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 1px;
+  background: transparent;
+  transition: background 0.12s, box-shadow 0.12s;
+}
+.sidebar-resizer:hover::after,
+.sidebar-resizer:focus-visible::after,
+.sidebar-resizer.dragging::after {
+  background: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+body.sidebar-resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 .sidebar-section { padding: 0 14px; margin-bottom: 16px; }
 .sidebar-title {
@@ -101,6 +132,23 @@ body {
 .collection-resolve-btn:hover { border-color: var(--accent); }
 .tree-item .folder-status-partial {
   margin-left: 6px;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--warning-bg, #fef3c7);
+  color: var(--warning-fg, #92400e);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+/* Collections whose rules can't be resolved (count_error). We keep the row
+   visible + right-clickable so the user can edit or delete it, but the
+   left-click filter path bails out with a toast — filtering to it would
+   400 /api/collections/<id>/photos. */
+.tree-item.unavailable { color: var(--text-faint); cursor: not-allowed; }
+.tree-item.unavailable .collection-name { text-decoration: line-through; }
+.tree-item .collection-unavailable-badge {
+  margin-left: auto;
   font-size: 10px;
   padding: 1px 6px;
   border-radius: 8px;
@@ -1394,7 +1442,7 @@ body {
 <div class="main-layout">
 
   <!-- Sidebar -->
-  <aside class="sidebar">
+  <aside class="sidebar" id="browseSidebar">
     <div class="sidebar-section">
       <div class="sidebar-title">Folders</div>
       <div id="folderTree"></div>
@@ -1407,6 +1455,12 @@ body {
       </div>
     </div>
   </aside>
+
+  <div class="sidebar-resizer" id="browseSidebarResizer" role="separator"
+       aria-label="Resize Browse sidebar" aria-orientation="vertical"
+       aria-controls="browseSidebar" aria-valuemin="200" aria-valuemax="600"
+       aria-valuenow="260" tabindex="0"
+       title="Drag to resize the sidebar"></div>
 
   <!-- Content -->
   <div class="content-area">
@@ -1932,6 +1986,111 @@ var browseCompareIds = [];
 var browseCompareOffset = 0;
 var browseCompareSeq = 0;
 var browseCompareEscToken = null;
+
+/* ---------- Resizable sidebar ---------- */
+var BROWSE_SIDEBAR_DEFAULT_WIDTH = 260;
+var BROWSE_SIDEBAR_MIN_WIDTH = 200;
+var BROWSE_SIDEBAR_MAX_WIDTH = 600;
+var BROWSE_SIDEBAR_STORAGE_KEY = 'vireo.browse.sidebarWidth';
+// Room the resize cap must leave for the rest of the Browse layout: the
+// always-visible detail panel sibling (340px, fixed), the resize handle
+// itself (7px), and a minimum photo/content column so the grid stays usable.
+var BROWSE_DETAIL_PANEL_WIDTH = 340;
+var BROWSE_SIDEBAR_HANDLE_WIDTH = 7;
+var BROWSE_MIN_CONTENT_WIDTH = 360;
+
+function browseSidebarMaxWidth() {
+  return Math.max(
+    BROWSE_SIDEBAR_MIN_WIDTH,
+    Math.min(
+      BROWSE_SIDEBAR_MAX_WIDTH,
+      window.innerWidth
+        - BROWSE_DETAIL_PANEL_WIDTH
+        - BROWSE_SIDEBAR_HANDLE_WIDTH
+        - BROWSE_MIN_CONTENT_WIDTH
+    )
+  );
+}
+
+function setBrowseSidebarWidth(width, persist) {
+  var sidebar = document.getElementById('browseSidebar');
+  var resizer = document.getElementById('browseSidebarResizer');
+  if (!sidebar || !resizer) return;
+  var nextWidth = Math.round(Math.max(
+    BROWSE_SIDEBAR_MIN_WIDTH,
+    Math.min(browseSidebarMaxWidth(), Number(width) || BROWSE_SIDEBAR_DEFAULT_WIDTH)
+  ));
+  sidebar.style.width = nextWidth + 'px';
+  sidebar.style.flexBasis = nextWidth + 'px';
+  resizer.setAttribute('aria-valuenow', String(nextWidth));
+  resizer.setAttribute('aria-valuemax', String(browseSidebarMaxWidth()));
+  if (persist) {
+    try { localStorage.setItem(BROWSE_SIDEBAR_STORAGE_KEY, String(nextWidth)); } catch (e) {}
+  }
+  requestAnimationFrame(updateGridTail);
+}
+
+function initBrowseSidebarResize() {
+  var sidebar = document.getElementById('browseSidebar');
+  var resizer = document.getElementById('browseSidebarResizer');
+  if (!sidebar || !resizer) return;
+
+  var storedWidth = BROWSE_SIDEBAR_DEFAULT_WIDTH;
+  try { storedWidth = Number(localStorage.getItem(BROWSE_SIDEBAR_STORAGE_KEY)) || storedWidth; } catch (e) {}
+  setBrowseSidebarWidth(storedWidth, false);
+
+  resizer.addEventListener('pointerdown', function(e) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    var startX = e.clientX;
+    var startWidth = sidebar.getBoundingClientRect().width;
+    resizer.setPointerCapture(e.pointerId);
+    resizer.classList.add('dragging');
+    document.body.classList.add('sidebar-resizing');
+
+    function onPointerMove(moveEvent) {
+      setBrowseSidebarWidth(startWidth + moveEvent.clientX - startX, false);
+    }
+    function stopDragging(upEvent) {
+      setBrowseSidebarWidth(sidebar.getBoundingClientRect().width, true);
+      resizer.classList.remove('dragging');
+      document.body.classList.remove('sidebar-resizing');
+      resizer.removeEventListener('pointermove', onPointerMove);
+      resizer.removeEventListener('pointerup', stopDragging);
+      resizer.removeEventListener('pointercancel', stopDragging);
+      if (resizer.hasPointerCapture(upEvent.pointerId)) {
+        resizer.releasePointerCapture(upEvent.pointerId);
+      }
+    }
+    resizer.addEventListener('pointermove', onPointerMove);
+    resizer.addEventListener('pointerup', stopDragging);
+    resizer.addEventListener('pointercancel', stopDragging);
+  });
+
+  resizer.addEventListener('keydown', function(e) {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      e.stopPropagation();
+      var direction = e.key === 'ArrowRight' ? 1 : -1;
+      var step = e.shiftKey ? 50 : 10;
+      setBrowseSidebarWidth(sidebar.getBoundingClientRect().width + direction * step, true);
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      e.stopPropagation();
+      setBrowseSidebarWidth(BROWSE_SIDEBAR_MIN_WIDTH, true);
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      e.stopPropagation();
+      setBrowseSidebarWidth(browseSidebarMaxWidth(), true);
+    }
+  });
+
+  resizer.addEventListener('dblclick', function() {
+    setBrowseSidebarWidth(BROWSE_SIDEBAR_DEFAULT_WIDTH, true);
+  });
+}
+
+initBrowseSidebarResize();
 
 function refreshPendingSyncBanner() {
   if (typeof checkPendingSync === 'function') {
@@ -2559,18 +2718,32 @@ function renderCollectionList(collections) {
   var html = '';
   collections.forEach(function(c) {
     collectionsById[c.id] = c;
-    var count = c.photo_count != null ? c.photo_count : '';
     var canAddPhotos = collectionAcceptsManualPhotos(c);
     var kind = canAddPhotos ? 'manual' : 'smart';
     var kindLabel = canAddPhotos ? 'Manual' : 'Smart';
-    var resolveBtn = (c.name === 'GPS Without Location Keyword')
+    // count_error: /api/collections couldn't resolve this collection's rules,
+    // so filtering to it would 400 the /photos endpoint. Show it as
+    // unavailable (with edit still reachable via right-click) instead of
+    // rendering a clickable filter that silently fails.
+    var unavailable = !!c.count_error;
+    // Suppress the Resolve GPS shortcut on unavailable collections — it
+    // posts collection_id to /api/batch/location/from-exif, which resolves
+    // the same rules and would repeat the failure inside the modal.
+    var resolveBtn = (c.name === 'GPS Without Location Keyword' && !unavailable)
       ? '<button class="collection-resolve-btn" type="button" title="Resolve locations from GPS" onclick="event.stopPropagation(); openGpsResolveForCollection(' + c.id + ')">Resolve GPS</button>'
       : '';
-    html += '<div class="tree-item" data-collection-id="' + c.id + '" data-collection-kind="' + kind + '" onclick="filterByCollection(' + c.id + ')">' +
+    var itemClass = 'tree-item' + (unavailable ? ' unavailable' : '');
+    var titleAttr = unavailable
+      ? ' title="This collection\'s rules could not be resolved. Right-click → Edit Rules to fix it."'
+      : '';
+    var trailing = unavailable
+      ? '<span class="collection-unavailable-badge">unavailable</span>'
+      : '<span class="count">' + (c.photo_count != null ? c.photo_count : '') + '</span>';
+    html += '<div class="' + itemClass + '" data-collection-id="' + c.id + '" data-collection-kind="' + kind + '"' + titleAttr + ' onclick="filterByCollection(' + c.id + ')">' +
       '<span class="collection-name">' + escapeHtml(c.name) + '</span>' +
       '<span class="collection-kind-badge ' + kind + '">' + kindLabel + '</span>' +
       resolveBtn +
-      '<span class="count">' + count + '</span></div>';
+      trailing + '</div>';
   });
   document.getElementById('collectionList').innerHTML = html || '<div style="font-size:12px;color:var(--text-ghost);padding:4px 8px;">No collections</div>';
 }
@@ -2740,8 +2913,8 @@ async function loadCollectionCounts() {
     if (gen !== collectionCountLoadGen) return;
     if (!data) return;
     var items = document.querySelectorAll('#collectionList .tree-item');
-    var countsById = {};
-    data.forEach(function(c) { countsById[c.id] = c.photo_count; });
+    var metaById = {};
+    data.forEach(function(c) { metaById[c.id] = c; });
     items.forEach(function(el) {
       var id = parseInt(el.dataset.collectionId, 10);
       if (isNaN(id)) {
@@ -2750,9 +2923,36 @@ async function loadCollectionCounts() {
         var m = onclick.match(/filterByCollection\((\d+)\)/);
         if (m) id = parseInt(m[1], 10);
       }
-      if (!isNaN(id)) {
+      var meta = !isNaN(id) ? metaById[id] : null;
+      if (!meta) return;
+      // Keep our in-memory copy in sync so filterByCollection's guard fires
+      // for collections that transitioned to (or out of) unavailable.
+      collectionsById[id] = meta;
+      var wasUnavailable = el.classList.contains('unavailable');
+      var isUnavailable = !!meta.count_error;
+      if (wasUnavailable !== isUnavailable) {
+        el.classList.toggle('unavailable', isUnavailable);
+        var trailing = el.querySelector('.count, .collection-unavailable-badge');
+        if (trailing) {
+          if (isUnavailable) {
+            trailing.className = 'collection-unavailable-badge';
+            trailing.textContent = 'unavailable';
+          } else {
+            trailing.className = 'count';
+            trailing.textContent = meta.photo_count != null ? meta.photo_count : '';
+          }
+        }
+        if (isUnavailable) {
+          el.setAttribute(
+            'title',
+            "This collection's rules could not be resolved. Right-click → Edit Rules to fix it."
+          );
+        } else {
+          el.removeAttribute('title');
+        }
+      } else if (!isUnavailable) {
         var span = el.querySelector('.count');
-        if (span && countsById[id] != null) span.textContent = countsById[id];
+        if (span && meta.photo_count != null) span.textContent = meta.photo_count;
       }
     });
   } catch(e) {}
@@ -2822,6 +3022,23 @@ function refreshBrowseSidebarCounts() {
 }
 
 async function filterByCollection(id, options) {
+  // Guard: degraded (count_error) collections would 400 /api/collections/<id>/photos.
+  // Surface the reason instead of silently reloading into an error state. The
+  // sidebar renders these rows as `.tree-item.unavailable` and the context menu
+  // suppresses "Filter by this Collection", so this branch also catches any
+  // programmatic caller (deep-link, membership-change refresh) that pre-dates
+  // the guard.
+  var collectionMeta = collectionsById[id];
+  if (collectionMeta && collectionMeta.count_error) {
+    if (typeof showToast === 'function') {
+      showToast(
+        (collectionMeta.name || 'This collection') +
+          " is unavailable — its rules could not be resolved. Right-click → Edit Rules to fix it.",
+        'error'
+      );
+    }
+    return;
+  }
   cancelScheduledSearchFilter();
   var preserveAnchor = !(options && options.preserveAnchor === false);
   var anchor = preserveAnchor ? captureSelectedPhotoAnchor() : null;
@@ -4165,6 +4382,8 @@ function ensureViewportHydrated() {
 }
 
 window.addEventListener('resize', function() {
+  var sidebar = document.getElementById('browseSidebar');
+  if (sidebar) setBrowseSidebarWidth(sidebar.getBoundingClientRect().width, false);
   // Column count and card heights change with width — re-estimate the tail
   requestAnimationFrame(updateGridTail);
 });
@@ -5320,6 +5539,19 @@ async function openGpsResolve(source) {
 }
 
 function openGpsResolveForCollection(collectionId) {
+  // Same guard as filterByCollection: degraded collections would just
+  // re-hit the unresolvable rules inside /api/batch/location/from-exif.
+  var collectionMeta = collectionsById[collectionId];
+  if (collectionMeta && collectionMeta.count_error) {
+    if (typeof showToast === 'function') {
+      showToast(
+        (collectionMeta.name || 'This collection') +
+          " is unavailable — its rules could not be resolved. Right-click → Edit Rules to fix it.",
+        'error'
+      );
+    }
+    return;
+  }
   openGpsResolve({collection_id: collectionId});
 }
 
@@ -7532,18 +7764,24 @@ document.addEventListener('contextmenu', function(e) {
   if (isNaN(cid)) return;
   var nameEl = ti.querySelector('.collection-name');
   var name = nameEl ? nameEl.textContent : '';
-  var items = [
-    { label: 'Filter by this Collection',
-      onClick: function() { filterByCollection(cid); } },
-  ];
-  if (name === 'GPS Without Location Keyword') {
-    items.push({
-      label: 'Resolve GPS Locations',
-      onClick: function() { openGpsResolveForCollection(cid); },
-    });
+  var meta = collectionsById[cid];
+  var isUnavailable = !!(meta && meta.count_error);
+  // Degraded collections can't be filtered (the /photos endpoint would 400)
+  // and GPS resolve reads from the same collection rules — hide both while
+  // keeping the edit/rename/duplicate/delete actions reachable so the user
+  // can fix or discard the row.
+  var items = [];
+  if (!isUnavailable) {
+    items.push({ label: 'Filter by this Collection',
+      onClick: function() { filterByCollection(cid); } });
+    if (name === 'GPS Without Location Keyword') {
+      items.push({
+        label: 'Resolve GPS Locations',
+        onClick: function() { openGpsResolveForCollection(cid); },
+      });
+    }
   }
-  items = items.concat([
-    { separator: true },
+  var editActions = [
     { label: 'Edit Rules',
       onClick: function() { editCollection(cid); } },
     { label: 'Rename',
@@ -7553,7 +7791,11 @@ document.addEventListener('contextmenu', function(e) {
     { separator: true },
     { label: 'Delete Collection',
       onClick: function() { deleteCollectionById(cid, name); } },
-  ]);
+  ];
+  // Only emit a leading separator when there are filter/GPS actions above it
+  // to divide from — for degraded rows the menu starts at Edit Rules.
+  if (items.length) items.push({ separator: true });
+  items = items.concat(editActions);
   openContextMenu(e, items);
 });
 

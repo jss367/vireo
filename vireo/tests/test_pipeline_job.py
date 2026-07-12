@@ -9716,7 +9716,7 @@ def test_pipeline_eye_keypoints_per_run_optin_overrides_config_disabled(
     the visible checkbox on the Process page is a no-op until the user
     first flips Settings, which is the very "black box" the CLAUDE.md
     philosophy forbids. ``skip_eye_keypoints=False`` alone is NOT the
-    signal — ``resolve_strategy('full')`` also sets it to False as a
+    signal — ``the "Full" saved process`` also sets it to False as a
     base default (see ``test_pipeline_eye_keypoints_full_strategy_does_not_force_optin``).
     """
     import config as cfg
@@ -9805,7 +9805,7 @@ def test_pipeline_eye_keypoints_full_strategy_does_not_force_optin(
 ):
     """Codex thread 5 regression guard: a ``full``-strategy chain (e.g.
     after-import) reaches ``run_pipeline_job`` with
-    ``skip_eye_keypoints=False`` from ``resolve_strategy('full')`` — that
+    ``skip_eye_keypoints=False`` from ``the "Full" saved process`` — that
     is a strategy default, NOT an explicit user opt-in. When Settings has
     ``eye_detect_enabled=False`` (the new default) and no
     ``eye_detect_override`` is set, the stage-level preflight must skip
@@ -9856,10 +9856,10 @@ def test_pipeline_eye_keypoints_full_strategy_does_not_force_optin(
         fake_detect_eye_keypoints_stage,
     )
 
-    # Mirror what resolve_strategy("full") produces: skip_eye_keypoints=False
+    # Mirror what the "Full" saved process produces: skip_eye_keypoints=False
     # (base default), but no eye_detect_override (leave None so config wins).
-    from process_strategies import resolve_strategy
-    expanded = resolve_strategy("full")
+    from process_strategies import SEED_PROCESSES, seed_flags
+    expanded = seed_flags(next(s for s in SEED_PROCESSES if s["name"] == "Full"))
     assert expanded["skip_eye_keypoints"] is False
     params = PipelineParams(
         collection_id=col_id,
@@ -10020,8 +10020,8 @@ def test_pipeline_regroup_full_strategy_default_does_not_force_scoring_config(
         pipeline_mod, "run_full_pipeline", fake_run_full_pipeline,
     )
 
-    from process_strategies import resolve_strategy
-    expanded = resolve_strategy("full")
+    from process_strategies import SEED_PROCESSES, seed_flags
+    expanded = seed_flags(next(s for s in SEED_PROCESSES if s["name"] == "Full"))
     params = PipelineParams(
         collection_id=col_id,
         skip_classify=True,

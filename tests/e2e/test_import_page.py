@@ -871,7 +871,7 @@ def test_import_copy_start_sends_restored_options(live_server, page):
     # The After Import dropdown was untouched, and this is a new-workspace
     # import — the client must omit after_import so the server resolves the
     # default against the newly-created workspace instead of leaking the
-    # previously-active workspace's pipeline.default_strategy.
+    # previously-active workspace's pipeline.default_process_id.
     assert "after_import" not in body
 
 
@@ -887,7 +887,7 @@ def test_import_start_sends_common_tags_and_gps_location_option(
             content_type="application/json",
             body=json.dumps({
                 "google_maps_api_key": "configured-for-test",
-                "pipeline": {"default_strategy": None},
+                "pipeline": {"default_process_id": None},
             }),
         )
 
@@ -928,7 +928,7 @@ def test_import_gps_location_option_explains_missing_api_key(live_server, page):
             content_type="application/json",
             body=json.dumps({
                 "google_maps_api_key": "",
-                "pipeline": {"default_strategy": None},
+                "pipeline": {"default_process_id": None},
             }),
         )
 
@@ -942,10 +942,15 @@ def test_import_gps_location_option_explains_missing_api_key(live_server, page):
 
 
 def test_import_new_workspace_forwards_explicit_after_import(live_server, page):
-    """When the user actively picks a strategy for a new-workspace import,
-    the client must forward that pick — only the untouched-dropdown case is
-    omitted so the server can apply the new workspace's default."""
+    """When the user actively picks a saved process for a new-workspace
+    import, the client must forward that pick as a process id — only the
+    untouched-dropdown case is omitted so the server can apply the new
+    workspace's default."""
     url = live_server["url"]
+    db = live_server["db"]
+    identify_id = next(
+        p["id"] for p in db.get_saved_processes() if p["name"] == "Identify birds"
+    )
     captured = {}
 
     def start_import(route):
@@ -968,14 +973,14 @@ def test_import_new_workspace_forwards_explicit_after_import(live_server, page):
     page.locator("#workspaceNew").check()
     page.locator("#newWorkspaceName").fill("Serengeti")
     page.locator("#destInput").fill("/tmp/archive")
-    page.locator("#afterImportSelect").select_option("identify")
+    page.locator("#afterImportSelect").select_option(str(identify_id))
 
     page.locator("#btnStart").click()
     expect(page.locator("#progressCard")).to_be_visible()
 
     body = captured["body"]
     assert body["new_workspace_name"] == "Serengeti"
-    assert body["after_import"] == "identify"
+    assert body["after_import"] == identify_id
 
 
 def test_import_new_workspace_shows_target_default_in_after_import_display(
@@ -987,13 +992,17 @@ def test_import_new_workspace_shows_target_default_in_after_import_display(
     inherits — rather than leaking the currently-active workspace's
     (possibly-overridden) prefilled selection."""
     url = live_server["url"]
+    db = live_server["db"]
+    procs_by_name = {p["name"]: p["id"] for p in db.get_saved_processes()}
+    identify_id = procs_by_name["Identify birds"]
+    quick_look_id = procs_by_name["Quick look"]
 
     def config_route(route):
         route.fulfill(
             status=200,
             content_type="application/json",
             body=json.dumps({
-                "pipeline": {"default_strategy": "identify"},
+                "pipeline": {"default_process_id": identify_id},
             }),
         )
 
@@ -1005,7 +1014,7 @@ def test_import_new_workspace_shows_target_default_in_after_import_display(
                 "id": 1,
                 "name": "Existing",
                 "config_overrides": {
-                    "pipeline": {"default_strategy": "quick_look"},
+                    "pipeline": {"default_process_id": quick_look_id},
                 },
             }),
         )
@@ -1015,15 +1024,16 @@ def test_import_new_workspace_shows_target_default_in_after_import_display(
     page.goto(f"{url}/import")
 
     # Before touching workspaceNew, the dropdown reflects the CURRENT
-    # workspace's default (quick_look) — the source of the misleading
+    # workspace's default (Quick look) — the source of the misleading
     # signal that this fix addresses.
-    expect(page.locator("#afterImportSelect")).to_have_value("quick_look")
+    expect(page.locator("#afterImportSelect")).to_have_value(str(quick_look_id))
 
     page.locator("#workspaceNew").check()
 
     # After switching to new-workspace mode, the visible selection swaps
-    # to a placeholder that names the GLOBAL default (identify) — matching
-    # what the server will actually apply to the freshly-created workspace.
+    # to a placeholder that names the GLOBAL default (Identify birds) —
+    # matching what the server will actually apply to the freshly-created
+    # workspace.
     expect(page.locator("#afterImportSelect")).to_have_value("__hidden_default__")
     placeholder = page.locator("#afterImportHiddenDefault")
     expect(placeholder).to_contain_text("New workspace default")
@@ -1033,7 +1043,7 @@ def test_import_new_workspace_shows_target_default_in_after_import_display(
     # dropdown restores the current workspace's default rather than
     # sticking on the placeholder.
     page.locator("#workspaceCurrent").check()
-    expect(page.locator("#afterImportSelect")).to_have_value("quick_look")
+    expect(page.locator("#afterImportSelect")).to_have_value(str(quick_look_id))
 
 
 def test_import_browse_button_opens_folder_browser_fallback(live_server, page):

@@ -1034,6 +1034,205 @@ def test_migrate_eye_detect_default_off_chunks_workspace_invalidation(
         )
 
 
+def test_migrate_default_strategy_to_process_id_rewrites_global(
+    tmp_path, monkeypatch
+):
+    """The global config file's legacy ``pipeline.default_strategy`` is
+    rewritten to ``pipeline.default_process_id`` at the matching seed id.
+
+    Without this rewrite, an upgraded install with a global after-import
+    default set the old way silently falls back to import-only because the
+    import endpoints and ``get_effective_config`` now only read
+    ``pipeline.default_process_id``.
+    """
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {
+        "pipeline": {"default_strategy": "identify"},
+    })
+    from db import Database
+
+    db = Database(str(tmp_path / "vireo.db"))
+    try:
+        identify_id = next(
+            p["id"] for p in db.get_saved_processes()
+            if p["name"] == "Identify birds"
+        )
+        assert cfg.migrate_default_strategy_to_process_id(db) is True
+    finally:
+        db.close()
+
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["pipeline"]["default_process_id"] == identify_id
+    assert "default_strategy" not in raw["pipeline"]
+    assert (
+        cfg.MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID in raw["_migrations_applied"]
+    )
+
+
+def test_migrate_default_strategy_to_process_id_unknown_name_becomes_null(
+    tmp_path, monkeypatch
+):
+    """An unknown/removed legacy strategy name maps to null (import only).
+    The old key is still dropped and the marker is stamped so we don't try
+    again on the next boot."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {
+        "pipeline": {"default_strategy": "some_deleted_preset"},
+    })
+    from db import Database
+
+    db = Database(str(tmp_path / "vireo.db"))
+    try:
+        assert cfg.migrate_default_strategy_to_process_id(db) is True
+    finally:
+        db.close()
+
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert "default_strategy" not in raw["pipeline"]
+    assert "default_process_id" not in raw["pipeline"]
+    assert (
+        cfg.MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID in raw["_migrations_applied"]
+    )
+
+
+def test_migrate_default_strategy_to_process_id_is_one_time(
+    tmp_path, monkeypatch
+):
+    """After the marker is stamped, a user who later hand-adds
+    ``default_strategy`` back is not silently rewritten — respecting a
+    deliberate manual edit."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {
+        "pipeline": {"default_strategy": "full"},
+    })
+    from db import Database
+
+    db = Database(str(tmp_path / "vireo.db"))
+    try:
+        assert cfg.migrate_default_strategy_to_process_id(db) is True
+
+        # User hand-edits the (now-legacy) key back in after upgrade.
+        raw = _read_raw(cfg.CONFIG_PATH)
+        raw["pipeline"]["default_strategy"] = "cull_ready"
+        _write_raw(cfg.CONFIG_PATH, raw)
+
+        assert cfg.migrate_default_strategy_to_process_id(db) is False
+    finally:
+        db.close()
+
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["pipeline"]["default_strategy"] == "cull_ready"
+
+
+def test_migrate_default_strategy_to_process_id_no_config_file(
+    tmp_path, monkeypatch
+):
+    """Fresh install (no config.json yet) — nothing to rewrite; just the
+    marker gets stamped."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+
+    db = Database(str(tmp_path / "vireo.db"))
+    try:
+        assert cfg.migrate_default_strategy_to_process_id(db) is False
+    finally:
+        db.close()
+
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert (
+        cfg.MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID in raw["_migrations_applied"]
+    )
+
+
+def test_migrate_default_strategy_defers_when_saved_processes_absent(
+    tmp_path, monkeypatch
+):
+    """The low-level migration function must DEFER when passed a
+    schema-less connection (return False, keep the legacy key, not stamp
+    the marker) instead of crashing with 'no such table: saved_processes'.
+
+    ``create_app`` itself now opens a schema-initializing handle for this
+    migration so it completes on the first boot after upgrade (see
+    ``test_create_app_completes_default_strategy_migration_on_first_boot``);
+    the defer path here is the safety net when a caller passes a
+    ``initialize_schema=False`` handle directly, ensuring the migration is
+    still recoverable on a later boot rather than blowing up startup.
+    """
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {"pipeline": {"default_strategy": "identify"}})
+    from db import Database
+
+    db_path = str(tmp_path / "vireo.db")
+    # Simulate a pre-saved_processes upgrade: a DB with the older tables but no
+    # saved_processes. Build the full schema, then drop the new table.
+    seed_db = Database(db_path)
+    seed_db.conn.execute("DROP TABLE saved_processes")
+    seed_db.conn.commit()
+    seed_db.close()
+
+    # init_db-style handle: no schema initialization on this connection.
+    db = Database(db_path, initialize_schema=False)
+    try:
+        assert cfg.migrate_default_strategy_to_process_id(db) is False
+    finally:
+        db.close()
+
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["pipeline"]["default_strategy"] == "identify"  # legacy key kept
+    assert "default_process_id" not in raw["pipeline"]
+    assert (
+        cfg.MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID
+        not in raw.get("_migrations_applied", [])
+    )
+
+
+def test_create_app_completes_default_strategy_migration_on_first_boot(
+    tmp_path, monkeypatch
+):
+    """create_app's startup init_db uses initialize_schema=False, but the
+    global default_strategy migration still needs the seeded
+    saved_processes table to resolve legacy strategy names to ids. Without
+    a schema-initializing pass gated on the migration marker, the
+    migration silently defers on the first boot after upgrade — any
+    import in that session inheriting the legacy default falls back to
+    import-only. create_app must open a targeted schema-initializing
+    handle so the migration completes on the very first boot.
+    """
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {"pipeline": {"default_strategy": "identify"}})
+
+    from app import create_app
+
+    db_path = str(tmp_path / "vireo.db")
+    thumb_dir = tmp_path / "thumbs"
+    thumb_dir.mkdir()
+    # First boot after upgrade: DB file didn't exist before this call.
+    app = create_app(db_path, str(thumb_dir))
+    assert app is not None
+
+    raw = _read_raw(cfg.CONFIG_PATH)
+    # Legacy key must be gone and the migration marker stamped so the
+    # next boot doesn't re-run.
+    assert "default_strategy" not in raw.get("pipeline", {}), raw
+    assert (
+        cfg.MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID
+        in raw.get("_migrations_applied", [])
+    )
+    # The seeded "Identify birds" process should exist and be pointed at.
+    pid = raw["pipeline"].get("default_process_id")
+    assert isinstance(pid, int) and pid > 0, raw
+    from db import Database
+    seeded = Database(db_path).get_saved_process(pid)
+    assert seeded is not None
+    assert seeded["name"] == "Identify birds"
+
+
 def test_default_subject_types_includes_taxonomy_individual_genre(tmp_path, monkeypatch):
     """Default subject_types is the set of keyword types that count as
     'identifying' a photo — taxonomy + individual + genre by default."""
