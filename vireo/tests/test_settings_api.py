@@ -657,6 +657,107 @@ def test_import_prefers_default_process_id_over_legacy_key(app_and_db):
     assert "default_strategy" not in raw["pipeline"]
 
 
+def test_export_includes_default_process_name(app_and_db):
+    """The export emits the process name alongside the id so a foreign import
+    can translate to the target DB's id. saved_processes are DB-local — an
+    id alone would collide (seed ids 1-4 or coincidental custom ids) and
+    silently activate a different process on restore."""
+    app, db = app_and_db
+    full_id = next(p["id"] for p in db.get_saved_processes() if p["name"] == "Full")
+    import config as cfg
+    cfg.set("pipeline", {**cfg.load()["pipeline"], "default_process_id": full_id})
+    client = app.test_client()
+    resp = client.get("/api/settings/export")
+    assert resp.status_code == 200
+    body = json.loads(resp.get_data())
+    assert body["pipeline"]["default_process_id"] == full_id
+    assert body["pipeline"]["default_process_name"] == "Full"
+
+
+def test_export_omits_default_process_name_when_id_absent(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/settings/export")
+    body = json.loads(resp.get_data())
+    # No default_process_id was ever set — export is empty and the name
+    # field never appears.
+    assert "default_process_name" not in body.get("pipeline", {})
+
+
+def test_import_translates_default_process_name_to_target_id(app_and_db):
+    """A backup carrying ``pipeline.default_process_name`` translates to the
+    target DB's id for that name. The raw id in the payload is overridden
+    because saved_processes are DB-local — a foreign id would silently point
+    at a different process, but the name is a portable identity."""
+    app, db = app_and_db
+    cull_ready_id = next(
+        p["id"] for p in db.get_saved_processes() if p["name"] == "Cull-ready"
+    )
+    client = app.test_client()
+    # Payload's raw id is a random stale value; the name should still resolve.
+    payload = {
+        "pipeline": {
+            "default_process_id": 999,
+            "default_process_name": "Cull-ready",
+        },
+    }
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps(payload)},
+    )
+    assert resp.status_code == 200
+    import config as cfg
+    raw = cfg.load()
+    assert raw["pipeline"]["default_process_id"] == cull_ready_id
+    # The name field is stripped so it doesn't leak into the persisted file.
+    assert "default_process_name" not in raw["pipeline"]
+
+
+def test_import_default_process_name_missing_in_target_falls_back_to_null(app_and_db):
+    """When the payload names a process that doesn't exist in the target DB
+    (custom process from another install, renamed, or deleted), the default
+    falls back to null (import only) rather than silently reusing whatever
+    row happens to share the payload's raw id."""
+    app, _ = app_and_db
+    client = app.test_client()
+    payload = {
+        "pipeline": {
+            "default_process_id": 1,
+            "default_process_name": "A custom process from another DB",
+        },
+    }
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps(payload)},
+    )
+    assert resp.status_code == 200
+    import config as cfg
+    raw = cfg.load()
+    assert raw["pipeline"]["default_process_id"] is None
+    assert "default_process_name" not in raw["pipeline"]
+
+
+def test_import_default_process_name_null_clears_id(app_and_db):
+    """A payload with explicit null ``default_process_name`` clears the id."""
+    app, db = app_and_db
+    full_id = next(p["id"] for p in db.get_saved_processes() if p["name"] == "Full")
+    client = app.test_client()
+    payload = {
+        "pipeline": {
+            "default_process_id": full_id,
+            "default_process_name": None,
+        },
+    }
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps(payload)},
+    )
+    assert resp.status_code == 200
+    import config as cfg
+    raw = cfg.load()
+    assert raw["pipeline"]["default_process_id"] is None
+
+
 def test_import_rejects_invalid_json(app_and_db):
     app, _ = app_and_db
     client = app.test_client()

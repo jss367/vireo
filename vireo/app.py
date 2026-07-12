@@ -11629,7 +11629,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if key in ("keyboard_shortcuts", "remote_targets"):
                     continue
                 if key in cfg.DEFAULTS:
-                    current[key] = body[key]
+                    # Deep-merge for nested-dict config sections so a curated
+                    # payload that only ships a subset of keys (settings.html's
+                    # saveConfig posts a ``pipeline`` block with just the
+                    # weights/miss/eye sliders it renders) doesn't wipe the
+                    # keys it didn't include. Without this, the global
+                    # ``pipeline.default_process_id`` would silently reset to
+                    # null on every autosave and workspaces inheriting it
+                    # would go back to import-only.
+                    if (
+                        isinstance(cfg.DEFAULTS[key], dict)
+                        and isinstance(body[key], dict)
+                        and isinstance(current.get(key), dict)
+                    ):
+                        current[key] = cfg._deep_merge(current[key], body[key])
+                    else:
+                        current[key] = body[key]
             # Apply HF token to environment immediately
             hf_token = current.get("hf_token", "")
             if hf_token:
@@ -11929,6 +11944,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         raw = _read_raw_config_file()
         raw.pop("_migrations_applied", None)
+        # ``pipeline.default_process_id`` points into ``saved_processes``,
+        # whose rows are DB-local — the ids don't transfer across databases.
+        # If the same integer id happens to exist in the target DB it points
+        # at a different process; the seed ids 1-4 make this collision
+        # common. Emit the current process name alongside the id as a
+        # portable identity so ``/api/settings/import`` can translate it to
+        # the right id in the target DB. The name lives in the exported
+        # JSON only — the raw config file itself is never rewritten with it.
+        pipeline_raw = raw.get("pipeline")
+        if isinstance(pipeline_raw, dict):
+            pid = pipeline_raw.get("default_process_id")
+            if isinstance(pid, int):
+                match = _get_db().get_saved_process(pid)
+                if match is not None:
+                    pipeline_raw["default_process_name"] = match["name"]
         body = json.dumps(raw, indent=2)
         today = _datetime.date.today().isoformat()
         resp = make_response(body)
@@ -11998,6 +12028,34 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     if match is not None:
                         translated_pid = match["id"]
                 pipeline_payload["default_process_id"] = translated_pid
+
+        # Translate the portable ``pipeline.default_process_name`` (emitted by
+        # /api/settings/export alongside the id) to the target DB's id.
+        # ``saved_processes`` rows are DB-local — the raw id doesn't transfer
+        # across databases (seed ids 1-4 collide, custom ids collide by
+        # chance), so a foreign backup that only carried ``default_process_id``
+        # would silently point at whatever unrelated row happens to share that
+        # id. When the name is present, it wins over the raw id; when the
+        # target DB has no process by that name (renamed, deleted, or a foreign
+        # custom process that never existed here) the effective default falls
+        # back to null (import only) rather than silently activating a stale
+        # process. The name field is stripped from the payload so it doesn't
+        # persist to ~/.vireo/config.json as a non-schema key.
+        if isinstance(pipeline_payload, dict) and "default_process_name" in pipeline_payload:
+            name_val = pipeline_payload.pop("default_process_name")
+            if name_val is None:
+                pipeline_payload["default_process_id"] = None
+            elif isinstance(name_val, str):
+                match = next(
+                    (
+                        p for p in _get_db().get_saved_processes()
+                        if p["name"] == name_val
+                    ),
+                    None,
+                )
+                pipeline_payload["default_process_id"] = (
+                    match["id"] if match is not None else None
+                )
 
         # Iterate the schema directly rather than relying on flatten() — empty
         # objects at schema leaves (e.g. {"classification_threshold": {}}) flatten

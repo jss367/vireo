@@ -351,6 +351,54 @@ def test_eye_focus_config_round_trips_through_settings_api(tmp_path, monkeypatch
     assert p["reject_eye_focus"] == 0.55
 
 
+def test_curated_config_post_preserves_default_process_id(tmp_path, monkeypatch):
+    """The curated Settings saveConfig() posts a ``pipeline`` block that only
+    ships the sliders it renders (weights / miss / eye), not
+    ``default_process_id``. A plain replace-on-write would wipe the global
+    after-import default on every autosave, silently sending workspaces
+    that inherit it back to import-only. Verify the nested dict is
+    deep-merged so keys the client didn't send survive the save."""
+    import json as _json
+
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    from app import create_app
+    db_path = str(tmp_path / "vireo.db")
+    thumb_dir = tmp_path / "thumbs"
+    thumb_dir.mkdir()
+    app = create_app(db_path, str(thumb_dir))
+    client = app.test_client()
+
+    # Simulate a user having previously set a global after-import default via
+    # the All-settings picker: write the id directly to the raw config file.
+    with app.app_context():
+        pass  # keep app in scope
+    initial = cfg.load()
+    initial["pipeline"]["default_process_id"] = 1
+    cfg.save(initial)
+    assert cfg.load()["pipeline"]["default_process_id"] == 1
+
+    # Now the curated form autosaves a pipeline block with only its sliders.
+    r = client.post(
+        "/api/config",
+        data=_json.dumps({
+            "pipeline": {
+                "w_focus": 0.42,
+                "miss_enabled": True,
+            },
+        }),
+        headers={"Content-Type": "application/json"},
+    )
+    assert r.status_code == 200
+
+    loaded = cfg.load()
+    assert loaded["pipeline"]["w_focus"] == 0.42
+    assert loaded["pipeline"]["miss_enabled"] is True
+    # The key the client didn't send survives the save.
+    assert loaded["pipeline"]["default_process_id"] == 1
+
+
 def test_compare_shortcut_round_trips_through_config_api(tmp_path, monkeypatch):
     """The Browse compare shortcut must be in backend defaults or POST validation drops it."""
     import json as _json
