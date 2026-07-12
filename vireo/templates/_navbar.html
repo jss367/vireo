@@ -6704,6 +6704,16 @@ function openLightbox(photoId, filename, photoList, options) {
     if (_lbCurrentSrcKey !== 'original') {
       img.onload = null;
       img.onerror = null;
+      // No further fallback tier is available. Clear the pending visual
+      // transition — otherwise the metadata callback would keep skipping
+      // layout updates and _lbSaveViewportState would keep treating the
+      // incoming photo as mid-transition even though the UI already points
+      // at it. Apply any deferred viewport state so the layout reflects
+      // the incoming photo instead of the frozen outgoing bitmap.
+      _lbVisualTransitionPending = false;
+      _lbRecomputeNativeZoom();
+      if (!_lbTryApplyPendingViewportState()) _lbApplyPendingOneToOneZoom();
+      _lbApplyTransform();
       return;
     }
     _lbOriginalUnavailable = true;

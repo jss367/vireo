@@ -494,6 +494,84 @@ def test_browse_lightbox_mid_transition_save_does_not_leak_outgoing_transform(
     )
 
 
+def test_browse_lightbox_clears_transition_state_when_incoming_image_errors(
+    live_server, page
+):
+    """A non-'original' image error must clear _lbVisualTransitionPending.
+
+    Regression: handleInitialImageError's early-return path (taken when the
+    failing tier isn't the /original fallback candidate) previously left
+    _lbVisualTransitionPending true indefinitely. That kept the metadata
+    callback skipping layout updates and made _lbSaveViewportState treat the
+    incoming photo as still mid-transition even though the UI/counter had
+    already advanced to it, freezing the outgoing transform on screen until
+    the lightbox was closed or another navigation succeeded.
+    """
+    first_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#274"/>'
+        '<circle cx="1000" cy="1400" r="180" fill="#fff"/></svg>'
+    )
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{url}/browse")
+    page.locator(".grid-card").nth(1).wait_for(state="visible")
+    next_id = page.evaluate("window.photos[1].id")
+
+    def route_full(route):
+        # Fail the incoming photo's /full tier; the outgoing photo's /full
+        # still resolves normally so we can enter the mid-navigation window.
+        if f"/photos/{next_id}/full" in route.request.url:
+            route.fulfill(status=404, body=b"", content_type="text/plain")
+            return
+        route.fulfill(body=first_svg, content_type="image/svg+xml")
+
+    page.route("**/photos/*/full", route_full)
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 4000;
+        }"""
+    )
+
+    # A fit-view navigation opens the incoming photo at _lbCurrentSrcKey='full'
+    # with _lbVisualTransitionPending=true. The /full request then 404s, so
+    # handleInitialImageError takes the non-'original' early-return path.
+    page.locator("[title='Next (→)']").click()
+    expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
+    page.wait_for_function(
+        "() => window._lightboxCurrentId === window.photos[1].id"
+    )
+
+    page.wait_for_function(
+        "() => window._lbVisualTransitionPending === false",
+        timeout=3000,
+    )
+
+    # With the pending flag cleared, saving the current photo's viewport must
+    # go through the normal (non-guard) path — the guard block only activates
+    # while a transition is pending — so the incoming photo id is a legal
+    # save target rather than a frozen-outgoing snapshot sink.
+    saved = page.evaluate(
+        """() => {
+            const id = window._lightboxCurrentId;
+            const returned = window._lbSaveViewportState(id);
+            return {
+                returned: returned,
+                pendingFlag: window._lbVisualTransitionPending,
+            };
+        }"""
+    )
+    assert saved["pendingFlag"] is False
+    assert saved["returned"] is not None
+
+
 def test_browse_lightbox_pending_high_zoom_survives_native_zoom_race(live_server, page):
     """A saved zoom > 4 is not lost when native zoom is unknown at first apply.
 
