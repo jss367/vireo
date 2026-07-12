@@ -6094,7 +6094,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             for row in affected:
                 _queue_keyword_remove(row["photo_id"], old_name, workspace_id=row["workspace_id"])
                 _queue_keyword_add(row["photo_id"], new_name, workspace_id=row["workspace_id"])
-        return jsonify({"ok": True, "keyword_id": effective_id})
+        # keywords.html's updateType/renameKeyword/bulk-apply handlers refetch
+        # only when `merged` is truthy; without it the UI keeps the deleted
+        # source id and its next edit/delete would 404 or hit the wrong row.
+        merged = effective_id != keyword_id
+        return jsonify({"ok": True, "keyword_id": effective_id, "merged": merged})
 
     @app.route("/api/keywords/<int:keyword_id>", methods=["DELETE"])
     def api_delete_keyword(keyword_id):
@@ -9007,6 +9011,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         species = normalize_keyword_display(species)
         if not species:
             return json_error("species required")
+        # Canonicalize the submitted spelling to the stored keyword name
+        # BEFORE the snapshot passes below. add_keyword() reuses any
+        # case-insensitive taxonomy/general match at parent_id IS NULL
+        # and preserves its stored `name`, so a request for `saffron finch`
+        # when the stored keyword and curation rows read `Saffron Finch`
+        # eventually tags the existing row. Without pre-canonicalizing,
+        # the `row["species"] == species` snapshots (hl_dst_preexisting,
+        # pref_dst_taken, rep_dst_preexisting, plus the source-side skips
+        # in the preference/rep passes) would miss those pre-existing
+        # target rows and record dst_existed=false — undo would then
+        # delete the user's pre-existing highlight/preference/rep.
+        existing_species_row = db.conn.execute(
+            "SELECT name FROM keywords "
+            "WHERE name = ? COLLATE NOCASE AND parent_id IS NULL "
+            "AND type IN ('taxonomy', 'general') "
+            "ORDER BY (type = 'taxonomy') DESC, id ASC LIMIT 1",
+            (species,),
+        ).fetchone()
+        if existing_species_row and existing_species_row["name"]:
+            species = existing_species_row["name"]
         error, status = _validate_highlight_photo_ids(db, photo_ids)
         if error:
             return json_error(error, status)
