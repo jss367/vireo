@@ -14982,12 +14982,13 @@ class Database:
             if not has_explicit_false:
                 to_invalidate.append(row["id"])
         if to_invalidate:
-            placeholders = ",".join("?" * len(to_invalidate))
-            self.conn.execute(
-                f"UPDATE workspaces SET last_group_fingerprint = NULL "
-                f"WHERE id IN ({placeholders})",
-                to_invalidate,
-            )
+            for chunk in _chunks(to_invalidate):
+                placeholders = ",".join("?" * len(chunk))
+                self.conn.execute(
+                    f"UPDATE workspaces SET last_group_fingerprint = NULL "
+                    f"WHERE id IN ({placeholders})",
+                    list(chunk),
+                )
             self.conn.commit()
         return len(to_invalidate)
 

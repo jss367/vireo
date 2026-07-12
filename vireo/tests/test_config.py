@@ -990,6 +990,50 @@ def test_migrate_eye_detect_default_off_preserves_explicit_workspace_opt_ins(
     )
 
 
+def test_migrate_eye_detect_default_off_chunks_workspace_invalidation(
+    tmp_path, monkeypatch,
+):
+    """When more workspaces need their fingerprint cleared than SQLite's
+    bound-parameter limit, the invalidation UPDATE must be chunked. A
+    single ``UPDATE ... WHERE id IN (?, ?, ...)`` with a placeholder per
+    workspace raises ``OperationalError: too many SQL variables`` on
+    legacy 999-variable SQLite builds and would prevent the app from
+    starting (the migration runs during ``create_app``). Regression for
+    Codex thread PRRT_kwDORn8c-s6QODfD.
+    """
+    import config as cfg
+    from db import _SQLITE_PARAM_CHUNK_SIZE, Database
+
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(config_path))
+    config_path.write_text(
+        json.dumps({"pipeline": {"eye_detect_enabled": True}})
+    )
+    db = Database(str(tmp_path / "test.db"), initialize_schema=True)
+    # Create more workspaces than the chunk size so a naive single-IN
+    # UPDATE would need >_SQLITE_PARAM_CHUNK_SIZE placeholders. Each must
+    # be marked as having a stamped fingerprint so they enter the
+    # invalidation set.
+    count = _SQLITE_PARAM_CHUNK_SIZE + 25
+    ws_ids = []
+    for i in range(count):
+        ws_id = db.create_workspace(f"ws-{i}")
+        db.set_workspace_group_state(ws_id, f"fp-{i}", "2025-01-01T00:00:00Z")
+        ws_ids.append(ws_id)
+
+    assert cfg.migrate_eye_detect_default_off(db) is True
+
+    rows = db.conn.execute(
+        "SELECT id, last_group_fingerprint FROM workspaces"
+    ).fetchall()
+    fingerprints = {r["id"]: r["last_group_fingerprint"] for r in rows}
+    for ws_id in ws_ids:
+        assert fingerprints[ws_id] is None, (
+            f"workspace {ws_id} was relying on the global True default "
+            f"and must have its fingerprint cleared even at scale"
+        )
+
+
 def test_default_subject_types_includes_taxonomy_individual_genre(tmp_path, monkeypatch):
     """Default subject_types is the set of keyword types that count as
     'identifying' a photo — taxonomy + individual + genre by default."""
