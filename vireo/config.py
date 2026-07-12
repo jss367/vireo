@@ -123,7 +123,7 @@ DEFAULTS = {
         # disable the override.
         "miss_classifier_override_conf": 0.8,
         # Eye-focus detection
-        "eye_detect_enabled": True,
+        "eye_detect_enabled": False,
         "eye_classifier_conf_gate": 0.50,
         "eye_detection_conf_gate": 0.50,
         "eye_window_k": 0.08,
@@ -297,6 +297,7 @@ def set(key, value):
 
 MIGRATION_MISS_THRESHOLDS = "miss_thresholds_2026_05"
 MIGRATION_TOGGLE_UI_H_CONFLICT = "toggle_ui_h_conflict_2026_07"
+MIGRATION_EYE_DETECT_DEFAULT_OFF = "eye_detect_default_off_2026_07"
 
 _LEGACY_MISS_DET_CONFIDENCE = 0.25
 _LEGACY_MISS_DET_CONFIDENCE_BURST = 0.15
@@ -403,6 +404,35 @@ def migrate_toggle_ui_h_conflict():
                         rewrote = True
                         break
         applied.append(MIGRATION_TOGGLE_UI_H_CONFLICT)
+        raw["_migrations_applied"] = applied
+        save(raw)
+        return rewrote
+
+
+def migrate_eye_detect_default_off(db=None):
+    """One-time rewrite of the previous eye-detection default.
+
+    Older versions defaulted ``pipeline.eye_detect_enabled`` to ``True``.
+    Because legacy save paths may have persisted the full merged config,
+    upgraded users would otherwise keep the old default even after DEFAULTS
+    changes. Rewrite only the exact legacy default value; an already-false
+    user setting remains false, and future explicit true settings are kept.
+    """
+    with _lock:
+        raw = _read_raw()
+        applied = _migrations_applied(raw)
+        if MIGRATION_EYE_DETECT_DEFAULT_OFF in applied:
+            return False
+        rewrote = False
+        pipeline = raw.get("pipeline")
+        if isinstance(pipeline, dict) and pipeline.get("eye_detect_enabled") is True:
+            pipeline["eye_detect_enabled"] = False
+            rewrote = True
+        if db is not None:
+            ws_rewrites = db.rewrite_legacy_eye_detect_default_in_workspaces()
+            if ws_rewrites:
+                rewrote = True
+        applied.append(MIGRATION_EYE_DETECT_DEFAULT_OFF)
         raw["_migrations_applied"] = applied
         save(raw)
         return rewrote

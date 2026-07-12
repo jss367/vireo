@@ -1476,7 +1476,7 @@ def eye_keypoint_stage_preflight(config):
     start (mirroring SAM2/DINOv2), so a missing-weights state is no longer
     a preflight skip — only the explicit config flag is.
     """
-    if not config.get("eye_detect_enabled", True):
+    if not config.get("eye_detect_enabled", False):
         return "Disabled in config"
     return None
 
@@ -1658,7 +1658,7 @@ def detect_eye_keypoints_stage(
     Args:
         db: Database with an active workspace.
         config: dict of tunables. Reads:
-            - eye_detect_enabled (bool, default True)
+            - eye_detect_enabled (bool, default False)
             - eye_classifier_conf_gate (float, default 0.5)
             - eye_detection_conf_gate (float, default 0.5)
             - eye_window_k (float, default 0.08)

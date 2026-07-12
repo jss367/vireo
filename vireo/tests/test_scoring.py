@@ -308,7 +308,7 @@ def test_focus_score_uses_eye_tenengrad_when_populated():
     b = _make_base_photo(subject_tenengrad=5000, eye_tenengrad=50000)
     enc = {"photos": [a, b]}
 
-    score_encounter(enc)
+    score_encounter(enc, config={"eye_detect_enabled": True})
 
     assert b["focus_score"] > a["focus_score"], (
         f"eye-based ranking should put sharp-eye photo ahead; "
@@ -324,7 +324,7 @@ def test_focus_score_falls_back_to_subject_tenengrad_when_eye_null():
     b = _make_base_photo(subject_tenengrad=5000, eye_tenengrad=None)
     enc = {"photos": [a, b]}
 
-    score_encounter(enc)
+    score_encounter(enc, config={"eye_detect_enabled": True})
 
     assert a["focus_score"] > b["focus_score"], (
         "without eye_tenengrad, score_encounter must rank on subject_tenengrad"
@@ -345,7 +345,7 @@ def test_focus_score_mixed_eye_and_body_ranks_within_their_group():
     d = _make_base_photo(subject_tenengrad=10000, eye_tenengrad=None)
     enc = {"photos": [a, b, c, d]}
 
-    score_encounter(enc)
+    score_encounter(enc, config={"eye_detect_enabled": True})
 
     assert b["focus_score"] > a["focus_score"]
     assert d["focus_score"] > c["focus_score"]
@@ -369,7 +369,7 @@ def test_body_only_focus_not_diluted_by_eye_capable_peers():
     body_lo = _make_base_photo(subject_tenengrad=5000, eye_tenengrad=None)
     body_hi = _make_base_photo(subject_tenengrad=20000, eye_tenengrad=None)
     mixed_enc = {"photos": [eye_a, eye_b, body_lo, body_hi]}
-    score_encounter(mixed_enc)
+    score_encounter(mixed_enc, config={"eye_detect_enabled": True})
     mixed_body_lo = body_lo["focus_score"]
     mixed_body_hi = body_hi["focus_score"]
 
@@ -379,7 +379,7 @@ def test_body_only_focus_not_diluted_by_eye_capable_peers():
     ref_lo = _make_base_photo(subject_tenengrad=5000, eye_tenengrad=None)
     ref_hi = _make_base_photo(subject_tenengrad=20000, eye_tenengrad=None)
     ref_enc = {"photos": [ref_lo, ref_hi]}
-    score_encounter(ref_enc)
+    score_encounter(ref_enc, config={"eye_detect_enabled": True})
 
     assert mixed_body_lo == ref_lo["focus_score"], (
         f"body-only low scorer should not be diluted by eye peers: "
@@ -403,7 +403,10 @@ def test_reject_eye_soft_fires_when_eye_present_and_below_threshold():
     )
     enc = {"photos": [soft_eye, sharp_eye]}
 
-    score_encounter(enc, config={"reject_eye_focus": 0.35})
+    score_encounter(
+        enc,
+        config={"eye_detect_enabled": True, "reject_eye_focus": 0.35},
+    )
 
     assert any("eye_soft" in r for r in soft_eye.get("reject_reasons", []))
     assert not any("eye_soft" in r for r in sharp_eye.get("reject_reasons", []))
@@ -435,6 +438,21 @@ def test_eye_detect_disabled_falls_back_to_body_focus():
     enc = {"photos": [a, b]}
 
     score_encounter(enc, config={"eye_detect_enabled": False})
+
+    assert a["focus_score"] > b["focus_score"]
+    assert "eye_focus_score" not in a
+    assert "eye_focus_score" not in b
+
+
+def test_eye_detect_missing_config_defaults_disabled():
+    """Missing eye_detect_enabled follows the global default: disabled."""
+    from scoring import score_encounter
+
+    a = _make_base_photo(subject_tenengrad=50000, eye_tenengrad=5000)
+    b = _make_base_photo(subject_tenengrad=5000, eye_tenengrad=50000)
+    enc = {"photos": [a, b]}
+
+    score_encounter(enc)
 
     assert a["focus_score"] > b["focus_score"]
     assert "eye_focus_score" not in a

@@ -2688,6 +2688,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # workspace overrides. Gated by a marker so it runs once; re-saved
     # legacy values are preserved on subsequent boots.
     cfg.migrate_legacy_miss_thresholds(init_db)
+    # One-time rewrite of the previous eye-focus detection default from on to
+    # off in both global config and workspace overrides.
+    cfg.migrate_eye_detect_default_off(init_db)
     # One-time resolution of the browse.toggle_ui="h" default clashing with
     # any pre-existing browse binding on ``h``. Writes an explicit "" so the
     # user's existing action keeps working; they can re-bind toggle_ui from
@@ -3454,7 +3457,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "sam2_variant": sam2_variant,
                 "dinov2_variant": dinov2_variant,
                 "proxy_longest_edge": proxy_longest_edge,
-                "eye_detect_enabled": pipeline_cfg.get("eye_detect_enabled", True),
+                "eye_detect_enabled": pipeline_cfg.get("eye_detect_enabled", False),
                 "preview_max_size": effective_cfg.get("preview_max_size", 1920),
             },
             "mask_variant_coverage": db.mask_variant_coverage(),

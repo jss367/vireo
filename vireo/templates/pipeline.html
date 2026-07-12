@@ -847,7 +847,7 @@ body { padding-bottom: 36px; }
   <div class="stage-card" id="card-eyekeypoints" data-testid="stage-card" data-advanced-stage>
     <div class="stage-header" onclick="toggleCard('eyekeypoints')">
       <span class="stage-num" id="numEyeKeypoints">6</span>
-      <input type="checkbox" class="stage-enable" id="enableEyeKeypoints" checked
+      <input type="checkbox" class="stage-enable" id="enableEyeKeypoints"
              onchange="onStageToggle('eyekeypoints')" onclick="event.stopPropagation()">
       <span class="stage-name">Eye Keypoints (optional)</span>
       <span class="stage-status-pill" id="pillEyeKeypoints"></span>
@@ -1027,15 +1027,16 @@ function initPipelinePage() {
       }
 
       // Eye keypoints stage default tracks the global eye_detect_enabled
-      // config so users who turned it off in Settings see it unchecked here
-      // by default. The checkbox is the per-run override.
+      // config. Missing config defaults off; the checkbox is the per-run
+      // override.
       var ekCb = document.getElementById('enableEyeKeypoints');
-      if (ekCb) ekCb.checked = cfg.eye_detect_enabled !== false;
+      if (ekCb) ekCb.checked = cfg.eye_detect_enabled === true;
 
       // Update saved config defaults from server
       _savedModelConfig.sam2_variant = cfg.sam2_variant;
       _savedModelConfig.dinov2_variant = cfg.dinov2_variant;
       _savedModelConfig.proxy_longest_edge = cfg.proxy_longest_edge;
+      _savedModelConfig.eye_detect_enabled = cfg.eye_detect_enabled === true;
 
       updateCardStates();
       if (typeof updateReadiness === 'function') updateReadiness();
@@ -1397,7 +1398,12 @@ function applyStrategyPreset() {
   if (!sel || sel.value === '__custom__') { refreshPipelineUI(); return; }
   var presets = {
     identify:   { classify: true,  extract: false, eyes: false, group: false },
-    full:       { classify: true,  extract: true,  eyes: true,  group: true  },
+    full:       {
+      classify: true,
+      extract: true,
+      eyes: _savedModelConfig.eye_detect_enabled === true,
+      group: true
+    },
     cull_ready: { classify: true,  extract: false, eyes: false, group: true  },
     quick_look: { classify: false, extract: false, eyes: false, group: false },
   };
@@ -3424,6 +3430,7 @@ function _currentModelConfigFromDom() {
     sam2_variant: samEl ? samEl.value : '',
     dinov2_variant: dinoEl ? dinoEl.value : '',
     proxy_longest_edge: proxyEl ? parseInt(proxyEl.value, 10) : 0,
+    eye_detect_enabled: false,
   };
 }
 
@@ -3455,6 +3462,7 @@ function onModelConfigChange() {
     sam2_variant: document.getElementById('cfgSam2').value,
     dinov2_variant: document.getElementById('cfgDinov2').value,
     proxy_longest_edge: parseInt(document.getElementById('cfgProxy').value),
+    eye_detect_enabled: _savedModelConfig.eye_detect_enabled === true,
   };
 
   // Save to server

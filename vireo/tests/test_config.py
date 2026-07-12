@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 
@@ -300,7 +301,7 @@ def test_eye_focus_defaults_exist():
     from config import DEFAULTS
 
     p = DEFAULTS["pipeline"]
-    assert p["eye_detect_enabled"] is True
+    assert p["eye_detect_enabled"] is False
     assert p["eye_classifier_conf_gate"] == 0.50
     assert p["eye_detection_conf_gate"] == 0.50
     assert p["eye_window_k"] == 0.08
@@ -393,7 +394,10 @@ def test_reject_eye_focus_flows_from_config_to_scoring(tmp_path, monkeypatch):
     import config as cfg
     monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
     with open(cfg.CONFIG_PATH, "w") as f:
-        _json.dump({"pipeline": {"reject_eye_focus": 0.99}}, f)
+        _json.dump(
+            {"pipeline": {"eye_detect_enabled": True, "reject_eye_focus": 0.99}},
+            f,
+        )
 
     from db import Database
     from scoring import score_encounter
@@ -712,6 +716,80 @@ def test_migrate_toggle_ui_h_conflict_no_config_file(tmp_path, monkeypatch):
     assert cfg.migrate_toggle_ui_h_conflict() is False
     raw = _read_raw(cfg.CONFIG_PATH)
     assert cfg.MIGRATION_TOGGLE_UI_H_CONFLICT in raw["_migrations_applied"]
+
+
+def test_migrate_eye_detect_default_off_rewrites_legacy_true(
+    tmp_path, monkeypatch
+):
+    import config as cfg
+
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(config_path))
+    config_path.write_text(
+        json.dumps({"pipeline": {"eye_detect_enabled": True}})
+    )
+
+    assert cfg.migrate_eye_detect_default_off() is True
+    raw = json.loads(config_path.read_text())
+    assert raw["pipeline"]["eye_detect_enabled"] is False
+    assert cfg.MIGRATION_EYE_DETECT_DEFAULT_OFF in raw["_migrations_applied"]
+
+
+def test_migrate_eye_detect_default_off_preserves_false(tmp_path, monkeypatch):
+    import config as cfg
+
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(config_path))
+    config_path.write_text(
+        json.dumps({"pipeline": {"eye_detect_enabled": False}})
+    )
+
+    assert cfg.migrate_eye_detect_default_off() is False
+    raw = json.loads(config_path.read_text())
+    assert raw["pipeline"]["eye_detect_enabled"] is False
+    assert cfg.MIGRATION_EYE_DETECT_DEFAULT_OFF in raw["_migrations_applied"]
+
+
+def test_migrate_eye_detect_default_off_is_one_time(tmp_path, monkeypatch):
+    import config as cfg
+
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(config_path))
+    config_path.write_text(
+        json.dumps({"pipeline": {"eye_detect_enabled": True}})
+    )
+
+    assert cfg.migrate_eye_detect_default_off() is True
+    raw = json.loads(config_path.read_text())
+    raw["pipeline"]["eye_detect_enabled"] = True
+    config_path.write_text(json.dumps(raw))
+
+    assert cfg.migrate_eye_detect_default_off() is False
+    raw = json.loads(config_path.read_text())
+    assert raw["pipeline"]["eye_detect_enabled"] is True
+
+
+def test_migrate_eye_detect_default_off_rewrites_workspace_overrides(
+    tmp_path, monkeypatch
+):
+    import config as cfg
+    from db import Database
+
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(config_path))
+    config_path.write_text("{}")
+    db = Database(str(tmp_path / "test.db"), initialize_schema=True)
+    db.create_workspace(
+        "legacy",
+        config_overrides={"pipeline": {"eye_detect_enabled": True}},
+    )
+
+    assert cfg.migrate_eye_detect_default_off(db) is True
+    rows = db.conn.execute(
+        "SELECT config_overrides FROM workspaces WHERE name = 'legacy'"
+    ).fetchall()
+    overrides = json.loads(rows[0]["config_overrides"])
+    assert overrides["pipeline"]["eye_detect_enabled"] is False
 
 
 def test_default_subject_types_includes_taxonomy_individual_genre(tmp_path, monkeypatch):

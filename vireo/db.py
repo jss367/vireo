@@ -14912,6 +14912,36 @@ class Database:
             self.conn.commit()
         return updated
 
+    def rewrite_legacy_eye_detect_default_in_workspaces(self):
+        """Rewrite the exact legacy eye-detection default in workspace overrides."""
+        rows = self.conn.execute(
+            "SELECT id, config_overrides FROM workspaces "
+            "WHERE config_overrides IS NOT NULL"
+        ).fetchall()
+        updated = 0
+        for row in rows:
+            raw = row["config_overrides"]
+            try:
+                overrides = json.loads(raw) if isinstance(raw, str) else raw
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(overrides, dict):
+                continue
+            pipeline = overrides.get("pipeline")
+            if not isinstance(pipeline, dict):
+                continue
+            if pipeline.get("eye_detect_enabled") is not True:
+                continue
+            pipeline["eye_detect_enabled"] = False
+            self.conn.execute(
+                "UPDATE workspaces SET config_overrides = ? WHERE id = ?",
+                (json.dumps(overrides), row["id"]),
+            )
+            updated += 1
+        if updated:
+            self.conn.commit()
+        return updated
+
     # ------ iNaturalist submissions ------
 
     def record_inat_submission(self, photo_id, observation_id, observation_url):

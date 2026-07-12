@@ -341,7 +341,7 @@ def score_encounter(encounter, config=None):
     # peers' eye_tenengrad. Skipped entirely when eye detection is
     # disabled so stale eye_tenengrad values from prior runs don't
     # influence scoring after the user turns the feature off.
-    eye_enabled = cfg.get("eye_detect_enabled", True)
+    eye_enabled = cfg.get("eye_detect_enabled", False)
     enc_eye_tenegrads = [
         p["eye_tenengrad"] for p in photos
         if p.get("eye_tenengrad") is not None

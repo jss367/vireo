@@ -1963,7 +1963,15 @@ def test_eye_keypoint_stage_preflight_enabled(tmp_path, monkeypatch):
     from pipeline import eye_keypoint_stage_preflight
 
     assert eye_keypoint_stage_preflight({"eye_detect_enabled": True}) is None
-    assert eye_keypoint_stage_preflight({}) is None
+
+
+def test_eye_keypoint_stage_preflight_missing_config_defaults_disabled(
+    tmp_path, monkeypatch
+):
+    """Missing eye_detect_enabled follows the global default: disabled."""
+    from pipeline import eye_keypoint_stage_preflight
+
+    assert eye_keypoint_stage_preflight({}) == "Disabled in config"
 
 
 def test_eye_keypoint_stage_writes_nothing_when_weights_absent(

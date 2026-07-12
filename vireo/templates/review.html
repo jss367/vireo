@@ -816,6 +816,7 @@ var availableModels = [];
 var collectionPhotoIds = null;  // null = no filter
 var thumbSize = 400;
 var mode = 'review';
+var reviewDetectionBoxesVisible = false;
 
 /* Species color palette for bounding boxes */
 var _speciesColors = {};
@@ -1125,7 +1126,7 @@ document.addEventListener('lightbox:renderchanged', function(e) {
       window.vireoPhotoHasOrientationEdit(id)
     );
     document.querySelectorAll('.detection-box[data-photo-id="' + id + '"]').forEach(function(box) {
-      box.style.display = hideDetectionOverlay ? 'none' : '';
+      box.style.display = (reviewDetectionBoxesVisible && !hideDetectionOverlay) ? '' : 'none';
     });
   });
 });
@@ -1307,7 +1308,7 @@ function renderPredictionCard(pred) {
     var bHeight = (pred.box_h * 100).toFixed(2) + '%';
     imgHtml = '<div class="card-img-wrap">' + imgTag +
       representativeBadge +
-      '<div class="detection-box" data-photo-id="' + pred.photo_id + '" style="' + (hideDetectionOverlay ? 'display:none;' : '') + 'left:' + bLeft + ';top:' + bTop +
+      '<div class="detection-box" data-photo-id="' + pred.photo_id + '" style="' + ((reviewDetectionBoxesVisible && !hideDetectionOverlay) ? '' : 'display:none;') + 'left:' + bLeft + ';top:' + bTop +
       ';width:' + bWidth + ';height:' + bHeight + ';border-color:' + color + ';">' +
       '<span class="detection-label" style="background:' + color +
       ';color:#0A1F2E;">' + escapeHtml(displaySpecies) + ' ' + confPct + '%</span>' +
