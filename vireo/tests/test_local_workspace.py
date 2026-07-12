@@ -174,6 +174,61 @@ def test_stage_rejects_symlink_that_leaves_and_reenters_root(local_workspace_env
         stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows test runners may not permit symlinks")
+def test_stage_rejects_symlinked_source_root(local_workspace_env, tmp_path):
+    # If the selected workspace root is itself a symlink, os.path.isdir()
+    # follows it and staging activates, but sync_back later lstats the same
+    # source path and refuses to publish through the link. Reject symlinked
+    # roots before entering the activation transaction instead.
+    env = local_workspace_env
+    real_source = tmp_path / "real-photos"
+    real_source.mkdir()
+    shutil.copytree(str(env["source"]), str(real_source / "photos"))
+    shutil.rmtree(str(env["source"]))
+    os.symlink(str(real_source / "photos"), str(env["source"]))
+
+    with pytest.raises(LocalWorkspaceError, match="symlink"):
+        stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+
+    # Catalog untouched and managed tree cleaned up.
+    assert _folder_path(env["db"], env["root_id"]) == str(env["source"])
+    assert not workspace_dir(str(env["vireo_dir"]), env["workspace_id"]).exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows test runners may not permit symlinks")
+def test_stage_rejects_source_swapped_to_symlink_before_copy(local_workspace_env, tmp_path, monkeypatch):
+    # A source entry that was a regular file during _walk_entries can be
+    # swapped for a symlink (or FIFO) before _copy_regular_with_hash opens
+    # it. A naive open() would follow the link and copy bytes from outside
+    # the workspace with a straight face. The copy path must re-validate the
+    # source type and refuse.
+    env = local_workspace_env
+    outside = tmp_path / "outside-secrets.txt"
+    outside.write_bytes(b"not part of the workspace")
+
+    real_walk_entries = local_workspace._walk_entries
+    swapped = {"done": False}
+
+    def swap_after_walk(root):
+        for entry in real_walk_entries(root):
+            rel, full, _st = entry
+            yield entry
+            if not swapped["done"] and rel == os.path.join("2026", "bird.jpg"):
+                os.unlink(full)
+                os.symlink(str(outside), full)
+                swapped["done"] = True
+
+    monkeypatch.setattr(local_workspace, "_walk_entries", swap_after_walk)
+
+    with pytest.raises(LocalWorkspaceError, match="regular file"):
+        stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+
+    assert swapped["done"], "test did not exercise the source swap"
+    # Catalog untouched: nothing was rebased and the outside file was not read.
+    assert _folder_path(env["db"], env["root_id"]) == str(env["source"])
+    assert not workspace_dir(str(env["vireo_dir"]), env["workspace_id"]).exists()
+
+
 def test_stage_rejects_case_colliding_source_paths(local_workspace_env, monkeypatch):
     # On case-insensitive local storage (Windows/macOS defaults) two source
     # paths differing only in case would land on the same destination; the

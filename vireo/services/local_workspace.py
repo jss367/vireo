@@ -300,7 +300,19 @@ def _collect_source_entries(roots: list[dict], local_base: Path) -> tuple[dict[i
     case_insensitive_target = _dest_case_insensitive(local_base)
     for index, root in enumerate(roots):
         source = root["source_path"]
-        if not os.path.isdir(source):
+        # os.path.isdir follows symlinks; a source root that is itself a
+        # symlink would activate successfully here but sync_back later lstats
+        # and rejects it, leaving every local edit unsyncable. Reject
+        # symlinked (or non-directory) roots up front instead.
+        try:
+            root_st = os.lstat(source)
+        except OSError as exc:
+            raise LocalWorkspaceError(f"Workspace folder is unavailable: {source}") from exc
+        if stat.S_ISLNK(root_st.st_mode):
+            raise LocalWorkspaceError(
+                f"Workspace root is a symlink and cannot be staged: {source}"
+            )
+        if not stat.S_ISDIR(root_st.st_mode):
             raise LocalWorkspaceError(f"Workspace folder is unavailable: {source}")
         entries = []
         folded_seen: dict[str, str] = {}
@@ -343,16 +355,46 @@ def _collect_source_entries(roots: list[dict], local_base: Path) -> tuple[dict[i
 
 def _copy_regular_with_hash(source: str, destination: str, cancel_check=None) -> dict:
     os.makedirs(os.path.dirname(destination), exist_ok=True)
+    # A source entry that was a regular file during _walk_entries can be
+    # swapped to a symlink or FIFO before we open it: a bare open() would then
+    # follow the link (reading from outside the workspace) or block on the
+    # FIFO. Re-lstat immediately before open and fstat the opened descriptor
+    # so a type flip in either window aborts staging instead of quietly
+    # copying the wrong bytes. Where available, O_NOFOLLOW refuses a symlink
+    # swap at the syscall boundary.
+    open_flags = os.O_RDONLY
+    if hasattr(os, "O_BINARY"):
+        open_flags |= os.O_BINARY
+    if hasattr(os, "O_NOFOLLOW"):
+        open_flags |= os.O_NOFOLLOW
     for attempt in range(2):
         before = os.stat(source, follow_symlinks=False)
+        if not stat.S_ISREG(before.st_mode):
+            raise LocalWorkspaceError(
+                f"Source entry is no longer a regular file and cannot be staged: {source}"
+            )
         fd, tmp = tempfile.mkstemp(
             prefix=f".{os.path.basename(destination)}.vireo-copying-",
             dir=os.path.dirname(destination),
         )
         os.close(fd)
         digest = hashlib.sha256()
+        source_fd = None
         try:
-            with open(source, "rb") as src, open(tmp, "wb") as dst:
+            try:
+                source_fd = os.open(source, open_flags)
+            except OSError as exc:
+                raise LocalWorkspaceError(
+                    f"Source entry could not be opened as a regular file: {source}"
+                ) from exc
+            fd_stat = os.fstat(source_fd)
+            if not stat.S_ISREG(fd_stat.st_mode):
+                raise LocalWorkspaceError(
+                    f"Source entry is no longer a regular file and cannot be staged: {source}"
+                )
+            src = os.fdopen(source_fd, "rb")
+            source_fd = None
+            with src, open(tmp, "wb") as dst:
                 while True:
                     if cancel_check and cancel_check():
                         raise LocalWorkspaceCancelled("Local workspace transfer cancelled")
@@ -379,6 +421,9 @@ def _copy_regular_with_hash(source: str, destination: str, cancel_check=None) ->
                 "sha256": digest.hexdigest(),
             }
         except BaseException:
+            if source_fd is not None:
+                with suppress(OSError):
+                    os.close(source_fd)
             with suppress(FileNotFoundError):
                 os.unlink(tmp)
             raise
