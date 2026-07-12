@@ -10085,6 +10085,84 @@ def test_pipeline_regroup_no_optin_leaves_scoring_config_untouched(
     )
 
 
+def test_pipeline_regroup_no_optin_preserves_settings_eye_on(
+    tmp_path, monkeypatch,
+):
+    """Reverse-direction guard for the Process-page checkbox flow: when
+    Settings has ``eye_detect_enabled=True`` and the user unchecks the
+    Eye Keypoints checkbox on the Process page, the client must NOT send
+    ``eye_detect_override=false`` — an unchecked box means "skip the
+    stage", not "disable eye scoring". Regroup must fall back to
+    Settings ``True`` so the run scores against existing
+    ``eye_tenengrad`` values instead of silently ignoring them.
+    """
+    import config as cfg
+    import pipeline as pipeline_mod
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    with open(cfg.CONFIG_PATH, "w") as f:
+        json.dump({"pipeline": {"eye_detect_enabled": True}}, f)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    _drop_jpeg(folder_path, "p.jpg")
+    col_id = db.add_collection(
+        "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    monkeypatch.setattr(
+        pipeline_mod, "load_photo_features",
+        lambda *a, **kw: [
+            {"id": pid, "filename": "p.jpg", "timestamp": 1_000_000.0},
+        ],
+    )
+    monkeypatch.setattr(pipeline_mod, "save_results", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        pipeline_mod, "_resolve_collection_photo_ids",
+        lambda db_, cid: {pid},
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "compute_group_fingerprint", lambda *a, **kw: "fp",
+    )
+
+    calls = {"configs": []}
+
+    def fake_run_full_pipeline(photos, config=None, emit_trace=False):
+        calls["configs"].append(dict(config or {}))
+        return {"encounters": [], "photos": [], "summary": {"groups": 0}}
+
+    monkeypatch.setattr(
+        pipeline_mod, "run_full_pipeline", fake_run_full_pipeline,
+    )
+
+    # Skip the stage but leave the override unset — the shape the Process
+    # page now sends when the Eye Keypoints checkbox is off.
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_eye_keypoints=True,
+        skip_regroup=False,
+    )
+    assert params.eye_detect_override is None
+    run_pipeline_job(_make_job(), FakeRunner(), db_path, ws_id, params)
+
+    assert calls["configs"], "run_full_pipeline must be invoked"
+    assert calls["configs"][0].get("eye_detect_enabled") is True, (
+        f"a Process-page run that only skips the eye stage (no explicit "
+        f"eye_detect_override) must let scoring keep Settings' "
+        f"eye_detect_enabled=True: got config={calls['configs'][0]!r}"
+    )
+
+
 def test_detect_eye_keypoints_stage_honors_abort_check(tmp_path, monkeypatch):
     """detect_eye_keypoints_stage must accept an `abort_check` callable and
     break the per-photo loop the first time it returns True. Without this

@@ -2178,13 +2178,19 @@ async function startPipeline() {
   body.skip_eye_keypoints = !eyeKeypointsEnabled;
   body.skip_regroup = !groupEnabled;
 
-  // Explicit per-run signal: the Eye Keypoints checkbox is the user's
-  // opt-in for this run. Send it as ``eye_detect_override`` so the backend
-  // can force ``pipeline_cfg["eye_detect_enabled"]`` accordingly — needed
-  // because the default Settings value is off, and reaching the stage with
-  // ``skip_eye_keypoints=false`` alone (which is also the ``full`` strategy
-  // default) is not proof of user intent.
-  body.eye_detect_override = !!eyeKeypointsEnabled;
+  // Only send ``eye_detect_override`` when the checkbox is CHECKED — an
+  // explicit per-run opt-in that forces ``pipeline_cfg["eye_detect_enabled"]``
+  // on for the run. An unchecked box is not an explicit eye-scoring
+  // opt-out: on a workspace with Settings ``eye_detect_enabled=true``, the
+  // user may simply want to skip the (expensive) stage while still scoring
+  // against existing ``eye_tenengrad``. Sending ``false`` here would
+  // silently disable eye-based scoring on such workspaces and produce
+  // different KEEP/REJECT results than the same server-side strategy /
+  // API path would (which leaves the override ``None``). When unset, the
+  // backend falls back to workspace Settings.
+  if (eyeKeypointsEnabled) {
+    body.eye_detect_override = true;
+  }
 
   // Classification options (only if enabled)
   if (classifyEnabled) {
@@ -4078,11 +4084,17 @@ function _buildPlanBody() {
   body.skip_eye_keypoints  = !document.getElementById('enableEyeKeypoints').checked;
   body.skip_regroup        = !document.getElementById('enableGroup').checked;
 
-  // Mirror startPipeline: send the checkbox state as ``eye_detect_override``
-  // so the plan pill matches what the job would actually do — otherwise
-  // opting in on a default-off workspace still renders "Will skip —
-  // Disabled in config".
-  body.eye_detect_override = !!document.getElementById('enableEyeKeypoints').checked;
+  // Mirror startPipeline: only send ``eye_detect_override`` when the
+  // checkbox is CHECKED. An unchecked box means "skip the eye stage"
+  // and does NOT imply "disable eye scoring" — on a workspace with
+  // Settings ``eye_detect_enabled=true`` the plan must still reflect
+  // Settings for regroup, otherwise the plan would show a different
+  // outcome (e.g. no ``eye_override_differs``) than the workspace would
+  // produce via any non-Process-page path. Sending ``false`` here
+  // caused the plan to silently disable eye scoring on such workspaces.
+  if (document.getElementById('enableEyeKeypoints').checked) {
+    body.eye_detect_override = true;
+  }
 
   // Mirror the strategy field startPipeline() sends so /api/pipeline/plan
   // expands the preset with the same rules /api/jobs/pipeline does. The
