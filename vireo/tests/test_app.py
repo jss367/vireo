@@ -627,7 +627,7 @@ def test_storage_page_has_health_cleanup_and_location_controls(app_and_db):
         b'storageFreeSize', b'storageReclaimableSize', b'clearSafeCaches',
         b'openStorageFolder', b'refreshStoragePage', b'Safe to clear',
         b'Download again', b'cannot currently be reclaimed separately',
-        b'loadMasksCard(s.masks)',
+        b'loadMasksCard(s && s.masks)',
     ):
         assert marker in page.data
     assert page.data.count(b"{name: 'Database'") == 1

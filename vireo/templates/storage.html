@@ -400,7 +400,7 @@ async function loadStoragePanel() {
   } catch(e) {
     document.getElementById('storageGrid').innerHTML = '<span style="color:var(--danger);font-size:12px;">Failed to load storage info</span>';
   }
-  await loadMasksCard(s.masks);
+  await loadMasksCard(s && s.masks);
 }
 
 async function refreshStoragePage() {
