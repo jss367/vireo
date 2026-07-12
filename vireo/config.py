@@ -493,35 +493,59 @@ def migrate_default_strategy_to_process_id(db):
     ``_migrations_applied`` so it runs at most once per install; a user who
     later manually adds ``default_strategy`` back is not silently rewritten.
     """
+    import sqlite3
+
     import process_strategies as ps
     with _lock:
         raw = _read_raw()
         applied = _migrations_applied(raw)
         if MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID in applied:
             return False
-        rewrote = False
         pipeline = raw.get("pipeline")
-        if isinstance(pipeline, dict) and "default_strategy" in pipeline:
-            old = pipeline.pop("default_strategy")
-            seed_name = (
-                ps.LEGACY_STRATEGY_NAMES.get(old)
-                if isinstance(old, str) else None
-            )
-            pid = None
-            if seed_name is not None:
-                rows = db.conn.execute(
-                    "SELECT id FROM saved_processes WHERE name = ?",
-                    (seed_name,),
-                ).fetchall()
-                if rows:
-                    pid = rows[0]["id"]
-            if pid is not None:
-                pipeline["default_process_id"] = pid
-            rewrote = True
+        if not (isinstance(pipeline, dict) and "default_strategy" in pipeline):
+            # Nothing legacy to migrate — stamp so we don't re-check every
+            # boot. No saved_processes access needed on this (possibly
+            # schema-uninitialized) connection.
+            applied.append(MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID)
+            raw["_migrations_applied"] = applied
+            save(raw)
+            return False
+        # A legacy key is present and must be resolved against the seeded
+        # saved_processes table. create_app opens its startup ``init_db`` with
+        # ``initialize_schema=False``, so on the first boot after an upgrade
+        # this can run before any schema-initializing handle created/seeded
+        # the table. Defer WITHOUT stamping (and without dropping the legacy
+        # key) so a later boot completes the migration once a request-path
+        # Database has seeded the table — instead of crashing startup with
+        # "no such table: saved_processes".
+        try:
+            seeded = db.conn.execute(
+                "SELECT id FROM saved_processes WHERE name = ?",
+                (ps.DEFAULT_SEED_NAME,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return False
+        if seeded is None:
+            return False
+        old = pipeline.pop("default_strategy")
+        seed_name = (
+            ps.LEGACY_STRATEGY_NAMES.get(old)
+            if isinstance(old, str) else None
+        )
+        pid = None
+        if seed_name is not None:
+            rows = db.conn.execute(
+                "SELECT id FROM saved_processes WHERE name = ?",
+                (seed_name,),
+            ).fetchall()
+            if rows:
+                pid = rows[0]["id"]
+        if pid is not None:
+            pipeline["default_process_id"] = pid
         applied.append(MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID)
         raw["_migrations_applied"] = applied
         save(raw)
-        return rewrote
+        return True
 
 
 def get_editors():

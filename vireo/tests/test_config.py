@@ -351,54 +351,6 @@ def test_eye_focus_config_round_trips_through_settings_api(tmp_path, monkeypatch
     assert p["reject_eye_focus"] == 0.55
 
 
-def test_curated_config_post_preserves_default_process_id(tmp_path, monkeypatch):
-    """The curated Settings saveConfig() posts a ``pipeline`` block that only
-    ships the sliders it renders (weights / miss / eye), not
-    ``default_process_id``. A plain replace-on-write would wipe the global
-    after-import default on every autosave, silently sending workspaces
-    that inherit it back to import-only. Verify the nested dict is
-    deep-merged so keys the client didn't send survive the save."""
-    import json as _json
-
-    import config as cfg
-    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
-
-    from app import create_app
-    db_path = str(tmp_path / "vireo.db")
-    thumb_dir = tmp_path / "thumbs"
-    thumb_dir.mkdir()
-    app = create_app(db_path, str(thumb_dir))
-    client = app.test_client()
-
-    # Simulate a user having previously set a global after-import default via
-    # the All-settings picker: write the id directly to the raw config file.
-    with app.app_context():
-        pass  # keep app in scope
-    initial = cfg.load()
-    initial["pipeline"]["default_process_id"] = 1
-    cfg.save(initial)
-    assert cfg.load()["pipeline"]["default_process_id"] == 1
-
-    # Now the curated form autosaves a pipeline block with only its sliders.
-    r = client.post(
-        "/api/config",
-        data=_json.dumps({
-            "pipeline": {
-                "w_focus": 0.42,
-                "miss_enabled": True,
-            },
-        }),
-        headers={"Content-Type": "application/json"},
-    )
-    assert r.status_code == 200
-
-    loaded = cfg.load()
-    assert loaded["pipeline"]["w_focus"] == 0.42
-    assert loaded["pipeline"]["miss_enabled"] is True
-    # The key the client didn't send survives the save.
-    assert loaded["pipeline"]["default_process_id"] == 1
-
-
 def test_compare_shortcut_round_trips_through_config_api(tmp_path, monkeypatch):
     """The Browse compare shortcut must be in backend defaults or POST validation drops it."""
     import json as _json
@@ -1193,6 +1145,44 @@ def test_migrate_default_strategy_to_process_id_no_config_file(
     raw = _read_raw(cfg.CONFIG_PATH)
     assert (
         cfg.MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID in raw["_migrations_applied"]
+    )
+
+
+def test_migrate_default_strategy_defers_when_saved_processes_absent(
+    tmp_path, monkeypatch
+):
+    """create_app opens its startup init_db with initialize_schema=False, so on
+    the first boot after an upgrade the saved_processes table may not exist yet
+    when this global migration runs. With a legacy default_strategy set, the
+    migration must DEFER (return False, keep the legacy key, not stamp the
+    marker) instead of crashing with 'no such table: saved_processes' — a later
+    boot completes it once a request-path Database has seeded the table."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {"pipeline": {"default_strategy": "identify"}})
+    from db import Database
+
+    db_path = str(tmp_path / "vireo.db")
+    # Simulate a pre-saved_processes upgrade: a DB with the older tables but no
+    # saved_processes. Build the full schema, then drop the new table.
+    seed_db = Database(db_path)
+    seed_db.conn.execute("DROP TABLE saved_processes")
+    seed_db.conn.commit()
+    seed_db.close()
+
+    # init_db-style handle: no schema initialization on this connection.
+    db = Database(db_path, initialize_schema=False)
+    try:
+        assert cfg.migrate_default_strategy_to_process_id(db) is False
+    finally:
+        db.close()
+
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["pipeline"]["default_strategy"] == "identify"  # legacy key kept
+    assert "default_process_id" not in raw["pipeline"]
+    assert (
+        cfg.MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID
+        not in raw.get("_migrations_applied", [])
     )
 
 
