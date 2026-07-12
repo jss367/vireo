@@ -327,23 +327,28 @@ def test_pipeline_failed_status_clears_running_pill(live_server, page):
     expect(page.locator("#pillClassify")).not_to_contain_text("Running")
 
 
-def test_pipeline_eye_keypoints_pill_will_run_by_default(live_server, page):
-    """SuperAnimal weights are auto-downloaded by pipeline_job on first run,
-    so the pill defaults to 'Will run' even on a fresh fixture with no
-    keypoint models on disk — the user is no longer expected to click a
-    Download button before starting the pipeline."""
+def test_pipeline_eye_keypoints_pill_will_skip_by_default(live_server, page):
+    """Eye-keypoint detection is opt-in, so a fresh fixture skips it.
+
+    Model readiness does not control this state: SuperAnimal weights are
+    downloaded automatically if the user explicitly enables the stage.
+    """
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
-    expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will run")
+    expect(page.locator("#enableEyeKeypoints")).not_to_be_checked()
+    expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will skip")
 
 
 def test_pipeline_eye_keypoints_toggle_off_marks_will_skip(live_server, page):
-    """Unchecking the Eye Keypoints enable checkbox flips its pill to
-    'Will skip' without affecting Group, which doesn't depend on it."""
+    """Explicitly enabling then disabling Eye Keypoints updates its pill.
+
+    Group remains runnable because it does not depend on eye keypoints.
+    """
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
-    expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will run")
     page.click("#card-eyekeypoints .stage-header")
+    page.check("#enableEyeKeypoints")
+    expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will run")
     page.uncheck("#enableEyeKeypoints")
     expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will skip")
     # Group does not depend on eye keypoints — it must still be runnable.
