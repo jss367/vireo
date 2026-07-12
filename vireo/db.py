@@ -10541,19 +10541,71 @@ class Database:
         if _commit:
             self.conn.commit()
 
-    def clear_species_representative(self, species, _commit=True):
-        """Clear all representative photos for a species globally."""
+    def _species_representative_keys_for_canonical(self, species):
+        """Return stored representative species keys matching a canonical name."""
+        canonical = self.canonical_species_name(species)
+        rows = self.conn.execute(
+            "SELECT DISTINCT species FROM species_representatives",
+        ).fetchall()
+        keys = [
+            row["species"] for row in rows
+            if self.canonical_species_name(row["species"]) == canonical
+        ]
+        if canonical not in keys:
+            keys.append(canonical)
+        return canonical, keys
+
+    def _photo_preference_keys_for_canonical(self, species, purposes):
+        """Return workspace-scoped preference species keys matching a canonical name."""
+        canonical = self.canonical_species_name(species)
         ws = self._ws_id()
-        self.conn.execute(
-            "DELETE FROM species_representatives WHERE species = ?",
-            (species,),
+        purposes = tuple(purposes)
+        purpose_placeholders = ",".join("?" for _ in purposes)
+        rows = self.conn.execute(
+            f"""SELECT DISTINCT species
+                FROM photo_preferences
+                WHERE workspace_id = ?
+                  AND purpose IN ({purpose_placeholders})""",
+            (ws, *purposes),
+        ).fetchall()
+        keys = [
+            row["species"] for row in rows
+            if self.canonical_species_name(row["species"]) == canonical
+        ]
+        if canonical not in keys:
+            keys.append(canonical)
+        return canonical, keys
+
+    def clear_species_representative(self, species, _commit=True):
+        """Clear all representative photos for a species globally.
+
+        Removes rows keyed under any casing that canonicalizes to the
+        requested species, so upgraded databases with legacy classifier
+        casing (e.g. ``Common Waxbill``) are cleared alongside the
+        canonical spelling (``Common waxbill``).
+        """
+        ws = self._ws_id()
+        purposes = ("species_representative", "life_list", "highlights")
+        _canonical_r, rep_keys = self._species_representative_keys_for_canonical(
+            species
         )
+        _canonical_p, pref_keys = self._photo_preference_keys_for_canonical(
+            species, purposes
+        )
+        rep_placeholders = ",".join("?" for _ in rep_keys)
         self.conn.execute(
-            """DELETE FROM photo_preferences
+            f"""DELETE FROM species_representatives
+                WHERE species IN ({rep_placeholders})""",
+            tuple(rep_keys),
+        )
+        pref_placeholders = ",".join("?" for _ in pref_keys)
+        purpose_placeholders = ",".join("?" for _ in purposes)
+        self.conn.execute(
+            f"""DELETE FROM photo_preferences
                WHERE workspace_id = ?
-                 AND species = ?
-                 AND purpose IN ('species_representative', 'life_list', 'highlights')""",
-            (ws, species),
+                 AND species IN ({pref_placeholders})
+                 AND purpose IN ({purpose_placeholders})""",
+            (ws, *pref_keys, *purposes),
         )
         if _commit:
             self.conn.commit()

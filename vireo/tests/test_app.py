@@ -8607,6 +8607,56 @@ def test_highlights_endpoint_picks_newest_representative_across_casing(app_and_d
     assert bucket["photos"][0]["id"] == canonical_pid
 
 
+def test_photo_preferences_clear_removes_legacy_cased_representative(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/wax-clear', 'wax', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Common waxbill', 'taxonomy', 1)"
+    )
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'rep.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.execute(
+        """INSERT INTO species_representatives
+                 (species, photo_id, selected_order)
+             VALUES ('Common Waxbill', ?, 1)""",
+        (pid,),
+    )
+    db.conn.execute(
+        """INSERT INTO photo_preferences
+                 (workspace_id, purpose, species, photo_id)
+             VALUES (?, 'species_representative', 'Common Waxbill', ?)""",
+        (db._ws_id(), pid),
+    )
+    db.conn.commit()
+
+    resp = client.delete(
+        "/api/photo-preferences",
+        json={"purpose": "species_representative", "species": "Common waxbill"},
+    )
+    assert resp.status_code == 200
+
+    reps = db.conn.execute(
+        "SELECT COUNT(*) AS count FROM species_representatives"
+    ).fetchone()
+    assert reps["count"] == 0
+    prefs = db.conn.execute(
+        "SELECT COUNT(*) AS count FROM photo_preferences "
+        "WHERE purpose = 'species_representative'"
+    ).fetchone()
+    assert prefs["count"] == 0
+
+
 def test_highlights_confirmation_filter_splits_confirmed_and_unconfirmed(app_and_db):
     app, db = app_and_db
     client = app.test_client()
