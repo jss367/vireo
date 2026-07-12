@@ -473,6 +473,28 @@ def test_generate_thumbnail_accepts_near_full_raw_active_area(tmp_path, monkeypa
     assert result == str(tmp_path / "thumbs" / "1.jpg")
 
 
+def test_generate_thumbnail_accepts_unknown_min_source_size(tmp_path, monkeypatch):
+    """A photo row missing width/height feeds (0, 0) into min_source_size via
+    _scaled_recipe_source_dimensions. The gate must not reject an otherwise-
+    successfully-decoded thumbnail just because the expected dims are unknown
+    — that regresses legacy/unsupported-RAW libraries with no usable JPEG
+    fallback back to permanently thumbnail-less.
+    """
+    import thumbnails as thumbnails_mod
+
+    monkeypatch.setattr(
+        thumbnails_mod, "load_image",
+        lambda *args, **kwargs: Image.new("RGB", (800, 600), "red"),
+    )
+
+    result = thumbnails_mod.generate_thumbnail(
+        1, str(tmp_path / "photo.NEF"), str(tmp_path / "thumbs"),
+        min_source_size=(0, 0),
+    )
+
+    assert result == str(tmp_path / "thumbs" / "1.jpg")
+
+
 def test_generate_thumbnail_rejects_truncated_raw_preview(tmp_path, monkeypatch):
     import thumbnails as thumbnails_mod
 

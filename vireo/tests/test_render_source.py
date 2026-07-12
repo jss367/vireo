@@ -60,6 +60,22 @@ def test_thumbnail_tolerance_accepts_near_full_nikon_active_area():
     assert rs.is_undersized(5392, 3592, 5408, 3608) is True
 
 
+def test_thumbnail_tolerance_unknown_expected_is_acceptable():
+    # Photo rows with missing width/height feed (0, 0) into the thumbnail gate
+    # via _scaled_recipe_source_dimensions. Match is_undersized's pass-through
+    # so an otherwise-decoded thumbnail is not rejected as undersized.
+    assert rs.thumbnail_source_dimensions_are_acceptable(
+        800, 600, 0, 0,
+    ) is True
+    assert rs.thumbnail_source_dimensions_are_acceptable(
+        800, 600, 6000, 0,
+    ) is True
+    # A broken image (0-sized) is still unacceptable regardless of expected.
+    assert rs.thumbnail_source_dimensions_are_acceptable(
+        0, 0, 0, 0,
+    ) is False
+
+
 def test_thumbnail_tolerance_rejects_large_or_misshapen_shortfalls():
     # More than the 32px absolute ceiling, despite remaining within 1%.
     assert rs.thumbnail_source_dimensions_are_acceptable(

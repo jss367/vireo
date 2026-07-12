@@ -206,9 +206,16 @@ def thumbnail_source_dimensions_are_acceptable(
     a small relative shortfall, a small absolute shortfall, and a stable
     aspect ratio. Full-resolution preview/export paths intentionally keep
     using :func:`is_undersized` instead of this thumbnail-only policy.
+
+    When the expected dimensions are unknown (<= 0), returns True so callers
+    match :func:`is_undersized`'s pass-through semantic — a photo row missing
+    ``width``/``height`` should not cause an otherwise-decoded thumbnail to
+    be rejected. A broken image (width/height <= 0) is still unacceptable.
     """
-    if expected_w <= 0 or expected_h <= 0 or width <= 0 or height <= 0:
+    if width <= 0 or height <= 0:
         return False
+    if expected_w <= 0 or expected_h <= 0:
+        return True
     if width >= expected_w and height >= expected_h:
         return True
 
