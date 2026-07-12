@@ -295,6 +295,108 @@ def test_migration_folds_general_variant_alongside_clean_general_homonym(tmp_pat
         db.close()
 
 
+def test_migration_preserves_variant_species_general_alongside_individual(tmp_path):
+    """A variant 'general' row that carries the legacy species flag
+    (``type='general', is_species=1``) must NOT be folded into a
+    non-taxonomy specific-type peer: _merge_keyword_into's
+    ``leaks_species_into_nontaxonomy`` branch would clear the species
+    flag on the destination, so every photo previously tagged with the
+    legacy species row would silently drop out of species/life-list
+    filters. At the top level, SQLite treats NULL parents as distinct
+    for UNIQUE(name, parent_id), so the disambiguating rename can bring
+    the variant onto its clean spelling without colliding with the
+    individual peer."""
+    db, _ws_id, p1, p2 = _make_db(tmp_path)
+    try:
+        variant_species_id = _insert_keyword(
+            db, "‘Robin", "general", is_species=1
+        )
+        individual_id = _insert_keyword(db, "Robin", "individual")
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (p1, variant_species_id),
+        )
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (p2, individual_id),
+        )
+        db.conn.commit()
+
+        db._normalize_keyword_data_once()
+        db.conn.commit()
+
+        rows = db.conn.execute(
+            "SELECT id, name, type, is_species FROM keywords "
+            "WHERE name = 'Robin' ORDER BY type"
+        ).fetchall()
+        # Both rows survive with the clean spelling; each keeps its
+        # metadata and its own photo tag. Critically, the species flag
+        # on the legacy general row is preserved so species/life-list
+        # queries still surface p1's photo.
+        assert [(r["id"], r["type"], r["is_species"]) for r in rows] == [
+            (variant_species_id, "general", 1),
+            (individual_id, "individual", 0),
+        ]
+        variant_tags = {
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+                (variant_species_id,),
+            )
+        }
+        individual_tags = {
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+                (individual_id,),
+            )
+        }
+        assert variant_tags == {p1}
+        assert individual_tags == {p2}
+    finally:
+        db.close()
+
+
+def test_migration_folds_variant_species_general_into_taxonomy_peer(tmp_path):
+    """A variant species-bearing general still folds into a same-slot
+    taxonomy peer — that's a species-to-species merge, the species flag
+    survives, and the fold resolves the imminent name collision."""
+    db, _ws_id, p1, p2 = _make_db(tmp_path)
+    try:
+        variant_species_id = _insert_keyword(
+            db, "‘Robin", "general", is_species=1
+        )
+        taxonomy_id = _insert_keyword(db, "Robin", "taxonomy", is_species=1)
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (p1, variant_species_id),
+        )
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (p2, taxonomy_id),
+        )
+        db.conn.commit()
+
+        db._normalize_keyword_data_once()
+        db.conn.commit()
+
+        rows = db.conn.execute(
+            "SELECT id, name, type, is_species FROM keywords "
+            "WHERE name = 'Robin'"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["id"] == taxonomy_id
+        assert rows[0]["type"] == "taxonomy"
+        assert rows[0]["is_species"] == 1
+        tagged = {
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+                (taxonomy_id,),
+            )
+        }
+        assert tagged == {p1, p2}
+    finally:
+        db.close()
+
+
 def test_migration_cross_type_child_collision_disambiguates_variant(tmp_path):
     """Under a non-NULL parent, UNIQUE(name, parent_id) blocks renaming a
     variant onto a clean name a different-type sibling already holds. The

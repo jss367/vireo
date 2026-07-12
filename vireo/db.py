@@ -9534,7 +9534,7 @@ class Database:
         while True:
             grouped = {}
             for row in self.conn.execute(
-                "SELECT id, name, parent_id, type FROM keywords"
+                "SELECT id, name, parent_id, type, is_species FROM keywords"
             ).fetchall():
                 key = keyword_match_key(row["name"])
                 if not key:
@@ -9564,15 +9564,42 @@ class Database:
                     # parent — they still ARE duplicates by NOCASE and
                     # should merge) but do not cross into the specific
                     # types.
+                    #
+                    # Species-bearing variant generals (legacy
+                    # `type='general', is_species=1` rows on upgraded DBs)
+                    # get their own further split: folding one into a
+                    # non-taxonomy specific-type subgroup triggers
+                    # _merge_keyword_into's `leaks_species_into_nontaxonomy`
+                    # branch, which clears the species flag on the
+                    # destination — silently dropping every photo already
+                    # tagged with that legacy row out of species/life-list
+                    # filters. Route them to the taxonomy subgroup when
+                    # present; otherwise keep them in their own subgroup
+                    # so the disambiguating rename below preserves their
+                    # species identity (top-level parent_id IS NULL rows
+                    # can coexist because SQLite treats NULL parents as
+                    # distinct for UNIQUE(name, parent_id); non-NULL
+                    # parents fall back to a `<clean> (id-<id>)` name).
                     variant_generals = [
                         r for r in generals
                         if normalize_keyword_display(r["name"]) != r["name"]
+                    ]
+                    species_variant_generals = [
+                        r for r in variant_generals if r["is_species"] == 1
+                    ]
+                    plain_variant_generals = [
+                        r for r in variant_generals if r["is_species"] != 1
                     ]
                     clean_generals = [
                         r for r in generals
                         if normalize_keyword_display(r["name"]) == r["name"]
                     ]
-                    subgroups[0] += variant_generals
+                    subgroups[0] += plain_variant_generals
+                    if species_variant_generals:
+                        if specific_types[0] == "taxonomy":
+                            subgroups[0] += species_variant_generals
+                        else:
+                            subgroups.append(species_variant_generals)
                     if clean_generals:
                         subgroups.append(clean_generals)
                 else:
