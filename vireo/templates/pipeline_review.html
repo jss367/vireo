@@ -4525,6 +4525,68 @@ function grmSeedFromDbState(dbPhotos, items, selectPhotoId) {
   grmUpdateApplyLabel();
 }
 
+function grmSyncSelectionClasses() {
+  var selectedIds = grmState && grmState.selectedIds ? grmState.selectedIds : new Set();
+  document.querySelectorAll('#grmOverlay .grm-card[data-photo-id]').forEach(function(card) {
+    var id = card.getAttribute('data-photo-id');
+    card.classList.toggle(
+      'selected',
+      selectedIds.has(parseInt(id, 10)) || selectedIds.has(id)
+    );
+  });
+}
+
+function grmZonePlaceholder(text) {
+  var span = document.createElement('span');
+  span.style.cssText = 'font-size:12px;color:var(--text-ghost);';
+  span.textContent = text;
+  return span;
+}
+
+function grmSyncZoneCards() {
+  if (!grmState) return;
+  var zones = { picks: [], candidates: [], rejects: [] };
+  var visible = {};
+  _grmVisibleItems().forEach(function(p) {
+    var id = String(p.id);
+    visible[id] = true;
+    if (grmState.picks.has(p.id)) zones.picks.push(id);
+    else if (grmState.rejects.has(p.id)) zones.rejects.push(id);
+    else zones.candidates.push(id);
+  });
+
+  var cardById = {};
+  document.querySelectorAll('#grmOverlay .grm-card[data-photo-id]').forEach(function(card) {
+    var id = card.getAttribute('data-photo-id');
+    if (visible[id]) cardById[id] = card;
+    else card.remove();
+  });
+
+  function syncStrip(stripId, ids, emptyText) {
+    var strip = document.getElementById(stripId);
+    if (!strip) return;
+    Array.from(strip.children).forEach(function(child) {
+      if (!child.classList || !child.classList.contains('grm-card')) child.remove();
+    });
+    ids.forEach(function(id) {
+      var card = cardById[id];
+      if (card) strip.appendChild(card);
+    });
+    if (!ids.length) strip.appendChild(grmZonePlaceholder(emptyText));
+  }
+
+  syncStrip('grmPicks', zones.picks, 'Press ↑ to add picks');
+  syncStrip('grmCandidates', zones.candidates, 'All sorted');
+  syncStrip('grmRejects', zones.rejects, 'Press ↓ to reject');
+
+  document.getElementById('grmCount').textContent =
+    zones.picks.length + ' picks, ' + zones.rejects.length + ' rejects, ' +
+    zones.candidates.length + ' unsorted';
+  grmSyncSelectionClasses();
+  grmRefreshResetAllVisibility();
+  grmUpdateApplyLabel();
+}
+
 function closeGroupReview() {
   document.getElementById('grmOverlay').classList.remove('open');
   _grmOffsets = {};
@@ -4898,32 +4960,8 @@ function grmSelect(photoId, mode) {
       grmState.selectionAnchor = photoId;
     }
   }
-  renderGroupModal();
-
-  // Update loupe preview
-  var loupeImg = document.getElementById('grmLoupePhoto');
-  var loupeInfo = document.getElementById('grmLoupeInfo');
-  var detailEl = document.getElementById('grmLoupeDetail');
-
-  if (grmState.selected) {
-    loupeImg.src = grmPhotoUrl(grmState.selected);
-    _grmAfterLoupeSourceChange();
-    var photo = grmState.items.find(function(p) { return p.id === grmState.selected; });
-    if (photo) {
-      var sharp = photo.subject_tenengrad != null ? Math.round(photo.subject_tenengrad) : '?';
-      var boxSharp = photo.box_sharpness != null ? ' - box sharpness: ' + Math.round(photo.box_sharpness) : '';
-      loupeInfo.textContent = (photo.filename || '') + ' - sharpness: ' + sharp + boxSharp + ' - move cursor to compare';
-
-      // Render pipeline metadata in detail panel
-      detailEl.innerHTML = buildPipelineMetadataHtml(photo);
-    }
-    grmUpdateResLabel();
-  } else {
-    loupeImg.removeAttribute('src');
-    loupeInfo.textContent = 'Select a photo to preview. Hover to compare sharpness across all frames.';
-    detailEl.innerHTML = '';
-    grmLoupeReset();
-  }
+  grmSyncSelectionClasses();
+  grmRefreshSelectedLoupe();
 }
 
 function grmRefreshSelectedLoupe() {
@@ -4933,8 +4971,11 @@ function grmRefreshSelectedLoupe() {
   if (!loupeImg || !loupeInfo || !detailEl) return;
 
   if (grmState.selected) {
-    loupeImg.src = grmPhotoUrl(grmState.selected);
-    _grmAfterLoupeSourceChange();
+    var nextSrc = grmPhotoUrl(grmState.selected);
+    if (loupeImg.getAttribute('src') !== nextSrc) {
+      loupeImg.src = nextSrc;
+      _grmAfterLoupeSourceChange();
+    }
     var photo = grmState.items.find(function(p) { return p.id === grmState.selected; });
     if (photo) {
       var sharp = photo.subject_tenengrad != null ? Math.round(photo.subject_tenengrad) : '?';
@@ -5764,7 +5805,7 @@ function grmMoveUp() {
       grmState.picks.add(photoId);
     }
   });
-  renderGroupModal();
+  grmSyncZoneCards();
 }
 
 function grmMoveDown() {
@@ -5779,7 +5820,7 @@ function grmMoveDown() {
       grmState.rejects.add(photoId);
     }
   });
-  renderGroupModal();
+  grmSyncZoneCards();
 }
 
 function grmMovePick() {
@@ -5790,7 +5831,7 @@ function grmMovePick() {
     grmState.rejects.delete(photoId);
     grmState.picks.add(photoId);
   });
-  renderGroupModal();
+  grmSyncZoneCards();
 }
 
 function grmMoveReject() {
@@ -5801,7 +5842,7 @@ function grmMoveReject() {
     grmState.picks.delete(photoId);
     grmState.rejects.add(photoId);
   });
-  renderGroupModal();
+  grmSyncZoneCards();
 }
 
 function grmMoveCandidate() {
@@ -5812,7 +5853,7 @@ function grmMoveCandidate() {
     grmState.picks.delete(photoId);
     grmState.rejects.delete(photoId);
   });
-  renderGroupModal();
+  grmSyncZoneCards();
 }
 
 function grmRemoveFromGroup() {
@@ -5828,8 +5869,8 @@ function grmRemoveFromGroup() {
   grmState.selected = null;
   if (grmState.selectedIds) grmState.selectedIds.clear();
   grmState.selectionAnchor = null;
-  renderGroupModal();
-  document.getElementById('grmLoupeDetail').innerHTML = '';
+  grmSyncZoneCards();
+  grmRefreshSelectedLoupe();
 }
 
 /* --- Keyboard handling --- */
@@ -5902,7 +5943,7 @@ document.addEventListener('contextmenu', function(e) {
       grmState.selectedIds = new Set([pid]);
     }
     grmState.selectionAnchor = pid;
-    renderGroupModal();
+    grmSyncSelectionClasses();
     // Keep the right-hand loupe in sync with the newly selected card so it
     // doesn't stay on the previous photo if the user dismisses the menu.
     if (prevSelected !== pid && typeof grmRefreshSelectedLoupe === 'function') {
