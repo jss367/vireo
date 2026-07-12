@@ -2683,6 +2683,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     init_db.migrate_default_subject_collection()
     init_db.migrate_default_needs_identification_collection()
     init_db.migrate_default_location_collections()
+    # One-shot keyword-name normalization backfill. Database.__init__ only
+    # runs it when initialize_schema=True, and every file-backed connection
+    # this app opens — including this startup init_db and every per-request
+    # connection at `_get_db` — passes initialize_schema=False. Without an
+    # explicit run here, an upgraded DB can serve requests with `‘apapane`-
+    # style variant rows still present until some background job happens
+    # to construct a full `Database()` (initialize_schema=True); in that
+    # window an add/rename can miss the legacy row and create duplicate
+    # tags or stale XMP. The method is idempotent (db_meta-gated) so
+    # subsequent boots are a cheap SELECT.
+    init_db.normalize_keyword_data()
     # One-time rewrite of the previous miss-threshold defaults (0.25 / 0.15)
     # to the new defaults (0.20 / 0.12) in both ~/.vireo/config.json and
     # workspace overrides. Gated by a marker so it runs once; re-saved

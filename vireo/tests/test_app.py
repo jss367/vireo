@@ -5507,6 +5507,79 @@ def test_create_app_runs_wildlife_backfill_synchronously_on_first_boot(tmp_path,
     db2.close()
 
 
+def test_create_app_runs_keyword_normalization_migration_on_file_db(
+    tmp_path, monkeypatch,
+):
+    """Regression: create_app must run the one-shot keyword-name
+    normalization migration on the startup connection for a file-backed
+    database. Database.__init__ only runs it when initialize_schema=True,
+    and every connection this app opens (startup init_db and every
+    per-request _get_db) passes initialize_schema=False, so without an
+    explicit run in create_app upgraded DBs could serve requests with
+    ‘apapane-style variant rows still present.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    import models
+    from app import create_app
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"))
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+
+    db_path = str(tmp_path / "test.db")
+    thumb_dir = str(tmp_path / "thumbs")
+    os.makedirs(thumb_dir)
+
+    # Seed a legacy edge-quote variant keyword row that the write-side
+    # normalization would reject at runtime; only the migration can heal
+    # it. Insert via raw SQL to bypass add_keyword's normalization.
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    db.conn.execute("DELETE FROM db_meta WHERE key = 'keyword_names_normalized'")
+    kid = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES (?, NULL, 1, 'taxonomy')",
+        ("‘apapane",),
+    ).lastrowid
+    db.conn.commit()
+    assert db.get_meta("keyword_names_normalized") != "1", (
+        "Pre-condition: normalization marker should be unset before create_app"
+    )
+    db.close()
+
+    fake_tax = MagicMock()
+    fake_tax.lookup.return_value = None
+
+    with patch("taxonomy.load_local_taxonomy", return_value=fake_tax):
+        app = create_app(
+            db_path=db_path, thumb_cache_dir=thumb_dir, api_token="test",
+        )
+        assert app is not None
+
+    # After create_app returns, the seeded variant row must have been
+    # normalized in place and the marker set.
+    db2 = Database(db_path, initialize_schema=False)
+    row = db2.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row is not None
+    assert row["name"] == "apapane", (
+        "create_app must normalize legacy variant keyword names before "
+        "serving requests, but the '‘apapane' row is still stored verbatim."
+    )
+    assert db2.get_meta("keyword_names_normalized") == "1", (
+        "keyword_names_normalized marker must be set after create_app "
+        "runs the one-shot migration synchronously."
+    )
+    db2.close()
+
+
 def test_add_keyword_route_does_not_clobber_existing_individual_type(app_and_db):
     """Regression: POST /api/photos/<id>/keywords with type='taxonomy' for a
     keyword that already exists as 'individual' must not silently rewrite
