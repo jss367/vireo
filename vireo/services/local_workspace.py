@@ -257,7 +257,25 @@ def _copy_directory_structure(source_root: str, local_root: str) -> None:
         dirnames[:] = [name for name in dirnames if not os.path.islink(os.path.join(dirpath, name))]
 
 
-def _root_records(db, workspace_id: int, local_base: Path) -> tuple[list[dict], list[dict]]:
+def _other_manifest_source_roots(vireo_dir: str, workspace_id: int) -> list[str]:
+    roots = []
+    manifests_dir = Path(vireo_dir) / "local-workspaces"
+    if not manifests_dir.is_dir():
+        return roots
+    for child in manifests_dir.iterdir():
+        try:
+            other_workspace_id = int(child.name)
+        except ValueError:
+            continue
+        if other_workspace_id == workspace_id:
+            continue
+        manifest = _load_manifest(vireo_dir, other_workspace_id)
+        if manifest:
+            roots.extend(root["source_path"] for root in manifest.get("roots", []))
+    return roots
+
+
+def _root_records(db, workspace_id: int, local_base: Path, vireo_dir: str) -> tuple[list[dict], list[dict]]:
     roots = [dict(row) for row in db.get_workspace_folder_roots(workspace_id)]
     folders = [dict(row) for row in db.get_workspace_folders(workspace_id)]
     if not roots:
@@ -269,12 +287,16 @@ def _root_records(db, workspace_id: int, local_base: Path) -> tuple[list[dict], 
             if _is_within(other, path):
                 raise LocalWorkspaceError("Workspace roots overlap; remove the nested root before working locally")
 
-    folder_ids = [row["id"] for row in folders]
-    placeholders = ",".join("?" for _ in folder_ids)
     shared = db.conn.execute(
-        f"SELECT f.path FROM workspace_folders wf JOIN folders f ON f.id=wf.folder_id "
-        f"WHERE wf.folder_id IN ({placeholders}) AND wf.workspace_id != ? LIMIT 1",
-        [*folder_ids, workspace_id],
+        """SELECT f.path
+           FROM workspace_folders current_wf
+           JOIN workspace_folders other_wf
+             ON other_wf.folder_id = current_wf.folder_id
+            AND other_wf.workspace_id != current_wf.workspace_id
+           JOIN folders f ON f.id = current_wf.folder_id
+           WHERE current_wf.workspace_id = ?
+           LIMIT 1""",
+        (workspace_id,),
     ).fetchone()
     if shared:
         raise LocalWorkspaceError(
@@ -294,11 +316,13 @@ def _root_records(db, workspace_id: int, local_base: Path) -> tuple[list[dict], 
            WHERE wf.workspace_id != ? AND wf.is_root = 1""",
         (workspace_id,),
     ).fetchall()
+    other_root_paths = {row["path"] for row in other_roots}
+    other_root_paths.update(_other_manifest_source_roots(vireo_dir, workspace_id))
     for folder in folders:
-        for other_root in other_roots:
-            if _is_within(folder["path"], other_root["path"]) or _is_within(other_root["path"], folder["path"]):
+        for other_root_path in other_root_paths:
+            if _is_within(folder["path"], other_root_path) or _is_within(other_root_path, folder["path"]):
                 raise LocalWorkspaceError(
-                    f"Folder overlaps a root used by another workspace: {other_root['path']}. "
+                    f"Folder overlaps a root used by another workspace: {other_root_path}. "
                     "Remove the overlapping folder there before working locally."
                 )
 
@@ -348,7 +372,7 @@ def stage_workspace(db, workspace_id: int, vireo_dir: str, *, progress=None, can
             raise LocalWorkspaceError("This workspace is already staged locally")
 
         base = workspace_dir(vireo_dir, workspace_id)
-        roots, folders = _root_records(db, workspace_id, base / "files")
+        roots, folders = _root_records(db, workspace_id, base / "files", vireo_dir)
         total_files, total_bytes = _preflight_sources(roots, base)
         manifest = {
             "version": MANIFEST_VERSION,

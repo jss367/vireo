@@ -339,6 +339,60 @@ def test_stage_rejects_folder_covered_by_another_workspace_root(tmp_path):
     db.close()
 
 
+def test_stage_rejects_source_root_from_active_local_workspace(tmp_path):
+    source_root = tmp_path / "nas" / "photos"
+    source_root.mkdir(parents=True)
+    (source_root / "bird.jpg").write_bytes(b"bird")
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    db = Database(str(vireo_dir / "vireo.db"))
+    first_workspace = db._active_workspace_id
+    db.add_folder(str(source_root), name="photos")
+    stage_workspace(db, first_workspace, str(vireo_dir))
+
+    nested = source_root / "2026"
+    nested.mkdir()
+    (nested / "new.jpg").write_bytes(b"new")
+    second_workspace = db.create_workspace("Nested")
+    db.set_active_workspace(second_workspace)
+    db.add_folder(str(nested), name="2026")
+
+    with pytest.raises(LocalWorkspaceError, match="overlaps a root used by another workspace"):
+        stage_workspace(db, second_workspace, str(vireo_dir))
+    db.close()
+
+
+def test_shared_folder_check_handles_more_than_sqlite_variable_limit(tmp_path):
+    source_root = tmp_path / "nas" / "photos"
+    source_root.mkdir(parents=True)
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    db = Database(str(vireo_dir / "vireo.db"))
+    workspace_id = db._active_workspace_id
+    root_id = db.add_folder(str(source_root), name="photos")
+    other_workspace = db.create_workspace("Shared descendant")
+
+    rows = [(folder_id, str(source_root / f"folder-{folder_id}"), root_id) for folder_id in range(1000, 2105)]
+    db.conn.executemany(
+        "INSERT INTO folders (id, path, name, parent_id) VALUES (?, ?, '', ?)",
+        rows,
+    )
+    db.conn.executemany(
+        "INSERT INTO workspace_folders (workspace_id, folder_id, is_root) VALUES (?, ?, 0)",
+        [(workspace_id, folder_id) for folder_id, _path, _parent in rows],
+    )
+    shared_id = rows[-1][0]
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id, is_root) VALUES (?, ?, 0)",
+        (other_workspace, shared_id),
+    )
+    db.conn.commit()
+
+    with pytest.raises(LocalWorkspaceError, match="also used by another workspace"):
+        stage_workspace(db, workspace_id, str(vireo_dir))
+    db.close()
+
+
 def test_work_locally_http_job_flow(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     from app import create_app
