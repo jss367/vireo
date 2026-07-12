@@ -700,7 +700,7 @@ function renderStripCards(photos, _unanalyzedCount) {
       html += '<div class="analyzed-divider">Not yet analyzed — ' + tailCount
         + ' photo' + (tailCount === 1 ? '' : 's') + '</div>';
     }
-    html += renderCard(photos[i]);
+    html += renderCard(photos[i], i);
   }
   return html;
 }
