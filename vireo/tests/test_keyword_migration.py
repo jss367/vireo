@@ -1004,3 +1004,97 @@ def test_migration_species_replace_preexisting_survivor_undo_safe(tmp_path):
         assert surv_still_tagged is not None
     finally:
         db.close()
+
+
+def test_migration_species_replace_old_side_preexisting_survivor_undo_safe(tmp_path):
+    """Symmetric to the new-side case above. A prior ``species_replace``
+    swapped src → some other species; ``item.old_value`` stores str(src_id)
+    (bare-string form). If the merged photo already carried the survivor
+    at merge time, a src→dst retarget of item.old_value would leave
+    ``_apply_redo`` iterating old_kids=[dst_id] and untag_photo(pid,
+    dst_id), stripping the pre-existing survivor tag. Same applies to the
+    JSON ``keyword_ids`` payload form used by newer swaps. The migration
+    must drop those items instead of retargeting them."""
+    db, ws_id, p1, _p2 = _make_db(tmp_path)
+    try:
+        src_id = _insert_keyword(db, "‘Robin", "taxonomy", is_species=1)
+        dst_id = _insert_keyword(db, "Robin", "taxonomy", is_species=1)
+        other_id = _insert_keyword(db, "Sparrow", "taxonomy", is_species=1)
+        # p1 pre-existed with the survivor tag before the merge.
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (p1, dst_id),
+        )
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (p1, src_id),
+        )
+        # Bare-string old_value species_replace: the edit swapped
+        # src → Sparrow. edit_history.new_value = str(other_id) (NOT
+        # src_id), so the existing new-side cleanup can't reach this row.
+        db.conn.execute(
+            "INSERT INTO edit_history "
+            "(action_type, description, new_value, workspace_id) "
+            "VALUES ('species_replace', 'x', ?, ?)",
+            (str(other_id), ws_id),
+        )
+        bare_edit_id = db.conn.execute(
+            "SELECT id FROM edit_history WHERE description = 'x' "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()["id"]
+        db.conn.execute(
+            "INSERT INTO edit_history_items "
+            "(edit_id, photo_id, old_value, new_value) "
+            "VALUES (?, ?, ?, ?)",
+            (bare_edit_id, p1, str(src_id), str(other_id)),
+        )
+        # JSON-payload old_value species_replace: another swap that
+        # replaced [src, Sparrow] → some third species. keyword_ids
+        # references src; a naive rewrite would replace it with dst
+        # in the list and leave redo untagging dst_id (the survivor).
+        db.conn.execute(
+            "INSERT INTO edit_history "
+            "(action_type, description, new_value, workspace_id) "
+            "VALUES ('species_replace', 'y', ?, ?)",
+            (str(other_id), ws_id),
+        )
+        json_edit_id = db.conn.execute(
+            "SELECT id FROM edit_history WHERE description = 'y' "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()["id"]
+        import json as _json
+        json_payload = _json.dumps(
+            {"keyword_id": src_id, "keyword_ids": [src_id, other_id]},
+            sort_keys=True,
+        )
+        db.conn.execute(
+            "INSERT INTO edit_history_items "
+            "(edit_id, photo_id, old_value, new_value) "
+            "VALUES (?, ?, ?, ?)",
+            (json_edit_id, p1, json_payload, str(other_id)),
+        )
+        db.conn.commit()
+
+        db._normalize_keyword_data_once()
+        db.conn.commit()
+
+        # Both items on p1 must have been dropped so redo can't strip
+        # the survivor tag by untagging dst_id.
+        bare_remaining = db.conn.execute(
+            "SELECT id FROM edit_history_items WHERE edit_id = ?",
+            (bare_edit_id,),
+        ).fetchall()
+        assert bare_remaining == []
+        json_remaining = db.conn.execute(
+            "SELECT id FROM edit_history_items WHERE edit_id = ?",
+            (json_edit_id,),
+        ).fetchall()
+        assert json_remaining == []
+        surv_still_tagged = db.conn.execute(
+            "SELECT 1 FROM photo_keywords "
+            "WHERE photo_id = ? AND keyword_id = ?",
+            (p1, dst_id),
+        ).fetchone()
+        assert surv_still_tagged is not None
+    finally:
+        db.close()

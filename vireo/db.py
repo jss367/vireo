@@ -10140,10 +10140,13 @@ class Database:
         #     item.new_value) before restoring the old species (see
         #     `_apply_undo`); the retargeted item.new_value = dst_id would
         #     remove the survivor tag the edit never actually created.
-        #     Redo similarly untags item.new_value again. The
-        #     `_edit_old_value_meta` JSON rewriter below still runs for
-        #     these entries so the retag-old-species side stays coherent
-        #     when both endpoints of a swap collided on the survivor.
+        #     Redo similarly untags item.new_value again. Symmetric case
+        #     on the OLD side: for a prior replace where src was the OLD
+        #     species being swapped out, redo iterates
+        #     old_kids (bare-string or JSON `keyword_ids`) and untags each
+        #     — a src→dst retarget of those references would strip the
+        #     pre-existing survivor. Drop those items too (bare-string in
+        #     the second DELETE below, JSON in the payload rewrite pass).
         preexisting_dst_photos = [
             r["photo_id"] for r in self.conn.execute(
                 "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
@@ -10185,6 +10188,24 @@ class Database:
                             AND action_type = 'keyword_remove'
                       )""",
                 [src_str, *chunk, src_str],
+            )
+            # species_replace: item.old_value = str(old_kid) (bare-string
+            # form) for a prior replace where src_id was the OLD species
+            # being swapped out. The bare-string retarget below would
+            # rewrite that to dst_str; _apply_redo then iterates
+            # old_kids=[dst_id] and untag_photo(pid, dst_id), stripping
+            # the survivor tag that pre-existed the merge and was never
+            # created by that edit. Drop the item — same tradeoff as the
+            # new_value / species_replace case above.
+            self.conn.execute(
+                f"""DELETE FROM edit_history_items
+                    WHERE old_value = ?
+                      AND photo_id IN ({ph})
+                      AND edit_id IN (
+                          SELECT id FROM edit_history
+                          WHERE action_type = 'species_replace'
+                      )""",
+                [src_str, *chunk],
             )
         # 1) edit_history.new_value: the canonical keyword id per entry.
         self.conn.execute(
@@ -10234,8 +10255,14 @@ class Database:
         #    like JSON so bare id strings (already handled above) are
         #    skipped cheaply. Uses ? for the LIKE prefix to keep the
         #    format string free of literal SQL wildcard characters.
+        #    For species_replace items whose photo already carried the
+        #    survivor before the merge, a src→dst rewrite of the JSON
+        #    old_kids would make _apply_redo untag the pre-existing
+        #    survivor (see the bare-string DELETE above); drop those
+        #    items instead of retargeting them.
+        preexisting_set = set(preexisting_dst_photos)
         json_rows = self.conn.execute(
-            f"""SELECT ehi.id, ehi.old_value
+            f"""SELECT ehi.id, ehi.photo_id, ehi.old_value, eh.action_type
                 FROM edit_history_items ehi
                 JOIN edit_history eh ON eh.id = ehi.edit_id
                 WHERE eh.action_type IN ({_kw_placeholders})
@@ -10250,8 +10277,33 @@ class Database:
                 continue
             if not isinstance(data, dict):
                 continue
-            dirty = False
+            references_src = False
             raw_kid = data.get("keyword_id")
+            if raw_kid is not None:
+                try:
+                    if int(raw_kid) == src_id:
+                        references_src = True
+                except (TypeError, ValueError):
+                    pass
+            if not references_src:
+                for k in (data.get("keyword_ids") or []):
+                    try:
+                        if int(k) == src_id:
+                            references_src = True
+                            break
+                    except (TypeError, ValueError):
+                        continue
+            if (
+                references_src
+                and row["action_type"] == "species_replace"
+                and row["photo_id"] in preexisting_set
+            ):
+                self.conn.execute(
+                    "DELETE FROM edit_history_items WHERE id = ?",
+                    (row["id"],),
+                )
+                continue
+            dirty = False
             if raw_kid is not None:
                 try:
                     if int(raw_kid) == src_id:
