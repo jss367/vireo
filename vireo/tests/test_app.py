@@ -3365,6 +3365,62 @@ def test_encounter_species_confirm_single_burst_does_not_detach(app_and_db):
     assert enc["bursts"][0]["species_override"] == {"species": "Golden Eagle", "confirmed": True}
 
 
+def test_encounter_species_burst_confirm_does_not_detach_on_variant_spelling(app_and_db):
+    """Burst confirm must compare `enc_species` against the submitted species
+    by keyword_match_key: a cached pre-normalization spelling of the same
+    species (e.g. legacy `‘Apapane` from before the migration ran vs the
+    stored/submitted `Apapane`) is the same species and must not trigger
+    _auto_detach_burst_for_species. A raw `!=` compare would treat them as
+    different and split the burst out even though nothing actually changed.
+    """
+    import json as _json
+    app, db = app_and_db
+    client = app.test_client()
+
+    cache_dir = os.path.dirname(app.config["DB_PATH"])
+    ws_id = db._active_workspace_id
+    # Encounter has 2 bursts; confirmed_species carries the legacy quoted
+    # spelling. The clean form is what the user is submitting.
+    results = {
+        "encounters": [
+            {
+                "species": ["Apapane", 0.9],
+                "confirmed_species": "‘Apapane",
+                "species_predictions": [],
+                "species_confirmed": True,
+                "photo_count": 2,
+                "burst_count": 2,
+                "time_range": ["2024-06-10T09:00:00", "2024-06-10T09:00:02"],
+                "photo_ids": [1, 2],
+                "bursts": [
+                    {"photo_ids": [1], "species_predictions": [], "species_override": None},
+                    {"photo_ids": [2], "species_predictions": [], "species_override": None},
+                ],
+            }
+        ],
+        "photos": [
+            {"id": 1, "label": "KEEP", "filename": "a.jpg", "timestamp": "2024-06-10T09:00:00"},
+            {"id": 2, "label": "KEEP", "filename": "b.jpg", "timestamp": "2024-06-10T09:00:02"},
+        ],
+        "summary": {"total_photos": 2, "encounter_count": 1, "burst_count": 2,
+                     "keep_count": 2, "review_count": 0, "reject_count": 0, "rarity_protected": 0},
+    }
+    path = os.path.join(cache_dir, f"pipeline_results_ws{ws_id}.json")
+    with open(path, "w") as f:
+        _json.dump(results, f)
+
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Apapane", "photo_ids": [1], "burst_index": 0})
+    assert resp.status_code == 200
+
+    with open(path) as f:
+        updated = _json.load(f)
+    # Same species (variant-only difference in confirmed_species) — burst
+    # must NOT be split off. Still exactly one encounter with both bursts.
+    assert len(updated["encounters"]) == 1
+    assert len(updated["encounters"][0]["bursts"]) == 2
+
+
 def test_encounter_species_detach_merges_into_adjacent_encounter(app_and_db):
     """Detaching a second burst merges it into an adjacent encounter with matching confirmed species."""
     import json as _json
@@ -3480,6 +3536,54 @@ def test_keyword_duplicates_scoped_by_workspace(app_and_db):
         assert "Cardinal" in dupe_names or "cardinal" in dupe_names
         # sparrow dupe is only in ws_b, should not appear
         assert "sparrow" not in dupe_names
+
+
+def test_keyword_duplicates_scoped_by_slot(app_and_db):
+    """Same-name keywords in different slots (parent_id, type) are not reported.
+
+    The cleanup endpoint merges only within (keyword_match_key, parent_id, type).
+    If the duplicates listing groups solely by lowered name, users would see
+    persistent false positives — a taxonomy `Robin` and an individual `Robin`,
+    or `Springfield` under Illinois vs Missouri — that never disappear after
+    clicking Clean.
+    """
+    app, db = app_and_db
+    photos = db.get_photos()
+    p1 = photos[0]["id"]
+    p2 = photos[1]["id"]
+
+    # Same name under two different parents — legitimately distinct places
+    illinois = db.add_keyword("Illinois")
+    missouri = db.add_keyword("Missouri")
+    sfd_il = db.add_keyword("Springfield", parent_id=illinois)
+    sfd_mo = db.add_keyword("Springfield", parent_id=missouri)
+    db.tag_photo(p1, sfd_il)
+    db.tag_photo(p2, sfd_mo)
+
+    # Same name at root but different type — species vs general
+    # Insert directly to bypass add_keyword's dedup, and match how the migration
+    # allows type-distinct roots to coexist (UNIQUE(name, parent_id) permits it
+    # because parent_id is NULL — NULLs don't compare equal in SQLite).
+    cur1 = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'taxonomy', 1)",
+        ("Robin",),
+    )
+    cur2 = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'general', 0)",
+        ("Robin",),
+    )
+    db.conn.commit()
+    db.tag_photo(p1, cur1.lastrowid)
+    db.tag_photo(p2, cur2.lastrowid)
+
+    with app.test_client() as c:
+        resp = c.get("/api/keywords/duplicates")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        dupe_names = {v["name"] for d in data for v in d["variants"]}
+        # Neither slot-distinct name should be reported as a duplicate
+        assert "Springfield" not in dupe_names
+        assert "Robin" not in dupe_names
 
 
 def test_all_keywords_scoped_by_workspace(app_and_db):

@@ -4998,7 +4998,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/keywords/duplicates")
     def api_keyword_duplicates():
-        """Find case-insensitive duplicate keywords within current workspace."""
+        """Find case-insensitive duplicate keywords within current workspace.
+
+        Groups by the same slot key as merge_duplicate_keywords()
+        — (LOWER(name), parent_id, type) — so the UI does not report
+        legitimate same-name-different-slot rows (a taxonomy `Robin` and an
+        individual `Robin`, or leaves under different parents) as duplicates
+        the cleanup endpoint can never actually merge.
+        """
         db = _get_db()
         ws = db._active_workspace_id
         dupes = db.conn.execute(
@@ -5009,7 +5016,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                JOIN photos p ON p.id = pk.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                WHERE wf.workspace_id = ?
-               GROUP BY LOWER(k.name) HAVING COUNT(DISTINCT k.id) > 1""",
+               GROUP BY LOWER(k.name), k.parent_id, k.type
+               HAVING COUNT(DISTINCT k.id) > 1""",
             (ws,),
         ).fetchall()
         results = []
@@ -21120,12 +21128,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # Auto-detach if burst's confirmed species differs from its
                 # encounter — splits it out and merges into an adjacent
                 # encounter of the same confirmed species when one exists.
+                # Compare with keyword_match_key so a cached pre-normalization
+                # spelling (e.g. ‘Apapane) does not trigger a needless split
+                # against the stored species (Apapane); the DB write already
+                # normalized to the canonical form.
                 enc_species = target_enc.get("confirmed_species") or (
                     target_enc["species"][0] if target_enc.get("species") else None
                 )
                 if (
                     enc_species is not None
-                    and enc_species != species
+                    and keyword_match_key(enc_species) != keyword_match_key(species)
                     and len(target_enc["bursts"]) > 1
                 ):
                     _auto_detach_burst_for_species(
