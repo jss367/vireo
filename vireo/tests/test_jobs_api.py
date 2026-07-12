@@ -2637,6 +2637,23 @@ def test_pipeline_omitted_process_id_uses_body_params(app_and_db):
         assert cfg.get("process_id") is None
 
 
+def test_pipeline_legacy_strategy_field_rejected(app_and_db):
+    # The previous /api/jobs/pipeline shape accepted a "strategy" name
+    # ("quick_look", "identify", "full", "cull_ready") and expanded it to
+    # stage flags. That vocabulary was replaced by saved-process ids; a
+    # caller still sending the old field must get a 400 instead of the
+    # request silently falling through to a default full-pipeline run
+    # (reclassifying/regrouping the whole collection unasked).
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "strategy": "quick_look",
+        })
+        assert resp.status_code == 400
+        assert "strategy" in resp.get_json()["error"]
+
+
 def test_pipeline_explicit_flags_beat_process(app_and_db, monkeypatch):
     # A caller may pin one flag on top of a process; explicit wins. The
     # fake model keeps the no-model auto-skip from flipping the same flags
@@ -4192,3 +4209,55 @@ def test_chained_run_surfaces_model_warning(app_and_db, tmp_path):
         assert "model_warning" in res
         pj = client.get(f"/api/jobs/{res['process_job_id']}").get_json()
         assert pj["config"]["skip_classify"] is True  # auto-skip applied
+
+
+def test_chained_process_snapshot_survives_mid_import_edit(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """A saved process edited AFTER the user submits the import must not
+    change the chained run — the enqueue point captures the flag snapshot.
+
+    An archive-copy import from a full card can take many minutes; if the
+    resolve happens only when the chain hook fires, a settings edit in
+    that window would silently swap in different toggles than the user
+    accepted at the click. This test flips skip_regroup on the chosen
+    process between submit and the chained job's config read, then asserts
+    the chained run reflects the ORIGINAL flags.
+
+    The fake active model keeps the no-model auto-skip from touching
+    skip_classify (which would otherwise mask an unrelated flag flip),
+    so skip_regroup (which the auto-skip never touches) cleanly proves
+    the snapshot survived.
+    """
+    from wait import wait_for_job_via_client
+
+    app, db = app_and_db
+    # Snapshot the "Full" seed and then flip skip_regroup=True after the
+    # import request returns. Any live-resolve would show skip_regroup=True
+    # in the chained job config; the enqueue-time snapshot keeps it False.
+    full_id = next(pr["id"] for pr in db.get_saved_processes()
+                   if pr["name"] == "Full")
+    original = db.get_saved_process(full_id)
+    assert original["skip_regroup"] is False, original
+
+    _fake_active_model(monkeypatch)
+    card = _chain_card(tmp_path)
+    with app.test_client() as client:
+        job_id = _post_import(client, card, tmp_path / "arch", full_id)
+        # Mutate the saved process BEFORE the chain hook fires. The import
+        # still runs to completion, so this is the exact window the fix
+        # closes: the chain hook fires from the import-job thread after
+        # ingest, and without the snapshot it would call resolve_process
+        # against this mutated row.
+        db.update_saved_process(full_id, skip_regroup=True)
+
+        job = wait_for_job_via_client(client, job_id)
+        res = job["result"]
+        assert res.get("process_job_id"), res
+
+        pj = client.get(f"/api/jobs/{res['process_job_id']}").get_json()
+        # The chained run should reflect the snapshot at enqueue time
+        # (skip_regroup=False), not the post-submit edit.
+        assert pj["config"]["skip_regroup"] is False, pj["config"]
+        # And the process_id link is still preserved for provenance.
+        assert pj["config"]["process_id"] == full_id

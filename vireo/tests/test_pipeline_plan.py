@@ -2664,6 +2664,21 @@ def test_api_pipeline_plan_rejects_null_process_id(app_and_db):
     assert "process_id" in resp.get_json()["error"]
 
 
+def test_api_pipeline_plan_rejects_legacy_strategy(app_and_db):
+    """The plan route must reject the previous strategy-name shape too, so
+    an old caller sending `{"strategy": "quick_look"}` fails here rather
+    than silently producing a full-pipeline plan the job route would then
+    reject."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={"strategy": "quick_look"},
+    )
+    assert resp.status_code == 400
+    assert "strategy" in resp.get_json()["error"]
+
+
 def test_api_pipeline_plan_collection_scope(app_and_db):
     """Passing a collection_id must scope the plan to that collection's
     photos — the endpoint's headline transparency contract.

@@ -2760,7 +2760,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # id). The workspace-side rewrite happens inside Database(); this covers
     # the global config file so workspaces that inherit the global default
     # don't silently fall back to import-only after upgrade.
-    cfg.migrate_default_strategy_to_process_id(init_db)
+    #
+    # init_db uses initialize_schema=False for boot perf, so on the first
+    # boot after upgrade the saved_processes table isn't guaranteed to
+    # exist yet on this connection — the migration would silently defer
+    # and any import in this session that would inherit the legacy global
+    # default falls back to import-only until the *next* boot. Open a
+    # short-lived schema-initializing handle so the migration completes on
+    # the very first boot instead. Only pay the schema-init cost if the
+    # migration hasn't been stamped yet; subsequent boots short-circuit
+    # inside the function and pass ``init_db`` (whose schema state is
+    # irrelevant because the marker check runs first).
+    if (
+        cfg.MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID
+        not in cfg._migrations_applied(cfg._read_raw())
+    ):
+        _default_strategy_migration_db = Database(db_path)
+        try:
+            cfg.migrate_default_strategy_to_process_id(
+                _default_strategy_migration_db,
+            )
+        finally:
+            _default_strategy_migration_db.close()
+    else:
+        cfg.migrate_default_strategy_to_process_id(init_db)
     init_db.create_default_collections_for_all_workspaces()
 
     # Wildlife backfill timing:
@@ -3584,6 +3607,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(
                 "import/archive fields are no longer accepted by the "
                 "process planner; use the Import page for photo imports",
+                400,
+            )
+        # Reject the previous strategy-name shape so the plan endpoint's
+        # contract matches /api/jobs/pipeline: an old caller that still
+        # sends {"strategy": "quick_look"} must fail here rather than
+        # silently planning a full-pipeline run the job route would then
+        # reject too.
+        if "strategy" in body:
+            return json_error(
+                "strategy is no longer accepted; send process_id (a "
+                "saved_processes id) or explicit stage flags",
                 400,
             )
         # hash_duplicate_paths is the frontend's pre-computed set of source
@@ -18478,6 +18512,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if err is not None:
                 return err
 
+        # Snapshot the chosen saved process's stage flags at enqueue time
+        # so a mid-import edit or delete can't silently change (or void)
+        # the after-import run the user already accepted. An in-place
+        # import can take many minutes on a full card, and until the
+        # chain hook fires the pipeline_job's actual toggles are still up
+        # for grabs — resolving here freezes them.
+        after_import_snapshot = None
+        if after_import is not None:
+            try:
+                after_import_snapshot = db.resolve_process(after_import)
+            except ValueError as e:
+                return json_error(str(e), 404)
+
         runner = app._job_runner
         thumb_cache_dir = app.config["THUMB_CACHE_DIR"]
         vireo_dir = os.path.dirname(thumb_cache_dir)
@@ -18512,6 +18559,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     collection_id=col_id,
                     process_id=after_import,
                     chained_from=job["id"],
+                    expanded=after_import_snapshot,
                 )
                 result["process_job_id"] = process_job_id
                 if model_warning:
@@ -18966,6 +19014,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if err is not None:
                 return err
 
+        # Snapshot the chosen saved process's stage flags at enqueue time
+        # so a mid-import edit or delete can't silently change (or void)
+        # the after-import run the user already accepted. An archive-copy
+        # import from a full card can take many minutes, and until the
+        # chain hook fires the pipeline_job's actual toggles are still up
+        # for grabs — resolving here freezes them (mirrors the remote-
+        # transport snapshot below).
+        after_import_snapshot = None
+        if after_import is not None:
+            try:
+                after_import_snapshot = db.resolve_process(after_import)
+            except ValueError as e:
+                return json_error(str(e), 404)
+
         runner = app._job_runner
         thumb_cache_dir = app.config["THUMB_CACHE_DIR"]
         vireo_dir = os.path.dirname(thumb_cache_dir)
@@ -19049,6 +19111,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     collection_id=col_id,
                     process_id=after_import,
                     chained_from=job["id"],
+                    expanded=after_import_snapshot,
                 )
                 result["process_job_id"] = process_job_id
                 if model_warning:
@@ -21032,7 +21095,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     def _enqueue_process_job(thread_db, runner, workspace_id, *,
                              collection_id, process_id,
-                             chained_from=None):
+                             chained_from=None, expanded=None):
         """Enqueue a collection-scoped process run for a saved-process id.
 
         The after-import chaining hook's path into the pipeline. Runs on a
@@ -21041,10 +21104,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         same process expansion and no-model auto-skip as ``api_job_pipeline``
         so a chained run degrades identically to a manual one. Returns
         ``(job_id, model_warning)``.
+
+        ``expanded`` is the pre-resolved flag snapshot the import endpoint
+        captured at enqueue-request time. Pass it through so a saved-process
+        edit or delete while the import copies photos (a card copy can take
+        many minutes) can't silently swap in different toggles — or fail
+        the chain outright — after the user has already accepted the choice.
+        Falls back to a live resolve for callers that don't pre-capture.
         """
         from pipeline_job import PipelineParams, run_pipeline_job
 
-        expanded = thread_db.resolve_process(process_id)
+        if expanded is None:
+            expanded = thread_db.resolve_process(process_id)
         params = PipelineParams(
             collection_id=collection_id,
             skip_classify=expanded["skip_classify"],
@@ -21129,6 +21200,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         from pipeline_job import PipelineParams, run_pipeline_job
 
         body = request.get_json(silent=True) or {}
+
+        # Reject the previous strategy-name shape ({"strategy": "quick_look"},
+        # "identify", "full", "cull_ready"). That vocabulary was replaced by
+        # saved-process ids; without an explicit 400 here, an old caller's
+        # `strategy` field is silently dropped and the request falls through
+        # to a default full-pipeline run — silently reclassifying/regrouping
+        # the whole collection when the caller meant a quick-look scan.
+        if "strategy" in body:
+            return json_error(
+                "strategy is no longer accepted; send process_id (a "
+                "saved_processes id) or explicit stage flags",
+                400,
+            )
 
         # Saved process: expand a process id server-side into stage flags so
         # the import page, the process page, and import→process chaining share

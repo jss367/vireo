@@ -1151,12 +1151,17 @@ def test_migrate_default_strategy_to_process_id_no_config_file(
 def test_migrate_default_strategy_defers_when_saved_processes_absent(
     tmp_path, monkeypatch
 ):
-    """create_app opens its startup init_db with initialize_schema=False, so on
-    the first boot after an upgrade the saved_processes table may not exist yet
-    when this global migration runs. With a legacy default_strategy set, the
-    migration must DEFER (return False, keep the legacy key, not stamp the
-    marker) instead of crashing with 'no such table: saved_processes' — a later
-    boot completes it once a request-path Database has seeded the table."""
+    """The low-level migration function must DEFER when passed a
+    schema-less connection (return False, keep the legacy key, not stamp
+    the marker) instead of crashing with 'no such table: saved_processes'.
+
+    ``create_app`` itself now opens a schema-initializing handle for this
+    migration so it completes on the first boot after upgrade (see
+    ``test_create_app_completes_default_strategy_migration_on_first_boot``);
+    the defer path here is the safety net when a caller passes a
+    ``initialize_schema=False`` handle directly, ensuring the migration is
+    still recoverable on a later boot rather than blowing up startup.
+    """
     import config as cfg
     monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
     _write_raw(cfg.CONFIG_PATH, {"pipeline": {"default_strategy": "identify"}})
@@ -1184,6 +1189,48 @@ def test_migrate_default_strategy_defers_when_saved_processes_absent(
         cfg.MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID
         not in raw.get("_migrations_applied", [])
     )
+
+
+def test_create_app_completes_default_strategy_migration_on_first_boot(
+    tmp_path, monkeypatch
+):
+    """create_app's startup init_db uses initialize_schema=False, but the
+    global default_strategy migration still needs the seeded
+    saved_processes table to resolve legacy strategy names to ids. Without
+    a schema-initializing pass gated on the migration marker, the
+    migration silently defers on the first boot after upgrade — any
+    import in that session inheriting the legacy default falls back to
+    import-only. create_app must open a targeted schema-initializing
+    handle so the migration completes on the very first boot.
+    """
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {"pipeline": {"default_strategy": "identify"}})
+
+    from app import create_app
+
+    db_path = str(tmp_path / "vireo.db")
+    thumb_dir = tmp_path / "thumbs"
+    thumb_dir.mkdir()
+    # First boot after upgrade: DB file didn't exist before this call.
+    app = create_app(db_path, str(thumb_dir))
+    assert app is not None
+
+    raw = _read_raw(cfg.CONFIG_PATH)
+    # Legacy key must be gone and the migration marker stamped so the
+    # next boot doesn't re-run.
+    assert "default_strategy" not in raw.get("pipeline", {}), raw
+    assert (
+        cfg.MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID
+        in raw.get("_migrations_applied", [])
+    )
+    # The seeded "Identify birds" process should exist and be pointed at.
+    pid = raw["pipeline"].get("default_process_id")
+    assert isinstance(pid, int) and pid > 0, raw
+    from db import Database
+    seeded = Database(db_path).get_saved_process(pid)
+    assert seeded is not None
+    assert seeded["name"] == "Identify birds"
 
 
 def test_default_subject_types_includes_taxonomy_individual_genre(tmp_path, monkeypatch):
