@@ -1,4 +1,5 @@
 import os
+import shutil
 import threading
 from pathlib import Path
 
@@ -120,6 +121,25 @@ def test_stage_aborts_when_source_directory_cannot_be_read(local_workspace_env, 
     assert not workspace_dir(str(env["vireo_dir"]), env["workspace_id"]).exists()
 
 
+def test_staging_temp_file_cannot_overwrite_real_sibling(local_workspace_env, monkeypatch):
+    env = local_workspace_env
+    sibling = env["source"] / "collision.vireo-copying"
+    base = env["source"] / "collision"
+    sibling.write_bytes(b"legitimate sibling")
+    base.write_bytes(b"base contents")
+    real_walk_entries = local_workspace._walk_entries
+
+    def sibling_first(root):
+        yield from sorted(real_walk_entries(root), reverse=True)
+
+    monkeypatch.setattr(local_workspace, "_walk_entries", sibling_first)
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    local_root = Path(_folder_path(env["db"], env["root_id"]))
+
+    assert (local_root / "collision").read_bytes() == b"base contents"
+    assert (local_root / "collision.vireo-copying").read_bytes() == b"legitimate sibling"
+
+
 def test_sync_refuses_source_changes_and_preserves_local_workspace(local_workspace_env):
     env = local_workspace_env
     stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
@@ -147,6 +167,24 @@ def test_sync_detects_source_change_with_preserved_size_and_mtime(local_workspac
         sync_back(env["db"], env["workspace_id"], str(env["vireo_dir"]))
 
     assert str(source_file) in exc_info.value.paths
+
+
+def test_sync_refuses_missing_managed_local_root(local_workspace_env):
+    env = local_workspace_env
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    local_root = Path(_folder_path(env["db"], env["root_id"]))
+    shutil.rmtree(local_root)
+
+    current = status(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    assert current["state"] == "recovery"
+    with pytest.raises(LocalWorkspaceError, match="Managed local folder is unavailable"):
+        sync_back(
+            env["db"],
+            env["workspace_id"],
+            str(env["vireo_dir"]),
+            allow_deletions=True,
+        )
+    assert (env["child"] / "bird.jpg").read_bytes() == b"bird-original"
 
 
 def test_sync_requires_explicit_confirmation_for_deletions(local_workspace_env):

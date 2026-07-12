@@ -170,7 +170,11 @@ def _copy_regular_with_hash(source: str, destination: str, cancel_check=None) ->
     os.makedirs(os.path.dirname(destination), exist_ok=True)
     for attempt in range(2):
         before = os.stat(source, follow_symlinks=False)
-        tmp = destination + ".vireo-copying"
+        fd, tmp = tempfile.mkstemp(
+            prefix=f".{os.path.basename(destination)}.vireo-copying-",
+            dir=os.path.dirname(destination),
+        )
+        os.close(fd)
         digest = hashlib.sha256()
         try:
             with open(source, "rb") as src, open(tmp, "wb") as dst:
@@ -476,6 +480,12 @@ def status(db, workspace_id: int, vireo_dir: str) -> dict:
     if result["state"] != "active":
         return result
 
+    missing_local_roots = [root["local_path"] for root in manifest["roots"] if not os.path.isdir(root["local_path"])]
+    if missing_local_roots:
+        result["state"] = "recovery"
+        result["missing_local_paths"] = missing_local_roots
+        return result
+
     baseline, local = _manifest_maps(manifest)
     created = 0
     modified = 0
@@ -559,6 +569,11 @@ def sync_back(
         for root in manifest["roots"]:
             if not os.path.isdir(root["source_path"]):
                 raise LocalWorkspaceError(f"Source storage is unavailable: {root['source_path']}")
+            if not os.path.isdir(root["local_path"]):
+                raise LocalWorkspaceError(
+                    f"Managed local folder is unavailable: {root['local_path']}. "
+                    "Restore it or discard the local workspace; source files were not changed."
+                )
 
         restore_mappings = _preflight_restore_paths(db, manifest)
         baseline, local = _manifest_maps(manifest)
