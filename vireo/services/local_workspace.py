@@ -931,19 +931,19 @@ def _prepare_publish_target(remote_path: str) -> None:
         os.rmdir(dirpath)
 
 
-def _ancestor_conflicts(publish_keys, manifest: dict, deleted_set: set) -> list[str]:
-    """Source paths where a non-directory blocks a new local subtree.
+def _ancestor_conflicts(mutation_keys, manifest: dict, deleted_set: set) -> list[str]:
+    """Source paths where a non-directory blocks a mutation.
 
-    Publishing ``a/b/c`` needs every ancestor of ``c`` to be a real
-    directory on the source; a file or a symlink sitting at ``a/b`` would
-    make the publish fail after the sync already began, or (for a symlink
-    to a directory) silently redirect the write outside the workspace.
+    Both publishing ``a/b/c`` and deleting ``a/b/c`` need every ancestor of
+    ``c`` to be a real directory on the source; a file or a symlink sitting
+    at ``a/b`` would make the publish fail mid-sync, or (for a symlink to a
+    directory) silently redirect the write or unlink outside the workspace.
     Ancestors that the deletion pass is about to remove (a local
     file→directory replacement) are not conflicts.
     """
     conflicts = []
     checked = set()
-    for root_index, rel in publish_keys:
+    for root_index, rel in mutation_keys:
         source_root = manifest["roots"][root_index]["source_path"]
         parent = os.path.dirname(os.path.join(source_root, rel))
         while _is_within(parent, source_root) and _norm(parent) != _norm(source_root):
@@ -1180,7 +1180,9 @@ def sync_back(
             elif not _same_content(local[key][0], remote_path, cancel_check):
                 conflicts.append(remote_path)
 
-        conflicts.extend(_ancestor_conflicts(changed, manifest, deleted_set))
+        conflicts.extend(
+            _ancestor_conflicts(list(changed) + list(deleted), manifest, deleted_set)
+        )
         if conflicts:
             raise LocalWorkspaceConflict(sorted(set(conflicts)))
 

@@ -190,6 +190,16 @@ def create_local_workspace_blueprint(
                 confirmed_deletions = int(confirmed_deletions)
             except (TypeError, ValueError):
                 return json_error("confirmed_deletion_count must be a number", 400)
+        # Confirmation without a count is meaningless: the workflow binds the
+        # authorization to what the user actually saw. A stale client or direct
+        # API caller that sends ``confirm_deletions: true`` alone must not be
+        # able to authorize whatever number of deletions happens to be pending
+        # at execution time.
+        if allow_deletions and confirmed_deletions is None:
+            return json_error(
+                "confirmed_deletion_count is required when confirming deletions",
+                400,
+            )
 
         runner = get_runner()
 

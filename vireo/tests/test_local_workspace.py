@@ -895,6 +895,39 @@ def test_sync_refuses_symlinked_source_ancestor_for_new_local_file(local_workspa
     assert status(env["db"], env["workspace_id"], str(env["vireo_dir"]))["state"] == "active"
 
 
+def test_sync_refuses_symlinked_source_ancestor_for_deleted_local_file(local_workspace_env, tmp_path):
+    # If the only local mutation is a deletion, the ancestor check must still
+    # cover its source parent: an os.unlink on ``a/file`` after ``a`` was
+    # replaced by a symlink would delete outside the workspace.
+    env = local_workspace_env
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    local_child = Path(_folder_path(env["db"], env["child_id"]))
+    os.unlink(local_child / "bird.jpg")
+    os.unlink(local_child / "bird.xmp")
+
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    decoy = outside / "bird.jpg"
+    decoy.write_bytes(b"outside-do-not-delete")
+    shutil.rmtree(env["child"])
+    os.symlink(outside, env["child"])
+
+    with pytest.raises(LocalWorkspaceConflict) as exc_info:
+        sync_back(
+            env["db"],
+            env["workspace_id"],
+            str(env["vireo_dir"]),
+            allow_deletions=True,
+            confirmed_deletions=2,
+        )
+
+    assert str(env["child"]) in exc_info.value.paths
+    # No file was deleted through the symlink target.
+    assert decoy.exists()
+    # The workspace never entered syncing state.
+    assert status(env["db"], env["workspace_id"], str(env["vireo_dir"]))["state"] == "active"
+
+
 def test_local_file_to_directory_replacement_syncs(local_workspace_env):
     env = local_workspace_env
     stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
@@ -1168,6 +1201,62 @@ def test_work_locally_http_job_flow(tmp_path, monkeypatch):
     assert _folder_path(final_db, folder_id) == str(source)
     assert final_db._active_workspace_id == workspace_id
     final_db.close()
+
+
+def test_sync_http_rejects_confirm_deletions_without_count(tmp_path, monkeypatch):
+    # The workflow binds deletion authorization to the count the user saw.
+    # A stale client or direct API caller that sends ``confirm_deletions: true``
+    # without ``confirmed_deletion_count`` must be rejected instead of letting
+    # sync delete however many source files happen to match at execution time.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from app import create_app
+
+    source = tmp_path / "nas" / "photos"
+    source.mkdir(parents=True)
+    (source / "bird.jpg").write_bytes(b"original")
+    (source / "extra.jpg").write_bytes(b"extra-original")
+    vireo_dir = tmp_path / "vireo"
+    thumbs = vireo_dir / "thumbnails"
+    thumbs.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    folder_id = db.add_folder(str(source), name="photos")
+    db.close()
+
+    app = create_app(db_path, thumb_cache_dir=str(thumbs))
+    app.config["TESTING"] = True
+    with app.test_client() as client:
+        response = client.post("/api/workspaces/active/local-workspace/stage", json={})
+        assert response.status_code == 202
+        assert wait_for_job_via_client(client, response.get_json()["job_id"])["status"] == "completed"
+
+        check_db = Database(db_path)
+        local_path = _folder_path(check_db, folder_id)
+        check_db.close()
+        os.unlink(Path(local_path, "bird.jpg"))
+        os.unlink(Path(local_path, "extra.jpg"))
+
+        rejected = client.post(
+            "/api/workspaces/active/local-workspace/sync",
+            json={"confirm_deletions": True},
+        )
+        assert rejected.status_code == 400
+        assert "confirmed_deletion_count" in rejected.get_json()["error"]
+        # Source files must survive the rejected request.
+        assert (source / "bird.jpg").exists()
+        assert (source / "extra.jpg").exists()
+
+        # A properly bound confirmation still succeeds.
+        accepted = client.post(
+            "/api/workspaces/active/local-workspace/sync",
+            json={"confirm_deletions": True, "confirmed_deletion_count": 2},
+        )
+        assert accepted.status_code == 202
+        job = wait_for_job_via_client(client, accepted.get_json()["job_id"])
+        assert job["status"] == "completed"
+        assert not (source / "bird.jpg").exists()
+        assert not (source / "extra.jpg").exists()
 
 
 def test_discard_http_flow_guards_stale_page_state(tmp_path, monkeypatch):
