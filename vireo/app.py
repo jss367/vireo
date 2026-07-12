@@ -6058,22 +6058,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         new_name = body.get("name")
         old_name = None
         old_is_species_keyword = False
-        if new_name:
+        # Capture the pre-update stored name whenever the request could
+        # trigger a rename OR a same-slot merge. Explicit `name` submissions
+        # are the obvious case: db.update_keyword() normalizes the rename
+        # target, so a PUT of `{"name": "‘apapane"}` against an upgraded
+        # row still stored as `‘apapane` rewrites the row to `apapane` and
+        # the earlier raw-string guard would have left sidecars/curation
+        # keyed to the legacy spelling. But a TYPE-ONLY PUT can also
+        # change source-tagged photos' effective keyword name: when
+        # update_keyword finds a normalized-equal peer at the same
+        # (parent_id, effective_type), _merge_keyword_into retargets the
+        # source row's photo tags onto the peer's stored spelling and
+        # deletes the source row. Without capturing the source's
+        # pre-update state on that path too, no sidecar keyword_remove/
+        # keyword_add pair is queued for those photos and their XMP keeps
+        # exporting the source's legacy spelling indefinitely. The post-
+        # update guard below (`if old_name == new_name: old_name = None`)
+        # uses the resolved stored name, so a plain type-only PUT that
+        # doesn't hit the merge path still no-ops.
+        if 'name' in body or 'type' in body:
             old_row = db.conn.execute(
                 """SELECT name, is_species, type
                    FROM keywords WHERE id = ?""",
                 (keyword_id,),
             ).fetchone()
-            # Capture the pre-update stored name unconditionally when a
-            # name is submitted -- even if the raw submitted value matches
-            # the current stored spelling. db.update_keyword() normalizes
-            # the rename target, so a PUT of `{"name": "‘apapane"}` against
-            # an upgraded row still stored as `‘apapane` rewrites the row
-            # to `apapane`; the earlier raw-string guard skipped this case
-            # and left the sidecar/curation keyed to the legacy spelling.
-            # The post-update guard below (`if old_name == new_name:
-            # old_name = None`) uses the resolved stored name, so a true
-            # idempotent PUT still no-ops.
             if old_row:
                 old_name = old_row["name"]
                 old_is_species_keyword = (

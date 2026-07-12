@@ -4044,6 +4044,99 @@ def test_type_only_put_merge_queues_sidecar_rename_for_peer_photos(
     assert ("keyword_add", "apapane") in actions
 
 
+def test_type_only_put_merge_queues_sidecar_rename_for_source_photos(
+    app_and_db,
+):
+    """Type-only PUT that merges a legacy-spelled SOURCE row into a clean
+    peer must queue keyword_remove(legacy) + keyword_add(canonical) for
+    photos that were originally tagged with the source row — otherwise
+    those source photos' sidecars keep exporting the source's legacy
+    spelling even after _merge_keyword_into moves their DB tags to the
+    peer's clean spelling.
+
+    Reproduces the fresh gap after the previous peer-photos fix
+    (r3565437646). Scenario: an upgraded DB has a legacy general keyword
+    stored as ``‘apapane`` (edge quote) AND a clean taxonomy peer
+    ``apapane``. A photo P1 is tagged with the legacy general source row
+    and its sidecar has already been synced under the quoted spelling.
+    The Browse/Keywords UI sends a type dropdown change on the legacy
+    row — ``PUT /api/keywords/<legacy_id>`` with ``{"type": "taxonomy"}``
+    and no ``name`` field.
+
+    ``db.update_keyword`` detects the same-slot clean taxonomy peer and
+    merges the legacy source into it, retargeting P1's DB tag onto the
+    peer's clean spelling. But ``api_update_keyword`` used to only
+    snapshot the source's pre-update state when the request included a
+    ``name``, so the type-only PUT skipped the source-photo queue
+    entirely and P1 kept exporting ``‘apapane`` to its sidecar
+    indefinitely. The peer-photos block (see the sibling test) only
+    handles photos ALREADY tagged with the peer, not those retargeted
+    from the source.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    # Clean taxonomy peer — the target the legacy row will merge into.
+    taxonomy_id = db.add_keyword("apapane", is_species=True)
+    row = db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (taxonomy_id,)
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+
+    # Legacy general row inserted directly to preserve the edge quote
+    # (add_keyword would normalize it away).
+    db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES (?, 'general')",
+        ("‘apapane",),
+    )
+    db.conn.commit()
+    legacy_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = '‘apapane'"
+    ).fetchone()["id"]
+
+    # Tag photo p1 with the legacy SOURCE row — this photo's sidecar has
+    # already been synced under the quoted spelling and needs the
+    # remove/add pair after the merge retargets its DB tag.
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.tag_photo(p1, legacy_id)
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    # Type-only PUT on the legacy row: no `name` in body. Mirrors the
+    # Browse/Keywords type dropdown flow.
+    resp = client.put(
+        f"/api/keywords/{legacy_id}", json={"type": "taxonomy"}
+    )
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["ok"] is True
+    assert payload["merged"] is True
+    assert payload["effective_id"] == taxonomy_id
+
+    # The merge collapsed legacy_id into taxonomy_id and retargeted p1's
+    # DB tag onto the clean spelling.
+    assert db.conn.execute(
+        "SELECT id FROM keywords WHERE id = ?", (legacy_id,)
+    ).fetchone() is None
+    survivor = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (taxonomy_id,)
+    ).fetchone()
+    assert survivor["name"] == "apapane"
+
+    # The regression: source photo p1 must have keyword_remove('‘apapane')
+    # + keyword_add('apapane') queued so its sidecar catches up with the
+    # retargeted DB row. Without the fix, no rows would be queued for p1
+    # and the sidecar would keep exporting the quoted spelling.
+    changes = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ? "
+        "ORDER BY id",
+        (p1,),
+    ).fetchall()
+    actions = [(c["change_type"], c["value"]) for c in changes]
+    assert ("keyword_remove", "‘apapane") in actions
+    assert ("keyword_add", "apapane") in actions
+
+
 def test_type_only_put_merge_skips_queue_when_peer_already_canonical(
     app_and_db,
 ):
