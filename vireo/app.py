@@ -8504,7 +8504,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # table so a cached Highlights page or older client doesn't silently
         # overwrite the species representative instead.
         if parsed["purpose"] == "highlights":
-            rank = db.add_species_highlight(
+            rank = db.add_species_highlight_canonical(
                 parsed["species"], parsed["photo_id"]
             )
             return jsonify({"ok": True, **parsed, "rank": rank})
@@ -8519,7 +8519,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if _photo_can_be_highlights_preference(
             db, parsed["species"], parsed["photo_id"]
         ):
-            rank = db.promote_species_highlight(
+            rank = db.promote_species_highlight_canonical(
                 parsed["species"], parsed["photo_id"], _commit=False
             )
         db.conn.commit()
@@ -8589,7 +8589,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(
                 "photo_id is not eligible as a highlight for that species", 400,
             )
-        rank = db.add_species_highlight(parsed["species"], parsed["photo_id"])
+        rank = db.add_species_highlight_canonical(
+            parsed["species"], parsed["photo_id"]
+        )
         return jsonify({"ok": True, **parsed, "rank": rank})
 
     @app.route("/api/species-highlights", methods=["DELETE"])

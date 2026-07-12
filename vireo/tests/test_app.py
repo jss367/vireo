@@ -8446,6 +8446,56 @@ def test_highlights_reorders_legacy_cased_selection_with_canonical_species(app_a
     ]
 
 
+def test_highlights_add_appends_after_legacy_cased_selection(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/wax-add', 'wax', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    waxbill_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Common waxbill', 'taxonomy', 1)"
+    ).lastrowid
+    photo_ids = []
+    for filename, score in (("first.jpg", 0.9), ("second.jpg", 0.8)):
+        pid = db.conn.execute(
+            "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+            "VALUES (?, ?, ?, 'none')",
+            (fid, filename, score),
+        ).lastrowid
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (pid, waxbill_kw),
+        )
+        photo_ids.append(pid)
+    db.conn.execute(
+        "INSERT INTO species_highlights "
+        "(workspace_id, species, photo_id, rank) "
+        "VALUES (?, 'Common Waxbill', ?, 1)",
+        (db._ws_id(), photo_ids[0]),
+    )
+    db.conn.commit()
+
+    resp = client.post(
+        "/api/species-highlights",
+        json={"species": "Common waxbill", "photo_id": photo_ids[1]},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["rank"] == 2
+
+    rows = db.conn.execute(
+        "SELECT species, photo_id, rank FROM species_highlights ORDER BY rank"
+    ).fetchall()
+    assert [(r["species"], r["photo_id"], r["rank"]) for r in rows] == [
+        ("Common waxbill", photo_ids[0], 1),
+        ("Common waxbill", photo_ids[1], 2),
+    ]
+
+
 def test_highlights_confirmation_filter_splits_confirmed_and_unconfirmed(app_and_db):
     app, db = app_and_db
     client = app.test_client()

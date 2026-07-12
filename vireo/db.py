@@ -10736,6 +10736,61 @@ class Database:
             keys.append(canonical)
         return canonical, keys
 
+    def _species_highlight_ids_for_canonical(self, species):
+        canonical, keys = self._species_highlight_keys_for_canonical(species)
+        ws = self._ws_id()
+        placeholders = ",".join("?" for _ in keys)
+        rows = self.conn.execute(
+            f"""SELECT photo_id
+                FROM species_highlights
+                WHERE workspace_id = ? AND species IN ({placeholders})
+                ORDER BY rank, created_at, photo_id""",
+            (ws, *keys),
+        ).fetchall()
+        ids = []
+        for row in rows:
+            if row["photo_id"] not in ids:
+                ids.append(row["photo_id"])
+        return canonical, keys, ids
+
+    def _rewrite_species_highlight_canonical_order(self, canonical, keys, ids):
+        ws = self._ws_id()
+        placeholders = ",".join("?" for _ in keys)
+        self.conn.execute(
+            f"""DELETE FROM species_highlights
+                WHERE workspace_id = ? AND species IN ({placeholders})""",
+            (ws, *keys),
+        )
+        for rank, pid in enumerate(ids, start=1):
+            self.conn.execute(
+                """INSERT INTO species_highlights
+                       (workspace_id, species, photo_id, rank, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
+                (ws, canonical, pid, rank),
+            )
+
+    def add_species_highlight_canonical(self, species, photo_id, _commit=True):
+        """Append a highlighted photo across canonical-equivalent species keys."""
+        canonical, keys, ids = self._species_highlight_ids_for_canonical(species)
+        if photo_id not in ids:
+            ids.append(photo_id)
+        self._rewrite_species_highlight_canonical_order(canonical, keys, ids)
+        if _commit:
+            self.conn.commit()
+        return ids.index(photo_id) + 1
+
+    def promote_species_highlight_canonical(
+        self, species, photo_id, _commit=True,
+    ):
+        """Promote a highlighted photo across canonical-equivalent species keys."""
+        canonical, keys, ids = self._species_highlight_ids_for_canonical(species)
+        ids = [pid for pid in ids if pid != photo_id]
+        ids.insert(0, photo_id)
+        self._rewrite_species_highlight_canonical_order(canonical, keys, ids)
+        if _commit:
+            self.conn.commit()
+        return 1
+
     def remove_species_highlight_canonical(self, species, photo_id, _commit=True):
         """Remove a highlighted photo from all canonical-equivalent keys."""
         ws = self._ws_id()
@@ -10789,20 +10844,7 @@ class Database:
         self, species, photo_id, direction, _commit=True,
     ):
         """Move a highlighted photo across canonical-equivalent species keys."""
-        canonical, keys = self._species_highlight_keys_for_canonical(species)
-        ws = self._ws_id()
-        placeholders = ",".join("?" for _ in keys)
-        rows = self.conn.execute(
-            f"""SELECT photo_id
-                FROM species_highlights
-                WHERE workspace_id = ? AND species IN ({placeholders})
-                ORDER BY rank, created_at, photo_id""",
-            (ws, *keys),
-        ).fetchall()
-        ids = []
-        for row in rows:
-            if row["photo_id"] not in ids:
-                ids.append(row["photo_id"])
+        canonical, keys, ids = self._species_highlight_ids_for_canonical(species)
         if photo_id not in ids:
             return False
         idx = ids.index(photo_id)
@@ -10814,18 +10856,7 @@ class Database:
             return False
         if new_idx != idx:
             ids.insert(new_idx, ids.pop(idx))
-        self.conn.execute(
-            f"""DELETE FROM species_highlights
-                WHERE workspace_id = ? AND species IN ({placeholders})""",
-            (ws, *keys),
-        )
-        for rank, pid in enumerate(ids, start=1):
-            self.conn.execute(
-                """INSERT INTO species_highlights
-                       (workspace_id, species, photo_id, rank, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
-                (ws, canonical, pid, rank),
-            )
+        self._rewrite_species_highlight_canonical_order(canonical, keys, ids)
         if _commit:
             self.conn.commit()
         return True
