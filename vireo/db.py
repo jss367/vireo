@@ -9984,8 +9984,12 @@ class Database:
             across the photo's detections (NULL if no usable prediction
             exists)
 
-        Only photos with ``quality_score >= min_quality`` that are not
-        user-rejected are returned. The API layer applies the final
+        Photos with ``quality_score >= min_quality`` that are not
+        user-rejected are returned. When ``min_quality <= 0`` (the default),
+        photos with no ``quality_score`` yet (not analyzed) are also included
+        so picks and other unscored photos still surface on the Highlights
+        page; raising the quality floor above 0 excludes them, since they have
+        no measured quality to compare. The API layer applies the final
         highlights ranking because it combines these persisted quality fields
         with prediction confidence and user ratings.
         """
@@ -10091,8 +10095,8 @@ class Database:
                WHERE wf.workspace_id = ?
                  {folder_filter}
                  {photo_filter}
-                 AND p.quality_score IS NOT NULL
-                 AND p.quality_score >= ?
+                 AND (p.quality_score >= ?
+                      OR (? <= 0 AND p.quality_score IS NULL))
                  AND (p.flag IS NULL OR p.flag != 'rejected')
                ORDER BY p.quality_score DESC""",
             (
@@ -10103,6 +10107,7 @@ class Database:
                 ws,
                 *folder_params,
                 *photo_params,
+                min_quality,
                 min_quality,
             ),
         ).fetchall()
@@ -10526,6 +10531,12 @@ class Database:
         are no longer eligible for the Highlights page. Stored rows are kept
         intact so un-rejecting a photo restores its selection.
 
+        Eligibility mirrors :meth:`get_highlights_candidates` at the default
+        quality floor: not-yet-analyzed (``quality_score IS NULL``) photos
+        stay eligible, because they now appear on the Highlights page and can
+        be saved as highlights. Filtering them out here would silently drop a
+        highlight the user just chose until analysis ran.
+
         Result shape is ``{species: {photo_id: rank}}``.
         """
         ws = self._ws_id()
@@ -10539,7 +10550,6 @@ class Database:
                    JOIN folders f ON f.id = p.folder_id
                     AND f.status IN ('ok', 'partial')"""
             eligibility_filter = """
-                 AND p.quality_score IS NOT NULL
                  AND COALESCE(p.flag, 'none') != 'rejected'
                  AND sh.species = COALESCE(
                      (
@@ -14935,6 +14945,86 @@ class Database:
         if updated:
             self.conn.commit()
         return updated
+
+    def rewrite_legacy_eye_detect_default_in_workspaces(self):
+        """Rewrite the exact legacy eye-detection default in workspace overrides.
+
+        Also nulls ``last_group_fingerprint`` on any rewritten workspace so the
+        Process page treats its cached KEEP/REJECT decisions as outdated —
+        those results were scored with eye detection on, and the workspace's
+        effective ``eye_detect_enabled`` just changed to False.
+        """
+        rows = self.conn.execute(
+            "SELECT id, config_overrides FROM workspaces "
+            "WHERE config_overrides IS NOT NULL"
+        ).fetchall()
+        updated = 0
+        for row in rows:
+            raw = row["config_overrides"]
+            try:
+                overrides = json.loads(raw) if isinstance(raw, str) else raw
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(overrides, dict):
+                continue
+            pipeline = overrides.get("pipeline")
+            if not isinstance(pipeline, dict):
+                continue
+            if pipeline.get("eye_detect_enabled") is not True:
+                continue
+            pipeline["eye_detect_enabled"] = False
+            self.conn.execute(
+                "UPDATE workspaces "
+                "SET config_overrides = ?, last_group_fingerprint = NULL "
+                "WHERE id = ?",
+                (json.dumps(overrides), row["id"]),
+            )
+            updated += 1
+        if updated:
+            self.conn.commit()
+        return updated
+
+    def invalidate_group_fingerprints_without_explicit_eye_false(self):
+        """Clear last_group_fingerprint on workspaces without an explicit
+        ``pipeline.eye_detect_enabled=False`` override.
+
+        Called from ``migrate_eye_detect_default_off`` when the global
+        default is about to flip from True to False. Workspaces that were
+        relying on the global default were producing eye-enabled scoring;
+        their cached triage must be treated as outdated so the Process page
+        re-runs Group & Score with the new default. Workspaces with an
+        explicit False override were already producing eye-disabled scoring
+        and don't need invalidation.
+        """
+        rows = self.conn.execute(
+            "SELECT id, config_overrides FROM workspaces "
+            "WHERE last_group_fingerprint IS NOT NULL"
+        ).fetchall()
+        to_invalidate = []
+        for row in rows:
+            raw = row["config_overrides"]
+            has_explicit_false = False
+            if raw is not None:
+                try:
+                    overrides = json.loads(raw) if isinstance(raw, str) else raw
+                except (json.JSONDecodeError, TypeError):
+                    overrides = None
+                if isinstance(overrides, dict):
+                    pipeline = overrides.get("pipeline")
+                    if isinstance(pipeline, dict) and pipeline.get("eye_detect_enabled") is False:
+                        has_explicit_false = True
+            if not has_explicit_false:
+                to_invalidate.append(row["id"])
+        if to_invalidate:
+            for chunk in _chunks(to_invalidate):
+                placeholders = ",".join("?" * len(chunk))
+                self.conn.execute(
+                    f"UPDATE workspaces SET last_group_fingerprint = NULL "
+                    f"WHERE id IN ({placeholders})",
+                    list(chunk),
+                )
+            self.conn.commit()
+        return len(to_invalidate)
 
     # ------ iNaturalist submissions ------
 

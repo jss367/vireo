@@ -13,6 +13,8 @@
   .control-group label { font-size:13px; color:var(--text-secondary); white-space:nowrap; }
   .control-group input[type=search], .control-group select { font-size:13px; padding:4px 8px; background:var(--bg-input); color:var(--text-primary); border:1px solid var(--border-secondary); border-radius:4px; }
   .control-group input[type=search] { width:180px; }
+  .control-group .numbering-toggle { display:flex; align-items:center; gap:6px; color:var(--text-primary); cursor:pointer; }
+  .control-group .numbering-toggle input { margin:0; }
   .control-group .search-control { width:240px; }
   .control-group .search-control input[type=search] { width:auto; border-radius:4px 0 0 4px; }
   .lifelist-actions { margin-left:auto; display:flex; gap:8px; align-items:center; }
@@ -150,6 +152,13 @@
       <option value="most-photos">Most photos</option>
     </select>
   </div>
+  <div class="control-group" title="When enabled, number the visible cards in their current displayed order. Disable it to keep each species' original chronological lifer number.">
+    <label for="renumberView">Life List numbering</label>
+    <label class="numbering-toggle" for="renumberView">
+      <input type="checkbox" id="renumberView">
+      <span>Renumber for each view</span>
+    </label>
+  </div>
   <div class="lifelist-actions">
     <button class="publish-btn" onclick="openExportModal()">Export...</button>
     <button class="publish-btn" onclick="openPublishModal()">Publish Site</button>
@@ -247,6 +256,24 @@
 <script>
 var currentData = null;
 var debounceTimer = null;
+var LIFE_LIST_SORT_STORAGE_KEY = 'vireo.lifeList.sort';
+var LIFE_LIST_RENUMBER_STORAGE_KEY = 'vireo.lifeList.renumber';
+var LIFE_LIST_SORTS = ['newest', 'life-order', 'alpha', 'most-photos'];
+
+function restoreLifeListViewPreferences() {
+  try {
+    var savedSort = window.localStorage.getItem(LIFE_LIST_SORT_STORAGE_KEY);
+    if (LIFE_LIST_SORTS.indexOf(savedSort) !== -1) {
+      document.getElementById('sortSelect').value = savedSort;
+    }
+    document.getElementById('renumberView').checked =
+      window.localStorage.getItem(LIFE_LIST_RENUMBER_STORAGE_KEY) === '1';
+  } catch (e) {}
+}
+
+function saveLifeListViewPreference(key, value) {
+  try { window.localStorage.setItem(key, value); } catch (e) {}
+}
 
 // All dynamic values rendered into card HTML pass through escapeAttr —
 // same escaping convention as highlights.html.
@@ -302,7 +329,7 @@ function photoThumbnailUrl(photo) {
     : '/thumbnails/' + photo.id + '.jpg';
 }
 
-function renderCard(entry) {
+function renderCard(entry, displayNumber) {
   var best = entry.best;
   var thumb = best ? photoThumbnailUrl(best) : '';
   var sci = entry.scientific_name && entry.scientific_name !== entry.species
@@ -320,7 +347,7 @@ function renderCard(entry) {
   if (extraLocs > 0) locations += '<span class="loc-chip">+' + extraLocs + ' more</span>';
   return '<div class="species-card" data-species="' + escapeAttr(entry.species) + '" title="'
     + escapeAttr((entry.locations || []).join(', ')) + '">'
-    + '<div class="lifer-number">#' + entry.number + '</div>'
+    + '<div class="lifer-number">#' + displayNumber + '</div>'
     + (best && best.is_species_representative ? '<div class="lifelist-ribbon">Representative</div>' : '')
     + (best ? '<img src="' + escapeAttr(thumb) + '" data-photo-id="' + escapeAttr(best.id) + '" alt="' + escapeAttr(best.filename) + '" loading="lazy">' : '')
     + '<div class="species-info">'
@@ -364,7 +391,10 @@ function render() {
     + currentData.meta.photo_count + ' tagged photos'
     + (search ? ' · ' + list.length + ' matching' : '');
 
-  content.innerHTML = list.map(renderCard).join('')
+  var renumberView = document.getElementById('renumberView').checked;
+  content.innerHTML = list.map(function(entry, index) {
+    return renderCard(entry, renumberView ? index + 1 : entry.number);
+  }).join('')
     || '<div class="lifelist-empty" style="grid-column:1/-1;"><p>No species match this search.</p></div>';
 
   content.querySelectorAll('.species-card').forEach(function(card) {
@@ -388,6 +418,11 @@ function debounceRender() {
 
 document.getElementById('speciesSearch').addEventListener('input', debounceRender);
 document.getElementById('sortSelect').addEventListener('change', function() {
+  saveLifeListViewPreference(LIFE_LIST_SORT_STORAGE_KEY, this.value);
+  if (currentData) render();
+});
+document.getElementById('renumberView').addEventListener('change', function() {
+  saveLifeListViewPreference(LIFE_LIST_RENUMBER_STORAGE_KEY, this.checked ? '1' : '0');
   if (currentData) render();
 });
 
@@ -1050,6 +1085,7 @@ function llSwitchTab(name) {
   }
 }
 
+restoreLifeListViewPreferences();
 loadLifeList();
 
 // Initial tab from ?view= (defaults to list).

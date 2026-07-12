@@ -50,6 +50,200 @@ def test_import_source_browse_button_shows_quick_photo_count(live_server, page):
     expect(source_list.locator(".source-meta")).to_have_text("42 photos")
 
 
+def test_import_preview_runs_automatically_after_source_selection(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/import")
+    page.evaluate(
+        """
+        () => {
+          const originalFetch = window.fetch.bind(window);
+          window.__fullPreviewCalls = 0;
+          window.__dupCalls = 0;
+          window.__destCalls = 0;
+          window.fetch = (input, init) => {
+            const target = typeof input === 'string' ? input : input.url;
+            if (target && target.indexOf('/api/import/folder-preview') === 0) {
+              const body = JSON.parse(init.body || '{}');
+              if (body.summary_only) {
+                return Promise.resolve(new Response(JSON.stringify({
+                  total_count: 2,
+                  total_size: 2468,
+                  type_breakdown: {'.jpg': 2},
+                  duplicate_count: 0,
+                  files: [],
+                }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+              }
+              window.__fullPreviewCalls += 1;
+              return Promise.resolve(new Response(JSON.stringify({
+                total_count: 2,
+                total_size: 2468,
+                type_breakdown: {'.jpg': 2},
+                duplicate_count: 0,
+                files: [
+                  {
+                    path: '/tmp/card-a/IMG_0001.jpg',
+                    filename: 'IMG_0001.jpg',
+                    subfolder: 'card-a',
+                    size: 1234,
+                    extension: '.jpg',
+                    thumb_url: 'data:image/gif;base64,R0lGODlhAQABAAAAACw=',
+                  },
+                  {
+                    path: '/tmp/card-a/IMG_0002.jpg',
+                    filename: 'IMG_0002.jpg',
+                    subfolder: 'card-a',
+                    size: 1234,
+                    extension: '.jpg',
+                    thumb_url: 'data:image/gif;base64,R0lGODlhAQABAAAAACw=',
+                  },
+                ],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            if (target && target.indexOf('/api/import/check-duplicates') === 0) {
+              window.__dupCalls += 1;
+              const frame = 'data: ' + JSON.stringify({
+                duplicates: ['/tmp/card-a/IMG_0002.jpg'],
+                checked: 2,
+                total: 2,
+              }) + '\\n\\n' + 'data: ' + JSON.stringify({
+                done: true,
+                duplicate_count: 1,
+                checked: 2,
+                total: 2,
+              }) + '\\n\\n';
+              return Promise.resolve(new Response(frame, {
+                status: 200,
+                headers: {'Content-Type': 'text/event-stream'},
+              }));
+            }
+            if (target && target.indexOf('/api/import/destination-preview') === 0) {
+              window.__destCalls += 1;
+              return Promise.resolve(new Response(JSON.stringify({
+                folders: [{
+                  path: '2026/2026-07-11',
+                  full_path: '/archive/2026/2026-07-11',
+                  count: 1,
+                  exists: false,
+                }],
+                total_photos: 1,
+                total_folders: 1,
+                new_folders: 1,
+                existing_folders: 0,
+                managed_archive: null,
+                files: [{
+                  path: '/tmp/card-a/IMG_0001.jpg',
+                  folder: '2026/2026-07-11',
+                  full_folder: '/archive/2026/2026-07-11',
+                }],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            return originalFetch(input, init);
+          };
+        }
+        """
+    )
+
+    page.locator("#modeCopy").check()
+    page.locator("#destInput").fill("/archive")
+    page.locator("#sourceInput").fill("/tmp/card-a")
+    page.locator("#btnAddSource").click()
+
+    page.wait_for_function(
+        "window.__fullPreviewCalls >= 1 && window.__dupCalls >= 1 && window.__destCalls >= 1"
+    )
+    expect(page.locator("#previewSummary")).to_contain_text("1 already in your library")
+    grid = page.locator("#importPreviewGrid")
+    expect(grid).to_be_visible()
+    expect(grid).to_contain_text("IMG_0001.jpg")
+    expect(grid).to_contain_text("IMG_0002.jpg")
+    expect(grid).to_contain_text("Duplicate")
+    expect(grid).to_contain_text("To: 2026/2026-07-11")
+
+
+def test_import_auto_preview_clears_grid_when_selection_becomes_invalid(
+    live_server, page
+):
+    url = live_server["url"]
+    page.goto(f"{url}/import")
+    page.evaluate(
+        """
+        () => {
+          const originalFetch = window.fetch.bind(window);
+          window.__fullPreviewCalls = 0;
+          window.fetch = (input, init) => {
+            const target = typeof input === 'string' ? input : input.url;
+            if (target && target.indexOf('/api/import/folder-preview') === 0) {
+              const body = JSON.parse(init.body || '{}');
+              if (body.summary_only) {
+                return Promise.resolve(new Response(JSON.stringify({
+                  total_count: 1,
+                  total_size: 1234,
+                  type_breakdown: {'.jpg': 1},
+                  duplicate_count: 0,
+                  files: [],
+                }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+              }
+              window.__fullPreviewCalls += 1;
+              return Promise.resolve(new Response(JSON.stringify({
+                total_count: 1,
+                total_size: 1234,
+                type_breakdown: {'.jpg': 1},
+                duplicate_count: 0,
+                files: [{
+                  path: '/tmp/card-a/IMG_0001.jpg',
+                  filename: 'IMG_0001.jpg',
+                  subfolder: 'card-a',
+                  size: 1234,
+                  extension: '.jpg',
+                  thumb_url: 'data:image/gif;base64,R0lGODlhAQABAAAAACw=',
+                }],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            if (target && target.indexOf('/api/import/check-duplicates') === 0) {
+              const frame = 'data: ' + JSON.stringify({
+                done: true, duplicate_count: 0, checked: 1, total: 1,
+              }) + '\\n\\n';
+              return Promise.resolve(new Response(frame, {
+                status: 200,
+                headers: {'Content-Type': 'text/event-stream'},
+              }));
+            }
+            if (target && target.indexOf('/api/import/destination-preview') === 0) {
+              return Promise.resolve(new Response(JSON.stringify({
+                folders: [],
+                files: [],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            return originalFetch(input, init);
+          };
+        }
+        """
+    )
+
+    page.locator("#modeCopy").check()
+    page.locator("#destInput").fill("/archive")
+    page.locator("#sourceInput").fill("/tmp/card-a")
+    page.locator("#btnAddSource").click()
+    page.wait_for_function("window.__fullPreviewCalls >= 1")
+    expect(page.locator("#importPreviewGrid")).to_be_visible()
+
+    page.locator("#fileTypePreset").select_option("custom")
+    page.evaluate(
+        """
+        () => {
+          document.querySelectorAll('.file-ext').forEach(el => { el.checked = false; });
+          document.querySelector('.file-ext').dispatchEvent(
+            new Event('change', { bubbles: true }));
+        }
+        """
+    )
+
+    expect(page.locator("#importError")).to_contain_text(
+        "Choose at least one file extension."
+    )
+    expect(page.locator("#importPreviewGrid")).to_be_hidden()
+
+
 def test_import_destination_browse_button_sets_destination(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/import")
@@ -61,6 +255,31 @@ def test_import_destination_browse_button_sets_destination(live_server, page):
     browse_btn.click()
 
     expect(page.locator("#destInput")).to_have_value("/tmp/archive")
+
+
+def test_import_recent_destination_button_selects_saved_path(live_server, page):
+    """Saved import destinations remain visible as one-click choices."""
+    import config as cfg
+
+    config = cfg.load()
+    config["ingest"]["recent_destinations"] = [
+        "/Volumes/Photos/Archive",
+        "/Volumes/Photos/Trips",
+    ]
+    cfg.save(config)
+
+    page.goto(f"{live_server['url']}/import")
+    page.locator("#modeCopy").check()
+
+    choices = page.locator("[data-testid='recent-destinations']")
+    expect(choices).to_be_visible()
+    expect(choices).to_contain_text("Archive")
+    expect(choices).to_contain_text("Trips")
+
+    page.get_by_role(
+        "button", name="Use /Volumes/Photos/Trips"
+    ).click()
+    expect(page.locator("#destInput")).to_have_value("/Volumes/Photos/Trips")
 
 
 def test_import_custom_extensions_feed_preview(live_server, page):
@@ -161,8 +380,8 @@ def test_import_preview_passes_verify_by_hash_to_duplicate_check(live_server, pa
 
 
 def test_import_preview_shows_destination_folder_structure(live_server, page):
-    """Copy-mode preview surfaces the destination folder structure (new vs
-    existing folders) and a managed-archive callout, wired to
+    """Copy-mode preview surfaces exact destination folder paths and file
+    counts beside the folder template, plus a managed-archive callout, wired to
     /api/import/destination-preview. Skipped duplicates are excluded so the
     folder counts match the files that will actually land."""
     url = live_server["url"]
@@ -230,7 +449,16 @@ def test_import_preview_shows_destination_folder_structure(live_server, page):
     structure = page.locator("#destStructure")
     expect(structure).to_be_visible()
     expect(structure).to_contain_text(
-        "2 photos → 2 folders (1 new, 1 existing)"
+        "Resulting folders: 2 files split into 2 folders (1 new, 1 existing)"
+    )
+    expect(page.locator("#destCard #destStructure")).to_be_visible()
+    expect(structure.locator("th")).to_have_text(["Exact folder", "Files", "Status"])
+    rows = structure.locator("tr")
+    expect(rows.nth(1).locator("td")).to_have_text(
+        ["/archive/2026/2026-07-01", "1", "new"]
+    )
+    expect(rows.nth(2).locator("td")).to_have_text(
+        ["/archive/2026/2026-07-02", "1", "existing"]
     )
     expect(structure).to_contain_text("Merging into a managed archive at")
     expect(structure).to_contain_text("/archive")
@@ -647,6 +875,72 @@ def test_import_copy_start_sends_restored_options(live_server, page):
     assert "after_import" not in body
 
 
+def test_import_start_sends_common_tags_and_gps_location_option(
+    live_server, page,
+):
+    url = live_server["url"]
+    captured = {}
+
+    def config_route(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "google_maps_api_key": "configured-for-test",
+                "pipeline": {"default_strategy": None},
+            }),
+        )
+
+    def start_import(route):
+        captured["body"] = json.loads(route.request.post_data or "{}")
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"job_id": "import-tags-test"}),
+        )
+
+    page.route("**/api/config", config_route)
+    page.route("**/api/jobs/import-in-place", start_import)
+    page.goto(f"{url}/import")
+
+    page.locator("#sourceInput").fill("/tmp/card-a")
+    page.locator("#btnAddSource").click()
+    page.locator("#importTagInput").fill("Kenya trip")
+    page.locator("#importTagInput").press("Enter")
+    page.locator("#importTagInput").fill("Portfolio")
+    page.locator("#btnAddImportTag").click()
+    expect(page.locator("#importTagList .import-tag-chip")).to_have_count(2)
+    page.locator("#chkLocationFromGps").check()
+
+    page.locator("#btnStart").click()
+    expect(page.locator("#progressCard")).to_be_visible()
+
+    assert captured["body"]["tags"] == ["Kenya trip", "Portfolio"]
+    assert captured["body"]["location_from_gps"] is True
+
+
+def test_import_gps_location_option_explains_missing_api_key(live_server, page):
+    url = live_server["url"]
+
+    def config_route(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "google_maps_api_key": "",
+                "pipeline": {"default_strategy": None},
+            }),
+        )
+
+    page.route("**/api/config", config_route)
+    page.goto(f"{url}/import")
+
+    expect(page.locator("#chkLocationFromGps")).to_be_disabled()
+    expect(page.locator("#locationGpsHint")).to_contain_text(
+        "Add a Google Maps API key in Settings"
+    )
+
+
 def test_import_new_workspace_forwards_explicit_after_import(live_server, page):
     """When the user actively picks a strategy for a new-workspace import,
     the client must forward that pick — only the untouched-dropdown case is
@@ -756,6 +1050,56 @@ def test_import_browse_button_opens_folder_browser_fallback(live_server, page):
     expect(page.locator(".folder-browser-panel")).to_have_attribute("aria-modal", "true")
     expect(page.locator(".folder-browser-panel")).to_have_attribute(
         "aria-labelledby", "folderBrowserTitle")
+
+
+def test_import_folder_browser_shows_recursive_photo_counts(live_server, page):
+    """Source picker rows show the recursive count returned for each folder."""
+    url = live_server["url"]
+    page.goto(f"{url}/import")
+    page.evaluate("window.pickDirectory = async () => null")
+    page.evaluate(
+        """
+        () => {
+          const originalFetch = window.fetch.bind(window);
+          window.fetch = (input, init) => {
+            const target = typeof input === 'string' ? input : input.url;
+            if (target === '/api/browse/photo-counts') {
+              const body = JSON.parse(init.body || '{}');
+              window.__folderCountRequest = body;
+              return Promise.resolve(new Response(JSON.stringify({
+                counts: {
+                  '/tmp/card-a': 1,
+                  '/tmp/card-b': 1234,
+                  '/tmp/empty': 0,
+                },
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            if (target && target.indexOf('/api/browse') === 0) {
+              return Promise.resolve(new Response(JSON.stringify({
+                path: '/tmp',
+                dirs: [
+                  {name: 'card-a', path: '/tmp/card-a'},
+                  {name: 'card-b', path: '/tmp/card-b'},
+                  {name: 'empty', path: '/tmp/empty'},
+                ],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            return originalFetch(input, init);
+          };
+        }
+        """
+    )
+
+    page.locator("[data-testid='import-source-browse-btn']").click()
+
+    rows = page.locator("#folderBrowserList .folder-browser-item[data-folder-path]")
+    expect(rows).to_have_count(3)
+    expect(rows.nth(0).locator(".folder-browser-count")).to_have_text("1 photo")
+    expect(rows.nth(1).locator(".folder-browser-count")).to_have_text("1,234 photos")
+    expect(rows.nth(2).locator(".folder-browser-count")).to_be_empty()
+    request = page.evaluate("window.__folderCountRequest")
+    assert request["paths"] == ["/tmp/card-a", "/tmp/card-b", "/tmp/empty"]
+    assert request["file_types"] == "both"
 
 
 def test_import_folder_browser_selects_multiple_source_folders(live_server, page):

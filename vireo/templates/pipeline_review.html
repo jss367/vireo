@@ -1094,6 +1094,34 @@ input[type="range"]::-moz-range-thumb {
   transform-origin: 0 0;
   /* Inline style.width / style.height set per-card in JS to natural size. */
 }
+.grm-card-kw-dot,
+.grm-card-needs-tag {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 4;
+  pointer-events: none;
+}
+.grm-card.has-offset .grm-card-kw-dot,
+.grm-card.has-offset .grm-card-needs-tag {
+  top: 18px;
+}
+.grm-card-kw-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.55);
+}
+.grm-card-needs-tag {
+  background: var(--warning, #e0a800);
+  color: var(--bg-primary);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.4;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
 .grm-card-info {
   padding: 6px 8px;
   font-size: 11px;
@@ -1195,6 +1223,14 @@ input[type="range"]::-moz-range-thumb {
   color: var(--text-muted); cursor:pointer; user-select:none; }
 .grm-commit-toggle input { cursor:pointer; }
 .grm-dirty-hint { font-size:11px; color: var(--warning, #e0a800); }
+.grm-keyword-summary {
+  min-width: 132px;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.grm-keyword-summary.ok { color: var(--accent); }
+.grm-keyword-summary.warn { color: var(--warning, #e0a800); }
 .grm-res-control,
 .grm-loupe-zoom-control {
   display: flex;
@@ -1668,6 +1704,7 @@ input[type="range"]::-moz-range-thumb {
   <div class="grm-header">
     <h3 id="grmTitle">Review Burst Group</h3>
     <span id="grmCount" style="font-size:12px;color:var(--text-dim);"></span>
+    <span class="grm-keyword-summary" id="grmSpeciesKeywordSummary"></span>
     <button class="grm-close" onclick="closeGroupReview()">&times;</button>
   </div>
   <div class="grm-body">
@@ -3535,7 +3572,7 @@ function renderEmptyState(readiness) {
                species_predictions: 'species predictions'})[k] || k;
     });
     body.textContent = 'You can compute results now. Quality will be lower without: '
-      + labels.join(', ') + '. Re-run those stages on the Pipeline page later to improve.';
+      + labels.join(', ') + '. Re-run those stages on the Process page later to improve.';
   }
   actions.innerHTML = '<button class="compute-btn" onclick="computeReviewNow()">'
     + 'Compute results now</button>';
@@ -4339,7 +4376,11 @@ function grmRenderKeepingCurrentSelection(items, fallbackId) {
 
   var nextId = grmFallbackSelectionId(items, fallbackId);
   if (nextId != null) {
-    grmSelect(nextId);
+    grmState.selected = nextId;
+    grmState.selectedIds = new Set([nextId]);
+    grmState.selectionAnchor = nextId;
+    renderGroupModal();
+    grmRefreshSelectedLoupe();
     return;
   }
 
@@ -4441,6 +4482,13 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
     // null = follow smart default; true/false = user explicitly set it.
     confirmSpeciesOverride: null,
     applyFlagsOverride: null,
+    // Flipped true the first time grmOnSpeciesInput fires. Gates the
+    // render-time fallback that populates the species field from the
+    // encounter — otherwise clearing the field would immediately repopulate
+    // it on the very next renderGroupModal(), making it impossible to leave
+    // the species blank (and, on an unconfirmed predicted burst, keeping
+    // the smart default checked so the reinstated species gets applied).
+    speciesFieldTouched: false,
     applying: false
   };
   _grmLoupeLocked = false;
@@ -4606,6 +4654,69 @@ function grmSeedFromDbState(dbPhotos, items, selectPhotoId) {
   grmUpdateApplyLabel();
 }
 
+function grmSyncSelectionClasses() {
+  var selectedIds = grmState && grmState.selectedIds ? grmState.selectedIds : new Set();
+  document.querySelectorAll('#grmOverlay .grm-card[data-photo-id]').forEach(function(card) {
+    var id = card.getAttribute('data-photo-id');
+    card.classList.toggle(
+      'selected',
+      selectedIds.has(parseInt(id, 10)) || selectedIds.has(id)
+    );
+  });
+}
+
+function grmZonePlaceholder(text) {
+  var span = document.createElement('span');
+  span.style.cssText = 'font-size:12px;color:var(--text-ghost);';
+  span.textContent = text;
+  return span;
+}
+
+function grmSyncZoneCards() {
+  if (!grmState) return;
+  var zones = { picks: [], candidates: [], rejects: [] };
+  var visible = {};
+  _grmVisibleItems().forEach(function(p) {
+    var id = String(p.id);
+    visible[id] = true;
+    if (grmState.picks.has(p.id)) zones.picks.push(id);
+    else if (grmState.rejects.has(p.id)) zones.rejects.push(id);
+    else zones.candidates.push(id);
+  });
+
+  var cardById = {};
+  document.querySelectorAll('#grmOverlay .grm-card[data-photo-id]').forEach(function(card) {
+    var id = card.getAttribute('data-photo-id');
+    if (visible[id]) cardById[id] = card;
+    else card.remove();
+  });
+
+  function syncStrip(stripId, ids, emptyText) {
+    var strip = document.getElementById(stripId);
+    if (!strip) return;
+    Array.from(strip.children).forEach(function(child) {
+      if (!child.classList || !child.classList.contains('grm-card')) child.remove();
+    });
+    ids.forEach(function(id) {
+      var card = cardById[id];
+      if (card) strip.appendChild(card);
+    });
+    if (!ids.length) strip.appendChild(grmZonePlaceholder(emptyText));
+  }
+
+  syncStrip('grmPicks', zones.picks, 'Press ↑ to add picks');
+  syncStrip('grmCandidates', zones.candidates, 'All sorted');
+  syncStrip('grmRejects', zones.rejects, 'Press ↓ to reject');
+
+  document.getElementById('grmCount').textContent =
+    zones.picks.length + ' picks, ' + zones.rejects.length + ' rejects, ' +
+    zones.candidates.length + ' unsorted';
+  grmUpdateKeywordSummary(grmKeywordStats(_grmKeywordSummaryMembers()));
+  grmSyncSelectionClasses();
+  grmRefreshResetAllVisibility();
+  grmUpdateApplyLabel();
+}
+
 function closeGroupReview() {
   document.getElementById('grmOverlay').classList.remove('open');
   _grmOffsets = {};
@@ -4616,8 +4727,67 @@ function closeGroupReview() {
   grmRefreshResetAllVisibility();
 }
 
+function grmHasSpeciesKeyword(photoId, species) {
+  if (!species || !grmState || grmState.keywordStateSpecies !== species) return false;
+  var st = (grmState.dbState && grmState.dbState[photoId]) || {};
+  return !!st.has_species_keyword;
+}
+
+function grmKeywordStats(items) {
+  var speciesEl = document.getElementById('grmSpecies');
+  var species = speciesEl ? (speciesEl.value || '').trim() : '';
+  var stats = {
+    species: species,
+    total: species ? items.length : 0,
+    applied: 0,
+    missing: 0
+  };
+  if (!species) return stats;
+
+  items.forEach(function(p) {
+    if (grmHasSpeciesKeyword(p.id, species)) stats.applied++;
+    else stats.missing++;
+  });
+  return stats;
+}
+
+function grmUpdateKeywordSummary(stats) {
+  var summary = document.getElementById('grmSpeciesKeywordSummary');
+  if (!summary) return;
+  summary.className = 'grm-keyword-summary';
+  if (!grmState || !grmState.seeded) {
+    summary.textContent = 'Loading keyword state';
+    return;
+  }
+  if (!stats.species) {
+    summary.textContent = 'No species keyword';
+    return;
+  }
+  summary.textContent = 'Species keyword: ' + stats.applied + '/' + stats.total + ' applied';
+  if (stats.total > 0 && stats.missing === 0) summary.classList.add('ok');
+  else if (stats.missing > 0) summary.classList.add('warn');
+}
+
+function grmKeywordBadgeHtml(p, stats) {
+  if (!stats.species || !grmState || !grmState.seeded || stats.total === 0) return '';
+  var hasKw = grmHasSpeciesKeyword(p.id, stats.species);
+  if (stats.missing === 0) return '';
+  if (stats.applied === 0) return '';
+  if (hasKw) {
+    return '<span class="grm-card-kw-dot" title="Species keyword already applied"></span>';
+  }
+  return '<span class="grm-card-needs-tag" title="Missing species keyword; Apply will add it if Confirm species is checked">Needs tag</span>';
+}
+
 function renderGroupModal() {
   var items = grmState.items.filter(function(p) { return !grmState.removed.has(p.id); });
+  // Per-card badges are keyed off the *visible* items — a removed frame has
+  // no card to decorate, so its keyword state can't drive per-card markers
+  // without confusing the user. The header summary, in contrast, must count
+  // every frame Apply would still tag (removed frames included when flags
+  // are unchecked), which is what _grmKeywordSummaryMembers resolves.
+  var keywordStats = grmKeywordStats(items);
+  var summaryStats = grmKeywordStats(_grmKeywordSummaryMembers());
 
   function renderCard(p) {
     var isSelected = grmState.selectedIds && grmState.selectedIds.has(p.id);
@@ -4632,15 +4802,12 @@ function renderGroupModal() {
     // pipeline cache hasn't been refreshed.
     var dbSt = (grmState.dbState && grmState.dbState[p.id]) || {};
     var dbFlag = dbSt.flag || 'none';
-    var hasKw = !!dbSt.has_species_keyword;
 
     var flagHtml = '';
     if (dbFlag === 'flagged') flagHtml = '<span class="photo-flag-badge flag-flagged" title="Already flagged in library" style="bottom:auto;top:4px;left:4px;">P</span>';
     else if (dbFlag === 'rejected') flagHtml = '<span class="photo-flag-badge flag-rejected" title="Already rejected in library" style="bottom:auto;top:4px;left:4px;">X</span>';
 
-    var kwHtml = hasKw
-      ? '<span class="grm-card-kw-badge" title="Species keyword already applied" style="position:absolute;top:4px;right:4px;background:var(--accent);color:var(--accent-text);font-size:10px;font-weight:600;padding:2px 6px;border-radius:3px;letter-spacing:0.04em;">TAG</span>'
-      : '';
+    var kwHtml = grmKeywordBadgeHtml(p, keywordStats);
     var repHtml = dbSt.is_species_representative
       ? '<span class="grm-card-representative">Representative</span>'
       : '';
@@ -4676,13 +4843,18 @@ function renderGroupModal() {
   document.getElementById('grmCandidates').innerHTML = candidateItems.map(renderCard).join('') || '<span style="font-size:12px;color:var(--text-ghost);">All sorted</span>';
   document.getElementById('grmRejects').innerHTML = rejectItems.map(renderCard).join('') || '<span style="font-size:12px;color:var(--text-ghost);">Press ↓ to reject</span>';
 
-  // Species input
-  if (!document.getElementById('grmSpecies').value && items.length > 0) {
+  // Species input — pre-fill from the encounter on the *initial* render only.
+  // Once the user has typed in (or cleared) the field, honor that: repopulating
+  // here would make it impossible to leave the species blank, and would also
+  // resurrect the smart default so an unconfirmed predicted burst could apply
+  // an unwanted species without the user noticing.
+  if (!document.getElementById('grmSpecies').value && items.length > 0 && !grmState.speciesFieldTouched) {
     var enc = pipelineResults.encounters[grmState.encIdx];
     document.getElementById('grmSpecies').value = enc.confirmed_species || (enc.species ? enc.species[0] : '') || '';
   }
 
   document.getElementById('grmCount').textContent = pickItems.length + ' picks, ' + rejectItems.length + ' rejects, ' + candidateItems.length + ' unsorted';
+  grmUpdateKeywordSummary(summaryStats);
 
   // Re-apply offset indicators and the per-card transforms (cover-fit always
   // needs an explicit transform now that <img>s are laid out at natural
@@ -4701,11 +4873,14 @@ function renderGroupModal() {
 var _grmSpeciesRefetchTimer = null;
 var _grmSpeciesRefetchToken = 0;
 
-// Called from the species <input>'s oninput. Refresh the Apply label
-// immediately (the diff uses the typed value), and schedule a debounced
-// refetch of has_species_keyword so the TAG markers + Tag-N preview reflect
-// the *currently typed* species, not the one the modal opened with.
+// Called from the species <input>'s oninput. Refresh the Apply label and
+// visible keyword summary immediately (the diff uses the typed value), and
+// schedule a debounced refetch of has_species_keyword so missing-keyword
+// markers + Tag-N preview reflect the *currently typed* species, not the one
+// the modal opened with.
 function grmOnSpeciesInput() {
+  if (grmState) grmState.speciesFieldTouched = true;
+  renderGroupModal();
   grmUpdateApplyLabel();
   if (_grmSpeciesRefetchTimer) clearTimeout(_grmSpeciesRefetchTimer);
   _grmSpeciesRefetchTimer = setTimeout(grmRefreshSpeciesKeywordState, 250);
@@ -4760,6 +4935,10 @@ function grmOnToggleChange(which) {
     if (flChk) grmState.applyFlagsOverride = flChk.checked;
   }
   grmUpdateApplyLabel();
+  // The header summary is keyed off the effective post-apply member set,
+  // which shifts with the flags override: unchecking it re-includes
+  // "removed" frames in the count. Refresh so `N/M applied` stays truthful.
+  grmUpdateKeywordSummary(grmKeywordStats(_grmKeywordSummaryMembers()));
 }
 
 // Smart default: is there a real pending change for each side?
@@ -4909,9 +5088,7 @@ function grmSpeciesMemberItems(checks) {
 function grmSpeciesTagCount(checks, species) {
   if (!species) return 0;
   return grmSpeciesMemberItems(checks).filter(function(p) {
-    var st = (grmState.dbState && grmState.dbState[p.id]) || {};
-    var hasKw = grmState.keywordStateSpecies === species && !!st.has_species_keyword;
-    return !hasKw;
+    return !grmHasSpeciesKeyword(p.id, species);
   }).length;
 }
 
@@ -4934,6 +5111,18 @@ function grmApplyTitle(diff, checks, tagCount) {
 
 function _grmVisibleItems() {
   return grmState.items.filter(function(p) { return !grmState.removed.has(p.id); });
+}
+
+// Members whose keyword state the header summary reports on. Mirrors the
+// effective post-apply burst membership (grmSpeciesMemberItems): a removed
+// photo is excluded only when its removal actually commits (checks.flags);
+// otherwise the removal is discarded on close and Apply still tags it, so
+// the summary must count it too. Falls back to visible items before the
+// modal is seeded (no diff/checks yet).
+function _grmKeywordSummaryMembers() {
+  if (!grmState || !grmState.seeded) return _grmVisibleItems();
+  var checks = grmResolveChecks(grmComputeDiff());
+  return grmSpeciesMemberItems(checks);
 }
 
 function _grmEnsureSelectedIds() {
@@ -4987,32 +5176,8 @@ function grmSelect(photoId, mode) {
       grmState.selectionAnchor = photoId;
     }
   }
-  renderGroupModal();
-
-  // Update loupe preview
-  var loupeImg = document.getElementById('grmLoupePhoto');
-  var loupeInfo = document.getElementById('grmLoupeInfo');
-  var detailEl = document.getElementById('grmLoupeDetail');
-
-  if (grmState.selected) {
-    loupeImg.src = grmPhotoUrl(grmState.selected);
-    _grmAfterLoupeSourceChange();
-    var photo = grmState.items.find(function(p) { return p.id === grmState.selected; });
-    if (photo) {
-      var sharp = photo.subject_tenengrad != null ? Math.round(photo.subject_tenengrad) : '?';
-      var boxSharp = photo.box_sharpness != null ? ' - box sharpness: ' + Math.round(photo.box_sharpness) : '';
-      loupeInfo.textContent = (photo.filename || '') + ' - sharpness: ' + sharp + boxSharp + ' - move cursor to compare';
-
-      // Render pipeline metadata in detail panel
-      detailEl.innerHTML = buildPipelineMetadataHtml(photo);
-    }
-    grmUpdateResLabel();
-  } else {
-    loupeImg.removeAttribute('src');
-    loupeInfo.textContent = 'Select a photo to preview. Hover to compare sharpness across all frames.';
-    detailEl.innerHTML = '';
-    grmLoupeReset();
-  }
+  grmSyncSelectionClasses();
+  grmRefreshSelectedLoupe();
 }
 
 function grmRefreshSelectedLoupe() {
@@ -5022,8 +5187,11 @@ function grmRefreshSelectedLoupe() {
   if (!loupeImg || !loupeInfo || !detailEl) return;
 
   if (grmState.selected) {
-    loupeImg.src = grmPhotoUrl(grmState.selected);
-    _grmAfterLoupeSourceChange();
+    var nextSrc = grmPhotoUrl(grmState.selected);
+    if (loupeImg.getAttribute('src') !== nextSrc) {
+      loupeImg.src = nextSrc;
+      _grmAfterLoupeSourceChange();
+    }
     var photo = grmState.items.find(function(p) { return p.id === grmState.selected; });
     if (photo) {
       var sharp = photo.subject_tenengrad != null ? Math.round(photo.subject_tenengrad) : '?';
@@ -5146,6 +5314,35 @@ function buildBurstConsensus(photos) {
   // Stable sort by total count desc (insertion order breaks ties, like the server).
   rows.sort(function(a, b) { return b.count - a.count; });
   return rows;
+}
+
+// Client mirror of encounter_species_label() (vireo/encounters.py): pick the
+// species with the highest confidence-weighted sum across all photos' top-5
+// predictions, breaking ties by first-appearance order. Used to persist an
+// unconfirmed species override for a detached single-photo burst so the
+// local save-cache path agrees with the server detach endpoint, which
+// derives the same label via _rebuild_encounter_species_label. Sorting by
+// prediction count (as buildBurstConsensus does for display) can pick a
+// different species when a lower-confidence label repeats across
+// detections/models while a higher-confidence one appears once — e.g.
+// [A .90, B .44, B .44] where the server picks A but a count sort picks B.
+function candidateSpeciesOverrideFromPhotos(photos) {
+  var weights = {};
+  var order = [];
+  (photos || []).forEach(function(p) {
+    ((p && p.species_top5) || []).forEach(function(entry) {
+      var sp = entry[0];
+      var conf = entry[1] || 0;
+      if (!(sp in weights)) { weights[sp] = 0; order.push(sp); }
+      weights[sp] += conf;
+    });
+  });
+  if (order.length === 0) return null;
+  var best = order[0];
+  for (var i = 1; i < order.length; i++) {
+    if (weights[order[i]] > weights[best]) best = order[i];
+  }
+  return { species: best, confirmed: false };
 }
 
 // Build the per-photo + consensus species prediction blocks. The per-photo
@@ -5853,7 +6050,7 @@ function grmMoveUp() {
       grmState.picks.add(photoId);
     }
   });
-  renderGroupModal();
+  grmSyncZoneCards();
 }
 
 function grmMoveDown() {
@@ -5868,7 +6065,7 @@ function grmMoveDown() {
       grmState.rejects.add(photoId);
     }
   });
-  renderGroupModal();
+  grmSyncZoneCards();
 }
 
 function grmMovePick() {
@@ -5879,7 +6076,7 @@ function grmMovePick() {
     grmState.rejects.delete(photoId);
     grmState.picks.add(photoId);
   });
-  renderGroupModal();
+  grmSyncZoneCards();
 }
 
 function grmMoveReject() {
@@ -5890,7 +6087,7 @@ function grmMoveReject() {
     grmState.picks.delete(photoId);
     grmState.rejects.add(photoId);
   });
-  renderGroupModal();
+  grmSyncZoneCards();
 }
 
 function grmMoveCandidate() {
@@ -5901,7 +6098,7 @@ function grmMoveCandidate() {
     grmState.picks.delete(photoId);
     grmState.rejects.delete(photoId);
   });
-  renderGroupModal();
+  grmSyncZoneCards();
 }
 
 function grmRemoveFromGroup() {
@@ -5917,8 +6114,8 @@ function grmRemoveFromGroup() {
   grmState.selected = null;
   if (grmState.selectedIds) grmState.selectedIds.clear();
   grmState.selectionAnchor = null;
-  renderGroupModal();
-  document.getElementById('grmLoupeDetail').innerHTML = '';
+  grmSyncZoneCards();
+  grmRefreshSelectedLoupe();
 }
 
 /* --- Keyboard handling --- */
@@ -5973,17 +6170,52 @@ function buildPipelinePhotoContextMenu(photoId) {
   );
 }
 
-/* --- Right-click menu ---
- * Catches contextmenu on photo cards (main grid) and grm-cards (group review
- * modal). Browse opens in a new tab (browser) or navigates in place (Tauri app
- * window) via openInBrowse, so the user reaches the photo either way. */
-document.addEventListener('contextmenu', function(e) {
+function pipelineContextPhotoIdFromEvent(e) {
   var card = e.target.closest('.photo-card[data-photo-id], .grm-card[data-photo-id]');
-  if (!card) return;
-  var pid = parseInt(card.dataset.photoId, 10);
-  if (!pid) return;
+  if (card) {
+    var cardPid = parseInt(card.dataset.photoId, 10);
+    if (cardPid) {
+      return {
+        photoId: cardPid,
+        card: card,
+      };
+    }
+  }
+
+  // The burst-review loupe is an image too, but it is not nested in a
+  // data-photo-id card. Resolve it through the modal's current selection so
+  // the same context menu actions work on the large preview.
+  var loupe = e.target.closest('#grmLoupeImg, #grmLoupePhoto');
+  var overlay = document.getElementById('grmOverlay');
+  if (
+    loupe &&
+    overlay &&
+    overlay.classList.contains('open') &&
+    typeof grmState !== 'undefined' &&
+    grmState &&
+    grmState.selected
+  ) {
+    return {
+      photoId: parseInt(grmState.selected, 10),
+      card: null,
+    };
+  }
+
+  return null;
+}
+
+/* --- Right-click menu ---
+ * Catches contextmenu on photo cards (main grid), grm-cards (group review
+ * modal), and the group-review loupe preview. Browse opens in a new tab
+ * (browser) or navigates in place (Tauri app window) via openInBrowse, so the
+ * user reaches the photo either way. */
+document.addEventListener('contextmenu', function(e) {
+  var target = pipelineContextPhotoIdFromEvent(e);
+  if (!target) return;
+  var pid = target.photoId;
+  var card = target.card;
   e.preventDefault();
-  if (card.classList.contains('grm-card') && typeof grmState !== 'undefined' && grmState) {
+  if (card && card.classList.contains('grm-card') && typeof grmState !== 'undefined' && grmState) {
     var prevSelected = grmState.selected;
     grmState.selected = pid;
     if (!grmState.selectedIds) grmState.selectedIds = new Set();
@@ -5991,7 +6223,7 @@ document.addEventListener('contextmenu', function(e) {
       grmState.selectedIds = new Set([pid]);
     }
     grmState.selectionAnchor = pid;
-    renderGroupModal();
+    grmSyncSelectionClasses();
     // Keep the right-hand loupe in sync with the newly selected card so it
     // doesn't stay on the previous photo if the user dismisses the menu.
     if (prevSelected !== pid && typeof grmRefreshSelectedLoupe === 'function') {
@@ -6191,12 +6423,22 @@ async function grmApply() {
         // single-photo burst must keep it (shallow clone so it doesn't alias the
         // source), or a flags-only apply would silently revert this photo to the
         // encounter species and drop the burst-specific confirmation.
+        var detachedPhotos = photo ? [photo] : [];
+        var detachedConsensus = buildBurstConsensus(detachedPhotos);
+        var sourceOverride = burst && burst.species_override;
+        // Match the server detach-photo elif (vireo/app.py): fall through to
+        // a null override whenever the encounter tracks any confirmed_species,
+        // including the mixed/partial state (species_confirmed=false but
+        // confirmed_species set) where a classifier-guess override would
+        // mask the real prior tag for a later burst-confirm.
         enc.bursts.push({
           photo_ids: [pid],
-          species_predictions: buildBurstConsensus(photo ? [photo] : []),
-          species_override: burst && burst.species_override
-            ? Object.assign({}, burst.species_override)
-            : null,
+          species_predictions: detachedConsensus,
+          species_override: sourceOverride && sourceOverride.confirmed === true
+            ? Object.assign({}, sourceOverride)
+            : (enc.confirmed_species
+              ? null
+              : candidateSpeciesOverrideFromPhotos(detachedPhotos)),
         });
       });
       // Recompute the shortened source burst's consensus from its remaining

@@ -776,6 +776,10 @@
       <option value="date_desc">Date (newest)</option>
     </select>
     <button class="btn-batch-accept" id="acceptAllBtn" onclick="acceptAllPending()" style="display:none;">Accept All</button>
+    <button type="button" class="model-selector" id="toggleDetectionBoxesBtn"
+            onclick="toggleReviewDetectionBoxes()"
+            title="Toggle bounding-box overlays on review cards"
+            style="margin-left:12px;cursor:pointer;">Show Boxes</button>
     <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted,#888);margin-left:12px;">
       Min confidence:
       <input type="range" id="confFilter" min="0" max="90" step="5" value="0"
@@ -816,6 +820,46 @@ var availableModels = [];
 var collectionPhotoIds = null;  // null = no filter
 var thumbSize = 400;
 var mode = 'review';
+
+function _reviewStoredBool(key, fallback) {
+  try {
+    var value = localStorage.getItem(key);
+    if (value === '0') return false;
+    if (value === '1') return true;
+  } catch (e) {}
+  return fallback;
+}
+function _reviewPersistBool(key, value) {
+  try { localStorage.setItem(key, value ? '1' : '0'); } catch (e) {}
+}
+var REVIEW_BOXES_STORAGE_KEY = 'vireo.review.detectionBoxesVisible';
+var reviewDetectionBoxesVisible = _reviewStoredBool(REVIEW_BOXES_STORAGE_KEY, false);
+
+function _syncReviewDetectionBoxesBtn() {
+  var btn = document.getElementById('toggleDetectionBoxesBtn');
+  if (btn) btn.textContent = reviewDetectionBoxesVisible ? 'Hide Boxes' : 'Show Boxes';
+}
+
+function _syncReviewDetectionBoxes() {
+  document.querySelectorAll('.detection-box').forEach(function(box) {
+    var pid = parseInt(box.getAttribute('data-photo-id'), 10);
+    var hideDetectionOverlay = (
+      typeof window.vireoPhotoHasOrientationEdit === 'function' &&
+      !isNaN(pid) &&
+      window.vireoPhotoHasOrientationEdit(pid)
+    );
+    box.style.display = (reviewDetectionBoxesVisible && !hideDetectionOverlay) ? '' : 'none';
+  });
+}
+
+function toggleReviewDetectionBoxes() {
+  reviewDetectionBoxesVisible = !reviewDetectionBoxesVisible;
+  _reviewPersistBool(REVIEW_BOXES_STORAGE_KEY, reviewDetectionBoxesVisible);
+  _syncReviewDetectionBoxesBtn();
+  _syncReviewDetectionBoxes();
+}
+
+document.addEventListener('DOMContentLoaded', _syncReviewDetectionBoxesBtn);
 
 /* Species color palette for bounding boxes */
 var _speciesColors = {};
@@ -1125,7 +1169,7 @@ document.addEventListener('lightbox:renderchanged', function(e) {
       window.vireoPhotoHasOrientationEdit(id)
     );
     document.querySelectorAll('.detection-box[data-photo-id="' + id + '"]').forEach(function(box) {
-      box.style.display = hideDetectionOverlay ? 'none' : '';
+      box.style.display = (reviewDetectionBoxesVisible && !hideDetectionOverlay) ? '' : 'none';
     });
   });
 });
@@ -1307,7 +1351,7 @@ function renderPredictionCard(pred) {
     var bHeight = (pred.box_h * 100).toFixed(2) + '%';
     imgHtml = '<div class="card-img-wrap">' + imgTag +
       representativeBadge +
-      '<div class="detection-box" data-photo-id="' + pred.photo_id + '" style="' + (hideDetectionOverlay ? 'display:none;' : '') + 'left:' + bLeft + ';top:' + bTop +
+      '<div class="detection-box" data-photo-id="' + pred.photo_id + '" style="' + ((reviewDetectionBoxesVisible && !hideDetectionOverlay) ? '' : 'display:none;') + 'left:' + bLeft + ';top:' + bTop +
       ';width:' + bWidth + ';height:' + bHeight + ';border-color:' + color + ';">' +
       '<span class="detection-label" style="background:' + color +
       ';color:#0A1F2E;">' + escapeHtml(displaySpecies) + ' ' + confPct + '%</span>' +
@@ -1775,7 +1819,11 @@ async function loadGroupData(groupId) {
 
     // Auto-select the best photo for the loupe
     if (best) {
-      grmSelect(best.photo_id);
+      grmState.selected = best.photo_id;
+      grmState.selectedIds = new Set([best.photo_id]);
+      grmState.selectionAnchor = best.photo_id;
+      renderGroupModal();
+      grmRefreshSelectedLoupe();
     } else {
       renderGroupModal();
     }
@@ -1881,6 +1929,68 @@ function _grmEnsureSelectedIds() {
   return grmState.selectedIds;
 }
 
+function grmSyncSelectionClasses() {
+  var selectedIds = grmState && grmState.selectedIds ? grmState.selectedIds : new Set();
+  document.querySelectorAll('#grmOverlay .grm-card[data-photo-id]').forEach(function(card) {
+    var id = card.getAttribute('data-photo-id');
+    card.classList.toggle(
+      'selected',
+      selectedIds.has(parseInt(id, 10)) || selectedIds.has(id)
+    );
+  });
+}
+
+function grmZonePlaceholder(text) {
+  var span = document.createElement('span');
+  span.style.cssText = 'font-size:12px;color:var(--text-ghost,#555);';
+  span.textContent = text;
+  return span;
+}
+
+function grmSyncZoneCards() {
+  if (!grmState) return;
+  var zones = { picks: [], candidates: [], rejects: [] };
+  var visible = {};
+  _grmVisibleItems().forEach(function(it) {
+    var id = String(it.photo_id);
+    visible[id] = true;
+    if (grmState.picks.has(it.photo_id)) zones.picks.push(id);
+    else if (grmState.rejects.has(it.photo_id)) zones.rejects.push(id);
+    else zones.candidates.push(id);
+  });
+
+  var cardById = {};
+  document.querySelectorAll('#grmOverlay .grm-card[data-photo-id]').forEach(function(card) {
+    var id = card.getAttribute('data-photo-id');
+    if (visible[id]) cardById[id] = card;
+    else card.remove();
+  });
+
+  function syncStrip(stripId, ids, emptyText) {
+    var strip = document.getElementById(stripId);
+    if (!strip) return;
+    Array.from(strip.children).forEach(function(child) {
+      if (!child.classList || !child.classList.contains('grm-card')) child.remove();
+    });
+    ids.forEach(function(id) {
+      var card = cardById[id];
+      if (card) strip.appendChild(card);
+    });
+    if (!ids.length) strip.appendChild(grmZonePlaceholder(emptyText));
+  }
+
+  syncStrip('grmPicks', zones.picks, 'Drag or press ↑ to add picks');
+  syncStrip('grmCandidates', zones.candidates, 'All sorted');
+  syncStrip('grmRejects', zones.rejects, 'Drag or press ↓ to reject');
+
+  document.getElementById('grmCount').textContent =
+    zones.picks.length + ' picks, ' + zones.rejects.length + ' rejects, ' +
+    zones.candidates.length + ' unsorted';
+  grmSyncSelectionClasses();
+  grmRefreshResetAllVisibility();
+  grmUpdateApplyLabel();
+}
+
 function _grmSelectRange(anchorId, photoId) {
   var selectedIds = _grmEnsureSelectedIds();
   var items = _grmVisibleItems();
@@ -1927,29 +2037,8 @@ function grmSelect(photoId, mode) {
       grmState.selectionAnchor = photoId;
     }
   }
-  renderGroupModal();
-
-  // Update loupe preview
-  var loupeImg = document.getElementById('grmLoupePhoto');
-  var loupeInfo = document.getElementById('grmLoupeInfo');
-  var loupePreds = document.getElementById('grmLoupePreds');
-  if (grmState.selected) {
-    loupeImg.src = grmLoupePhotoUrl(grmState.selected);
-    _grmAfterLoupeSourceChange();
-    var item = grmState.items.find(function(it) { return it.photo_id === grmState.selected; });
-    if (item) {
-      var sharp = item.subject_sharpness != null ? Math.round(item.subject_sharpness) : (item.sharpness != null ? Math.round(item.sharpness) : '?');
-      var boxSharp = item.box_sharpness != null ? ' — box sharpness: ' + Math.round(item.box_sharpness) : '';
-      loupeInfo.textContent = (item.filename || '') + ' — sharpness: ' + sharp + boxSharp + ' — move cursor to compare';
-      loupePreds.innerHTML = renderLoupePreds(item);
-    }
-    grmUpdateResLabel();
-  } else {
-    loupeImg.src = '';
-    loupeInfo.textContent = 'Select a photo to preview. Hover to compare sharpness across all frames.';
-    loupePreds.innerHTML = '';
-    grmLoupeReset();
-  }
+  grmSyncSelectionClasses();
+  grmRefreshSelectedLoupe();
 }
 
 function grmRefreshSelectedLoupe() {
@@ -1958,8 +2047,11 @@ function grmRefreshSelectedLoupe() {
   var loupePreds = document.getElementById('grmLoupePreds');
   if (!loupeImg || !loupeInfo || !loupePreds) return;
   if (grmState.selected) {
-    loupeImg.src = grmLoupePhotoUrl(grmState.selected);
-    _grmAfterLoupeSourceChange();
+    var nextSrc = grmLoupePhotoUrl(grmState.selected);
+    if (loupeImg.getAttribute('src') !== nextSrc) {
+      loupeImg.src = nextSrc;
+      _grmAfterLoupeSourceChange();
+    }
     var item = grmState.items.find(function(it) { return it.photo_id === grmState.selected; });
     if (item) {
       var sharp = item.subject_sharpness != null ? Math.round(item.subject_sharpness) : (item.sharpness != null ? Math.round(item.sharpness) : '?');
@@ -2825,7 +2917,7 @@ function grmMoveUp() {
     }
     // already in picks — do nothing
   });
-  renderGroupModal();
+  grmSyncZoneCards();
 }
 
 function grmMoveDown() {
@@ -2842,7 +2934,7 @@ function grmMoveDown() {
     }
     // already in rejects — do nothing
   });
-  renderGroupModal();
+  grmSyncZoneCards();
 }
 
 function grmMovePick() {
@@ -2852,7 +2944,7 @@ function grmMovePick() {
     grmState.rejects.delete(photoId);
     grmState.picks.add(photoId);
   });
-  renderGroupModal();
+  grmSyncZoneCards();
 }
 
 function grmMoveReject() {
@@ -2862,7 +2954,7 @@ function grmMoveReject() {
     grmState.picks.delete(photoId);
     grmState.rejects.add(photoId);
   });
-  renderGroupModal();
+  grmSyncZoneCards();
 }
 
 function grmMoveCandidate() {
@@ -2872,7 +2964,7 @@ function grmMoveCandidate() {
     grmState.picks.delete(photoId);
     grmState.rejects.delete(photoId);
   });
-  renderGroupModal();
+  grmSyncZoneCards();
 }
 
 function grmRemoveFromGroup() {
@@ -2888,7 +2980,8 @@ function grmRemoveFromGroup() {
   grmState.selected = null;
   if (grmState.selectedIds) grmState.selectedIds.clear();
   grmState.selectionAnchor = null;
-  renderGroupModal();
+  grmSyncZoneCards();
+  grmRefreshSelectedLoupe();
 }
 
 function grmUpdateApplyLabel() {

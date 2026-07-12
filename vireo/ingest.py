@@ -187,11 +187,21 @@ def preview_destination(sources, destination, folder_template="%Y/%Y-%m-%d",
 
     timestamps = _source_file_timestamps(all_files)
     folder_counts = {}
+    file_destinations = []
     for source_file in all_files:
         rel_folder = build_destination_path(timestamps.get(source_file), folder_template)
         if not rel_folder:
             rel_folder = "."
         folder_counts[rel_folder] = folder_counts.get(rel_folder, 0) + 1
+        file_destinations.append({
+            "path": str(source_file),
+            "folder": rel_folder,
+            "full_folder": str(
+                Path(destination)
+                if rel_folder == "."
+                else Path(destination) / rel_folder
+            ),
+        })
 
     dest_path = Path(destination)
     folders = []
@@ -213,6 +223,7 @@ def preview_destination(sources, destination, folder_template="%Y/%Y-%m-%d",
         "total_folders": len(folders),
         "new_folders": new_count,
         "existing_folders": existing_count,
+        "files": file_destinations,
     }
 
 

@@ -17,6 +17,7 @@ import os
 import queue
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -26,7 +27,7 @@ import uuid
 import webbrowser
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import quote, urlsplit
 
 import places
 from db import (
@@ -325,17 +326,41 @@ def _highlight_score_bucket(photos, picked_first=False):
         }
         p["reasons"] = reasons[:3]
 
-    photos.sort(
-        key=lambda p: (
-            (1 if p.get("flag") == "flagged" else 0) if picked_first else 0,
-            p.get("highlight_score") or 0,
-            p.get("predicted_confidence") or 0,
-            p.get("quality_score") or 0,
-            p.get("rating") or 0,
-            -p.get("id", 0),
-        ),
-        reverse=True,
-    )
+    if picked_first:
+        # Highlights page ordering: three contiguous regions —
+        #   1. picks (flagged): analyzed first (by score desc), then
+        #      unanalyzed picks in capture order;
+        #   2. analyzed non-picks: by highlight_score desc;
+        #   3. unanalyzed non-picks: capture order (earliest first).
+        # The analyzed-before-unanalyzed tier separates the groups so the
+        # score term only reorders analyzed rows and the timestamp term only
+        # reorders unanalyzed rows — they never compete. Timestamps are ISO
+        # text, so lexicographic order is chronological; missing timestamps
+        # sort to the end of their group. This is an ascending sort (no
+        # reverse), negating the score to rank analyzed rows high-first.
+        def _bucket_sort_key(p):
+            analyzed = p.get("quality_score") is not None
+            ts = p.get("timestamp")
+            return (
+                0 if p.get("flag") == "flagged" else 1,
+                0 if analyzed else 1,
+                -(p.get("highlight_score") or 0) if analyzed else 0.0,
+                (ts is None, ts),
+                p.get("id", 0),
+            )
+
+        photos.sort(key=_bucket_sort_key)
+    else:
+        photos.sort(
+            key=lambda p: (
+                p.get("highlight_score") or 0,
+                p.get("predicted_confidence") or 0,
+                p.get("quality_score") or 0,
+                p.get("rating") or 0,
+                -p.get("id", 0),
+            ),
+            reverse=True,
+        )
 
 
 def _apply_preferred_photo(photos, preferred_photo_id, marker_key):
@@ -372,6 +397,32 @@ def _bucket_best_score(photos):
     """
     scores = [p.get("highlight_score") for p in photos if p.get("highlight_score") is not None]
     return max(scores) if scores else None
+
+
+def _bucket_unanalyzed_count(photos):
+    """Length of the trailing "Not yet analyzed" tail of a bucket.
+
+    Counts only the contiguous run of unscored non-pick photos at the END of
+    ``photos``. This is what the divider labels, so callers can trust that a
+    non-zero value marks a real tail below the divider.
+
+    Only the trailing run is counted (not every unscored non-pick in the
+    bucket) so that curated ordering — where
+    :func:`_apply_ordered_highlights` or :func:`_apply_highlight_preferences`
+    can promote an unscored, non-flagged photo to the front as a species
+    highlight or representative — doesn't inflate the count with photos that
+    now live above the divider. Unscored picks are excluded because they
+    stay grouped with the other picks at the front regardless.
+    """
+    if not photos:
+        return 0
+    tail = 0
+    for p in reversed(photos):
+        if p.get("quality_score") is None and p.get("flag") != "flagged":
+            tail += 1
+        else:
+            break
+    return tail
 
 
 def _apply_highlight_preferences(db, buckets):
@@ -414,6 +465,10 @@ def _apply_highlight_preferences(db, buckets):
         # photos.
         bucket["best_score"] = _bucket_best_score(bucket["photos"])
         bucket["best_timestamp"] = top.get("timestamp")
+        # Run last so curated promotion (an unscored rep pushed to the front)
+        # doesn't leave a stale tail count that anchors the divider above
+        # analyzed content.
+        bucket["unanalyzed_count"] = _bucket_unanalyzed_count(bucket.get("photos"))
 
 
 def _apply_ordered_highlights(db, buckets):
@@ -452,6 +507,9 @@ def _apply_ordered_highlights(db, buckets):
         bucket["highlight_count"] = sum(
             1 for p in bucket.get("photos") or [] if p.get("is_highlighted")
         )
+        # unanalyzed_count is assigned in _apply_highlight_preferences instead:
+        # that runs after this pass and can still reorder photos, so anchoring
+        # the tail count here would be stale under curated ordering.
         bucket["best_quality"] = best.get("quality_score")
         bucket["best_score"] = best.get("highlight_score")
         bucket["best_timestamp"] = best.get("timestamp")
@@ -557,6 +615,7 @@ def _collect_highlight_buckets(
             "rating": r.get("rating") or 0,
             "flag": r.get("flag") or "none",
             "quality_score": r.get("quality_score"),
+            "is_analyzed": r.get("quality_score") is not None,
             "subject_sharpness": r.get("subject_sharpness"),
             "subject_size": r.get("subject_size"),
             "sharpness": r.get("sharpness"),
@@ -1203,6 +1262,26 @@ def _compute_time_range(photos_by_id, photo_ids):
     return [min(timestamps), max(timestamps)]
 
 
+def _rebuild_encounter_species_label(results, photo_ids, fallback=None):
+    """Return the encounter-level species label for exactly photo_ids."""
+    from encounters import encounter_species_label
+
+    id_set = set(photo_ids or [])
+    photos = [p for p in results.get("photos", []) if p.get("id") in id_set]
+    name, confidence = encounter_species_label(photos)
+    if name is None and fallback is not None:
+        return list(fallback)
+    return [name, confidence]
+
+
+def _candidate_species_override(species_label):
+    """Convert a derived species label into an unconfirmed burst candidate."""
+    species = species_label[0] if species_label else None
+    if not species:
+        return None
+    return {"species": species, "confirmed": False}
+
+
 def _find_merge_target(encounters, detached_range, target_species):
     """Find an encounter index whose confirmed species matches target_species and
     whose time range is adjacent to detached_range (no other encounter sits in
@@ -1315,6 +1394,9 @@ def _auto_detach_burst_for_species(results, enc_idx, burst_idx, new_species):
         enc["photo_count"] = len(remaining)
         enc["burst_count"] = len(bursts)
         enc["species_predictions"] = rebuild_species_predictions(results, remaining)
+        enc["species"] = _rebuild_encounter_species_label(
+            results, remaining, fallback=enc.get("species")
+        )
         for b in bursts:
             b["species_predictions"] = rebuild_species_predictions(results, b["photo_ids"])
         enc["time_range"] = _compute_time_range(photos_by_id, remaining)
@@ -1335,6 +1417,9 @@ def _auto_detach_burst_for_species(results, enc_idx, burst_idx, new_species):
         target["species_predictions"] = rebuild_species_predictions(
             results, target["photo_ids"]
         )
+        target["species"] = _rebuild_encounter_species_label(
+            results, target["photo_ids"], fallback=target.get("species")
+        )
         # Same reason as above — target's trace no longer matches its photo set.
         target.pop("trace", None)
         t_min, t_max = target.get("time_range") or [None, None]
@@ -1346,8 +1431,11 @@ def _auto_detach_burst_for_species(results, enc_idx, burst_idx, new_species):
             max(maxs) if maxs else None,
         ]
     else:
+        detached_species = _rebuild_encounter_species_label(
+            results, detached_ids, fallback=enc.get("species")
+        )
         encounters.append({
-            "species": enc.get("species"),
+            "species": detached_species,
             "confirmed_species": new_species,
             "species_predictions": detached["species_predictions"],
             "species_confirmed": True,
@@ -2661,6 +2749,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # workspace overrides. Gated by a marker so it runs once; re-saved
     # legacy values are preserved on subsequent boots.
     cfg.migrate_legacy_miss_thresholds(init_db)
+    # One-time rewrite of the previous eye-focus detection default from on to
+    # off in both global config and workspace overrides.
+    cfg.migrate_eye_detect_default_off(init_db)
     # One-time resolution of the browse.toggle_ui="h" default clashing with
     # any pre-existing browse binding on ``h``. Writes an explicit "" so the
     # user's existing action keeps working; they can re-bind toggle_ui from
@@ -3427,7 +3518,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "sam2_variant": sam2_variant,
                 "dinov2_variant": dinov2_variant,
                 "proxy_longest_edge": proxy_longest_edge,
-                "eye_detect_enabled": pipeline_cfg.get("eye_detect_enabled", True),
+                "eye_detect_enabled": pipeline_cfg.get("eye_detect_enabled", False),
                 "preview_max_size": effective_cfg.get("preview_max_size", 1920),
             },
             "mask_variant_coverage": db.mask_variant_coverage(),
@@ -3605,6 +3696,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "review_mode must be a string or null, got "
                 f"{type(review_mode).__name__}", 400,
             )
+        # ``eye_detect_override`` is tri-state (None/True/False); accept
+        # only bool or missing so the plan matches what /api/jobs/pipeline
+        # would do.
+        eye_detect_override_body = body.get("eye_detect_override")
+        if (
+            eye_detect_override_body is not None
+            and not isinstance(eye_detect_override_body, bool)
+        ):
+            return json_error(
+                f"eye_detect_override must be boolean, got "
+                f"{type(eye_detect_override_body).__name__}", 400,
+            )
         params = PipelinePlanParams(
             collection_id=body.get("collection_id"),
             photo_ids=scope_photo_ids,
@@ -3612,6 +3715,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             skip_classify=bool(body.get("skip_classify")),
             skip_extract_masks=bool(body.get("skip_extract_masks")),
             skip_eye_keypoints=bool(body.get("skip_eye_keypoints")),
+            eye_detect_override=eye_detect_override_body,
             skip_regroup=bool(body.get("skip_regroup")),
             model_ids=body.get("model_ids") or (
                 [body["model_id"]] if body.get("model_id") else []
@@ -5216,7 +5320,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return None, json_error("collection not found", 404)
         return db.get_collection_photo_ids(collection_id), None
 
-    def _bulk_gps_location_payload(db, body):
+    def _bulk_gps_location_payload(db, body, cancel_check=None):
         """Build preview/apply data for resolving locations from EXIF GPS."""
         photo_ids, error = _bulk_gps_location_source_ids(db, body)
         if error is not None:
@@ -5250,7 +5354,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         unresolved = []
         skipped = []
         ordered_group_keys = []
+        cancelled = False
         for pid in photo_ids:
+            if cancel_check is not None and cancel_check():
+                cancelled = True
+                break
             photo = photos_map[pid]
             if pid in assigned_ids:
                 skipped.append({
@@ -5298,7 +5406,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "sample_filenames": group["sample_filenames"],
             })
 
-        return {
+        result = {
             "total": len(photo_ids),
             "resolvable": sum(group["count"] for group in group_list),
             "updated": 0,
@@ -5306,7 +5414,306 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "unresolved": unresolved,
             "skipped": skipped,
             "_details_by_place_id": {k: v["details"] for k, v in groups.items()},
-        }, None
+        }
+        if cancelled:
+            result["cancelled"] = True
+        return result, None
+
+    def _validate_import_tag_options(body):
+        """Normalize optional tags attached to a photo import request."""
+        raw_tags = body.get("tags", [])
+        if not isinstance(raw_tags, list):
+            return None, None, json_error("tags must be a list of names")
+        if len(raw_tags) > 50:
+            return None, None, json_error("at most 50 import tags are allowed")
+
+        tags = []
+        seen = set()
+        for raw in raw_tags:
+            if not isinstance(raw, str):
+                return None, None, json_error(
+                    "tags must contain only strings"
+                )
+            name = normalize_keyword_display(raw)
+            if not name:
+                return None, None, json_error("import tags must not be empty")
+            if len(name) > 200:
+                return None, None, json_error(
+                    "import tags must be 200 characters or fewer"
+                )
+            match_key = keyword_match_key(name) or name.casefold()
+            if match_key not in seen:
+                seen.add(match_key)
+                tags.append(name)
+
+        location_from_gps = body.get("location_from_gps", False)
+        if not isinstance(location_from_gps, bool):
+            return None, None, json_error(
+                "location_from_gps must be a boolean"
+            )
+        return tags, location_from_gps, None
+
+    def _queue_import_keyword_add(
+        db, photo_id, keyword_name, workspace_id, *, commit=False,
+    ):
+        """Thread-safe equivalent of _queue_keyword_add for import jobs."""
+        removed = db.remove_pending_changes(
+            photo_id, "keyword_remove", keyword_name,
+            workspace_id=workspace_id, _commit=commit,
+        )
+        if removed == 0:
+            db.queue_change(
+                photo_id, "keyword_add", keyword_name,
+                workspace_id=workspace_id, _commit=commit,
+            )
+
+    def _queue_import_location_sync(
+        db, photo_id, workspace_id, *, commit=False,
+    ):
+        """Thread-safe equivalent of _queue_location_sync_if_enabled."""
+        db.remove_pending_changes(
+            photo_id, "location", workspace_id=workspace_id, _commit=commit,
+        )
+        db.queue_change(
+            photo_id, "location", "effective",
+            workspace_id=workspace_id, _commit=commit,
+        )
+
+    def _apply_import_tags(
+        workspace_id, photo_ids, tags, location_from_gps, result,
+        *, job=None, runner=None,
+    ):
+        """Apply requested common tags and per-photo GPS locations.
+
+        Tagging is deliberately post-import: ``photo_ids`` is the importer's
+        authoritative set of successfully cataloged photos, so skipped
+        archive duplicates never gain tags. Failures here do not change the
+        copy/verification result; they are reported separately in the job.
+        """
+        if not tags and not location_from_gps:
+            return
+
+        summary = {
+            "requested_tags": list(tags),
+            "tagged_photos": 0,
+            "location_requested": bool(location_from_gps),
+            "locations_added": 0,
+            "locations_unresolved": 0,
+            "locations_skipped": 0,
+            "errors": [],
+        }
+        result["tagging"] = summary
+
+        def cancel_requested():
+            cancelled = result.get("cancelled") or (
+                job is not None and runner is not None
+                and runner.is_cancelled(job["id"])
+            )
+            if cancelled:
+                # The cancellation may arrive after the importer itself has
+                # returned a successful result. Persist it on the shared
+                # result so downstream after-import chaining also stops.
+                result["cancelled"] = True
+            return cancelled
+
+        if cancel_requested():
+            summary["skipped"] = "import cancelled"
+            return
+        if not photo_ids:
+            summary["skipped"] = "no new photos"
+            return
+
+        if job is not None and runner is not None:
+            phase = (
+                "Adding tags and GPS locations"
+                if tags and location_from_gps
+                else "Adding GPS locations"
+                if location_from_gps
+                else "Adding tags"
+            )
+            runner.push_event(job["id"], "progress", {
+                "current": job["progress"].get("current", 0),
+                "total": job["progress"].get("total", 0),
+                "current_file": "",
+                "phase": phase,
+            })
+
+        thread_db = Database(db_path)
+        thread_db.set_active_workspace(workspace_id)
+        tagged_photo_ids = set()
+
+        for requested_name in tags:
+            if cancel_requested():
+                summary["skipped"] = "import cancelled"
+                break
+            try:
+                keyword_id = thread_db.add_keyword(
+                    requested_name, kw_type="general", _commit=False,
+                )
+                stored = thread_db.conn.execute(
+                    "SELECT name, parent_id, type FROM keywords WHERE id = ?",
+                    (keyword_id,),
+                ).fetchone()
+                keyword_name = (
+                    stored["name"] if stored and stored["name"]
+                    else requested_name
+                )
+                variant_ids = [keyword_id]
+                if stored is not None and keyword_match_key(stored["name"]):
+                    normalized_name = normalize_keyword_display(stored["name"])
+                    if stored["parent_id"] is None:
+                        peer_rows = thread_db.conn.execute(
+                            "SELECT id FROM keywords "
+                            "WHERE vireo_normalize_keyword(name) = ? "
+                            "COLLATE NOCASE AND parent_id IS NULL "
+                            "AND type = ? AND id != ?",
+                            (normalized_name, stored["type"], keyword_id),
+                        ).fetchall()
+                    else:
+                        peer_rows = thread_db.conn.execute(
+                            "SELECT id FROM keywords "
+                            "WHERE vireo_normalize_keyword(name) = ? "
+                            "COLLATE NOCASE AND parent_id = ? "
+                            "AND type = ? AND id != ?",
+                            (
+                                normalized_name, stored["parent_id"],
+                                stored["type"], keyword_id,
+                            ),
+                        ).fetchall()
+                    variant_ids.extend(row["id"] for row in peer_rows)
+                variant_placeholders = ",".join("?" for _ in variant_ids)
+                items = []
+                for photo_id in photo_ids:
+                    if cancel_requested():
+                        break
+                    exists = thread_db.conn.execute(
+                        "SELECT 1 FROM photo_keywords "
+                        f"WHERE photo_id = ? AND keyword_id IN "
+                        f"({variant_placeholders})",
+                        [photo_id, *variant_ids],
+                    ).fetchone()
+                    if exists is not None:
+                        continue
+                    thread_db.tag_photo(photo_id, keyword_id, _commit=False)
+                    _queue_import_keyword_add(
+                        thread_db, photo_id, keyword_name, workspace_id,
+                    )
+                    items.append({
+                        "photo_id": photo_id,
+                        "old_value": "",
+                        "new_value": str(keyword_id),
+                    })
+                if cancel_requested():
+                    thread_db.conn.rollback()
+                    summary["skipped"] = "import cancelled"
+                    break
+                if items:
+                    thread_db.record_edit(
+                        "keyword_add",
+                        f'Added "{keyword_name}" during import to '
+                        f"{len(items)} photos",
+                        str(keyword_id), items, is_batch=True, _commit=False,
+                    )
+                thread_db.conn.commit()
+                tagged_photo_ids.update(item["photo_id"] for item in items)
+            except Exception as exc:
+                thread_db.conn.rollback()
+                log.exception("Failed to add import tag %r", requested_name)
+                summary["errors"].append(
+                    f'Could not add tag "{requested_name}": {exc}'
+                )
+        summary["tagged_photos"] = len(tagged_photo_ids)
+
+        if location_from_gps and not cancel_requested():
+            unresolved = 0
+            skipped = 0
+            added = 0
+            cancelled_during_gps = False
+            # The public bulk endpoint caps a request at 10,000 IDs. Imports
+            # can exceed that, so reuse its resolution logic in bounded
+            # chunks while sharing the persistent ~110 m geocode cache.
+            for photo_chunk in _gps_location_chunks(photo_ids, size=10000):
+                if cancel_requested():
+                    cancelled_during_gps = True
+                    break
+                try:
+                    payload, error = _bulk_gps_location_payload(
+                        thread_db, {"photo_ids": photo_chunk},
+                        cancel_check=cancel_requested,
+                    )
+                    if error is not None:
+                        raise RuntimeError("location resolution was rejected")
+                    if payload.pop("cancelled", False) or cancel_requested():
+                        cancelled_during_gps = True
+                        break
+                    details_by_place_id = payload.pop(
+                        "_details_by_place_id", {}
+                    )
+                    unresolved += len(payload["unresolved"])
+                    skipped += len(payload["skipped"])
+                    for group in payload["groups"]:
+                        if cancel_requested():
+                            cancelled_during_gps = True
+                            break
+                        details = details_by_place_id.get(group["place_id"])
+                        if not details:
+                            unresolved += len(group["photo_ids"])
+                            continue
+                        try:
+                            leaf_id = thread_db.upsert_place_chain(details)
+                        except Exception as exc:
+                            log.exception(
+                                "Failed to create GPS import location %s",
+                                group["place_id"],
+                            )
+                            summary["errors"].append(
+                                f"Could not create location "
+                                f"{group.get('summary') or group['place_id']}: "
+                                f"{exc}"
+                            )
+                            unresolved += len(group["photo_ids"])
+                            continue
+                        location_items = []
+                        for photo_id in group["photo_ids"]:
+                            if cancel_requested():
+                                cancelled_during_gps = True
+                                break
+                            thread_db.set_photo_location(photo_id, leaf_id)
+                            _queue_import_location_sync(
+                                thread_db, photo_id, workspace_id,
+                            )
+                            location_items.append({
+                                "photo_id": photo_id,
+                                "old_value": "",
+                                "new_value": str(leaf_id),
+                            })
+                        added += len(location_items)
+                        if location_items:
+                            thread_db.record_edit(
+                                "location_set",
+                                f"Added GPS location during import to "
+                                f"{len(location_items)} photos",
+                                "from_exif", location_items,
+                                is_batch=True, _commit=False,
+                            )
+                    thread_db.conn.commit()
+                    if cancelled_during_gps:
+                        break
+                except Exception as exc:
+                    thread_db.conn.rollback()
+                    log.exception("Failed to add GPS locations during import")
+                    summary["errors"].append(
+                        f"Could not add GPS locations: {exc}"
+                    )
+                    unresolved += len(photo_chunk)
+            summary["locations_added"] = added
+            summary["locations_unresolved"] = unresolved
+            summary["locations_skipped"] = skipped
+            if cancelled_during_gps:
+                summary["skipped"] = "import cancelled"
+        elif location_from_gps:
+            summary["skipped"] = "import cancelled"
+        thread_db.conn.close()
 
     # -- Edit API routes --
 
@@ -8672,6 +9079,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "photos": unidentified_limited,
                 "loaded_count": len(unidentified_limited),
                 "has_more": len(unidentified_photos) > len(unidentified_limited),
+                "unanalyzed_count": _bucket_unanalyzed_count(unidentified_photos),
             },
             "folders": [
                 {"id": f["id"], "name": f["name"], "photo_count": f["photo_count"]}
@@ -12264,6 +12672,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         return jsonify({"opened": len(file_paths)})
 
+    def _storage_masks_data(db):
+        """Build the shared mask-storage payload once per storage refresh."""
+        import config as cfg
+
+        # This is a global view, so use the most permissive confidence floor
+        # across workspaces. The stale set must not change with active workspace.
+        min_detector_conf = db.min_detector_confidence_across_workspaces(
+            cfg.load()
+        )
+        variants = db.mask_variants_summary()
+        stale = db.find_stale_masks(detector_confidence=min_detector_conf)
+        return {
+            "variants": variants,
+            "total_bytes": sum(v["bytes"] for v in variants),
+            "stale_count": len(stale),
+            "path": os.path.join(os.path.dirname(db_path), "masks"),
+        }
+
     @app.route("/api/storage")
     def api_storage():
         """Comprehensive storage info for the storage management panel."""
@@ -12302,6 +12728,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         offline_count_row = db.conn.execute(
             "SELECT COUNT(*) AS c FROM offline_originals WHERE status='cached'"
         ).fetchone()
+        masks = _storage_masks_data(db)
+        masks_size = masks["total_bytes"]
 
         # HuggingFace cache — only count Vireo-relevant models
         hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
@@ -12330,11 +12758,90 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             + models_size
             + hf_size
             + offline_size
+            + masks_size
         )
+        reclaimable = thumb["size"] + preview["size"] + emb["size"]
+
+        storage_root = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+
+        def _volume_for_path(path):
+            usage_path = os.path.abspath(path)
+            while not os.path.exists(usage_path):
+                parent = os.path.dirname(usage_path)
+                if parent == usage_path:
+                    break
+                usage_path = parent
+            try:
+                usage = shutil.disk_usage(usage_path)
+                free_bytes = usage.free
+                capacity_bytes = usage.total
+            except OSError:
+                free_bytes = None
+                capacity_bytes = None
+
+            mount_path = usage_path
+            while not os.path.ismount(mount_path):
+                parent = os.path.dirname(mount_path)
+                if parent == mount_path:
+                    break
+                mount_path = parent
+            if sys.platform.startswith("win"):
+                name = os.path.splitdrive(mount_path)[0] or mount_path
+            elif mount_path == os.path.sep:
+                name = "System volume"
+            else:
+                name = os.path.basename(mount_path.rstrip(os.path.sep)) or mount_path
+            return {
+                "name": name,
+                "mount_path": mount_path,
+                "free": free_bytes,
+                "capacity": capacity_bytes,
+            }
+
+        raw_locations = [
+            ("catalog", "Catalog and masks", os.path.dirname(db_path)),
+            (
+                "generated",
+                "Thumbnails, previews, and offline originals",
+                storage_root,
+            ),
+        ]
+        if emb["size"]:
+            raw_locations.append(("embeddings", "Label embeddings", EMB_CACHE_DIR))
+        if models_size:
+            raw_locations.append(("models", "Downloaded models", DEFAULT_MODELS_DIR))
+        if hf_size:
+            raw_locations.append(("hf_cache", "Hugging Face cache", hf_cache))
+
+        locations_by_path = {}
+        for location_id, label, path in raw_locations:
+            normalized = os.path.abspath(path)
+            if normalized not in locations_by_path:
+                locations_by_path[normalized] = {
+                    "id": location_id,
+                    "path": normalized,
+                    "labels": [],
+                    "volume": _volume_for_path(normalized),
+                }
+            locations_by_path[normalized]["labels"].append(label)
+        locations = list(locations_by_path.values())
+
+        volumes_by_mount = {}
+        for location in locations:
+            volume = location["volume"]
+            mount = volume["mount_path"]
+            if mount not in volumes_by_mount:
+                volumes_by_mount[mount] = dict(volume)
+                volumes_by_mount[mount]["location_ids"] = []
+            volumes_by_mount[mount]["location_ids"].append(location["id"])
 
         return jsonify(
             {
                 "total": total,
+                "reclaimable": reclaimable,
+                "storage_root": storage_root,
+                "locations": locations,
+                "volumes": list(volumes_by_mount.values()),
                 "database": {"size": db_size, "path": db_path},
                 "thumbnails": thumb,
                 "previews": preview,
@@ -12346,6 +12853,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "size": offline_size,
                     "path": os.path.join(os.path.dirname(app.config["THUMB_CACHE_DIR"]), "offline"),
                 },
+                "masks": {"size": masks_size, **masks},
             }
         )
 
@@ -12353,28 +12861,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_storage_masks():
         """Per-variant SAM mask summary (counts, bytes, active counts)
         plus stale-mask count for the storage dashboard."""
-        import config as cfg
-
-        db = _get_db()
-        # Storage is global across all workspaces, so the stale floor
-        # must be too. Using the active workspace's detector_confidence
-        # would make stale_count flip when the user switches workspaces
-        # and let masks valid under another workspace's lower floor
-        # show up as stale. The minimum across workspaces is the most
-        # permissive view: only mark a mask stale when no workspace
-        # would still consider it fresh.
-        min_detector_conf = db.min_detector_confidence_across_workspaces(
-            cfg.load()
-        )
-        variants = db.mask_variants_summary()
-        stale = db.find_stale_masks(detector_confidence=min_detector_conf)
-        masks_dir = os.path.join(os.path.dirname(db_path), "masks")
-        return jsonify({
-            "variants": variants,
-            "total_bytes": sum(v["bytes"] for v in variants),
-            "stale_count": len(stale),
-            "path": masks_dir,
-        })
+        return jsonify(_storage_masks_data(_get_db()))
 
     @app.route("/api/storage/masks/delete-variant", methods=["POST"])
     def api_storage_masks_delete_variant():
@@ -12499,14 +12986,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "limit": limit,
         })
 
-    @app.route("/api/storage/clear", methods=["POST"])
-    def api_storage_clear():
-        """Clear a specific cache."""
-        import shutil
-
-        body = request.get_json(silent=True) or {}
-        cache_type = body.get("type", "")
-
+    def _clear_storage_cache(cache_type):
         if cache_type == "previews":
             preview_dir = os.path.join(
                 os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews"
@@ -12549,6 +13029,70 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return jsonify({"ok": True})
         else:
             return json_error("Unknown cache type")
+
+    @app.route("/api/storage/clear", methods=["POST"])
+    def api_storage_clear():
+        """Clear a specific cache."""
+        body = request.get_json(silent=True) or {}
+        return _clear_storage_cache(body.get("type", ""))
+
+    @app.route("/api/storage/clear-safe", methods=["POST"])
+    def api_storage_clear_safe():
+        """Clear every regenerable cache without touching models or originals."""
+        for cache_type in ("thumbnails", "previews", "embeddings"):
+            _clear_storage_cache(cache_type)
+        return jsonify({
+            "ok": True,
+            "cleared": ["thumbnails", "previews", "embeddings"],
+        })
+
+    @app.route("/api/storage/open-folder", methods=["POST"])
+    def api_storage_open_folder():
+        """Open one of Vireo's server-selected storage paths."""
+        from classifier import CACHE_DIR as EMB_CACHE_DIR
+        from models import DEFAULT_MODELS_DIR
+
+        location_id = (request.get_json(silent=True) or {}).get(
+            "location", "generated"
+        )
+        locations = {
+            "catalog": os.path.dirname(db_path),
+            "generated": os.path.dirname(app.config["THUMB_CACHE_DIR"]),
+            "embeddings": EMB_CACHE_DIR,
+            "models": DEFAULT_MODELS_DIR,
+            "hf_cache": os.path.expanduser("~/.cache/huggingface/hub"),
+        }
+        path = locations.get(location_id)
+        if path is None:
+            return json_error("Unknown storage location")
+        path = os.path.abspath(path)
+        if not os.path.isdir(path):
+            return jsonify({"ok": False, "reason": "storage folder not found"})
+        try:
+            if sys.platform == "darwin":
+                proc = subprocess.run(
+                    ["open", "--", path], timeout=5, check=False,
+                    capture_output=True, text=True, **no_window_kwargs(),
+                )
+            elif sys.platform.startswith("win"):
+                proc = subprocess.run(
+                    ["explorer", path], timeout=5, check=False,
+                    capture_output=True, text=True, **no_window_kwargs(),
+                )
+            else:
+                proc = subprocess.run(
+                    ["xdg-open", path], timeout=5, check=False,
+                    capture_output=True, text=True, **no_window_kwargs(),
+                )
+            if not sys.platform.startswith("win") and proc.returncode != 0:
+                reason = (proc.stderr or proc.stdout or "").strip()
+                return jsonify({
+                    "ok": False,
+                    "reason": reason or f"open command exited {proc.returncode}",
+                })
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            return jsonify({"ok": False, "reason": str(exc)})
+        return jsonify({"ok": True})
 
     @app.route("/api/storage/delete-files", methods=["POST"])
     def api_storage_delete_files():
@@ -14224,26 +14768,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         species = pred["species"] if pred else ""
         scientific = pred["scientific_name"] if pred else ""
 
-        # Percent-encode every value: scientific names contain spaces, and an
-        # unencoded space makes the URL invalid, so the desktop opener plugin
-        # rejects it and nothing opens.
-        params = []
-        if scientific:
-            params.append(("taxon_name", scientific))
-        elif species:
-            params.append(("taxon_name", species))
-        if photo["timestamp"]:
-            params.append(("observed_on", photo["timestamp"][:10]))
         loc = db.get_effective_photo_location(photo_id)
         lat = loc["latitude"] if loc else None
         lng = loc["longitude"] if loc else None
-        if lat is not None and lng is not None:
-            params.append(("lat", str(lat)))
-            params.append(("lng", str(lng)))
-
+        # The browser uploader does not document query parameters for
+        # pre-filling an observation. In particular, taxon_name is an
+        # observation-search parameter, not an uploader parameter. Open the
+        # generic uploader and keep the prepared metadata in this response for
+        # Vireo's authenticated direct-upload flow.
         upload_url = "https://www.inaturalist.org/observations/upload"
-        if params:
-            upload_url += "?" + urlencode(params)
 
         # Check submission history
         subs = db.get_inat_submissions([photo_id])
@@ -17675,6 +18208,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return json_error(f"source directory not found: {s}")
 
         recursive = bool(body.get("recursive", True))
+        import_tags, location_from_gps, tag_options_err = (
+            _validate_import_tag_options(body)
+        )
+        if tag_options_err is not None:
+            return tag_options_err
         db = _get_db()
         # Preflight an explicit after_import before creating a workspace so
         # a bad value doesn't leave an orphan Card Import behind. The
@@ -17895,7 +18433,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     job["id"], "scan", status="cancelled",
                     summary=f"{indexed} photos (cancelled)",
                 )
-                return {
+                result = {
                     "mode": "in_place",
                     "ok": False,
                     "cancelled": True,
@@ -17905,6 +18443,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "errors": root_errors,
                     "photo_ids": photo_ids,
                 }
+                _apply_import_tags(
+                    active_ws, photo_ids, import_tags, location_from_gps,
+                    result, job=job, runner=runner,
+                )
+                return result
 
             metadata_warning = _scan_metadata_warning()
             summary = f"{indexed} photos"
@@ -17926,6 +18469,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "errors": root_errors,
                 "photo_ids": photo_ids,
             }
+            _apply_import_tags(
+                active_ws, photo_ids, import_tags, location_from_gps, result,
+                job=job, runner=runner,
+            )
             _chain_after_import(job, result)
             return result
 
@@ -17934,6 +18481,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "destination": None,
             "recursive": recursive,
             "after_import": after_import,
+            "tags": import_tags,
+            "location_from_gps": location_from_gps,
             "mode": "in_place",
             "workspace_id": active_ws,
             "created_workspace": created_workspace,
@@ -18155,6 +18704,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         skip_duplicates = bool(body.get("skip_duplicates", True))
         verify_by_hash = bool(body.get("verify_by_hash", False))
         recursive = bool(body.get("recursive", True))
+        import_tags, location_from_gps, tag_options_err = (
+            _validate_import_tag_options(body)
+        )
+        if tag_options_err is not None:
+            return tag_options_err
 
         active_ws, created_workspace, workspace_err = (
             _prepare_import_workspace(db, body)
@@ -18209,6 +18763,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "verify_by_hash": verify_by_hash,
             "recursive": recursive,
             "after_import": after_import,
+            "tags": import_tags,
+            "location_from_gps": location_from_gps,
             "remote_target_id": remote_target_id or None,
             "remote_subpath": remote_subpath or None,
             "workspace_id": active_ws,
@@ -18289,6 +18845,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             try:
                 result = run_import_job(
                     job, runner, db_path, active_ws, params,
+                )
+                _apply_import_tags(
+                    active_ws, result.get("photo_ids") or [], import_tags,
+                    location_from_gps, result, job=job, runner=runner,
                 )
                 _chain_after_import(job, result)
                 return result
@@ -20790,6 +21350,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 f"{type(miss_enabled_body).__name__}"
             )
 
+        # ``eye_detect_override`` mirrors ``miss_enabled`` as a tri-state
+        # per-run switch (None = defer to workspace config). Same validation
+        # rationale: a string "false" would flow through as truthy and force
+        # eye detection on for a caller expecting the workspace default.
+        eye_detect_override_body = body.get("eye_detect_override")
+        if (
+            eye_detect_override_body is not None
+            and not isinstance(eye_detect_override_body, bool)
+        ):
+            return json_error(
+                f"eye_detect_override must be boolean, got "
+                f"{type(eye_detect_override_body).__name__}"
+            )
+
         # Validate ``model_id`` / ``model_ids`` shape BEFORE the folder-scope
         # collection is materialized. The auto-skip-classify block further
         # down calls ``list(params.model_ids or [])`` and ``by_id.get(mid, ...)``
@@ -20852,6 +21426,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             download_taxonomy=body.get("download_taxonomy", True),
             skip_extract_masks=body.get("skip_extract_masks", False),
             skip_eye_keypoints=body.get("skip_eye_keypoints", False),
+            eye_detect_override=eye_detect_override_body,
             skip_regroup=body.get("skip_regroup", False),
             # ``review_mode`` reaches ``body`` only through the strategy
             # expansion at the top of this handler (identify sets it to
@@ -21910,6 +22485,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # too-wide range that would misplace this encounter under time sorts.
             enc["time_range"] = _compute_time_range(photos_by_id, enc["photo_ids"])
             enc["species_predictions"] = rebuild_species_predictions(results, enc["photo_ids"])
+            # No fallback: if the remaining photos have no predictions the
+            # source encounter's stale label was likely inherited from the
+            # burst we just detached, so keeping it would advertise the
+            # detached burst's species as a one-click candidate on an
+            # unrelated group of photos.
+            enc["species"] = _rebuild_encounter_species_label(
+                results, enc["photo_ids"]
+            )
             # Pair indices in trace reference the original photo composition;
             # drop it so the algorithm-trace panel renders an honest "needs
             # recompute" state instead of stale rows.
@@ -21920,13 +22503,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Create new encounter from detached burst
         new_enc_predictions = rebuild_species_predictions(results, detached_ids)
+        # No fallback: predictionless detached photos must not inherit the
+        # parent encounter's species — that is exactly the stale-label bug
+        # the surrounding PR is fixing.
+        new_enc_species = _rebuild_encounter_species_label(
+            results, detached_ids
+        )
         # Also refresh the detached burst's own predictions
         detached["species_predictions"] = new_enc_predictions
+        detached_override = detached.get("species_override") or {}
+        detached_confirmed = bool(detached_override.get("confirmed"))
         new_enc = {
-            "species": enc.get("species"),
-            "confirmed_species": detached.get("species_override", {}).get("species") if detached.get("species_override") else None,
+            "species": new_enc_species,
+            "confirmed_species": detached_override.get("species") if detached_confirmed else None,
             "species_predictions": new_enc_predictions,
-            "species_confirmed": bool(detached.get("species_override", {}).get("confirmed")) if detached.get("species_override") else False,
+            "species_confirmed": detached_confirmed,
             "photo_count": len(detached_ids),
             "burst_count": 1,
             # Compute from the detached photos' timestamps. A [None, None] range
@@ -21980,6 +22571,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         burst = bursts[burst_idx]
         if photo_id not in burst["photo_ids"]:
             return json_error("photo_id not in burst")
+        source_override = burst.get("species_override") or {}
 
         # Remove photo from burst
         burst["photo_ids"].remove(photo_id)
@@ -21992,10 +22584,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             burst["species_predictions"] = rebuild_species_predictions(results, burst["photo_ids"])
 
         # Create new single-photo burst in the same encounter
+        new_burst_predictions = rebuild_species_predictions(results, [photo_id])
+        new_burst_species = _rebuild_encounter_species_label(results, [photo_id])
+        if source_override.get("confirmed") and source_override.get("species"):
+            new_burst_override = {
+                "species": source_override["species"],
+                "confirmed": True,
+            }
+        elif enc.get("confirmed_species"):
+            # Inherit the encounter's prior confirmed species by leaving the
+            # override empty. Also covers the mixed/partial state where
+            # species_confirmed is False but confirmed_species records the
+            # dominant prior species (pipeline.py builds encounter payloads
+            # this way for encounters whose photos disagree on confirmed
+            # species). A classifier-guess override here would mask that
+            # prior tag: the confirm endpoint reads species_override.species
+            # without inspecting the confirmed flag, so a later burst confirm
+            # would target the guess as previous_species instead of the real
+            # prior species and leave both keywords on the photo.
+            new_burst_override = None
+        else:
+            new_burst_override = _candidate_species_override(new_burst_species)
         new_burst = {
             "photo_ids": [photo_id],
-            "species_predictions": rebuild_species_predictions(results, [photo_id]),
-            "species_override": None,
+            "species_predictions": new_burst_predictions,
+            "species_override": new_burst_override,
         }
         bursts.append(new_burst)
         enc["burst_count"] = len(bursts)

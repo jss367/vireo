@@ -97,6 +97,10 @@ body { padding-bottom: 36px; }
   background: var(--danger, #E74C3C);
   color: #fff;
 }
+.stage-status-pill.warning {
+  background: color-mix(in srgb, var(--warning, #F0A030) 20%, transparent);
+  color: var(--warning, #F0A030);
+}
 .stage-status-pill.blocked {
   background: color-mix(in srgb, var(--danger, #E74C3C) 18%, transparent);
   color: var(--danger, #E74C3C);
@@ -847,7 +851,7 @@ body { padding-bottom: 36px; }
   <div class="stage-card" id="card-eyekeypoints" data-testid="stage-card" data-advanced-stage>
     <div class="stage-header" onclick="toggleCard('eyekeypoints')">
       <span class="stage-num" id="numEyeKeypoints">6</span>
-      <input type="checkbox" class="stage-enable" id="enableEyeKeypoints" checked
+      <input type="checkbox" class="stage-enable" id="enableEyeKeypoints"
              onchange="onStageToggle('eyekeypoints')" onclick="event.stopPropagation()">
       <span class="stage-name">Eye Keypoints (optional)</span>
       <span class="stage-status-pill" id="pillEyeKeypoints"></span>
@@ -1027,15 +1031,16 @@ function initPipelinePage() {
       }
 
       // Eye keypoints stage default tracks the global eye_detect_enabled
-      // config so users who turned it off in Settings see it unchecked here
-      // by default. The checkbox is the per-run override.
+      // config. Missing config defaults off; the checkbox is the per-run
+      // override.
       var ekCb = document.getElementById('enableEyeKeypoints');
-      if (ekCb) ekCb.checked = cfg.eye_detect_enabled !== false;
+      if (ekCb) ekCb.checked = cfg.eye_detect_enabled === true;
 
       // Update saved config defaults from server
       _savedModelConfig.sam2_variant = cfg.sam2_variant;
       _savedModelConfig.dinov2_variant = cfg.dinov2_variant;
       _savedModelConfig.proxy_longest_edge = cfg.proxy_longest_edge;
+      _savedModelConfig.eye_detect_enabled = cfg.eye_detect_enabled === true;
 
       updateCardStates();
       if (typeof updateReadiness === 'function') updateReadiness();
@@ -1329,6 +1334,11 @@ async function loadFolderScopeList() {
       });
     }
     list.innerHTML = '';
+    if (folders.length === 0) {
+      list.innerHTML = 'No photos are in this workspace yet. '
+        + '<a href="/import" style="color:var(--accent);">Open Import to add photos</a>.';
+      return;
+    }
     folders.forEach(function(f) {
       // Only offer top-level entries: children are covered by the
       // server-side subtree expansion, and listing every dated folder
@@ -1392,7 +1402,12 @@ function applyStrategyPreset() {
   if (!sel || sel.value === '__custom__') { refreshPipelineUI(); return; }
   var presets = {
     identify:   { classify: true,  extract: false, eyes: false, group: false },
-    full:       { classify: true,  extract: true,  eyes: true,  group: true  },
+    full:       {
+      classify: true,
+      extract: true,
+      eyes: _savedModelConfig.eye_detect_enabled === true,
+      group: true
+    },
     cull_ready: { classify: true,  extract: false, eyes: false, group: true  },
     quick_look: { classify: false, extract: false, eyes: false, group: false },
   };
@@ -2167,6 +2182,20 @@ async function startPipeline() {
   body.skip_eye_keypoints = !eyeKeypointsEnabled;
   body.skip_regroup = !groupEnabled;
 
+  // Only send ``eye_detect_override`` when the checkbox is CHECKED — an
+  // explicit per-run opt-in that forces ``pipeline_cfg["eye_detect_enabled"]``
+  // on for the run. An unchecked box is not an explicit eye-scoring
+  // opt-out: on a workspace with Settings ``eye_detect_enabled=true``, the
+  // user may simply want to skip the (expensive) stage while still scoring
+  // against existing ``eye_tenengrad``. Sending ``false`` here would
+  // silently disable eye-based scoring on such workspaces and produce
+  // different KEEP/REJECT results than the same server-side strategy /
+  // API path would (which leaves the override ``None``). When unset, the
+  // backend falls back to workspace Settings.
+  if (eyeKeypointsEnabled) {
+    body.eye_detect_override = true;
+  }
+
   // Classification options (only if enabled)
   if (classifyEnabled) {
     var selectedModels = [];
@@ -2349,18 +2378,22 @@ function _updatePipelineStageUI(p) {
   // substages reach a terminal state. Resolving each substage event in
   // isolation made the pill flash 'Done' as soon as the first substage
   // finished, even though more work was pending.
-  var cardAgg = {};  // cardSuffix -> {running, failed, completed, skipped, present}
+  var cardAgg = {};  // cardSuffix -> aggregate substage outcomes
   for (var stageName in stages) {
     var cardSuffix = _stageToCard[stageName];
     if (!cardSuffix) continue;
     var agg = cardAgg[cardSuffix] || (cardAgg[cardSuffix] = {
-      running: false, failed: false, completed: 0, skipped: 0, present: 0,
+      running: false, failed: false, warning: false,
+      completed: 0, skipped: 0, present: 0,
     });
     agg.present += 1;
     var st = stages[stageName].status;
     if (st === 'running') agg.running = true;
     else if (st === 'failed') agg.failed = true;
-    else if (st === 'completed') agg.completed += 1;
+    else if (st === 'completed') {
+      agg.completed += 1;
+      if ((stages[stageName].error_count || 0) > 0) agg.warning = true;
+    }
     else if (st === 'skipped') agg.skipped += 1;
   }
 
@@ -2412,8 +2445,8 @@ function _updatePipelineStageUI(p) {
       numEl.className = 'stage-num complete';
       delete _runningStages[cardSuffix2];
       if (a.completed > 0) {
-        _stageOutcomes[cardSuffix2] = 'done';
-        _setPill(cardSuffix2, 'done');
+        _stageOutcomes[cardSuffix2] = a.warning ? 'warning' : 'done';
+        _setPill(cardSuffix2, a.warning ? 'warning' : 'done');
         if (cardSuffix2 === 'Source') _showSourceEjectSafe(stages['ingest']);
       } else {
         // Every substage was skipped. Backend 'skipped' covers both
@@ -3419,6 +3452,7 @@ function _currentModelConfigFromDom() {
     sam2_variant: samEl ? samEl.value : '',
     dinov2_variant: dinoEl ? dinoEl.value : '',
     proxy_longest_edge: proxyEl ? parseInt(proxyEl.value, 10) : 0,
+    eye_detect_enabled: false,
   };
 }
 
@@ -3450,6 +3484,7 @@ function onModelConfigChange() {
     sam2_variant: document.getElementById('cfgSam2').value,
     dinov2_variant: document.getElementById('cfgDinov2').value,
     proxy_longest_edge: parseInt(document.getElementById('cfgProxy').value),
+    eye_detect_enabled: _savedModelConfig.eye_detect_enabled === true,
   };
 
   // Save to server
@@ -3813,6 +3848,7 @@ function _formatPillLabel(stage, planEntry, state) {
   // labels — counts during a run come from a separate channel.
   if (state === 'running')   return 'Running…';
   if (state === 'done')      return 'Done';
+  if (state === 'warning')   return 'Completed with warnings';
   if (state === 'failed')    return 'Failed';
   if (state === 'cancelled') return 'Cancelled';
   if (state === 'will-skip') return 'Will skip';
@@ -4056,6 +4092,18 @@ function _buildPlanBody() {
   body.skip_extract_masks  = !document.getElementById('enableExtract').checked;
   body.skip_eye_keypoints  = !document.getElementById('enableEyeKeypoints').checked;
   body.skip_regroup        = !document.getElementById('enableGroup').checked;
+
+  // Mirror startPipeline: only send ``eye_detect_override`` when the
+  // checkbox is CHECKED. An unchecked box means "skip the eye stage"
+  // and does NOT imply "disable eye scoring" — on a workspace with
+  // Settings ``eye_detect_enabled=true`` the plan must still reflect
+  // Settings for regroup, otherwise the plan would show a different
+  // outcome (e.g. no ``eye_override_differs``) than the workspace would
+  // produce via any non-Process-page path. Sending ``false`` here
+  // caused the plan to silently disable eye scoring on such workspaces.
+  if (document.getElementById('enableEyeKeypoints').checked) {
+    body.eye_detect_override = true;
+  }
 
   // Mirror the strategy field startPipeline() sends so /api/pipeline/plan
   // expands the preset with the same rules /api/jobs/pipeline does. The
