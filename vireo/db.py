@@ -9306,7 +9306,7 @@ class Database:
 
         return total_merged
 
-    def _normalize_keyword_row_name(self, keyword_id):
+    def _normalize_keyword_row_name(self, keyword_id, disambiguate_on_conflict=False):
         """Trim stray edge punctuation from a surviving keyword row name.
 
         Post-migration, stored names are already normalized, so this is a
@@ -9320,6 +9320,14 @@ class Database:
         changes, the workspaces those (photo, keyword) tags belong to), so
         a separate same-spelling keyword row elsewhere in the DB is never
         rewritten by side effect.
+
+        ``disambiguate_on_conflict`` — when a different-type keyword already
+        occupies (cleaned, parent_id) and the UPDATE would hit
+        ``UNIQUE(name, parent_id)``, retry with a ``<cleaned> (id-<id>)``
+        suffix so no stored variant survives. Used by the one-shot
+        migration so its completion marker can honestly assert the "no
+        stored variant" invariant; the runtime dedup path leaves this
+        False and keeps the stored spelling in the collision case.
         """
         row = self.conn.execute(
             "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
@@ -9349,13 +9357,26 @@ class Database:
         # A same-name row in a different dedupe boundary (another type at
         # the same parent) can still occupy the table-level
         # UNIQUE(name, parent_id) slot. The links still merge correctly;
-        # keep the stored spelling unchanged in that case.
+        # keep the stored spelling unchanged in that case, unless the
+        # caller opts into disambiguation (migration path).
         try:
             self.conn.execute(
                 "UPDATE keywords SET name = ? WHERE id = ?", (cleaned, keyword_id)
             )
         except sqlite3.IntegrityError:
-            return
+            if not disambiguate_on_conflict:
+                return
+            # Fallback: append an id suffix so the row's name is still in
+            # normalize_keyword_display() form (the parenthesized suffix is
+            # ASCII and idempotent under the strip) while sidestepping the
+            # UNIQUE(name, parent_id) slot the different-type peer holds.
+            # The retarget below runs against this disambiguated name so
+            # pending sidecar changes and species curation stay in lockstep
+            # with the row's stored spelling.
+            cleaned = f"{cleaned} (id-{keyword_id})"
+            self.conn.execute(
+                "UPDATE keywords SET name = ? WHERE id = ?", (cleaned, keyword_id)
+            )
         # Retarget pending keyword_add/keyword_remove rows queued under the
         # pre-canonical spelling so a still-unsynced sidecar write can't
         # leak the legacy variant after the DB row was rewritten. A pending
@@ -9562,27 +9583,45 @@ class Database:
                 break
 
         # Rewrite the surviving variant spellings (also retargets each
-        # row's scoped pending changes and curation snapshots).
+        # row's scoped pending changes and curation snapshots). The
+        # ``disambiguate_on_conflict`` flag guarantees no stored variant
+        # survives even when the clean slot is held by a different-type
+        # peer: the leftover falls back to a ``<clean> (id-<id>)`` name,
+        # which is still in normalize_keyword_display() form. Without
+        # this, the marker below would advertise the "no stored variant"
+        # invariant while a quoted spelling persisted, and a later clean
+        # add for the same (name, parent) slot could surface as an
+        # uncaught IntegrityError/500.
         renamed = 0
-        leftovers = []
+        disambiguated = []
         for row in self.conn.execute("SELECT id, name FROM keywords").fetchall():
             clean = normalize_keyword_display(row["name"])
             if not clean or clean == row["name"]:
                 continue
-            self._normalize_keyword_row_name(row["id"])
+            self._normalize_keyword_row_name(
+                row["id"], disambiguate_on_conflict=True
+            )
             after = self.conn.execute(
                 "SELECT name FROM keywords WHERE id = ?", (row["id"],)
             ).fetchone()
-            if after and after["name"] == clean:
+            if not after or after["name"] == row["name"]:
+                # No forward progress — shouldn't happen with
+                # disambiguate_on_conflict=True, but guard against a silent
+                # regression in the fallback branch.
+                continue
+            if after["name"] == clean:
                 renamed += 1
             else:
-                leftovers.append(row["name"])
-        if leftovers:
+                disambiguated.append((row["name"], after["name"]))
+        if disambiguated:
             log.warning(
-                "keyword normalization migration: %d name(s) kept their "
-                "stored spelling because a different-type keyword already "
+                "keyword normalization migration: disambiguated %d name(s) "
+                "with an id suffix because a different-type keyword already "
                 "uses the normalized form under the same parent: %s",
-                len(leftovers), ", ".join(repr(n) for n in leftovers[:10]),
+                len(disambiguated),
+                ", ".join(
+                    f"{old!r} -> {new!r}" for old, new in disambiguated[:10]
+                ),
             )
 
         # Pending sidecar changes: the queued value is written verbatim to

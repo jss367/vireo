@@ -186,15 +186,16 @@ def test_migration_keeps_distinct_specific_types_separate(tmp_path):
         db.close()
 
 
-def test_migration_cross_type_child_collision_keeps_spelling(tmp_path):
+def test_migration_cross_type_child_collision_disambiguates_variant(tmp_path):
     """Under a non-NULL parent, UNIQUE(name, parent_id) blocks renaming a
-    variant onto a clean name a different-type sibling already holds; the
-    variant keeps its stored spelling rather than being merged across
-    types."""
+    variant onto a clean name a different-type sibling already holds. The
+    migration disambiguates the variant with an id suffix so no stored
+    variant survives (the marker below can honestly advertise the
+    invariant) while the different-type peer keeps its clean slot."""
     db, _ws_id, _p1, _p2 = _make_db(tmp_path)
     try:
         parent_id = _insert_keyword(db, "Birds", "general")
-        _insert_keyword(db, "Hawk", "location", parent_id=parent_id)
+        peer_id = _insert_keyword(db, "Hawk", "location", parent_id=parent_id)
         variant_id = _insert_keyword(
             db, "‘Hawk", "taxonomy", parent_id=parent_id, is_species=1
         )
@@ -206,7 +207,12 @@ def test_migration_cross_type_child_collision_keeps_spelling(tmp_path):
         row = db.conn.execute(
             "SELECT name FROM keywords WHERE id = ?", (variant_id,)
         ).fetchone()
-        assert row["name"] == "‘Hawk"
+        assert row["name"] == f"Hawk (id-{variant_id})"
+        # The different-type peer is untouched.
+        peer = db.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (peer_id,)
+        ).fetchone()
+        assert peer["name"] == "Hawk"
     finally:
         db.close()
 
