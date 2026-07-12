@@ -604,7 +604,9 @@ def _atomic_publish(local_path: str, remote_path: str) -> None:
             raise
     try:
         shutil.copy2(local_path, temp, follow_symlinks=False)
-        with open(temp, "rb") as handle:
+        # Open for write so os.fsync works on Windows (its _commit backend
+        # rejects read-only handles with EBADF).
+        with open(temp, "rb+") as handle:
             os.fsync(handle.fileno())
         os.replace(temp, remote_path)
     except BaseException:
