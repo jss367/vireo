@@ -1005,6 +1005,13 @@ body { padding-bottom: 36px; }
 
 <script>
 // -- Page init: fetch pipeline data from API and populate the page --
+// Signals that /api/pipeline/page-init's success/failure handler has run,
+// so tests (and any other code that races the initial load) can wait
+// before touching stage-enable checkboxes. The handler assigns
+// enableEyeKeypoints.checked from cfg.eye_detect_enabled; interacting
+// with the checkbox while this is still true risks having that
+// assignment silently overwrite the interaction.
+window._pageInitPending = true;
 function initPipelinePage() {
   fetch('/api/pipeline/page-init')
     .then(function(r) { return r.json(); })
@@ -1054,6 +1061,9 @@ function initPipelinePage() {
     })
     .catch(function(e) {
       console.error('Failed to load pipeline page data:', e);
+    })
+    .finally(function() {
+      window._pageInitPending = false;
     });
 
   // Load collections, models, and labels in parallel

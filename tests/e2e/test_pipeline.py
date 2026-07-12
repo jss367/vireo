@@ -335,10 +335,14 @@ def test_pipeline_eye_keypoints_pill_will_skip_by_default(live_server, page):
     """
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
-    # Wait for the initial /api/pipeline/plan to settle before asserting.
-    # Otherwise the pill can read "Will skip" from the fallback (checkbox
-    # unchecked) even if the server-side plan has flipped Eye Keypoints
-    # back to opt-in-by-default — the very regression this test guards.
+    # Wait for /api/pipeline/page-init to settle so the checkbox reflects
+    # cfg.eye_detect_enabled (not the HTML default), then wait for the
+    # initial /api/pipeline/plan. Without the page-init wait the checkbox
+    # could still flip during the assertions; without the plan wait the
+    # pill could read "Will skip" from the fallback (checkbox unchecked)
+    # even if the server-side plan has flipped Eye Keypoints back to
+    # opt-in-by-default — the very regression this test guards.
+    page.wait_for_function("() => window._pageInitPending === false")
     page.wait_for_function(
         "() => window._pipelinePlan && window._pipelinePlan.stages "
         "&& window._pipelinePlan.stages.EyeKeypoints "
@@ -356,6 +360,11 @@ def test_pipeline_eye_keypoints_toggle_off_marks_will_skip(live_server, page):
     """
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
+    # Wait for /api/pipeline/page-init to settle first. Its success handler
+    # assigns enableEyeKeypoints.checked from cfg.eye_detect_enabled; if it
+    # ran after page.check() below, it would silently overwrite the opt-in
+    # and the later "will-run" wait would time out.
+    page.wait_for_function("() => window._pageInitPending === false")
     page.click("#card-eyekeypoints .stage-header")
     page.check("#enableEyeKeypoints")
     # Wait for the debounced plan refresh to confirm 'will-run'. Reading
