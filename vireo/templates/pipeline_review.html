@@ -5148,9 +5148,33 @@ function buildBurstConsensus(photos) {
   return rows;
 }
 
-function candidateSpeciesOverrideFromConsensus(rows) {
-  var species = rows && rows.length > 0 ? rows[0].species : null;
-  return species ? { species: species, confirmed: false } : null;
+// Client mirror of encounter_species_label() (vireo/encounters.py): pick the
+// species with the highest confidence-weighted sum across all photos' top-5
+// predictions, breaking ties by first-appearance order. Used to persist an
+// unconfirmed species override for a detached single-photo burst so the
+// local save-cache path agrees with the server detach endpoint, which
+// derives the same label via _rebuild_encounter_species_label. Sorting by
+// prediction count (as buildBurstConsensus does for display) can pick a
+// different species when a lower-confidence label repeats across
+// detections/models while a higher-confidence one appears once — e.g.
+// [A .90, B .44, B .44] where the server picks A but a count sort picks B.
+function candidateSpeciesOverrideFromPhotos(photos) {
+  var weights = {};
+  var order = [];
+  (photos || []).forEach(function(p) {
+    ((p && p.species_top5) || []).forEach(function(entry) {
+      var sp = entry[0];
+      var conf = entry[1] || 0;
+      if (!(sp in weights)) { weights[sp] = 0; order.push(sp); }
+      weights[sp] += conf;
+    });
+  });
+  if (order.length === 0) return null;
+  var best = order[0];
+  for (var i = 1; i < order.length; i++) {
+    if (weights[order[i]] > weights[best]) best = order[i];
+  }
+  return { species: best, confirmed: false };
 }
 
 // Build the per-photo + consensus species prediction blocks. The per-photo
@@ -6196,7 +6220,8 @@ async function grmApply() {
         // single-photo burst must keep it (shallow clone so it doesn't alias the
         // source), or a flags-only apply would silently revert this photo to the
         // encounter species and drop the burst-specific confirmation.
-        var detachedConsensus = buildBurstConsensus(photo ? [photo] : []);
+        var detachedPhotos = photo ? [photo] : [];
+        var detachedConsensus = buildBurstConsensus(detachedPhotos);
         var sourceOverride = burst && burst.species_override;
         enc.bursts.push({
           photo_ids: [pid],
@@ -6205,7 +6230,7 @@ async function grmApply() {
             ? Object.assign({}, sourceOverride)
             : (enc.species_confirmed && enc.confirmed_species
               ? null
-              : candidateSpeciesOverrideFromConsensus(detachedConsensus)),
+              : candidateSpeciesOverrideFromPhotos(detachedPhotos)),
         });
       });
       // Recompute the shortened source burst's consensus from its remaining
