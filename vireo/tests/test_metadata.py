@@ -17,6 +17,18 @@ requires_exiftool = pytest.mark.skipif(
 )
 
 
+def test_find_exiftool_prefers_pyinstaller_bundle(monkeypatch, tmp_path):
+    import metadata
+
+    bundled = tmp_path / "vendor" / "exiftool" / "exiftool.exe"
+    bundled.parent.mkdir(parents=True)
+    bundled.write_bytes(b"exe")
+    monkeypatch.setattr(metadata.sys, "_MEIPASS", str(tmp_path), raising=False)
+    monkeypatch.setattr(metadata.shutil, "which", lambda _name: "/path/exiftool")
+
+    assert metadata.find_exiftool() == str(bundled)
+
+
 def _create_jpg_with_exif(path):
     """Create a JPEG with EXIF data via PIL's native Exif support."""
     img = Image.new('RGB', (200, 100), color='green')

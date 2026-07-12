@@ -207,6 +207,18 @@
     height: 8px;
     border-radius: 50%;
   }
+  .miss-card-representative {
+    position: absolute;
+    bottom: 6px;
+    left: 6px;
+    padding: 2px 6px;
+    background: var(--accent);
+    color: var(--accent-text);
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
 
   .miss-card-unflag {
     position: absolute;
@@ -888,6 +900,7 @@ function renderCard(cat, p, idx) {
           '<span class="dot cat-' + cat + '"></span>' +
           escapeHtml(CATEGORY_LABELS[cat]) +
         '</span>' +
+        (p.is_species_representative ? '<span class="miss-card-representative">Representative</span>' : '') +
         '<button class="miss-card-unflag" ' +
           'title="Unflag as miss (U)" ' +
           'data-testid="miss-unflag-' + cat + '-' + p.id + '" ' +
@@ -1035,6 +1048,38 @@ async function bulkReject(cat, e) {
   loadMisses();
 }
 
+// Server-side representative eligibility (see get_species_representatives)
+// hides rejected photos. Both flag paths below intentionally leave the card
+// rendered until the next loadMisses() so keyboard navigation stays put, but
+// without clearing rep state here the "Representative" badge and the shared
+// context menu's Already-representative hint keep treating the just-rejected
+// card as current until that later refetch. Walk missesData across all
+// categories in place — same shape the lifelist:changed listener uses.
+function _clearMissRepresentativeStateIfIneligible(photoIds, flag) {
+  if (flag !== 'rejected') return false;
+  var ids = photoIds instanceof Set ? photoIds : new Set(photoIds || []);
+  if (!ids.size) return false;
+  var changed = false;
+  CATEGORY_ORDER.forEach(function(cat) {
+    var photos = missesData[cat] || [];
+    photos.forEach(function(p) {
+      if (!ids.has(p.id)) return;
+      if (p.is_species_representative) {
+        p.is_species_representative = false;
+        changed = true;
+      }
+      if (Array.isArray(p.life_list)) {
+        p.life_list.forEach(function(entry) {
+          if (!entry) return;
+          if (entry.is_current_photo) { entry.is_current_photo = false; changed = true; }
+          if (entry.is_species_representative) { entry.is_species_representative = false; changed = true; }
+        });
+      }
+    });
+  });
+  return changed;
+}
+
 /* ---------- Per-card flag/reject (keyboard) ----------
  * Mirrors the bulk-reject behavior: sets the photo's flag without removing
  * the card from the list, so j/k navigation stays continuous. The card will
@@ -1051,6 +1096,9 @@ async function flagFocusedMiss(photoId, flag) {
   } catch (err) {
     if (typeof showToast === 'function') showToast('Flag update failed', 'error');
     return;
+  }
+  if (_clearMissRepresentativeStateIfIneligible([photoId], flag)) {
+    render();
   }
   if (typeof showToast === 'function') {
     var label = flag === 'flagged' ? 'Flagged' : flag === 'rejected' ? 'Rejected' : 'Cleared';
@@ -1078,11 +1126,13 @@ async function bulkFlagSelection(flag) {
     if (typeof showToast === 'function') showToast('Bulk flag failed', 'error');
     return;
   }
+  var repChanged = _clearMissRepresentativeStateIfIneligible(ids, flag);
   if (typeof showToast === 'function') {
     var verb = flag === 'flagged' ? 'Flagged' : flag === 'rejected' ? 'Rejected' : 'Cleared';
     showToast(verb + ' ' + ids.length + ' photo' + (ids.length === 1 ? '' : 's'), 'success');
   }
   clearSelection();
+  if (repChanged) render();
 }
 
 /* Bulk unflag-as-miss across the selection. Each photo can be flagged in
@@ -1490,6 +1540,69 @@ function extendSelectionByFocus(delta) {
   var newP = photos[focusedIndex];
   if (newP) setSelected(newP.id, true);
 }
+
+// setLifeListPhoto (miss card context menu / shared lightbox action) only emits
+// a lifelist:changed event and updates its own caches; without this listener
+// the Misses cards keep the pre-change value of p.is_species_representative, so
+// the newly assigned photo stays un-badged and any previously visible former
+// representative keeps its badge until a full reload. Walk missesData across
+// all categories in place, flip the species entry's flags, and rerender.
+document.addEventListener('lifelist:changed', function(e) {
+  var detail = e && e.detail ? e.detail : {};
+  var species = detail.species;
+  var photoId = detail.photoId;
+  if (!species || !photoId) return;
+  var changed = false;
+  CATEGORY_ORDER.forEach(function(cat) {
+    var photos = missesData[cat] || [];
+    photos.forEach(function(p) {
+      var entries = Array.isArray(p.life_list) ? p.life_list : [];
+      var touched = false;
+      entries.forEach(function(entry) {
+        if (!entry || entry.species !== species) return;
+        var isCurrent = p.id === photoId;
+        if (entry.is_current_photo !== isCurrent || entry.is_species_representative !== isCurrent) {
+          entry.is_current_photo = isCurrent;
+          entry.is_species_representative = isCurrent;
+          touched = true;
+        }
+      });
+      if (p.id === photoId && !entries.some(function(entry) { return entry && entry.species === species; })) {
+        entries.push({species: species, is_current_photo: true, is_species_representative: true});
+        p.life_list = entries;
+        touched = true;
+      }
+      var isRep = entries.some(function(entry) {
+        return entry && entry.is_species_representative;
+      });
+      if (p.is_species_representative !== isRep) {
+        p.is_species_representative = isRep;
+        touched = true;
+      }
+      if (touched) changed = true;
+    });
+  });
+  if (changed) render();
+});
+
+// Reject via the shared lightbox does NOT route through flagFocusedMiss /
+// bulkFlagSelection: handleMissesLightboxFlagShortcut only intercepts
+// flag === 'none' (unflag-as-miss), and every other flag lands in _lbApplyFlag's
+// generic /api/photos/<id>/flag fallback because misses.html doesn't define
+// window.setFlagFor / setReviewFlag. That path never clears the local
+// representative state, so a card whose rep badge was rendered stays showing
+// "Representative" after a lightbox reject until the next loadMisses().
+// _lbApplyFlag emits lightbox:flagchanged with the settled flag; listen here
+// and reuse the same clearing helper the keyboard/bulk reject paths use.
+document.addEventListener('lightbox:flagchanged', function(e) {
+  var detail = e && e.detail ? e.detail : {};
+  var photoId = detail.photoId;
+  var flag = detail.flag;
+  if (photoId == null || flag !== 'rejected') return;
+  if (_clearMissRepresentativeStateIfIneligible([photoId], flag)) {
+    render();
+  }
+});
 
 /* ---------- Boot ---------- */
 installMissSliderHandlers();

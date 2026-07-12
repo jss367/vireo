@@ -91,9 +91,9 @@ def test_initial_load_matches_default_workspace_scope(live_server, page):
     # a per-card .card-species label.
     bucket_titles = page.locator(".bucket-title").all_inner_texts()
     species_text = {t.strip() for title in bucket_titles for t in [title]}
-    # bucket-title text may include a trailing badge (e.g. "Confirmed"); match
+    # bucket-title text may include a trailing badge (e.g. "Keyword confirmed"); match
     # by substring so we tolerate either "Red-tailed Hawk" or
-    # "Red-tailed Hawk Confirmed".
+    # "Red-tailed Hawk Keyword confirmed".
     has_hawk = any("Red-tailed Hawk" in t for t in species_text)
     has_robin = any("American Robin" in t for t in species_text)
     assert has_hawk and has_robin, (
@@ -199,6 +199,707 @@ def test_highlights_best_ui_is_advanced_only(live_server, page):
     )
 
 
+def test_highlights_picked_photos_show_flag_marker(live_server, page):
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+    picked_id = data["photos"][0]
+    db.update_photo_flag(picked_id, "flagged")
+
+    page.goto(f"{live_server['url']}/highlights", timeout=5000)
+
+    card = page.locator(f'.highlights-card[data-photo-id="{picked_id}"]')
+    expect(card).to_be_visible(timeout=5000)
+    expect(card).to_have_class(re.compile(r"\bpick-flag-card\b"))
+    expect(card.locator(".pick-flag-badge")).to_be_visible()
+    expect(card.locator(".pick-flag-badge")).to_have_text("Pick")
+
+
+def test_highlights_lightbox_pick_updates_card_without_reload(live_server, page):
+    """Picking/unpicking from the lightbox must refresh the card DOM in place.
+
+    Regression for Codex feedback on PR #1176: the highlights
+    ``lightbox:flagchanged`` handler only reacted to ``rejected`` (and
+    previously-rejected) transitions, so the new Pick badge/outline never
+    appeared or disappeared until a full reload.
+    """
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+
+    page.goto(f"{live_server['url']}/highlights", timeout=5000)
+    hawk_section = page.locator("section.bucket").filter(has_text="Red-tailed Hawk")
+    first_card = hawk_section.locator(".highlights-card").nth(0)
+    expect(first_card).to_be_visible(timeout=5000)
+    first_pid = int(first_card.get_attribute("data-photo-id"))
+
+    # Nothing picked yet — the badge/class must be absent.
+    expect(first_card).not_to_have_class(re.compile(r"\bpick-flag-card\b"))
+    expect(
+        page.locator(f'.highlights-card[data-photo-id="{first_pid}"] .pick-flag-badge')
+    ).to_have_count(0)
+
+    first_card.click()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+    page.wait_for_function(
+        "pid => _lightboxCurrentId === pid",
+        arg=first_pid,
+        timeout=3000,
+    )
+
+    page.keyboard.press("p")
+
+    assert _wait_for_flag(db, first_pid, "flagged") == "flagged"
+    refreshed = page.locator(f'.highlights-card[data-photo-id="{first_pid}"]')
+    expect(refreshed).to_have_class(re.compile(r"\bpick-flag-card\b"), timeout=5000)
+    expect(refreshed.locator(".pick-flag-badge")).to_be_visible()
+
+    # Clearing the pick from the lightbox must also refresh the card DOM.
+    page.keyboard.press("u")
+
+    assert _wait_for_flag(db, first_pid, "none") == "none"
+    cleared = page.locator(f'.highlights-card[data-photo-id="{first_pid}"]')
+    expect(cleared).not_to_have_class(re.compile(r"\bpick-flag-card\b"), timeout=5000)
+    expect(cleared.locator(".pick-flag-badge")).to_have_count(0)
+
+
+def test_highlights_lightbox_pick_hidden_photo_promotes_to_visible(live_server, page):
+    """Picking a preloaded-but-hidden photo from the lightbox must promote it
+    into the visible slice, not leave it hidden until a reload.
+
+    Regression for Codex feedback on PR #1176: the ``lightbox:flagchanged``
+    handler only mutated ``pickedPhoto.flag`` and rerendered the existing
+    array order. So a photo picked from beyond the ``perRow`` slice (the
+    backend preloads up to 20 per bucket but the grid shows 5 by default)
+    kept its new Pick badge invisible until a full refetch, even though the
+    server's ``picked_first`` sort would have promoted it.
+    """
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+
+    hawk_kid = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("Red-tailed Hawk",)
+    ).fetchone()["id"]
+    folder_id = data["folders"][0]
+    extras = []
+    for i in range(8):
+        pid = db.add_photo(
+            folder_id=folder_id,
+            filename=f"extra-hawk-{i}.jpg",
+            extension=".jpg",
+            file_size=1000,
+            file_mtime=1.0,
+            timestamp=f"2024-03-11T08:{i:02d}:00",
+        )
+        db.conn.execute(
+            "UPDATE photos SET quality_score = ? WHERE id = ?",
+            (0.5 - i * 0.01, pid),
+        )
+        db.conn.execute(
+            "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (pid, hawk_kid),
+        )
+        extras.append(pid)
+    db.conn.commit()
+
+    page.goto(f"{live_server['url']}/highlights", timeout=5000)
+    hawk_section = page.locator("section.bucket").filter(has_text="Red-tailed Hawk")
+    expect(hawk_section.locator(".highlights-card").first).to_be_visible(timeout=5000)
+
+    visible_ids = hawk_section.locator(".highlights-card").evaluate_all(
+        "cards => cards.map(c => Number(c.getAttribute('data-photo-id')))"
+    )
+    # perRow default is 5; extra hawks (8) plus seeded hawks (3) = 11 in the
+    # bucket, so at least one preloaded photo is hidden past the slice.
+    assert len(visible_ids) == 5
+    hidden_pid = next(pid for pid in extras if pid not in set(visible_ids))
+
+    # Open the lightbox on the first visible card so `_lightboxPhotoList` is
+    # populated with the full bucket, then jump to the hidden photo.
+    hawk_section.locator(".highlights-card").nth(0).click()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+    page.evaluate(
+        "pid => openLightbox(pid, '', _lightboxPhotoList)",
+        hidden_pid,
+    )
+    page.wait_for_function(
+        "pid => _lightboxCurrentId === pid",
+        arg=hidden_pid,
+        timeout=3000,
+    )
+
+    page.keyboard.press("p")
+
+    assert _wait_for_flag(db, hidden_pid, "flagged") == "flagged"
+    promoted = page.locator(f'.highlights-card[data-photo-id="{hidden_pid}"]')
+    expect(promoted).to_be_visible(timeout=5000)
+    expect(promoted).to_have_class(re.compile(r"\bpick-flag-card\b"))
+    expect(promoted.locator(".pick-flag-badge")).to_be_visible()
+
+
+def test_highlights_lightbox_pick_keeps_curated_highlight_first(live_server, page):
+    """Picking an unhighlighted photo must not demote a stored species highlight.
+
+    Regression for Codex feedback on PR #1176: the client-side re-sort ran a
+    picked-first ordering that ignored ``is_highlighted``/``highlight_rank``,
+    so pressing ``P`` on an unhighlighted photo in a curated bucket shoved
+    the stored highlight out of its top slot — changing the visible slice
+    and the Save-as-Collection payload — until a full reload restored the
+    server's ``_apply_ordered_highlights`` ordering.
+    """
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+
+    # photos[1] is a lower-quality hawk than photos[0]; without the stored
+    # highlight it would sort second. Marking it a species highlight promotes
+    # it to the top of the bucket via _apply_ordered_highlights.
+    highlighted_id = data["photos"][1]
+    unhighlighted_id = data["photos"][0]
+    db.add_species_highlight("Red-tailed Hawk", highlighted_id)
+
+    page.goto(f"{live_server['url']}/highlights", timeout=5000)
+    hawk_section = page.locator("section.bucket").filter(has_text="Red-tailed Hawk")
+    expect(hawk_section.locator(".highlights-card").first).to_be_visible(timeout=5000)
+
+    first_card = hawk_section.locator(".highlights-card").nth(0)
+    assert int(first_card.get_attribute("data-photo-id")) == highlighted_id
+
+    # Open the lightbox on the unhighlighted card and pick it.
+    unhighlighted_card = hawk_section.locator(
+        f'.highlights-card[data-photo-id="{unhighlighted_id}"]'
+    )
+    unhighlighted_card.click()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+    page.wait_for_function(
+        "pid => _lightboxCurrentId === pid",
+        arg=unhighlighted_id,
+        timeout=3000,
+    )
+    page.keyboard.press("p")
+    assert _wait_for_flag(db, unhighlighted_id, "flagged") == "flagged"
+
+    # The stored highlight must still lead the bucket; the newly-picked
+    # photo must NOT have jumped ahead of it.
+    picked_card = hawk_section.locator(
+        f'.highlights-card[data-photo-id="{unhighlighted_id}"]'
+    )
+    expect(picked_card).to_have_class(re.compile(r"\bpick-flag-card\b"), timeout=5000)
+    still_first = hawk_section.locator(".highlights-card").nth(0)
+    assert int(still_first.get_attribute("data-photo-id")) == highlighted_id
+
+
+def test_highlights_lightbox_pick_applies_backend_score_bonus(live_server, page):
+    """Picking must apply the backend's pick bonus before client-side re-sort.
+
+    Regression for Codex feedback on PR #1176 (thread on line 881): the
+    client sort compares cached ``highlight_score`` values, but the backend
+    bakes a ``+0.08`` bonus into ``highlight_score`` for flagged photos in
+    ``_highlight_score_bucket`` before ordering. In a curated bucket with a
+    stored species highlight, unhighlighted photos are ordered by
+    ``highlight_score``. Without the bonus adjustment, picking an
+    unhighlighted photo whose score is within 0.08 of the next one leaves
+    it behind in the client slice, while a reload would promote it — so the
+    visible slice (and the Save-as-Collection payload derived from it)
+    diverges from what the backend would produce.
+    """
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+
+    # Seeded quality scores: hawks are photos[0]=0.90, photos[1]=0.85,
+    # photos[2]=0.80. With no other subject metrics populated,
+    # highlight_score == quality_score in _highlight_score_bucket.
+    highlighted_id = data["photos"][0]  # promoted to top by the stored highlight
+    upper_unhighlighted = data["photos"][1]  # score 0.85 — the pick target
+    lower_unhighlighted = data["photos"][2]  # score 0.80
+
+    # Reduce the gap between the two unhighlighted hawks so the +0.08 bonus
+    # is enough to flip their order, but small enough that a stale cached
+    # score would still leave lower_unhighlighted second.
+    db.conn.execute(
+        "UPDATE photos SET quality_score = ? WHERE id = ?",
+        (0.83, lower_unhighlighted),
+    )
+    db.conn.commit()
+
+    db.add_species_highlight("Red-tailed Hawk", highlighted_id)
+
+    page.goto(f"{live_server['url']}/highlights", timeout=5000)
+    hawk_section = page.locator("section.bucket").filter(has_text="Red-tailed Hawk")
+    expect(hawk_section.locator(".highlights-card").first).to_be_visible(timeout=5000)
+
+    # Initial order: [highlighted, upper_unhighlighted(0.85), lower_unhighlighted(0.83)].
+    initial_ids = hawk_section.locator(".highlights-card").evaluate_all(
+        "cards => cards.map(c => Number(c.getAttribute('data-photo-id')))"
+    )
+    assert initial_ids[0] == highlighted_id
+    assert initial_ids[1] == upper_unhighlighted
+    assert initial_ids[2] == lower_unhighlighted
+
+    # Open the lightbox on the lower unhighlighted card and pick it. The
+    # backend would add +0.08 to its highlight_score (0.83 -> 0.91),
+    # promoting it above upper_unhighlighted (0.85).
+    lower_card = hawk_section.locator(
+        f'.highlights-card[data-photo-id="{lower_unhighlighted}"]'
+    )
+    lower_card.click()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+    page.wait_for_function(
+        "pid => _lightboxCurrentId === pid",
+        arg=lower_unhighlighted,
+        timeout=3000,
+    )
+    page.keyboard.press("p")
+    assert _wait_for_flag(db, lower_unhighlighted, "flagged") == "flagged"
+
+    # The picked photo must jump ahead of the higher-scored unhighlighted
+    # photo — mirroring what a full reload would render.
+    picked_card = hawk_section.locator(
+        f'.highlights-card[data-photo-id="{lower_unhighlighted}"]'
+    )
+    expect(picked_card).to_have_class(re.compile(r"\bpick-flag-card\b"), timeout=5000)
+    updated_ids = hawk_section.locator(".highlights-card").evaluate_all(
+        "cards => cards.map(c => Number(c.getAttribute('data-photo-id')))"
+    )
+    assert updated_ids[0] == highlighted_id
+    assert updated_ids[1] == lower_unhighlighted
+    assert updated_ids[2] == upper_unhighlighted
+
+
+def test_highlights_lightbox_pick_refreshes_bucket_best_timestamp(live_server, page):
+    """Picking a photo that becomes ``bucket.photos[0]`` must refresh
+    ``bucket.best_timestamp`` so ``sortedBuckets()`` ('Newest top photo' /
+    'Oldest top photo') doesn't rank the species by the pre-pick top
+    photo's timestamp until reload.
+
+    Regression for Codex feedback on PR #1176 (line 873): the client-side
+    pick handler only refreshed ``best_score`` after re-sorting. A pick
+    that promoted an older/newer photo to ``photos[0]`` left
+    ``best_timestamp`` pointing at the previous top photo, so a reload
+    would rank the species differently in the timestamp-based sorts.
+    """
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+
+    # Seeded quality scores put hawk1 (2024-03-10T08:00:00) at photos[0]
+    # via _highlight_score_bucket. Picking hawk3 (2024-03-10T08:02:00)
+    # promotes it to photos[0] under picked_first ordering.
+    hawk1_id = data["photos"][0]
+    hawk3_id = data["photos"][2]
+
+    page.goto(f"{live_server['url']}/highlights", timeout=5000)
+    hawk_section = page.locator("section.bucket").filter(has_text="Red-tailed Hawk")
+    expect(hawk_section.locator(".highlights-card").first).to_be_visible(timeout=5000)
+
+    initial = page.evaluate(
+        "() => {"
+        "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+        "  return { first: b.photos[0].id, ts: b.best_timestamp };"
+        "}"
+    )
+    assert initial["first"] == hawk1_id
+    assert initial["ts"] == "2024-03-10T08:00:00"
+
+    hawk3_card = hawk_section.locator(
+        f'.highlights-card[data-photo-id="{hawk3_id}"]'
+    )
+    hawk3_card.click()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+    page.wait_for_function(
+        "pid => _lightboxCurrentId === pid",
+        arg=hawk3_id,
+        timeout=3000,
+    )
+    page.keyboard.press("p")
+    assert _wait_for_flag(db, hawk3_id, "flagged") == "flagged"
+
+    page.wait_for_function(
+        "() => {"
+        "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+        "  return b && b.photos[0] && b.photos[0].flag === 'flagged';"
+        "}",
+        timeout=5000,
+    )
+    after = page.evaluate(
+        "() => {"
+        "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+        "  return { first: b.photos[0].id, ts: b.best_timestamp };"
+        "}"
+    )
+    assert after["first"] == hawk3_id
+    assert after["ts"] == "2024-03-10T08:02:00"
+
+
+def test_highlights_lightbox_pick_refetches_paged_bucket(live_server, page):
+    """Picking in a bucket with `has_more` must refetch, not just resort locally.
+
+    Regression for Codex feedback on PR #1176 (line 1308): when a bucket
+    still has ``has_more=true``, the client's loaded window is a subset of
+    the server's ordered list. A local resort of that slice can't reconcile
+    a pick that promotes a preloaded-but-hidden photo into the window (or
+    demotes a visible one past it), and ``loadMoreBucket`` uses
+    ``target.photos.length`` as its next offset — so it would either append
+    duplicates for photos still at the same server offset or skip photos
+    that newly entered the first page.
+    """
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+
+    hawk_kid = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("Red-tailed Hawk",)
+    ).fetchone()["id"]
+    folder_id = data["folders"][0]
+
+    # loadHighlights sends limit_per_bucket = max(20, perRowSlider). Seed
+    # >20 hawks total so the initial hawk bucket comes back with
+    # has_more=true (3 seeded hawks + 25 extras = 28 > 20).
+    extras = []
+    for i in range(25):
+        pid = db.add_photo(
+            folder_id=folder_id,
+            filename=f"pageable-hawk-{i}.jpg",
+            extension=".jpg",
+            file_size=1000,
+            file_mtime=1.0,
+            timestamp=f"2024-03-11T09:{i:02d}:00",
+        )
+        db.conn.execute(
+            "UPDATE photos SET quality_score = ? WHERE id = ?",
+            (0.5 - i * 0.005, pid),
+        )
+        db.conn.execute(
+            "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (pid, hawk_kid),
+        )
+        extras.append(pid)
+    db.conn.commit()
+
+    page.goto(f"{live_server['url']}/highlights", timeout=5000)
+    hawk_section = page.locator("section.bucket").filter(has_text="Red-tailed Hawk")
+    expect(hawk_section.locator(".highlights-card").first).to_be_visible(timeout=5000)
+
+    # Sanity: 28 hawks total, 20 loaded → has_more should be true.
+    has_more = page.evaluate(
+        "() => currentData.buckets.find(b => b.species === 'Red-tailed Hawk').has_more"
+    )
+    assert has_more is True
+
+    # Pick a photo from within the loaded window.
+    first_card = hawk_section.locator(".highlights-card").nth(0)
+    first_pid = int(first_card.get_attribute("data-photo-id"))
+    first_card.click()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+    page.wait_for_function(
+        "pid => _lightboxCurrentId === pid",
+        arg=first_pid,
+        timeout=3000,
+    )
+
+    # The pick must trigger a refetch from offset=0 against the bucket
+    # endpoint, not just a local reorder.
+    with page.expect_response(
+        lambda r: (
+            "/api/highlights/bucket" in r.url
+            and "offset=0" in r.url
+            and "species=Red-tailed" in r.url
+        ),
+        timeout=5000,
+    ):
+        page.keyboard.press("p")
+
+    assert _wait_for_flag(db, first_pid, "flagged") == "flagged"
+
+    # Load the rest of the bucket via the Load-more path. If the refetch
+    # aligned the client window with the server's post-bonus ordering, the
+    # combined set is duplicate-free and covers every hawk.
+    page.evaluate(
+        "async () => { while (currentData.buckets.find(b => b.species === 'Red-tailed Hawk').has_more) "
+        "{ await loadMoreBucket('Red-tailed Hawk', false); } }"
+    )
+    all_ids = page.evaluate(
+        "() => currentData.buckets.find(b => b.species === 'Red-tailed Hawk').photos.map(p => p.id)"
+    )
+    assert len(all_ids) == len(set(all_ids)), (
+        f"Duplicate photo IDs after Load-more: {all_ids}"
+    )
+    # 3 seeded hawks + 25 extras = 28 unique hawks in the bucket.
+    assert len(all_ids) == 28
+
+
+def test_highlights_lightbox_pick_preserves_loaded_window(live_server, page):
+    """Picking must refetch only the currently-loaded window, not inflate it.
+
+    Regression for Codex feedback on PR #1176 (line 907): the refetch
+    forced ``targetLen = Math.max(500, currentLen)`` on every lightbox
+    pick/unpick. For an unexpanded bucket with the default 20-row initial
+    load, that silently pulled the bucket up to 500 photos in one request;
+    the next "Load more" click then used ``target.photos.length`` (now 500)
+    as its offset and appended photos 500-999, so the expanded grid — and
+    the Save-as-Collection payload — suddenly included hundreds of photos
+    the user never paged through, and each pick downloaded far more data
+    than necessary.
+    """
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+
+    hawk_kid = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("Red-tailed Hawk",)
+    ).fetchone()["id"]
+    folder_id = data["folders"][0]
+
+    # 3 seeded + 25 extras = 28 hawks; the initial /api/highlights load
+    # caps at 20 per bucket, so has_more starts true and the loaded window
+    # is exactly 20.
+    for i in range(25):
+        pid = db.add_photo(
+            folder_id=folder_id,
+            filename=f"windowed-hawk-{i}.jpg",
+            extension=".jpg",
+            file_size=1000,
+            file_mtime=1.0,
+            timestamp=f"2024-03-11T09:{i:02d}:00",
+        )
+        db.conn.execute(
+            "UPDATE photos SET quality_score = ? WHERE id = ?",
+            (0.5 - i * 0.005, pid),
+        )
+        db.conn.execute(
+            "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (pid, hawk_kid),
+        )
+    db.conn.commit()
+
+    page.goto(f"{live_server['url']}/highlights", timeout=5000)
+    hawk_section = page.locator("section.bucket").filter(has_text="Red-tailed Hawk")
+    expect(hawk_section.locator(".highlights-card").first).to_be_visible(timeout=5000)
+
+    initial = page.evaluate(
+        "() => {"
+        "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+        "  return { len: b.photos.length, hasMore: b.has_more };"
+        "}"
+    )
+    assert initial["len"] == 20
+    assert initial["hasMore"] is True
+
+    first_card = hawk_section.locator(".highlights-card").nth(0)
+    first_pid = int(first_card.get_attribute("data-photo-id"))
+    first_card.click()
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+    page.wait_for_function(
+        "pid => _lightboxCurrentId === pid",
+        arg=first_pid,
+        timeout=3000,
+    )
+
+    # Capture the refetch request URL to prove the limit matches the loaded
+    # window (20), not the old 500 floor.
+    with page.expect_response(
+        lambda r: (
+            "/api/highlights/bucket" in r.url
+            and "offset=0" in r.url
+            and "species=Red-tailed" in r.url
+        ),
+        timeout=5000,
+    ) as refetch:
+        page.keyboard.press("p")
+
+    assert _wait_for_flag(db, first_pid, "flagged") == "flagged"
+    assert "limit=20" in refetch.value.url, (
+        f"refetch limit must match loaded window (20); got {refetch.value.url}"
+    )
+    assert "limit=500" not in refetch.value.url
+
+    # After the refetch, the client-side loaded window must still be 20 —
+    # not silently expanded to 28 (the whole bucket). has_more must remain
+    # true so the Load-more path still targets offset=20 next.
+    page.wait_for_function(
+        "() => {"
+        "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+        "  return b && b.photos.length === 20 && b.photos[0].flag === 'flagged';"
+        "}",
+        timeout=5000,
+    )
+    after = page.evaluate(
+        "() => {"
+        "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+        "  return { len: b.photos.length, hasMore: b.has_more };"
+        "}"
+    )
+    assert after["len"] == 20
+    assert after["hasMore"] is True
+
+
+def test_highlights_lightbox_repick_after_eviction_restores_photo(live_server, page):
+    """Re-picking from the lightbox after the photo was evicted from the
+    loaded window must reload highlights, not silently no-op.
+
+    Regression for Codex feedback on PR #1176 (line 1288): the lightbox
+    ``flagchanged`` handler bailed on ``if (!hit) return;`` whenever the
+    photo wasn't in any bucket's loaded window. That happens when a photo
+    is only in the loaded slice because ``picked_first`` promoted it — a
+    prior unpick's ``refetchBucketFromZero`` then replaces the bucket with
+    a server prefix that no longer contains the photo. Pressing ``P``
+    again from the still-open lightbox left the photo flagged on the
+    backend but absent from the visible Highlights grid (and the
+    Save-as-Collection payload) until a full reload.
+    """
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+
+    hawk_kid = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("Red-tailed Hawk",)
+    ).fetchone()["id"]
+    folder_id = data["folders"][0]
+
+    # Seed 25 extra hawks (3 seeded + 25 = 28 > 20) with very low quality
+    # scores so the loaded window's first 20 tail hawks all outrank the
+    # low_hawk below. That guarantees low_hawk is only visible because
+    # picked_first promotes it.
+    for i in range(25):
+        pid = db.add_photo(
+            folder_id=folder_id,
+            filename=f"filler-hawk-{i}.jpg",
+            extension=".jpg",
+            file_size=1000,
+            file_mtime=1.0,
+            timestamp=f"2024-03-11T09:{i:02d}:00",
+        )
+        db.conn.execute(
+            "UPDATE photos SET quality_score = ? WHERE id = ?",
+            (0.7 - i * 0.01, pid),
+        )
+        db.conn.execute(
+            "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (pid, hawk_kid),
+        )
+
+    # The eviction target: a hawk with a much lower base score than every
+    # other hawk. Without picked_first it sits at the bottom of the
+    # sorted-by-score list, past the initial 20-photo window.
+    low_hawk = db.add_photo(
+        folder_id=folder_id,
+        filename="low-score-hawk.jpg",
+        extension=".jpg",
+        file_size=1000,
+        file_mtime=1.0,
+        timestamp="2024-03-11T10:00:00",
+    )
+    db.conn.execute(
+        "UPDATE photos SET quality_score = 0.05, flag = 'flagged' WHERE id = ?",
+        (low_hawk,),
+    )
+    db.conn.execute(
+        "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (low_hawk, hawk_kid),
+    )
+    db.conn.commit()
+
+    page.goto(f"{live_server['url']}/highlights", timeout=5000)
+    hawk_section = page.locator("section.bucket").filter(has_text="Red-tailed Hawk")
+    expect(hawk_section.locator(".highlights-card").first).to_be_visible(timeout=5000)
+
+    # Initial load: picked_first promotes low_hawk into bucket.photos even
+    # though its base score would otherwise put it past position 20.
+    def _bucket_has_photo(pid):
+        return page.evaluate(
+            "pid => {"
+            "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+            "  return !!(b && b.photos.some(p => p.id === pid));"
+            "}",
+            pid,
+        )
+
+    assert _bucket_has_photo(low_hawk) is True
+
+    # Open the lightbox on the picked low_hawk. `attachCardClicks` only
+    # wires the visible slice, so drive the lightbox directly with the
+    # bucket's photo list.
+    low_card = hawk_section.locator(
+        f'.highlights-card[data-photo-id="{low_hawk}"]'
+    )
+    if low_card.count() > 0:
+        low_card.click()
+    else:
+        page.evaluate(
+            "pid => {"
+            "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+            "  openLightbox(pid, '', b.photos);"
+            "}",
+            low_hawk,
+        )
+    page.wait_for_function(
+        "document.getElementById('lightboxOverlay').classList.contains('active')",
+        timeout=3000,
+    )
+    page.wait_for_function(
+        "pid => _lightboxCurrentId === pid",
+        arg=low_hawk,
+        timeout=3000,
+    )
+
+    # Unpick from the lightbox. The refetch that fires after this must
+    # drop low_hawk out of the loaded window (no picked_first bonus and
+    # a much lower score than every other hawk).
+    page.keyboard.press("u")
+    assert _wait_for_flag(db, low_hawk, "none") == "none"
+    page.wait_for_function(
+        "pid => {"
+        "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+        "  return !!(b && !b.photos.some(p => p.id === pid));"
+        "}",
+        arg=low_hawk,
+        timeout=5000,
+    )
+    assert _bucket_has_photo(low_hawk) is False
+    assert page.evaluate("() => _lightboxCurrentId") == low_hawk
+
+    # Re-pick from the still-open lightbox. Before the fix, the handler
+    # would bail because the photo is no longer in any bucket's loaded
+    # window; with the fix, it falls back to loadHighlights() so
+    # picked_first promotes low_hawk back into the visible grid.
+    page.keyboard.press("p")
+    assert _wait_for_flag(db, low_hawk, "flagged") == "flagged"
+    page.wait_for_function(
+        "pid => {"
+        "  const b = currentData.buckets.find(x => x.species === 'Red-tailed Hawk');"
+        "  return !!(b && b.photos.some(p => p.id === pid && p.flag === 'flagged'));"
+        "}",
+        arg=low_hawk,
+        timeout=5000,
+    )
+    restored = page.locator(f'.highlights-card[data-photo-id="{low_hawk}"]')
+    expect(restored).to_be_visible(timeout=5000)
+    expect(restored).to_have_class(re.compile(r"\bpick-flag-card\b"))
+
+
 def test_highlights_species_search_filters_buckets(live_server, page):
     db = live_server["db"]
     data = live_server["data"]
@@ -217,6 +918,42 @@ def test_highlights_species_search_filters_buckets(live_server, page):
         "Red-tailed Hawk" in title
         for title in page.locator(".bucket-title").all_inner_texts()
     )
+
+
+def test_highlights_curation_filter_controls_combine(live_server, page):
+    db = live_server["db"]
+    data = live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+    db.add_species_highlight("Red-tailed Hawk", data["photos"][0])
+    db.add_species_highlight("American Robin", data["photos"][3])
+    db.set_species_representative("American Robin", data["photos"][3])
+
+    page.goto(f"{live_server['url']}/highlights", timeout=5000)
+    expect(page.locator(".highlights-card").first).to_be_visible(timeout=5000)
+    expect(page.locator("label[for='confirmationFilter']")).to_have_text(
+        "Species keyword"
+    )
+
+    with page.expect_response(
+        lambda response: (
+            "/api/highlights?" in response.url
+            and "highlight_selection=yes" in response.url
+        )
+    ):
+        page.locator("#highlightSelectionFilter").select_option("yes")
+    expect(page.locator(".bucket-title")).to_have_count(2)
+
+    with page.expect_response(
+        lambda response: (
+            "/api/highlights?" in response.url
+            and "highlight_selection=yes" in response.url
+            and "species_representative=no" in response.url
+        )
+    ):
+        page.locator("#representativeFilter").select_option("no")
+
+    expect(page.locator(".bucket-title")).to_have_count(1)
+    expect(page.locator(".bucket-title").first).to_contain_text("Red-tailed Hawk")
 
 
 def test_highlights_general_search_filters_by_filename_folder_and_keyword(live_server, page):
@@ -238,6 +975,7 @@ def test_highlights_general_search_filters_by_filename_folder_and_keyword(live_s
         search.fill("hawk1")
     expect(page.locator(".highlights-card")).to_have_count(1)
     expect(page.locator(".highlights-card img")).to_have_attribute("alt", "hawk1.jpg")
+    expect(page.locator(".highlights-card .card-filename")).to_have_text("hawk1.jpg")
 
     with page.expect_response(
         lambda r: "/api/highlights?" in r.url and "q=yard" in r.url.lower()
@@ -313,16 +1051,16 @@ def test_ordered_highlight_updates_top_photo_timestamp(live_server):
 
 
 def test_highlights_search_recomputes_bucket_accepted_status(live_server):
-    """Filtering a mixed bucket down to only confirmed photos must flip
+    """Filtering a mixed bucket down to keyword-confirmed photos must flip
     ``is_accepted`` to True so the bucket loses the candidate badge and the
-    Confirmed-first sort places it above unconfirmed rows."""
+    confirmed-keywords-first sort places it above prediction-only rows."""
     db = live_server["db"]
     data = live_server["data"]
     _seed_quality_scores_and_species(db, data)
 
     # Add a prediction-only photo that lands in the same "Red-tailed Hawk"
     # bucket (predicted confidence above the default 0.70 threshold) so the
-    # bucket is a mix of confirmed (keyword-tagged) and unconfirmed photos.
+    # bucket mixes keyword-confirmed and prediction-only photos.
     pid = db.add_photo(
         folder_id=data["folders"][0],
         filename="predicted-hawk.jpg",
@@ -351,14 +1089,14 @@ def test_highlights_search_recomputes_bucket_accepted_status(live_server):
 
     base = live_server["url"]
 
-    # Without a filter, the mixed bucket is unconfirmed at the bucket level.
+    # Without a filter, the mixed bucket is not fully keyword-confirmed.
     with urlopen(f"{base}/api/highlights?scope=workspace") as resp:
         payload = json.load(resp)
     hawk = next(b for b in payload["buckets"] if b["species"] == "Red-tailed Hawk")
     assert hawk["is_accepted"] is False
     assert hawk["certainty"] != "confirmed"
 
-    # Filtering by filename to only include a confirmed (keyword-tagged) photo
+    # Filtering by filename to only include a keyword-confirmed photo
     # must recompute ``is_accepted`` from the filtered photos.
     with urlopen(f"{base}/api/highlights?scope=workspace&q=hawk1") as resp:
         payload = json.load(resp)

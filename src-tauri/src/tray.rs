@@ -3,10 +3,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{
-    AppHandle, Manager,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     window::{ProgressBarState, ProgressBarStatus},
+    AppHandle, Manager,
 };
 use tauri_plugin_opener::OpenerExt;
 
@@ -77,7 +77,12 @@ const QUIT: &str = "quit";
 /// `browser_mode` swaps the "Show / Hide Window" pair for a single
 /// "Open in browser" item, since the WKWebView window is intentionally
 /// hidden in that mode and showing it would be confusing.
-pub fn create_tray(app: &AppHandle, port: u16, browser_mode: bool) -> tauri::Result<()> {
+pub fn create_tray(
+    app: &AppHandle,
+    port: u16,
+    token: Option<String>,
+    browser_mode: bool,
+) -> tauri::Result<()> {
     let initial_status = "No active jobs";
     app.manage(TrayMode {
         browser_mode: AtomicBool::new(browser_mode),
@@ -113,7 +118,7 @@ pub fn create_tray(app: &AppHandle, port: u16, browser_mode: bool) -> tauri::Res
     // Start the background polling thread
     let stop = Arc::new(AtomicBool::new(false));
     app.manage(TrayPollState { stop: stop.clone() });
-    start_job_polling(app.clone(), port, stop);
+    start_job_polling(app.clone(), port, token, stop);
 
     Ok(())
 }
@@ -133,24 +138,12 @@ pub fn build_menu(
         // Browser-launch mode: there is no app window to show or hide, so
         // we offer a single "Open in browser" item that re-opens the URL
         // (handy if the user closed the tab).
-        let open = MenuItem::with_id(
-            app,
-            OPEN_IN_BROWSER,
-            "Open in browser",
-            true,
-            None::<&str>,
-        )?;
+        let open = MenuItem::with_id(app, OPEN_IN_BROWSER, "Open in browser", true, None::<&str>)?;
         Menu::with_items(app, &[&open, &sep1, &jobs, &sep2, &quit])
     } else {
         let show = MenuItem::with_id(app, SHOW_WINDOW, "Show Window", true, None::<&str>)?;
         let hide = MenuItem::with_id(app, HIDE_WINDOW, "Hide Window", true, None::<&str>)?;
-        let open = MenuItem::with_id(
-            app,
-            OPEN_IN_BROWSER,
-            "Open in Browser",
-            true,
-            None::<&str>,
-        )?;
+        let open = MenuItem::with_id(app, OPEN_IN_BROWSER, "Open in Browser", true, None::<&str>)?;
         Menu::with_items(app, &[&show, &hide, &open, &sep1, &jobs, &sep2, &quit])
     }
 }
@@ -255,13 +248,17 @@ pub fn is_browser_mode(app: &AppHandle) -> bool {
 }
 
 /// Query the Flask backend for jobs known to the in-memory runner.
-fn fetch_jobs(port: u16) -> Vec<JobInfo> {
+fn fetch_jobs(port: u16, token: Option<&str>) -> Vec<JobInfo> {
     let url = format!("http://127.0.0.1:{}/api/jobs", port);
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(2))
         .timeout_read(Duration::from_secs(5))
         .build();
-    match agent.get(&url).call() {
+    let mut request = agent.get(&url);
+    if let Some(token) = token {
+        request = request.set("X-Vireo-Token", token);
+    }
+    match request.call() {
         Ok(resp) => match resp.into_string() {
             Ok(body) => match serde_json::from_str::<JobsResponse>(&body) {
                 Ok(data) => data.active,
@@ -296,8 +293,16 @@ fn dock_progress_for_jobs(running: &[&JobInfo]) -> DockProgress {
         }
     }
 
-    let total = longest.progress.as_ref().and_then(|p| p.total).unwrap_or(0.0);
-    let current = longest.progress.as_ref().and_then(|p| p.current).unwrap_or(0.0);
+    let total = longest
+        .progress
+        .as_ref()
+        .and_then(|p| p.total)
+        .unwrap_or(0.0);
+    let current = longest
+        .progress
+        .as_ref()
+        .and_then(|p| p.current)
+        .unwrap_or(0.0);
     if total > 0.0 {
         let pct = ((current / total) * 100.0).round().clamp(0.0, 100.0) as u64;
         DockProgress::Normal(pct)
@@ -360,12 +365,12 @@ fn update_tray_menu(app: &AppHandle, job_status: &str) {
 
 /// Start a background thread that polls /api/jobs every 5 seconds
 /// and updates the tray menu with the current job count.
-pub fn start_job_polling(app: AppHandle, port: u16, stop: Arc<AtomicBool>) {
+pub fn start_job_polling(app: AppHandle, port: u16, token: Option<String>, stop: Arc<AtomicBool>) {
     std::thread::spawn(move || {
         let mut last_count: Option<usize> = None;
         let mut last_dock_progress: Option<DockProgress> = None;
         while !stop.load(Ordering::Relaxed) {
-            let jobs = fetch_jobs(port);
+            let jobs = fetch_jobs(port, token.as_deref());
             let running: Vec<&JobInfo> = jobs
                 .iter()
                 .filter(|j| j.status == "running" && j.counts_for_badge)

@@ -12,7 +12,6 @@ DEFAULT_PAGES = [
     "/dashboard",
     "/browse",
     "/review",
-    "/lightroom",
     "/audit",
     "/cull",
     "/pipeline",
@@ -46,6 +45,11 @@ def run_sweep(session, pages=None):
         pages = DEFAULT_PAGES
     for path in pages:
         label = path.strip("/").replace("/", "_") or "root"
-        session.goto(path, wait_until="load")
+        # Harness sessions mark onboarding complete so ordinary navigation
+        # reaches the application. Force the Welcome page when it is an
+        # explicit sweep target; otherwise /welcome redirects to /browse and
+        # broken setup assets are never exercised.
+        target = "/welcome?force=1" if path == "/welcome" else path
+        session.goto(target, wait_until="load")
         session.screenshot(f"sweep-{label}")
     return session.report

@@ -224,6 +224,30 @@ def test_pipeline_burst_context_open_browse_falls_back_to_current_window(live_se
     )
 
 
+def test_pipeline_burst_loupe_context_open_browse_uses_selected_photo(live_server, page):
+    """Right-clicking the Process Review loupe should target its selected photo."""
+    photo_ids = live_server["data"]["photos"][0:3]
+    _write_single_burst_cache(live_server, photo_ids)
+
+    _open_burst_modal(page, live_server)
+    selected_pid = page.evaluate("String(grmState.selected)")
+    assert selected_pid and selected_pid != "null"
+
+    page.evaluate("() => { window.open = () => null; }")
+    _dispatch_contextmenu(page.locator("#grmLoupePhoto"))
+
+    menu = page.locator(".vireo-ctx-menu")
+    expect(menu).to_be_visible()
+    menu.locator(".vireo-ctx-item", has_text="Open in Browse Mode").click()
+
+    page.wait_for_function(
+        "expectedPid => location.pathname === '/browse'"
+        " && new URLSearchParams(location.search).get('photo_id') === expectedPid",
+        arg=selected_pid,
+        timeout=5000,
+    )
+
+
 def test_smart_default_flags_checked_when_moves_pending(live_server, page):
     """Moving a frame to rejects pre-checks "Apply picks/rejects" via the smart
     default; "Confirm species" stays unchecked because the species field is

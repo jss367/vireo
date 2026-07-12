@@ -447,6 +447,18 @@
   color: var(--accent-text);
   font-weight: 600;
 }
+.photo-representative {
+  position: absolute;
+  bottom: 24px;
+  right: 6px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: 9px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 700;
+  text-transform: uppercase;
+}
 .photo-score-bar {
   height: 3px;
   background: var(--bg-tertiary);
@@ -843,6 +855,14 @@ input[type="range"]::-moz-range-thumb {
   border-color: var(--accent);
   color: var(--accent);
 }
+.species-confirm-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.species-confirm-btn:disabled:hover {
+  border-color: var(--border-primary);
+  color: var(--text-dim);
+}
 
 /* Species dropdown */
 .species-dropdown {
@@ -1110,6 +1130,18 @@ input[type="range"]::-moz-range-thumb {
 .grm-card-species { color: var(--text-primary); font-weight: 600; }
 .grm-card-scores { color: var(--text-dim); }
 .grm-card-scores .score-val { color: var(--text-secondary); }
+.grm-card-representative {
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
 
 .grm-footer {
   padding: 12px 20px;
@@ -2590,6 +2622,7 @@ function renderPhotoCard(p, encIdx, burstIdx) {
   html += '<img src="' + escapeAttr(thumbUrl) + '" loading="lazy" alt="" onclick="openInspect(' + p.id + ')">';
   if (visibleLabel) html += '<span class="photo-label ' + visibleLabelClass + '">' + visibleLabel + '</span>';
   if (p.rarity_protected) html += '<span class="photo-rarity">protected</span>';
+  if (p.is_species_representative) html += '<span class="photo-representative">Representative</span>';
   if (p.flag === 'flagged') html += '<span class="photo-flag-badge flag-flagged">P</span>';
   else if (p.flag === 'rejected') html += '<span class="photo-flag-badge flag-rejected">X</span>';
   if (encIdx != null && burstIdx != null) {
@@ -3062,7 +3095,25 @@ function setPipelineReviewFlag(photoId, flag) {
     body: JSON.stringify({ flag: flag }),
   }).then(function() {
     var photo = findPhotoInResults(photoId);
-    if (photo) photo.flag = flag;
+    if (photo) {
+      photo.flag = flag;
+      // Rejected photos lose representative eligibility server-side
+      // (get_species_representatives(eligible_only=True) filters them out),
+      // so drop the cached representative fields — the pipeline grid renders
+      // the Representative badge from photo.is_species_representative and
+      // would otherwise keep displaying it on a photo that's just been
+      // rejected via the inspect shortcut or the shared lightbox reject.
+      if (flag === 'rejected') {
+        if (photo.is_species_representative) photo.is_species_representative = false;
+        if (Array.isArray(photo.life_list)) {
+          photo.life_list.forEach(function(entry) {
+            if (!entry) return;
+            if (entry.is_current_photo) entry.is_current_photo = false;
+            if (entry.is_species_representative) entry.is_species_representative = false;
+          });
+        }
+      }
+    }
     renderResults();
     if (inspectPhotoId === photoId && document.getElementById('inspectOverlay').classList.contains('open')) {
       openInspect(photoId);
@@ -3645,6 +3696,22 @@ function refreshMissesReviewBtn() {
 // -- Species confirmation --
 
 var activeDropdown = null;
+var speciesConfirmInFlight = {};
+
+function speciesConfirmPhotoKey(photoIds) {
+  return 'photos:' + (photoIds || []).slice().sort(function(a, b) { return a - b; }).join(',');
+}
+
+function speciesConfirmPendingFor(enc, burstIdx) {
+  if (!enc) return false;
+  var photoIds = null;
+  if (burstIdx != null && enc.bursts && enc.bursts[burstIdx]) {
+    photoIds = enc.bursts[burstIdx].photo_ids;
+  } else {
+    photoIds = enc.photo_ids;
+  }
+  return !!speciesConfirmInFlight[speciesConfirmPhotoKey(photoIds)];
+}
 
 function renderSpeciesWidget(enc, encIdx, level, burstIdx, pos) {
   // level: 'encounter' or 'burst'
@@ -3673,16 +3740,19 @@ function renderSpeciesWidget(enc, encIdx, level, burstIdx, pos) {
   }
 
   var hasCandidate = !!candidateSpecies;
+  var isPending = speciesConfirmPendingFor(enc, burstIdx);
   var cls = isConfirmed ? 'confirmed' : (hasCandidate ? 'unconfirmed' : 'missing');
   var badge = isConfirmed ? '&#10003;' : (hasCandidate ? '?' : '+');
   var widgetCls = level === 'burst' ? 'burst-species-widget' : 'species-widget';
 
   var idKey = (burstIdx != null ? burstIdx : 'enc') + '_' + pos;
   var html = '<span class="' + widgetCls + '" data-species-widget="1" data-level="' + level + '" data-enc="' + encIdx + '" data-burst="' + (burstIdx != null ? burstIdx : '') + '" data-pos="' + pos + '">';
-  html += '<span class="species-name ' + cls + '" title="' + (hasCandidate ? 'Change species' : 'Add species') + '" onclick="toggleSpeciesDropdown(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',\'' + pos + '\')">' + escapeHtml(displayName) + '</span>';
+  html += '<span class="species-name ' + cls + '" title="' + (isPending ? 'Confirming species...' : (hasCandidate ? 'Change species' : 'Add species')) + '"'
+    + (isPending ? '' : ' onclick="toggleSpeciesDropdown(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',\'' + pos + '\')"')
+    + '>' + escapeHtml(displayName) + '</span>';
   html += '<span class="species-badge ' + cls + '">' + badge + '</span>';
   if (!isConfirmed && hasCandidate) {
-    html += '<button class="species-confirm-btn" onclick="confirmSpecies(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',null)" title="Confirm as ' + escapeHtml(displayName) + '">&#10003;</button>';
+    html += '<button class="species-confirm-btn" onclick="confirmSpecies(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',null)" title="' + (isPending ? 'Confirming species...' : 'Confirm as ' + escapeHtml(displayName)) + '"' + (isPending ? ' disabled aria-busy="true"' : '') + '>&#10003;</button>';
   }
 
   // Dropdown — bottom-bar widget opens upward to stay inside the card
@@ -3720,6 +3790,7 @@ function renderSpeciesWidget(enc, encIdx, level, burstIdx, pos) {
 
 function toggleSpeciesDropdown(event, encIdx, burstIdx, pos) {
   event.stopPropagation();
+  if (pipelineResults && pipelineResults.encounters && speciesConfirmPendingFor(pipelineResults.encounters[encIdx], burstIdx)) return;
   pos = pos || 'top';
   var id = 'spDrop_' + encIdx + '_' + (burstIdx != null ? burstIdx : 'enc') + '_' + pos;
   var el = document.getElementById(id);
@@ -3882,7 +3953,7 @@ function refreshAfterSpeciesConfirm(encIdx, burstIdx, forceFullRender) {
 }
 
 async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
-  event.stopPropagation();
+  if (event && event.stopPropagation) event.stopPropagation();
   closeAllDropdowns();
 
   // /api/encounters/species reloads and rewrites the saved cache on the
@@ -3916,31 +3987,15 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
   } else {
     photoIds = enc.photo_ids;
   }
+  var pendingKey = speciesConfirmPhotoKey(photoIds);
+  if (speciesConfirmInFlight[pendingKey]) return;
+  speciesConfirmInFlight[pendingKey] = true;
+  rerenderSpeciesWidgets(encIdx, burstIdx);
 
   var body = { species: speciesName, photo_ids: photoIds };
   if (burstIdx != null) body.burst_index = burstIdx;
 
-  var rollback;
-  var optimisticStructure = null;
-  if (burstIdx != null && enc.bursts && enc.bursts[burstIdx]) {
-    var burst = enc.bursts[burstIdx];
-    var previousOverride = burst.species_override
-      ? Object.assign({}, burst.species_override)
-      : burst.species_override;
-    rollback = function() { burst.species_override = previousOverride; };
-    burst.species_override = { species: speciesName, confirmed: true };
-  } else {
-    var previousConfirmed = enc.species_confirmed;
-    var previousSpecies = enc.confirmed_species;
-    rollback = function() {
-      enc.species_confirmed = previousConfirmed;
-      enc.confirmed_species = previousSpecies;
-    };
-    enc.species_confirmed = true;
-    enc.confirmed_species = speciesName;
-  }
-  refreshAfterSpeciesConfirm(encIdx, burstIdx, false);
-  optimisticStructure = encounterStructureSignature(pipelineResults.encounters);
+  var previousStructure = encounterStructureSignature(pipelineResults.encounters);
 
   var resp;
   try {
@@ -3950,11 +4005,15 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
       body: JSON.stringify(body),
     });
   } catch (e) {
-    if (rollback) rollback();
-    refreshAfterSpeciesConfirm(encIdx, burstIdx, false);
+    delete speciesConfirmInFlight[pendingKey];
+    rerenderSpeciesWidgets(encIdx, burstIdx);
     return;
   }
-  if (!resp || !resp.ok) return;
+  delete speciesConfirmInFlight[pendingKey];
+  if (!resp || !resp.ok) {
+    rerenderSpeciesWidgets(encIdx, burstIdx);
+    return;
+  }
 
   // Prefer the server's encounter list — the endpoint may auto-detach a burst
   // into a new or adjacent encounter when its confirmed species differs from
@@ -3962,7 +4021,7 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
   // next save-cache POST.
   var forceFullRender = false;
   if (resp.encounters) {
-    forceFullRender = encounterStructureSignature(resp.encounters) !== optimisticStructure;
+    forceFullRender = encounterStructureSignature(resp.encounters) !== previousStructure;
     pipelineResults.encounters = resp.encounters;
     if (resp.summary) {
       pipelineResults.summary = resp.summary;
@@ -4317,7 +4376,11 @@ function grmRenderKeepingCurrentSelection(items, fallbackId) {
 
   var nextId = grmFallbackSelectionId(items, fallbackId);
   if (nextId != null) {
-    grmSelect(nextId);
+    grmState.selected = nextId;
+    grmState.selectedIds = new Set([nextId]);
+    grmState.selectionAnchor = nextId;
+    renderGroupModal();
+    grmRefreshSelectedLoupe();
     return;
   }
 
@@ -4584,6 +4647,69 @@ function grmSeedFromDbState(dbPhotos, items, selectPhotoId) {
   grmUpdateApplyLabel();
 }
 
+function grmSyncSelectionClasses() {
+  var selectedIds = grmState && grmState.selectedIds ? grmState.selectedIds : new Set();
+  document.querySelectorAll('#grmOverlay .grm-card[data-photo-id]').forEach(function(card) {
+    var id = card.getAttribute('data-photo-id');
+    card.classList.toggle(
+      'selected',
+      selectedIds.has(parseInt(id, 10)) || selectedIds.has(id)
+    );
+  });
+}
+
+function grmZonePlaceholder(text) {
+  var span = document.createElement('span');
+  span.style.cssText = 'font-size:12px;color:var(--text-ghost);';
+  span.textContent = text;
+  return span;
+}
+
+function grmSyncZoneCards() {
+  if (!grmState) return;
+  var zones = { picks: [], candidates: [], rejects: [] };
+  var visible = {};
+  _grmVisibleItems().forEach(function(p) {
+    var id = String(p.id);
+    visible[id] = true;
+    if (grmState.picks.has(p.id)) zones.picks.push(id);
+    else if (grmState.rejects.has(p.id)) zones.rejects.push(id);
+    else zones.candidates.push(id);
+  });
+
+  var cardById = {};
+  document.querySelectorAll('#grmOverlay .grm-card[data-photo-id]').forEach(function(card) {
+    var id = card.getAttribute('data-photo-id');
+    if (visible[id]) cardById[id] = card;
+    else card.remove();
+  });
+
+  function syncStrip(stripId, ids, emptyText) {
+    var strip = document.getElementById(stripId);
+    if (!strip) return;
+    Array.from(strip.children).forEach(function(child) {
+      if (!child.classList || !child.classList.contains('grm-card')) child.remove();
+    });
+    ids.forEach(function(id) {
+      var card = cardById[id];
+      if (card) strip.appendChild(card);
+    });
+    if (!ids.length) strip.appendChild(grmZonePlaceholder(emptyText));
+  }
+
+  syncStrip('grmPicks', zones.picks, 'Press ↑ to add picks');
+  syncStrip('grmCandidates', zones.candidates, 'All sorted');
+  syncStrip('grmRejects', zones.rejects, 'Press ↓ to reject');
+
+  document.getElementById('grmCount').textContent =
+    zones.picks.length + ' picks, ' + zones.rejects.length + ' rejects, ' +
+    zones.candidates.length + ' unsorted';
+  grmUpdateKeywordSummary(grmKeywordStats(_grmVisibleItems()));
+  grmSyncSelectionClasses();
+  grmRefreshResetAllVisibility();
+  grmUpdateApplyLabel();
+}
+
 function closeGroupReview() {
   document.getElementById('grmOverlay').classList.remove('open');
   _grmOffsets = {};
@@ -4669,6 +4795,9 @@ function renderGroupModal() {
     else if (dbFlag === 'rejected') flagHtml = '<span class="photo-flag-badge flag-rejected" title="Already rejected in library" style="bottom:auto;top:4px;left:4px;">X</span>';
 
     var kwHtml = grmKeywordBadgeHtml(p, keywordStats);
+    var repHtml = dbSt.is_species_representative
+      ? '<span class="grm-card-representative">Representative</span>'
+      : '';
 
     var nat = grmNaturalDims(p);
     var imgStyle = 'width:' + nat.w + 'px;height:' + nat.h + 'px;';
@@ -4684,6 +4813,7 @@ function renderGroupModal() {
           ' onload="grmCardImgLoaded(this)" loading="lazy" draggable="false">' +
         flagHtml +
         kwHtml +
+        repHtml +
       '</div>' +
       '<div class="grm-card-info">' +
         '<div class="grm-card-species">' + escapeHtml(p.filename || '') + '</div>' +
@@ -4756,12 +4886,16 @@ function grmRefreshSpeciesKeywordState() {
     if (grmState.sessionId !== sessionId) return;
     if (token !== _grmSpeciesRefetchToken) return;
     var fresh = (data && data.photos) || {};
-    // Only update the keyword field — the flag field is owned by the user's
+    // Only update DB-owned fields — the flag field is owned by the user's
     // in-modal moves at this point and would be wrong to overwrite from DB.
+    // The representative field is species-scoped, so it has to move with
+    // the typed species or the badge would show the previous species'
+    // representative state on the newly typed one.
     Object.keys(fresh).forEach(function(pidStr) {
       var pid = parseInt(pidStr, 10);
       if (!grmState.dbState[pid]) grmState.dbState[pid] = { flag: 'none' };
       grmState.dbState[pid].has_species_keyword = !!fresh[pidStr].has_species_keyword;
+      grmState.dbState[pid].is_species_representative = !!fresh[pidStr].is_species_representative;
     });
     grmState.keywordStateSpecies = species;
     renderGroupModal();
@@ -5008,32 +5142,8 @@ function grmSelect(photoId, mode) {
       grmState.selectionAnchor = photoId;
     }
   }
-  renderGroupModal();
-
-  // Update loupe preview
-  var loupeImg = document.getElementById('grmLoupePhoto');
-  var loupeInfo = document.getElementById('grmLoupeInfo');
-  var detailEl = document.getElementById('grmLoupeDetail');
-
-  if (grmState.selected) {
-    loupeImg.src = grmPhotoUrl(grmState.selected);
-    _grmAfterLoupeSourceChange();
-    var photo = grmState.items.find(function(p) { return p.id === grmState.selected; });
-    if (photo) {
-      var sharp = photo.subject_tenengrad != null ? Math.round(photo.subject_tenengrad) : '?';
-      var boxSharp = photo.box_sharpness != null ? ' - box sharpness: ' + Math.round(photo.box_sharpness) : '';
-      loupeInfo.textContent = (photo.filename || '') + ' - sharpness: ' + sharp + boxSharp + ' - move cursor to compare';
-
-      // Render pipeline metadata in detail panel
-      detailEl.innerHTML = buildPipelineMetadataHtml(photo);
-    }
-    grmUpdateResLabel();
-  } else {
-    loupeImg.removeAttribute('src');
-    loupeInfo.textContent = 'Select a photo to preview. Hover to compare sharpness across all frames.';
-    detailEl.innerHTML = '';
-    grmLoupeReset();
-  }
+  grmSyncSelectionClasses();
+  grmRefreshSelectedLoupe();
 }
 
 function grmRefreshSelectedLoupe() {
@@ -5043,8 +5153,11 @@ function grmRefreshSelectedLoupe() {
   if (!loupeImg || !loupeInfo || !detailEl) return;
 
   if (grmState.selected) {
-    loupeImg.src = grmPhotoUrl(grmState.selected);
-    _grmAfterLoupeSourceChange();
+    var nextSrc = grmPhotoUrl(grmState.selected);
+    if (loupeImg.getAttribute('src') !== nextSrc) {
+      loupeImg.src = nextSrc;
+      _grmAfterLoupeSourceChange();
+    }
     var photo = grmState.items.find(function(p) { return p.id === grmState.selected; });
     if (photo) {
       var sharp = photo.subject_tenengrad != null ? Math.round(photo.subject_tenengrad) : '?';
@@ -5167,6 +5280,35 @@ function buildBurstConsensus(photos) {
   // Stable sort by total count desc (insertion order breaks ties, like the server).
   rows.sort(function(a, b) { return b.count - a.count; });
   return rows;
+}
+
+// Client mirror of encounter_species_label() (vireo/encounters.py): pick the
+// species with the highest confidence-weighted sum across all photos' top-5
+// predictions, breaking ties by first-appearance order. Used to persist an
+// unconfirmed species override for a detached single-photo burst so the
+// local save-cache path agrees with the server detach endpoint, which
+// derives the same label via _rebuild_encounter_species_label. Sorting by
+// prediction count (as buildBurstConsensus does for display) can pick a
+// different species when a lower-confidence label repeats across
+// detections/models while a higher-confidence one appears once — e.g.
+// [A .90, B .44, B .44] where the server picks A but a count sort picks B.
+function candidateSpeciesOverrideFromPhotos(photos) {
+  var weights = {};
+  var order = [];
+  (photos || []).forEach(function(p) {
+    ((p && p.species_top5) || []).forEach(function(entry) {
+      var sp = entry[0];
+      var conf = entry[1] || 0;
+      if (!(sp in weights)) { weights[sp] = 0; order.push(sp); }
+      weights[sp] += conf;
+    });
+  });
+  if (order.length === 0) return null;
+  var best = order[0];
+  for (var i = 1; i < order.length; i++) {
+    if (weights[order[i]] > weights[best]) best = order[i];
+  }
+  return { species: best, confirmed: false };
 }
 
 // Build the per-photo + consensus species prediction blocks. The per-photo
@@ -5874,7 +6016,7 @@ function grmMoveUp() {
       grmState.picks.add(photoId);
     }
   });
-  renderGroupModal();
+  grmSyncZoneCards();
 }
 
 function grmMoveDown() {
@@ -5889,7 +6031,7 @@ function grmMoveDown() {
       grmState.rejects.add(photoId);
     }
   });
-  renderGroupModal();
+  grmSyncZoneCards();
 }
 
 function grmMovePick() {
@@ -5900,7 +6042,7 @@ function grmMovePick() {
     grmState.rejects.delete(photoId);
     grmState.picks.add(photoId);
   });
-  renderGroupModal();
+  grmSyncZoneCards();
 }
 
 function grmMoveReject() {
@@ -5911,7 +6053,7 @@ function grmMoveReject() {
     grmState.picks.delete(photoId);
     grmState.rejects.add(photoId);
   });
-  renderGroupModal();
+  grmSyncZoneCards();
 }
 
 function grmMoveCandidate() {
@@ -5922,7 +6064,7 @@ function grmMoveCandidate() {
     grmState.picks.delete(photoId);
     grmState.rejects.delete(photoId);
   });
-  renderGroupModal();
+  grmSyncZoneCards();
 }
 
 function grmRemoveFromGroup() {
@@ -5938,8 +6080,8 @@ function grmRemoveFromGroup() {
   grmState.selected = null;
   if (grmState.selectedIds) grmState.selectedIds.clear();
   grmState.selectionAnchor = null;
-  renderGroupModal();
-  document.getElementById('grmLoupeDetail').innerHTML = '';
+  grmSyncZoneCards();
+  grmRefreshSelectedLoupe();
 }
 
 /* --- Keyboard handling --- */
@@ -5994,17 +6136,52 @@ function buildPipelinePhotoContextMenu(photoId) {
   );
 }
 
-/* --- Right-click menu ---
- * Catches contextmenu on photo cards (main grid) and grm-cards (group review
- * modal). Browse opens in a new tab (browser) or navigates in place (Tauri app
- * window) via openInBrowse, so the user reaches the photo either way. */
-document.addEventListener('contextmenu', function(e) {
+function pipelineContextPhotoIdFromEvent(e) {
   var card = e.target.closest('.photo-card[data-photo-id], .grm-card[data-photo-id]');
-  if (!card) return;
-  var pid = parseInt(card.dataset.photoId, 10);
-  if (!pid) return;
+  if (card) {
+    var cardPid = parseInt(card.dataset.photoId, 10);
+    if (cardPid) {
+      return {
+        photoId: cardPid,
+        card: card,
+      };
+    }
+  }
+
+  // The burst-review loupe is an image too, but it is not nested in a
+  // data-photo-id card. Resolve it through the modal's current selection so
+  // the same context menu actions work on the large preview.
+  var loupe = e.target.closest('#grmLoupeImg, #grmLoupePhoto');
+  var overlay = document.getElementById('grmOverlay');
+  if (
+    loupe &&
+    overlay &&
+    overlay.classList.contains('open') &&
+    typeof grmState !== 'undefined' &&
+    grmState &&
+    grmState.selected
+  ) {
+    return {
+      photoId: parseInt(grmState.selected, 10),
+      card: null,
+    };
+  }
+
+  return null;
+}
+
+/* --- Right-click menu ---
+ * Catches contextmenu on photo cards (main grid), grm-cards (group review
+ * modal), and the group-review loupe preview. Browse opens in a new tab
+ * (browser) or navigates in place (Tauri app window) via openInBrowse, so the
+ * user reaches the photo either way. */
+document.addEventListener('contextmenu', function(e) {
+  var target = pipelineContextPhotoIdFromEvent(e);
+  if (!target) return;
+  var pid = target.photoId;
+  var card = target.card;
   e.preventDefault();
-  if (card.classList.contains('grm-card') && typeof grmState !== 'undefined' && grmState) {
+  if (card && card.classList.contains('grm-card') && typeof grmState !== 'undefined' && grmState) {
     var prevSelected = grmState.selected;
     grmState.selected = pid;
     if (!grmState.selectedIds) grmState.selectedIds = new Set();
@@ -6012,7 +6189,7 @@ document.addEventListener('contextmenu', function(e) {
       grmState.selectedIds = new Set([pid]);
     }
     grmState.selectionAnchor = pid;
-    renderGroupModal();
+    grmSyncSelectionClasses();
     // Keep the right-hand loupe in sync with the newly selected card so it
     // doesn't stay on the previous photo if the user dismisses the menu.
     if (prevSelected !== pid && typeof grmRefreshSelectedLoupe === 'function') {
@@ -6136,12 +6313,29 @@ async function grmApply() {
 
     // Sync the in-memory pipeline cache's per-photo `flag` with what the
     // server just wrote, so the badges in the main grid (which read p.flag)
-    // refresh without a full reload.
+    // refresh without a full reload. Rejected photos also lose eligibility
+    // as species representatives (get_species_representatives(eligible_only)
+    // filters them out), so clear the cached representative fields too — the
+    // main pipeline grid renders its Representative badge from
+    // p.is_species_representative and would otherwise keep displaying it on
+    // a rejected photo until a full reload.
     if (applyResp && applyResp.photos) {
       Object.keys(applyResp.photos).forEach(function(pidStr) {
         var pid = parseInt(pidStr, 10);
         var p = photoMap[pid];
-        if (p) p.flag = applyResp.photos[pidStr].flag;
+        if (!p) return;
+        var newFlag = applyResp.photos[pidStr].flag;
+        p.flag = newFlag;
+        if (newFlag === 'rejected') {
+          if (p.is_species_representative) p.is_species_representative = false;
+          if (Array.isArray(p.life_list)) {
+            p.life_list.forEach(function(entry) {
+              if (!entry) return;
+              if (entry.is_current_photo) entry.is_current_photo = false;
+              if (entry.is_species_representative) entry.is_species_representative = false;
+            });
+          }
+        }
       });
     }
 
@@ -6195,12 +6389,22 @@ async function grmApply() {
         // single-photo burst must keep it (shallow clone so it doesn't alias the
         // source), or a flags-only apply would silently revert this photo to the
         // encounter species and drop the burst-specific confirmation.
+        var detachedPhotos = photo ? [photo] : [];
+        var detachedConsensus = buildBurstConsensus(detachedPhotos);
+        var sourceOverride = burst && burst.species_override;
+        // Match the server detach-photo elif (vireo/app.py): fall through to
+        // a null override whenever the encounter tracks any confirmed_species,
+        // including the mixed/partial state (species_confirmed=false but
+        // confirmed_species set) where a classifier-guess override would
+        // mask the real prior tag for a later burst-confirm.
         enc.bursts.push({
           photo_ids: [pid],
-          species_predictions: buildBurstConsensus(photo ? [photo] : []),
-          species_override: burst && burst.species_override
-            ? Object.assign({}, burst.species_override)
-            : null,
+          species_predictions: detachedConsensus,
+          species_override: sourceOverride && sourceOverride.confirmed === true
+            ? Object.assign({}, sourceOverride)
+            : (enc.confirmed_species
+              ? null
+              : candidateSpeciesOverrideFromPhotos(detachedPhotos)),
         });
       });
       // Recompute the shortened source burst's consensus from its remaining
@@ -6294,6 +6498,68 @@ async function grmApply() {
     }
   }
 }
+
+// setLifeListPhoto (card context menu / shared lightbox action) only emits a
+// lifelist:changed event and updates its own caches. Without this listener the
+// pipeline cards keep the pre-change value of p.is_species_representative, so
+// the newly assigned photo stays un-badged and any previously visible former
+// representative keeps its badge until a full reload. Walk pipelineResults.photos
+// in place and flip the species entry's flags, then rerender the grid. If the
+// burst modal happens to be open on the matching species, also update its
+// dbState so the modal's Representative badge stays honest.
+document.addEventListener('lifelist:changed', function(e) {
+  var detail = e && e.detail ? e.detail : {};
+  var species = detail.species;
+  var photoId = detail.photoId;
+  if (!species || !photoId) return;
+  if (!pipelineResults || !Array.isArray(pipelineResults.photos)) return;
+  var changed = false;
+  pipelineResults.photos.forEach(function(p) {
+    var entries = Array.isArray(p.life_list) ? p.life_list : [];
+    var touched = false;
+    entries.forEach(function(entry) {
+      if (!entry || entry.species !== species) return;
+      var isCurrent = p.id === photoId;
+      if (entry.is_current_photo !== isCurrent || entry.is_species_representative !== isCurrent) {
+        entry.is_current_photo = isCurrent;
+        entry.is_species_representative = isCurrent;
+        touched = true;
+      }
+    });
+    if (p.id === photoId && !entries.some(function(entry) { return entry && entry.species === species; })) {
+      entries.push({species: species, is_current_photo: true, is_species_representative: true});
+      p.life_list = entries;
+      touched = true;
+    }
+    var isRep = entries.some(function(entry) {
+      return entry && entry.is_species_representative;
+    });
+    if (p.is_species_representative !== isRep) {
+      p.is_species_representative = isRep;
+      touched = true;
+    }
+    if (touched) changed = true;
+  });
+  if (grmState && grmState.dbState && grmState.keywordStateSpecies === species) {
+    Object.keys(grmState.dbState).forEach(function(pidStr) {
+      var pid = parseInt(pidStr, 10);
+      var st = grmState.dbState[pid];
+      if (!st) return;
+      var next = (pid === photoId);
+      if (st.is_species_representative !== next) {
+        st.is_species_representative = next;
+        changed = true;
+      }
+    });
+  }
+  if (changed) {
+    renderResults();
+    if (typeof renderGroupModal === 'function') {
+      var overlay = document.getElementById('grmOverlay');
+      if (overlay && overlay.classList.contains('open')) renderGroupModal();
+    }
+  }
+});
 
 initPipelineReviewPage();
 </script>

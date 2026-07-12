@@ -10,6 +10,11 @@ def test_keyword_search_empty_state_and_clear(live_server, page):
     cards.first.wait_for(state="visible")
 
     search = page.locator("#searchInput")
+    expect(search).to_have_attribute("autocomplete", "off")
+    expect(search).to_have_attribute("autocorrect", "off")
+    expect(search).to_have_attribute("autocapitalize", "none")
+    expect(search).to_have_attribute("spellcheck", "false")
+
     search.fill("definitely-no-such-photo")
 
     expect(page.locator("#emptyState")).to_be_visible()

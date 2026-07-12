@@ -929,7 +929,7 @@
     <div class="setting-row">
       <div class="setting-label">
         Adobe DNG Converter path
-        <small>Leave empty to auto-detect the macOS app bundle or PATH. Required only when DNG conversion is enabled.</small>
+        <small>Leave empty to auto-detect the Windows installation, macOS app bundle, or PATH. Required only when DNG conversion is enabled.</small>
       </div>
       <div style="display:flex;align-items:center;gap:6px;">
         <input type="text" id="cfgDngConverterBin" placeholder="auto-detect"
@@ -970,6 +970,17 @@
         <small id="exiftoolDetail">Reads capture date, GPS, and camera info during scans.</small>
       </div>
       <span class="setting-value" id="exiftoolStatus">-</span>
+    </div>
+    <div class="setting-row" id="windowsSupportRow" style="display:none;">
+      <div class="setting-label">
+        Windows support
+        <small id="windowsSupportDetail">Checking platform readiness...</small>
+      </div>
+      <span class="setting-value" id="windowsSupportStatus">-</span>
+    </div>
+    <div id="dependencyReadiness" style="display:none;margin-top:10px;">
+      <div style="font-size:11px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Integration readiness</div>
+      <div id="dependencyReadinessRows"></div>
     </div>
   </div>
 
@@ -2181,9 +2192,51 @@ async function loadSystemInfo() {
       mdStatus.style.color = 'var(--danger)';
       mdDetail.textContent = d.megadetector_detail;
     }
+    renderPlatformReadiness(d.platform_support || null);
   } catch(e) {}
   loadExiftoolStatus();
   loadPipelineModels();
+}
+
+function renderPlatformReadiness(support) {
+  if (!support) return;
+  var row = document.getElementById('windowsSupportRow');
+  if (support.platform === 'win32') {
+    row.style.display = '';
+    var status = document.getElementById('windowsSupportStatus');
+    var detail = document.getElementById('windowsSupportDetail');
+    var supported = support.support_tier === 'public_beta';
+    status.textContent = supported ? 'Public beta' : 'Unsupported Windows version';
+    status.style.color = supported ? 'var(--warning)' : 'var(--danger)';
+    var bits = ['Windows ' + (support.windows_release || '11'), support.architecture || 'x64', 'CPU inference supported'];
+    if (support.webview2_version) bits.push('WebView2 ' + support.webview2_version);
+    if (support.long_paths && !support.long_paths.enabled) {
+      bits.push('Long paths need Windows policy');
+      status.textContent = 'Action needed';
+      status.style.color = 'var(--danger)';
+    }
+    detail.textContent = bits.join(' · ');
+  }
+
+  var deps = support.dependencies || {};
+  var names = {
+    exiftool: 'ExifTool', darktable: 'Darktable', dng_converter: 'Adobe DNG Converter',
+    openssh: 'OpenSSH Client', rsync: 'GNU rsync',
+    remote_transfer: 'Remote transfers'
+  };
+  var keys = Object.keys(names).filter(function(key) { return deps[key]; });
+  if (!keys.length) return;
+  document.getElementById('dependencyReadiness').style.display = '';
+  document.getElementById('dependencyReadinessRows').innerHTML = keys.map(function(key) {
+    var dep = deps[key];
+    var ready = dep.state === 'ready';
+    var color = ready ? 'var(--accent)' : (dep.required ? 'var(--danger)' : 'var(--warning)');
+    var label = ready ? 'Ready' : (dep.state === 'misconfigured' ? 'Needs repair' : 'Unavailable');
+    var detail = dep.path || dep.hint || '';
+    return '<div class="setting-row"><div class="setting-label">' + escapeHtml(names[key]) +
+      '<small>' + escapeHtml(detail) + '</small></div><span class="setting-value" style="color:' +
+      color + ';">' + label + '</span></div>';
+  }).join('');
 }
 
 // exiftool is the metadata backbone for every scan; a missing binary

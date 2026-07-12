@@ -12,6 +12,7 @@ import platform
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 
 def sign_binary(binary_path, entitlements_path=None):
@@ -121,6 +122,18 @@ def main():
         "--hidden-import", "onnxruntime",
         "--hidden-import", "tokenizers",
     ]
+
+    if platform.system() == "Windows":
+        # ExifTool is the metadata backbone, not an optional integration.  A
+        # Windows desktop install cannot assume it exists on PATH, so include
+        # the pinned, checksum-verified official distribution in the one-file
+        # sidecar.  metadata.py resolves it from PyInstaller's _MEIPASS.
+        from fetch_exiftool import fetch
+
+        exiftool_dir = fetch(Path(repo_root) / "build" / "vendor" / "exiftool")
+        pyinstaller_args += [
+            "--add-data", f"{exiftool_dir}{sep}vendor/exiftool",
+        ]
 
     if args.ci:
         # Exclude packages that bloat the binary but aren't needed at runtime

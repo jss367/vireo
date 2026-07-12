@@ -9,6 +9,7 @@ import logging
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 try:
     from .proc import no_window_kwargs
@@ -22,6 +23,27 @@ _BATCH_SIZE = 100
 _EXIFTOOL_TIMEOUT = 120
 _MAX_TIMEOUT_SPLIT_ATTEMPTS = 16
 _TIMEOUT = object()
+
+
+def find_exiftool() -> str | None:
+    """Resolve ExifTool, preferring Vireo's packaged Windows copy.
+
+    PyInstaller extracts bundled data below ``sys._MEIPASS``.  Keeping the
+    support directory next to the executable is required by the official
+    Windows distribution.  Development installs continue to use PATH.
+    """
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    if bundle_root:
+        bundled = Path(bundle_root) / "vendor" / "exiftool" / "exiftool.exe"
+        if bundled.is_file():
+            return str(bundled)
+    try:
+        return shutil.which("exiftool")
+    except (AttributeError, OSError):
+        # Defensive for restricted Windows runtimes where executable lookup
+        # itself is unavailable. Callers that execute the fallback still
+        # receive the normal FileNotFoundError handling.
+        return None
 
 
 def _exiftool_install_hint() -> str:
@@ -57,7 +79,7 @@ def exiftool_status():
     PATH-only check would render broken installs as a healthy green state
     while every scan loses capture date, GPS, and camera info.
     """
-    path = shutil.which("exiftool")
+    path = find_exiftool()
     if not path:
         return {
             "available": False,
@@ -72,7 +94,7 @@ def exiftool_status():
     error = None
     try:
         result = subprocess.run(
-            ["exiftool", "-ver"],
+            [path, "-ver"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -137,7 +159,8 @@ def _run_exiftool(file_paths, extra_args=None):
     if not file_paths:
         return []
 
-    cmd = ["exiftool", "-G", "-json", "-n"]
+    exiftool = find_exiftool() or "exiftool"
+    cmd = [exiftool, "-G", "-json", "-n"]
     if extra_args:
         cmd.extend(extra_args)
     cmd.append("--")

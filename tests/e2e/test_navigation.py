@@ -70,7 +70,7 @@ def test_workspace_persists_across_navigation(live_server, page):
 
 
 def test_navbar_renders_default_tabs_dynamically(live_server, page):
-    """The 9 default tabs render as <a class='nav-tab'> dynamically — no
+    """The default tabs render as <a class='nav-tab'> dynamically — no
     static linger-page anchors, no '+ Tools' button."""
     url = live_server["url"]
     page.goto(f"{url}/browse")
@@ -82,6 +82,10 @@ def test_navbar_renders_default_tabs_dynamically(live_server, page):
     assert "browse" in nav_ids
     assert "pipeline" in nav_ids
     assert "review" in nav_ids
+    assert nav_ids == [
+        "import", "browse", "pipeline", "pipeline_review", "review", "cull",
+        "jobs", "highlights", "misses", "storage", "settings",
+    ]
     # No standalone Logs icon (it's now a tab if pinned)
     logs_icons = page.query_selector_all(".nav-icon[href='/logs']")
     assert len(logs_icons) == 0
@@ -158,8 +162,11 @@ def test_cmdk_opens_palette(live_server, page):
     palette = page.query_selector("#commandPalette")
     assert palette is not None
     assert palette.is_hidden()
-    # Cmd+K (mac) or Ctrl+K elsewhere
-    page.keyboard.press("Meta+K")
+    # Cmd+K (mac) or Ctrl+K elsewhere. ControlOrMeta resolves to Meta on
+    # macOS and Control on Linux/Windows, matching the app's own
+    # `isMac ? e.metaKey : e.ctrlKey` handler — so this passes on the Linux
+    # CI runner where a hardcoded "Meta+K" silently does nothing.
+    page.keyboard.press("ControlOrMeta+K")
     page.wait_for_selector("#commandPalette:not([hidden])", timeout=2000)
     # Esc closes
     page.keyboard.press("Escape")
@@ -172,7 +179,7 @@ def test_cmdk_opens_palette(live_server, page):
 def test_palette_filters_by_query(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/browse")
-    page.keyboard.press("Meta+K")
+    page.keyboard.press("ControlOrMeta+K")
     page.wait_for_selector("#commandPalette:not([hidden])")
     page.fill("#cmdPaletteInput", "dup")
     # Wait for Duplicates row to be the (only/top) result
@@ -182,7 +189,7 @@ def test_palette_filters_by_query(live_server, page):
 def test_palette_enter_navigates(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/browse")
-    page.keyboard.press("Meta+K")
+    page.keyboard.press("ControlOrMeta+K")
     page.fill("#cmdPaletteInput", "dup")
     page.wait_for_selector(".cmd-palette-result[data-nav-id='duplicates'].selected")
     page.keyboard.press("Enter")
@@ -192,7 +199,7 @@ def test_palette_enter_navigates(live_server, page):
 def test_palette_arrow_keys_change_selection(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/browse")
-    page.keyboard.press("Meta+K")
+    page.keyboard.press("ControlOrMeta+K")
     # openCommandPalette refreshes tab state asynchronously before rendering,
     # so wait for the first selected row instead of querying immediately.
     page.wait_for_selector(".cmd-palette-result.selected", timeout=3000)
@@ -215,7 +222,7 @@ def test_cmd1_jumps_to_first_pinned_tab(live_server, page):
     page.goto(f"{url}/jobs")  # start somewhere not first
     # Wait for the dynamic tab strip to render so window._navTabs is populated.
     page.wait_for_selector(".nav-tab[data-nav-id='import']", timeout=3000)
-    page.keyboard.press("Meta+1")
+    page.keyboard.press("ControlOrMeta+1")
     page.wait_for_url(f"{url}/import", timeout=3000)
 
 
@@ -225,7 +232,7 @@ def test_cmdw_closes_ephemeral_tab(live_server, page):
     # /keywords is not in default pinned tabs — visiting makes it ephemeral.
     page.goto(f"{url}/keywords")
     page.wait_for_selector(".nav-tab[data-nav-id='keywords'].is-ephemeral", timeout=3000)
-    page.keyboard.press("Meta+W")
+    page.keyboard.press("ControlOrMeta+W")
     # After cmd+W, the page should navigate away from /keywords.
     page.wait_for_function("() => !location.pathname.startsWith('/keywords')", timeout=3000)
 
@@ -276,7 +283,7 @@ def test_map_tab_can_be_pinned_before_leaflet_cdn_finishes(live_server, page):
 def test_rapid_review_ephemeral_tab_pin_button_persists_tab(live_server, page):
     """Rapid Review can be pinned from its ephemeral tab."""
     url = live_server["url"]
-    page.goto(f"{url}/pipeline/rapid-review")
+    page.goto(f"{url}/pipeline/rapid-review", wait_until="domcontentloaded")
     page.wait_for_selector(
         ".nav-tab[data-nav-id='pipeline_rapid_review'].is-ephemeral",
         timeout=3000,
@@ -298,7 +305,7 @@ def test_close_ephemeral_navigates_to_rightmost_visible_pinned_tab(live_server, 
     the rightmost *visible* pinned tab — not the last pinned id, which may be
     hidden under overflow."""
     url = live_server["url"]
-    # Narrow viewport forces overflow with the 9 default pinned tabs.
+    # Narrow viewport forces overflow with the default pinned tabs.
     page.set_viewport_size({"width": 700, "height": 800})
     page.goto(f"{url}/keywords")  # unpinned → ephemeral
     page.wait_for_selector(".nav-tab[data-nav-id='keywords'].is-ephemeral", timeout=3000)
@@ -339,7 +346,7 @@ def test_palette_seeded_from_fallback_when_tabs_api_fails(live_server, page):
     # fetch is rejected.
     page.route("**/api/workspace/tabs", lambda route: route.abort())
     page.goto(f"{url}/browse")
-    page.keyboard.press("Meta+K")
+    page.keyboard.press("ControlOrMeta+K")
     page.wait_for_selector("#commandPalette:not([hidden])", timeout=2000)
     # Empty query should render the fallback page list, not an empty palette.
     rows = page.eval_on_selector_all(

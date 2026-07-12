@@ -29,6 +29,29 @@ def test_api_photos_includes_edit_recipe(app_and_db):
     assert listed[photo["id"]]["edit_recipe"] == {"version": 1, "rotation": 90}
 
 
+def test_api_photos_marks_species_representative(app_and_db):
+    """List payloads expose representative state for card views and menus."""
+    app, db = app_and_db
+    photo = db.get_photos()[0]
+    kid = db.add_keyword("American Robin", is_species=True)
+    db.tag_photo(photo["id"], kid)
+    db.set_species_representative("American Robin", photo["id"])
+
+    client = app.test_client()
+    resp = client.get("/api/photos")
+    assert resp.status_code == 200
+    listed = {p["id"]: p for p in resp.get_json()["photos"]}
+
+    assert listed[photo["id"]]["is_species_representative"] is True
+    assert listed[photo["id"]]["life_list"] == [
+        {
+            "species": "American Robin",
+            "is_current_photo": True,
+            "is_species_representative": True,
+        }
+    ]
+
+
 def test_api_photos_pagination(app_and_db):
     """GET /api/photos supports pagination."""
     app, _ = app_and_db
@@ -580,6 +603,66 @@ def test_photo_detail_life_list_current_false_when_other_photo_is_rep(app_and_db
             "species": "American Robin",
             "is_current_photo": False,
             "is_species_representative": False,
+        }
+    ]
+
+
+def test_photo_detail_life_list_marks_only_primary_of_multiple_reps(app_and_db):
+    """Secondary reps report is_current_photo=False so the lightbox lifelist
+    panel renders "Set Representative" (re-selecting promotes them) and the
+    shared context menu doesn't disable the item for a secondary rep."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    p1, p2 = photos[0]["id"], photos[1]["id"]
+    kid = db.add_keyword("American Robin", is_species=True)
+    db.tag_photo(p1, kid)
+    db.tag_photo(p2, kid)
+    # p1 selected first, then p2 — get_species_representative_lists is
+    # newest-first, so p2 is the primary (index 0) and p1 is secondary.
+    db.set_species_representative("American Robin", p1)
+    db.set_species_representative("American Robin", p2)
+
+    primary = client.get(f"/api/photos/{p2}").get_json()
+    secondary = client.get(f"/api/photos/{p1}").get_json()
+
+    assert primary["life_list"] == [
+        {
+            "species": "American Robin",
+            "is_current_photo": True,
+            "is_species_representative": True,
+        }
+    ]
+    assert secondary["life_list"] == [
+        {
+            "species": "American Robin",
+            "is_current_photo": False,
+            "is_species_representative": False,
+        }
+    ]
+
+
+def test_photo_detail_life_list_uses_primary_eligible_rep(app_and_db):
+    """If the newest representative is ineligible, the older eligible rep is
+    current so detail menus do not offer a redundant representative action."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    p1, p2 = photos[0]["id"], photos[1]["id"]
+    kid = db.add_keyword("American Robin", is_species=True)
+    db.tag_photo(p1, kid)
+    db.tag_photo(p2, kid)
+    db.set_species_representative("American Robin", p1)
+    db.set_species_representative("American Robin", p2)
+    db.update_photo_flag(p2, "rejected")
+
+    data = client.get(f"/api/photos/{p1}").get_json()
+
+    assert data["life_list"] == [
+        {
+            "species": "American Robin",
+            "is_current_photo": True,
+            "is_species_representative": True,
         }
     ]
 
@@ -2484,6 +2567,77 @@ def test_cropped_thumbnail_uses_companion_before_raw_failure_marker(
         assert img.size == (267, 400)
 
 
+def test_cropped_thumbnail_uses_working_copy_on_first_raw_decode_failure(
+    client_with_photo, monkeypatch,
+):
+    import io
+    import os
+
+    import thumbnails
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    raw_path = os.path.join(folder["path"], "DSC_7062.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(b"unsupported raw")
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_path = os.path.join(working_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (800, 600), (30, 120, 200)).save(wc_path, "JPEG")
+    mtime = os.path.getmtime(raw_path)
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='DSC_7062.NEF', extension='.nef',
+               companion_path=NULL,
+               working_copy_path=?,
+               width=800, height=600,
+               file_mtime=?,
+               working_copy_failed_at=NULL,
+               working_copy_failed_mtime=NULL,
+               working_copy_failed_source=NULL
+           WHERE id=?""",
+        (f"working/{photo_id}.jpg", mtime, photo_id),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        photo_id,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+    )
+
+    original_load_image = thumbnails.load_image
+    loaded_paths = []
+
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        loaded_paths.append(str(file_path))
+        if str(file_path).lower().endswith(".nef"):
+            return None
+        return original_load_image(file_path, max_size=max_size, **kwargs)
+
+    monkeypatch.setattr(thumbnails, "load_image", tracking_load_image)
+
+    rendered = client.get(f"/thumbnails/{photo_id}.jpg")
+
+    assert rendered.status_code == 200, rendered.get_data(as_text=True)
+    assert [os.path.normpath(path) for path in loaded_paths] == [
+        os.path.normpath(raw_path),
+        os.path.normpath(wc_path),
+    ]
+    with Image.open(io.BytesIO(rendered.data)) as img:
+        assert img.size == (267, 400)
+    row = db.conn.execute(
+        "SELECT working_copy_failed_source FROM photos WHERE id=?",
+        (photo_id,),
+    ).fetchone()
+    assert row["working_copy_failed_source"] == "source"
+
+
 def test_thumbnail_falls_back_when_raw_short_edge_is_smaller(
     client_with_photo, monkeypatch,
 ):
@@ -3668,6 +3822,76 @@ def test_preview_falls_back_to_companion_on_first_raw_decode_failure(
     # The failed RAW decode must stamp the source marker so subsequent
     # requests skip the slow RAW retry and _recipe_render_source selects
     # the companion directly.
+    row = db.conn.execute(
+        "SELECT working_copy_failed_source FROM photos WHERE id=?",
+        (photo_id,),
+    ).fetchone()
+    assert row["working_copy_failed_source"] == "source"
+
+
+def test_preview_falls_back_to_working_copy_on_first_raw_decode_failure(
+    client_with_photo, monkeypatch,
+):
+    import io
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    raw_path = os.path.join(folder["path"], "DSC_7062.NEF")
+    with open(raw_path, "wb") as f:
+        f.write(b"unsupported raw")
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_path = os.path.join(working_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (800, 600), (30, 120, 200)).save(wc_path, "JPEG")
+    mtime = os.path.getmtime(raw_path)
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='DSC_7062.NEF', extension='.nef',
+               companion_path=NULL,
+               working_copy_path=?,
+               width=800, height=600,
+               file_mtime=?,
+               working_copy_failed_at=NULL,
+               working_copy_failed_mtime=NULL,
+               working_copy_failed_source=NULL
+           WHERE id=?""",
+        (f"working/{photo_id}.jpg", mtime, photo_id),
+    )
+    db.conn.commit()
+    db.set_photo_edit_recipe(
+        photo_id,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+    )
+
+    original_load_image = image_loader.load_image
+    loaded_paths = []
+
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        loaded_paths.append(str(file_path))
+        if str(file_path).lower().endswith(".nef"):
+            return None
+        return original_load_image(file_path, max_size=max_size, **kwargs)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    resp = app.test_client().get(f"/photos/{photo_id}/preview?size=1920")
+
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert [os.path.normpath(path) for path in loaded_paths] == [
+        os.path.normpath(raw_path),
+        os.path.normpath(wc_path),
+    ]
+    with Image.open(io.BytesIO(resp.data)) as img:
+        assert img.size == (400, 600)
     row = db.conn.execute(
         "SELECT working_copy_failed_source FROM photos WHERE id=?",
         (photo_id,),
@@ -5360,15 +5584,26 @@ def test_edit_math_version_migration_survives_unreadable_preview_dir(
         db3.conn.close()
 
 
-def test_external_edit_handoff_meta_includes_math_version(client_with_photo):
+def test_external_edit_handoff_meta_includes_math_version(
+    client_with_photo, monkeypatch,
+):
     """The external-editor handoff render reuses external-edits/<id>.jpg only
     when its cached metadata matches. That metadata must carry
     EDIT_MATH_VERSION so a math bump (which changes per-pixel output but not
     recipe/source/mtime) invalidates the stale hard-clipped render."""
     import json
     import os
+    import subprocess
 
     from image_edits import EDIT_MATH_VERSION
+
+    # Stub the launcher: with no editor configured this endpoint falls through
+    # to a real `open <handoff>.jpg` on macOS, which pops the render up in
+    # Preview during the test run. The handoff meta is written before launch,
+    # so a no-op launcher doesn't weaken what this test checks.
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a[0] if a else [], 0))
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: None)
 
     app, db, photo_id = client_with_photo
     client = app.test_client()

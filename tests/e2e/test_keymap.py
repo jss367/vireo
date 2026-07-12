@@ -299,6 +299,7 @@ def test_shortcuts_sheet_lists_misses_and_shared_hotkeys(live_server, page):
     assert {"key": "Escape", "label": "Clear selection"} in groups["Misses"]
     assert {"key": "?", "label": "Open keyboard shortcuts"} in groups["Global"]
     assert {"key": "Alt+U", "label": "Clear pick/reject flag"} in groups["Lightbox"]
+    assert {"key": "H", "label": "Toggle UI controls"} in groups["Lightbox"]
 
 
 def test_question_mark_opens_shortcuts_sheet_over_lightbox(live_server, page):

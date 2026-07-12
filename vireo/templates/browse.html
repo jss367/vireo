@@ -267,6 +267,19 @@ body {
   border-radius: 3px;
   pointer-events: none;
 }
+.representative-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  pointer-events: none;
+}
 .grid-card-info {
   padding: 8px 10px;
 }
@@ -410,6 +423,22 @@ body {
   cursor: pointer;
 }
 .selection-keyword-add:hover { filter: brightness(1.05); }
+.selection-keyword-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.selection-keyword-remove {
+  flex-shrink: 0;
+  background: var(--bg-primary);
+  color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 60%, var(--border-secondary));
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.selection-keyword-remove:hover { background: color-mix(in srgb, var(--danger) 12%, var(--bg-primary)); }
 .selection-empty {
   color: var(--text-muted);
   font-size: 12px;
@@ -1385,7 +1414,9 @@ body {
     <!-- Filter Bar -->
     <div class="filter-bar">
       <div class="search-control">
-        <input type="text" id="searchInput" placeholder="Search keywords or filenames..." onkeydown="if(event.key==='Enter')applySearchFilterNow()" oninput="scheduleSearchFilter()">
+        <input type="text" id="searchInput" placeholder="Search keywords or filenames..."
+               autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false"
+               onkeydown="if(event.key==='Enter')applySearchFilterNow()" oninput="scheduleSearchFilter()">
         <button id="keywordMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="toggleKeywordSearchOption('match_case')" title="Match case">Aa</button>
         <button id="keywordWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="toggleKeywordSearchOption('whole_word')" title="Match whole word">ab</button>
       </div>
@@ -1559,7 +1590,7 @@ body {
         <div style="margin-bottom:16px;font-size:18px;color:var(--text-primary);font-weight:600;">Welcome to Vireo</div>
         <p style="max-width:460px;margin:0 auto 20px;line-height:1.6;color:var(--text-muted);">
           To get started, import your photos. You can scan a folder of images
-          (with or without existing XMP sidecars), or import keywords from a Lightroom catalog.
+          (with or without existing XMP sidecars).
         </p>
         <a href="/import" style="display:inline-block;background:var(--accent);color:var(--accent-text);padding:10px 28px;border-radius:4px;font-size:14px;font-weight:600;text-decoration:none;">Import Photos</a>
       </div>
@@ -1646,7 +1677,8 @@ body {
         <div id="locationFilled" class="single-only" hidden></div>
         <div id="locationEmpty">
           <div class="keyword-autocomplete">
-            <input type="text" id="locationInput" class="add-kw-input" placeholder="📍 Add location..." autocomplete="off">
+            <input type="text" id="locationInput" class="add-kw-input" placeholder="📍 Add location..."
+                   autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false">
             <div class="keyword-suggestion-list location-keyword-suggestion-list" id="locationKeywordSuggestions" role="listbox"></div>
           </div>
           <div id="locationExifSuggestion" class="location-suggestion" hidden></div>
@@ -1658,7 +1690,8 @@ body {
         <div class="detail-section-title">Keywords</div>
         <div id="detailKeywords" class="single-only"></div>
         <div class="keyword-autocomplete">
-          <input class="add-kw-input" id="addKeywordInput" placeholder="Add keyword..." autocomplete="off">
+          <input class="add-kw-input" id="addKeywordInput" placeholder="Add keyword..."
+                 autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false">
           <div class="keyword-suggestion-list" id="addKeywordSuggestions" role="listbox"></div>
         </div>
       </div>
@@ -1717,7 +1750,8 @@ body {
   <div class="modal">
     <h3 id="batchKeywordTitle">Add Keyword</h3>
     <div class="keyword-autocomplete">
-      <input class="modal-input" id="batchKeywordInput" placeholder="Keyword name" autocomplete="off">
+      <input class="modal-input" id="batchKeywordInput" placeholder="Keyword name"
+             autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false">
       <div class="keyword-suggestion-list" id="batchKeywordSuggestions" role="listbox"></div>
     </div>
     <div class="modal-actions">
@@ -1859,6 +1893,8 @@ var selectedPhotos = new Set(); // multi-select
 var selectionKeywordRequestSeq = 0;
 var selectionKeywordKey = '';
 var selectionKeywordMissingById = {};
+var selectionKeywordPresentById = {};
+var selectionKeywordNameById = {};
 var showDetectionBoxes = false;
 var cardFields = ["filename", "rating", "flag", "color_label", "sharpness"]; // default, overridden by config
 var inatSubmitted = {};  // {photo_id: true}
@@ -2236,6 +2272,7 @@ function renderPhotoCard(p, idx) {
   }
   var inatBadge = inatSubmitted[String(p.id)] ? '<span class="inat-badge">iNat</span>' : '';
   var wildlifeBadge = p.wildlife_excluded ? '<span class="no-wildlife-badge">No Wildlife</span>' : '';
+  var representativeBadge = p.is_species_representative ? '<span class="representative-badge">Representative</span>' : '';
 
   // Species badges on image overlay (only when NOT in cardFields — if in cardFields, rendered below)
   var speciesBadgeHtml = '';
@@ -2260,6 +2297,7 @@ function renderPhotoCard(p, idx) {
       boxHtml +
       inatBadge +
       wildlifeBadge +
+      representativeBadge +
       speciesBadgeHtml +
     '</div>' +
     '<div class="grid-card-info">' +
@@ -2368,9 +2406,50 @@ function refreshGridCards(photoIds) {
       } else if (!shouldShow && existing) {
         existing.remove();
       }
+      var rep = wrap.querySelector('.representative-badge');
+      if (p.is_species_representative && !rep) {
+        wrap.insertAdjacentHTML('beforeend', '<span class="representative-badge">Representative</span>');
+      } else if (!p.is_species_representative && rep) {
+        rep.remove();
+      }
     }
   });
 }
+
+document.addEventListener('lifelist:changed', function(e) {
+  var detail = e && e.detail ? e.detail : {};
+  var species = detail.species;
+  var photoId = detail.photoId;
+  if (!species || !photoId) return;
+  var changed = [];
+  photos.forEach(function(p) {
+    var entries = Array.isArray(p.life_list) ? p.life_list : [];
+    var touched = false;
+    entries.forEach(function(entry) {
+      if (!entry || entry.species !== species) return;
+      var isCurrent = p.id === photoId;
+      if (entry.is_current_photo !== isCurrent || entry.is_species_representative !== isCurrent) {
+        entry.is_current_photo = isCurrent;
+        entry.is_species_representative = isCurrent;
+        touched = true;
+      }
+    });
+    if (p.id === photoId && !entries.some(function(entry) { return entry && entry.species === species; })) {
+      entries.push({species: species, is_current_photo: true, is_species_representative: true});
+      p.life_list = entries;
+      touched = true;
+    }
+    var isRep = entries.some(function(entry) {
+      return entry && entry.is_species_representative;
+    });
+    if (p.is_species_representative !== isRep) {
+      p.is_species_representative = isRep;
+      touched = true;
+    }
+    if (touched) changed.push(p.id);
+  });
+  if (changed.length) refreshGridCards(changed);
+});
 
 function getGridCard(photoId) {
   return document.querySelector('.grid-card[data-id="' + photoId + '"]');
@@ -2590,6 +2669,7 @@ async function loadKeywords() {
 }
 
 function renderKeywordTree(keywords) {
+  _rememberKeywordNames(keywords);
   var byParent = {};
   keywords.forEach(function(k) {
     var pid = k.parent_id || 'root';
@@ -2689,6 +2769,50 @@ function scheduleCollectionCountsRefresh() {
 function refreshActiveCollectionAfterMembershipChange() {
   if (!activeCollectionId) return;
   filterByCollection(activeCollectionId, { preserveAnchor: false });
+}
+
+// When bulk-removing the keyword that currently drives the filter, the
+// photos we just untagged no longer match the query. Without this reload
+// they stay in the grid and in the selection until the user manually
+// changes filters. Two paths can drive the current keyword filter — the
+// keyword tree (via `activeKeyword`) or the search box text (via
+// `appendKeywordSearchParams`) — so check both. Reloading is safe either
+// way (a photo still matching via another keyword or filename token
+// just comes back on the next fetch).
+function refreshActiveKeywordAfterRemoval(removedName) {
+  if (!removedName) return;
+  if (activeKeyword && activeKeyword === removedName) {
+    reloadBrowseResults();
+    return;
+  }
+  // While a collection is active, `refreshActiveCollectionAfterMembershipChange`
+  // has already reloaded via `filterByCollection`. Collections ignore the
+  // search input, so any stale `#searchInput` text is not driving the
+  // current grid. Calling `reloadBrowseResults` here would run
+  // `resetAndLoad`, which clears `activeCollectionId` and drops the user
+  // into the global keyword search.
+  if (activeCollectionId) return;
+  var searchInput = document.getElementById('searchInput');
+  var query = searchInput ? searchInput.value.trim() : '';
+  if (!query) return;
+  // The backend keyword filter tokenizes `keyword=<query>` and satisfies
+  // each token independently — a token can match via a different keyword
+  // or the filename. So a photo can appear in the grid because
+  // `removedName` satisfied one token while other tokens matched
+  // elsewhere. Reload whenever any query token still matches the removed
+  // keyword name; requiring the whole query to match would miss those
+  // multi-token cases.
+  var opts = {
+    matchCase: keywordSearchMatchCase,
+    wholeWord: keywordSearchWholeWord,
+  };
+  var tokens = query.split(/\s+/);
+  var anyTokenMatches = tokens.some(function(token) {
+    return token && VireoTextSearch.tokenMatches(removedName, token, opts);
+  });
+  if (anyTokenMatches) {
+    reloadBrowseResults();
+  }
 }
 
 function refreshBrowseSidebarCounts() {
@@ -4425,6 +4549,8 @@ function updateSelectionPanel(ids) {
     panel.classList.add('hidden');
     selectionKeywordKey = '';
     selectionKeywordMissingById = {};
+    selectionKeywordPresentById = {};
+    selectionKeywordNameById = {};
     selectionKeywordRequestSeq++;
     var list = document.getElementById('selectionKeywordSuggestions');
     if (list) list.innerHTML = '';
@@ -4460,6 +4586,8 @@ function updateSelectionPanel(ids) {
   if (ids.length > 1000) {
     selectionKeywordKey = selectionIdsKey(ids);
     selectionKeywordMissingById = {};
+    selectionKeywordPresentById = {};
+    selectionKeywordNameById = {};
     selectionKeywordRequestSeq++;
     var list = document.getElementById('selectionKeywordSuggestions');
     if (list) {
@@ -4668,7 +4796,7 @@ async function loadSelectionKeywordSuggestions(ids) {
       body: JSON.stringify({photo_ids: ids}),
     }, { toast: false });
     if (seq !== selectionKeywordRequestSeq) return;
-    renderSelectionKeywordSuggestions(data.suggestions || []);
+    renderSelectionKeywordSuggestions(data.suggestions || [], data.selected_count || ids.length);
   } catch(e) {
     if (seq === selectionKeywordRequestSeq && list) {
       list.innerHTML = '<div class="selection-empty">Could not load keyword suggestions.</div>';
@@ -4676,26 +4804,40 @@ async function loadSelectionKeywordSuggestions(ids) {
   }
 }
 
-function renderSelectionKeywordSuggestions(suggestions) {
+function renderSelectionKeywordSuggestions(keywords, selectedCount) {
   var list = document.getElementById('selectionKeywordSuggestions');
   if (!list) return;
-  if (!suggestions.length) {
+  if (!keywords.length) {
     selectionKeywordMissingById = {};
-    list.innerHTML = '<div class="selection-empty">No partial keywords in this selection.</div>';
+    selectionKeywordPresentById = {};
+    selectionKeywordNameById = {};
+    list.innerHTML = '<div class="selection-empty">No keywords on selected photos.</div>';
     return;
   }
 
   var html = '';
   selectionKeywordMissingById = {};
-  suggestions.slice(0, 8).forEach(function(k) {
+  selectionKeywordPresentById = {};
+  selectionKeywordNameById = {};
+  keywords.forEach(function(k) {
     var missing = k.missing_count || 0;
+    var count = k.count || 0;
     selectionKeywordMissingById[String(k.id)] = k.missing_photo_ids || [];
+    selectionKeywordPresentById[String(k.id)] = k.present_photo_ids || [];
+    selectionKeywordNameById[String(k.id)] = k.name;
+    var actions = '';
+    if (missing > 0) {
+      actions += '<button class="selection-keyword-add" onclick="applySelectionKeyword(' + k.id + ')" title="Add this keyword to the selected photos missing it">Add to ' + missing + '</button>';
+    }
+    if (count > 0) {
+      actions += '<button class="selection-keyword-remove" onclick="removeSelectionKeyword(' + k.id + ')" title="Remove this keyword from selected photos that have it">Remove from ' + count + '</button>';
+    }
     html += '<div class="selection-keyword-row">' +
       '<div style="min-width:0;">' +
         '<div class="selection-keyword-name">' + escapeHtml(k.name) + '</div>' +
-        '<div class="selection-keyword-meta">On ' + k.count + ', missing from ' + missing + '</div>' +
+        '<div class="selection-keyword-meta">On ' + count + ' of ' + selectedCount + (missing ? ', missing from ' + missing : '') + '</div>' +
       '</div>' +
-      '<button class="selection-keyword-add" onclick="applySelectionKeyword(' + k.id + ')" title="Add this keyword to the selected photos missing it">Add to ' + missing + '</button>' +
+      '<div class="selection-keyword-actions">' + actions + '</div>' +
     '</div>';
   });
   list.innerHTML = html;
@@ -4716,6 +4858,28 @@ async function applySelectionKeyword(keywordId) {
   loadKeywords();
   scheduleCollectionCountsRefresh();
   refreshActiveCollectionAfterMembershipChange();
+  refreshPendingSyncBanner();
+  showUndoToast();
+}
+
+async function removeSelectionKeyword(keywordId) {
+  var ids = selectionKeywordPresentById[String(keywordId)] || [];
+  if (!ids.length) return;
+  var removedName = selectionKeywordNameById[String(keywordId)] || null;
+  try {
+    await safeFetch('/api/batch/keyword-remove', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids, keyword_id: keywordId}),
+    });
+  } catch(e) { return; }
+  _clearRepresentativeStateAfterKeywordRemoval(ids, removedName);
+  selectionKeywordKey = '';
+  loadSelectionKeywordSuggestions(getActiveSelection());
+  loadKeywords();
+  scheduleCollectionCountsRefresh();
+  refreshActiveCollectionAfterMembershipChange();
+  refreshActiveKeywordAfterRemoval(removedName);
   refreshPendingSyncBanner();
   showUndoToast();
 }
@@ -4754,6 +4918,88 @@ async function batchSetRating(rating) {
   showUndoToast();
 }
 
+// Server-side representative eligibility (see get_species_representatives)
+// hides rejected photos. Mirror that here so the grid badge and the shared
+// representative context menu ("Already representative" hint on the current
+// entry) don't keep treating a just-rejected photo as still representative
+// until a reload. Un-rejecting is left as-is: the client can't know whether
+// the DB preference still points at this photo, so the badge stays hidden
+// until the page reloads rather than lighting up incorrectly.
+function _clearRepresentativeStateIfIneligible(photoId, flag) {
+  if (flag !== 'rejected') return;
+  var p = photos.find(function(x) { return x.id === photoId; });
+  if (!p) return;
+  if (p.is_species_representative) p.is_species_representative = false;
+  if (Array.isArray(p.life_list)) {
+    p.life_list.forEach(function(entry) {
+      if (!entry) return;
+      if (entry.is_current_photo) entry.is_current_photo = false;
+      if (entry.is_species_representative) entry.is_species_representative = false;
+    });
+  }
+}
+
+// Every render path that has (keywordId, name) pairs feeds this map so the
+// single-photo remove path can resolve the name even before the autocomplete
+// field is ever opened. keywordAutocompleteCache starts as null and only
+// populates after that field renders, so on a fresh Browse page the previous
+// lookup returned null and _clearRepresentativeStateAfterKeywordRemoval
+// no-oped — the grid badge/context-menu state stayed stale until reload.
+var _keywordNamesById = {};
+function _rememberKeywordNames(keywords) {
+  if (!Array.isArray(keywords)) return;
+  keywords.forEach(function(k) {
+    if (k && typeof k.id === 'number' && typeof k.name === 'string') {
+      _keywordNamesById[k.id] = k.name;
+    }
+  });
+}
+
+function _keywordNameFromCache(keywordId) {
+  if (Object.prototype.hasOwnProperty.call(_keywordNamesById, keywordId)) {
+    return _keywordNamesById[keywordId];
+  }
+  if (!Array.isArray(keywordAutocompleteCache)) return null;
+  for (var i = 0; i < keywordAutocompleteCache.length; i++) {
+    var k = keywordAutocompleteCache[i];
+    if (k && k.id === keywordId) return k.name;
+  }
+  return null;
+}
+
+// Server-side eligibility requires the photo to still carry the species
+// keyword, so removing a species keyword drops the photo from the eligible
+// representative set. Mirror that locally: strip life_list entries whose
+// species matches the removed keyword name and recompute the badge flag.
+// The context menu reads photo.life_list too, so this also stops the shared
+// "Already representative" hint from lingering on a photo the DB no longer
+// counts. Non-species keywords never appear in life_list, so the filter
+// no-ops for those. If the cache lookup fails to resolve the name, we
+// leave state alone rather than clearing the wrong entry.
+function _clearRepresentativeStateAfterKeywordRemoval(photoIds, keywordName) {
+  if (!Array.isArray(photoIds) || !photoIds.length) return;
+  if (!keywordName) return;
+  var touched = [];
+  photoIds.forEach(function(id) {
+    var p = photos.find(function(x) { return x.id === id; });
+    if (!p || !Array.isArray(p.life_list)) return;
+    var next = p.life_list.filter(function(entry) {
+      return !entry || entry.species !== keywordName;
+    });
+    if (next.length !== p.life_list.length) {
+      p.life_list = next;
+      var isRep = next.some(function(entry) {
+        return entry && entry.is_species_representative;
+      });
+      if (p.is_species_representative !== isRep) {
+        p.is_species_representative = isRep;
+      }
+      touched.push(id);
+    }
+  });
+  if (touched.length) refreshGridCards(touched);
+}
+
 async function batchSetFlag(flag) {
   var ids = getActiveSelection();
   try {
@@ -4765,6 +5011,7 @@ async function batchSetFlag(flag) {
   ids.forEach(function(id) {
     var p = photos.find(function(x) { return x.id === id; });
     if (p) p.flag = flag;
+    _clearRepresentativeStateIfIneligible(id, flag);
   });
   refreshGridCards(ids);
   if (selectedPhotoId != null && ids.indexOf(selectedPhotoId) !== -1) {
@@ -5443,6 +5690,7 @@ function renderDetail(photo) {
   // Keywords
   var kwTypeIcons = {general:'●', taxonomy:'🌿', individual:'👤', location:'📍', genre:'🎭'};
   var kwTypeLabels = {general:'General', taxonomy:'Taxonomy', individual:'Individual', location:'Location', genre:'Genre'};
+  _rememberKeywordNames(photo.keywords || []);
   var kwHtml = '';
   (photo.keywords || []).forEach(function(k) {
     var ktype = k.type || 'general';
@@ -5785,6 +6033,7 @@ async function setFlag(flag) {
     });
     var p = photos.find(function(x) { return x.id === photoId; });
     if (p) p.flag = flag;
+    _clearRepresentativeStateIfIneligible(photoId, flag);
     refreshGridCards([photoId]);
     if (selectedPhotoId === photoId) updateDetailFlagButtons(flag);
     scheduleCollectionCountsRefresh();
@@ -6052,6 +6301,10 @@ async function removeKeyword(photoId, keywordId) {
     await safeFetch('/api/photos/' + photoId + '/keywords/' + keywordId, {
       method: 'DELETE',
     });
+    _clearRepresentativeStateAfterKeywordRemoval(
+      [photoId],
+      _keywordNameFromCache(keywordId),
+    );
     loadDetail(photoId);
     loadKeywords();
     scheduleCollectionCountsRefresh();
@@ -6949,6 +7202,7 @@ async function setFlagFor(photoId, flag) {
   } catch(e) { return false; }
   var p = photos.find(function(x) { return x.id === photoId; });
   if (p) p.flag = flag;
+  _clearRepresentativeStateIfIneligible(photoId, flag);
   refreshGridCards([photoId]);
   _refreshInspectorAfterSinglePhotoEdit(photoId, function() { updateDetailFlagButtons(flag); });
   scheduleCollectionCountsRefresh();
@@ -7351,12 +7605,12 @@ document.addEventListener('contextmenu', function(e) {
       deepLinkLoaded = true;
     }
 
-    // Keep loading pages until we find the photo or run out
-    var el = document.querySelector('.grid-card[data-id="' + photoId + '"]');
-    while (!el && !allLoaded) {
-      await loadPhotos();
-      el = document.querySelector('.grid-card[data-id="' + photoId + '"]');
-    }
+    // Keep loading pages until we find the photo or run out. The setup guard
+    // above intentionally blocks IntersectionObserver-driven loads, but
+    // loadPhotos() also honors it; clear it before this explicit paging pass
+    // or a target beyond the first page spins in a resolved Promise loop.
+    loading = false;
+    var el = await loadUntilPhotoRendered(photoId);
 
     // Update folder tree active state
     document.querySelectorAll('#folderTree .tree-item').forEach(function(el) {

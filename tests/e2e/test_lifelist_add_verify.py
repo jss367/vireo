@@ -46,6 +46,13 @@ def test_browse_menu_sets_representative(live_server, page):
         "is_species_representative": True,
     }], life_list
 
+    expect(card.locator(".representative-badge", has_text="Representative")).to_be_visible()
+    card.click(button="right")
+    item = page.locator(".vireo-ctx-menu .vireo-ctx-item", has_text="Set Representative — Red-tailed Hawk")
+    expect(item).to_be_visible()
+    assert "vireo-ctx-disabled" in (item.get_attribute("class") or "")
+    assert item.get_attribute("title") == "Already representative"
+
 
 def test_browse_menu_hidden_for_photo_without_species(live_server, page):
     url = live_server["url"]

@@ -27,8 +27,39 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .source-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
 .source-item { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-primary); background: var(--bg-tertiary); border-radius: 4px; padding: 4px 8px; }
 .source-item button { background: none; border: none; color: var(--danger); cursor: pointer; font-size: 14px; }
+.source-meta { color: var(--text-secondary); white-space: nowrap; }
 .hint { font-size: 11px; color: var(--text-secondary); }
+.section-divider { border-top: 1px solid var(--border-primary); margin-top: 12px; padding-top: 12px; }
+.option-stack { display: flex; flex-direction: column; gap: 8px; margin: 6px 0 8px; }
+.option-stack label { font-size: 12px; color: var(--text-primary); }
+.extension-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(86px, 1fr));
+  gap: 6px 10px; width: 100%; margin: 4px 0 8px;
+}
+.extension-grid label {
+  background: var(--bg-tertiary); border: 1px solid var(--border-secondary);
+  border-radius: 4px; padding: 5px 8px; color: var(--text-primary);
+}
+.remote-preview {
+  font-size: 11px; color: var(--text-secondary); overflow-wrap: anywhere;
+  margin-top: 4px; width: 100%;
+}
+.input-fixed { max-width: 240px; flex: 0 1 240px; }
 .preview-summary { font-size: 12px; color: var(--text-secondary); margin-top: 6px; }
+.dest-structure { margin-top: 8px; }
+.dest-structure .structure-headline { font-size: 12px; color: var(--text-primary); font-weight: 600; }
+.managed-archive-callout {
+  font-size: 12px; color: var(--text-secondary); margin-top: 6px;
+  padding: 8px 10px; border-radius: 6px; overflow-wrap: anywhere;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.structure-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+.structure-table td { padding: 3px 8px; border-bottom: 1px solid var(--border-primary); color: var(--text-primary); }
+.structure-table td.num { text-align: right; color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.structure-table td.tag { text-align: right; white-space: nowrap; }
+.tag-new { color: var(--success, #2da44e); }
+.tag-existing { color: var(--text-secondary); }
 .progress-bar { height: 8px; background: var(--bg-tertiary); border-radius: 4px; overflow: hidden; }
 .progress-bar > div { height: 100%; background: var(--accent); width: 0; transition: width 0.2s; }
 .folder-progress { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
@@ -115,19 +146,65 @@ body { display: flex; flex-direction: column; height: 100vh; }
       </div>
       <div class="source-list" id="sourceList"></div>
       <div class="row" style="margin-top:8px;">
-        <label><input type="checkbox" id="chkRecursive" checked> Include subfolders</label>
-        <label id="fileTypesWrap">File types
-          <select id="fileTypes" style="min-width:100px;">
+        <label><input type="checkbox" id="chkRecursive" checked onchange="refreshSourceCounts()"> Include subfolders</label>
+      </div>
+      <div id="fileTypesWrap" class="section-divider" style="display:none;">
+        <div class="row">
+          <label>File types</label>
+          <select id="fileTypePreset" class="input-fixed" onchange="updateFileTypeControls(); refreshSourceCounts();">
             <option value="both" selected>RAW + JPEG</option>
             <option value="raw">RAW only</option>
             <option value="jpeg">JPEG only</option>
+            <option value="custom">Choose extensions</option>
           </select>
-        </label>
+        </div>
+        <div id="customFileTypes" style="display:none;">
+          <div class="hint">Standard formats</div>
+          <div class="extension-grid">
+            <label><input type="checkbox" class="file-ext standard-ext" value=".jpg" checked onchange="refreshSourceCounts()"> JPG</label>
+            <label><input type="checkbox" class="file-ext standard-ext" value=".jpeg" checked onchange="refreshSourceCounts()"> JPEG</label>
+            <label><input type="checkbox" class="file-ext standard-ext" value=".png" checked onchange="refreshSourceCounts()"> PNG</label>
+            <label><input type="checkbox" class="file-ext standard-ext" value=".tif" checked onchange="refreshSourceCounts()"> TIF</label>
+            <label><input type="checkbox" class="file-ext standard-ext" value=".tiff" checked onchange="refreshSourceCounts()"> TIFF</label>
+            <label><input type="checkbox" class="file-ext standard-ext" value=".bmp" checked onchange="refreshSourceCounts()"> BMP</label>
+            <label><input type="checkbox" class="file-ext standard-ext" value=".webp" checked onchange="refreshSourceCounts()"> WebP</label>
+          </div>
+          <div class="hint">RAW formats</div>
+          <div class="extension-grid">
+            <label><input type="checkbox" class="file-ext raw-ext" value=".nef" checked onchange="refreshSourceCounts()"> NEF</label>
+            <label><input type="checkbox" class="file-ext raw-ext" value=".cr2" checked onchange="refreshSourceCounts()"> CR2</label>
+            <label><input type="checkbox" class="file-ext raw-ext" value=".cr3" checked onchange="refreshSourceCounts()"> CR3</label>
+            <label><input type="checkbox" class="file-ext raw-ext" value=".arw" checked onchange="refreshSourceCounts()"> ARW</label>
+            <label><input type="checkbox" class="file-ext raw-ext" value=".raf" checked onchange="refreshSourceCounts()"> RAF</label>
+            <label><input type="checkbox" class="file-ext raw-ext" value=".dng" checked onchange="refreshSourceCounts()"> DNG</label>
+            <label><input type="checkbox" class="file-ext raw-ext" value=".rw2" checked onchange="refreshSourceCounts()"> RW2</label>
+            <label><input type="checkbox" class="file-ext raw-ext" value=".orf" checked onchange="refreshSourceCounts()"> ORF</label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="workspaceCard">
+      <h3>Workspace</h3>
+      <div class="option-stack">
+        <label><input type="radio" name="workspaceMode" value="current" id="workspaceCurrent" checked onchange="updateWorkspaceMode()"> Current workspace <span class="hint" id="activeWorkspaceName"></span></label>
+        <label><input type="radio" name="workspaceMode" value="new" id="workspaceNew" onchange="updateWorkspaceMode()"> New workspace</label>
+      </div>
+      <div class="row" id="newWorkspaceRow" style="display:none;">
+        <label>Workspace name</label>
+        <input type="text" id="newWorkspaceName" class="input-fixed" placeholder="New workspace">
       </div>
     </div>
 
     <div class="card" id="destCard">
       <h3>Destination</h3>
+      <div class="row">
+        <label>Archive destination</label>
+        <select id="destMode" class="input-fixed" onchange="onImportDestModeChange()">
+          <option value="local" selected>Local path</option>
+        </select>
+      </div>
+      <div id="destLocalRows">
       <div class="row">
         <button class="btn btn-primary" id="btnBrowseDestination" data-testid="import-destination-browse-btn" onclick="browseForDestination()">Browse...</button>
         <input type="text" id="destInput" list="recentDestinations"
@@ -135,10 +212,24 @@ body { display: flex; flex-direction: column; height: 100vh; }
                value="">
         <datalist id="recentDestinations"></datalist>
       </div>
+      </div>
+      <div id="destRemoteRows" style="display:none;">
+        <div class="row">
+          <label>Remote subpath</label>
+          <input type="text" id="remoteSubpath" class="input-fixed" placeholder="2026/trip" oninput="updateRemoteDestPreview()">
+        </div>
+        <div class="remote-preview" id="remoteDestPreview"></div>
+      </div>
       <div class="row">
         <label>Folder template</label>
         <input type="text" id="folderTemplate" value="%Y/%Y-%m-%d" style="max-width:200px;flex:0 1 auto;">
         <span class="hint">strftime of each photo's capture time, e.g. %Y/%Y-%m-%d</span>
+      </div>
+      <div class="section-divider">
+        <div class="option-stack">
+          <label><input type="checkbox" id="chkSkipDuplicates" checked> Skip duplicates</label>
+          <label><input type="checkbox" id="chkVerifyByHash"> Verify copied files with full content hashes</label>
+        </div>
       </div>
     </div>
 
@@ -163,6 +254,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
         <button class="btn btn-primary" id="btnStart" onclick="startImport()">Start import</button>
       </div>
       <div class="preview-summary" id="previewSummary"></div>
+      <div id="destStructure" class="dest-structure" style="display:none;"></div>
       <div id="importError"></div>
     </div>
 
@@ -222,6 +314,8 @@ let sources = [];
 let activeJobId = null;
 let es = null;
 let stagingResultsByPath = {};
+let sourceCounts = {};
+let sourceCountRequestSeq = 0;
 let browserMode = 'source';
 let browserPath = '';
 let browserHomePath = '';
@@ -230,6 +324,14 @@ let browserEscHandler = null;
 let browserSelectedPaths = [];
 let browserSelectAnchorPath = '';
 let activeImportMode = 'in_place';
+let importRemoteTargets = [];
+let importRsyncAvailable = false;
+let destStructureSeq = 0;
+// Monotonic sequence for the import preview / duplicate-check flow so a
+// slow older previewImport() response can't overwrite the summary text
+// or trigger a folder-structure render on top of a newer preview's
+// results. Incremented at the top of previewImport().
+let importPreviewSeq = 0;
 
 function selectedImportMode() {
   const checked = document.querySelector('input[name="importMode"]:checked');
@@ -244,7 +346,169 @@ function updateImportMode() {
   document.getElementById('btnPreview').textContent =
     copyMode ? 'Check for duplicates' : 'Preview import';
   document.getElementById('previewSummary').textContent = '';
+  hideDestStructure();
   showError('');
+  updateFileTypeControls();
+  updateWorkspaceMode();
+  onImportDestModeChange();
+  refreshSourceCounts();
+}
+
+function selectedFileTypes() {
+  const preset = document.getElementById('fileTypePreset').value;
+  if (preset !== 'custom') return preset;
+  return Array.from(document.querySelectorAll('.file-ext:checked'))
+    .map(el => el.value);
+}
+
+function updateFileTypeControls() {
+  const preset = document.getElementById('fileTypePreset');
+  const custom = document.getElementById('customFileTypes');
+  if (!preset || !custom) return;
+  custom.style.display = preset.value === 'custom' ? '' : 'none';
+}
+
+function wireDestStructureInvalidation() {
+  [
+    'chkRecursive', 'fileTypePreset', 'destMode', 'remoteSubpath',
+    'chkSkipDuplicates', 'chkVerifyByHash', 'destInput', 'folderTemplate',
+  ].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('change', hideDestStructure);
+    el.addEventListener('input', hideDestStructure);
+  });
+  document.querySelectorAll('.file-ext').forEach((el) => {
+    el.addEventListener('change', hideDestStructure);
+  });
+}
+
+function updateWorkspaceMode() {
+  const newMode = !!document.getElementById('workspaceNew')?.checked;
+  const row = document.getElementById('newWorkspaceRow');
+  if (row) row.style.display = newMode ? '' : 'none';
+  // Flipping between "current workspace" and "new workspace" changes
+  // which default (workspace-scoped vs global) the server will resolve
+  // after_import against, so the After Import display must resync.
+  updateAdvancedImportOptions();
+}
+
+function importRemoteTargetId() {
+  const el = document.getElementById('destMode');
+  const v = el ? el.value : 'local';
+  return v.indexOf('remote:') === 0 ? v.slice(7) : '';
+}
+
+function importRemoteTarget() {
+  const id = importRemoteTargetId();
+  if (!id) return null;
+  return importRemoteTargets.find(t => t.id === id) || null;
+}
+
+function normalizeRemoteSubpath(raw) {
+  const trimmed = (raw || '').trim();
+  if (!trimmed) return {value: '', error: ''};
+  const s = trimmed.replace(/\\/g, '/');
+  if (s.charAt(0) === '/' || /^[A-Za-z]:/.test(s)) {
+    return {value: '', error: 'Subpath must be relative.'};
+  }
+  const parts = [];
+  for (const seg of s.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') return {value: '', error: "Subpath may not contain '..'."};
+    parts.push(seg);
+  }
+  return {value: parts.join('/'), error: ''};
+}
+
+function importIsAbsolutePath(p) {
+  if (!p) return false;
+  return p.charAt(0) === '/' || /^[A-Za-z]:[\\\/]/.test(p) || /^\\\\/.test(p);
+}
+
+function rsyncDestSpec(user, host, path) {
+  const hostToken = host && host.indexOf(':') !== -1 ? '[' + host + ']' : host;
+  return user + '@' + hostToken + ':' + path;
+}
+
+function remotePreviewWarn(text) {
+  const d = document.createElement('div');
+  d.style.color = 'var(--warning,#bf8700)';
+  d.textContent = text;
+  return d;
+}
+
+function updateRemoteDestPreview() {
+  const el = document.getElementById('remoteDestPreview');
+  if (!el) return;
+  el.textContent = '';
+  const t = importRemoteTarget();
+  if (!t) return;
+  const subResult = normalizeRemoteSubpath(document.getElementById('remoteSubpath').value);
+  if (subResult.error) {
+    el.appendChild(remotePreviewWarn('Warning: ' + subResult.error));
+  } else if (!subResult.value) {
+    const hint = document.createElement('div');
+    hint.textContent = 'Name the archive folder under ' + t.remote_path + ', e.g. 2026/kenya-trip.';
+    el.appendChild(hint);
+  } else {
+    const line = document.createElement('div');
+    line.textContent = 'Archive over SSH to: ';
+    const span = document.createElement('span');
+    span.style.fontFamily = 'monospace';
+    span.textContent = rsyncDestSpec(
+      t.user, t.host, t.remote_path.replace(/\/+$/, '') + '/' + subResult.value);
+    line.appendChild(span);
+    el.appendChild(line);
+  }
+  if (!importRsyncAvailable) {
+    el.appendChild(remotePreviewWarn('Warning: no GNU rsync found. Install GNU rsync or set its path under Settings > Paths.'));
+  }
+  if (!t.mount_path) {
+    el.appendChild(remotePreviewWarn('Warning: this target needs a local mount path for cataloging. Add one under Settings > Remote targets.'));
+  } else if (!importIsAbsolutePath(t.mount_path)) {
+    el.appendChild(remotePreviewWarn('Warning: this target local mount path must be absolute.'));
+  }
+}
+
+function remoteArchiveSelectionReady() {
+  const t = importRemoteTarget();
+  if (!t || !importRsyncAvailable) return false;
+  if (!t.mount_path || !importIsAbsolutePath(t.mount_path)) return false;
+  const subResult = normalizeRemoteSubpath(document.getElementById('remoteSubpath').value);
+  return !subResult.error && !!subResult.value;
+}
+
+function onImportDestModeChange() {
+  const remoteId = importRemoteTargetId();
+  const localRows = document.getElementById('destLocalRows');
+  const remoteRows = document.getElementById('destRemoteRows');
+  if (localRows) localRows.style.display = remoteId ? 'none' : '';
+  if (remoteRows) remoteRows.style.display = remoteId ? '' : 'none';
+  updateRemoteDestPreview();
+}
+
+async function loadImportRemoteTargets() {
+  try {
+    const resp = await fetch('/api/remote-targets');
+    if (!resp.ok) throw new Error('remote targets unavailable');
+    const data = await resp.json();
+    importRemoteTargets = (data && data.targets) || [];
+    importRsyncAvailable = !!(data && data.rsync_available);
+  } catch (e) {
+    importRemoteTargets = [];
+    importRsyncAvailable = false;
+  }
+  const sel = document.getElementById('destMode');
+  if (!sel) return;
+  while (sel.options.length > 1) sel.remove(1);
+  importRemoteTargets.forEach((t) => {
+    const opt = document.createElement('option');
+    opt.value = 'remote:' + t.id;
+    opt.textContent = t.name + ' - ' + t.user + '@' + t.host + ' (SSH)';
+    sel.appendChild(opt);
+  });
+  onImportDestModeChange();
 }
 
 function importEscapeHtml(s) {
@@ -266,14 +530,97 @@ function renderSources() {
     const span = document.createElement('span');
     span.textContent = s;
     span.style.flex = '1';
+    const meta = document.createElement('span');
+    meta.className = 'source-meta';
+    meta.textContent = sourceCounts[s] && sourceCounts[s].text
+      ? sourceCounts[s].text
+      : 'Counting photos...';
     const btn = document.createElement('button');
     btn.textContent = '×';
     btn.title = 'Remove';
-    btn.onclick = () => { sources.splice(i, 1); renderSources(); };
+    btn.onclick = () => {
+      sources.splice(i, 1);
+      delete sourceCounts[s];
+      hideDestStructure();
+      renderSources();
+    };
     div.appendChild(span);
+    div.appendChild(meta);
     div.appendChild(btn);
     list.appendChild(div);
   });
+}
+
+function selectedSourceCountOptions() {
+  const copyMode = selectedImportMode() === 'copy';
+  return {
+    file_types: copyMode ? selectedFileTypes() : 'both',
+    recursive: document.getElementById('chkRecursive').checked,
+  };
+}
+
+function sourceCountKey(path, options) {
+  return [
+    path,
+    options.file_types,
+    options.recursive ? 'recursive' : 'flat',
+  ].join('\n');
+}
+
+function formatPhotoCount(n) {
+  const count = Number(n || 0);
+  return count + ' photo' + (count === 1 ? '' : 's');
+}
+
+async function refreshSourceCount(path) {
+  if (!path) return;
+  const options = selectedSourceCountOptions();
+  const key = sourceCountKey(path, options);
+  const existing = sourceCounts[path];
+  if (existing && existing.key === key && existing.status === 'loaded') return;
+  const requestId = ++sourceCountRequestSeq;
+  sourceCounts[path] = {
+    key: key,
+    requestId: requestId,
+    status: 'loading',
+    text: 'Counting photos...',
+  };
+  renderSources();
+  try {
+    const resp = await fetch('/api/import/folder-preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        folders: [path],
+        file_types: options.file_types,
+        recursive: options.recursive,
+        summary_only: true,
+      }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    const current = sourceCounts[path];
+    if (!sources.includes(path) || !current || current.requestId !== requestId) return;
+    sourceCounts[path] = {
+      key: key,
+      requestId: requestId,
+      status: resp.ok ? 'loaded' : 'error',
+      text: resp.ok ? formatPhotoCount(data.total_count) : 'Count unavailable',
+    };
+  } catch (e) {
+    const current = sourceCounts[path];
+    if (!sources.includes(path) || !current || current.requestId !== requestId) return;
+    sourceCounts[path] = {
+      key: key,
+      requestId: requestId,
+      status: 'error',
+      text: 'Count unavailable',
+    };
+  }
+  renderSources();
+}
+
+function refreshSourceCounts() {
+  sources.forEach(refreshSourceCount);
 }
 
 function addSourcePath(path) {
@@ -281,7 +628,9 @@ function addSourcePath(path) {
   if (!v) return false;
   if (!sources.includes(v)) {
     sources.push(v);
+    hideDestStructure();
     renderSources();
+    refreshSourceCount(v);
     return true;
   }
   return false;
@@ -319,7 +668,10 @@ async function browseForDestination() {
     const result = await pickDirectory('Select archive folder');
     if (result) {
       const path = Array.isArray(result) ? result[0] : result;
-      if (path) document.getElementById('destInput').value = path;
+      if (path) {
+        document.getElementById('destInput').value = path;
+        hideDestStructure();
+      }
       return;
     }
     if (typeof isTauri === 'function' && isTauri()) return;
@@ -538,6 +890,7 @@ function selectImportBrowserFolder() {
   if (browserMode === 'destination') {
     if (!browserPath) return;
     document.getElementById('destInput').value = browserPath;
+    hideDestStructure();
   } else {
     const paths = browserSelectedPaths.length
       ? browserSelectedPaths
@@ -566,6 +919,15 @@ function retireHiddenDefaultOption(sel) {
   if (sel && sel.value === '__hidden_default__') sel.value = '__none__';
 }
 
+function afterImportOptionLabel(strategy) {
+  const sel = document.getElementById('afterImportSelect');
+  const value = strategy || '__none__';
+  if (!sel) return strategy || 'None — import only';
+  const opt = Array.from(sel.options).find(
+    (o) => o.value === value && o.id !== 'afterImportHiddenDefault');
+  return opt ? (opt.textContent || '').trim() : (strategy || 'None — import only');
+}
+
 function updateAdvancedImportOptions() {
   const sel = document.getElementById('afterImportSelect');
   if (!sel) return;
@@ -575,22 +937,58 @@ function updateAdvancedImportOptions() {
     opt.disabled = !advanced;
   });
   const placeholder = document.getElementById('afterImportHiddenDefault');
-  if (advanced) {
-    // Advanced mode is back on — reveal whichever advanced strategy the
-    // placeholder was masking so the visible selection matches what
-    // Start Import will send, then retire the placeholder.
-    if (placeholder && sel.value === '__hidden_default__') {
-      const masked = placeholder.dataset.maskedValue;
-      sel.value = masked || '__none__';
-      _afterImportHidingDefault = false;
-    }
+  if (!placeholder) return;
+
+  // Once the user actively picks an option, that pick is authoritative
+  // and no placeholder mode should override it.
+  if (_afterImportUserTouched) {
     retireHiddenDefaultOption(sel);
+    _afterImportHidingDefault = false;
     return;
   }
+
+  const newMode = !!document.getElementById('workspaceNew')?.checked;
+
+  // "New workspace" untouched: startImport() omits after_import so the
+  // server resolves it against the freshly-created workspace (which
+  // inherits the GLOBAL default, since a brand-new workspace has no
+  // overrides yet). The visible dropdown, prefilled from the currently-
+  // active workspace's default, would otherwise lie about what the
+  // server is going to do — show a placeholder that names the real
+  // target strategy.
+  if (newMode && _afterImportConfigLoaded) {
+    const label = afterImportOptionLabel(_globalDefaultStrategy);
+    placeholder.textContent =
+      'New workspace default: ' + label + ' (applied to the new workspace)';
+    placeholder.dataset.maskedValue = _globalDefaultStrategy || '';
+    placeholder.hidden = false;
+    placeholder.disabled = false;
+    _afterImportHidingDefault = true;
+    sel.value = '__hidden_default__';
+    return;
+  }
+
+  // Not new-workspace mode: the visible selection should track the
+  // workspace's own default (or the HTML fallback if config didn't
+  // load). Re-derive it every call so switching workspaceNew off
+  // restores the workspace default rather than sticking on whatever
+  // placeholder we were showing.
+  const wsDef = _afterImportConfigLoaded
+    ? (_workspaceDefaultStrategy || '__none__')
+    : '__none__';
+  sel.value = wsDef;
+  if (sel.selectedIndex === -1) sel.value = '__none__';
+
+  if (advanced) {
+    retireHiddenDefaultOption(sel);
+    _afterImportHidingDefault = false;
+    return;
+  }
+
   const current = sel.selectedOptions[0];
   const currentIsHiddenAdvanced =
     !!(current && current.disabled && current.hasAttribute('data-advanced-strategy'));
-  if (currentIsHiddenAdvanced && placeholder) {
+  if (currentIsHiddenAdvanced) {
     // The workspace's default is an advanced-only strategy (full,
     // cull_ready) but advanced mode is off. If we silently fell the
     // display back to __none__, startImport() would omit after_import so
@@ -607,8 +1005,9 @@ function updateAdvancedImportOptions() {
     placeholder.disabled = false;
     _afterImportHidingDefault = true;
     sel.value = '__hidden_default__';
-  } else if (sel.value !== '__hidden_default__') {
+  } else {
     retireHiddenDefaultOption(sel);
+    _afterImportHidingDefault = false;
   }
 }
 
@@ -635,6 +1034,35 @@ let _afterImportConfigLoaded = false;
 // null (which would run import-only). Cleared as soon as the user
 // actively changes the select.
 let _afterImportHidingDefault = false;
+
+// True once the user actively picks something in the After Import
+// dropdown. Until then the visible selection is whatever
+// initImportPage() prefilled from the CURRENTLY-active workspace's
+// default — which is the wrong basis for a new-workspace import, where
+// the server should apply the new workspace's (or global) default
+// instead. startImport() omits the after_import key for new-workspace
+// imports that this flag hasn't been set on, so the resolution happens
+// server-side after the workspace switch. An explicit user pick
+// (including "None — import only") flips this flag and gets forwarded
+// verbatim.
+let _afterImportUserTouched = false;
+
+// The unscoped global pipeline.default_strategy from /api/config, captured
+// during initImportPage. A brand-new workspace has no config_overrides yet,
+// so this is the strategy the server will apply when the new-workspace
+// import path omits `after_import`. Used to populate the honest "New
+// workspace default: X" placeholder so the visible dropdown selection
+// isn't misled by whatever was prefilled from the currently-active
+// workspace's (possibly-overridden) default.
+let _globalDefaultStrategy = null;
+
+// The effective pipeline.default_strategy for the CURRENTLY-active
+// workspace (global config merged with the workspace's overrides). Used
+// so updateAdvancedImportOptions() can re-derive the visible dropdown
+// selection when the user toggles "New workspace" off without touching
+// the dropdown — the underlying target reverts to the current workspace's
+// default rather than sticking on whatever placeholder was showing.
+let _workspaceDefaultStrategy = null;
 
 function showError(msg) {
   const el = document.getElementById('importError');
@@ -814,6 +1242,7 @@ async function deleteStaging(path, btn) {
 
 function useStagingAsImportSource(result) {
   sources = [result.source_root];
+  hideDestStructure();
   renderSources();
   // Staging recovery must copy the temporary staging tree into the archive.
   // In-place would catalog paths that disappear once staging is cleaned,
@@ -825,14 +1254,169 @@ function useStagingAsImportSource(result) {
   }
   if (result.inferred_destination) {
     document.getElementById('destInput').value = result.inferred_destination;
+    hideDestStructure();
   }
   document.getElementById('sourceCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
+function hideDestStructure() {
+  destStructureSeq += 1;
+  const el = document.getElementById('destStructure');
+  if (!el) return;
+  el.style.display = 'none';
+  el.innerHTML = '';
+}
+
+// Resolve the absolute local path files will be cataloged at, for the
+// destination-structure preview. Local mode: the destination field. Remote
+// (SSH) mode: the target's local mount path joined with the subpath — the
+// same path the import job catalogs at (mount_final). Returns '' when the
+// path isn't known/absolute yet, in which case the structure preview is
+// skipped (the duplicate summary still stands).
+function resolvedCopyDestination() {
+  if (importRemoteTargetId()) {
+    const t = importRemoteTarget();
+    if (!t || !t.mount_path || !importIsAbsolutePath(t.mount_path)) return '';
+    const sub = normalizeRemoteSubpath(document.getElementById('remoteSubpath').value);
+    if (sub.error) return '';
+    const base = t.mount_path.replace(/\/+$/, '');
+    return sub.value ? base + '/' + sub.value : base;
+  }
+  const local = (document.getElementById('destInput').value || '').trim();
+  return importIsAbsolutePath(local) ? local : '';
+}
+
+function destStructureSignature(destination, fileTypes, recursive, excludePaths) {
+  return JSON.stringify({
+    sources: sources.slice(),
+    destination: destination,
+    folder_template: (document.getElementById('folderTemplate').value || '').trim(),
+    file_types: fileTypes,
+    recursive: recursive,
+    skip_duplicates: document.getElementById('chkSkipDuplicates').checked,
+    verify_by_hash: document.getElementById('chkVerifyByHash').checked,
+    exclude_paths: (excludePaths || []).slice().sort(),
+  });
+}
+
+function importPreviewSignature() {
+  const copyMode = selectedImportMode() === 'copy';
+  return JSON.stringify({
+    sources: sources.slice(),
+    mode: copyMode ? 'copy' : 'in_place',
+    file_types: copyMode ? selectedFileTypes() : 'both',
+    recursive: document.getElementById('chkRecursive').checked,
+    skip_duplicates: document.getElementById('chkSkipDuplicates').checked,
+    verify_by_hash: document.getElementById('chkVerifyByHash').checked,
+  });
+}
+
+function importPreviewSignatureChanged(signature) {
+  return signature !== importPreviewSignature();
+}
+
+// Preview the destination folder structure (new vs existing folders) and,
+// when the destination sits in a folder Vireo already manages, a callout
+// naming that archive and how many photos it already holds. Best-effort:
+// any failure leaves the destination unknown and simply shows nothing, so
+// the duplicate summary above is never clobbered. ``excludePaths`` are the
+// source files that will be skipped as duplicates — excluding them keeps the
+// new/existing folder counts matching the files that actually land.
+async function renderDestStructure(excludePaths) {
+  hideDestStructure();
+  const destination = resolvedCopyDestination();
+  if (!destination) return;
+  const fileTypes = selectedFileTypes();
+  const recursive = document.getElementById('chkRecursive').checked;
+  const requestSeq = destStructureSeq;
+  const requestSignature = destStructureSignature(
+    destination, fileTypes, recursive, excludePaths);
+  let data;
+  try {
+    const resp = await fetch('/api/import/destination-preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sources: sources,
+        destination: destination,
+        folder_template: (document.getElementById('folderTemplate').value || '').trim(),
+        file_types: fileTypes,
+        recursive: recursive,
+        exclude_paths: excludePaths || [],
+      }),
+    });
+    if (!resp.ok) return;
+    data = await resp.json();
+  } catch (e) {
+    return;  // structure preview is optional; keep the summary intact
+  }
+  const el = document.getElementById('destStructure');
+  if (
+    requestSeq !== destStructureSeq ||
+    requestSignature !== destStructureSignature(
+      resolvedCopyDestination(), selectedFileTypes(),
+      document.getElementById('chkRecursive').checked, excludePaths)
+  ) {
+    return;
+  }
+  const folders = data.folders || [];
+  if (!folders.length && !data.managed_archive) return;
+
+  const headline = document.createElement('div');
+  headline.className = 'structure-headline';
+  headline.textContent = data.total_photos + ' photos → ' + data.total_folders +
+    ' folder' + (data.total_folders === 1 ? '' : 's') +
+    ' (' + data.new_folders + ' new, ' + data.existing_folders + ' existing)';
+  el.appendChild(headline);
+
+  if (data.managed_archive) {
+    const callout = document.createElement('div');
+    callout.className = 'managed-archive-callout';
+    const label = document.createElement('span');
+    label.textContent = 'Merging into a managed archive at ';
+    const path = document.createElement('span');
+    path.style.fontFamily = 'monospace';
+    path.textContent = data.managed_archive.path;
+    const tail = document.createElement('span');
+    tail.textContent = ' — ' + data.managed_archive.photo_count +
+      ' photo' + (data.managed_archive.photo_count === 1 ? '' : 's') +
+      ' already cataloged there.';
+    callout.append(label, path, tail);
+    el.appendChild(callout);
+  }
+
+  const table = document.createElement('table');
+  table.className = 'structure-table';
+  folders.forEach((f) => {
+    const tr = document.createElement('tr');
+    const name = document.createElement('td');
+    name.textContent = f.path === '.' ? '(archive root)' : f.path;
+    const count = document.createElement('td');
+    count.className = 'num';
+    count.textContent = f.count + ' photo' + (f.count === 1 ? '' : 's');
+    const tag = document.createElement('td');
+    tag.className = 'tag ' + (f.exists ? 'tag-existing' : 'tag-new');
+    tag.textContent = f.exists ? 'existing' : 'new';
+    tr.append(name, count, tag);
+    table.appendChild(tr);
+  });
+  el.appendChild(table);
+  el.style.display = '';
+}
+
 async function previewImport() {
   showError('');
+  hideDestStructure();
   if (!sources.length) { showError('Add at least one source folder.'); return; }
   const copyMode = selectedImportMode() === 'copy';
+  const fileTypes = copyMode ? selectedFileTypes() : 'both';
+  if (copyMode && Array.isArray(fileTypes) && !fileTypes.length) {
+    showError('Choose at least one file extension.');
+    return;
+  }
+  importPreviewSeq += 1;
+  const requestSeq = importPreviewSeq;
+  const requestSignature = importPreviewSignature();
   const summary = document.getElementById('previewSummary');
   summary.textContent = 'Discovering files…';
   try {
@@ -841,30 +1425,51 @@ async function previewImport() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         folders: sources,
-        file_types: copyMode ? document.getElementById('fileTypes').value : 'both',
+        file_types: fileTypes,
         recursive: document.getElementById('chkRecursive').checked,
       }),
     });
     if (!resp.ok) throw new Error((await resp.json()).error || 'preview failed');
     const data = await resp.json();
+    // A newer previewImport() started while this response was in flight —
+    // it owns the summary and any structure preview now, so bail without
+    // touching either. Clearing summary here would erase the newer run's
+    // "Discovering files…" or completed results.
+    if (requestSeq !== importPreviewSeq) return;
+    if (importPreviewSignatureChanged(requestSignature)) {
+      return;
+    }
     const files = data.files || [];
     if (!files.length) { summary.textContent = 'No importable files found.'; return; }
     if (!copyMode) {
       summary.textContent = files.length + ' files found · originals will stay in place';
       return;
     }
+    if (!document.getElementById('chkSkipDuplicates').checked) {
+      summary.textContent = files.length + ' files found · duplicates will be copied';
+      // No dedup gate, so every discovered file lands — pass no exclusions
+      // so the folder-structure counts match the full copy set.
+      await renderDestStructure([]);
+      return;
+    }
     summary.textContent = files.length + ' files found — checking for duplicates…';
-    // check-duplicates streams results; count flagged paths as they arrive.
+    // check-duplicates streams results; collect flagged paths as they arrive.
+    // Pass verify_by_hash so the preview and the import agree on which files
+    // are duplicates — otherwise a renamed/metadata-colliding file counted
+    // as "to copy" in the preview would be skipped by the hash-based import.
     const dupResp = await fetch('/api/import/check-duplicates', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ paths: files.map(f => f.path) }),
+      body: JSON.stringify({
+        paths: files.map(f => f.path),
+        verify_by_hash: document.getElementById('chkVerifyByHash').checked,
+      }),
     });
     if (!dupResp.ok) throw new Error('duplicate check failed');
     const reader = dupResp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    let dupCount = 0;
+    const duplicatePaths = [];
     for (;;) {
       const r = await reader.read();
       if (r.done) break;
@@ -876,14 +1481,29 @@ async function previewImport() {
         if (!m) continue;
         try {
           const d = JSON.parse(m[1]);
-          if (d.duplicates) dupCount += d.duplicates.length;
+          if (d.duplicates) duplicatePaths.push(...d.duplicates);
         } catch (e) { /* partial frame */ }
       }
     }
+    // Same guard as above for the duplicate-stream leg: a newer
+    // previewImport() may have started while the SSE was draining, and
+    // owns the summary now.
+    if (requestSeq !== importPreviewSeq) return;
+    if (importPreviewSignatureChanged(requestSignature)) {
+      return;
+    }
+    const dupCount = duplicatePaths.length;
     summary.textContent = files.length + ' files found · ' + dupCount +
       ' already in your library (will be skipped) · ' +
       (files.length - dupCount) + ' to copy';
+    // Skipped duplicates aren't copied, so exclude them from the
+    // folder-structure preview — the new/existing folder counts must
+    // reflect the files that will actually land in the archive.
+    await renderDestStructure(duplicatePaths);
   } catch (e) {
+    // Don't let a stale run's error clobber a newer preview's summary
+    // or surface a stale error banner — the newer run owns the UI.
+    if (requestSeq !== importPreviewSeq) return;
     summary.textContent = '';
     showError(String(e.message || e));
   }
@@ -915,18 +1535,53 @@ async function startImport() {
   showError('');
   if (!sources.length) { showError('Add at least one source folder.'); return; }
   const copyMode = selectedImportMode() === 'copy';
-  const destination = (document.getElementById('destInput').value || '').trim();
-  if (copyMode && !destination) { showError('Choose a destination folder.'); return; }
   const body = {
     sources: sources,
     recursive: document.getElementById('chkRecursive').checked,
   };
-  if (copyMode) {
-    body.destination = destination;
-    body.folder_template = (document.getElementById('folderTemplate').value || '').trim();
-    body.file_types = document.getElementById('fileTypes').value;
+  if (document.getElementById('workspaceNew').checked) {
+    const name = (document.getElementById('newWorkspaceName').value || '').trim();
+    if (!name) { showError('Name the new workspace.'); return; }
+    body.new_workspace_name = name;
   }
-  if (_afterImportConfigLoaded && !_afterImportHidingDefault) {
+  if (copyMode) {
+    const fileTypes = selectedFileTypes();
+    if (Array.isArray(fileTypes) && !fileTypes.length) {
+      showError('Choose at least one file extension.');
+      return;
+    }
+    const remoteId = importRemoteTargetId();
+    if (remoteId) {
+      if (!remoteArchiveSelectionReady()) {
+        showError('Choose a usable remote target and relative subpath.');
+        return;
+      }
+      body.remote_target_id = remoteId;
+      body.remote_subpath = normalizeRemoteSubpath(
+        document.getElementById('remoteSubpath').value).value;
+    } else {
+      const destination = (document.getElementById('destInput').value || '').trim();
+      if (!destination) { showError('Choose a destination folder.'); return; }
+      body.destination = destination;
+    }
+    body.folder_template = (document.getElementById('folderTemplate').value || '').trim();
+    body.file_types = fileTypes;
+    body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
+    body.verify_by_hash = document.getElementById('chkVerifyByHash').checked;
+  }
+  // For new-workspace imports where the user hasn't touched the After
+  // Import dropdown, the visible selection was prefilled from the
+  // currently-active workspace's default — posting it would make the
+  // server apply that old default instead of the new workspace's (or
+  // global) one. Omit the key so the server resolves it against the
+  // freshly-created workspace after the switch.
+  const newWorkspaceUntouched =
+    !!body.new_workspace_name && !_afterImportUserTouched;
+  if (
+    _afterImportConfigLoaded
+    && !_afterImportHidingDefault
+    && !newWorkspaceUntouched
+  ) {
     body.after_import = selectedAfterImport();
   }
   document.getElementById('btnStart').disabled = true;
@@ -938,6 +1593,10 @@ async function startImport() {
     });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || 'import failed to start');
+    if (data.workspace && data.workspace.name) {
+      const activeName = document.getElementById('activeWorkspaceName');
+      if (activeName) activeName.textContent = '(' + data.workspace.name + ')';
+    }
     activeJobId = data.job_id;
     document.getElementById('progressCard').style.display = '';
     document.getElementById('resultCard').style.display = 'none';
@@ -1070,6 +1729,23 @@ function renderModelWarning(res) {
 }
 
 async function initImportPage() {
+  // Install destination-structure invalidation before the first await —
+  // the form controls it listens on are all static template markup, so
+  // they're already in the DOM. Wiring after the /api/volumes,
+  // /api/config, and /api/workspaces/active fetches would leave a gap
+  // where a user can render a preview and then edit the destination,
+  // template, or file-type controls without the rendered structure
+  // being invalidated.
+  wireDestStructureInvalidation();
+  // Native menu deep link: File > Import Folder... routes here as
+  // /import?mode=copy&pick=source so it lands in Copy-to-archive with the
+  // source picker open, while File > Import Photos... gets the page
+  // default (Add in place).
+  const menuParams = new URLSearchParams(window.location.search);
+  if (menuParams.get('mode') === 'copy') {
+    const copyRadio = document.getElementById('modeCopy');
+    if (copyRadio) copyRadio.checked = true;
+  }
   // Volume suggestions for the source input.
   try {
     const resp = await fetch('/api/volumes');
@@ -1099,6 +1775,8 @@ async function initImportPage() {
     const resp = await fetch('/api/workspaces/active');
     if (resp.ok) {
       const ws = await resp.json();
+      const activeName = document.getElementById('activeWorkspaceName');
+      if (activeName && ws.name) activeName.textContent = '(' + ws.name + ')';
       const raw = ws.config_overrides;
       overrides = typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
       overridesOk = true;
@@ -1127,6 +1805,14 @@ async function initImportPage() {
   const def = pipelineCfg.default_strategy;
   sel.value = def ? def : '__none__';
   if (sel.selectedIndex === -1) sel.value = '__none__';
+  // Capture the unscoped global default so the "New workspace default"
+  // placeholder can name the strategy the server will actually apply
+  // to a freshly-created workspace (which starts with no overrides).
+  _globalDefaultStrategy = (cfg && cfg.pipeline && cfg.pipeline.default_strategy) || null;
+  // Capture the effective (workspace-scoped) default so switching out of
+  // "New workspace" mode without touching the dropdown restores this
+  // value rather than sticking on the placeholder.
+  _workspaceDefaultStrategy = def || null;
   // updateAdvancedImportOptions() may flip _afterImportHidingDefault
   // when the resolved default is an advanced-only strategy the current
   // mode hides. Wire the change listener first so a user-driven change
@@ -1134,20 +1820,35 @@ async function initImportPage() {
   // it) is always tracked.
   sel.addEventListener('change', () => {
     _afterImportHidingDefault = false;
+    _afterImportUserTouched = true;
     // Once the user actively picks a real option, the "Workspace
     // default (hidden)" placeholder is no longer relevant — retire it
     // so it doesn't clutter the dropdown on the next open.
     if (sel.value !== '__hidden_default__') retireHiddenDefaultOption(sel);
   });
   _afterImportHidingDefault = false;
-  updateAdvancedImportOptions();
   // Only mark the resolved default as trustworthy when BOTH config
   // fetches actually succeeded. Otherwise the select value reflects the
   // HTML placeholder rather than the workspace default, and startImport
   // should omit the key so the server applies pipeline.default_strategy.
+  // Set this BEFORE the initial updateAdvancedImportOptions() call so
+  // that call can use _workspaceDefaultStrategy to derive the visible
+  // dropdown value.
   _afterImportConfigLoaded = cfgOk && overridesOk;
+  updateAdvancedImportOptions();
+  loadImportRemoteTargets();
   loadOrphanedStaging();
   updateImportMode();
+  if (menuParams.get('pick') === 'source') {
+    // One-shot trigger: strip it from the URL so a manual reload doesn't
+    // reopen the picker, then open it (native dialog in Tauri, in-page
+    // folder browser otherwise).
+    menuParams.delete('pick');
+    const qs = menuParams.toString();
+    history.replaceState(
+      null, '', window.location.pathname + (qs ? '?' + qs : ''));
+    browseForSource();
+  }
 }
 initImportPage();
 </script>

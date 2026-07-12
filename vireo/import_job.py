@@ -78,6 +78,7 @@ from ingest import (
     build_destination_path,
     discover_source_files,
 )
+from job_contract import progress_event
 from scanner import EMPTY_FILE_SHA256
 
 log = logging.getLogger(__name__)
@@ -586,10 +587,10 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
             current_file=current_file,
             progress={"current": current, "total": total},
         )
-        runner.push_event(job["id"], "progress", {
-            "phase": phase, "current": current, "total": total,
-            "current_file": current_file,
-        })
+        runner.push_event(
+            job["id"], "progress",
+            progress_event(phase, current, total, current_file),
+        )
 
     # --- Discover (same enumeration-error handling as the local path) ---
     _emit("Discovering files", 0, 0)
@@ -2005,17 +2006,17 @@ def run_import_job(job, runner, db_path, workspace_id, params):
             current_file=current_file,
             progress={"current": current, "total": total},
         )
-        runner.push_event(job["id"], "progress", {
-            "phase": phase,
-            "current": current,
-            "total": total,
-            "current_file": current_file,
-            # Snapshot (counts dicts mutate as the loop advances; SSE
-            # consumers must see the state at emit time).
-            "folders": {
-                rel: dict(counts) for rel, counts in folder_counts.items()
-            },
-        })
+        runner.push_event(
+            job["id"], "progress",
+            progress_event(
+                phase, current, total, current_file,
+                # Snapshot (counts dicts mutate as the loop advances; SSE
+                # consumers must see the state at emit time).
+                folders={
+                    rel: dict(counts) for rel, counts in folder_counts.items()
+                },
+            ),
+        )
 
     # --- Discover ---------------------------------------------------
     # Enumeration errors (permission denied, macOS TCC block on a

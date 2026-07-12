@@ -47,6 +47,117 @@ def test_batch_color_label(app_and_db):
     assert db.get_color_label(pids[1]) == 'green'
 
 
+def test_get_color_labels(app_and_db):
+    """GET /api/photos/color_labels returns labels keyed by photo id."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pids = [photo['id'] for photo in photos[:2]]
+    db.set_color_label(pids[0], 'purple')
+
+    resp = client.get(
+        f'/api/photos/color_labels?ids={pids[0]},{pids[1]},not-an-id'
+    )
+
+    assert resp.status_code == 200
+    assert resp.get_json() == {str(pids[0]): 'purple'}
+
+
+def test_color_label_routes_are_owned_by_domain_blueprint(app_and_db):
+    """The extracted route group must not drift back into the app module."""
+    app, _ = app_and_db
+    endpoints = {
+        rule.rule: rule.endpoint
+        for rule in app.url_map.iter_rules()
+        if 'color_label' in rule.rule
+    }
+
+    assert endpoints == {
+        '/api/batch/color_label': 'photo_labels.set_labels',
+        '/api/photos/<int:photo_id>/color_label': 'photo_labels.set_label',
+        '/api/photos/color_labels': 'photo_labels.get_labels',
+    }
+
+
+def test_photo_review_routes_are_owned_by_domain_blueprint(app_and_db):
+    """Rating and flag routes stay outside the legacy app module."""
+    app, _ = app_and_db
+    review_routes = {
+        "/api/photos/<int:photo_id>/rating",
+        "/api/photos/<int:photo_id>/flag",
+        "/api/batch/rating",
+        "/api/batch/flag",
+    }
+    endpoints = {
+        rule.rule: rule.endpoint
+        for rule in app.url_map.iter_rules()
+        if rule.rule in review_routes
+    }
+
+    assert endpoints == {
+        "/api/photos/<int:photo_id>/rating": "photo_review.set_rating",
+        "/api/photos/<int:photo_id>/flag": "photo_review.set_flag",
+        "/api/batch/rating": "photo_review.set_ratings",
+        "/api/batch/flag": "photo_review.set_flags",
+    }
+
+
+def test_photo_review_routes_preserve_workspace_isolation(app_and_db):
+    """Individual and batch review edits reject hidden photos atomically."""
+    app, db = app_and_db
+    visible_id = db.get_photos()[0]["id"]
+    active_workspace_id = db._active_workspace_id
+    other_workspace_id = db.create_workspace("Other review workspace")
+    db.set_active_workspace(other_workspace_id)
+    folder_id = db.add_folder("/photos/other-review", name="other-review")
+    hidden_id = db.add_photo(
+        folder_id=folder_id,
+        filename="hidden-review.jpg",
+        extension=".jpg",
+        file_size=10,
+        file_mtime=1.0,
+    )
+    db.set_active_workspace(active_workspace_id)
+    client = app.test_client()
+
+    for field, value in (("rating", 4), ("flag", "flagged")):
+        individual = client.post(
+            f"/api/photos/{hidden_id}/{field}", json={field: value}
+        )
+        assert individual.status_code == 403
+
+        batch = client.post(
+            f"/api/batch/{field}",
+            json={"photo_ids": [visible_id, hidden_id], field: value},
+        )
+        assert batch.status_code == 403
+
+    assert db.get_photo(visible_id)["rating"] == 3
+    assert db.get_photo(visible_id)["flag"] == "none"
+    assert db.get_photo(hidden_id)["rating"] == 0
+    assert db.get_photo(hidden_id)["flag"] == "none"
+
+
+def test_photo_review_batches_skip_stale_ids_and_keep_requested_history_count(
+    app_and_db,
+):
+    """Batch review edits retain their stale-ID and audit-description contract."""
+    app, db = app_and_db
+    photo_id = db.get_photos()[0]["id"]
+    client = app.test_client()
+
+    response = client.post(
+        "/api/batch/rating",
+        json={"photo_ids": [photo_id, 999999], "rating": 2},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True, "updated": 1}
+    assert db.get_photo(photo_id)["rating"] == 2
+    history = db.get_edit_history()
+    assert history[0]["description"] == "Set rating to 2 on 2 photos"
+
+
 def test_set_rating(app_and_db):
     """POST /api/photos/<id>/rating updates rating and queues pending change."""
     app, db = app_and_db
@@ -568,6 +679,36 @@ def test_label_cluster_records_history(app_and_db):
     assert history[0]['item_count'] == 2
 
 
+def test_label_cluster_normalizes_edge_quote_label(app_and_db):
+    """Label cluster with a stray edge quote queues the normalized name.
+
+    Regression: prior to re-reading the stored name after add_keyword, a
+    label like `‘juvenile` would tag the normalized 'juvenile' row but
+    queue the raw stray-quote value for XMP sync, so the sidecar would
+    persist the wrong spelling and a later removal of the stored keyword
+    would not cancel the pending add.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pids = [p['id'] for p in photos[:2]]
+
+    resp = client.post('/api/species/label-cluster',
+                       json={'photo_ids': pids, 'label': '‘juvenile'})
+    assert resp.status_code == 200
+
+    pending = db.get_pending_changes()
+    keyword_adds = [c for c in pending if c['change_type'] == 'keyword_add']
+    assert keyword_adds, "expected keyword_add pending change"
+    assert all(c['value'] == 'juvenile' for c in keyword_adds), \
+        f"expected normalized label, got {[c['value'] for c in keyword_adds]}"
+
+    history = db.get_edit_history()
+    assert len(history) == 1
+    assert 'juvenile' in history[0]['description']
+    assert '‘' not in history[0]['description']
+
+
 def test_encounter_species_records_history(app_and_db):
     """Confirming encounter species records keyword_add in edit history."""
     app, db = app_and_db
@@ -583,6 +724,72 @@ def test_encounter_species_records_history(app_and_db):
     assert len(history) == 1
     assert history[0]['action_type'] == 'keyword_add'
     assert 'Red-tailed Hawk' in history[0]['description']
+
+
+def test_encounter_species_canonicalization_undo_restores_legacy(app_and_db):
+    """A confirm that only canonicalizes a legacy same-species variant
+    (e.g. cache/DB carries `‘apapane` and the request is `apapane`) must
+    record a species_replace edit so undo re-tags the legacy row.
+
+    Regression: the canonicalization pass untags legacy species rows
+    matching the target's normalized name so photos don't end up
+    double-tagged with two spellings of the same species. Recording that
+    as a plain `keyword_add` would leave undo's `keyword_add` branch --
+    which only untags the clean kid and knows nothing about the legacy
+    kid we just removed -- unable to restore anything, so undoing a
+    same-species confirm would leave the photos with no species tag.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pids = [p['id'] for p in photos[:2]]
+
+    # Simulate an upgraded DB where a legacy edge-quote taxonomy row and a
+    # clean spelling of the same species both exist. add_keyword would
+    # normally fold these together via its normalized-peer fallback, so we
+    # insert both rows directly to reproduce the split-catalog scenario
+    # the review comment describes.
+    with db.conn:
+        cursor = db.conn.execute(
+            """INSERT INTO keywords (name, parent_id, type, is_species)
+               VALUES (?, NULL, 'taxonomy', 1)""",
+            ("‘apapane",),
+        )
+        legacy_kid = cursor.lastrowid
+        cursor = db.conn.execute(
+            """INSERT INTO keywords (name, parent_id, type, is_species)
+               VALUES (?, NULL, 'taxonomy', 1)""",
+            ("apapane",),
+        )
+        clean_kid_seeded = cursor.lastrowid
+    for pid in pids:
+        db.tag_photo(pid, legacy_kid)
+
+    resp = client.post('/api/encounters/species',
+                       json={'species': 'apapane', 'photo_ids': pids})
+    assert resp.status_code == 200
+
+    history = db.get_edit_history()
+    assert len(history) == 1
+    # Recorded as species_replace (not keyword_add) so undo re-tags the
+    # legacy kids we untagged in the canonicalization pass.
+    assert history[0]['action_type'] == 'species_replace'
+
+    # After the confirm, photos carry the clean `apapane` kid and the
+    # legacy `‘apapane` kid is gone from them.
+    for pid in pids:
+        kids = {k['id'] for k in db.get_photo_keywords(pid)}
+        assert clean_kid_seeded in kids
+        assert legacy_kid not in kids
+
+    # Undo restores the legacy kid on every affected photo and clears the
+    # clean kid the confirm added.
+    resp = client.post('/api/undo')
+    assert resp.status_code == 200
+    for pid in pids:
+        kids = {k['id'] for k in db.get_photo_keywords(pid)}
+        assert legacy_kid in kids
+        assert clean_kid_seeded not in kids
 
 
 def test_sync_discard_records_history(app_and_db):

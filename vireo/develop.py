@@ -60,6 +60,18 @@ def find_darktable(configured_path):
     found = shutil.which("darktable-cli")
     if found:
         return os.path.realpath(found)
+    if os.name == "nt":
+        candidates = []
+        for env_var in ("PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432"):
+            base = os.environ.get(env_var)
+            if base:
+                candidates.extend([
+                    os.path.join(base, "darktable", "bin", "darktable-cli.exe"),
+                    os.path.join(base, "darktable", "darktable-cli.exe"),
+                ])
+        for candidate in candidates:
+            if os.path.isfile(candidate):
+                return os.path.realpath(candidate)
     return None
 
 

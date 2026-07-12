@@ -222,6 +222,67 @@ def test_predictionless_pipeline_encounter_can_add_species(live_server, page):
     assert {r["id"] for r in rows} == set(photo_ids)
 
 
+def test_pipeline_review_species_confirm_ignores_duplicate_inflight_clicks(live_server, page):
+    photo_ids = live_server["data"]["photos"][:2]
+    _write_confirmation_pipeline_cache(live_server, photo_ids)
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+
+    page.evaluate(
+        """
+        () => {
+          window.__speciesPosts = [];
+          const originalSafeFetch = window.safeFetch;
+          window.safeFetch = (url, opts, cfg) => {
+            if (String(url).includes('/api/encounters/species')) {
+              window.__speciesPosts.push(JSON.parse(opts.body));
+              return new Promise(resolve => {
+                window.__resolveSpeciesPost = () => resolve({
+                  ok: true,
+                  species: 'American Robin',
+                  keyword_id: 123,
+                  photo_count: 1,
+                  skipped_photo_ids: [],
+                  low_confidence_photo_ids: [],
+                });
+              });
+            }
+            return originalSafeFetch(url, opts, cfg);
+          };
+        }
+        """
+    )
+
+    post_count = page.evaluate(
+        """
+        () => {
+          const event = { stopPropagation() {} };
+          window.__confirmPromises = [
+            confirmSpecies(event, 1, null, null),
+            confirmSpecies(event, 1, null, null),
+          ];
+          return window.__speciesPosts.length;
+        }
+        """
+    )
+
+    assert post_count == 1
+    expect(
+        page.locator('[data-species-widget="1"][data-enc="1"] .species-confirm-btn').first
+    ).to_be_disabled()
+
+    page.evaluate("() => window.__resolveSpeciesPost()")
+    page.evaluate("() => Promise.all(window.__confirmPromises)")
+
+    posts = page.evaluate("() => window.__speciesPosts")
+    assert len(posts) == 1
+    assert posts[0]["species"] == "American Robin"
+    assert posts[0]["photo_ids"] == [photo_ids[1]]
+    expect(
+        page.locator('[data-species-widget="1"][data-enc="1"] .species-confirm-btn')
+    ).to_have_count(0)
+
+
 def test_species_name_arg_keeps_nullish_values_empty(live_server, page):
     page.goto(f"{live_server['url']}/pipeline/review")
 

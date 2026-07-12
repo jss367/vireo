@@ -10,6 +10,11 @@ on:
         description: "Release tag (e.g. v0.1.0). Leave blank for artifact-only build."
         required: false
         type: string
+      sign_windows_candidate:
+        description: "Sign and verify Windows artifacts without publishing a release."
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -22,7 +27,11 @@ env:
   CARGO_BUILD_JOBS: "3"
 
 jobs:
+  full-e2e:
+    uses: ./.github/workflows/e2e-full.yml
+
   build:
+    needs: full-e2e
     strategy:
       fail-fast: false
       matrix:
@@ -357,17 +366,62 @@ jobs:
           npx tauri build --target ${{ matrix.rust-target }} --bundles deb,appimage 2>&1
           echo "=== Tauri build finished at $(date -u) ==="
 
-      # Windows: no signing needed, use tauri-action.
-      # continue-on-error because Tauri can exit non-zero AFTER producing
-      # valid installers (e.g. cosmetic post-bundle steps fail). We tolerate
-      # that here, then the "Verify Windows installers" step below re-asserts
-      # that real artifacts exist — so a genuinely broken build (no installer
-      # produced) still fails the job loudly instead of silently shipping
-      # nothing through the release step's `if: always()`.
-      - name: Build Tauri app (Windows)
-        id: build_windows
+      # Decide whether this Windows build is signed. A tagged release or an
+      # explicitly requested candidate is a "release build" that we sign — but
+      # only when every SignPath value is present. Missing config downgrades to
+      # an unsigned build (with a warning) instead of failing the release.
+      - name: Determine Windows signing mode
+        id: win_signing
         if: runner.os == 'Windows'
-        continue-on-error: true
+        shell: bash
+        env:
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          SIGNPATH_PROJECT_SLUG: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          SIGNPATH_POLICY_SLUG: ${{ vars.SIGNPATH_POLICY_SLUG }}
+          SIGNPATH_ARTIFACT_CONFIGURATION_SLUG: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          WINDOWS_SIGNING_PUBLISHER: ${{ vars.WINDOWS_SIGNING_PUBLISHER }}
+        run: |
+          # A tagged release or requested candidate is a signable release build.
+          release_build=false
+          if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ] || [ -n "${{ inputs.tag_name }}" ] || [ "${{ inputs.sign_windows_candidate }}" = "true" ]; then
+            release_build=true
+          fi
+
+          # Signed release candidates may only be built from protected main.
+          if [ "${{ inputs.sign_windows_candidate }}" = "true" ] && [ -z "${{ inputs.tag_name }}" ] && [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Signed Windows release candidates may only be built from the protected main branch"
+            exit 1
+          fi
+
+          # Signing is available only when every SignPath value is present.
+          signing_configured=true
+          for name in SIGNPATH_API_TOKEN SIGNPATH_ORGANIZATION_ID SIGNPATH_PROJECT_SLUG SIGNPATH_POLICY_SLUG SIGNPATH_ARTIFACT_CONFIGURATION_SLUG WINDOWS_SIGNING_PUBLISHER; do
+            if [ -z "${!name}" ]; then
+              signing_configured=false
+            fi
+          done
+
+          if [ "$release_build" = "true" ] && [ "$signing_configured" = "true" ]; then
+            echo "should_sign=true" >> "$GITHUB_OUTPUT"
+            echo "Windows release build: SignPath is configured — producing a SIGNED build."
+          elif [ "$release_build" = "true" ]; then
+            echo "should_sign=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::SignPath is not configured; producing an UNSIGNED Windows release. Windows will show an 'unknown publisher' warning. Populate the SIGNPATH_* secret/variables to enable signing."
+          else
+            echo "should_sign=false" >> "$GITHUB_OUTPUT"
+            echo "Non-release Windows build — producing an unsigned internal artifact."
+          fi
+
+      # Windows signing is best-effort: a tagged release or requested candidate
+      # is signed via the split build/sign/bundle flow below ONLY when SignPath
+      # is configured (see "Determine Windows signing mode"). When it isn't, the
+      # release falls back to this unsigned internal-artifact path so releases
+      # are never blocked on signing config — Windows just shows an "unknown
+      # publisher" warning until SignPath secrets/variables are populated.
+      - name: Build Tauri app (Windows internal artifact)
+        id: build_windows
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign != 'true'
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -377,16 +431,70 @@ jobs:
           tauriScript: npx tauri
           args: --target ${{ matrix.rust-target }}
 
-      # Fail loud if the Windows build produced no installer. This step has NO
-      # continue-on-error, so an empty bundle dir fails the job — the only thing
-      # we suppress above is Tauri's non-zero-but-successful exit, not a build
-      # that genuinely produced nothing to ship.
+      - name: Build Windows application binaries for signing
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign == 'true'
+        shell: bash
+        run: |
+          cd src-tauri
+          npx tauri build --target ${{ matrix.rust-target }} --no-bundle
+
+      - name: Stage unsigned Windows application binaries
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign == 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force windows-binaries-unsigned | Out-Null
+          Copy-Item "src-tauri/target/${{ matrix.rust-target }}/release/vireo.exe" windows-binaries-unsigned
+          Copy-Item "src-tauri/binaries/vireo-server-${{ matrix.rust-target }}.exe" windows-binaries-unsigned
+
+      - name: Upload Windows application binaries for signing
+        id: upload_windows_binaries
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vireo-windows-binaries-unsigned
+          path: windows-binaries-unsigned/*
+          retention-days: 1
+
+      - name: Sign Windows application binaries with SignPath
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign == 'true'
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.upload_windows_binaries.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: windows-binaries-signed
+
+      - name: Install and verify signed Windows application binaries
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign == 'true'
+        shell: pwsh
+        run: |
+          ./scripts/verify_windows_signatures.ps1 -Root windows-binaries-signed -ExpectedPublisher '${{ vars.WINDOWS_SIGNING_PUBLISHER }}'
+          $app = Get-ChildItem windows-binaries-signed -Recurse -Filter "vireo.exe" | Select-Object -First 1 -ExpandProperty FullName
+          $sidecar = Get-ChildItem windows-binaries-signed -Recurse -Filter "vireo-server-${{ matrix.rust-target }}.exe" | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $app -or -not $sidecar) { throw "SignPath output is missing an application binary" }
+          Copy-Item $app "src-tauri/target/${{ matrix.rust-target }}/release/vireo.exe" -Force
+          Copy-Item $sidecar "src-tauri/binaries/vireo-server-${{ matrix.rust-target }}.exe" -Force
+
+      - name: Bundle signed Windows application
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign == 'true'
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          cd src-tauri
+          npx tauri bundle --target ${{ matrix.rust-target }} --bundles nsis,msi
+
+      # Fail loudly if the Windows build produced no installer.
       - name: Verify Windows installers
         if: runner.os == 'Windows'
         shell: bash
         env:
           BUNDLE_DIR: src-tauri/target/${{ matrix.rust-target }}/release/bundle
-          BUILD_OUTCOME: ${{ steps.build_windows.outcome }}
         run: |
           echo "Searching for installers under: $BUNDLE_DIR"
 
@@ -409,11 +517,78 @@ jobs:
             echo "  $f ($(du -h "$f" | cut -f1))"
           done
 
-          # If Tauri itself reported failure AND yet we have installers, surface
-          # it as a warning so the cosmetic post-bundle failure stays visible.
-          if [[ "$BUILD_OUTCOME" == "failure" ]]; then
-            echo "::warning::Tauri build step reported failure but valid installers were produced (tolerated post-bundle error). Review the build log above."
-          fi
+      - name: Smoke-test unsigned Windows internal artifact
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign != 'true'
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem "src-tauri/target/${{ matrix.rust-target }}/release/bundle" -Recurse -Filter "*-setup.exe" | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $installer) { throw "NSIS setup executable not found" }
+          ./scripts/windows_package_smoke.ps1 -Installer $installer
+
+      - name: Stage unsigned Windows installers
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign == 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force windows-installers-unsigned | Out-Null
+          Get-ChildItem "src-tauri/target/${{ matrix.rust-target }}/release/bundle" -Recurse -File |
+            Where-Object { $_.Extension -in '.exe', '.msi' } |
+            Copy-Item -Destination windows-installers-unsigned
+
+      - name: Upload unsigned Windows signing input
+        id: upload_windows_installers
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vireo-windows-installers-unsigned
+          path: windows-installers-unsigned/*
+          retention-days: 1
+
+      - name: Sign Windows installers with SignPath
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign == 'true'
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.upload_windows_installers.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-windows
+
+      - name: Verify signed Windows artifacts
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign == 'true'
+        shell: pwsh
+        run: |
+          ./scripts/verify_windows_signatures.ps1 -Root signed-windows -ExpectedPublisher '${{ vars.WINDOWS_SIGNING_PUBLISHER }}'
+
+      # Authenticode changes the installer bytes, invalidating the updater
+      # signatures Tauri created before SignPath. Sign the final bytes again.
+      - name: Sign final Windows updater artifacts
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign == 'true'
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { throw "TAURI_SIGNING_PRIVATE_KEY is required" }
+          Get-ChildItem signed-windows -Recurse -File |
+            Where-Object { $_.Extension -in '.exe', '.msi' } |
+            ForEach-Object {
+              Remove-Item "$($_.FullName).sig" -ErrorAction SilentlyContinue
+              npx tauri signer sign $_.FullName
+              if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$($_.FullName).sig")) {
+                throw "Failed to create updater signature for $($_.Name)"
+              }
+            }
+
+      - name: Smoke-test signed Windows artifact
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign == 'true'
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem signed-windows -Recurse -Filter "*-setup.exe" | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $installer) { throw "Signed NSIS setup executable not found" }
+          ./scripts/windows_package_smoke.ps1 -Installer $installer -RequireSignature
 
       # ── Dump resource monitor (Linux only) ─────────────────
       - name: Dump resource monitor log
@@ -426,6 +601,7 @@ jobs:
 
       # ── Upload artifacts ──────────────────────────────────
       - name: Upload build artifacts
+        if: runner.os != 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: vireo-${{ matrix.label }}
@@ -444,12 +620,34 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+      - name: Upload unsigned Windows CI artifacts
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vireo-${{ matrix.label }}
+          path: |
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.msi
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.exe
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.exe.sig
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.msi.sig
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload signed Windows artifacts
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.sign_windows_candidate && inputs.tag_name == '' && 'vireo-windows-x86_64-signed-candidate' || 'vireo-windows-x86_64' }}
+          path: signed-windows/**/*
+          if-no-files-found: error
+          retention-days: 30
+
   # ── Release job ─────────────────────────────────────────
   release:
     needs: build
     runs-on: ubuntu-latest
-    # Run even if some builds failed — release whatever succeeded
-    if: always() && (startsWith(github.ref, 'refs/tags/v') || github.event.inputs.tag_name != '')
+    # Every platform, including signed Windows artifacts, must succeed.
+    if: needs.build.result == 'success' && (startsWith(github.ref, 'refs/tags/v') || github.event.inputs.tag_name != '')
 
     steps:
       - name: Checkout repository
@@ -473,6 +671,14 @@ jobs:
       - name: Collect release files
         run: |
           mkdir -p release-files
+          # Drop every unsigned Windows signing-input artifact so it can't be
+          # scooped into the release. The unsigned installers share filenames
+          # with the SignPath-signed outputs and would otherwise overwrite them
+          # (or leave signed .sig sidecars paired with unsigned installer
+          # bytes); the unsigned raw binaries (vireo.exe, vireo-server-*.exe)
+          # would ship alongside the signed installers.
+          rm -rf artifacts/vireo-windows-installers-unsigned
+          rm -rf artifacts/vireo-windows-binaries-unsigned
           # Regular installers (unique names across platforms)
           find artifacts -type f \( \
             -name "*.dmg" -o \
@@ -503,6 +709,8 @@ jobs:
           done
 
           ls -lh release-files/
+
+          (cd release-files && sha256sum $(find . -maxdepth 1 -type f ! -name 'SHA256SUMS.txt' -printf '%f\n' | sort) > SHA256SUMS.txt)
 
       - name: Generate update manifest
         run: python3 scripts/generate_update_manifest.py "${{ steps.tag.outputs.tag }}" release-files

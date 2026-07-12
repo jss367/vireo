@@ -43,7 +43,7 @@ This script:
 4. Runs E2E tests
 5. **Without `--publish`**: builds the Python sidecar via PyInstaller, builds the Tauri app (`.dmg` on Mac)
 6. Commits the version bump
-7. **With `--publish`**: tags, pushes — CI then builds all platforms and creates a draft GitHub Release (no local build)
+7. **With `--publish`**: tags, pushes — CI then builds all platforms and creates a public GitHub Release (no local build)
 
 ### Manual steps (if you prefer)
 
@@ -62,7 +62,10 @@ git tag v0.3.0
 git push origin v0.3.0
 ```
 
-This produces `.dmg` (macOS ARM + Intel), `.msi` (Windows), `.AppImage` and `.deb` (Linux) as a draft GitHub Release.
+This produces `.dmg` (macOS ARM), signed `.exe` and `.msi` installers
+(Windows x64), and `.AppImage` and `.deb` packages (Linux x64) as a
+public GitHub Release. Windows signing configuration is documented
+in `.signpath/README.md`.
 
 ## Version Management
 

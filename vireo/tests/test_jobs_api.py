@@ -636,6 +636,8 @@ def test_install_exiftool_endpoint_exists(app_and_db, monkeypatch):
     """Install-exiftool endpoint should exist and return JSON."""
     import shutil
     import subprocess
+    import sys
+    monkeypatch.setattr(sys, "platform", "darwin")
     original_which = shutil.which
     monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/local/bin/brew" if cmd == "brew" else (None if cmd == "exiftool" else original_which(cmd)))
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: type("R", (), {"returncode": 0, "stderr": ""})())
@@ -650,6 +652,8 @@ def test_install_exiftool_endpoint_exists(app_and_db, monkeypatch):
 def test_install_exiftool_fails_without_brew(app_and_db, monkeypatch):
     """Install endpoint should fail gracefully when brew is not available."""
     import shutil
+    import sys
+    monkeypatch.setattr(sys, "platform", "darwin")
     original_which = shutil.which
     monkeypatch.setattr(shutil, "which", lambda cmd: None if cmd in ("brew", "exiftool") else original_which(cmd))
     app, _ = app_and_db
@@ -696,7 +700,8 @@ def test_pipeline_job_config_includes_collection_name(app_and_db, monkeypatch):
     db.set_active_workspace(db._active_workspace_id)
     col_id = db.add_collection("Costa Rica selects", json.dumps([]))
 
-    def fake_run(job, runner, db_path, workspace_id, params, thumb_cache_dir=None):
+    def fake_run(job, runner, db_path, workspace_id, params, thumb_cache_dir=None,
+                 **_kwargs):
         return {"ok": True}
 
     monkeypatch.setattr(pipeline_job, "run_pipeline_job", fake_run)
@@ -2243,6 +2248,12 @@ def _save_remote_target(monkeypatch, tmp_path, **overrides):
     # check so happy-path tests don't depend on a real GNU rsync being
     # installed in the CI environment.
     monkeypatch.setattr(move_mod, "is_gnu_rsync", lambda _rb: True)
+    # The remote-archive preflight also probes for an OpenSSH client
+    # (added for Windows). Stub so happy-path tests don't require ssh
+    # in the CI environment.
+    monkeypatch.setattr(
+        move_mod, "resolve_ssh_bin", lambda configured="": "/usr/bin/ssh",
+    )
     return entry
 
 
@@ -2417,7 +2428,7 @@ def test_pipeline_remote_archive_snapshots_target_at_enqueue(
     captured = {}
 
     def fake_run(job, runner, db_path, workspace_id, params,
-                 thumb_cache_dir=None):
+                 thumb_cache_dir=None, **_kwargs):
         captured["params"] = params
         return {}
 
@@ -3282,6 +3293,27 @@ def test_import_in_place_no_destination_required(app_and_db, tmp_path):
     assert result["after_import_skipped"] == "import-only"
 
 
+def test_import_in_place_can_target_new_workspace(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    old_ws = db._active_workspace_id
+
+    resp = client.post("/api/jobs/import-in-place", json={
+        "sources": [_import_card(tmp_path)],
+        "after_import": None,
+        "new_workspace_name": "Card Import",
+    })
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+    assert data["workspace"]["name"] == "Card Import"
+
+    config = _job_config(client, data["job_id"])
+    assert config["workspace_id"] != old_ws
+    assert config["created_workspace"]["name"] == "Card Import"
+    active = client.get("/api/workspaces/active").get_json()
+    assert active["id"] == config["workspace_id"]
+
+
 def test_import_photos_null_after_import_is_import_only(app_and_db, tmp_path):
     """after_import: null means import-only (PR 3's hook short-circuits) —
     same nullable vocabulary as pipeline.default_strategy."""
@@ -3295,6 +3327,28 @@ def test_import_photos_null_after_import_is_import_only(app_and_db, tmp_path):
     assert resp.status_code == 200, resp.get_json()
     config = _job_config(client, resp.get_json()["job_id"])
     assert config["after_import"] is None
+
+
+def test_import_photos_can_target_new_workspace(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    old_ws = db._active_workspace_id
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+        "new_workspace_name": "Archive Import",
+    })
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+    assert data["workspace"]["name"] == "Archive Import"
+
+    config = _job_config(client, data["job_id"])
+    assert config["workspace_id"] != old_ws
+    assert config["created_workspace"]["name"] == "Archive Import"
+    active = client.get("/api/workspaces/active").get_json()
+    assert active["id"] == config["workspace_id"]
 
 
 @pytest.mark.parametrize("bad", ["yolo", "none"])
@@ -3327,6 +3381,49 @@ def test_import_photos_after_import_defaults_from_workspace(
     assert resp.status_code == 200, resp.get_json()
     config = _job_config(client, resp.get_json()["job_id"])
     assert config["after_import"] == "cull_ready"
+
+
+def test_import_photos_new_workspace_ignores_old_default_strategy(
+        app_and_db, tmp_path):
+    """Regression: an omitted after_import must resolve against the TARGET
+    workspace's effective config, not the caller's previously-active one.
+    Otherwise a stale pipeline.default_strategy override on the old
+    workspace silently chains onto a fresh-workspace import."""
+    app, db = app_and_db
+    client = app.test_client()
+    old_ws = db._active_workspace_id
+    db.update_workspace(old_ws, config_overrides={
+        "pipeline": {"default_strategy": "cull_ready"},
+    })
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "new_workspace_name": "Fresh Archive",
+    })
+    assert resp.status_code == 200, resp.get_json()
+    config = _job_config(client, resp.get_json()["job_id"])
+    assert config["workspace_id"] != old_ws
+    assert config["after_import"] is None
+
+
+def test_import_in_place_new_workspace_ignores_old_default_strategy(
+        app_and_db, tmp_path):
+    """Same regression as above, exercised through the in-place endpoint —
+    both routes call _prepare_import_workspace so both had the bug."""
+    app, db = app_and_db
+    client = app.test_client()
+    old_ws = db._active_workspace_id
+    db.update_workspace(old_ws, config_overrides={
+        "pipeline": {"default_strategy": "cull_ready"},
+    })
+    resp = client.post("/api/jobs/import-in-place", json={
+        "sources": [_import_card(tmp_path)],
+        "new_workspace_name": "Fresh In-Place",
+    })
+    assert resp.status_code == 200, resp.get_json()
+    config = _job_config(client, resp.get_json()["job_id"])
+    assert config["workspace_id"] != old_ws
+    assert config["after_import"] is None
 
 
 def test_import_photos_validation_400s(app_and_db, tmp_path):

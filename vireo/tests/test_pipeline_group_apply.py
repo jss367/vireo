@@ -335,3 +335,56 @@ def test_state_endpoint_ignores_homonym_non_species_keyword(app_and_db):
     # reported, or it's a different id from the individual.
     assert data['species_kid'] != individual_kid
     assert data['photos'][str(pid)]['has_species_keyword'] is False
+
+
+def test_state_endpoint_gates_representative_on_current_eligibility(app_and_db):
+    """A stored representative preference that's now stale (photo rejected or
+    no longer carrying the species keyword) must NOT be reported as the
+    representative on the group modal, matching how browse/highlights hide it.
+    """
+    app, db = app_and_db
+    pids = _photo_ids(db)
+    live_id, rejected_id, untagged_id = pids[0], pids[1], pids[2]
+
+    # One species per photo so each failure mode is independently observable.
+    kid_live = db.add_keyword('Coyote Live', is_species=True)
+    kid_rejected = db.add_keyword('Coyote Rejected', is_species=True)
+    kid_untagged = db.add_keyword('Coyote Untagged', is_species=True)
+    db.tag_photo(live_id, kid_live)
+    db.tag_photo(rejected_id, kid_rejected)
+    db.tag_photo(untagged_id, kid_untagged)
+    db.set_species_representative('Coyote Live', live_id)
+    db.set_species_representative('Coyote Rejected', rejected_id)
+    db.set_species_representative('Coyote Untagged', untagged_id)
+
+    # Make each stale in one of the two ways the shared payload attachers
+    # already filter on. The preference rows themselves remain intact.
+    db.update_photo_flag(rejected_id, 'rejected')
+    db.untag_photo(untagged_id, kid_untagged)
+
+    client = app.test_client()
+
+    # Eligible representative still lights up.
+    resp = client.post('/api/pipeline/group/state', json={
+        'photo_ids': [live_id],
+        'species': 'Coyote Live',
+    })
+    assert resp.status_code == 200
+    assert resp.get_json()['photos'][str(live_id)]['is_species_representative'] is True
+
+    # Rejected photo whose preference row still points at it does NOT.
+    resp = client.post('/api/pipeline/group/state', json={
+        'photo_ids': [rejected_id],
+        'species': 'Coyote Rejected',
+    })
+    assert resp.status_code == 200
+    assert resp.get_json()['photos'][str(rejected_id)]['is_species_representative'] is False
+
+    # Photo whose preference row still points at it but that no longer carries
+    # the stored species keyword also does NOT.
+    resp = client.post('/api/pipeline/group/state', json={
+        'photo_ids': [untagged_id],
+        'species': 'Coyote Untagged',
+    })
+    assert resp.status_code == 200
+    assert resp.get_json()['photos'][str(untagged_id)]['is_species_representative'] is False
