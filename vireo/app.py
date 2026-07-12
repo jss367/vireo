@@ -11794,6 +11794,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except schema.ValidationError as e:
             return json_error(str(e), status=400)
 
+        # default_process_id points into saved_processes; config_schema only
+        # int-coerces it, so validate existence here too (mirrors the
+        # workspace PATCH and _validate_workspace_config_overrides). Without
+        # this, a stale global default lets workspaces that inherit it hit the
+        # import endpoints' "unknown process id" wall and fail to auto-process.
+        if (
+            key == "pipeline.default_process_id"
+            and value is not None
+            and _get_db().get_saved_process(value) is None
+        ):
+            return json_error(f"unknown process id: {value}", status=400)
+
         with _settings_write_lock:
             raw = _read_raw_config_file()
             schema.set_dotted(raw, key, value)

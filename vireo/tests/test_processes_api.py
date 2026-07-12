@@ -165,6 +165,30 @@ def test_workspace_default_accepts_valid_id(app_and_db):
     assert resp.get_json()["value"] == pid
 
 
+def test_global_default_rejects_unknown_id(app_and_db):
+    """The global settings PATCH must also validate default_process_id against
+    the DB — a stale global default lets workspaces that inherit it hit the
+    import endpoints' unknown-process wall and fail to auto-process."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.patch("/api/settings/global", json={
+        "key": "pipeline.default_process_id", "value": 999999,
+    })
+    assert resp.status_code == 400
+    assert "unknown process id" in resp.get_json()["error"]
+
+
+def test_global_default_accepts_valid_id(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.get_saved_processes()[0]["id"]
+    resp = client.patch("/api/settings/global", json={
+        "key": "pipeline.default_process_id", "value": pid,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["value"] == pid
+
+
 def test_settings_schema_injects_process_picker(app_and_db):
     """The settings widget renders as a picker: api_settings_schema swaps the
     stored int spec for an enum populated from the live process list.
