@@ -2552,6 +2552,41 @@ def test_pipeline_cull_ready_pins_miss_enabled_false(app_and_db, monkeypatch):
         assert cfg["skip_classify"] is False  # Cull-ready keeps classify on
 
 
+def test_pipeline_full_process_opts_into_eye_detection(app_and_db, monkeypatch):
+    # A saved process with Eye Keypoints on (the "Full" seed:
+    # skip_eye_keypoints=False) run by id must set eye_detect_override=True, so
+    # the eye stage runs instead of deferring to the workspace's
+    # eye_detect_enabled default (False) and silently skipping — mirroring what
+    # checking the Eye Keypoints box on the Process page does.
+    app, db = app_and_db
+    pid = _process_id(db, "Full")
+    col_id = _make_collection(app)
+    _fake_active_model(monkeypatch)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "process_id": pid,
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg["eye_detect_override"] is True
+
+
+def test_pipeline_eyes_off_process_leaves_eye_override_none(app_and_db, monkeypatch):
+    # A process with Eye Keypoints off (Identify birds) must NOT force the eye
+    # override — nothing to opt into, and the workspace default still governs.
+    app, db = app_and_db
+    pid = _process_id(db, "Identify birds")
+    col_id = _make_collection(app)
+    _fake_active_model(monkeypatch)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "process_id": pid,
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg["eye_detect_override"] is None
+
+
 def test_pipeline_unknown_process_id_404(app_and_db):
     app, _ = app_and_db
     col_id = _make_collection(app)

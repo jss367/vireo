@@ -3686,6 +3686,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             except ValueError as e:
                 return json_error(str(e), 404)
             body = {**expanded, **body}
+            # Mirror the job path: a process with Eye Keypoints on opts into
+            # eye scoring, so the plan reflects the eye stage running rather
+            # than deferring to the workspace eye_detect_enabled default.
+            if (
+                not body.get("skip_eye_keypoints")
+                and body.get("eye_detect_override") is None
+            ):
+                body["eye_detect_override"] = True
         review_mode = body.get("review_mode")
         if review_mode is not None and not isinstance(review_mode, str):
             return json_error(
@@ -20595,6 +20603,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             skip_regroup=expanded["skip_regroup"],
             miss_enabled=expanded["miss_enabled"],
             review_mode=expanded["review_mode"],
+            # A saved process's Eye Keypoints toggle is an explicit opt-in
+            # (the Process-page checkbox sends eye_detect_override alongside
+            # it). When the process runs the eye stage, opt into eye scoring
+            # too so a chained/by-id run matches running the same toggles on
+            # the page, instead of silently deferring to the workspace's
+            # eye_detect_enabled default and skipping eye detection.
+            eye_detect_override=(
+                None if expanded["skip_eye_keypoints"] else True
+            ),
         )
         model_warning = _apply_no_model_auto_skip(params)
 
@@ -20637,6 +20654,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "skip_regroup": params.skip_regroup,
             "review_mode": params.review_mode,
             "miss_enabled": params.miss_enabled,
+            "eye_detect_override": params.eye_detect_override,
         }
         if chained_from:
             # Provenance for the jobs panel: this run was started by an
@@ -20689,6 +20707,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # Expansion supplies *defaults*; explicitly-present body keys
             # win, so a caller can pin one flag on top of a process.
             body = {**expanded, **body}
+            # The process's Eye Keypoints toggle is an explicit opt-in (the
+            # Process-page checkbox sends eye_detect_override with it). Mirror
+            # that for a by-id run so the eye stage runs instead of deferring
+            # to the workspace eye_detect_enabled default; an explicit caller
+            # override still wins.
+            if (
+                not body.get("skip_eye_keypoints")
+                and body.get("eye_detect_override") is None
+            ):
+                body["eye_detect_override"] = True
 
         source = body.get("source")
         sources = body.get("sources")
@@ -21334,6 +21362,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "skip_regroup": params.skip_regroup,
             "review_mode": params.review_mode,
             "miss_enabled": params.miss_enabled,
+            "eye_detect_override": params.eye_detect_override,
         }
         # Preserve the caller's original folder_ids alongside the derived
         # ad-hoc collection_id so the Jobs page can show both what the user
