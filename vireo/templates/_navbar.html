@@ -2655,6 +2655,15 @@ window.NAV_ALL_PAGES = [
 
   let draggedEl = null;
   let indicator = null;
+  // Last pointer X seen during the drag, and a guard so the reorder is
+  // committed exactly once per drag. We commit on `dragend` (which fires
+  // reliably on the source element across engines, including the macOS
+  // WKWebView the desktop app runs in) rather than relying solely on the
+  // `drop` event — WKWebView frequently never fires `drop` for HTML5
+  // drag-and-drop, which left the dragged tab snapping back to its
+  // original position. `drop`, when it does fire, is a fast-path.
+  let lastClientX = null;
+  let committed = false;
 
   function createIndicator() {
     const el = document.createElement('span');
@@ -2688,14 +2697,16 @@ window.NAV_ALL_PAGES = [
     const newOrder = tabAnchors().map(a => a.dataset.navId);
     if (window._navTabs) window._navTabs.setTabs(newOrder);
   }
-  function commitDrop(e) {
-    if (!draggedEl) return;
-    e.preventDefault();
-    e.stopPropagation();
+  // Move the dragged tab to wherever `clientX` points and persist the new
+  // order. Guarded by `committed` so a drag that fires both `drop` and
+  // `dragend` only reorders/persists once.
+  function commitReorder(clientX) {
+    if (committed || !draggedEl || clientX == null) return;
     const s = strip();
     if (!s) return;
+    committed = true;
     removeIndicator();
-    s.insertBefore(draggedEl, dropReference(e.clientX));
+    s.insertBefore(draggedEl, dropReference(clientX));
     persistCurrentOrder();
   }
 
@@ -2707,23 +2718,36 @@ window.NAV_ALL_PAGES = [
       link.dataset.dragBound = '1';
       link.addEventListener('dragstart', function(e) {
         draggedEl = this;
+        lastClientX = null;
+        committed = false;
         this.classList.add('dragging');
         e.dataTransfer.effectAllowed = 'move';
         e.dataTransfer.setData('text/plain', this.dataset.navId);
       });
       link.addEventListener('dragend', function() {
+        // Primary commit path: `dragend` always fires on the source, even
+        // in WKWebView where `drop` may not. No-op if `drop` already
+        // committed this drag.
+        commitReorder(lastClientX);
         this.classList.remove('dragging');
         removeIndicator();
         draggedEl = null;
+        lastClientX = null;
+        committed = false;
       });
       link.addEventListener('dragover', function(e) {
         if (!draggedEl || draggedEl === this) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
+        lastClientX = e.clientX;
         showDropIndicator(e.clientX);
       });
       link.addEventListener('drop', function(e) {
-        commitDrop(e);
+        // Fast-path when the engine delivers `drop`. `dragend` still fires
+        // afterward but `committed` makes it a no-op.
+        e.preventDefault();
+        e.stopPropagation();
+        commitReorder(e.clientX);
       });
     });
   }
@@ -2744,9 +2768,15 @@ window.NAV_ALL_PAGES = [
       if (!draggedEl) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = 'move';
+      lastClientX = e.clientX;
       showDropIndicator(e.clientX);
     });
-    s.addEventListener('drop', commitDrop);
+    s.addEventListener('drop', function(e) {
+      if (!draggedEl) return;
+      e.preventDefault();
+      e.stopPropagation();
+      commitReorder(e.clientX);
+    });
     bindDragHandlers();
     const mo = new MutationObserver(() => bindDragHandlers());
     mo.observe(s, {childList: true});
