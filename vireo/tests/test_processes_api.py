@@ -237,6 +237,31 @@ def test_settings_import_accepts_null_default_process_id(app_and_db):
     assert cfg.load()["pipeline"]["default_process_id"] is None
 
 
+def test_api_config_rejects_unknown_default_process_id(app_and_db):
+    """The legacy /api/config POST deep-merges the pipeline block, so it must
+    apply the same saved-process existence check as the settings PATCH/import
+    paths — a stale global default here breaks every inheriting import."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/config", json={
+        "pipeline": {"default_process_id": 999999},
+    })
+    assert resp.status_code == 400
+    assert "unknown process id" in resp.get_json()["error"]
+
+
+def test_api_config_accepts_valid_default_process_id(app_and_db):
+    import config as cfg
+    app, db = app_and_db
+    pid = db.get_saved_processes()[0]["id"]
+    client = app.test_client()
+    resp = client.post("/api/config", json={
+        "pipeline": {"default_process_id": pid},
+    })
+    assert resp.status_code == 200, resp.get_json()
+    assert cfg.load()["pipeline"]["default_process_id"] == pid
+
+
 def test_delete_process_does_not_fossilize_defaults(app_and_db):
     """Deleting the globally-defaulted process must NOT rewrite the raw
     config with the fully deep-merged DEFAULTS.

@@ -12025,6 +12025,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         current[key] = cfg._deep_merge(current[key], body[key])
                     else:
                         current[key] = body[key]
+            # default_process_id points into saved_processes; the deep-merge
+            # above can carry a stale or foreign id into the global config.
+            # Reject it here like the settings PATCH/import paths, else
+            # workspaces inheriting this global default hit "unknown process
+            # id" in _validate_after_import on their next import instead of
+            # starting it.
+            pipeline_current = current.get("pipeline")
+            if isinstance(pipeline_current, dict):
+                pid = pipeline_current.get("default_process_id")
+                if pid is not None:
+                    if not isinstance(pid, int) or isinstance(pid, bool):
+                        return json_error(
+                            "pipeline.default_process_id must be an integer "
+                            "or null", status=400,
+                        )
+                    if _get_db().get_saved_process(pid) is None:
+                        return json_error(
+                            f"unknown process id: {pid}", status=400
+                        )
             # Apply HF token to environment immediately
             hf_token = current.get("hf_token", "")
             if hf_token:
