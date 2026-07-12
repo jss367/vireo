@@ -11985,6 +11985,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             except schema.ValidationError as e:
                 errors[schema_key] = str(e)
 
+        # default_process_id points into saved_processes; config_schema only
+        # coerces it to int/null. An imported config carrying an id from
+        # another DB — or a stale id after a process was deleted — would
+        # silently write through here and then hit the "unknown process id"
+        # 400 at every import that inherits this global default. Mirror the
+        # global PATCH check so the failure surfaces at the import layer.
+        pid_key = "pipeline.default_process_id"
+        if pid_key not in errors:
+            pid_val = schema.get_dotted(payload, pid_key, default=_MISSING)
+            if (
+                pid_val is not _MISSING
+                and pid_val is not None
+                and _get_db().get_saved_process(pid_val) is None
+            ):
+                errors[pid_key] = f"unknown process id: {pid_val}"
+
         # Structured non-schema keys still need shape validation, otherwise a
         # malformed payload would write through to the file and crash
         # downstream UI consumers that assume a specific shape.

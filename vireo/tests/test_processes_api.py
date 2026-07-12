@@ -189,6 +189,54 @@ def test_global_default_accepts_valid_id(app_and_db):
     assert resp.get_json()["value"] == pid
 
 
+def test_settings_import_rejects_unknown_default_process_id(app_and_db):
+    """The settings-import endpoint must apply the same DB check as the
+    global PATCH. An imported config carrying an id from another DB (or a
+    since-deleted process) would otherwise write through and 400 every
+    subsequent import that inherits it — the exact "silent stale default"
+    Codex flagged for the PATCH path."""
+    import json as _json
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/settings/import", json={
+        "json": _json.dumps({"pipeline": {"default_process_id": 999999}}),
+    })
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert "pipeline.default_process_id" in body["errors"]
+    assert "unknown process id" in body["errors"]["pipeline.default_process_id"]
+
+
+def test_settings_import_accepts_valid_default_process_id(app_and_db):
+    """Round trip for a valid id through the import endpoint."""
+    import json as _json
+
+    import config as cfg
+    app, db = app_and_db
+    pid = db.get_saved_processes()[0]["id"]
+    client = app.test_client()
+    resp = client.post("/api/settings/import", json={
+        "json": _json.dumps({"pipeline": {"default_process_id": pid}}),
+    })
+    assert resp.status_code == 200
+    assert cfg.load()["pipeline"]["default_process_id"] == pid
+
+
+def test_settings_import_accepts_null_default_process_id(app_and_db):
+    """Null (import only) short-circuits the DB check — the schema still
+    accepts it as a nullable int and the runtime never dereferences None."""
+    import json as _json
+
+    import config as cfg
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/settings/import", json={
+        "json": _json.dumps({"pipeline": {"default_process_id": None}}),
+    })
+    assert resp.status_code == 200
+    assert cfg.load()["pipeline"]["default_process_id"] is None
+
+
 def test_settings_schema_injects_process_picker(app_and_db):
     """The settings widget renders as a picker: api_settings_schema swaps the
     stored int spec for an enum populated from the live process list.
