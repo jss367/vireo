@@ -21921,8 +21921,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # too-wide range that would misplace this encounter under time sorts.
             enc["time_range"] = _compute_time_range(photos_by_id, enc["photo_ids"])
             enc["species_predictions"] = rebuild_species_predictions(results, enc["photo_ids"])
+            # No fallback: if the remaining photos have no predictions the
+            # source encounter's stale label was likely inherited from the
+            # burst we just detached, so keeping it would advertise the
+            # detached burst's species as a one-click candidate on an
+            # unrelated group of photos.
             enc["species"] = _rebuild_encounter_species_label(
-                results, enc["photo_ids"], fallback=enc.get("species")
+                results, enc["photo_ids"]
             )
             # Pair indices in trace reference the original photo composition;
             # drop it so the algorithm-trace panel renders an honest "needs
@@ -21934,8 +21939,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Create new encounter from detached burst
         new_enc_predictions = rebuild_species_predictions(results, detached_ids)
+        # No fallback: predictionless detached photos must not inherit the
+        # parent encounter's species — that is exactly the stale-label bug
+        # the surrounding PR is fixing.
         new_enc_species = _rebuild_encounter_species_label(
-            results, detached_ids, fallback=enc.get("species")
+            results, detached_ids
         )
         # Also refresh the detached burst's own predictions
         detached["species_predictions"] = new_enc_predictions

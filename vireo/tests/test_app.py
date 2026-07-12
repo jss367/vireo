@@ -3234,6 +3234,86 @@ def test_pipeline_detach_photo_partial_confirm_leaves_override_null(app_and_db):
     assert detached["species_override"] is None
 
 
+def test_pipeline_detach_burst_predictionless_does_not_inherit_parent_species(app_and_db):
+    """When the detached burst's photos have no species predictions,
+    ``encounter_species_label`` returns ``(None, 0.0)``. The new encounter
+    must remain unlabeled rather than inheriting the source encounter's
+    label — the parent species almost certainly came from the sibling
+    burst we just left behind, so advertising it as a one-click candidate
+    on the unrelated detached photos would reintroduce the stale-inherited-
+    label bug this change removes. Mirror check for the shrunken source
+    encounter when the only predicted burst is detached away from
+    unclassified siblings.
+    """
+    import json as _json
+    app, db = app_and_db
+    client = app.test_client()
+
+    cache_dir = os.path.dirname(app.config["DB_PATH"])
+    ws_id = db._active_workspace_id
+    results = {
+        "encounters": [
+            {
+                # Encounter-level label was inherited from burst [1,2] alone;
+                # burst [3] has no predictions of its own.
+                "species": ["Robin", 0.9],
+                "confirmed_species": None,
+                "species_predictions": [],
+                "species_confirmed": False,
+                "photo_count": 3,
+                "burst_count": 2,
+                "time_range": [None, None],
+                "photo_ids": [1, 2, 3],
+                "bursts": [
+                    {"photo_ids": [1, 2], "species_predictions": [], "species_override": None},
+                    {"photo_ids": [3], "species_predictions": [], "species_override": None},
+                ],
+            }
+        ],
+        "photos": [
+            {"id": 1, "label": "KEEP", "filename": "a.jpg",
+             "species_top5": [["Robin", 0.9, "m1"]]},
+            {"id": 2, "label": "KEEP", "filename": "b.jpg",
+             "species_top5": [["Robin", 0.85, "m1"]]},
+            # Photo 3 has no predictions — the burst we detach is unclassified.
+            {"id": 3, "label": "REVIEW", "filename": "c.jpg",
+             "species_top5": []},
+        ],
+        "summary": {"total_photos": 3, "encounter_count": 1, "burst_count": 2,
+                     "keep_count": 2, "review_count": 1, "reject_count": 0, "rarity_protected": 0},
+    }
+    path = os.path.join(cache_dir, f"pipeline_results_ws{ws_id}.json")
+    with open(path, "w") as f:
+        _json.dump(results, f)
+
+    resp = client.post("/api/pipeline/detach-burst",
+                       json={"encounter_index": 0, "burst_index": 1})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Sanity: two encounters, detached photo is on the new one.
+    assert len(data["encounters"]) == 2
+    assert data["encounters"][1]["photo_ids"] == [3]
+    # The detached encounter's photos have no predictions of their own,
+    # so its species must be [None, 0.0] — not the parent's Robin label.
+    assert data["encounters"][1]["species"] == [None, 0.0]
+
+    # Now the reverse: detach the only predicted burst and leave an
+    # encounter of unclassified photos behind. The remaining encounter
+    # must not keep the pre-detach Robin label.
+    with open(path, "w") as f:
+        _json.dump(results, f)
+    resp = client.post("/api/pipeline/detach-burst",
+                       json={"encounter_index": 0, "burst_index": 0})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Source encounter now holds only photo 3 (no predictions).
+    assert data["encounters"][0]["photo_ids"] == [3]
+    assert data["encounters"][0]["species"] == [None, 0.0]
+    # And the detached burst (photos 1, 2) keeps its own Robin label.
+    assert data["encounters"][1]["photo_ids"] == [1, 2]
+    assert data["encounters"][1]["species"][0] == "Robin"
+
+
 def test_pipeline_detach_burst_clears_stale_trace(app_and_db):
     """detach-burst must drop the source encounter's per-pair trace because
     pairs involving the detached photos are no longer present in the
