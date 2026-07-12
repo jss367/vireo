@@ -662,9 +662,49 @@ def test_api_storage_reports_volume_reclaimable_and_masks(
         data["offline_originals"]["size"], data["masks"]["size"],
     ])
     assert data["storage_root"] == str(tmp_path)
-    assert data["volume"]["name"]
-    assert data["volume"]["free"] >= 0
-    assert data["volume"]["capacity"] > 0
+    assert data["locations"]
+    assert data["volumes"]
+    assert all(volume["name"] for volume in data["volumes"])
+    assert all(volume["free"] >= 0 for volume in data["volumes"])
+    assert all(volume["capacity"] > 0 for volume in data["volumes"])
+
+
+def test_api_storage_reports_each_backing_volume(
+    app_and_db, tmp_path, monkeypatch,
+):
+    app, _ = app_and_db
+    import app as app_module
+    import classifier
+
+    embedding_dir = tmp_path / "separate-embedding-volume"
+    embedding_dir.mkdir()
+    (embedding_dir / "labels.npy").write_bytes(b"embedding")
+    monkeypatch.setattr(classifier, "CACHE_DIR", str(embedding_dir))
+
+    real_ismount = app_module.os.path.ismount
+    simulated_mounts = {str(tmp_path), str(embedding_dir)}
+    monkeypatch.setattr(
+        app_module.os.path, "ismount",
+        lambda path: path in simulated_mounts or real_ismount(path),
+    )
+    disk_usage = app_module.shutil._ntuple_diskusage
+    monkeypatch.setattr(
+        app_module.shutil, "disk_usage",
+        lambda path: disk_usage(
+            1000, 900 if path == str(embedding_dir) else 600,
+            100 if path == str(embedding_dir) else 400,
+        ),
+    )
+
+    data = app.test_client().get('/api/storage').get_json()
+    by_mount = {volume["mount_path"]: volume for volume in data["volumes"]}
+    assert by_mount[str(tmp_path)]["free"] == 400
+    assert by_mount[str(embedding_dir)]["free"] == 100
+    embedding_location = next(
+        location for location in data["locations"]
+        if location["id"] == "embeddings"
+    )
+    assert embedding_location["volume"]["mount_path"] == str(embedding_dir)
 
 
 def test_clear_safe_storage_caches(app_and_db, tmp_path, monkeypatch):

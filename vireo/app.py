@@ -12364,44 +12364,85 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         reclaimable = thumb["size"] + preview["size"] + emb["size"]
 
         storage_root = os.path.dirname(app.config["THUMB_CACHE_DIR"])
-        usage_path = os.path.abspath(storage_root)
-        while not os.path.exists(usage_path):
-            parent = os.path.dirname(usage_path)
-            if parent == usage_path:
-                break
-            usage_path = parent
-        try:
-            usage = shutil.disk_usage(usage_path)
-            free_bytes = usage.free
-            capacity_bytes = usage.total
-        except OSError:
-            free_bytes = None
-            capacity_bytes = None
 
-        mount_path = usage_path
-        while not os.path.ismount(mount_path):
-            parent = os.path.dirname(mount_path)
-            if parent == mount_path:
-                break
-            mount_path = parent
-        if sys.platform.startswith("win"):
-            volume_name = os.path.splitdrive(mount_path)[0] or mount_path
-        elif mount_path == os.path.sep:
-            volume_name = "System volume"
-        else:
-            volume_name = os.path.basename(mount_path.rstrip(os.path.sep)) or mount_path
+        def _volume_for_path(path):
+            usage_path = os.path.abspath(path)
+            while not os.path.exists(usage_path):
+                parent = os.path.dirname(usage_path)
+                if parent == usage_path:
+                    break
+                usage_path = parent
+            try:
+                usage = shutil.disk_usage(usage_path)
+                free_bytes = usage.free
+                capacity_bytes = usage.total
+            except OSError:
+                free_bytes = None
+                capacity_bytes = None
+
+            mount_path = usage_path
+            while not os.path.ismount(mount_path):
+                parent = os.path.dirname(mount_path)
+                if parent == mount_path:
+                    break
+                mount_path = parent
+            if sys.platform.startswith("win"):
+                name = os.path.splitdrive(mount_path)[0] or mount_path
+            elif mount_path == os.path.sep:
+                name = "System volume"
+            else:
+                name = os.path.basename(mount_path.rstrip(os.path.sep)) or mount_path
+            return {
+                "name": name,
+                "mount_path": mount_path,
+                "free": free_bytes,
+                "capacity": capacity_bytes,
+            }
+
+        raw_locations = [
+            ("catalog", "Catalog and masks", os.path.dirname(db_path)),
+            (
+                "generated",
+                "Thumbnails, previews, and offline originals",
+                storage_root,
+            ),
+        ]
+        if emb["size"]:
+            raw_locations.append(("embeddings", "Label embeddings", EMB_CACHE_DIR))
+        if models_size:
+            raw_locations.append(("models", "Downloaded models", DEFAULT_MODELS_DIR))
+        if hf_size:
+            raw_locations.append(("hf_cache", "Hugging Face cache", hf_cache))
+
+        locations_by_path = {}
+        for location_id, label, path in raw_locations:
+            normalized = os.path.abspath(path)
+            if normalized not in locations_by_path:
+                locations_by_path[normalized] = {
+                    "id": location_id,
+                    "path": normalized,
+                    "labels": [],
+                    "volume": _volume_for_path(normalized),
+                }
+            locations_by_path[normalized]["labels"].append(label)
+        locations = list(locations_by_path.values())
+
+        volumes_by_mount = {}
+        for location in locations:
+            volume = location["volume"]
+            mount = volume["mount_path"]
+            if mount not in volumes_by_mount:
+                volumes_by_mount[mount] = dict(volume)
+                volumes_by_mount[mount]["location_ids"] = []
+            volumes_by_mount[mount]["location_ids"].append(location["id"])
 
         return jsonify(
             {
                 "total": total,
                 "reclaimable": reclaimable,
                 "storage_root": storage_root,
-                "volume": {
-                    "name": volume_name,
-                    "mount_path": mount_path,
-                    "free": free_bytes,
-                    "capacity": capacity_bytes,
-                },
+                "locations": locations,
+                "volumes": list(volumes_by_mount.values()),
                 "database": {"size": db_size, "path": db_path},
                 "thumbnails": thumb,
                 "previews": preview,
@@ -12629,8 +12670,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/storage/open-folder", methods=["POST"])
     def api_storage_open_folder():
-        """Open Vireo's server-selected storage root in the OS file manager."""
-        path = os.path.abspath(os.path.dirname(app.config["THUMB_CACHE_DIR"]))
+        """Open one of Vireo's server-selected storage paths."""
+        from classifier import CACHE_DIR as EMB_CACHE_DIR
+        from models import DEFAULT_MODELS_DIR
+
+        location_id = (request.get_json(silent=True) or {}).get(
+            "location", "generated"
+        )
+        locations = {
+            "catalog": os.path.dirname(db_path),
+            "generated": os.path.dirname(app.config["THUMB_CACHE_DIR"]),
+            "embeddings": EMB_CACHE_DIR,
+            "models": DEFAULT_MODELS_DIR,
+            "hf_cache": os.path.expanduser("~/.cache/huggingface/hub"),
+        }
+        path = locations.get(location_id)
+        if path is None:
+            return json_error("Unknown storage location")
+        path = os.path.abspath(path)
         if not os.path.isdir(path):
             return jsonify({"ok": False, "reason": "storage folder not found"})
         try:

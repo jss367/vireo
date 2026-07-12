@@ -128,9 +128,9 @@ body { padding-bottom: 36px; }
         <div class="health-detail">Database, generated files, models, and offline originals</div>
       </div>
       <div class="health-card">
-        <div class="health-label">Available on volume</div>
+        <div class="health-label">Lowest available space</div>
         <div class="health-value" id="storageFreeSize">-</div>
-        <div class="health-detail" id="storageVolumeName">Checking volume…</div>
+        <div class="health-detail" id="storageVolumeName">Checking storage volumes…</div>
       </div>
       <div class="health-card">
         <div class="health-label">Safe to reclaim</div>
@@ -140,11 +140,7 @@ body { padding-bottom: 36px; }
       </div>
     </div>
     <div id="storageLowSpaceWarning" class="storage-note storage-warning" style="display:none;"></div>
-    <div class="storage-location">
-      <span style="font-size:11px;color:var(--text-dim);">Storage location</span>
-      <code id="storageRootPath">-</code>
-      <button class="btn-secondary" onclick="openStorageFolder()" style="margin-left:auto;">Open folder</button>
-    </div>
+    <div id="storageLocations"></div>
     <div class="storage-legend">
       <span class="stat-kind safe">Safe to clear</span> regenerates automatically &nbsp;
       <span class="stat-kind download">Download again</span> can be restored from its source &nbsp;
@@ -331,22 +327,41 @@ async function loadStoragePanel() {
     var s = await safeFetch('/api/storage', {}, { toast: false });
     document.getElementById('storageTotalSize').textContent = storageFormatBytes(s.total);
     document.getElementById('storageReclaimableSize').textContent = storageFormatBytes(s.reclaimable);
-    document.getElementById('storageRootPath').textContent = s.storage_root || '-';
-    var volume = s.volume || {};
-    document.getElementById('storageFreeSize').textContent = storageFormatBytes(volume.free);
-    document.getElementById('storageVolumeName').textContent = volume.name
-      ? volume.name + (volume.capacity != null ? ' · ' + storageFormatBytes(volume.capacity) + ' capacity' : '')
-      : 'Volume unavailable';
-    var lowSpace = volume.free != null && volume.capacity != null &&
-      (volume.free < 10 * 1024 * 1024 * 1024 || volume.free / volume.capacity < 0.10);
+    var volumes = s.volumes || [];
+    var measuredVolumes = volumes.filter(function(v) { return v.free != null; });
+    measuredVolumes.sort(function(a, b) { return a.free - b.free; });
+    var tightest = measuredVolumes[0] || {};
+    document.getElementById('storageFreeSize').textContent = storageFormatBytes(tightest.free);
+    document.getElementById('storageVolumeName').textContent = tightest.name
+      ? (volumes.length > 1 ? volumes.length + ' volumes · tightest is ' : '') + tightest.name +
+        (tightest.capacity != null ? ' · ' + storageFormatBytes(tightest.capacity) + ' capacity' : '')
+      : 'Volume information unavailable';
+    var lowVolumes = measuredVolumes.filter(function(v) {
+      return v.capacity != null &&
+        (v.free < 10 * 1024 * 1024 * 1024 || v.free / v.capacity < 0.10);
+    });
     var lowSpaceEl = document.getElementById('storageLowSpaceWarning');
-    if (lowSpace) {
-      lowSpaceEl.textContent = 'Storage is running low on ' + (volume.name || 'this volume') +
-        '. Only ' + storageFormatBytes(volume.free) + ' remains.';
+    if (lowVolumes.length) {
+      lowSpaceEl.textContent = 'Storage is running low on ' + lowVolumes.map(function(v) {
+        return (v.name || 'a storage volume') + ' (' + storageFormatBytes(v.free) + ' free)';
+      }).join(', ') + '.';
       lowSpaceEl.style.display = '';
     } else {
       lowSpaceEl.style.display = 'none';
     }
+    var locationsHtml = '';
+    (s.locations || []).forEach(function(location) {
+      var locationVolume = location.volume || {};
+      locationsHtml += '<div class="storage-location">' +
+        '<span style="font-size:11px;color:var(--text-dim);">' +
+          storageEscapeHtml((location.labels || []).join(' · ')) + '</span>' +
+        '<code>' + storageEscapeHtml(location.path || '') + '</code>' +
+        '<span style="font-size:10px;color:var(--text-ghost);">' +
+          storageEscapeHtml(locationVolume.name || '') + ' · ' + storageFormatBytes(locationVolume.free) + ' free</span>' +
+        '<button class="btn-secondary" onclick="openStorageFolder(\'' + storageEscapeAttr(location.id) + '\')" style="margin-left:auto;">Open folder</button>' +
+        '</div>';
+    });
+    document.getElementById('storageLocations').innerHTML = locationsHtml;
     var clearSafeBtn = document.getElementById('clearSafeCachesBtn');
     clearSafeBtn.disabled = !s.reclaimable;
     clearSafeBtn.textContent = s.reclaimable
@@ -415,9 +430,13 @@ async function clearSafeCaches() {
   await refreshStoragePage();
 }
 
-async function openStorageFolder() {
+async function openStorageFolder(locationId) {
   try {
-    var result = await safeFetch('/api/storage/open-folder', {method: 'POST'});
+    var result = await safeFetch('/api/storage/open-folder', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({location: locationId}),
+    });
     if (!result.ok) throw new Error(result.reason || 'Could not open storage folder');
   } catch(e) {
     showToast((e && e.message) || 'Could not open storage folder', 'error');

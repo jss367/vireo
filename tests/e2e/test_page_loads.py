@@ -45,10 +45,10 @@ def test_storage_page_reports_health_and_safety(live_server, page):
     expect(page.locator("#storageFreeSize")).not_to_have_text("-")
     expect(page.locator("#storageReclaimableSize")).not_to_have_text("-")
     expect(page.locator("#storageUpdatedAt")).to_contain_text("Updated")
-    expect(page.locator("#storageRootPath")).not_to_have_text("-")
+    expect(page.locator("#storageLocations code").first).not_to_have_text("")
     expect(page.locator("#storageGrid .stat-label", has_text="Database")).to_have_count(1)
     expect(page.get_by_text("Safe to clear", exact=True).first).to_be_visible()
-    expect(page.get_by_role("button", name="Open folder")).to_be_visible()
+    expect(page.get_by_role("button", name="Open folder").first).to_be_visible()
 
 
 def _expect_text_correction_disabled(locator):
