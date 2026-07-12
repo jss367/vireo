@@ -10427,22 +10427,24 @@ class Database:
                      JOIN keywords k ON k.id = pk.keyword_id
                       AND (k.is_species = 1 OR k.type = 'taxonomy')
                      WHERE pk.photo_id = sr.photo_id
-                       AND k.name = sr.species
+                       AND vireo_normalize_keyword(k.name) =
+                           vireo_normalize_keyword(sr.species) COLLATE NOCASE
                  )"""
         rows = self.conn.execute(
-            f"""SELECT sr.species, sr.photo_id
+            f"""SELECT sr.species, sr.photo_id, sr.selected_order
                FROM species_representatives sr
                JOIN photos p ON p.id = sr.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                 AND wf.workspace_id = ?
                JOIN folders f ON f.id = p.folder_id
                  {eligibility_filter}
-               ORDER BY sr.species, sr.selected_order DESC, sr.id DESC""",
+               ORDER BY sr.selected_order DESC, sr.id DESC""",
             (ws,),
         ).fetchall()
         result = {}
         for row in rows:
-            ids = result.setdefault(row["species"], [])
+            species = self.canonical_species_name(row["species"])
+            ids = result.setdefault(species, [])
             if row["photo_id"] not in ids:
                 ids.append(row["photo_id"])
         return result
@@ -10578,7 +10580,8 @@ class Database:
             eligibility_filter = """
                  AND p.quality_score IS NOT NULL
                  AND COALESCE(p.flag, 'none') != 'rejected'
-                 AND sh.species = COALESCE(
+                 AND vireo_normalize_keyword(sh.species) =
+                     vireo_normalize_keyword(COALESCE(
                      (
                          SELECT k.name
                          FROM photo_keywords pk
@@ -10609,7 +10612,7 @@ class Database:
                          ORDER BY pr.confidence DESC, pr.id DESC
                          LIMIT 1
                      )
-                 )"""
+                 )) COLLATE NOCASE"""
         if species:
             rows = self.conn.execute(
                 f"""SELECT sh.species, sh.photo_id, sh.rank

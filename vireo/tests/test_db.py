@@ -15856,6 +15856,83 @@ def test_add_prediction_reuses_legacy_cased_prediction_review(tmp_path):
     assert review["status"] == "rejected"
 
 
+def test_species_highlights_eligible_matches_legacy_casing(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    db.conn.execute(
+        "INSERT OR IGNORE INTO workspace_folders (workspace_id, folder_id) "
+        "VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'a.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Common waxbill', 'taxonomy', 1)"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, kid),
+    )
+    db.conn.execute(
+        "INSERT INTO species_highlights "
+        "(workspace_id, species, photo_id, rank) "
+        "VALUES (?, 'Common Waxbill', ?, 1)",
+        (db._ws_id(), pid),
+    )
+    db.conn.commit()
+
+    assert db.get_species_highlights(eligible_only=True) == {
+        "Common Waxbill": {pid: 1}
+    }
+
+
+def test_species_representatives_merge_casing_by_recency(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    db.conn.execute(
+        "INSERT OR IGNORE INTO workspace_folders (workspace_id, folder_id) "
+        "VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Common waxbill', 'taxonomy', 1)"
+    ).lastrowid
+    photo_ids = []
+    for filename in ("old.jpg", "new.jpg"):
+        pid = db.conn.execute(
+            "INSERT INTO photos (folder_id, filename, flag) "
+            "VALUES (?, ?, 'none')",
+            (fid, filename),
+        ).lastrowid
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (pid, kid),
+        )
+        photo_ids.append(pid)
+    db.conn.execute(
+        "INSERT INTO species_representatives "
+        "(species, photo_id, selected_order) VALUES ('Common Waxbill', ?, 1)",
+        (photo_ids[0],),
+    )
+    db.conn.execute(
+        "INSERT INTO species_representatives "
+        "(species, photo_id, selected_order) VALUES ('Common waxbill', ?, 2)",
+        (photo_ids[1],),
+    )
+    db.conn.commit()
+
+    assert db.get_species_representative_lists(eligible_only=True) == {
+        "Common waxbill": [photo_ids[1], photo_ids[0]]
+    }
+
+
 def test_sentence_case_preserves_first_word_internal_caps(tmp_path):
     """Sentence-case species names must not mangle the leading eponym."""
     from db import Database
