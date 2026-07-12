@@ -9947,6 +9947,37 @@ class Database:
         src_str = str(src_id)
         dst_str = str(dst_id)
         _kw_placeholders = ",".join("?" * len(_kw_id_actions))
+        # Pre-existing survivor tags: for a `keyword_add` recorded against
+        # src_id, an item whose photo already carried dst_id at merge time
+        # can't be retargeted honestly — the UPDATE OR IGNORE on
+        # photo_keywords below leaves the survivor row untouched and drops
+        # the src row, so an undo of the retargeted entry would call
+        # untag_photo(pid, dst_id) and remove the user's survivor tag,
+        # which was never part of this add. Drop those items before
+        # retargeting so undo iterates 0 (or the still-legitimate) items
+        # only. Scoped to `keyword_add` because that's the action whose
+        # undo untags entry['new_value'] per item (see _apply_undo); the
+        # keyword_remove/species_replace undo paths tag on the survivor
+        # instead, which INSERT OR IGNOREs to a no-op when dst pre-existed.
+        preexisting_dst_photos = [
+            r["photo_id"] for r in self.conn.execute(
+                "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+                (dst_id,),
+            ).fetchall()
+        ]
+        for chunk in _chunks(preexisting_dst_photos):
+            ph = ",".join("?" for _ in chunk)
+            self.conn.execute(
+                f"""DELETE FROM edit_history_items
+                    WHERE new_value = ?
+                      AND photo_id IN ({ph})
+                      AND edit_id IN (
+                          SELECT id FROM edit_history
+                          WHERE new_value = ?
+                            AND action_type = 'keyword_add'
+                      )""",
+                [src_str, *chunk, src_str],
+            )
         # 1) edit_history.new_value: the canonical keyword id per entry.
         self.conn.execute(
             f"""UPDATE edit_history

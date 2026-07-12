@@ -13824,6 +13824,89 @@ def test_merge_keyword_into_preserves_prediction_accept_old_value(tmp_path):
         db.close()
 
 
+def test_merge_keyword_into_preserves_preexisting_survivor_tag(tmp_path):
+    """When a `keyword_add(src_id)` edit references a photo that already
+    carried dst_id at merge time, retargeting the edit onto dst_id would
+    let a later undo call untag_photo(dst_id) and strip the user's
+    survivor tag — which was never part of that add. `_merge_keyword_into`
+    must drop such items so undo iterates only over the items whose photos
+    did NOT pre-existingly hold the survivor. Covers the Codex finding on
+    the retargeting pass.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        ws = db.ensure_default_workspace()
+        db.set_active_workspace(ws)
+        fid = db.add_folder("/photos", name="photos")
+        pid_had_both = db.add_photo(
+            folder_id=fid, filename="both.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        pid_only_src = db.add_photo(
+            folder_id=fid, filename="src.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+
+        keep_id = db.add_keyword("Robin", kw_type="general")
+        merge_id = db.add_keyword("robin variant", kw_type="general")
+
+        # pid_had_both already carries the survivor before the add.
+        db.tag_photo(pid_had_both, keep_id)
+        # Both photos then get tagged with the variant that will be merged.
+        db.tag_photo(pid_had_both, merge_id)
+        db.tag_photo(pid_only_src, merge_id)
+
+        # A batch keyword_add edit records the variant tag on both photos.
+        eid = db.record_edit(
+            "keyword_add", "Added variant to 2 photos", str(merge_id),
+            [
+                {"photo_id": pid_had_both, "old_value": "",
+                 "new_value": str(merge_id)},
+                {"photo_id": pid_only_src, "old_value": "",
+                 "new_value": str(merge_id)},
+            ],
+            is_batch=True,
+        )
+
+        db._merge_keyword_into(merge_id, keep_id)
+        db.conn.commit()
+
+        # The item for pid_had_both must be gone — retargeting it would
+        # let undo strip the survivor tag that pre-existed.
+        remaining = db.conn.execute(
+            "SELECT photo_id, new_value FROM edit_history_items "
+            "WHERE edit_id = ? ORDER BY photo_id", (eid,),
+        ).fetchall()
+        remaining_pids = [r["photo_id"] for r in remaining]
+        assert pid_had_both not in remaining_pids, (
+            "keyword_add item for a photo that pre-existingly held the "
+            "survivor tag should be dropped, not retargeted"
+        )
+        assert pid_only_src in remaining_pids
+        # Surviving item is retargeted onto the survivor id.
+        [only_src_item] = [r for r in remaining if r["photo_id"] == pid_only_src]
+        assert only_src_item["new_value"] == str(keep_id)
+
+        # End-to-end: undo the edit and confirm the pre-existing survivor
+        # tag on pid_had_both is preserved.
+        db.undo_last_edit()
+        keep_tags_had_both = {
+            r["id"] for r in db.get_photo_keywords(pid_had_both)
+        }
+        assert keep_id in keep_tags_had_both, (
+            "undo removed the pre-existing survivor tag from pid_had_both"
+        )
+        # And pid_only_src, whose add was legitimately retargeted, no
+        # longer carries the survivor tag after undo.
+        keep_tags_only_src = {
+            r["id"] for r in db.get_photo_keywords(pid_only_src)
+        }
+        assert keep_id not in keep_tags_only_src
+    finally:
+        db.close()
+
+
 def test_add_photo_retries_on_database_is_locked(tmp_path):
     """The INSERT inside add_photo must retry transient 'database is locked'.
 
