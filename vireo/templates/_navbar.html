@@ -2655,13 +2655,17 @@ window.NAV_ALL_PAGES = [
 
   let draggedEl = null;
   let indicator = null;
-  // Last pointer X seen during the drag, and a guard so the reorder is
-  // committed exactly once per drag. We commit on `dragend` (which fires
-  // reliably on the source element across engines, including the macOS
-  // WKWebView the desktop app runs in) rather than relying solely on the
-  // `drop` event — WKWebView frequently never fires `drop` for HTML5
-  // drag-and-drop, which left the dragged tab snapping back to its
-  // original position. `drop`, when it does fire, is a fast-path.
+  // Last pointer X seen while the drag was over the strip, and a guard so
+  // the reorder is committed exactly once per drag. We commit on `dragend`
+  // (which fires reliably on the source element across engines, including
+  // the macOS WKWebView the desktop app runs in) rather than relying solely
+  // on the `drop` event — WKWebView frequently never fires `drop` for HTML5
+  // drag-and-drop, which left the dragged tab snapping back to its original
+  // position. `drop`, when it does fire, is a fast-path.
+  //
+  // `lastClientX` is cleared when the pointer leaves the strip so an
+  // aborted drag (release outside the navbar) can't commit a reorder from
+  // the last in-strip position.
   let lastClientX = null;
   let committed = false;
 
@@ -2762,7 +2766,14 @@ window.NAV_ALL_PAGES = [
     // bindDragHandlers() on every MutationObserver tick would otherwise
     // accumulate duplicate listeners.
     s.addEventListener('dragleave', function(e) {
-      if (!s.contains(e.relatedTarget)) removeIndicator();
+      // When the drag exits the strip entirely, clear both the visual
+      // indicator and the pending drop position. Otherwise a subsequent
+      // `dragend` fired after the user releases outside the navbar would
+      // commit a reorder from the stale in-strip pointer X.
+      if (!s.contains(e.relatedTarget)) {
+        removeIndicator();
+        lastClientX = null;
+      }
     });
     s.addEventListener('dragover', function(e) {
       if (!draggedEl) return;
