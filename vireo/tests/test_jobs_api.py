@@ -4205,10 +4205,12 @@ def test_cancelled_import_does_not_create_collection(
         }
 
     monkeypatch.setattr(import_job, "run_import_job", cancelled_result)
+    quick_look_id = next(
+        pr["id"] for pr in db.get_saved_processes() if pr["name"] == "Quick look")
     card = _chain_card(tmp_path, n=1)
     with app.test_client() as client:
         job_id = _post_import(
-            client, card, tmp_path / "arch", "quick_look",
+            client, card, tmp_path / "arch", quick_look_id,
         )
         result = wait_for_job_via_client(client, job_id)["result"]
 
