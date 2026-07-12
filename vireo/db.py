@@ -10715,6 +10715,39 @@ class Database:
             self.conn.commit()
         return cur.rowcount
 
+    def _species_highlight_keys_for_canonical(self, species):
+        """Return stored highlight keys matching a canonical species name."""
+        canonical = self.canonical_species_name(species)
+        ws = self._ws_id()
+        rows = self.conn.execute(
+            """SELECT DISTINCT species
+               FROM species_highlights
+               WHERE workspace_id = ?""",
+            (ws,),
+        ).fetchall()
+        keys = [
+            row["species"] for row in rows
+            if self.canonical_species_name(row["species"]) == canonical
+        ]
+        if canonical not in keys:
+            keys.append(canonical)
+        return canonical, keys
+
+    def remove_species_highlight_canonical(self, species, photo_id, _commit=True):
+        """Remove a highlighted photo from all canonical-equivalent keys."""
+        ws = self._ws_id()
+        _canonical, keys = self._species_highlight_keys_for_canonical(species)
+        placeholders = ",".join("?" for _ in keys)
+        cur = self.conn.execute(
+            f"""DELETE FROM species_highlights
+                WHERE workspace_id = ? AND species IN ({placeholders})
+                  AND photo_id = ?""",
+            (ws, *keys, photo_id),
+        )
+        if _commit:
+            self.conn.commit()
+        return cur.rowcount
+
     def move_species_highlight(self, species, photo_id, direction, _commit=True):
         """Move a highlighted photo one step up/down within its species."""
         ws = self._ws_id()
@@ -10744,6 +10777,51 @@ class Database:
                    SET rank = ?, updated_at = datetime('now')
                    WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
                 (rank, ws, species, pid),
+            )
+        if _commit:
+            self.conn.commit()
+        return True
+
+    def move_species_highlight_canonical(
+        self, species, photo_id, direction, _commit=True,
+    ):
+        """Move a highlighted photo across canonical-equivalent species keys."""
+        canonical, keys = self._species_highlight_keys_for_canonical(species)
+        ws = self._ws_id()
+        placeholders = ",".join("?" for _ in keys)
+        rows = self.conn.execute(
+            f"""SELECT photo_id
+                FROM species_highlights
+                WHERE workspace_id = ? AND species IN ({placeholders})
+                ORDER BY rank, created_at, photo_id""",
+            (ws, *keys),
+        ).fetchall()
+        ids = []
+        for row in rows:
+            if row["photo_id"] not in ids:
+                ids.append(row["photo_id"])
+        if photo_id not in ids:
+            return False
+        idx = ids.index(photo_id)
+        if direction == "up":
+            new_idx = max(0, idx - 1)
+        elif direction == "down":
+            new_idx = min(len(ids) - 1, idx + 1)
+        else:
+            return False
+        if new_idx != idx:
+            ids.insert(new_idx, ids.pop(idx))
+        self.conn.execute(
+            f"""DELETE FROM species_highlights
+                WHERE workspace_id = ? AND species IN ({placeholders})""",
+            (ws, *keys),
+        )
+        for rank, pid in enumerate(ids, start=1):
+            self.conn.execute(
+                """INSERT INTO species_highlights
+                       (workspace_id, species, photo_id, rank, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
+                (ws, canonical, pid, rank),
             )
         if _commit:
             self.conn.commit()

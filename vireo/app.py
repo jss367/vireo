@@ -503,7 +503,9 @@ def _photo_highlight_entries(db, photo_id):
         species = bucket.get("species")
         if not species:
             continue
-        ranks = db.get_species_highlights(species).get(species, {})
+        ranks = _canonicalize_species_rank_maps(
+            db, db.get_species_highlights()
+        ).get(species, {})
         for photo in bucket.get("photos") or []:
             if photo.get("id") != photo_id:
                 continue
@@ -8536,7 +8538,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # _parse_photo_preference_body) and routes to remove_species_highlight
         # rather than clearing all representative rows for the species.
         if parsed["purpose"] == "highlights":
-            removed = db.remove_species_highlight(
+            removed = db.remove_species_highlight_canonical(
                 parsed["species"], parsed["photo_id"]
             )
             return jsonify({
@@ -8601,7 +8603,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         error, status = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
         if error:
             return json_error(error, status)
-        removed = db.remove_species_highlight(parsed["species"], parsed["photo_id"])
+        removed = db.remove_species_highlight_canonical(
+            parsed["species"], parsed["photo_id"]
+        )
         return jsonify({"ok": True, **parsed, "removed": removed})
 
     @app.route("/api/species-highlights/order", methods=["PATCH", "POST"])
@@ -8615,7 +8619,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         error, status = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
         if error:
             return json_error(error, status)
-        ok = db.move_species_highlight(
+        ok = db.move_species_highlight_canonical(
             parsed["species"], parsed["photo_id"], parsed["direction"]
         )
         if not ok:

@@ -4481,6 +4481,9 @@ def test_apply_ordered_highlights_preserves_order_when_no_visible_match():
     from app import _apply_ordered_highlights
 
     class FakeDb:
+        def canonical_species_name(self, species):
+            return species
+
         def get_species_highlights(self, eligible_only=False):
             assert eligible_only is True
             return {"Robin": {999: 1}}
@@ -4502,6 +4505,9 @@ def test_apply_ordered_highlights_resorts_when_visible_match():
     from app import _apply_ordered_highlights
 
     class FakeDb:
+        def canonical_species_name(self, species):
+            return species
+
         def get_species_highlights(self, eligible_only=False):
             assert eligible_only is True
             return {"Robin": {2: 1}}
@@ -8365,6 +8371,79 @@ def test_highlights_merges_prediction_case_with_existing_species_keyword(app_and
     predicted = next(p for p in bucket["photos"] if p["id"] == predicted_pid)
     assert predicted["predicted_species"] == "Common waxbill"
     assert predicted["is_highlighted"] is True
+
+    detail = client.get(f"/api/photos/{predicted_pid}")
+    assert detail.status_code == 200
+    highlight_entry = next(
+        e for e in detail.get_json()["highlight_list"]
+        if e["species"] == "Common waxbill"
+    )
+    assert highlight_entry["is_highlighted"] is True
+
+    resp = client.delete(
+        "/api/species-highlights",
+        json={"species": "Common waxbill", "photo_id": predicted_pid},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["removed"] == 1
+    remaining = db.conn.execute(
+        "SELECT COUNT(*) AS count FROM species_highlights"
+    ).fetchone()
+    assert remaining["count"] == 0
+
+
+def test_highlights_reorders_legacy_cased_selection_with_canonical_species(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/wax-order', 'wax', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    waxbill_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Common waxbill', 'taxonomy', 1)"
+    ).lastrowid
+    photo_ids = []
+    for filename, score in (("first.jpg", 0.9), ("second.jpg", 0.8)):
+        pid = db.conn.execute(
+            "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+            "VALUES (?, ?, ?, 'none')",
+            (fid, filename, score),
+        ).lastrowid
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (pid, waxbill_kw),
+        )
+        photo_ids.append(pid)
+    for rank, pid in enumerate(photo_ids, start=1):
+        db.conn.execute(
+            "INSERT INTO species_highlights "
+            "(workspace_id, species, photo_id, rank) "
+            "VALUES (?, 'Common Waxbill', ?, ?)",
+            (db._ws_id(), pid, rank),
+        )
+    db.conn.commit()
+
+    resp = client.patch(
+        "/api/species-highlights/order",
+        json={
+            "species": "Common waxbill",
+            "photo_id": photo_ids[1],
+            "direction": "up",
+        },
+    )
+    assert resp.status_code == 200
+
+    rows = db.conn.execute(
+        "SELECT species, photo_id, rank FROM species_highlights ORDER BY rank"
+    ).fetchall()
+    assert [(r["species"], r["photo_id"], r["rank"]) for r in rows] == [
+        ("Common waxbill", photo_ids[1], 1),
+        ("Common waxbill", photo_ids[0], 2),
+    ]
 
 
 def test_highlights_confirmation_filter_splits_confirmed_and_unconfirmed(app_and_db):
