@@ -87,6 +87,8 @@ from render_source import (
     working_copy_path_if_satisfies as _working_copy_path_if_satisfies,
 )
 from schema import ensure_schema
+from services.local_workspace import has_local_workspace
+from web.local_workspace import create_local_workspace_blueprint
 from web.pages import pages_blueprint
 from web.photo_labels import create_photo_labels_blueprint
 from web.photo_review import create_photo_review_blueprint
@@ -9771,6 +9773,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Prevent deleting the active workspace
         if ws_id == db._active_workspace_id:
             return json_error("Cannot delete the active workspace. Switch first.")
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        if has_local_workspace(vireo_dir, ws_id):
+            return json_error(
+                "Cannot delete a workspace with local work. Switch to it and sync or discard the local copy first."
+            )
         db.delete_workspace(ws_id)
         # Drop this workspace's cached Missing Originals payload so a
         # later workspace that reuses this SQLite rowid can't be served
@@ -10014,6 +10021,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     app.register_blueprint(
         create_workspace_blueprint(_get_db, json_error, ALL_PAGES)
+    )
+    app.register_blueprint(
+        create_local_workspace_blueprint(
+            _get_db,
+            json_error,
+            lambda: app._job_runner,
+            db_path,
+            os.path.dirname(app.config["THUMB_CACHE_DIR"]),
+        )
     )
 
     def _new_images_walk_fns(db, ws_id):

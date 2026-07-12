@@ -15,3 +15,4 @@ def test_workspace_page_lists_all_workspaces(live_server, page):
 
     expect(default_input).to_be_visible(timeout=5000)
     expect(field_work_input).to_be_visible(timeout=5000)
+    expect(page.get_by_role("button", name="Work Locally", exact=True)).to_be_visible()
