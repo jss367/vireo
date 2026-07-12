@@ -196,6 +196,27 @@ def _raise_walk_error(error: OSError) -> None:
     raise LocalWorkspaceError(f"Could not read workspace directory: {error}") from error
 
 
+def _dest_case_insensitive(local_base: Path) -> bool:
+    """Probe whether the local base directory's filesystem folds case.
+
+    Two source paths that only differ in case (``Bird.jpg`` vs
+    ``bird.jpg``) copy to the same destination on Windows/macOS defaults;
+    the second silently overwrites the first while the manifest still
+    records both entries. Callers use this probe to reject such source
+    pairs before any file is copied.
+    """
+    base = local_base.parent
+    base.mkdir(parents=True, exist_ok=True)
+    fd, probe = tempfile.mkstemp(prefix="VireoCaseProbe-", dir=str(base))
+    os.close(fd)
+    try:
+        lower = os.path.join(os.path.dirname(probe), os.path.basename(probe).lower())
+        return lower != probe and os.path.exists(lower)
+    finally:
+        with suppress(FileNotFoundError):
+            os.unlink(probe)
+
+
 def _walk_entries(root: str):
     """Yield ``(rel, full, lstat)`` for every entry under root.
 
@@ -232,11 +253,14 @@ def _collect_source_entries(roots: list[dict], local_base: Path) -> tuple[dict[i
     per_root: dict[int, list] = {}
     total_bytes = 0
     total_files = 0
+    local_base.parent.mkdir(parents=True, exist_ok=True)
+    case_insensitive_target = _dest_case_insensitive(local_base)
     for index, root in enumerate(roots):
         source = root["source_path"]
         if not os.path.isdir(source):
             raise LocalWorkspaceError(f"Workspace folder is unavailable: {source}")
         entries = []
+        folded_seen: dict[str, str] = {}
         for rel, full, st in _walk_entries(source):
             mode = st.st_mode
             if stat.S_ISREG(mode):
@@ -252,10 +276,18 @@ def _collect_source_entries(roots: list[dict], local_base: Path) -> tuple[dict[i
                 pass
             else:
                 raise LocalWorkspaceError(f"Unsupported special file in workspace: {full}")
+            if case_insensitive_target and rel:
+                key = rel.casefold()
+                prior = folded_seen.get(key)
+                if prior is not None and prior != rel:
+                    raise LocalWorkspaceError(
+                        "Source paths only differ in case and would collide on the local "
+                        f"filesystem: {os.path.join(source, prior)} vs {full}"
+                    )
+                folded_seen[key] = rel
             entries.append((rel, full, st))
         per_root[index] = entries
 
-    local_base.parent.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(local_base.parent).free
     required = total_bytes + LOCAL_RESERVE_BYTES
     if free < required:
@@ -763,10 +795,12 @@ def _prepare_publish_target(remote_path: str) -> None:
 def _ancestor_conflicts(publish_keys, manifest: dict, deleted_set: set) -> list[str]:
     """Source paths where a non-directory blocks a new local subtree.
 
-    Publishing ``a/b/c`` needs every ancestor of ``c`` to be a directory on
-    the source; a file sitting at ``a/b`` would make the publish fail after
-    the sync already began. Ancestors that the deletion pass is about to
-    remove (a local file→directory replacement) are not conflicts.
+    Publishing ``a/b/c`` needs every ancestor of ``c`` to be a real
+    directory on the source; a file or a symlink sitting at ``a/b`` would
+    make the publish fail after the sync already began, or (for a symlink
+    to a directory) silently redirect the write outside the workspace.
+    Ancestors that the deletion pass is about to remove (a local
+    file→directory replacement) are not conflicts.
     """
     conflicts = []
     checked = set()
@@ -777,11 +811,17 @@ def _ancestor_conflicts(publish_keys, manifest: dict, deleted_set: set) -> list[
             if parent in checked:
                 break
             checked.add(parent)
-            if (
-                os.path.lexists(parent)
-                and not os.path.isdir(parent)
-                and (root_index, _relative(parent, source_root)) not in deleted_set
-            ):
+            try:
+                parent_st = os.lstat(parent)
+            except FileNotFoundError:
+                parent = os.path.dirname(parent)
+                continue
+            except OSError as exc:
+                raise LocalWorkspaceError(f"Could not stat source ancestor {parent}: {exc}") from exc
+            if not stat.S_ISDIR(parent_st.st_mode) and (
+                root_index,
+                _relative(parent, source_root),
+            ) not in deleted_set:
                 conflicts.append(parent)
             parent = os.path.dirname(parent)
     return conflicts

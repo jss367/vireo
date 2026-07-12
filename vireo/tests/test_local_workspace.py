@@ -165,6 +165,38 @@ def test_stage_rejects_symlink_that_leaves_and_reenters_root(local_workspace_env
         stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
 
 
+def test_stage_rejects_case_colliding_source_paths(local_workspace_env, monkeypatch):
+    # On case-insensitive local storage (Windows/macOS defaults) two source
+    # paths differing only in case would land on the same destination; the
+    # second copy silently overwrites the first while the manifest keeps
+    # both, so sync can later delete one original and overwrite the other.
+    env = local_workspace_env
+    (env["child"] / "Bird.jpg").write_bytes(b"uppercase")
+
+    monkeypatch.setattr(local_workspace, "_dest_case_insensitive", lambda _base: True)
+
+    with pytest.raises(LocalWorkspaceError, match="only differ in case"):
+        stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+
+    # The catalog is untouched and the managed tree is cleaned up.
+    assert _folder_path(env["db"], env["root_id"]) == str(env["source"])
+    assert not workspace_dir(str(env["vireo_dir"]), env["workspace_id"]).exists()
+
+
+def test_stage_accepts_case_variants_on_case_sensitive_destination(local_workspace_env, monkeypatch):
+    # The check must not fire when the destination truly preserves case,
+    # or every source with a case-only pair becomes unstageable.
+    env = local_workspace_env
+    (env["child"] / "Bird.jpg").write_bytes(b"uppercase")
+
+    monkeypatch.setattr(local_workspace, "_dest_case_insensitive", lambda _base: False)
+
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    local_child = Path(_folder_path(env["db"], env["child_id"]))
+    assert (local_child / "bird.jpg").read_bytes() == b"bird-original"
+    assert (local_child / "Bird.jpg").read_bytes() == b"uppercase"
+
+
 def test_folder_status_survives_stage_and_sync(local_workspace_env):
     env = local_workspace_env
     env["db"].conn.execute("UPDATE folders SET status='partial' WHERE id=?", (env["child_id"],))
@@ -517,6 +549,33 @@ def test_sync_refuses_source_file_blocking_new_local_directory(local_workspace_e
         sync_back(env["db"], env["workspace_id"], str(env["vireo_dir"]))
 
     assert str(env["child"] / "newdir") in exc_info.value.paths
+    assert status(env["db"], env["workspace_id"], str(env["vireo_dir"]))["state"] == "active"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows test runners may not permit symlinks")
+def test_sync_refuses_symlinked_source_ancestor_for_new_local_file(local_workspace_env, tmp_path):
+    # If a source-side parent is replaced with a symlink after staging,
+    # os.path.isdir would follow the link and the publish would silently
+    # write the local file into the symlink target outside the workspace.
+    # Detect the topology change before entering the syncing state.
+    env = local_workspace_env
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    local_child = Path(_folder_path(env["db"], env["child_id"]))
+    (local_child / "new-subdir").mkdir()
+    (local_child / "new-subdir" / "newfile.jpg").write_bytes(b"published-locally")
+
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    shutil.rmtree(env["child"])
+    os.symlink(outside, env["child"])
+
+    with pytest.raises(LocalWorkspaceConflict) as exc_info:
+        sync_back(env["db"], env["workspace_id"], str(env["vireo_dir"]), allow_deletions=True)
+
+    assert str(env["child"]) in exc_info.value.paths
+    # No new file was written into the symlink target.
+    assert list(outside.iterdir()) == []
+    # The workspace never entered syncing state.
     assert status(env["db"], env["workspace_id"], str(env["vireo_dir"]))["state"] == "active"
 
 
