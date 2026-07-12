@@ -10265,6 +10265,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("Workspace not found", 404)
         if not db.get_folder(folder_id):
             return json_error("Folder not found", 404)
+        # A workspace with active local state has folder paths rebased into
+        # the managed copy and a manifest covering those paths. Silently
+        # adding a folder here would leave the UI showing a folder that the
+        # manifest and local_workspace_folders don't cover, so a later sync
+        # or discard could not act on it consistently.
+        if has_local_workspace(db, ws_id):
+            return json_error(
+                "Cannot change folder membership while working locally. Sync or discard the local copy first.",
+                409,
+            )
         db.add_workspace_folder(ws_id, folder_id)
         # A newly linked folder can introduce ghosts (or resolve them if it
         # was previously offline). The missing-originals cache is keyed by
@@ -10276,6 +10286,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/workspaces/<int:ws_id>/folders/<int:folder_id>", methods=["DELETE"])
     def api_remove_workspace_folder(ws_id, folder_id):
         db = _get_db()
+        # Removing a staged root while local work is active would leave
+        # local_workspace_folders and the manifest covering paths the UI no
+        # longer shows, so a later sync could publish/delete files for a
+        # folder the workspace has already dropped.
+        if has_local_workspace(db, ws_id):
+            return json_error(
+                "Cannot change folder membership while working locally. Sync or discard the local copy first.",
+                409,
+            )
         db.remove_workspace_folder_tree(ws_id, folder_id)
         # Unlinking a folder tree removes photos from the workspace's scope;
         # the cached ready payload would otherwise keep listing ghosts from
@@ -10297,6 +10316,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("Provide target_workspace_id or new_workspace_name")
         if target_ws_id and new_ws_name:
             return json_error("Provide target_workspace_id or new_workspace_name, not both")
+
+        # Block folder-membership mutation while either side is working
+        # locally: moving a folder off a staged workspace would leave its
+        # manifest covering a folder the UI no longer shows, and moving one
+        # onto a workspace whose paths are rebased would leave the new folder
+        # untracked by the manifest.
+        if has_local_workspace(db, ws_id):
+            return json_error(
+                "Cannot move folders out of a workspace working locally. Sync or discard the local copy first.",
+                409,
+            )
+        if target_ws_id and has_local_workspace(db, target_ws_id):
+            return json_error(
+                "Cannot move folders into a workspace working locally. Sync or discard the local copy first.",
+                409,
+            )
 
         # Validate source workspace and folder ownership before creating a
         # new workspace to avoid orphans if the move would fail.

@@ -438,6 +438,88 @@ def test_move_folders_no_target_returns_400(app_and_db):
     assert resp.status_code == 400
 
 
+# ---- Folder membership guards while working locally ----
+
+
+def _mark_local(db, workspace_id):
+    """Insert a fake local_workspaces row so has_local_workspace(db, ws) is True."""
+    db.conn.execute(
+        "INSERT OR REPLACE INTO local_workspaces (workspace_id, state, created_at) VALUES (?, 'active', 0)",
+        (workspace_id,),
+    )
+    db.conn.commit()
+
+
+def test_add_folder_rejected_while_workspace_is_local(app_and_db):
+    """A workspace working locally has its paths rebased into the managed copy;
+    adding a folder here would leave it untracked by the manifest and local
+    workspace folders, so the endpoint must refuse until sync or discard."""
+    app, db = app_and_db
+    client = app.test_client()
+    ws_id = client.post("/api/workspaces", json={"name": "LocalFolderAdd"}).get_json()["id"]
+    folder = db.conn.execute("SELECT id FROM folders LIMIT 1").fetchone()
+    fid = folder["id"]
+    _mark_local(db, ws_id)
+    resp = client.post(f"/api/workspaces/{ws_id}/folders", json={"folder_id": fid})
+    assert resp.status_code == 409
+    assert "working locally" in resp.get_json()["error"]
+
+
+def test_remove_folder_rejected_while_workspace_is_local(app_and_db):
+    """Removing a staged root while local work is active would leave the
+    manifest and local_workspace_folders covering paths the UI no longer
+    shows; the endpoint must refuse until sync or discard."""
+    app, db = app_and_db
+    client = app.test_client()
+    ws_id = client.post("/api/workspaces", json={"name": "LocalFolderRm"}).get_json()["id"]
+    folder = db.conn.execute("SELECT id FROM folders LIMIT 1").fetchone()
+    fid = folder["id"]
+    # Link the folder before the workspace is marked local.
+    client.post(f"/api/workspaces/{ws_id}/folders", json={"folder_id": fid})
+    _mark_local(db, ws_id)
+    resp = client.delete(f"/api/workspaces/{ws_id}/folders/{fid}")
+    assert resp.status_code == 409
+    assert "working locally" in resp.get_json()["error"]
+
+
+def test_move_folders_rejected_when_source_is_local(app_and_db):
+    """Moving folders out of a workspace working locally would strand the
+    manifest and local_workspace_folders on a workspace the UI no longer
+    shows those folders on."""
+    app, db = app_and_db
+    client = app.test_client()
+    active = client.get("/api/workspaces/active").get_json()
+    source_ws_id = active["id"]
+    folder_ids = [f["id"] for f in active["folders"]]
+    target_ws_id = client.post("/api/workspaces", json={"name": "MoveTarget"}).get_json()["id"]
+    _mark_local(db, source_ws_id)
+    resp = client.post(
+        f"/api/workspaces/{source_ws_id}/move-folders",
+        json={"folder_ids": folder_ids, "target_workspace_id": target_ws_id},
+    )
+    assert resp.status_code == 409
+    assert "working locally" in resp.get_json()["error"]
+
+
+def test_move_folders_rejected_when_target_is_local(app_and_db):
+    """Moving folders INTO a workspace working locally would leave the new
+    folder untracked by that workspace's manifest until the local copy is
+    resolved."""
+    app, db = app_and_db
+    client = app.test_client()
+    active = client.get("/api/workspaces/active").get_json()
+    source_ws_id = active["id"]
+    folder_ids = [f["id"] for f in active["folders"]]
+    target_ws_id = client.post("/api/workspaces", json={"name": "MoveTargetLocal"}).get_json()["id"]
+    _mark_local(db, target_ws_id)
+    resp = client.post(
+        f"/api/workspaces/{source_ws_id}/move-folders",
+        json={"folder_ids": folder_ids, "target_workspace_id": target_ws_id},
+    )
+    assert resp.status_code == 409
+    assert "working locally" in resp.get_json()["error"]
+
+
 # ---- Pin / unpin + ordering ----
 
 def test_pin_workspace_sets_pinned_at(app_and_db):

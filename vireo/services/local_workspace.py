@@ -76,6 +76,49 @@ def manifest_path(vireo_dir: str, workspace_id: int) -> Path:
     return workspace_dir(vireo_dir, workspace_id) / "manifest.json"
 
 
+def _sync_recovery_path(vireo_dir: str, workspace_id: int) -> Path:
+    """The confirmed-deletion set persisted at the sync recovery boundary."""
+    return workspace_dir(vireo_dir, workspace_id) / "sync-recovery.json"
+
+
+def _write_sync_recovery(vireo_dir: str, workspace_id: int, deleted_keys) -> None:
+    """Record the deletion set the user confirmed before the sync began.
+
+    A resumed sync must not silently authorize any additional source
+    deletion that appeared after the first attempt was interrupted — the
+    user only confirmed the deletions listed here.
+    """
+    path = _sync_recovery_path(vireo_dir, workspace_id)
+    payload = {
+        "confirmed_deletions": [[int(root_index), rel] for root_index, rel in deleted_keys],
+    }
+    _write_manifest(path, payload)
+
+
+def _load_sync_recovery(vireo_dir: str, workspace_id: int) -> set | None:
+    """Return the confirmed-deletion key set from the sync recovery file, or None."""
+    path = _sync_recovery_path(vireo_dir, workspace_id)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LocalWorkspaceError(f"Sync recovery marker is unreadable: {exc}") from exc
+    confirmed = data.get("confirmed_deletions")
+    if not isinstance(confirmed, list):
+        return set()
+    result = set()
+    for entry in confirmed:
+        if isinstance(entry, list) and len(entry) == 2:
+            root_index, rel = entry
+            try:
+                result.add((int(root_index), str(rel)))
+            except (TypeError, ValueError):
+                continue
+    return result
+
+
 def local_state(db, workspace_id: int) -> dict | None:
     """Return the workspace's local-workspace state row, or None."""
     row = db.conn.execute(
@@ -916,10 +959,15 @@ def sync_back(
             raise LocalWorkspaceError("This workspace is not working locally")
         resuming = state_row["state"] == "syncing"
         # A resumed sync inherits the deletion confirmation from the original
-        # attempt: entering "syncing" required deletions to be confirmed then.
+        # attempt, but only for the exact deletions the user confirmed then
+        # — any new deletion that appeared after the interruption still needs
+        # a fresh count-bound confirmation, which is validated below against
+        # the persisted recovery marker.
+        recovery_confirmed: set | None = None
         if resuming:
             allow_deletions = True
             confirmed_deletions = None
+            recovery_confirmed = _load_sync_recovery(vireo_dir, workspace_id)
 
         manifest = _load_manifest(vireo_dir, workspace_id)
         if manifest is None:
@@ -929,7 +977,19 @@ def sync_back(
             )
 
         for root in manifest["roots"]:
-            if not os.path.isdir(root["source_path"]):
+            try:
+                source_st = os.lstat(root["source_path"])
+            except OSError:
+                raise LocalWorkspaceError(f"Source storage is unavailable: {root['source_path']}") from None
+            # os.path.isdir follows symlinks; a root replaced with a symlink
+            # to another directory after staging would let sync publish and
+            # delete through the link into a tree outside the recorded
+            # workspace. Reject any non-directory or symlinked root here.
+            if stat.S_ISLNK(source_st.st_mode):
+                raise LocalWorkspaceError(
+                    f"Source storage changed shape after staging (now a symlink): {root['source_path']}"
+                )
+            if not stat.S_ISDIR(source_st.st_mode):
                 raise LocalWorkspaceError(f"Source storage is unavailable: {root['source_path']}")
             if not os.path.isdir(root["local_path"]):
                 raise LocalWorkspaceError(
@@ -945,6 +1005,19 @@ def sync_back(
                 f"Local deletions changed since you confirmed: {len(deleted)} file(s) would now be "
                 "deleted from the source. Review and confirm again."
             )
+        # Resume path: any deletion that appeared after the first attempt was
+        # interrupted was NOT part of the user's original count-bound
+        # confirmation. Refuse instead of silently authorizing extra source
+        # deletions when "Finish Sync-back" is clicked. The recovery UI can
+        # then send a fresh confirmation for the current set.
+        if resuming and recovery_confirmed is not None:
+            new_deletions = [key for key in deleted if key not in recovery_confirmed]
+            if new_deletions:
+                raise LocalWorkspaceError(
+                    f"Local deletions changed since sync was interrupted: "
+                    f"{len(new_deletions)} file(s) would now be deleted from the source "
+                    "that were not part of your original confirmation. Review and confirm again."
+                )
 
         # Conflict scan. Only paths sync would write or delete can clobber
         # anything, so only those are verified — by full content hash, since
@@ -1000,8 +1073,12 @@ def sync_back(
             raise LocalWorkspaceCancelled("Local workspace sync cancelled")
 
         # Persist the recovery boundary before the first source mutation, so
-        # an interruption is recognized as a partially-published sync.
+        # an interruption is recognized as a partially-published sync. The
+        # recovery marker records the confirmed deletion set so a resumed
+        # sync cannot silently authorize additional deletions that appeared
+        # after the first attempt was interrupted.
         if not resuming:
+            _write_sync_recovery(vireo_dir, workspace_id, deleted)
             db.conn.execute(
                 "UPDATE local_workspaces SET state='syncing' WHERE workspace_id=?", (workspace_id,)
             )

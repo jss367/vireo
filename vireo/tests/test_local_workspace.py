@@ -553,6 +553,75 @@ def test_sync_refuses_source_file_blocking_new_local_directory(local_workspace_e
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows test runners may not permit symlinks")
+def test_sync_refuses_symlinked_source_root_replaced_after_staging(local_workspace_env, tmp_path):
+    # If the source root itself is replaced with a symlink after staging,
+    # os.path.isdir would follow the link and sync would delete/publish
+    # through it into a directory outside the recorded workspace. The
+    # root check must use lstat so the topology change is caught before
+    # the sync enters the syncing state.
+    env = local_workspace_env
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    local_root = Path(_folder_path(env["db"], env["root_id"]))
+    (local_root / "root.jpg").write_bytes(b"edited-locally")
+
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "root.jpg").write_bytes(b"outside-file")
+    shutil.rmtree(env["source"])
+    os.symlink(outside, env["source"])
+
+    with pytest.raises(LocalWorkspaceError, match="symlink"):
+        sync_back(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+
+    # Nothing was written through the symlink target.
+    assert (outside / "root.jpg").read_bytes() == b"outside-file"
+    # The workspace never entered the syncing state.
+    assert status(env["db"], env["workspace_id"], str(env["vireo_dir"]))["state"] == "active"
+
+
+def test_sync_recovery_refuses_new_deletions_that_were_not_confirmed(local_workspace_env, monkeypatch):
+    # If a file is deleted from the managed local tree after the first sync
+    # attempt was interrupted, clicking Finish Sync-back must NOT silently
+    # authorize that new source deletion — the user only confirmed the
+    # deletions that existed when the first sync began.
+    env = local_workspace_env
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    local_child = Path(_folder_path(env["db"], env["child_id"]))
+    (local_child / "bird.jpg").write_bytes(b"edited-locally")
+    # One deletion confirmed at the start of the first sync.
+    os.unlink(local_child / "bird.xmp")
+
+    real_publish = local_workspace._atomic_publish
+
+    def crashing_publish(local_path, remote_path):
+        real_publish(local_path, remote_path)
+        raise RuntimeError("simulated crash mid-sync")
+
+    monkeypatch.setattr(local_workspace, "_atomic_publish", crashing_publish)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        sync_back(
+            env["db"],
+            env["workspace_id"],
+            str(env["vireo_dir"]),
+            allow_deletions=True,
+            confirmed_deletions=1,
+        )
+
+    # A cleanup tool (or the user) removes a second file after the crash.
+    local_root = Path(_folder_path(env["db"], env["root_id"]))
+    os.unlink(local_root / "root.jpg")
+
+    monkeypatch.setattr(local_workspace, "_atomic_publish", real_publish)
+    with pytest.raises(LocalWorkspaceError, match="not part of your original confirmation"):
+        sync_back(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+
+    # The unconfirmed new deletion did not reach the source.
+    assert (env["source"] / "root.jpg").exists()
+    # Recovery state persists so the user can re-confirm through the UI.
+    assert status(env["db"], env["workspace_id"], str(env["vireo_dir"]))["state"] == "recovery"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows test runners may not permit symlinks")
 def test_sync_refuses_symlinked_source_ancestor_for_new_local_file(local_workspace_env, tmp_path):
     # If a source-side parent is replaced with a symlink after staging,
     # os.path.isdir would follow the link and the publish would silently
