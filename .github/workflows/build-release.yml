@@ -27,7 +27,11 @@ env:
   CARGO_BUILD_JOBS: "3"
 
 jobs:
+  full-e2e:
+    uses: ./.github/workflows/e2e-full.yml
+
   build:
+    needs: full-e2e
     strategy:
       fail-fast: false
       matrix:

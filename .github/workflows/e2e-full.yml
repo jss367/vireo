@@ -1,0 +1,34 @@
+name: Full browser suite
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 9 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: full-browser-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  full-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+      - name: Install Vireo and Chromium
+        run: |
+          pip install -e ".[dev]"
+          python -m playwright install --with-deps chromium
+      - name: Run complete Playwright suite
+        run: >-
+          python -m pytest -o addopts='' -q tests/e2e/
+          --tb=short --timeout=120 --timeout-method=thread
