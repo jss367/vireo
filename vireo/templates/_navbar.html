@@ -3410,7 +3410,7 @@ async function createWorkspace() {
   </div>
   <div class="lightbox-filename" id="lightboxFilename"></div>
   <div class="lightbox-flag-status" id="lightboxFlagStatus" aria-live="polite"></div>
-  <div id="lightboxCounter" style="display:none;position:absolute;top:16px;left:50%;transform:translateX(-50%);color:rgba(255,255,255,0.6);font-size:13px;background:rgba(0,0,0,0.5);padding:3px 10px;border-radius:4px;"></div>
+  <div id="lightboxCounter" style="display:none;position:absolute;top:16px;left:50%;transform:translateX(-50%);max-width:calc(100vw - 160px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:rgba(255,255,255,0.6);font-size:13px;background:rgba(0,0,0,0.5);padding:3px 10px;border-radius:4px;"></div>
   <div id="lightboxActions" class="lightbox-actions">
     <button class="lb-action-btn" id="lightboxToggleBoxes" onclick="event.stopPropagation(); toggleLightboxBoxes();" title="Toggle detection boxes (b)">
       Hide Boxes
@@ -6809,9 +6809,13 @@ function openLightbox(photoId, filename, photoList, options) {
   var counter = document.getElementById('lightboxCounter');
   if (_lightboxPhotoList.length > 1) {
     var idx = _lightboxPhotoList.findIndex(function(p) { return p.id === photoId; });
-    counter.textContent = (idx + 1) + ' / ' + _lightboxPhotoList.length;
+    var counterFilename = filename || (currentFromList && currentFromList.filename) || '';
+    counter.textContent = (idx + 1) + ' / ' + _lightboxPhotoList.length
+      + (counterFilename ? ' \u00b7 ' + counterFilename : '');
+    counter.title = counterFilename;
     counter.style.display = '';
   } else {
+    counter.title = '';
     counter.style.display = 'none';
   }
 }
