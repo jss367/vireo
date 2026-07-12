@@ -705,3 +705,49 @@ def test_sync_to_xmp_selected_add_pulls_in_paired_legacy_remove(tmp_path):
 
     remaining = db.get_pending_changes()
     assert remaining == []
+
+
+def test_sync_to_xmp_normalized_rename_preserves_unrelated_hierarchy(tmp_path):
+    """A normalization-only rename queued as ``keyword_remove('‘Birds')`` +
+    ``keyword_add('Birds')`` on the same photo must not strip an unrelated
+    hierarchy like ``Animals|Birds|Hawk``.
+
+    Regression: ``remove_keywords()`` compares each pipe-delimited hierarchy
+    segment by normalized match key, so a naive hierarchical remove of the
+    legacy variant matches the clean ``Birds`` segment inside the unrelated
+    hierarchy and drops the whole ``Animals|Birds|Hawk`` entry from
+    ``lr:hierarchicalSubject``. Applying flat-only removal for the paired
+    remove keeps the hierarchy intact while still canonicalizing the flat
+    legacy ``<rdf:li>‘Birds</rdf:li>`` to ``Birds`` in ``dc:subject``.
+    """
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_hierarchical_keywords, read_keywords, write_sidecar
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+    # Sidecar carries the legacy flat variant AND an unrelated hierarchy
+    # whose middle segment happens to normalize to the same key as the
+    # remove target.
+    write_sidecar(
+        xmp_path,
+        flat_keywords={'‘Birds'},
+        hierarchical_keywords={'Animals|Birds|Hawk'},
+    )
+
+    db.queue_change(pid, 'keyword_remove', '‘Birds')
+    db.queue_change(pid, 'keyword_add', 'Birds')
+
+    result = sync_to_xmp(db)
+    assert result['synced'] == 1
+    assert result['failed'] == 0
+
+    # Flat legacy variant is gone, clean spelling is written.
+    flat = read_keywords(xmp_path)
+    assert 'Birds' in flat
+    assert '‘Birds' not in flat
+    # Unrelated hierarchy survives -- was NOT stripped by the paired
+    # remove even though `Birds` segment normalizes to the remove key.
+    assert 'Animals|Birds|Hawk' in read_hierarchical_keywords(xmp_path)

@@ -13492,6 +13492,96 @@ def test_update_keyword_merge_canonicalizes_legacy_peer_name(tmp_path):
         db.close()
 
 
+def test_update_keyword_merge_canonicalizes_non_root_peer_name(tmp_path):
+    """The peer-merge canonicalization must work for child keywords too.
+
+    Regression: for non-root rows the surviving `(name, parent_id)` slot is
+    UNIQUE-constrained. Normalizing the peer's stored spelling in place
+    while the clean source still occupies that slot silently no-ops on
+    ``IntegrityError``, so ``_merge_keyword_into`` then deletes the clean
+    source and leaves a legacy-spelled survivor ``Parent > ‘Hawk``. The fix
+    merges first (freeing the slot) and normalizes the peer afterwards, so
+    the surviving child row stores the canonical name.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        ws_id = db.ensure_default_workspace()
+        db.set_active_workspace(ws_id)
+        fid = db.add_folder('/photos', name='photos')
+        p1 = db.add_photo(
+            folder_id=fid, filename='a.jpg', extension='.jpg',
+            file_size=100, file_mtime=1.0,
+        )
+        p2 = db.add_photo(
+            folder_id=fid, filename='b.jpg', extension='.jpg',
+            file_size=100, file_mtime=1.0,
+        )
+        parent_id = db.add_keyword("Parent", kw_type="general")
+        # Legacy edge-quoted taxonomy child (imported/upgraded DB shape).
+        # One photo carries it and its pending sidecar add references the
+        # legacy spelling.
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type) "
+            "VALUES (?, ?, 1, 'taxonomy')",
+            ("‘Hawk", parent_id),
+        )
+        legacy_id = cur.lastrowid
+        db.tag_photo(p1, legacy_id)
+        db.queue_change(p1, 'keyword_add', '‘Hawk')
+        # Clean general child at the same parent, tagged on the other photo.
+        general_id = db.add_keyword("Hawk", parent_id=parent_id, kw_type="general")
+        db.tag_photo(p2, general_id)
+        assert general_id != legacy_id
+
+        # PUT-style retype: turn the clean general child into taxonomy. The
+        # peer lookup finds the legacy child at the same parent and merges
+        # the clean row into it. The survivor must end up as clean `Hawk`,
+        # not `‘Hawk` -- otherwise the UNIQUE(name, parent_id) collision
+        # inside _normalize_keyword_row_name silently leaves the legacy
+        # spelling in place.
+        effective_id = db.update_keyword(general_id, type="taxonomy")
+        assert effective_id == legacy_id
+
+        # Survivor's stored name must be the canonical spelling.
+        row = db.conn.execute(
+            "SELECT name, parent_id, type FROM keywords WHERE id = ?",
+            (legacy_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["name"] == "Hawk", row["name"]
+        assert row["parent_id"] == parent_id
+        assert row["type"] == "taxonomy"
+
+        # Exactly one child row must remain for the normalized name under
+        # this parent.
+        rows = db.conn.execute(
+            "SELECT id FROM keywords "
+            "WHERE vireo_normalize_keyword(name) = 'hawk' COLLATE NOCASE "
+            "AND parent_id = ? AND type = 'taxonomy'",
+            (parent_id,),
+        ).fetchall()
+        assert [r["id"] for r in rows] == [legacy_id]
+        # The old general row must be gone (merged away).
+        gone = db.conn.execute(
+            "SELECT id FROM keywords WHERE id = ?", (general_id,)
+        ).fetchone()
+        assert gone is None
+
+        # Pending change queued under the legacy spelling must now
+        # reference the canonical name so sync_to_xmp doesn't leak the
+        # stray-quote spelling back into the sidecar.
+        pending = db.conn.execute(
+            "SELECT value FROM pending_changes "
+            "WHERE photo_id = ? AND change_type = 'keyword_add'",
+            (p1,),
+        ).fetchall()
+        values = sorted(r["value"] for r in pending)
+        assert values == ["Hawk"], values
+    finally:
+        db.close()
+
+
 def test_add_keyword_species_prefers_taxonomy_peer_over_general_exact_match(tmp_path):
     """When both a clean `general` row `apapane` and a legacy `taxonomy`
     edge-quote row `‘apapane` exist at the same slot, add_keyword('apapane',

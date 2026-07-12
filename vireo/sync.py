@@ -176,8 +176,32 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
             # changes and leaving the sidecar without the keyword. Applying
             # the remove first strips only the pre-existing quoted variant;
             # the subsequent write_sidecar then adds the clean spelling.
+            #
+            # Split removals by whether they're paired with an add for the
+            # same normalized key. A paired remove+add is a normalization-only
+            # rename (e.g. remove `‘Birds` + add `Birds`); hierarchical mode
+            # would then strip unrelated hierarchies like `Animals|Birds|Hawk`
+            # because remove_keywords() matches by any pipe-segment key. Use
+            # flat-only removal for those paired removes so the rename only
+            # touches the flat `dc:subject` legacy entry. Solo removes keep
+            # hierarchical semantics so real keyword deletions still drop
+            # pipe-segment matches.
             if keywords_to_remove:
-                remove_keywords(xmp_path, keywords_to_remove)
+                paired_keys = {
+                    keyword_match_key(kw) for kw in keywords_to_add
+                }
+                paired_keys.discard("")
+                paired_removes = {
+                    kw for kw in keywords_to_remove
+                    if keyword_match_key(kw) in paired_keys
+                }
+                solo_removes = keywords_to_remove - paired_removes
+                if solo_removes:
+                    remove_keywords(xmp_path, solo_removes)
+                if paired_removes:
+                    remove_keywords(
+                        xmp_path, paired_removes, hierarchical=False,
+                    )
 
             # Strip any sidecar dc:subject entry that normalizes to a
             # keyword we're about to add. write_sidecar() dedupes with an

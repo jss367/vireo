@@ -11068,22 +11068,33 @@ class Database:
                             (new_name, parent_id, effective_type, keyword_id),
                         ).fetchone()
                     if peer:
-                        # Canonicalize the peer's stored spelling before
-                        # merging into it. Without this, when the peer is an
-                        # upgraded legacy row whose stored name still carries
-                        # an edge quote (e.g. taxonomy `‘apapane`) and the
-                        # edited row is the clean `apapane`, _merge_keyword_into
-                        # keeps the peer's legacy name as the survivor and
-                        # rewrites the source's pending changes onto that
-                        # quoted value. The keyword then remains visible/
-                        # exported as `‘apapane` even though the effective
-                        # requested name is `apapane`. _normalize_keyword_row_name
-                        # scopes pending-change and species-curation retargeting
-                        # to photos actually tagged with the peer row, so a
-                        # separate same-name legacy row in another workspace
-                        # isn't rewritten by side effect.
-                        self._normalize_keyword_row_name(peer["id"])
+                        # Canonicalize the peer's stored spelling when it is
+                        # an upgraded legacy row that still carries an edge
+                        # quote (e.g. taxonomy `‘apapane`) and the edited row
+                        # is the clean `apapane`. Without this, _merge_keyword_into
+                        # keeps the peer's legacy name as the survivor and the
+                        # keyword remains visible/exported as `‘apapane` even
+                        # though the effective requested name is `apapane`.
+                        #
+                        # Merge FIRST, then normalize the peer's stored name.
+                        # For non-root keywords the source's clean spelling
+                        # occupies the same (name, parent_id) UNIQUE slot as
+                        # the target canonical name, so canonicalizing the
+                        # peer while the source still exists hits an
+                        # IntegrityError inside _normalize_keyword_row_name
+                        # and silently no-ops -- _merge_keyword_into then
+                        # deletes the clean source and leaves a legacy-spelled
+                        # survivor `Parent > ‘Hawk`. Deleting the source row
+                        # first frees the slot so the peer's UPDATE succeeds.
+                        # For top-level rows (NULL parent, no UNIQUE collision)
+                        # this order still produces the clean survivor because
+                        # _normalize_keyword_row_name rewrites pending changes
+                        # and species curation scoped to the peer's now-merged
+                        # tag set. Scoping to tagged (photo, workspace) pairs
+                        # keeps a separate same-name legacy row in another
+                        # workspace from being rewritten by side effect.
                         self._merge_keyword_into(keyword_id, peer["id"])
+                        self._normalize_keyword_row_name(peer["id"])
                         self.conn.commit()
                         return peer["id"]
                     # No same-type peer, but a DIFFERENT-type peer at the
