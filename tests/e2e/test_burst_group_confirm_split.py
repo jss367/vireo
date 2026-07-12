@@ -641,3 +641,93 @@ def test_species_only_with_removed_photo_keeps_member_and_tags_it(live_server, p
     tagged = _photos_with_species(live_server, photo_ids, "Broad-winged Hawk")
     assert tagged == set(photo_ids), tagged
     assert second_pid in tagged
+
+
+def test_keyword_summary_counts_discarded_removals(live_server, page):
+    """Regression: with "Apply picks/rejects" unchecked, a photo the user marked
+    "Remove from group" is still a burst member Apply will tag. The header
+    summary must reflect that — showing `N/3` (mixed) instead of `2/2 applied`.
+
+    Bug: the summary and per-card markers were computed from the visible cards
+    (removed frames filtered out), so it could show `2/2 applied` with no mixed
+    state even though Apply was still going to tag the hidden third frame.
+    """
+    photo_ids = live_server["data"]["photos"][0:3]
+    species = "Red-tailed Hawk"
+
+    # Burst is confirmed as `species`; tag TWO frames with it and leave the
+    # third missing the keyword. We'll remove one of the tagged frames so the
+    # visible-cards view would look "2/2 applied", while the effective post-
+    # apply members (removal discarded) are still 3 with one missing.
+    _write_single_burst_cache(live_server, photo_ids, confirmed_species=species)
+    db = live_server["db"]
+    kid = db.add_keyword(species, is_species=True)
+    db.tag_photo(photo_ids[0], kid)
+    db.tag_photo(photo_ids[1], kid)
+    # photo_ids[2] intentionally untagged.
+
+    _open_burst_modal(page, live_server)
+
+    # Sanity: field pre-fills with the confirmed species; summary shows 2/3.
+    expect(page.locator("#grmSpecies")).to_have_value(species)
+    expect(page.locator("#grmSpeciesKeywordSummary")).to_contain_text(
+        "Species keyword: 2/3 applied"
+    )
+
+    # Remove one of the ALREADY-TAGGED frames from the group. Use the second
+    # card explicitly: the first card is already selected on modal open, so
+    # clicking it would deselect rather than change the anchor (grmSelect's
+    # single-click toggle).
+    target_pid = int(
+        page.locator("#grmOverlay .grm-card[data-photo-id]").nth(1).get_attribute("data-photo-id")
+    )
+    assert target_pid == photo_ids[1]
+    page.locator(f"#grmOverlay .grm-card[data-photo-id='{target_pid}']").click()
+    page.locator("#grmRemoveBtn").click()
+
+    # Removal auto-checks flags; UNCHECK to discard the removal so Apply's
+    # species call still targets all three frames.
+    expect(page.locator("#grmApplyFlagsChk")).to_be_checked()
+    page.locator("#grmApplyFlagsChk").uncheck()
+
+    # The header summary must still say `2/3`, not `1/2`, because Apply will
+    # still tag the hidden third frame — visible cards no longer include the
+    # removed one, but the effective member set does.
+    expect(page.locator("#grmSpeciesKeywordSummary")).to_contain_text(
+        "Species keyword: 2/3 applied"
+    )
+    # And the summary must carry the mixed-state warning class, not the "ok"
+    # class that would appear for a truly-complete N/N applied state.
+    summary = page.locator("#grmSpeciesKeywordSummary")
+    expect(summary).to_have_class(re.compile(r"\bwarn\b"))
+    expect(summary).not_to_have_class(re.compile(r"\bok\b"))
+
+
+def test_species_field_clear_is_not_repopulated(live_server, page):
+    """Regression: clearing the species field must leave it blank. Previously
+    every renderGroupModal() call hit a fallback that copied the encounter's
+    confirmed species back into the input, so users couldn't leave the field
+    empty (and on unconfirmed predicted bursts the reinstated species could
+    apply an unwanted keyword without the user noticing)."""
+    photo_ids = live_server["data"]["photos"][0:3]
+    species = "Red-tailed Hawk"
+    _write_single_burst_cache(live_server, photo_ids, confirmed_species=species)
+    _tag_all(live_server, photo_ids, species)
+
+    _open_burst_modal(page, live_server)
+
+    # Field opens pre-filled with the confirmed species.
+    field = page.locator("#grmSpecies")
+    expect(field).to_have_value(species)
+
+    # Clear it, then wait long enough for the debounced refetch (250ms) plus
+    # any follow-up renderGroupModal() calls to fire.
+    field.fill("")
+    page.wait_for_timeout(400)
+
+    # The field stays blank — the render-time fallback must not resurrect it.
+    expect(field).to_have_value("")
+    # And the summary reflects "no species", not the stale species stats.
+    expect(page.locator("#grmSpeciesKeywordSummary")).to_contain_text(
+        "No species keyword"
+    )
