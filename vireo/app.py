@@ -3677,10 +3677,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # (mirrors the merge /api/jobs/pipeline runs). The process page's Run
         # sends explicit stage flags (including miss_enabled/review_mode), so
         # process_id is optional here.
-        if body.get("process_id") is not None:
+        # Key presence — not truthiness — decides whether a process was
+        # requested, matching /api/jobs/pipeline: a present-but-null process_id
+        # must 400 (not be treated as omitted), so previewing and starting the
+        # same body agree instead of the plan describing a run the job route
+        # would reject.
+        if "process_id" in body:
             pid = body.get("process_id")
             if not isinstance(pid, int) or isinstance(pid, bool):
-                return json_error("process_id must be an integer", 400)
+                kind = "null" if pid is None else type(pid).__name__
+                return json_error(
+                    f"process_id must be an integer, got {kind}", 400
+                )
             try:
                 expanded = _get_db().resolve_process(pid)
             except ValueError as e:

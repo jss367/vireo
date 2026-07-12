@@ -2649,6 +2649,21 @@ def test_api_pipeline_plan_rejects_unknown_process_id(app_and_db):
     assert resp.status_code == 404
 
 
+def test_api_pipeline_plan_rejects_null_process_id(app_and_db):
+    """A present-but-null process_id must 400, matching /api/jobs/pipeline —
+    key presence, not truthiness. Otherwise previewing and starting the same
+    body disagree: the plan treats null as omitted and returns a Custom plan
+    while the job route rejects the identical body."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={"process_id": None},
+    )
+    assert resp.status_code == 400
+    assert "process_id" in resp.get_json()["error"]
+
+
 def test_api_pipeline_plan_collection_scope(app_and_db):
     """Passing a collection_id must scope the plan to that collection's
     photos — the endpoint's headline transparency contract.
