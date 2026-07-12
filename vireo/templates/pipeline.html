@@ -1288,7 +1288,18 @@ async function loadCollections() {
     var collections = await safeFetch('/api/collections', {}, { toast: false });
     if (!Array.isArray(collections)) return;
     collections.forEach(function(c) {
-      sel.innerHTML += '<option value="' + c.id + '">' + escapeHtml(c.name) + '</option>';
+      // count_error means /api/collections couldn't resolve this collection's
+      // rules — selecting it would 500 the downstream /photos endpoint and
+      // leave the pipeline advertising a source it can't actually run. Show
+      // it disabled with a hint so the user knows to edit the rules instead.
+      var disabled = c.count_error ? ' disabled' : '';
+      var label = c.count_error
+        ? escapeHtml(c.name) + ' (unavailable — edit rules to fix)'
+        : escapeHtml(c.name);
+      var title = c.count_error
+        ? ' title="This collection\'s rules could not be resolved. Edit it in Browse to make it usable."'
+        : '';
+      sel.innerHTML += '<option value="' + c.id + '"' + disabled + title + '>' + label + '</option>';
     });
   } catch(e) {
     // Don't fail silently: an empty picker used to look like "no collections"

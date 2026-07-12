@@ -11705,6 +11705,53 @@ def test_collections_list_survives_one_unresolvable_rule(app_and_db):
     assert by_id[bad]["count_error"] is True
 
 
+def test_collection_photos_returns_400_for_unresolvable_rule(app_and_db):
+    """When a collection's rules can't be resolved, /photos, /photo-ids and
+    /api/import/collection-preview must return a 400, not 500. Otherwise the
+    pipeline picker (which just shows every collection from /api/collections)
+    would advertise a source whose downstream endpoints crash the moment a
+    user selects it — leaving the UI stuck.
+    """
+    import json
+    app, db = app_and_db
+    client = app.test_client()
+
+    bad = db.add_collection(
+        "Broken", json.dumps([{"field": "nonexistent_field", "op": "is", "value": 1}])
+    )
+
+    resp = client.get(f"/api/collections/{bad}/photos")
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+
+    resp = client.get(f"/api/collections/{bad}/photo-ids")
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+
+    resp = client.post(
+        "/api/import/collection-preview",
+        json={"collection_id": bad},
+    )
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+
+
+def test_pipeline_picker_disables_degraded_collections(app_and_db):
+    """The pipeline page's collection picker must not offer degraded
+    collections as selectable — count_error entries render with a `disabled`
+    attribute so users can't accidentally pick a source that would 500 the
+    downstream /photos endpoint.
+    """
+    app, _db = app_and_db
+    client = app.test_client()
+    html = client.get("/pipeline").get_data(as_text=True)
+    # The renderer keys off c.count_error and adds ' disabled' to the option
+    # (plus a tooltip explaining why it's unavailable). Assert the branch is
+    # actually in the template rather than probing it from the DOM.
+    assert "c.count_error" in html
+    assert "unavailable" in html
+
+
 def test_collection_preview_returns_match_count(app_and_db):
     """POST /api/collections/preview returns the count of photos that
     would match an unsaved rules list. Powers the smart-collection

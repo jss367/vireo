@@ -8372,8 +8372,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         page = request.args.get("page", 1, type=int)
         default_per_page = cfg.load().get("photos_per_page", 50)
         per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), _MAX_PER_PAGE))
-        photos = db.get_collection_photos(collection_id, page=page, per_page=per_page)
-        total = db.count_collection_photos(collection_id)
+        # If the saved rules can't be resolved (e.g. an unknown field/op left
+        # over from an older schema), surface a 400 instead of a 500 so
+        # callers can render a real error — this is the same collection state
+        # that /api/collections flags with count_error=True.
+        try:
+            photos = db.get_collection_photos(collection_id, page=page, per_page=per_page)
+            total = db.count_collection_photos(collection_id)
+        except ValueError as e:
+            app.logger.exception(
+                "Collection %s has unresolvable rules", collection_id
+            )
+            return json_error(f"collection rules cannot be resolved: {e}", 400)
         photo_dicts = [dict(p) for p in photos]
         _attach_species(db, photo_dicts)
         _attach_species_representatives(db, photo_dicts)
@@ -8392,7 +8402,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_collection_photo_ids(collection_id):
         """Return every photo ID matching a collection."""
         db = _get_db()
-        photo_ids = db.get_collection_photo_ids(collection_id)
+        try:
+            photo_ids = db.get_collection_photo_ids(collection_id)
+        except ValueError as e:
+            app.logger.exception(
+                "Collection %s has unresolvable rules", collection_id
+            )
+            return json_error(f"collection rules cannot be resolved: {e}", 400)
         return jsonify({"photo_ids": photo_ids, "total": len(photo_ids)})
 
     # -- Highlights --
@@ -13639,7 +13655,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("collection_id required", 400)
 
         db = _get_db()
-        photos = db.get_collection_photos(collection_id, page=1, per_page=100000)
+        try:
+            photos = db.get_collection_photos(collection_id, page=1, per_page=100000)
+        except ValueError as e:
+            app.logger.exception(
+                "Collection %s has unresolvable rules", collection_id
+            )
+            return json_error(f"collection rules cannot be resolved: {e}", 400)
 
         folder_rows = db.conn.execute("SELECT id, path, name FROM folders").fetchall()
         folder_map = {r["id"]: dict(r) for r in folder_rows}
