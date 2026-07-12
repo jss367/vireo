@@ -792,6 +792,124 @@ def test_migrate_eye_detect_default_off_rewrites_workspace_overrides(
     assert overrides["pipeline"]["eye_detect_enabled"] is False
 
 
+def test_migrate_eye_detect_default_off_invalidates_workspace_group_fingerprint(
+    tmp_path, monkeypatch,
+):
+    """A workspace override rewritten from True to False was previously
+    scoring with eye detection on. Its cached
+    ``pipeline_results_ws*.json`` reflects those KEEP/REJECT decisions,
+    but ``compute_group_fingerprint`` only reads encounter/burst settings.
+    The migration must null ``last_group_fingerprint`` on the rewritten
+    workspace so the Process page reports the cache as outdated rather
+    than serving stale eye-enabled scoring after the default flips.
+    """
+    import config as cfg
+    from db import Database
+
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(config_path))
+    config_path.write_text("{}")
+    db = Database(str(tmp_path / "test.db"), initialize_schema=True)
+    ws_id = db.create_workspace(
+        "legacy",
+        config_overrides={"pipeline": {"eye_detect_enabled": True}},
+    )
+    db.set_workspace_group_state(ws_id, "stale-fp", "2025-01-01T00:00:00Z")
+
+    assert cfg.migrate_eye_detect_default_off(db) is True
+
+    row = db.conn.execute(
+        "SELECT last_group_fingerprint FROM workspaces WHERE id = ?", (ws_id,),
+    ).fetchone()
+    assert row["last_group_fingerprint"] is None, (
+        "workspace whose eye_detect_enabled override was rewritten from True "
+        "to False must have its group fingerprint cleared so the plan page "
+        "treats prior eye-enabled scoring as outdated"
+    )
+
+
+def test_migrate_eye_detect_default_off_invalidates_default_relying_workspaces(
+    tmp_path, monkeypatch,
+):
+    """When the global default flips from True to False, workspaces that
+    were relying on the global default (no explicit False override) also
+    had their effective ``eye_detect_enabled`` change. Their cached
+    triage was scored with eye detection on and must be invalidated.
+    Workspaces with an explicit False override were already scoring
+    without eye detection and must keep their fingerprint.
+    """
+    import config as cfg
+    from db import Database
+
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(config_path))
+    config_path.write_text(
+        json.dumps({"pipeline": {"eye_detect_enabled": True}})
+    )
+    db = Database(str(tmp_path / "test.db"), initialize_schema=True)
+    ws_relying_id = db.create_workspace("relying")
+    ws_explicit_false_id = db.create_workspace(
+        "explicit-false",
+        config_overrides={"pipeline": {"eye_detect_enabled": False}},
+    )
+    db.set_workspace_group_state(ws_relying_id, "relying-fp", "2025-01-01T00:00:00Z")
+    db.set_workspace_group_state(
+        ws_explicit_false_id, "explicit-false-fp", "2025-01-01T00:00:00Z",
+    )
+
+    assert cfg.migrate_eye_detect_default_off(db) is True
+
+    rows = {
+        r["id"]: r["last_group_fingerprint"]
+        for r in db.conn.execute(
+            "SELECT id, last_group_fingerprint FROM workspaces",
+        ).fetchall()
+    }
+    assert rows[ws_relying_id] is None, (
+        "workspace relying on the global True default must have its "
+        "fingerprint cleared when the global flips to False"
+    )
+    assert rows[ws_explicit_false_id] == "explicit-false-fp", (
+        "workspace with an explicit False override was already scoring "
+        "eye-disabled; its fingerprint must not be cleared"
+    )
+
+
+def test_migrate_eye_detect_default_off_keeps_fingerprint_when_global_already_false(
+    tmp_path, monkeypatch,
+):
+    """When the global default is already False, workspaces without any
+    eye override were already scoring eye-disabled and their cached
+    triage remains accurate. Only workspaces whose override rewrites
+    from True to False should have their fingerprints cleared.
+    """
+    import config as cfg
+    from db import Database
+
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(config_path))
+    config_path.write_text(
+        json.dumps({"pipeline": {"eye_detect_enabled": False}})
+    )
+    db = Database(str(tmp_path / "test.db"), initialize_schema=True)
+    ws_no_override_id = db.create_workspace("no-override")
+    db.set_workspace_group_state(
+        ws_no_override_id, "keep-me", "2025-01-01T00:00:00Z",
+    )
+
+    assert cfg.migrate_eye_detect_default_off(db) is False
+
+    row = db.conn.execute(
+        "SELECT last_group_fingerprint FROM workspaces WHERE id = ?",
+        (ws_no_override_id,),
+    ).fetchone()
+    assert row["last_group_fingerprint"] == "keep-me", (
+        "when the global default was already False, workspaces without an "
+        "eye override were already scoring eye-disabled and must keep their "
+        "cached fingerprint"
+    )
+
+
 def test_default_subject_types_includes_taxonomy_individual_genre(tmp_path, monkeypatch):
     """Default subject_types is the set of keyword types that count as
     'identifying' a photo — taxonomy + individual + genre by default."""

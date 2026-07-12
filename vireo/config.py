@@ -425,13 +425,28 @@ def migrate_eye_detect_default_off(db=None):
             return False
         rewrote = False
         pipeline = raw.get("pipeline")
-        if isinstance(pipeline, dict) and pipeline.get("eye_detect_enabled") is True:
+        global_was_true = (
+            isinstance(pipeline, dict) and pipeline.get("eye_detect_enabled") is True
+        )
+        if global_was_true:
             pipeline["eye_detect_enabled"] = False
             rewrote = True
         if db is not None:
             ws_rewrites = db.rewrite_legacy_eye_detect_default_in_workspaces()
             if ws_rewrites:
                 rewrote = True
+            # A workspace's cached ``pipeline_results_ws*.json`` and stamped
+            # ``last_group_fingerprint`` were produced with whatever
+            # ``eye_detect_enabled`` was effective at the time. Flipping the
+            # default changes scoring/KEEP/REJECT decisions, but
+            # ``compute_group_fingerprint`` only reads encounter/burst
+            # settings — so without invalidation the Process page keeps
+            # reporting the prior cache as fresh. When the global default is
+            # flipping, every workspace without an explicit False override
+            # was relying on the True default; clear their fingerprints so
+            # the plan reports Group & Score as needing to re-run.
+            if global_was_true:
+                db.invalidate_group_fingerprints_without_explicit_eye_false()
         applied.append(MIGRATION_EYE_DETECT_DEFAULT_OFF)
         raw["_migrations_applied"] = applied
         save(raw)
