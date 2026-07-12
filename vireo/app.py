@@ -2742,6 +2742,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     init_db.migrate_default_subject_collection()
     init_db.migrate_default_needs_identification_collection()
     init_db.migrate_default_location_collections()
+    # One-shot keyword-name normalization backfill. Database.__init__ only
+    # runs it when initialize_schema=True, and every file-backed connection
+    # this app opens — including this startup init_db and every per-request
+    # connection at `_get_db` — passes initialize_schema=False. Without an
+    # explicit run here, an upgraded DB can serve requests with `‘apapane`-
+    # style variant rows still present until some background job happens
+    # to construct a full `Database()` (initialize_schema=True); in that
+    # window an add/rename can miss the legacy row and create duplicate
+    # tags or stale XMP. The method is idempotent (db_meta-gated) so
+    # subsequent boots are a cheap SELECT.
+    init_db.normalize_keyword_data()
     # One-time rewrite of the previous miss-threshold defaults (0.25 / 0.15)
     # to the new defaults (0.20 / 0.12) in both ~/.vireo/config.json and
     # workspace overrides. Gated by a marker so it runs once; re-saved
@@ -5121,50 +5132,55 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/keywords/duplicates")
     def api_keyword_duplicates():
-        """Find normalized duplicate keywords within current workspace."""
+        """Find case-insensitive duplicate keywords within current workspace.
+
+        Groups by the same slot key as merge_duplicate_keywords()
+        — (LOWER(name), parent_id, type, species-bearing) — so the UI does
+        not report legitimate same-name-different-slot rows (a taxonomy
+        `Robin` and an individual `Robin`, a legacy species-bearing general
+        and an ordinary general homonym, or leaves under different parents)
+        as duplicates the cleanup endpoint can never actually merge.
+        """
         db = _get_db()
         ws = db._active_workspace_id
-        rows = db.conn.execute(
-            """SELECT k.id, k.name, k.parent_id, k.type,
-                      COUNT(DISTINCT pk.photo_id) as photo_count
+        dupes = db.conn.execute(
+            """SELECT LOWER(k.name) as lname, GROUP_CONCAT(k.id) as ids,
+                      GROUP_CONCAT(k.name, ' | ') as names, COUNT(DISTINCT k.id) as cnt
                FROM keywords k
                JOIN photo_keywords pk ON pk.keyword_id = k.id
                JOIN photos p ON p.id = pk.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                WHERE wf.workspace_id = ?
-               GROUP BY k.id, k.name, k.parent_id, k.type""",
+               GROUP BY LOWER(k.name), k.parent_id, k.type,
+                        CASE WHEN k.type = 'taxonomy' OR k.is_species = 1
+                             THEN 1 ELSE 0 END
+               HAVING COUNT(DISTINCT k.id) > 1""",
             (ws,),
         ).fetchall()
-        grouped = {}
-        for row in rows:
-            key = keyword_match_key(row["name"])
-            if not key:
-                continue
-            grouped.setdefault((key, row["parent_id"], row["type"]), []).append(row)
         results = []
-        for group in grouped.values():
-            variants = [
-                {
-                    "id": row["id"],
-                    "name": row["name"],
-                    "photo_count": row["photo_count"],
-                }
-                for row in sorted(
-                    group,
-                    key=lambda row: (
-                        normalize_keyword_display(row["name"]) != row["name"],
-                        row["id"],
-                    ),
-                )
-                if row["photo_count"] > 0
-            ]
+        for d in dupes:
+            ids = list(set(int(x) for x in d["ids"].split(",")))
+            # Count photos per variant within this workspace
+            variants = []
+            for kid in ids:
+                row = db.conn.execute(
+                    """SELECT k.name, COUNT(pk.photo_id) as cnt
+                       FROM keywords k
+                       JOIN photo_keywords pk ON pk.keyword_id = k.id
+                       JOIN photos p ON p.id = pk.photo_id
+                       JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                       WHERE k.id = ? AND wf.workspace_id = ?""",
+                    (kid, ws),
+                ).fetchone()
+                if row and row["cnt"] > 0:
+                    variants.append({"id": kid, "name": row["name"], "photo_count": row["cnt"]})
             if len(variants) > 1:
                 results.append({"variants": variants, "keep": variants[0]["name"]})
         return jsonify(results)
 
     @app.route("/api/keywords/clean", methods=["POST"])
     def api_clean_keywords():
-        """Merge normalized duplicate keywords."""
+        """Merge case-insensitive duplicate keywords."""
         db = _get_db()
         merged = db.merge_duplicate_keywords()
         log.info("Keyword cleanup: merged %d duplicates", merged)
@@ -5172,6 +5188,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     def _queue_keyword_add(photo_id, keyword_name, workspace_id=None, _commit=True):
         """Queue a keyword add unless it cancels a pending removal."""
+        # Normalize before the cancellation lookup: queue_change normalizes
+        # on insert, so pending values are stored in clean form and an
+        # exact-match cancel against a raw variant would miss its pair.
+        keyword_name = normalize_keyword_display(keyword_name)
+        if not keyword_name:
+            return
         db = _get_db()
         removed = db.remove_pending_changes(
             photo_id, "keyword_remove", keyword_name,
@@ -5185,6 +5207,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     def _queue_keyword_remove(photo_id, keyword_name, workspace_id=None, _commit=True):
         """Queue a keyword removal unless it cancels a pending add."""
+        # See _queue_keyword_add: keep the cancellation lookup in the same
+        # normalized form queue_change stores.
+        keyword_name = normalize_keyword_display(keyword_name)
+        if not keyword_name:
+            return
         db = _get_db()
         removed = db.remove_pending_changes(
             photo_id, "keyword_add", keyword_name,
@@ -5604,39 +5631,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     stored["name"] if stored and stored["name"]
                     else requested_name
                 )
-                variant_ids = [keyword_id]
-                if stored is not None and keyword_match_key(stored["name"]):
-                    normalized_name = normalize_keyword_display(stored["name"])
-                    if stored["parent_id"] is None:
-                        peer_rows = thread_db.conn.execute(
-                            "SELECT id FROM keywords "
-                            "WHERE vireo_normalize_keyword(name) = ? "
-                            "COLLATE NOCASE AND parent_id IS NULL "
-                            "AND type = ? AND id != ?",
-                            (normalized_name, stored["type"], keyword_id),
-                        ).fetchall()
-                    else:
-                        peer_rows = thread_db.conn.execute(
-                            "SELECT id FROM keywords "
-                            "WHERE vireo_normalize_keyword(name) = ? "
-                            "COLLATE NOCASE AND parent_id = ? "
-                            "AND type = ? AND id != ?",
-                            (
-                                normalized_name, stored["parent_id"],
-                                stored["type"], keyword_id,
-                            ),
-                        ).fetchall()
-                    variant_ids.extend(row["id"] for row in peer_rows)
-                variant_placeholders = ",".join("?" for _ in variant_ids)
                 items = []
                 for photo_id in photo_ids:
                     if cancel_requested():
                         break
                     exists = thread_db.conn.execute(
                         "SELECT 1 FROM photo_keywords "
-                        f"WHERE photo_id = ? AND keyword_id IN "
-                        f"({variant_placeholders})",
-                        [photo_id, *variant_ids],
+                        "WHERE photo_id = ? AND keyword_id = ?",
+                        (photo_id, keyword_id),
                     ).fetchone()
                     if exists is not None:
                         continue
@@ -6301,11 +6303,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             kid = keyword_row["id"]
             name = keyword_row["name"]
         else:
-            # Reject empty after normalization too, so input like `"'"` — which
-            # passes `not name` before stripping edge quotes — doesn't 500 out
-            # of add_keyword's ValueError; it should look like the plain
-            # empty-name case to the caller.
-            if not name or not normalize_keyword_display(name):
+            if not name:
                 return json_error("name required")
             # Validate kw_type at the boundary (isinstance guard against
             # non-hashable JSON; membership against the canonical enum).
@@ -6320,68 +6318,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if isinstance(kw_type_raw, str) and kw_type_raw in KEYWORD_TYPES
                 else None
             )
-            kid = db.add_keyword(name, kw_type=kw_type)
-            # Re-read the stored keyword name so the pending-change and
-            # history entries match the row actually tagged. Without this
-            # step, a request like `‘apapane` would tag the normalized
-            # `apapane` row (or match a legacy edge-quote row via the
-            # add_keyword UDF fallback) while still queuing the raw
-            # request string, so a later delete — which reads k.name from
-            # the DB — queues a differently-spelled entry and pending
-            # changes no longer cancel; XMP sync would then persist the
-            # stray-quote spelling even though the in-app keyword is
-            # normalized. Using the stored name also picks up any species
-            # casing convention applied inside add_keyword.
+            try:
+                kid = db.add_keyword(name, kw_type=kw_type)
+            except ValueError as exc:
+                return json_error(str(exc))
+            # Queue/record the stored spelling: add_keyword normalizes
+            # punctuation and applies the species casing convention, so it
+            # can differ from the raw request name.
             stored = db.conn.execute(
                 "SELECT name FROM keywords WHERE id = ?", (kid,)
             ).fetchone()
-            if stored and stored["name"]:
+            if stored:
                 name = stored["name"]
-
-        # Treat any normalized-equivalent peer already on the photo as
-        # already-tagged: without this, adding clean `Cardinal` to a photo
-        # that carries a legacy `‘Cardinal` variant stacks the clean row on
-        # top of the legacy one, leaving duplicate in-app tags and a
-        # duplicate <rdf:li> after sync. Mirrors the peer expansion in
-        # api_batch_keyword / api_batch_keyword_remove; scoped to same
-        # (parent_id, type) so cross-type same-name keywords stay distinct.
-        target_row = db.conn.execute(
-            "SELECT id, name, parent_id, type FROM keywords WHERE id = ?", (kid,)
-        ).fetchone()
-        variant_ids = [kid]
-        if target_row is not None and keyword_match_key(target_row["name"]):
-            target_norm = normalize_keyword_display(target_row["name"])
-            parent_id = target_row["parent_id"]
-            if parent_id is None:
-                peer_rows = db.conn.execute(
-                    """SELECT id FROM keywords
-                       WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE
-                         AND parent_id IS NULL
-                         AND type = ?
-                         AND id != ?""",
-                    (target_norm, target_row["type"], kid),
-                ).fetchall()
-            else:
-                peer_rows = db.conn.execute(
-                    """SELECT id FROM keywords
-                       WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE
-                         AND parent_id = ?
-                         AND type = ?
-                         AND id != ?""",
-                    (target_norm, parent_id, target_row["type"], kid),
-                ).fetchall()
-            variant_ids.extend(row["id"] for row in peer_rows)
-
-        id_placeholders = ",".join("?" for _ in variant_ids)
+        # tag_photo is INSERT OR IGNORE, so a repeated Add click on a
+        # keyword the photo already carries would still queue a
+        # keyword_add sidecar change and record a keyword_add edit whose
+        # undo calls untag_photo — removing the pre-existing tag. Skip
+        # the pending/history bookkeeping when the row already exists, so
+        # the second click is a true no-op (mirrors the batch route's
+        # already_tagged precheck).
         already_tagged = db.conn.execute(
-            f"""SELECT 1 FROM photo_keywords
-                WHERE photo_id = ? AND keyword_id IN ({id_placeholders})
-                LIMIT 1""",
-            [photo_id] + variant_ids,
-        ).fetchone()
-        if already_tagged is not None:
+            "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+            (photo_id, kid),
+        ).fetchone() is not None
+        if already_tagged:
             return jsonify({"ok": True, "keyword_id": kid})
-
         db.tag_photo(photo_id, kid)
         _queue_keyword_add(photo_id, name)
         db.record_edit('keyword_add', f'Added keyword "{name}"', str(kid),
@@ -6439,7 +6400,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             chunk = photo_ids[i:i + batch_size]
             placeholders = ",".join("?" for _ in chunk)
             rows.extend(db.conn.execute(
-                f"""SELECT pk.photo_id, k.id, k.name, k.parent_id, k.type
+                f"""SELECT pk.photo_id, k.id, k.name, k.type
                     FROM photo_keywords pk
                     JOIN keywords k ON k.id = pk.keyword_id
                     WHERE pk.photo_id IN ({placeholders})
@@ -6450,27 +6411,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         selected_count = len(photo_ids)
         by_keyword = {}
         for row in rows:
-            match_key = keyword_match_key(row["name"])
-            if not match_key:
-                continue
-            key = (match_key, row["parent_id"], row["type"])
-            display_name = normalize_keyword_display(row["name"]) or row["name"]
-            variant_rank = (row["name"] != display_name, row["id"])
             entry = by_keyword.setdefault(
-                key,
+                row["id"],
                 {
                     "id": row["id"],
-                    "name": display_name,
+                    "name": row["name"],
                     "type": row["type"],
-                    "_rank": variant_rank,
                     "photo_ids": set(),
                 },
             )
-            if variant_rank < entry["_rank"]:
-                entry["id"] = row["id"]
-                entry["name"] = display_name
-                entry["type"] = row["type"]
-                entry["_rank"] = variant_rank
             entry["photo_ids"].add(row["photo_id"])
 
         keywords = []
@@ -6507,49 +6456,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_update_keyword(keyword_id):
         db = _get_db()
         body = request.get_json(silent=True) or {}
-        # Capture old name before update for sidecar queuing
-        new_name = body.get("name")
-        old_name = None
-        old_is_species_keyword = False
-        # Capture the pre-update stored name whenever the request could
-        # trigger a rename OR a same-slot merge. Explicit `name` submissions
-        # are the obvious case: db.update_keyword() normalizes the rename
-        # target, so a PUT of `{"name": "‘apapane"}` against an upgraded
-        # row still stored as `‘apapane` rewrites the row to `apapane` and
-        # the earlier raw-string guard would have left sidecars/curation
-        # keyed to the legacy spelling. But a TYPE-ONLY PUT can also
-        # change source-tagged photos' effective keyword name: when
-        # update_keyword finds a normalized-equal peer at the same
-        # (parent_id, effective_type), _merge_keyword_into retargets the
-        # source row's photo tags onto the peer's stored spelling and
-        # deletes the source row. Without capturing the source's
-        # pre-update state on that path too, no sidecar keyword_remove/
-        # keyword_add pair is queued for those photos and their XMP keeps
-        # exporting the source's legacy spelling indefinitely. The post-
-        # update guard below (`if old_name == new_name: old_name = None`)
-        # uses the resolved stored name, so a plain type-only PUT that
-        # doesn't hit the merge path still no-ops.
-        if 'name' in body or 'type' in body:
-            old_row = db.conn.execute(
-                """SELECT name, is_species, type
-                   FROM keywords WHERE id = ?""",
-                (keyword_id,),
-            ).fetchone()
-            if old_row:
-                old_name = old_row["name"]
-                old_is_species_keyword = (
-                    old_row["is_species"] == 1 or old_row["type"] == "taxonomy"
-                )
-        # Snapshot the photo/workspace pairs that carry this keyword before
-        # the update. When the rename target collides with an existing peer
-        # keyword, update_keyword merges this row's photo_keywords into the
-        # peer and deletes the source, so a post-update query for pk.keyword_id
-        # = keyword_id would return nothing and the sidecar remove/add pair
-        # would never queue. Grabbing the pairs up front works for both the
-        # plain-rename and merged paths.
-        pre_affected = []
-        if old_name:
-            pre_affected = db.conn.execute(
+        # Capture old identity and tagged photos BEFORE the update: a rename
+        # or retype can merge this row into a normalized same-slot peer, in
+        # which case the original id and its photo_keywords rows are gone
+        # afterwards (update_keyword returns the surviving id).
+        old_row = db.conn.execute(
+            """SELECT name, is_species, type
+               FROM keywords WHERE id = ?""",
+            (keyword_id,),
+        ).fetchone()
+        affected = []
+        # Capture affected photos whenever a rename OR a retype is being
+        # requested: update_keyword's merge-into-peer path can move photo
+        # tags for either kind of change (a type-only PUT with an existing
+        # same-name peer under the new type moves the tagged photos onto the
+        # peer's stored spelling), and without the snapshot the
+        # keyword_remove/keyword_add sidecar queueing below iterates an
+        # empty list and XMP keeps exporting the old spelling until another
+        # edit occurs.
+        if body.get("name") or body.get("type"):
+            affected = db.conn.execute(
                 """SELECT pk.photo_id, wf.workspace_id
                    FROM photo_keywords pk
                    JOIN photos p ON p.id = pk.photo_id
@@ -6562,36 +6488,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             effective_id = db.update_keyword(keyword_id, **body)
         except ValueError as e:
             return json_error(str(e), 400)
-        # `effective_id` is the surviving keyword row: the input `keyword_id`
-        # for a plain rename, or the peer's id when update_keyword merged this
-        # row into an existing normalized-equal peer.
-        if effective_id is None:
-            effective_id = keyword_id
-        # Re-read the stored name so sidecar queue/history and highlights
-        # rename use the normalized value that update_keyword actually
-        # wrote. Without this, a rename to `‘apapane` would store the
-        # normalized `apapane` but queue the raw stray-quote value to
-        # sidecars, defeating the same-name invariant enforced on the
-        # add path.
-        if old_name:
-            stored = db.conn.execute(
-                "SELECT name FROM keywords WHERE id = ?", (effective_id,)
-            ).fetchone()
-            if stored and stored["name"]:
-                new_name = stored["name"]
-            if old_name == new_name:
-                old_name = None
-        # Queue sidecar updates only after successful DB update, for all affected workspaces
-        if old_name:
-            affected = pre_affected
-            new_row = db.conn.execute(
-                """SELECT is_species, type
-                   FROM keywords WHERE id = ?""",
-                (effective_id,),
-            ).fetchone()
+        # Queue sidecar updates only after a successful DB update, using the
+        # STORED spelling of the surviving row — update_keyword normalizes
+        # the requested name, so it can differ from the raw request value.
+        new_row = db.conn.execute(
+            """SELECT name, is_species, type
+               FROM keywords WHERE id = ?""",
+            (effective_id,),
+        ).fetchone()
+        if (
+            old_row is not None and new_row is not None
+            and old_row["name"] != new_row["name"]
+        ):
+            old_name = old_row["name"]
+            new_name = new_row["name"]
+            old_is_species_keyword = (
+                old_row["is_species"] == 1 or old_row["type"] == "taxonomy"
+            )
             new_is_species_keyword = (
-                new_row is not None
-                and (new_row["is_species"] == 1 or new_row["type"] == "taxonomy")
+                new_row["is_species"] == 1 or new_row["type"] == "taxonomy"
             )
             if old_is_species_keyword and new_is_species_keyword:
                 pairs = [
@@ -6610,47 +6525,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             for row in affected:
                 _queue_keyword_remove(row["photo_id"], old_name, workspace_id=row["workspace_id"])
                 _queue_keyword_add(row["photo_id"], new_name, workspace_id=row["workspace_id"])
-        # When update_keyword merged this row into a normalized-equal peer
-        # AND canonicalized the peer's stored spelling (upgraded legacy row
-        # like `‘apapane` rewritten to `apapane`), photos that were already
-        # tagged with the PEER before the merge still have sidecars keyed to
-        # the peer's legacy spelling. _normalize_keyword_row_name retargeted
-        # their pending_changes and species curation, but no new sidecar
-        # remove/add is queued for photos whose XMP was already synced —
-        # the pre_affected block above only covers photos originally tagged
-        # with the source row (keyword_id), and specifically only fires when
-        # the request included a `name` field. A type-only PUT that hits
-        # the merge path (e.g. flipping a clean general `apapane` to
-        # taxonomy while a legacy taxonomy `‘apapane` peer exists) skips
-        # that block entirely, so without this the peer's pre-existing
-        # tagged photos keep exporting the quoted spelling indefinitely.
-        peer_pre_name = getattr(effective_id, "peer_pre_name", None)
-        peer_pre_photos = getattr(effective_id, "peer_pre_photos", ())
-        if peer_pre_name and peer_pre_photos:
-            peer_new_row = db.conn.execute(
-                "SELECT name FROM keywords WHERE id = ?", (int(effective_id),)
-            ).fetchone()
-            peer_new_name = peer_new_row["name"] if peer_new_row else None
-            if peer_new_name and peer_new_name != peer_pre_name:
-                for photo_id, workspace_id in peer_pre_photos:
-                    _queue_keyword_remove(
-                        photo_id, peer_pre_name, workspace_id=workspace_id,
-                    )
-                    _queue_keyword_add(
-                        photo_id, peer_new_name, workspace_id=workspace_id,
-                    )
-        # Signal the surviving id when update_keyword merged this row into a
-        # normalized-equal peer. Without this, the keywords UI keeps mutating
-        # the requested keyword_id in place (see keywords.html renameKeyword /
-        # updateType / kwBulkApply), leaving allKeywords pointed at a keyword
-        # row the DB just deleted; subsequent rename/type/delete actions for
-        # that stale entry silently affect nothing. Callers refetch when
-        # `merged` is true.
-        return jsonify({
-            "ok": True,
-            "effective_id": effective_id,
-            "merged": effective_id != keyword_id,
-        })
+        # keywords.html's updateType/renameKeyword/bulk-apply handlers refetch
+        # only when `merged` is truthy; without it the UI keeps the deleted
+        # source id and its next edit/delete would 404 or hit the wrong row.
+        merged = effective_id != keyword_id
+        return jsonify({"ok": True, "keyword_id": effective_id, "merged": merged})
 
     @app.route("/api/keywords/<int:keyword_id>", methods=["DELETE"])
     def api_delete_keyword(keyword_id):
@@ -7588,8 +7467,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             kid = keyword_row["id"]
             name = keyword_row["name"]
         else:
-            # Reject empty after normalization — see api_add_keyword.
-            if not name or not normalize_keyword_display(name):
+            if not name:
                 return json_error("photo_ids and name required")
             # Route kw_type through add_keyword so its type-reconciliation logic
             # runs (preserves existing user-typed rows; only upgrades 'general').
@@ -7600,63 +7478,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if isinstance(kw_type_raw, str) and kw_type_raw in KEYWORD_TYPES
                 else None
             )
-            kid = db.add_keyword(name, kw_type=kw_type)
-            # Re-read the stored keyword name so queue/history entries
-            # match the row actually tagged; see api_add_keyword for the
-            # full rationale (pending-change cancellation and XMP sync).
+            try:
+                kid = db.add_keyword(name, kw_type=kw_type)
+            except ValueError as exc:
+                return json_error(str(exc))
+            # Queue/record the stored spelling (see api_add_keyword).
             stored = db.conn.execute(
                 "SELECT name FROM keywords WHERE id = ?", (kid,)
             ).fetchone()
-            if stored and stored["name"]:
+            if stored:
                 name = stored["name"]
-
-        # Expand the "already tagged" check to include every legacy row that
-        # normalizes to the same (name, parent_id, type). Mirrors the peer
-        # expansion in api_batch_keyword_remove. api_selection_keyword_suggestions
-        # collapses variants that share a match key and returns a single
-        # representative id, so an "Add to N missing" click can hit here with
-        # that one id even when some of the selected photos are tagged with a
-        # legacy peer (e.g. `‘Cardinal` alongside clean `Cardinal`). Without
-        # this expansion, tag_photo stacks the clean row on top of the legacy
-        # variant instead of canonicalizing to a single tag.
-        target_row = db.conn.execute(
-            "SELECT id, name, parent_id, type FROM keywords WHERE id = ?", (kid,)
-        ).fetchone()
-        variant_ids = [kid]
-        if target_row is not None and keyword_match_key(target_row["name"]):
-            target_norm = normalize_keyword_display(target_row["name"])
-            parent_id = target_row["parent_id"]
-            if parent_id is None:
-                peer_rows = db.conn.execute(
-                    """SELECT id FROM keywords
-                       WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE
-                         AND parent_id IS NULL
-                         AND type = ?
-                         AND id != ?""",
-                    (target_norm, target_row["type"], kid),
-                ).fetchall()
-            else:
-                peer_rows = db.conn.execute(
-                    """SELECT id FROM keywords
-                       WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE
-                         AND parent_id = ?
-                         AND type = ?
-                         AND id != ?""",
-                    (target_norm, parent_id, target_row["type"], kid),
-                ).fetchall()
-            variant_ids.extend(row["id"] for row in peer_rows)
 
         already_tagged = set()
         batch_size = 800
         for i in range(0, len(photo_ids), batch_size):
             chunk = list(photo_ids[i:i + batch_size])
-            id_placeholders = ",".join("?" for _ in variant_ids)
-            photo_placeholders = ",".join("?" for _ in chunk)
+            placeholders = ",".join("?" for _ in chunk)
             existing_rows = db.conn.execute(
-                f"""SELECT DISTINCT photo_id FROM photo_keywords
-                    WHERE keyword_id IN ({id_placeholders})
-                      AND photo_id IN ({photo_placeholders})""",
-                list(variant_ids) + chunk,
+                f"""SELECT photo_id FROM photo_keywords
+                    WHERE keyword_id = ? AND photo_id IN ({placeholders})""",
+                [kid] + chunk,
             ).fetchall()
             already_tagged.update(row["photo_id"] for row in existing_rows)
         added_ids = [pid for pid in photo_ids if pid not in already_tagged]
@@ -7693,7 +7534,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("photo_ids required")
 
         keyword_row = db.conn.execute(
-            "SELECT id, name, parent_id, type FROM keywords WHERE id = ?", (keyword_id,)
+            "SELECT id, name FROM keywords WHERE id = ?", (keyword_id,)
         ).fetchone()
         if keyword_row is None:
             return json_error("keyword not found", 404)
@@ -7704,83 +7545,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     f"Photo {pid} does not belong to the active workspace", 403
                 )
 
-        # Expand the target to include every legacy row that normalizes to
-        # the same (name, parent_id, type). add_keyword() collapses those to
-        # a single canonical row on new inserts, but an upgraded DB can still
-        # carry legacy variants (e.g. `‘apapane` alongside clean `apapane`).
-        # `api_selection_keyword_suggestions` groups by the same match key and
-        # returns a single representative id for the group, so a "Remove from
-        # N" click hits this endpoint with that one id even when some of the
-        # selected photos are tagged with a peer variant instead. Without
-        # this expansion, only photos carrying the exact representative id
-        # get untagged and the others keep the legacy variant.
-        target_key = keyword_match_key(keyword_row["name"])
-        variant_ids = [keyword_id]
-        if target_key:
-            parent_id = keyword_row["parent_id"]
-            if parent_id is None:
-                peer_rows = db.conn.execute(
-                    """SELECT id FROM keywords
-                       WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE
-                         AND parent_id IS NULL
-                         AND type = ?
-                         AND id != ?""",
-                    (normalize_keyword_display(keyword_row["name"]),
-                     keyword_row["type"], keyword_id),
-                ).fetchall()
-            else:
-                peer_rows = db.conn.execute(
-                    """SELECT id FROM keywords
-                       WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE
-                         AND parent_id = ?
-                         AND type = ?
-                         AND id != ?""",
-                    (normalize_keyword_display(keyword_row["name"]),
-                     parent_id, keyword_row["type"], keyword_id),
-                ).fetchall()
-            variant_ids.extend(row["id"] for row in peer_rows)
-
-        # Look up each variant's stored name so pending-change cancellation
-        # matches on the legacy value the queue was recorded under (e.g. a
-        # `keyword_add` queued as `‘Cardinal` needs a `keyword_remove` with
-        # the same spelling to cancel, not the canonical `Cardinal`).
-        variant_names = {}
-        for row in db.conn.execute(
-            f"""SELECT id, name FROM keywords
-                WHERE id IN ({",".join("?" for _ in variant_ids)})""",
-            variant_ids,
-        ).fetchall():
-            variant_names[row["id"]] = row["name"]
-
-        # Photo_ids tagged with ANY variant get an untag+remove pair. Track
-        # which specific variant each photo carried so we untag the right row.
-        tagged_by_pid = {}
+        tagged_ids = []
         batch_size = 800
         for i in range(0, len(clean_ids), batch_size):
             chunk = clean_ids[i:i + batch_size]
-            id_placeholders = ",".join("?" for _ in variant_ids)
-            photo_placeholders = ",".join("?" for _ in chunk)
+            placeholders = ",".join("?" for _ in chunk)
             rows = db.conn.execute(
-                f"""SELECT photo_id, keyword_id FROM photo_keywords
-                    WHERE keyword_id IN ({id_placeholders})
-                      AND photo_id IN ({photo_placeholders})""",
-                list(variant_ids) + chunk,
+                f"""SELECT photo_id FROM photo_keywords
+                    WHERE keyword_id = ? AND photo_id IN ({placeholders})""",
+                [keyword_id] + chunk,
             ).fetchall()
-            for row in rows:
-                tagged_by_pid.setdefault(row["photo_id"], []).append(row["keyword_id"])
+            tagged_ids.extend(row["photo_id"] for row in rows)
 
-        removed_ids = [pid for pid in clean_ids if pid in tagged_by_pid]
+        tagged_set = set(tagged_ids)
+        removed_ids = [pid for pid in clean_ids if pid in tagged_set]
         name = keyword_row["name"]
         for pid in removed_ids:
-            queued_names = set()
-            for kid in tagged_by_pid[pid]:
-                db.untag_photo(pid, kid)
-                variant_name = variant_names.get(kid, name)
-                if variant_name not in queued_names:
-                    _queue_keyword_remove(pid, variant_name)
-                    queued_names.add(variant_name)
-            if name not in queued_names:
-                _queue_keyword_remove(pid, name)
+            db.untag_photo(pid, keyword_id)
+            _queue_keyword_remove(pid, name)
 
         items = [
             {"photo_id": pid, "old_value": str(keyword_id), "new_value": ""}
@@ -9655,247 +9437,286 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(error)
         species = body.get("species", "")
         species = species.strip() if isinstance(species, str) else ""
-        if not species:
-            return json_error("species required")
-        # Normalize species BEFORE snapshotting existing highlight/preference
-        # rows for the undo payload. add_keyword() below normalizes on insert
-        # (see line ~8255), and rename_* helpers below use the normalized
-        # name, so the "did a target-species row already exist?" queries at
-        # `WHERE species = ?` must compare on the same normalized value.
-        # Without this, a request like `‘apapane` snapshots against the raw
-        # spelling, misses an existing clean `apapane` highlight/preference
-        # row, records `dst_existed=False`, and undo then deletes the
-        # pre-existing curation row it never created. Reject inputs that
-        # normalize to empty for the same reason api_add_keyword does.
+        # Normalize up front: the curation snapshots below compare this
+        # value against stored species strings, and add_keyword would
+        # normalize on insert anyway — one spelling throughout the route.
         species = normalize_keyword_display(species)
         if not species:
             return json_error("species required")
+        # Canonicalize the submitted spelling to the final stored keyword
+        # name BEFORE the snapshot passes below. resolve_species_display_name
+        # mirrors add_keyword's two branches: preserve an existing NOCASE
+        # match, otherwise apply the species casing convention (`black
+        # phoebe` → `Black Phoebe`). Without this, the `row["species"] ==
+        # species` snapshots (hl_dst_preexisting, pref_dst_taken,
+        # rep_dst_preexisting, plus the source-side skips in the
+        # preference/rep passes) would miss pre-existing target rows for
+        # the destination species — from another keyword row, or from
+        # prediction-seeded curation with no keyword row — and record
+        # dst_existed=false; undo would then delete the user's
+        # pre-existing highlight/preference/rep.
+        species = db.resolve_species_display_name(species)
         error, status = _validate_highlight_photo_ids(db, photo_ids)
         if error:
             return json_error(error, status)
 
         top_predictions = _highlight_top_predictions(db, photo_ids)
-        # Snapshot the top-prediction species per photo (lowercase). Used
-        # below in the current_species-empty filter branch to accept only
+        # Snapshot the top-prediction species per photo, keyed by
+        # keyword_match_key (SQLite's ASCII-only NOCASE fold). Used below
+        # in the current_species-empty filter branch to accept only
         # curation whose old species matches an active prediction — see
         # the prediction-only relabel scenario in
         # test_highlights_relabel_prediction_only_undo_restores_curation.
+        # keyword_match_key (not Python's str.lower()) matches
+        # add_keyword's SQLite dedupe, so `Éclair` vs `éclair` — which
+        # SQLite/add_keyword keep distinct — stay distinct here too;
+        # otherwise a stale curation row for one would fold onto the
+        # other on relabel.
         predicted_species_by_pid = {}
         for pid_pred, pred_row in top_predictions.items():
             pred_species = pred_row["species"] if pred_row else None
             if pred_species:
-                predicted_species_by_pid.setdefault(pid_pred, set()).add(
-                    keyword_match_key(pred_species)
-                )
+                key = keyword_match_key(pred_species)
+                if key:
+                    predicted_species_by_pid.setdefault(pid_pred, set()).add(key)
         ws_id = db._ws_id()
+        # Chunk both lookups: photo_ids has no upstream cap
+        # (_parse_highlight_photo_ids just parses the list), so a bulk
+        # relabel of >999 photos would blow SQLITE_MAX_VARIABLE_NUMBER
+        # on the legacy builds this file already guards against.
+
+        # Snapshot each photo's current taxonomy keywords before the relabel
+        # touches them. Used to skip stale curation rows for species the
+        # photo no longer carries across all three curation tables
+        # (species_highlights, photo_preferences, species_representatives):
+        # untag_photo does not clear any of them, so a photo can retain a
+        # curation row for species A after that keyword was removed. Without
+        # this filter, relabeling the photo's current species B→C would
+        # sweep the stale A rows into A→C renames — losing the preserved A
+        # state and making C look manually selected.
+        current_species_by_pid = {}
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT pk.photo_id, k.name
+                    FROM photo_keywords pk
+                    JOIN keywords k ON k.id = pk.keyword_id
+                    WHERE pk.photo_id IN ({placeholders})
+                      AND (k.is_species = 1 OR k.type = 'taxonomy')""",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                key = keyword_match_key(row["name"])
+                if key:
+                    current_species_by_pid.setdefault(row["photo_id"], set()).add(key)
+
+        def _accept_curation_source(pid, old_species_name):
+            """Shared filter for the highlight, preference, and rep passes.
+
+            With any current taxonomy keywords, only migrate curation for
+            species the photo currently carries. Without any taxonomy —
+            the prediction-only relabel path (``keyword_add`` instead of
+            ``species_replace``) — only migrate curation whose species
+            matches an active prediction on the photo. That preserves the
+            legitimate prediction-species migration exercised by
+            ``test_highlights_relabel_prediction_only_undo_restores_curation``
+            while blocking stale curation rows for species that were
+            tagged and later untagged.
+
+            Keyed by keyword_match_key (see the snapshot above): SQLite's
+            ASCII-only NOCASE keeps `Éclair` and `éclair` distinct as
+            separate keyword rows, and str.lower() folds them together —
+            which would let a stale `éclair` curation row migrate onto a
+            photo still carrying `Éclair`.
+            """
+            old_key = keyword_match_key(old_species_name)
+            if not old_key:
+                return False
+            current = current_species_by_pid.get(pid)
+            if current:
+                return old_key in current
+            predicted = predicted_species_by_pid.get(pid) or set()
+            return old_key in predicted
+
+        highlight_renames = {}
+        hl_prev_by_pid = {}
+        # Photos that already had a `(species=<target>, photo_id)` row in
+        # species_highlights before the relabel. rename_species_highlights_species
+        # skips inserting a duplicate for these, so the destination row is
+        # pre-existing and undo must not delete it.
+        hl_dst_preexisting = set()
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT species, photo_id, rank FROM species_highlights
+                    WHERE workspace_id = ? AND photo_id IN ({placeholders})""",
+                (ws_id, *chunk),
+            ).fetchall()
+            for row in rows:
+                old_species_name = row["species"]
+                if old_species_name == species:
+                    hl_dst_preexisting.add(row["photo_id"])
+                    continue
+                if not _accept_curation_source(
+                    row["photo_id"], old_species_name
+                ):
+                    continue
+                highlight_renames.setdefault(old_species_name, []).append(
+                    row["photo_id"]
+                )
+                # Snapshot the original rank so undo can restore each
+                # highlighted photo at its original position instead of
+                # dumping it at MAX(rank)+1 (see _restore_relabel_curation).
+                hl_prev_by_pid.setdefault(row["photo_id"], []).append({
+                    "species": old_species_name,
+                    "rank": row["rank"],
+                })
+        # Backfill dst_existed onto each entry now that the target-species
+        # pass has finished (row order within the query is unspecified).
+        for pid, entries in hl_prev_by_pid.items():
+            dst = pid in hl_dst_preexisting
+            for entry in entries:
+                entry["dst_existed"] = dst
+        preference_renames = {}
+        pref_prev_by_pid = {}
+        # Purposes that already have a row at (new_species, purpose) — for
+        # any photo. rename_photo_preferences_species uses INSERT OR IGNORE,
+        # so when the destination slot is already taken (either by this
+        # photo or a different one), the relabel does not create a new
+        # destination row for this photo and undo must not attempt to
+        # delete it. Un-gating the old-species restore from a destination
+        # row lookup lets undo recover representatives even when the
+        # relabel collided with another photo holding the slot.
+        pref_dst_taken = {
+            r["purpose"] for r in db.conn.execute(
+                """SELECT purpose FROM photo_preferences
+                   WHERE workspace_id = ? AND species = ?
+                     AND purpose IN (
+                         'species_representative', 'life_list', 'highlights'
+                     )""",
+                (ws_id, species),
+            ).fetchall()
+        }
+        # Photos that already had a (species=<target>, photo_id) row in
+        # species_representatives before the relabel.
+        # rename_species_representatives_species uses INSERT OR IGNORE, so
+        # when the destination rep row is already present the relabel does
+        # not create a new one and undo must not delete it. Applies to
+        # both preference-covered moves (via pref_prev.rep_dst_existed
+        # below) and rep-only moves (via rep_prev.dst_existed).
+        rep_dst_preexisting = set()
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            for row in db.conn.execute(
+                f"""SELECT photo_id FROM species_representatives
+                    WHERE species = ? AND photo_id IN ({placeholders})""",
+                (species, *chunk),
+            ).fetchall():
+                rep_dst_preexisting.add(row["photo_id"])
+        # Snapshot the original selected_order for every existing
+        # species_representatives row on the retagged photos. Undo restores
+        # each row at its captured order rather than the fresh MAX+1 that
+        # _set_global_species_representative would assign — so undoing a
+        # relabel of a secondary representative does not promote it above
+        # the pre-existing primary for that species.
+        rep_selected_order_by_pid_species = {}
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            for row in db.conn.execute(
+                f"""SELECT species, photo_id, selected_order
+                    FROM species_representatives
+                    WHERE photo_id IN ({placeholders})""",
+                chunk,
+            ).fetchall():
+                rep_selected_order_by_pid_species[
+                    (row["photo_id"], row["species"])
+                ] = row["selected_order"]
+        pref_covered_by_pid_species = set()
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT species, photo_id, purpose FROM photo_preferences
+                    WHERE workspace_id = ?
+                      AND photo_id IN ({placeholders})
+                      AND purpose IN (
+                          'species_representative', 'life_list', 'highlights'
+                      )""",
+                (ws_id, *chunk),
+            ).fetchall()
+            for row in rows:
+                old_species_name = row["species"]
+                if old_species_name == species:
+                    continue
+                if not _accept_curation_source(
+                    row["photo_id"], old_species_name
+                ):
+                    continue
+                preference_renames.setdefault(old_species_name, []).append(
+                    row["photo_id"]
+                )
+                pref_prev_by_pid.setdefault(row["photo_id"], []).append({
+                    "purpose": row["purpose"],
+                    "species": old_species_name,
+                    "dst_existed": row["purpose"] in pref_dst_taken,
+                    "rep_dst_existed": row["photo_id"] in rep_dst_preexisting,
+                    "rep_selected_order": rep_selected_order_by_pid_species.get(
+                        (row["photo_id"], old_species_name)
+                    ),
+                })
+                pref_covered_by_pid_species.add(
+                    (row["photo_id"], old_species_name)
+                )
+        # Global species_representatives moves. Representatives are global
+        # (no workspace column), so a photo can carry a
+        # (species, photo_id) row picked from a different workspace with
+        # no matching photo_preferences row in the active workspace. In
+        # that case the preference-rename pass above would miss it, and
+        # the retag would strand the representative under the old species
+        # name — leaving both species without a representative. Query
+        # species_representatives directly and enqueue any rep-only moves
+        # the preference pass didn't already cover. The same
+        # current-species filter applies here (see the snapshot comment
+        # above).
+        representative_renames = {}
+        rep_prev_by_pid = {}
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT species, photo_id FROM species_representatives
+                    WHERE photo_id IN ({placeholders})""",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                old_species_name = row["species"]
+                pid = row["photo_id"]
+                if old_species_name == species:
+                    continue
+                # rename_photo_preferences_species already migrates
+                # species_representatives for pids in preference_renames,
+                # so skip anything the preference pass will cover.
+                if (pid, old_species_name) in pref_covered_by_pid_species:
+                    continue
+                if not _accept_curation_source(pid, old_species_name):
+                    continue
+                representative_renames.setdefault(old_species_name, []).append(pid)
+                rep_prev_by_pid.setdefault(pid, []).append({
+                    "species": old_species_name,
+                    "dst_existed": pid in rep_dst_preexisting,
+                    "selected_order": rep_selected_order_by_pid_species.get(
+                        (pid, old_species_name)
+                    ),
+                })
         try:
             kid = db.add_keyword(species, is_species=True, _commit=False)
-            # Re-read the stored keyword name so subsequent queue/history
-            # entries, highlight/preference renames, the curation snapshots
-            # below, and the "did this photo already carry the target
-            # species?" comparison all reflect the row actually tagged.
-            # Without this, `‘apapane` from the request tags the normalized
-            # `apapane` row but queues the raw stray-quote value for XMP
-            # sync, and the old-name comparison below spuriously sees
-            # `apapane` (stored on the photo) as different from `‘apapane`
-            # (request), producing a remove/add pair that rewrites the
-            # sidecar to the stray-quote spelling. Same rationale as
-            # api_add_keyword / api_batch_keyword.
+            # Use the stored spelling from here on: add_keyword applies the
+            # species casing convention, so it can differ from the request
+            # value, and the queued sidecar changes / curation renames /
+            # history payload must match the row actually tagged.
             stored = db.conn.execute(
                 "SELECT name FROM keywords WHERE id = ?", (kid,)
             ).fetchone()
             if stored and stored["name"]:
                 species = stored["name"]
-            # Chunk both lookups: photo_ids has no upstream cap
-            # (_parse_highlight_photo_ids just parses the list), so a bulk
-            # relabel of >999 photos would blow SQLITE_MAX_VARIABLE_NUMBER
-            # on the legacy builds this file already guards against.
-            # Snapshots MUST run after the stored-name resolution above so
-            # `hl_dst_preexisting` / `pref_dst_taken` compare against the
-            # same species name the rename_* helpers will insert under.
-            # Without this ordering, add_keyword resolving to a legacy
-            # edge-quote row (stored name `‘apapane` when the request was
-            # `apapane`) would leave the snapshots computed under the
-            # normalized `apapane`, mark `dst_existed=False` for photos
-            # that already carry a `‘apapane` highlight/preference row,
-            # and the undo path would then delete those pre-existing rows
-            # as if this relabel had created them.
-            # Snapshot each photo's current taxonomy keywords before the
-            # relabel touches them. Used to skip stale curation rows for
-            # species the photo no longer carries across all three curation
-            # tables (species_highlights, photo_preferences,
-            # species_representatives). Compare with the normalized keyword
-            # key so legacy edge-quote spellings line up with normalized DB
-            # species names.
-            current_species_by_pid = {}
-            for chunk in _chunked(photo_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                rows = db.conn.execute(
-                    f"""SELECT pk.photo_id, k.name
-                        FROM photo_keywords pk
-                        JOIN keywords k ON k.id = pk.keyword_id
-                        WHERE pk.photo_id IN ({placeholders})
-                          AND (k.is_species = 1 OR k.type = 'taxonomy')""",
-                    chunk,
-                ).fetchall()
-                for row in rows:
-                    current_species_by_pid.setdefault(row["photo_id"], set()).add(
-                        keyword_match_key(row["name"])
-                    )
-
-            def _accept_curation_source(pid, old_species_name):
-                """Return whether old curation should move to the new species."""
-                old_key = keyword_match_key(old_species_name)
-                current = current_species_by_pid.get(pid)
-                if current:
-                    return old_key in current
-                predicted = predicted_species_by_pid.get(pid) or set()
-                return old_key in predicted
-
-            highlight_renames = {}
-            hl_prev_by_pid = {}
-            # Photos that already had a `(species=<target>, photo_id)` row in
-            # species_highlights before the relabel. rename_species_highlights_species
-            # skips inserting a duplicate for these, so the destination row is
-            # pre-existing and undo must not delete it.
-            hl_dst_preexisting = set()
-            for chunk in _chunked(photo_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                rows = db.conn.execute(
-                    f"""SELECT species, photo_id, rank FROM species_highlights
-                        WHERE workspace_id = ? AND photo_id IN ({placeholders})""",
-                    (ws_id, *chunk),
-                ).fetchall()
-                for row in rows:
-                    old_species_name = row["species"]
-                    if old_species_name == species:
-                        hl_dst_preexisting.add(row["photo_id"])
-                        continue
-                    if not _accept_curation_source(row["photo_id"], old_species_name):
-                        continue
-                    highlight_renames.setdefault(old_species_name, []).append(
-                        row["photo_id"]
-                    )
-                    # Snapshot the original rank so undo can restore each
-                    # highlighted photo at its original position instead of
-                    # dumping it at MAX(rank)+1 (see _restore_relabel_curation).
-                    hl_prev_by_pid.setdefault(row["photo_id"], []).append({
-                        "species": old_species_name,
-                        "rank": row["rank"],
-                    })
-            # Backfill dst_existed onto each entry now that the target-species
-            # pass has finished (row order within the query is unspecified).
-            for pid, entries in hl_prev_by_pid.items():
-                dst = pid in hl_dst_preexisting
-                for entry in entries:
-                    entry["dst_existed"] = dst
-            preference_renames = {}
-            pref_prev_by_pid = {}
-            # Purposes that already have a row at (new_species, purpose) — for
-            # any photo. rename_photo_preferences_species uses INSERT OR IGNORE,
-            # so when the destination slot is already taken (either by this
-            # photo or a different one), the relabel does not create a new
-            # destination row for this photo and undo must not attempt to
-            # delete it. Un-gating the old-species restore from a destination
-            # row lookup lets undo recover representatives even when the
-            # relabel collided with another photo holding the slot.
-            pref_dst_taken = {
-                r["purpose"] for r in db.conn.execute(
-                    """SELECT purpose FROM photo_preferences
-                       WHERE workspace_id = ? AND species = ?
-                         AND purpose IN (
-                             'species_representative', 'life_list', 'highlights'
-                         )""",
-                    (ws_id, species),
-                ).fetchall()
-            }
-            # Photos that already had a (species=<target>, photo_id) row in
-            # species_representatives before the relabel.
-            rep_dst_preexisting = set()
-            for chunk in _chunked(photo_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                for row in db.conn.execute(
-                    f"""SELECT photo_id FROM species_representatives
-                        WHERE species = ? AND photo_id IN ({placeholders})""",
-                    (species, *chunk),
-                ).fetchall():
-                    rep_dst_preexisting.add(row["photo_id"])
-            # Snapshot original representative order so undo restores
-            # secondary representatives without promoting them.
-            rep_selected_order_by_pid_species = {}
-            for chunk in _chunked(photo_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                for row in db.conn.execute(
-                    f"""SELECT species, photo_id, selected_order
-                        FROM species_representatives
-                        WHERE photo_id IN ({placeholders})""",
-                    chunk,
-                ).fetchall():
-                    rep_selected_order_by_pid_species[
-                        (row["photo_id"], row["species"])
-                    ] = row["selected_order"]
-            pref_covered_by_pid_species = set()
-            for chunk in _chunked(photo_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                rows = db.conn.execute(
-                    f"""SELECT species, photo_id, purpose FROM photo_preferences
-                        WHERE workspace_id = ?
-                          AND photo_id IN ({placeholders})
-                          AND purpose IN (
-                              'species_representative', 'life_list', 'highlights'
-                          )""",
-                    (ws_id, *chunk),
-                ).fetchall()
-                for row in rows:
-                    old_species_name = row["species"]
-                    if old_species_name == species:
-                        continue
-                    if not _accept_curation_source(row["photo_id"], old_species_name):
-                        continue
-                    preference_renames.setdefault(old_species_name, []).append(
-                        row["photo_id"]
-                    )
-                    pref_prev_by_pid.setdefault(row["photo_id"], []).append({
-                        "purpose": row["purpose"],
-                        "species": old_species_name,
-                        "dst_existed": row["purpose"] in pref_dst_taken,
-                        "rep_dst_existed": row["photo_id"] in rep_dst_preexisting,
-                        "rep_selected_order": rep_selected_order_by_pid_species.get(
-                            (row["photo_id"], old_species_name)
-                        ),
-                    })
-                    pref_covered_by_pid_species.add(
-                        (row["photo_id"], old_species_name)
-                    )
-            # Global species_representatives moves can exist without matching
-            # active-workspace photo_preferences rows, so migrate rep-only
-            # rows separately under the same curation-source filter.
-            representative_renames = {}
-            rep_prev_by_pid = {}
-            for chunk in _chunked(photo_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                rows = db.conn.execute(
-                    f"""SELECT species, photo_id FROM species_representatives
-                        WHERE photo_id IN ({placeholders})""",
-                    chunk,
-                ).fetchall()
-                for row in rows:
-                    old_species_name = row["species"]
-                    pid = row["photo_id"]
-                    if old_species_name == species:
-                        continue
-                    if (pid, old_species_name) in pref_covered_by_pid_species:
-                        continue
-                    if not _accept_curation_source(pid, old_species_name):
-                        continue
-                    representative_renames.setdefault(old_species_name, []).append(pid)
-                    rep_prev_by_pid.setdefault(pid, []).append({
-                        "species": old_species_name,
-                        "dst_existed": pid in rep_dst_preexisting,
-                        "selected_order": rep_selected_order_by_pid_species.get(
-                            (pid, old_species_name)
-                        ),
-                    })
             items = []
             rejected_prediction_ids = []
             has_old_species = False
@@ -9919,12 +9740,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     has_old_species = True
                 for old in old_rows:
                     db.untag_photo(pid, old["id"], _commit=False)
-                    # Compare by id: the untagged row is the SAME keyword as
-                    # the target when a photo already carries the new
-                    # species (e.g. a re-confirm). Comparing names would
-                    # miss a case where `species` normalized to the stored
-                    # name but the comparison is now against a different
-                    # spelling; comparing ids is exact.
+                    # Compare by keyword id: SQLite's NOCASE is ASCII-only,
+                    # so `Éclair` and `éclair` live as distinct rows with
+                    # distinct ids, but Python `.lower()` folds them equal.
+                    # A name-based skip would suppress the remove for a
+                    # different SQLite row and leave the old spelling in
+                    # the sidecar after the next XMP sync (add_keyword above
+                    # normalized `species` to the row it will tag, so `kid`
+                    # is authoritative).
                     if old["id"] != kid:
                         _queue_keyword_remove(
                             pid, old["name"], workspace_id=ws_id, _commit=False,
@@ -11396,12 +11219,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             if species:
                 kid = db.add_keyword(species, is_species=True)
-                # Re-read the stored keyword name so the sidecar queue and
-                # history record the row actually tagged. See api_add_keyword
-                # for the full rationale: a request like `‘apapane` tags the
-                # normalized `apapane` row but would otherwise queue the raw
-                # stray-quote spelling for XMP, and a later delete of the
-                # stored keyword wouldn't cancel the pending add.
+                # Queue/record the stored spelling (see api_add_keyword).
                 stored = db.conn.execute(
                     "SELECT name FROM keywords WHERE id = ?", (kid,)
                 ).fetchone()
@@ -20436,16 +20254,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids", [])
         label = body.get("label", "").strip()
-        if not photo_ids or not label or not normalize_keyword_display(label):
+        if not photo_ids or not label:
             return json_error("photo_ids and label required")
 
-        kid = db.add_keyword(label)
-        # Re-read the stored keyword name so the queued sidecar change and
-        # history entry match the row actually tagged. Without this, a
-        # request like `‘juvenile` tags the normalized `juvenile` row but
-        # queues the raw stray-quote value, so XMP sync writes the wrong
-        # spelling and a later removal of the stored keyword does not
-        # cancel the pending add. Same reasoning as api_add_keyword.
+        try:
+            kid = db.add_keyword(label)
+        except ValueError as exc:
+            return json_error(str(exc))
+        # Queue/record the stored spelling (see api_add_keyword).
         stored = db.conn.execute(
             "SELECT name FROM keywords WHERE id = ?", (kid,)
         ).fetchone()
@@ -22025,11 +21841,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         photo_ids = body.get("photo_ids", [])
         burst_index = body.get("burst_index")
 
-        # Reject empty-after-normalization inputs (e.g. `"'"`, `"""`) up front
-        # so add_keyword's ValueError doesn't escape the surrounding try/except
-        # as a 500 — this matches the client-visible 400 behavior of
-        # api_add_keyword and api_label_cluster for the same input class.
-        if not species or not normalize_keyword_display(species):
+        # Normalize up front: this route compares the requested species
+        # against stored keyword rows and previous_species cache values
+        # below, and add_keyword would normalize on insert anyway — keep one
+        # spelling throughout. Rejects quote-only input as empty.
+        species = normalize_keyword_display(species)
+        if not species:
             return json_error("species is required")
         if not photo_ids:
             return json_error("photo_ids is required")
@@ -22118,7 +21935,61 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             else:
                 previous_species = target_enc.get("confirmed_species")
 
+        # previous_species comes from the pipeline cache on disk, which the
+        # v5 DB migration does not touch — a pre-normalization cache can
+        # still carry a quoted spelling like `‘Apapane`. Normalize before
+        # comparing/looking up against stored keyword rows, which are always
+        # clean.
+        if previous_species is not None:
+            previous_species = normalize_keyword_display(previous_species)
+            if not previous_species:
+                previous_species = None
+
         ws_id = db._ws_id()
+
+        old_kid = None
+        # Compare using the ASCII-only fold SQLite's `COLLATE NOCASE` (which
+        # add_keyword's dedupe relies on) uses — Python's str.lower() folds
+        # non-ASCII letters that SQLite treats as distinct. Without this, a
+        # cache-recorded confirmed species `Éclair` and a user-submitted
+        # `éclair` would match here, the replacement path would be skipped,
+        # yet add_keyword's NOCASE lookup would still create/tag a separate
+        # `éclair` row — leaving the photo with both taxonomy tags and no
+        # remove queued for the old one.
+        is_replacement = (
+            previous_species is not None
+            and keyword_match_key(previous_species) != keyword_match_key(species)
+        )
+        if is_replacement:
+            # Match add_keyword's write path: species keywords live as root
+            # keywords (parent_id IS NULL). Looking up by name alone could
+            # collide with a non-species homonym nested under another keyword
+            # (schema allows UNIQUE(name, parent_id)). Accept taxonomy-typed
+            # rows with is_species=0 too: update_keyword with an explicit
+            # type='taxonomy' (the Keywords type dropdown) doesn't set the
+            # legacy is_species column, and the rest of the app treats
+            # (is_species = 1 OR type = 'taxonomy') as species.
+            old_kid_row = db.conn.execute(
+                """SELECT id, name FROM keywords
+                   WHERE name = ? COLLATE NOCASE
+                     AND parent_id IS NULL
+                     AND (is_species = 1 OR type = 'taxonomy')""",
+                (previous_species,),
+            ).fetchone()
+            # Track the stored keyword row's spelling separately so the
+            # keyword_remove queued below cancels an unsynced keyword_add
+            # written under the DB's canonical case. Cached
+            # confirmed_species can legitimately differ from the stored
+            # row only by case (SQLite NOCASE keeps them together, but
+            # pending_changes.value is exact-match), so queueing the
+            # cache spelling would leave an add(<stored>) alongside a
+            # remove(<cache>) that sync_to_xmp treats as a paired rename
+            # and rewrites the removed spelling back into the sidecar.
+            old_species_stored = previous_species
+            if old_kid_row:
+                old_kid = old_kid_row["id"]
+                if old_kid_row["name"]:
+                    old_species_stored = old_kid_row["name"]
 
         # Run all mutations in a single transaction so that a mid-loop failure
         # (SQLite lock, disk error, etc.) can't leave half the photos retagged
@@ -22128,26 +21999,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # which photos already carry it. add_keyword is idempotent and
             # returns the existing id when the species already exists.
             kid = db.add_keyword(species, is_species=True, _commit=False)
-            # Re-read the stored keyword name so the sidecar queue, response,
-            # and cache override reflect the row actually tagged. Without
-            # this, a request like `‘apapane` tags the normalized `apapane`
-            # row but would queue the raw stray-quote value for XMP sync,
-            # and the pipeline cache's `confirmed_species` would be written
-            # with a spelling that no longer matches the DB keyword. Same
-            # rationale as api_add_keyword.
+            # Queue/record the stored spelling (see api_add_keyword).
             stored = db.conn.execute(
                 "SELECT name FROM keywords WHERE id = ?", (kid,)
             ).fetchone()
             if stored and stored["name"]:
                 species = stored["name"]
 
-            # Precheck which submitted photos already carry a given keyword.
-            # Only photos that get a *new* tag should generate edit-history
-            # items and sidecar adds — otherwise confirming an already-tagged
-            # photo would push a no-op onto the undo stack, and undoing it
-            # would destructively remove the pre-existing keyword. Mirrors
-            # the precheck pattern in api_batch_keyword. Chunked so the
-            # IN-clause stays under SQLite's bound-parameter cap.
+            # Precheck which submitted photos already carry the new species
+            # keyword. Only photos that get a *new* tag should generate
+            # edit-history items and sidecar adds — otherwise confirming an
+            # already-tagged photo would push a no-op onto the undo stack, and
+            # undoing it would destructively remove the pre-existing keyword.
+            # Mirrors the precheck pattern in api_batch_keyword. Chunked so
+            # the IN-clause stays under SQLite's bound-parameter cap.
             def _photos_with_keyword(keyword_id):
                 hits = set()
                 for chunk in _chunked(photo_ids):
@@ -22162,90 +22027,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     )
                 return hits
 
-            # Canonicalize any legacy species-keyword rows that normalize to
-            # the same species we just resolved. On an upgraded DB a photo
-            # can still carry a quoted variant like `‘apapane` under a
-            # different keyword_id than the clean `apapane` above. Without
-            # this pass, when `previous_species` matches (normalized) — so
-            # the replacement path below is skipped — `_photos_with_keyword(kid)`
-            # treats those photos as missing the tag and adds kid alongside
-            # the legacy row, leaving duplicate taxonomy tags for the same
-            # normalized species. Untag the legacy row and queue a sidecar
-            # remove for its stored name; the normal tagging path below then
-            # adds the clean row and queues the clean sidecar entry.
-            canonical_target = normalize_keyword_display(species)
-            # Track legacy species-keyword ids untagged per photo by the
-            # canonicalization pass below. When the confirm is not a
-            # replacement (same normalized species as previous_species) but
-            # still removed one or more legacy variants, the edit needs to
-            # carry those ids so undo can retag them -- otherwise undoing a
-            # same-species confirm leaves those photos with no species tag.
-            canonicalized_by_pid: dict[int, list[int]] = {}
-            if canonical_target:
-                # Species membership here matches the rest of the endpoint's
-                # semantics: a row is a species tag if is_species=1 OR
-                # type='taxonomy'. An upgraded row that carries taxonomy typing
-                # but hasn't had is_species flipped (e.g. legacy edge-quote
-                # `‘apapane` promoted via the type dropdown) would otherwise
-                # slip past this lookup, so photos tagged only with that
-                # legacy row would keep the stray-quote tag and also gain the
-                # clean one below.
-                legacy_rows = db.conn.execute(
-                    """SELECT id, name FROM keywords
-                       WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE
-                         AND parent_id IS NULL
-                         AND (is_species = 1 OR type = 'taxonomy')
-                         AND id != ?""",
-                    (canonical_target, kid),
-                ).fetchall()
-                for legacy_row in legacy_rows:
-                    legacy_id = legacy_row["id"]
-                    legacy_name = legacy_row["name"]
-                    for pid in _photos_with_keyword(legacy_id):
-                        db.untag_photo(pid, legacy_id, _commit=False)
-                        canonicalized_by_pid.setdefault(pid, []).append(legacy_id)
-                        if legacy_name:
-                            _queue_keyword_remove(
-                                pid, legacy_name,
-                                workspace_id=ws_id, _commit=False,
-                            )
-
-            # Compare previous vs new species with a normalized match key so
-            # a legacy cache/sidecar spelling like `‘apapane` is recognized
-            # as the same species as a new `apapane` and doesn't spuriously
-            # trigger the replacement path (which would remove the
-            # already-correct tag and queue a stray-quote add).
-            old_kid = None
-            is_replacement = (
-                previous_species is not None
-                and keyword_match_key(previous_species) != keyword_match_key(species)
-            )
-            if is_replacement:
-                # Match add_keyword's write path: species keywords live as
-                # root keywords (parent_id IS NULL) with is_species=1.
-                # Compare via vireo_normalize_keyword so a legacy row whose
-                # stored spelling still carries edge quotes is also found.
-                old_kid_row = db.conn.execute(
-                    """SELECT id, name FROM keywords
-                       WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE
-                         AND parent_id IS NULL
-                         AND (is_species = 1 OR type = 'taxonomy')""",
-                    (normalize_keyword_display(previous_species),),
-                ).fetchone()
-                if old_kid_row:
-                    old_kid = old_kid_row["id"]
-                    # Use the stored keyword name (not the raw cached
-                    # `previous_species`) for the sidecar remove queue so
-                    # pending-change cancellation lines up with the pending
-                    # `keyword_add` written under the normalized spelling.
-                    # A legacy pipeline cache can still hold `‘apapane` while
-                    # the DB keyword row is stored as clean `apapane`; queuing
-                    # the raw quoted value would leave a stale add un-cancelled
-                    # and a quoted remove that the next XMP sync writes back to
-                    # the sidecar.
-                    if old_kid_row["name"]:
-                        previous_species = old_kid_row["name"]
-
             already_has_new = _photos_with_keyword(kid)
             newly_tagged = [pid for pid in photo_ids if pid not in already_has_new]
 
@@ -22259,7 +22040,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         continue
                     db.untag_photo(pid, old_kid, _commit=False)
                     _queue_keyword_remove(
-                        pid, previous_species,
+                        pid, old_species_stored,
                         workspace_id=ws_id, _commit=False,
                     )
 
@@ -22269,44 +22050,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     pid, species, workspace_id=ws_id, _commit=False,
                 )
 
-            def _species_old_value(pid, include_old_kid):
-                # Build the edit-history `old_value` for one photo, folding
-                # in any legacy species-keyword ids the canonicalization
-                # pass untagged. Uses the JSON payload shape recognized by
-                # `_edit_old_value_meta` so `species_replace` undo can
-                # re-tag every removed row (not just the primary old_kid).
-                ids: list[int] = []
-                if include_old_kid and old_kid is not None:
-                    ids.append(old_kid)
-                ids.extend(canonicalized_by_pid.get(pid, []))
-                if not ids:
-                    return ""
-                if len(ids) == 1:
-                    return str(ids[0])
-                return json.dumps(
-                    {"keyword_id": str(ids[0]), "keyword_ids": ids},
-                    sort_keys=True,
-                )
-
-            newly_set = set(newly_tagged)
             if is_replacement and old_kid is not None and had_old:
                 # Photos that actually changed: had the old keyword (so the
-                # remove side fired), newly gained the new one, or had a
-                # legacy same-species variant untagged by canonicalization
-                # above. Use the union so undo restores the exact state we
-                # mutated.
+                # remove side fired) and/or newly gained the new one. Use the
+                # union so undo restores the exact state we mutated.
+                newly_set = set(newly_tagged)
                 changed = [
-                    pid for pid in photo_ids
-                    if pid in had_old
-                    or pid in newly_set
-                    or pid in canonicalized_by_pid
+                    pid for pid in photo_ids if pid in had_old or pid in newly_set
                 ]
                 items = [
                     {
                         "photo_id": pid,
-                        "old_value": _species_old_value(
-                            pid, include_old_kid=pid in had_old,
-                        ),
+                        "old_value": str(old_kid) if pid in had_old else "",
                         "new_value": str(kid) if pid in newly_set else "",
                     }
                     for pid in changed
@@ -22314,35 +22069,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 db.record_edit(
                     "species_replace",
                     f'Replaced species "{previous_species}" with "{species}" on {len(changed)} photos',
-                    str(kid),
-                    items,
-                    is_batch=len(changed) > 1,
-                    _commit=False,
-                )
-            elif canonicalized_by_pid:
-                # Same normalized species as before but a legacy variant row
-                # was untagged (e.g. cache/DB carried `‘apapane` and the
-                # request was `apapane`). Route through species_replace so
-                # undo restores the legacy tag(s); recording this as
-                # `keyword_add` would only untag the clean kid on undo and
-                # leave the photos with no species tag at all.
-                changed = [
-                    pid for pid in photo_ids
-                    if pid in newly_set or pid in canonicalized_by_pid
-                ]
-                items = [
-                    {
-                        "photo_id": pid,
-                        "old_value": _species_old_value(
-                            pid, include_old_kid=False,
-                        ),
-                        "new_value": str(kid) if pid in newly_set else "",
-                    }
-                    for pid in changed
-                ]
-                db.record_edit(
-                    "species_replace",
-                    f'Canonicalized species "{species}" on {len(changed)} photos',
                     str(kid),
                     items,
                     is_batch=len(changed) > 1,
@@ -22380,13 +22106,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # Auto-detach if burst's confirmed species differs from its
                 # encounter — splits it out and merges into an adjacent
                 # encounter of the same confirmed species when one exists.
+                # Compare with keyword_match_key so a cached pre-normalization
+                # spelling (e.g. ‘Apapane) does not trigger a needless split
+                # against the stored species (Apapane); the DB write already
+                # normalized to the canonical form.
                 enc_species = target_enc.get("confirmed_species") or (
                     target_enc["species"][0] if target_enc.get("species") else None
                 )
-                # Compare via keyword_match_key so a legacy cache spelling
-                # like `‘apapane` isn't treated as a different species from
-                # the normalized `apapane` we just tagged (which would
-                # spuriously detach and re-merge bursts on every confirm).
                 if (
                     enc_species is not None
                     and keyword_match_key(enc_species) != keyword_match_key(species)
@@ -22400,12 +22126,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 target_enc["confirmed_species"] = species
             save_results_raw(cached, cache_dir, db._active_workspace_id)
 
-        replaced = (
-            previous_species
-            if previous_species
-            and keyword_match_key(previous_species) != keyword_match_key(species)
-            else None
-        )
+        # Report `replaced` consistent with the actual replacement decision
+        # (is_replacement, which uses keyword_match_key to match SQLite's
+        # ASCII-only NOCASE). Python's `.lower()` folds non-ASCII pairs like
+        # `Éclair`/`éclair` — which SQLite/add_keyword keep as distinct
+        # keyword rows — so a `.lower()` comparison here would report
+        # replaced=None on a request that actually untagged the previous
+        # species row and tagged a new one.
+        replaced = previous_species if is_replacement else None
         response = {
             "ok": True,
             "species": species,
