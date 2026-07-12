@@ -103,7 +103,9 @@ def _physical_is_within(path: str, root: str) -> bool:
 
 def _symlink_stays_within(path: str, root: str) -> bool:
     target = os.readlink(path)
-    resolved = target if os.path.isabs(target) else os.path.join(os.path.dirname(path), target)
+    if os.path.isabs(target):
+        return False
+    resolved = os.path.join(os.path.dirname(path), target)
     return _physical_is_within(resolved, root)
 
 
@@ -159,7 +161,9 @@ def _preflight_sources(roots: list[dict], local_base: Path) -> tuple[int, int]:
                 total_bytes += os.lstat(full).st_size
             elif stat.S_ISLNK(mode):
                 if not _symlink_stays_within(full, source):
-                    raise LocalWorkspaceError(f"Symlink escapes the workspace and cannot be staged: {full}")
+                    raise LocalWorkspaceError(
+                        f"Symlink escapes or uses an absolute target and cannot be staged: {full}"
+                    )
             else:
                 raise LocalWorkspaceError(f"Unsupported special file in workspace: {full}")
             total_files += 1
@@ -467,7 +471,9 @@ def _manifest_maps(manifest: dict) -> tuple[dict, dict]:
             continue
         for rel, full in _walk_entries(root["local_path"]):
             if os.path.islink(full) and not _symlink_stays_within(full, root["local_path"]):
-                raise LocalWorkspaceError(f"Symlink escapes the managed local workspace: {full}")
+                raise LocalWorkspaceError(
+                    f"Symlink escapes or uses an absolute target in the managed local workspace: {full}"
+                )
             local[(root_index, rel)] = full
     return baseline, local
 

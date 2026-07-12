@@ -147,7 +147,7 @@ def test_stage_rejects_symlink_that_escapes_workspace(local_workspace_env):
     outside.write_bytes(b"outside")
     os.symlink(outside, env["source"] / "escape.jpg")
 
-    with pytest.raises(LocalWorkspaceError, match="Symlink escapes the workspace"):
+    with pytest.raises(LocalWorkspaceError, match="Symlink escapes or uses an absolute target"):
         stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
 
     assert _folder_path(env["db"], env["root_id"]) == str(env["source"])
@@ -216,6 +216,19 @@ def test_sync_refuses_missing_managed_local_root(local_workspace_env):
             allow_deletions=True,
         )
     assert (env["child"] / "bird.jpg").read_bytes() == b"bird-original"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows test runners may not permit symlinks")
+def test_sync_rejects_absolute_symlink_inside_managed_tree(local_workspace_env):
+    env = local_workspace_env
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    local_root = Path(_folder_path(env["db"], env["root_id"]))
+    os.symlink(local_root / "root.jpg", local_root / "absolute-link.jpg")
+
+    with pytest.raises(LocalWorkspaceError, match="absolute target"):
+        sync_back(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+
+    assert not (env["source"] / "absolute-link.jpg").exists()
 
 
 def test_sync_requires_explicit_confirmation_for_deletions(local_workspace_env):
