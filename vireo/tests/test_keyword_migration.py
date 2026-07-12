@@ -1098,3 +1098,149 @@ def test_migration_species_replace_old_side_preexisting_survivor_undo_safe(tmp_p
         assert surv_still_tagged is not None
     finally:
         db.close()
+
+
+def test_migration_keeps_keyword_remove_item_when_survivor_added_later(tmp_path):
+    """A ``keyword_remove`` edit for the src, followed by a later
+    ``keyword_add`` of the survivor to the same photo, must survive
+    the migration retargeted rather than being dropped. Latest-first
+    undo runs the later add's untag first — dst_id leaves the photo
+    — and the earlier remove's undo is then the only item that can
+    restore the merged keyword by re-tagging dst_id. Dropping the
+    item would leave the photo un-tagged after both edits are undone,
+    silently losing the survivor tag from history."""
+    db, ws_id, p1, _p2 = _make_db(tmp_path)
+    try:
+        src_id = _insert_keyword(db, "‘Robin", "taxonomy", is_species=1)
+        dst_id = _insert_keyword(db, "Robin", "taxonomy", is_species=1)
+        # Photo currently carries dst_id (added later, see edit A below).
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (p1, dst_id),
+        )
+        # Edit R: keyword_remove src from p1 (earlier).
+        db.conn.execute(
+            "INSERT INTO edit_history "
+            "(action_type, description, new_value, workspace_id) "
+            "VALUES ('keyword_remove', 'r', ?, ?)",
+            (str(src_id), ws_id),
+        )
+        remove_edit_id = db.conn.execute(
+            "SELECT id FROM edit_history WHERE description = 'r' "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()["id"]
+        db.conn.execute(
+            "INSERT INTO edit_history_items "
+            "(edit_id, photo_id, old_value, new_value) "
+            "VALUES (?, ?, ?, '')",
+            (remove_edit_id, p1, str(src_id)),
+        )
+        # Edit A: keyword_add dst to p1 (later — higher id).
+        db.conn.execute(
+            "INSERT INTO edit_history "
+            "(action_type, description, new_value, workspace_id) "
+            "VALUES ('keyword_add', 'a', ?, ?)",
+            (str(dst_id), ws_id),
+        )
+        add_edit_id = db.conn.execute(
+            "SELECT id FROM edit_history WHERE description = 'a' "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()["id"]
+        db.conn.execute(
+            "INSERT INTO edit_history_items "
+            "(edit_id, photo_id, old_value, new_value) "
+            "VALUES (?, ?, '', ?)",
+            (add_edit_id, p1, str(dst_id)),
+        )
+        db.conn.commit()
+
+        db._normalize_keyword_data_once()
+        db.conn.commit()
+
+        # The remove item must have survived and been retargeted to dst.
+        remove_items = db.conn.execute(
+            "SELECT old_value FROM edit_history_items WHERE edit_id = ?",
+            (remove_edit_id,),
+        ).fetchall()
+        assert [r["old_value"] for r in remove_items] == [str(dst_id)]
+        assert db.conn.execute(
+            "SELECT 1 FROM photo_keywords "
+            "WHERE photo_id = ? AND keyword_id = ?",
+            (p1, dst_id),
+        ).fetchone() is not None
+
+        # Simulate latest-first undo: undo A (untag dst), then undo R
+        # (tag dst via INSERT OR IGNORE). After both, dst must be back
+        # on the photo — the historical remove of the merged keyword
+        # got restored by the item the migration preserved.
+        db.conn.execute(
+            "DELETE FROM photo_keywords "
+            "WHERE photo_id = ? AND keyword_id = ?",
+            (p1, dst_id),
+        )
+        db.conn.execute(
+            "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) "
+            "VALUES (?, ?)",
+            (p1, int(remove_items[0]["old_value"])),
+        )
+        db.conn.commit()
+        assert db.conn.execute(
+            "SELECT 1 FROM photo_keywords "
+            "WHERE photo_id = ? AND keyword_id = ?",
+            (p1, dst_id),
+        ).fetchone() is not None
+    finally:
+        db.close()
+
+
+def test_migration_drops_keyword_remove_item_when_survivor_pre_existed(tmp_path):
+    """Negative counterpart of the case above. When the survivor
+    genuinely pre-existed a ``keyword_remove`` edit — no later add of
+    dst brings it back — the retargeted item must still be dropped so
+    that redoing the remove does not strip the pre-existing survivor
+    tag the edit never created."""
+    db, ws_id, p1, _p2 = _make_db(tmp_path)
+    try:
+        src_id = _insert_keyword(db, "‘Robin", "taxonomy", is_species=1)
+        dst_id = _insert_keyword(db, "Robin", "taxonomy", is_species=1)
+        # Photo carries dst_id and previously carried src_id. dst_id
+        # was tagged before the remove and never touched afterwards.
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (p1, dst_id),
+        )
+        # Edit R: keyword_remove src from p1. No subsequent add of
+        # dst — the current dst_id tag pre-existed R.
+        db.conn.execute(
+            "INSERT INTO edit_history "
+            "(action_type, description, new_value, workspace_id) "
+            "VALUES ('keyword_remove', 'r', ?, ?)",
+            (str(src_id), ws_id),
+        )
+        remove_edit_id = db.conn.execute(
+            "SELECT id FROM edit_history WHERE description = 'r' "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()["id"]
+        db.conn.execute(
+            "INSERT INTO edit_history_items "
+            "(edit_id, photo_id, old_value, new_value) "
+            "VALUES (?, ?, ?, '')",
+            (remove_edit_id, p1, str(src_id)),
+        )
+        db.conn.commit()
+
+        db._normalize_keyword_data_once()
+        db.conn.commit()
+
+        remove_items = db.conn.execute(
+            "SELECT id FROM edit_history_items WHERE edit_id = ?",
+            (remove_edit_id,),
+        ).fetchall()
+        assert remove_items == []
+        assert db.conn.execute(
+            "SELECT 1 FROM photo_keywords "
+            "WHERE photo_id = ? AND keyword_id = ?",
+            (p1, dst_id),
+        ).fetchone() is not None
+    finally:
+        db.close()

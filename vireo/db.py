@@ -10177,7 +10177,25 @@ class Database:
             )
             # keyword_remove: item.new_value is '' by convention (see
             # record_edit call sites in app.py); the keyword id lives in
-            # item.old_value.
+            # item.old_value. Drop the item ONLY when the survivor
+            # genuinely pre-existed THIS remove — i.e., no later edit
+            # added the merged keyword back to the same photo. If dst
+            # was tagged AFTER this remove, the current photo_keywords
+            # row does not prove pre-existence and dropping the item
+            # breaks undo: latest-first undo of the later add first
+            # strips dst_id, and this remove's undo would then no-op
+            # (no item), leaving the merged keyword missing when the
+            # earlier remove is reversed. Keeping the item is safe in
+            # that case:
+            #   * undo of remove → tag_photo(pid, dst) is INSERT OR
+            #     IGNORE and a no-op if dst is already present;
+            #   * redo of remove → untag_photo(pid, dst) is consistent
+            #     with replaying the historical remove of what became
+            #     the merged keyword.
+            # "Later add" covers keyword_add / prediction_accept and
+            # the tagging half of species_replace (item.new_value =
+            # str(kid)). Src-spelled adds count too — pre-migration
+            # they refer to what will become the merged keyword.
             self.conn.execute(
                 f"""DELETE FROM edit_history_items
                     WHERE old_value = ?
@@ -10186,8 +10204,22 @@ class Database:
                           SELECT id FROM edit_history
                           WHERE new_value = ?
                             AND action_type = 'keyword_remove'
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM edit_history_items ehi2
+                          JOIN edit_history eh2
+                            ON eh2.id = ehi2.edit_id
+                          WHERE ehi2.photo_id = edit_history_items.photo_id
+                            AND ehi2.new_value IN (?, ?)
+                            AND eh2.action_type IN (
+                                'keyword_add',
+                                'prediction_accept',
+                                'species_replace'
+                            )
+                            AND ehi2.id > edit_history_items.id
                       )""",
-                [src_str, *chunk, src_str],
+                [src_str, *chunk, src_str, src_str, dst_str],
             )
             # species_replace: item.old_value = str(old_kid) (bare-string
             # form) for a prior replace where src_id was the OLD species
