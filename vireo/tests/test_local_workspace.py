@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 import pytest
+import services.local_workspace as local_workspace
 from db import Database
 from services.local_workspace import (
     LocalWorkspaceConflict,
@@ -100,6 +101,24 @@ def test_stage_modify_and_sync_back(local_workspace_env):
     assert not workspace_dir(str(env["vireo_dir"]), env["workspace_id"]).exists()
 
 
+def test_stage_aborts_when_source_directory_cannot_be_read(local_workspace_env, monkeypatch):
+    env = local_workspace_env
+    real_walk = local_workspace.os.walk
+
+    def failing_walk(path, *args, **kwargs):
+        if os.path.normpath(path) == os.path.normpath(env["source"]):
+            kwargs["onerror"](PermissionError("NAS directory denied"))
+        return real_walk(path, *args, **kwargs)
+
+    monkeypatch.setattr(local_workspace.os, "walk", failing_walk)
+
+    with pytest.raises(LocalWorkspaceError, match="NAS directory denied"):
+        stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+
+    assert _folder_path(env["db"], env["root_id"]) == str(env["source"])
+    assert not workspace_dir(str(env["vireo_dir"]), env["workspace_id"]).exists()
+
+
 def test_sync_refuses_source_changes_and_preserves_local_workspace(local_workspace_env):
     env = local_workspace_env
     stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
@@ -139,6 +158,20 @@ def test_sync_requires_explicit_confirmation_for_deletions(local_workspace_env):
         sync_back(env["db"], env["workspace_id"], str(env["vireo_dir"]))
 
     assert (env["child"] / "bird.xmp").exists()
+
+
+def test_sync_temp_file_cannot_overwrite_real_sibling(local_workspace_env):
+    env = local_workspace_env
+    sibling = env["child"] / "bird.jpg.vireo-syncing"
+    sibling.write_bytes(b"legitimate sibling")
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    local_child = Path(_folder_path(env["db"], env["child_id"]))
+    (local_child / "bird.jpg").write_bytes(b"edited locally")
+
+    sync_back(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+
+    assert (env["child"] / "bird.jpg").read_bytes() == b"edited locally"
+    assert sibling.read_bytes() == b"legitimate sibling"
 
 
 def test_discard_restores_catalog_without_changing_source(local_workspace_env):

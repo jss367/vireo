@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import stat
+import tempfile
 import threading
 import time
 from contextlib import suppress
@@ -122,9 +123,13 @@ def _sha256(path: str, cancel_check=None) -> str:
     return digest.hexdigest()
 
 
+def _raise_walk_error(error: OSError) -> None:
+    raise LocalWorkspaceError(f"Could not read workspace directory: {error}") from error
+
+
 def _walk_entries(root: str):
     """Yield relative paths for regular files and symlinks without following links."""
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False, onerror=_raise_walk_error):
         for dirname in list(dirnames):
             full = os.path.join(dirpath, dirname)
             if os.path.islink(full):
@@ -216,7 +221,7 @@ def _copy_entry(source: str, destination: str, cancel_check=None) -> dict:
 
 def _copy_directory_structure(source_root: str, local_root: str) -> None:
     """Create real source directories locally, including empty directories."""
-    for dirpath, dirnames, _filenames in os.walk(source_root, followlinks=False):
+    for dirpath, dirnames, _filenames in os.walk(source_root, followlinks=False, onerror=_raise_walk_error):
         rel_dir = _relative(dirpath, source_root)
         local_dir = os.path.join(local_root, rel_dir)
         os.makedirs(local_dir, exist_ok=True)
@@ -510,14 +515,21 @@ def _preflight_restore_paths(db, manifest: dict) -> list[tuple[int, str, str]]:
 
 def _atomic_publish(local_path: str, remote_path: str) -> None:
     os.makedirs(os.path.dirname(remote_path), exist_ok=True)
+    fd, temp = tempfile.mkstemp(
+        prefix=f".{os.path.basename(remote_path)}.vireo-syncing-",
+        dir=os.path.dirname(remote_path),
+    )
+    os.close(fd)
     if os.path.islink(local_path):
-        temp = remote_path + ".vireo-syncing"
-        with suppress(FileNotFoundError):
+        try:
             os.unlink(temp)
-        os.symlink(os.readlink(local_path), temp)
-        os.replace(temp, remote_path)
-        return
-    temp = remote_path + ".vireo-syncing"
+            os.symlink(os.readlink(local_path), temp)
+            os.replace(temp, remote_path)
+            return
+        except BaseException:
+            with suppress(FileNotFoundError):
+                os.unlink(temp)
+            raise
     try:
         shutil.copy2(local_path, temp, follow_symlinks=False)
         with open(temp, "rb") as handle:
