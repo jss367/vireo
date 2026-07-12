@@ -244,6 +244,72 @@ def test_import_auto_preview_clears_grid_when_selection_becomes_invalid(
     expect(page.locator("#importPreviewGrid")).to_be_hidden()
 
 
+def test_import_auto_preview_clears_grid_when_duplicate_check_fails(
+    live_server, page
+):
+    url = live_server["url"]
+    page.goto(f"{url}/import")
+    page.evaluate(
+        """
+        () => {
+          const originalFetch = window.fetch.bind(window);
+          window.__fullPreviewCalls = 0;
+          window.__dupCalls = 0;
+          window.fetch = (input, init) => {
+            const target = typeof input === 'string' ? input : input.url;
+            if (target && target.indexOf('/api/import/folder-preview') === 0) {
+              const body = JSON.parse(init.body || '{}');
+              if (body.summary_only) {
+                return Promise.resolve(new Response(JSON.stringify({
+                  total_count: 1,
+                  total_size: 1234,
+                  type_breakdown: {'.jpg': 1},
+                  duplicate_count: 0,
+                  files: [],
+                }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+              }
+              window.__fullPreviewCalls += 1;
+              return Promise.resolve(new Response(JSON.stringify({
+                total_count: 1,
+                total_size: 1234,
+                type_breakdown: {'.jpg': 1},
+                duplicate_count: 0,
+                files: [{
+                  path: '/tmp/card-a/IMG_0001.jpg',
+                  filename: 'IMG_0001.jpg',
+                  subfolder: 'card-a',
+                  size: 1234,
+                  extension: '.jpg',
+                  thumb_url: 'data:image/gif;base64,R0lGODlhAQABAAAAACw=',
+                }],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            if (target && target.indexOf('/api/import/check-duplicates') === 0) {
+              window.__dupCalls += 1;
+              return Promise.resolve(new Response(
+                JSON.stringify({error: 'duplicate check failed'}),
+                {status: 500, headers: {'Content-Type': 'application/json'}}
+              ));
+            }
+            return originalFetch(input, init);
+          };
+        }
+        """
+    )
+
+    page.locator("#modeCopy").check()
+    page.locator("#destInput").fill("/archive")
+    page.locator("#sourceInput").fill("/tmp/card-a")
+    page.locator("#btnAddSource").click()
+    page.wait_for_function(
+        "window.__fullPreviewCalls >= 1 && window.__dupCalls >= 1"
+    )
+    expect(page.locator("#importError")).to_contain_text(
+        "duplicate check failed"
+    )
+    expect(page.locator("#importPreviewGrid")).to_be_hidden()
+
+
 def test_import_destination_browse_button_sets_destination(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/import")

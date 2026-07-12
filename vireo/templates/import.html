@@ -1747,6 +1747,10 @@ async function previewImport(opts) {
     if (requestSeq !== importPreviewSeq) return;
     if (importPreviewSignatureChanged(requestSignature)) return;
     summary.textContent = '';
+    // Grid may already hold a partial render (files found, but duplicate or
+    // destination context never landed because of the throw). Clear it so
+    // the error state isn't misread as a real preview minus a footnote.
+    clearImportPreviewGrid();
     showError(String(e.message || e));
   } finally {
     if (requestSeq === importPreviewSeq && btnPreview) {
