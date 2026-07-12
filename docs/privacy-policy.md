@@ -37,7 +37,7 @@ Beyond the bug reports you choose to submit, the Vireo application has no analyt
 
 ## Website measurement
 
-When you visit `vireo.photo`, we use Plausible Analytics to understand aggregate website traffic and download-button clicks. The information measured includes the page visited, referring site, campaign parameters included in the URL, installer-link destination, browser, operating system, device category, and country, region, and city inferred from your network address. We use this information only to understand how people discover Vireo and which downloads they choose.
+When you visit `vireo.photo`, we use Plausible Analytics to understand aggregate website traffic and outbound-link clicks, including download-button clicks. The information measured includes the page visited, referring site, campaign parameters included in the URL, outbound-link destination, browser, operating system, device category, and country, region, and city inferred from your network address. We use this information only to understand how people discover Vireo, which downloads they choose, and which external resources they follow.
 
 Plausible does not use cookies, browser storage, or persistent identifiers. Plausible briefly processes your IP address and browser user-agent to calculate aggregate statistics using an identifier that changes daily, but does not store the raw values. Vireo does not receive or store your IP address. Learn more in [Plausible's data policy](https://plausible.io/data-policy).
 

@@ -2,7 +2,7 @@
 
 Vireo measures interest in downloads without adding analytics or identifiers to the desktop application. Two independent sources answer different questions:
 
-- Plausible Analytics reports aggregate visits to `vireo.photo`, referral sources, campaign parameters, approximate location and device information, and clicks on installer links.
+- Plausible Analytics reports aggregate visits to `vireo.photo`, referral sources, campaign parameters, approximate location and device information, and outbound-link clicks, including installer links.
 - GitHub reports the cumulative download count for each release asset.
 
 A download-button click is not proof that a download completed. A GitHub asset download is not a unique person or confirmed installation; retries, automated traffic, and maintainer testing may be included.
