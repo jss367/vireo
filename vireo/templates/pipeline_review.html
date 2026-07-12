@@ -5148,6 +5148,11 @@ function buildBurstConsensus(photos) {
   return rows;
 }
 
+function candidateSpeciesOverrideFromConsensus(rows) {
+  var species = rows && rows.length > 0 ? rows[0].species : null;
+  return species ? { species: species, confirmed: false } : null;
+}
+
 // Build the per-photo + consensus species prediction blocks. The per-photo
 // block changes as you select different photos; the consensus block is the
 // per-species mean over the scope's frames. The title names only the scope
@@ -6191,12 +6196,16 @@ async function grmApply() {
         // single-photo burst must keep it (shallow clone so it doesn't alias the
         // source), or a flags-only apply would silently revert this photo to the
         // encounter species and drop the burst-specific confirmation.
+        var detachedConsensus = buildBurstConsensus(photo ? [photo] : []);
+        var sourceOverride = burst && burst.species_override;
         enc.bursts.push({
           photo_ids: [pid],
-          species_predictions: buildBurstConsensus(photo ? [photo] : []),
-          species_override: burst && burst.species_override
-            ? Object.assign({}, burst.species_override)
-            : null,
+          species_predictions: detachedConsensus,
+          species_override: sourceOverride && sourceOverride.confirmed === true
+            ? Object.assign({}, sourceOverride)
+            : (enc.species_confirmed && enc.confirmed_species
+              ? null
+              : candidateSpeciesOverrideFromConsensus(detachedConsensus)),
         });
       });
       // Recompute the shortened source burst's consensus from its remaining

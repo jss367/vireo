@@ -1201,6 +1201,26 @@ def _compute_time_range(photos_by_id, photo_ids):
     return [min(timestamps), max(timestamps)]
 
 
+def _rebuild_encounter_species_label(results, photo_ids, fallback=None):
+    """Return the encounter-level species label for exactly photo_ids."""
+    from encounters import encounter_species_label
+
+    id_set = set(photo_ids or [])
+    photos = [p for p in results.get("photos", []) if p.get("id") in id_set]
+    name, confidence = encounter_species_label(photos)
+    if name is None and fallback is not None:
+        return list(fallback)
+    return [name, confidence]
+
+
+def _candidate_species_override(species_label):
+    """Convert a derived species label into an unconfirmed burst candidate."""
+    species = species_label[0] if species_label else None
+    if not species:
+        return None
+    return {"species": species, "confirmed": False}
+
+
 def _find_merge_target(encounters, detached_range, target_species):
     """Find an encounter index whose confirmed species matches target_species and
     whose time range is adjacent to detached_range (no other encounter sits in
@@ -1313,6 +1333,9 @@ def _auto_detach_burst_for_species(results, enc_idx, burst_idx, new_species):
         enc["photo_count"] = len(remaining)
         enc["burst_count"] = len(bursts)
         enc["species_predictions"] = rebuild_species_predictions(results, remaining)
+        enc["species"] = _rebuild_encounter_species_label(
+            results, remaining, fallback=enc.get("species")
+        )
         for b in bursts:
             b["species_predictions"] = rebuild_species_predictions(results, b["photo_ids"])
         enc["time_range"] = _compute_time_range(photos_by_id, remaining)
@@ -1333,6 +1356,9 @@ def _auto_detach_burst_for_species(results, enc_idx, burst_idx, new_species):
         target["species_predictions"] = rebuild_species_predictions(
             results, target["photo_ids"]
         )
+        target["species"] = _rebuild_encounter_species_label(
+            results, target["photo_ids"], fallback=target.get("species")
+        )
         # Same reason as above — target's trace no longer matches its photo set.
         target.pop("trace", None)
         t_min, t_max = target.get("time_range") or [None, None]
@@ -1344,8 +1370,11 @@ def _auto_detach_burst_for_species(results, enc_idx, burst_idx, new_species):
             max(maxs) if maxs else None,
         ]
     else:
+        detached_species = _rebuild_encounter_species_label(
+            results, detached_ids, fallback=enc.get("species")
+        )
         encounters.append({
-            "species": enc.get("species"),
+            "species": detached_species,
             "confirmed_species": new_species,
             "species_predictions": detached["species_predictions"],
             "species_confirmed": True,
@@ -21892,6 +21921,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # too-wide range that would misplace this encounter under time sorts.
             enc["time_range"] = _compute_time_range(photos_by_id, enc["photo_ids"])
             enc["species_predictions"] = rebuild_species_predictions(results, enc["photo_ids"])
+            enc["species"] = _rebuild_encounter_species_label(
+                results, enc["photo_ids"], fallback=enc.get("species")
+            )
             # Pair indices in trace reference the original photo composition;
             # drop it so the algorithm-trace panel renders an honest "needs
             # recompute" state instead of stale rows.
@@ -21902,13 +21934,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Create new encounter from detached burst
         new_enc_predictions = rebuild_species_predictions(results, detached_ids)
+        new_enc_species = _rebuild_encounter_species_label(
+            results, detached_ids, fallback=enc.get("species")
+        )
         # Also refresh the detached burst's own predictions
         detached["species_predictions"] = new_enc_predictions
+        detached_override = detached.get("species_override") or {}
+        detached_confirmed = bool(detached_override.get("confirmed"))
         new_enc = {
-            "species": enc.get("species"),
-            "confirmed_species": detached.get("species_override", {}).get("species") if detached.get("species_override") else None,
+            "species": new_enc_species,
+            "confirmed_species": detached_override.get("species") if detached_confirmed else None,
             "species_predictions": new_enc_predictions,
-            "species_confirmed": bool(detached.get("species_override", {}).get("confirmed")) if detached.get("species_override") else False,
+            "species_confirmed": detached_confirmed,
             "photo_count": len(detached_ids),
             "burst_count": 1,
             # Compute from the detached photos' timestamps. A [None, None] range
@@ -21962,6 +21999,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         burst = bursts[burst_idx]
         if photo_id not in burst["photo_ids"]:
             return json_error("photo_id not in burst")
+        source_override = burst.get("species_override") or {}
 
         # Remove photo from burst
         burst["photo_ids"].remove(photo_id)
@@ -21974,10 +22012,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             burst["species_predictions"] = rebuild_species_predictions(results, burst["photo_ids"])
 
         # Create new single-photo burst in the same encounter
+        new_burst_predictions = rebuild_species_predictions(results, [photo_id])
+        new_burst_species = _rebuild_encounter_species_label(results, [photo_id])
+        if source_override.get("confirmed") and source_override.get("species"):
+            new_burst_override = {
+                "species": source_override["species"],
+                "confirmed": True,
+            }
+        elif enc.get("species_confirmed") and enc.get("confirmed_species"):
+            new_burst_override = None
+        else:
+            new_burst_override = _candidate_species_override(new_burst_species)
         new_burst = {
             "photo_ids": [photo_id],
-            "species_predictions": rebuild_species_predictions(results, [photo_id]),
-            "species_override": None,
+            "species_predictions": new_burst_predictions,
+            "species_override": new_burst_override,
         }
         bursts.append(new_burst)
         enc["burst_count"] = len(bursts)

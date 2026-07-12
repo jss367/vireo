@@ -2984,6 +2984,10 @@ def test_pipeline_detach_burst(app_and_db):
     assert len(data["encounters"]) == 2
     assert len(data["encounters"][0]["bursts"]) == 1
     assert data["encounters"][1]["photo_ids"] == [3]
+    assert data["encounters"][0]["species"] == ["Robin", 0.875]
+    assert data["encounters"][1]["species"] == ["Eagle", 0.8]
+    assert data["encounters"][1]["confirmed_species"] is None
+    assert data["encounters"][1]["species_confirmed"] is False
     # Remaining encounter predictions should only reflect photos 1,2
     remaining_species = [sp["species"] for sp in data["encounters"][0]["species_predictions"]]
     assert "Robin" in remaining_species
@@ -3098,6 +3102,10 @@ def test_pipeline_detach_photo(app_and_db):
     # New burst predictions should reflect photo 3
     new_species = [sp["species"] for sp in enc["bursts"][1]["species_predictions"]]
     assert "Eagle" in new_species
+    assert enc["bursts"][1]["species_override"] == {
+        "species": "Eagle",
+        "confirmed": False,
+    }
 
 
 def test_pipeline_detach_burst_clears_stale_trace(app_and_db):
