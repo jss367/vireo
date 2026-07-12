@@ -355,6 +355,68 @@ def test_migration_preserves_variant_species_general_alongside_individual(tmp_pa
         db.close()
 
 
+def test_migration_keeps_species_general_separate_from_plain_general_homonym(tmp_path):
+    """A legacy species-bearing general (``type='general', is_species=1``)
+    and a plain general homonym (``type='general', is_species=0``) with
+    no specific-type peer must stay separate: species queries
+    ``is_species = 1 OR type = 'taxonomy'`` distinguish them, so folding
+    them into one general survivor would either strip the species flag
+    from the legacy row's photos or (via _merge_keyword_into's same-type
+    is_species CASE) stamp is_species=1 onto the plain general and every
+    photo already tagged with it, sending them into species/life-list
+    filters. Top-level NULL parents let both survive under the same
+    match key (SQLite treats NULL parents as distinct for
+    UNIQUE(name, parent_id))."""
+    db, _ws_id, p1, p2 = _make_db(tmp_path)
+    try:
+        # Plain general inserted first so it wins the earliest-id tiebreak
+        # in the merge loop — this is the direction that leaks is_species=1
+        # onto the non-species survivor without the split.
+        plain_general_id = _insert_keyword(db, "Robin", "general")
+        species_general_id = _insert_keyword(
+            db, "robin", "general", is_species=1
+        )
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (p1, plain_general_id),
+        )
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (p2, species_general_id),
+        )
+        db.conn.commit()
+
+        db._normalize_keyword_data_once()
+        db.conn.commit()
+
+        rows = db.conn.execute(
+            "SELECT id, name, type, is_species FROM keywords "
+            "WHERE LOWER(name) = 'robin' ORDER BY id"
+        ).fetchall()
+        # Both rows survive; each keeps its own is_species value and its
+        # own photo tag. The plain general must NOT have gained is_species=1.
+        assert [(r["id"], r["type"], r["is_species"]) for r in rows] == [
+            (plain_general_id, "general", 0),
+            (species_general_id, "general", 1),
+        ]
+        plain_tags = {
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+                (plain_general_id,),
+            )
+        }
+        species_tags = {
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+                (species_general_id,),
+            )
+        }
+        assert plain_tags == {p1}
+        assert species_tags == {p2}
+    finally:
+        db.close()
+
+
 def test_migration_folds_variant_species_general_into_taxonomy_peer(tmp_path):
     """A variant species-bearing general still folds into a same-slot
     taxonomy peer — that's a species-to-species merge, the species flag

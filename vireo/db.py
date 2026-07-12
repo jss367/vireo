@@ -9603,7 +9603,30 @@ class Database:
                     if clean_generals:
                         subgroups.append(clean_generals)
                 else:
-                    subgroups = [generals]
+                    # No specific-type peer: the generals still can't be
+                    # collapsed indiscriminately. A legacy species-bearing
+                    # general (`type='general', is_species=1` on upgraded
+                    # DBs) sharing a match key with a plain
+                    # `type='general', is_species=0` homonym is not the same
+                    # keyword — species queries `is_species = 1 OR
+                    # type = 'taxonomy'` distinguish them — so merging
+                    # them into one general survivor would either strip
+                    # the species flag off the legacy row's photos or, via
+                    # _merge_keyword_into's same-type is_species CASE,
+                    # stamp is_species=1 onto every photo tagged with the
+                    # plain general. Split by is_species so the two
+                    # subgroups collapse only among themselves.
+                    species_generals = [
+                        r for r in generals if r["is_species"] == 1
+                    ]
+                    nonspecies_generals = [
+                        r for r in generals if r["is_species"] != 1
+                    ]
+                    subgroups = []
+                    if species_generals:
+                        subgroups.append(species_generals)
+                    if nonspecies_generals:
+                        subgroups.append(nonspecies_generals)
                 for members in subgroups:
                     if len(members) < 2:
                         continue
