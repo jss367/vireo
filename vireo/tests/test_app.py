@@ -4734,6 +4734,150 @@ def test_apply_ordered_highlights_resorts_when_visible_match():
     assert marks == {1: False, 2: True}
 
 
+def test_highlight_score_bucket_orders_picks_then_scored_then_unscored():
+    """Highlights ordering (picked_first) forms three contiguous regions:
+    picks (scored first, then unscored in capture order), scored non-picks by
+    score, then unscored non-picks in capture order. No rich metrics are set,
+    so highlight_score collapses to quality_score (+0.08 pick bonus)."""
+    from app import _highlight_score_bucket
+
+    photos = [
+        # scored non-picks (out of order to prove score sorts them)
+        {"id": 4, "quality_score": 0.3, "flag": "none", "timestamp": "2024-01-07"},
+        {"id": 5, "quality_score": 0.9, "flag": "none", "timestamp": "2024-01-06"},
+        # unscored non-picks (later capture times, shuffled)
+        {"id": 6, "quality_score": None, "flag": "none", "timestamp": "2024-03-02"},
+        {"id": 7, "quality_score": None, "flag": "none", "timestamp": "2024-03-01"},
+        # picks: one scored, two unscored (shuffled capture times)
+        {"id": 1, "quality_score": 0.5, "flag": "flagged", "timestamp": "2024-01-05"},
+        {"id": 2, "quality_score": None, "flag": "flagged", "timestamp": "2024-01-09"},
+        {"id": 3, "quality_score": None, "flag": "flagged", "timestamp": "2024-01-02"},
+    ]
+    _highlight_score_bucket(photos, picked_first=True)
+    # picks first (scored pick 1, then unscored picks 3<2 by capture time),
+    # then scored non-picks by score (5 before 4),
+    # then unscored non-picks by capture time (7 before 6).
+    assert [p["id"] for p in photos] == [1, 3, 2, 5, 4, 7, 6]
+
+
+def test_highlight_score_bucket_picked_first_false_unchanged():
+    """Regression: the non-picks-first path (life list / best-photo) still
+    ranks purely by score descending, ignoring flag and capture time."""
+    from app import _highlight_score_bucket
+
+    photos = [
+        {"id": 1, "quality_score": 0.4, "flag": "flagged", "timestamp": "2024-01-01"},
+        {"id": 2, "quality_score": 0.9, "flag": "none", "timestamp": "2024-01-09"},
+        {"id": 3, "quality_score": 0.6, "flag": "none", "timestamp": "2024-01-02"},
+    ]
+    _highlight_score_bucket(photos, picked_first=False)
+    assert [p["id"] for p in photos] == [2, 3, 1]
+
+
+def test_bucket_unanalyzed_count_counts_unscored_non_picks_only():
+    from app import _bucket_unanalyzed_count
+
+    photos = [
+        {"id": 1, "quality_score": 0.5, "flag": "flagged"},   # scored pick
+        {"id": 2, "quality_score": None, "flag": "flagged"},  # unscored pick (excluded)
+        {"id": 3, "quality_score": 0.4, "flag": "none"},      # scored non-pick
+        {"id": 4, "quality_score": None, "flag": "none"},     # unscored non-pick
+        {"id": 5, "quality_score": None, "flag": "none"},     # unscored non-pick
+    ]
+    assert _bucket_unanalyzed_count(photos) == 2
+    assert _bucket_unanalyzed_count([]) == 0
+    assert _bucket_unanalyzed_count(None) == 0
+
+
+def _set_photo_quality_flag(db, photo_id, quality=None, flag=None):
+    db.conn.execute(
+        "UPDATE photos SET quality_score = ?, flag = ? WHERE id = ?",
+        (quality, flag, photo_id),
+    )
+    db.conn.commit()
+
+
+def _seed_anianiau_bucket(db):
+    """Seed one species folder mirroring the real bug: a scored pick, two
+    unscored picks, scored/unscored non-picks, and a rejected photo. Returns
+    (folder_id, {label: photo_id})."""
+    fid = db.add_folder('/photos/hawaii', name='hawaii')
+    kid = db.add_keyword('Anianiau', is_species=True)
+    spec = [
+        # label, quality, flag, timestamp
+        ("scored_pick",   0.45, "flagged", "2024-01-05T10:00:00"),
+        ("unscored_pickB", None, "flagged", "2024-01-02T10:00:00"),
+        ("unscored_pickA", None, "flagged", "2024-01-09T10:00:00"),
+        ("np_high",       0.90, None,       "2024-01-06T10:00:00"),
+        ("np_low",        0.40, None,       "2024-01-07T10:00:00"),
+        ("unp_early",     None, None,       "2024-03-01T10:00:00"),
+        ("unp_late",      None, None,       "2024-03-02T10:00:00"),
+        ("rejected",      0.99, "rejected", "2024-01-01T10:00:00"),
+    ]
+    ids = {}
+    for i, (label, quality, flag, ts) in enumerate(spec):
+        pid = db.add_photo(
+            folder_id=fid, filename=f"{label}.jpg", extension='.jpg',
+            file_size=1000 + i, file_mtime=float(i), timestamp=ts,
+        )
+        db.tag_photo(pid, kid)
+        _set_photo_quality_flag(db, pid, quality=quality, flag=flag)
+        ids[label] = pid
+    return fid, ids
+
+
+def test_highlights_candidates_include_unscored_picks_and_order(app_and_db):
+    """Unscored photos now flow into Highlights: all three picks appear (the
+    real bug was two vanishing), ordered picks -> scored -> unscored, with
+    is_analyzed flags and unanalyzed_count set for the divider."""
+    from app import _apply_ordered_highlights, _collect_highlight_buckets
+
+    app, db = app_and_db
+    fid, ids = _seed_anianiau_bucket(db)
+
+    candidates = db.get_highlights_candidates(fid, min_quality=0.0)
+    buckets, _unid = _collect_highlight_buckets(candidates, 0.70)
+    _apply_ordered_highlights(db, buckets)
+    bucket = next(b for b in buckets if b["species"] == "Anianiau")
+
+    order = [p["filename"] for p in bucket["photos"]]
+    assert order == [
+        "scored_pick.jpg",       # scored pick leads
+        "unscored_pickB.jpg",    # unscored picks next, capture order
+        "unscored_pickA.jpg",
+        "np_high.jpg",           # scored non-picks by score
+        "np_low.jpg",
+        "unp_early.jpg",         # unscored non-picks last, capture order
+        "unp_late.jpg",
+    ]
+    # rejected photo is still excluded entirely
+    assert "rejected.jpg" not in order
+
+    by_name = {p["filename"]: p for p in bucket["photos"]}
+    assert by_name["scored_pick.jpg"]["is_analyzed"] is True
+    assert by_name["unscored_pickA.jpg"]["is_analyzed"] is False
+    assert by_name["unp_early.jpg"]["is_analyzed"] is False
+    # Only unscored non-picks form the labeled "not yet analyzed" tail.
+    assert bucket["unanalyzed_count"] == 2
+
+
+def test_highlights_candidates_exclude_unscored_when_quality_floor_raised(app_and_db):
+    """Raising the quality floor above 0 drops unscored photos (no measured
+    quality) and low-scored ones, leaving only photos above the floor."""
+    from app import _collect_highlight_buckets
+
+    app, db = app_and_db
+    fid, ids = _seed_anianiau_bucket(db)
+
+    candidates = db.get_highlights_candidates(fid, min_quality=0.5)
+    buckets, _unid = _collect_highlight_buckets(candidates, 0.70)
+    bucket = next(b for b in buckets if b["species"] == "Anianiau")
+    names = {p["filename"] for p in bucket["photos"]}
+
+    # Only np_high (0.90) clears the 0.5 floor; the rejected 0.99 stays excluded.
+    assert names == {"np_high.jpg"}
+
+
 def test_rename_homonym_non_species_keyword_leaves_species_preferences(app_and_db):
     """Renaming an unrelated same-name keyword must not rewrite species prefs."""
     app, db = app_and_db
@@ -8275,17 +8419,22 @@ def test_highlights_page_renders_after_redesign(app_and_db):
     assert b"Per row" in resp.data
 
 
-def test_highlights_get_empty(app_and_db):
-    """GET /api/highlights returns empty buckets when no quality data exists."""
+def test_highlights_get_includes_unscored_photos(app_and_db):
+    """Unscored photos now surface on Highlights (the page used to be empty
+    until analysis ran). The fixture's three unanalyzed photos — none carrying
+    an accepted species keyword — appear in the unidentified section, marked
+    not-yet-analyzed so the divider can label them."""
     app, _ = app_and_db
     client = app.test_client()
     resp = client.get("/api/highlights")
     assert resp.status_code == 200
     data = resp.get_json()
     assert data["buckets"] == []
-    assert data["unidentified"]["photo_count"] == 0
-    assert data["folders"] == []
-    assert data["meta"]["eligible"] == 0
+    unid = data["unidentified"]
+    assert unid["photo_count"] == 3
+    assert unid["unanalyzed_count"] == 3
+    assert all(p["is_analyzed"] is False for p in unid["photos"])
+    assert data["meta"]["eligible"] == 3
 
 
 def test_highlights_buckets_by_accepted_species(app_and_db):

@@ -60,6 +60,7 @@
   .bucket-expand:hover { text-decoration:underline; }
 
   .unid-divider { padding:20px 24px 8px; font-size:11px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:1px; border-top:2px solid var(--border-primary); margin-top:8px; }
+  .analyzed-divider { grid-column:1 / -1; padding:8px 2px 2px; font-size:11px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:1px; border-top:1px solid var(--border-primary); margin-top:4px; }
 
   .highlights-empty { text-align:center; padding:80px 24px; color:var(--text-secondary); }
   .highlights-empty a { color:var(--accent); }
@@ -673,6 +674,25 @@ async function moveSpeciesHighlight(species, photoId, direction, button) {
   }
 }
 
+// Render a strip's cards, inserting the "Not yet analyzed" divider before the
+// first unscored non-pick photo. The ordering guarantees those photos form one
+// contiguous tail, so the divider fires exactly once. Unscored picks (flagged,
+// at the front) are skipped so no stray divider appears up top.
+function renderStripCards(photos, unanalyzedCount) {
+  var html = '';
+  var dividerShown = false;
+  for (var i = 0; i < photos.length; i++) {
+    var p = photos[i];
+    if (!dividerShown && unanalyzedCount && !p.is_analyzed && p.flag !== 'flagged') {
+      html += '<div class="analyzed-divider">Not yet analyzed — ' + unanalyzedCount
+        + ' photo' + (unanalyzedCount === 1 ? '' : 's') + '</div>';
+      dividerShown = true;
+    }
+    html += renderCard(p);
+  }
+  return html;
+}
+
 function renderBucket(bucket) {
   var perRow = parseInt(document.getElementById('perRowSlider').value);
   var expanded = expandedBuckets.has(bucket.species);
@@ -711,7 +731,7 @@ function renderBucket(bucket) {
     + '<div class="bucket-meta">' + meta + '</div></div>'
     + actions
     + '</div>'
-    + '<div class="bucket-strip">' + visible.map(renderCard).join('') + '</div>'
+    + '<div class="bucket-strip">' + renderStripCards(visible, bucket.unanalyzed_count) + '</div>'
     + expandBtn
     + '</section>';
 }
@@ -738,7 +758,7 @@ function renderUnidentified() {
     + '<div class="bucket-meta">' + unid.photo_count + ' photos</div></div>'
     + '<div class="bucket-actions"><button class="bucket-action" data-action="change-unidentified">Set species</button></div>'
     + '</div>'
-    + '<div class="bucket-strip">' + visible.map(renderCard).join('') + '</div>'
+    + '<div class="bucket-strip">' + renderStripCards(visible, unid.unanalyzed_count) + '</div>'
     + expandBtn
     + '</section>';
 }

@@ -9960,8 +9960,12 @@ class Database:
             across the photo's detections (NULL if no usable prediction
             exists)
 
-        Only photos with ``quality_score >= min_quality`` that are not
-        user-rejected are returned. The API layer applies the final
+        Photos with ``quality_score >= min_quality`` that are not
+        user-rejected are returned. When ``min_quality <= 0`` (the default),
+        photos with no ``quality_score`` yet (not analyzed) are also included
+        so picks and other unscored photos still surface on the Highlights
+        page; raising the quality floor above 0 excludes them, since they have
+        no measured quality to compare. The API layer applies the final
         highlights ranking because it combines these persisted quality fields
         with prediction confidence and user ratings.
         """
@@ -10067,8 +10071,8 @@ class Database:
                WHERE wf.workspace_id = ?
                  {folder_filter}
                  {photo_filter}
-                 AND p.quality_score IS NOT NULL
-                 AND p.quality_score >= ?
+                 AND (p.quality_score >= ?
+                      OR (? <= 0 AND p.quality_score IS NULL))
                  AND (p.flag IS NULL OR p.flag != 'rejected')
                ORDER BY p.quality_score DESC""",
             (
@@ -10079,6 +10083,7 @@ class Database:
                 ws,
                 *folder_params,
                 *photo_params,
+                min_quality,
                 min_quality,
             ),
         ).fetchall()
