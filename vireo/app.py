@@ -3362,7 +3362,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 d["count_error"] = True
                 collection_dicts.append(d)
                 continue
-            d["can_add_photos"] = _collection_accepts_manual_photos(parsed_rules)
             if not db.rules_resolvable(parsed_rules):
                 app.logger.warning(
                     "Collection %s (%s) has unresolvable rules; marking degraded",
@@ -3370,6 +3369,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     c["name"],
                 )
                 d["count_error"] = True
+                # Same reasoning as /api/collections: an unresolvable rule
+                # cannot be safely merged into via add-photos, so keep it
+                # out of the add-to-collection modal.
+                d["can_add_photos"] = False
+            else:
+                d["can_add_photos"] = _collection_accepts_manual_photos(parsed_rules)
             collection_dicts.append(d)
 
         return jsonify(
@@ -8209,12 +8214,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 )
                 d["photo_count"] = None
                 d["count_error"] = True
-            try:
-                d["can_add_photos"] = _collection_accepts_manual_photos(
-                    json.loads(c["rules"])
-                )
-            except (TypeError, ValueError):
+            # Degraded rows must never advertise manual-add support: the
+            # add-to-collection modal filters only on can_add_photos, and
+            # /api/collections/<id>/add-photos calls set(ids_rule["value"])
+            # on the existing rule — which 500s on any malformed photo_ids
+            # payload (non-scalar entries, non-list value, etc.). If the
+            # rule is bad enough to fail count, it isn't safe to merge into.
+            if d.get("count_error"):
                 d["can_add_photos"] = False
+            else:
+                try:
+                    d["can_add_photos"] = _collection_accepts_manual_photos(
+                        json.loads(c["rules"])
+                    )
+                except (TypeError, ValueError):
+                    d["can_add_photos"] = False
             result.append(d)
         return jsonify(result)
 

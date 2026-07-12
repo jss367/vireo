@@ -11852,6 +11852,55 @@ def test_collection_pickers_disable_degraded_collections(app_and_db):
         )
 
 
+def test_degraded_collections_never_advertise_manual_add(app_and_db, monkeypatch):
+    """A count_error collection must not report can_add_photos=True from
+    either /api/collections or /api/browse/init. The add-to-collection
+    modal filters only on can_add_photos, and /api/collections/<id>/add-photos
+    reaches set(ids_rule["value"]) — which 500s on any malformed photo_ids
+    payload. Defense-in-depth alongside the picker guards: degraded rows
+    are surfaced (so the user can edit them) but never offered as an
+    append target.
+    """
+    import json
+    import sqlite3
+
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    # A static photo_ids collection whose count query fails at rule-resolve
+    # time: the shape looks like a manual-add target, but the DB can't
+    # count it, so it lands in the count_error path.
+    bad = db.add_collection(
+        "Broken static",
+        json.dumps([
+            {"field": "photo_ids", "value": [1, 2, 3]},
+            {"field": "nonexistent_field", "op": "is", "value": 1},
+        ]),
+    )
+
+    resp = client.get("/api/collections")
+    assert resp.status_code == 200
+    by_id = {c["id"]: c for c in resp.get_json()}
+    assert by_id[bad]["count_error"] is True
+    assert by_id[bad]["can_add_photos"] is False, (
+        "degraded /api/collections row must not advertise manual-add support"
+    )
+
+    # /api/browse/init derives count_error from cheap rule validation, so
+    # patch that instead of count_collection_photos to trigger the branch.
+    monkeypatch.setattr(Database, "rules_resolvable", lambda self, rules: False)
+
+    resp = client.get("/api/browse/init")
+    assert resp.status_code == 200
+    by_id = {c["id"]: c for c in resp.get_json()["collections"]}
+    assert by_id[bad]["count_error"] is True
+    assert by_id[bad]["can_add_photos"] is False, (
+        "degraded /api/browse/init row must not advertise manual-add support"
+    )
+
+
 def test_browse_filter_by_collection_guards_degraded_rows():
     """The Browse sidebar renders every collection from /api/collections as a
     clickable filter target (filterByCollection). Before this fix,
