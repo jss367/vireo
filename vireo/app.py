@@ -50,7 +50,7 @@ from flask import (
     send_from_directory,
 )
 from jobs import SLOT_CAP, JobRunner, LogBroadcaster
-from keyword_normalization import normalize_keyword_display
+from keyword_normalization import keyword_match_key, normalize_keyword_display
 from preview_cache import (
     evict_if_over_quota as evict_preview_cache_if_over_quota,
 )
@@ -6043,7 +6043,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             (keyword_id,),
         ).fetchone()
         affected = []
-        if body.get("name"):
+        # Capture affected photos whenever a rename OR a retype is being
+        # requested: update_keyword's merge-into-peer path can move photo
+        # tags for either kind of change (a type-only PUT with an existing
+        # same-name peer under the new type moves the tagged photos onto the
+        # peer's stored spelling), and without the snapshot the
+        # keyword_remove/keyword_add sidecar queueing below iterates an
+        # empty list and XMP keeps exporting the old spelling until another
+        # edit occurs.
+        if body.get("name") or body.get("type"):
             affected = db.conn.execute(
                 """SELECT pk.photo_id, wf.workspace_id
                    FROM photo_keywords pk
@@ -20944,9 +20952,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ws_id = db._ws_id()
 
         old_kid = None
+        # Compare using the ASCII-only fold SQLite's `COLLATE NOCASE` (which
+        # add_keyword's dedupe relies on) uses — Python's str.lower() folds
+        # non-ASCII letters that SQLite treats as distinct. Without this, a
+        # cache-recorded confirmed species `Éclair` and a user-submitted
+        # `éclair` would match here, the replacement path would be skipped,
+        # yet add_keyword's NOCASE lookup would still create/tag a separate
+        # `éclair` row — leaving the photo with both taxonomy tags and no
+        # remove queued for the old one.
         is_replacement = (
             previous_species is not None
-            and previous_species.strip().lower() != species.lower()
+            and keyword_match_key(previous_species) != keyword_match_key(species)
         )
         if is_replacement:
             # Match add_keyword's write path: species keywords live as root

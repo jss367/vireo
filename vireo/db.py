@@ -9740,22 +9740,36 @@ class Database:
                 src["type"] == "taxonomy"
                 and dst is not None and dst["type"] != "taxonomy"
             )
-            propagate_species_flag = (
-                src["is_species"] if not leaks_species_into_nontaxonomy else 0
-            )
-            propagate_taxon_id = (
-                None if leaks_species_into_nontaxonomy else src["taxon_id"]
-            )
-            self.conn.execute(
-                """UPDATE keywords
-                   SET is_species = CASE WHEN ? = 1 THEN 1 ELSE is_species END,
-                       latitude   = COALESCE(latitude, ?),
-                       longitude  = COALESCE(longitude, ?),
-                       taxon_id   = COALESCE(taxon_id, ?)
-                   WHERE id = ?""",
-                (propagate_species_flag, src["latitude"], src["longitude"],
-                 propagate_taxon_id, dst_id),
-            )
+            if leaks_species_into_nontaxonomy:
+                # Retype-into-peer path (see update_keyword): the survivor
+                # is deliberately non-taxonomy, so the row must not stay
+                # matched by species queries. Suppressing the source's
+                # is_species/taxon_id is not enough — the destination may
+                # carry a legacy is_species=1 (dirty pre-invariant data on
+                # 'individual'/'general' rows) or a stale taxon_id, and
+                # keeping either lets `is_species = 1 OR type = 'taxonomy'`
+                # keep matching every photo that already used the dst row.
+                # Clear both alongside the metadata fold.
+                self.conn.execute(
+                    """UPDATE keywords
+                       SET is_species = 0,
+                           latitude   = COALESCE(latitude, ?),
+                           longitude  = COALESCE(longitude, ?),
+                           taxon_id   = NULL
+                       WHERE id = ?""",
+                    (src["latitude"], src["longitude"], dst_id),
+                )
+            else:
+                self.conn.execute(
+                    """UPDATE keywords
+                       SET is_species = CASE WHEN ? = 1 THEN 1 ELSE is_species END,
+                           latitude   = COALESCE(latitude, ?),
+                           longitude  = COALESCE(longitude, ?),
+                           taxon_id   = COALESCE(taxon_id, ?)
+                       WHERE id = ?""",
+                    (src["is_species"], src["latitude"], src["longitude"],
+                     src["taxon_id"], dst_id),
+                )
         # Retarget pending keyword_add/keyword_remove rows queued under the
         # source name onto the destination name. A pending row that would
         # collide with an existing (photo_id, change_type, dst_name) row is
