@@ -1,6 +1,6 @@
 # Privacy Policy
 
-*Effective date: June 25, 2026*
+*Effective date: July 12, 2026*
 
 Vireo is a wildlife photo organizer that runs entirely on your device. This policy explains what data Vireo accesses, what stays on your device, and what leaves it.
 
@@ -33,7 +33,15 @@ Vireo contacts external services in the following ways:
 
 - **Bug reports** — Only when you choose to submit an in-app issue report, Vireo sends your description along with diagnostics — recent application logs, photo/folder/prediction counts, system information, recent job history, and your configuration — to a reporting endpoint. By default this is a Google Apps Script endpoint operated by the Vireo project, so the bundle is received and processed on Google's infrastructure. Credentials (tokens, keys, secrets, and passwords) are redacted, but the bundle can still include local file paths, such as the photo folders you have added and the source paths of recent scans or imports. Nothing is sent unless you submit a report.
 
-Beyond the bug reports you choose to submit, Vireo has no analytics, telemetry, or automated crash reporting.
+Beyond the bug reports you choose to submit, the Vireo application has no analytics, usage telemetry, advertising trackers, persistent installation identifiers, or automated crash reporting.
+
+## Website measurement
+
+When you visit `vireo.photo`, we use Plausible Analytics to understand aggregate website traffic and download-button clicks. The information measured includes the page visited, referring site, campaign parameters included in the URL, installer-link destination, browser, operating system, device category, and country, region, and city inferred from your network address. We use this information only to understand how people discover Vireo and which downloads they choose.
+
+Plausible does not use cookies, browser storage, or persistent identifiers. Plausible briefly processes your IP address and browser user-agent to calculate aggregate statistics using an identifier that changes daily, but does not store the raw values. Vireo does not receive or store your IP address. Learn more in [Plausible's data policy](https://plausible.io/data-policy).
+
+Installer files are hosted by GitHub. GitHub provides the Vireo project with an aggregate download count for each release file and handles download requests under [GitHub's privacy statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement). These counts are not connected to identifiable website visitors by Vireo.
 
 ## Credentials
 

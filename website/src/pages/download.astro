@@ -59,6 +59,11 @@ const windowsBetaAvailable = windowsVersion !== '0.18.0';
           View all releases on GitHub &rarr;
         </a>
       </p>
+
+      <p class="download-hero__privacy">
+        We use cookie-free analytics to count aggregate website visits and download-button clicks.
+        The Vireo app sends no usage telemetry. <a href={`${base}privacy/`}>Privacy details</a>.
+      </p>
     </div>
   </section>
 
@@ -211,6 +216,22 @@ const windowsBetaAvailable = windowsVersion !== '0.18.0';
   }
 
   .download-hero__releases a:hover {
+    color: var(--color-accent);
+  }
+
+  .download-hero__privacy {
+    max-width: 620px;
+    margin-top: var(--space-xl);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .download-hero__privacy a {
+    color: var(--color-text-muted);
+    text-decoration: underline;
+  }
+
+  .download-hero__privacy a:hover {
     color: var(--color-accent);
   }
 

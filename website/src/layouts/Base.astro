@@ -10,6 +10,7 @@ interface Props {
 
 const { title, description = 'AI-powered wildlife photo organizer. Triage thousands of photos in minutes.' } = Astro.props;
 const base = import.meta.env.BASE_URL;
+const plausibleScriptUrl = import.meta.env.PUBLIC_PLAUSIBLE_SCRIPT_URL;
 ---
 
 <!DOCTYPE html>
@@ -34,6 +35,21 @@ const base = import.meta.env.BASE_URL;
   <meta property="og:type" content="website" />
 
   <title>{title}</title>
+
+  {plausibleScriptUrl && (
+    <>
+      <script is:inline async src={plausibleScriptUrl}></script>
+      <script is:inline>
+        window.plausible = window.plausible || function() {
+          (window.plausible.q = window.plausible.q || []).push(arguments);
+        };
+        window.plausible.init = window.plausible.init || function(options) {
+          window.plausible.o = options || {};
+        };
+        window.plausible.init();
+      </script>
+    </>
+  )}
 </head>
 <body>
   <Nav />
