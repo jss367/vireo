@@ -27,7 +27,7 @@ import uuid
 import webbrowser
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import quote, urlsplit
 
 import places
 from db import (
@@ -14447,26 +14447,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         species = pred["species"] if pred else ""
         scientific = pred["scientific_name"] if pred else ""
 
-        # Percent-encode every value: scientific names contain spaces, and an
-        # unencoded space makes the URL invalid, so the desktop opener plugin
-        # rejects it and nothing opens.
-        params = []
-        if scientific:
-            params.append(("taxon_name", scientific))
-        elif species:
-            params.append(("taxon_name", species))
-        if photo["timestamp"]:
-            params.append(("observed_on", photo["timestamp"][:10]))
         loc = db.get_effective_photo_location(photo_id)
         lat = loc["latitude"] if loc else None
         lng = loc["longitude"] if loc else None
-        if lat is not None and lng is not None:
-            params.append(("lat", str(lat)))
-            params.append(("lng", str(lng)))
-
+        # The browser uploader does not document query parameters for
+        # pre-filling an observation. In particular, taxon_name is an
+        # observation-search parameter, not an uploader parameter. Open the
+        # generic uploader and keep the prepared metadata in this response for
+        # Vireo's authenticated direct-upload flow.
         upload_url = "https://www.inaturalist.org/observations/upload"
-        if params:
-            upload_url += "?" + urlencode(params)
 
         # Check submission history
         subs = db.get_inat_submissions([photo_id])

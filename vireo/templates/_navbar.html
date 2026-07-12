@@ -7502,6 +7502,45 @@ async function _inatOpenUrl(url) {
   return false;
 }
 
+function _inatQuickUploadUrl(idx) {
+  var item = inatQueue[idx];
+  var base = (item && item.upload_url) || 'https://www.inaturalist.org/observations/upload';
+  base = base.split('?')[0];
+  var params = [];
+  var taxon = document.getElementById('inatIncludeTaxon' + idx);
+  var date = document.getElementById('inatIncludeDate' + idx);
+  var location = document.getElementById('inatIncludeLocation' + idx);
+  if (taxon && taxon.checked && item.taxon_name) {
+    params.push('taxon_name=' + encodeURIComponent(item.taxon_name));
+  }
+  if (date && date.checked && item.observed_on) {
+    params.push('observed_on=' + encodeURIComponent(item.observed_on));
+  }
+  if (location && location.checked && item.latitude !== '' && item.longitude !== '') {
+    params.push('lat=' + encodeURIComponent(String(item.latitude)));
+    params.push('lng=' + encodeURIComponent(String(item.longitude)));
+  }
+  return base + (params.length ? '?' + params.join('&') : '');
+}
+
+async function openInatQuickUpload(idx) {
+  var url = _inatQuickUploadUrl(idx);
+  if (await _inatOpenUrl(url)) {
+    showToast('Opened iNaturalist in your browser.', 'success');
+    return;
+  }
+  if (typeof showExternalOpenFailure === 'function') {
+    showExternalOpenFailure(
+      url,
+      'Vireo could not open iNaturalist. Retry or copy the upload URL below.'
+    );
+  }
+}
+
+function copyInatQuickUploadUrl(idx) {
+  return copyExternalUrl(_inatQuickUploadUrl(idx));
+}
+
 async function submitToInat(photoId) {
   try {
     var data = await safeFetch('/api/inat/prepare/' + photoId, {}, { toast: false });
@@ -7554,29 +7593,10 @@ async function submitToInatBatch(photoIds) {
 }
 
 async function openInatQuickModal(items, failures) {
-  var skipAutoOpenForDuplicate = items.length === 1 && !!items[0].already_submitted;
-  var hasFailures = !!(failures && failures.length);
-  // When batch preparation left other photos in a failure state, always render
-  // the modal so the failure summary is visible instead of silently dropping it.
-  if (items.length === 1 && items[0].upload_url && !skipAutoOpenForDuplicate && !hasFailures) {
-    var opened = await _inatOpenUrl(items[0].upload_url);
-    if (opened) {
-      showToast('Opened iNaturalist in your browser.', 'success');
-      return;
-    }
-    if (typeof showExternalOpenFailure === 'function') {
-      showExternalOpenFailure(
-        items[0].upload_url,
-        'Vireo could not open iNaturalist. Retry or copy the prepared upload URL below.'
-      );
-      return;
-    }
-  }
-
   if (window._inatEscToken) Keymap.popEsc(window._inatEscToken);
   window._inatEscToken = Keymap.pushEsc(function() { closeInatModal(); });
 
-  inatQueue = [];
+  inatQueue = items.slice();
   var title = items.length === 1 ? 'Open in iNaturalist' : 'Open ' + items.length + ' iNaturalist uploads';
   document.getElementById('inatModalTitle').textContent = title;
   document.getElementById('inatProgress').style.display = 'none';
@@ -7596,6 +7616,29 @@ async function openInatQuickModal(items, failures) {
     return '<div class="inat-card-status warning" style="margin-top:6px;">&#9888; Already submitted to iNaturalist: ' + linkOrText + '. Opening a new upload will create a duplicate observation.</div>';
   }
 
+  function _inatQuickOptions(item, idx) {
+    var hasTaxon = !!item.taxon_name;
+    var hasDate = !!item.observed_on;
+    var hasLocation = item.latitude !== '' && item.longitude !== '';
+    var taxonText = hasTaxon ? item.taxon_name : 'No detected taxon';
+    var dateText = hasDate ? item.observed_on : 'No observation date';
+    var locationText = hasLocation
+      ? String(item.latitude) + ', ' + String(item.longitude)
+      : 'No location';
+    return '<fieldset style="border:0;padding:0;margin:12px 0 0;display:flex;flex-direction:column;gap:8px;">' +
+      '<legend style="font-size:13px;color:var(--text-primary);margin-bottom:7px;">Include in the upload link</legend>' +
+      '<label style="font-size:13px;color:var(--text-secondary);display:flex;align-items:center;gap:8px;">' +
+        '<input id="inatIncludeTaxon' + idx + '" type="checkbox"' + (hasTaxon ? ' checked' : ' disabled') + '> Taxon: ' + escapeHtml(taxonText) +
+      '</label>' +
+      '<label style="font-size:13px;color:var(--text-secondary);display:flex;align-items:center;gap:8px;">' +
+        '<input id="inatIncludeDate' + idx + '" type="checkbox"' + (hasDate ? ' checked' : ' disabled') + '> Date: ' + escapeHtml(dateText) +
+      '</label>' +
+      '<label style="font-size:13px;color:var(--text-secondary);display:flex;align-items:center;gap:8px;">' +
+        '<input id="inatIncludeLocation' + idx + '" type="checkbox"' + (hasLocation ? ' checked' : ' disabled') + '> Location: ' + escapeHtml(locationText) +
+      '</label>' +
+    '</fieldset>';
+  }
+
   var html = '';
   if (items.length === 1) {
     html += '<div class="inat-card">' +
@@ -7603,36 +7646,33 @@ async function openInatQuickModal(items, failures) {
         '<img class="inat-card-thumb" src="/thumbnails/' + items[0].photo_id + '.jpg" alt="">' +
         '<div style="flex:1;min-width:0;">' +
           '<div style="font-size:13px;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(items[0].filename) + '</div>' +
-          '<div class="inat-card-status warning">' +
-            (skipAutoOpenForDuplicate
-              ? 'Did not auto-open — this photo appears already submitted. Review the warning below before opening a new upload.'
-              : 'Use the prepared link below.') +
-          '</div>' +
           _inatAlreadySubmittedWarning(items[0]) +
         '</div>' +
       '</div>' +
       '<div style="font-size:13px;line-height:1.5;color:var(--text-secondary);">' +
-        'Direct uploads need an iNaturalist token in Settings. This link opens iNaturalist with the prepared taxon, date, and location.' +
+        'Choose which details Vireo should add to the iNaturalist upload link.' +
       '</div>' +
+      _inatQuickOptions(items[0], 0) +
       '<div style="margin-top:12px;">' +
-        '<a class="modal-btn modal-btn-primary" href="' + escapeAttr(items[0].upload_url) + '" target="_blank" rel="noopener" onclick="return openExternalLink(event, this.href)" style="display:inline-block;text-decoration:none;">Open Upload Page</a>' +
-        '<button type="button" class="modal-btn" data-external-url="' + escapeAttr(items[0].upload_url) + '" onclick="copyExternalUrl(this.getAttribute(\'data-external-url\'))" style="margin-left:8px;">Copy URL</button>' +
+        '<button type="button" class="modal-btn modal-btn-primary" onclick="openInatQuickUpload(0)">Open Upload Page</button>' +
+        '<button type="button" class="modal-btn" onclick="copyInatQuickUploadUrl(0)" style="margin-left:8px;">Copy URL</button>' +
       '</div>' +
     '</div>';
   } else {
     html += '<div class="inat-card">' +
       '<div style="font-size:13px;line-height:1.5;color:var(--text-secondary);margin-bottom:10px;">' +
-        'Direct uploads need an iNaturalist token in Settings. Open each prepared upload page below.' +
+        'Direct uploads need an iNaturalist token in Settings. Open the iNaturalist upload page for each photo below.' +
       '</div>';
-    items.forEach(function(item) {
+    items.forEach(function(item, idx) {
       html += '<div style="display:flex;flex-direction:column;gap:4px;padding:8px 0;border-top:1px solid var(--border-primary);">' +
         '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">' +
           '<span style="font-size:13px;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(item.filename) + '</span>' +
           '<span style="display:flex;align-items:center;gap:8px;white-space:nowrap;">' +
-            '<a href="' + escapeAttr(item.upload_url) + '" target="_blank" rel="noopener" onclick="return openExternalLink(event, this.href)" style="color:var(--accent);font-size:12px;">Open Upload</a>' +
-            '<button type="button" data-external-url="' + escapeAttr(item.upload_url) + '" onclick="copyExternalUrl(this.getAttribute(\'data-external-url\'))" style="border:0;background:none;color:var(--text-secondary);font-size:12px;cursor:pointer;padding:0;">Copy URL</button>' +
+            '<button type="button" onclick="openInatQuickUpload(' + idx + ')" style="border:0;background:none;color:var(--accent);font-size:12px;cursor:pointer;padding:0;">Open Upload</button>' +
+            '<button type="button" onclick="copyInatQuickUploadUrl(' + idx + ')" style="border:0;background:none;color:var(--text-secondary);font-size:12px;cursor:pointer;padding:0;">Copy URL</button>' +
           '</span>' +
         '</div>' +
+        _inatQuickOptions(item, idx) +
         _inatAlreadySubmittedWarning(item) +
       '</div>';
     });

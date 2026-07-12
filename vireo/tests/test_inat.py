@@ -1,6 +1,5 @@
 import os
 import sys
-from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -302,27 +301,24 @@ def test_api_inat_prepare_uses_assigned_location_coords(app_and_db):
 
     assert data['latitude'] == 48.8566
     assert data['longitude'] == 2.3522
-    assert "lat=48.8566" in data["upload_url"]
-    assert "lng=2.3522" in data["upload_url"]
+    assert data["upload_url"] == "https://www.inaturalist.org/observations/upload"
 
 
-def test_api_inat_prepare_url_encodes_quick_upload_params(app_and_db):
-    """The prefilled upload URL must be valid: a scientific name with a space
-    (e.g. "Cardinalis cardinalis") has to be percent-encoded, otherwise the
-    desktop opener plugin rejects the malformed URL and nothing opens."""
+def test_api_inat_prepare_uses_generic_browser_upload_url(app_and_db):
+    """Token-free handoff opens iNaturalist's generic browser uploader.
+
+    Prepared metadata remains in the response for direct uploads, but it must
+    not be attached as unsupported uploader query parameters.
+    """
     app, _db, pid = app_and_db
     client = app.test_client()
     resp = client.get(f'/api/inat/prepare/{pid}')
     assert resp.status_code == 200
     data = resp.get_json()
 
-    url = data["upload_url"]
-    # No raw spaces anywhere in the URL.
-    assert " " not in url
-    # The taxon name still round-trips back to the real binomial.
-    qs = parse_qs(urlparse(url).query)
-    assert qs["taxon_name"] == ["Cardinalis cardinalis"]
-    assert qs["observed_on"] == ["2024-06-01"]
+    assert data["upload_url"] == "https://www.inaturalist.org/observations/upload"
+    assert data["scientific_name"] == "Cardinalis cardinalis"
+    assert data["timestamp"].startswith("2024-06-01")
 
 
 def test_api_inat_prepare_preserves_zero_coordinates(app_and_db):
@@ -340,10 +336,11 @@ def test_api_inat_prepare_preserves_zero_coordinates(app_and_db):
 
     client = app.test_client()
     resp = client.get(f'/api/inat/prepare/{pid}')
-    query = parse_qs(urlparse(resp.get_json()["upload_url"]).query)
+    data = resp.get_json()
 
-    assert query["lat"] == ["0.0"]
-    assert query["lng"] == ["0.0"]
+    assert data["latitude"] == 0.0
+    assert data["longitude"] == 0.0
+    assert data["upload_url"] == "https://www.inaturalist.org/observations/upload"
 
 
 def test_api_inat_prepare_marks_quick_mode_as_not_photo_upload(app_and_db):
