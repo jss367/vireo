@@ -257,6 +257,31 @@ def test_import_destination_browse_button_sets_destination(live_server, page):
     expect(page.locator("#destInput")).to_have_value("/tmp/archive")
 
 
+def test_import_recent_destination_button_selects_saved_path(live_server, page):
+    """Saved import destinations remain visible as one-click choices."""
+    import config as cfg
+
+    config = cfg.load()
+    config["ingest"]["recent_destinations"] = [
+        "/Volumes/Photos/Archive",
+        "/Volumes/Photos/Trips",
+    ]
+    cfg.save(config)
+
+    page.goto(f"{live_server['url']}/import")
+    page.locator("#modeCopy").check()
+
+    choices = page.locator("[data-testid='recent-destinations']")
+    expect(choices).to_be_visible()
+    expect(choices).to_contain_text("Archive")
+    expect(choices).to_contain_text("Trips")
+
+    page.get_by_role(
+        "button", name="Use /Volumes/Photos/Trips"
+    ).click()
+    expect(page.locator("#destInput")).to_have_value("/Volumes/Photos/Trips")
+
+
 def test_import_custom_extensions_feed_preview(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/import")
@@ -848,6 +873,72 @@ def test_import_copy_start_sends_restored_options(live_server, page):
     # default against the newly-created workspace instead of leaking the
     # previously-active workspace's pipeline.default_strategy.
     assert "after_import" not in body
+
+
+def test_import_start_sends_common_tags_and_gps_location_option(
+    live_server, page,
+):
+    url = live_server["url"]
+    captured = {}
+
+    def config_route(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "google_maps_api_key": "configured-for-test",
+                "pipeline": {"default_strategy": None},
+            }),
+        )
+
+    def start_import(route):
+        captured["body"] = json.loads(route.request.post_data or "{}")
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"job_id": "import-tags-test"}),
+        )
+
+    page.route("**/api/config", config_route)
+    page.route("**/api/jobs/import-in-place", start_import)
+    page.goto(f"{url}/import")
+
+    page.locator("#sourceInput").fill("/tmp/card-a")
+    page.locator("#btnAddSource").click()
+    page.locator("#importTagInput").fill("Kenya trip")
+    page.locator("#importTagInput").press("Enter")
+    page.locator("#importTagInput").fill("Portfolio")
+    page.locator("#btnAddImportTag").click()
+    expect(page.locator("#importTagList .import-tag-chip")).to_have_count(2)
+    page.locator("#chkLocationFromGps").check()
+
+    page.locator("#btnStart").click()
+    expect(page.locator("#progressCard")).to_be_visible()
+
+    assert captured["body"]["tags"] == ["Kenya trip", "Portfolio"]
+    assert captured["body"]["location_from_gps"] is True
+
+
+def test_import_gps_location_option_explains_missing_api_key(live_server, page):
+    url = live_server["url"]
+
+    def config_route(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "google_maps_api_key": "",
+                "pipeline": {"default_strategy": None},
+            }),
+        )
+
+    page.route("**/api/config", config_route)
+    page.goto(f"{url}/import")
+
+    expect(page.locator("#chkLocationFromGps")).to_be_disabled()
+    expect(page.locator("#locationGpsHint")).to_contain_text(
+        "Add a Google Maps API key in Settings"
+    )
 
 
 def test_import_new_workspace_forwards_explicit_after_import(live_server, page):
