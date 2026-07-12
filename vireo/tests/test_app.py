@@ -618,6 +618,21 @@ def test_storage_page_bounds_large_cache_file_listings(app_and_db):
     assert b'Delete Entire Cache' in resp.data
 
 
+def test_storage_page_has_health_cleanup_and_location_controls(app_and_db):
+    """Storage surfaces capacity, safety guidance, refresh, and folder actions."""
+    app, _ = app_and_db
+    page = app.test_client().get('/storage')
+    assert page.status_code == 200
+    for marker in (
+        b'storageFreeSize', b'storageReclaimableSize', b'clearSafeCaches',
+        b'openStorageFolder', b'refreshStoragePage', b'Safe to clear',
+        b'Download again', b'cannot currently be reclaimed separately',
+        b'loadMasksCard(s && s.masks)',
+    ):
+        assert marker in page.data
+    assert page.data.count(b"{name: 'Database'") == 1
+
+
 def test_api_storage_includes_offline_originals(app_and_db):
     """Storage totals include Vireo-managed offline originals."""
     app, _ = app_and_db
@@ -628,6 +643,118 @@ def test_api_storage_includes_offline_originals(app_and_db):
     assert data["offline_originals"]["count"] == 0
     assert data["offline_originals"]["size"] == 0
     assert data["offline_originals"]["path"].endswith("offline")
+
+
+def test_api_storage_reports_volume_reclaimable_and_masks(
+    app_and_db, tmp_path,
+):
+    app, db = app_and_db
+    _seed_masks(db, tmp_path)
+
+    data = app.test_client().get('/api/storage').get_json()
+    assert data["masks"]["size"] == 450
+    assert data["masks"]["total_bytes"] == 450
+    assert len(data["masks"]["variants"]) == 2
+    assert data["reclaimable"] == sum(
+        data[name]["size"] for name in ("thumbnails", "previews", "embeddings")
+    )
+    assert data["total"] == sum([
+        data["database"]["size"], data["thumbnails"]["size"],
+        data["previews"]["size"], data["embeddings"]["size"],
+        data["models"]["size"], data["hf_cache"]["size"],
+        data["offline_originals"]["size"], data["masks"]["size"],
+    ])
+    assert data["storage_root"] == str(tmp_path)
+    assert data["locations"]
+    assert data["volumes"]
+    assert all(volume["name"] for volume in data["volumes"])
+    assert all(volume["free"] >= 0 for volume in data["volumes"])
+    assert all(volume["capacity"] > 0 for volume in data["volumes"])
+
+
+def test_api_storage_reports_each_backing_volume(
+    app_and_db, tmp_path, monkeypatch,
+):
+    app, _ = app_and_db
+    import app as app_module
+    import classifier
+
+    embedding_dir = tmp_path / "separate-embedding-volume"
+    embedding_dir.mkdir()
+    (embedding_dir / "labels.npy").write_bytes(b"embedding")
+    monkeypatch.setattr(classifier, "CACHE_DIR", str(embedding_dir))
+
+    real_ismount = app_module.os.path.ismount
+    simulated_mounts = {str(tmp_path), str(embedding_dir)}
+    monkeypatch.setattr(
+        app_module.os.path, "ismount",
+        lambda path: path in simulated_mounts or real_ismount(path),
+    )
+    disk_usage = app_module.shutil._ntuple_diskusage
+    monkeypatch.setattr(
+        app_module.shutil, "disk_usage",
+        lambda path: disk_usage(
+            1000, 900 if path == str(embedding_dir) else 600,
+            100 if path == str(embedding_dir) else 400,
+        ),
+    )
+
+    data = app.test_client().get('/api/storage').get_json()
+    by_mount = {volume["mount_path"]: volume for volume in data["volumes"]}
+    assert by_mount[str(tmp_path)]["free"] == 400
+    assert by_mount[str(embedding_dir)]["free"] == 100
+    embedding_location = next(
+        location for location in data["locations"]
+        if location["id"] == "embeddings"
+    )
+    assert embedding_location["volume"]["mount_path"] == str(embedding_dir)
+
+
+def test_clear_safe_storage_caches(app_and_db, tmp_path, monkeypatch):
+    app, db = app_and_db
+    import classifier
+
+    preview_dir = tmp_path / "previews"
+    preview_dir.mkdir()
+    (preview_dir / "1_1200.jpg").write_bytes(b"preview")
+    embedding_dir = tmp_path / "embedding-cache"
+    embedding_dir.mkdir()
+    (embedding_dir / "labels.npy").write_bytes(b"embedding")
+    monkeypatch.setattr(classifier, "CACHE_DIR", str(embedding_dir))
+
+    response = app.test_client().post('/api/storage/clear-safe')
+    assert response.status_code == 200
+    assert response.get_json()["cleared"] == [
+        "thumbnails", "previews", "embeddings",
+    ]
+    assert not (tmp_path / "thumbs").exists()
+    assert not preview_dir.exists()
+    assert not embedding_dir.exists()
+    assert db.conn.execute("SELECT COUNT(*) FROM preview_cache").fetchone()[0] == 0
+
+
+def test_open_storage_folder_uses_server_selected_path(
+    app_and_db, monkeypatch,
+):
+    app, _ = app_and_db
+    import app as app_module
+
+    calls = []
+
+    class Result:
+        returncode = 0
+        stderr = ""
+        stdout = ""
+
+    monkeypatch.setattr(
+        app_module.subprocess, "run",
+        lambda command, **kwargs: calls.append(command) or Result(),
+    )
+    response = app.test_client().post('/api/storage/open-folder')
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True}
+    assert calls
+    assert calls[0][-1] == app.config["THUMB_CACHE_DIR"].rsplit(os.sep, 1)[0]
 
 
 def test_detection_cache_stats_endpoint(app_and_db):

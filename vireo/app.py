@@ -17,6 +17,7 @@ import os
 import queue
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -12291,6 +12292,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         return jsonify({"opened": len(file_paths)})
 
+    def _storage_masks_data(db):
+        """Build the shared mask-storage payload once per storage refresh."""
+        import config as cfg
+
+        # This is a global view, so use the most permissive confidence floor
+        # across workspaces. The stale set must not change with active workspace.
+        min_detector_conf = db.min_detector_confidence_across_workspaces(
+            cfg.load()
+        )
+        variants = db.mask_variants_summary()
+        stale = db.find_stale_masks(detector_confidence=min_detector_conf)
+        return {
+            "variants": variants,
+            "total_bytes": sum(v["bytes"] for v in variants),
+            "stale_count": len(stale),
+            "path": os.path.join(os.path.dirname(db_path), "masks"),
+        }
+
     @app.route("/api/storage")
     def api_storage():
         """Comprehensive storage info for the storage management panel."""
@@ -12329,6 +12348,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         offline_count_row = db.conn.execute(
             "SELECT COUNT(*) AS c FROM offline_originals WHERE status='cached'"
         ).fetchone()
+        masks = _storage_masks_data(db)
+        masks_size = masks["total_bytes"]
 
         # HuggingFace cache — only count Vireo-relevant models
         hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
@@ -12357,11 +12378,90 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             + models_size
             + hf_size
             + offline_size
+            + masks_size
         )
+        reclaimable = thumb["size"] + preview["size"] + emb["size"]
+
+        storage_root = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+
+        def _volume_for_path(path):
+            usage_path = os.path.abspath(path)
+            while not os.path.exists(usage_path):
+                parent = os.path.dirname(usage_path)
+                if parent == usage_path:
+                    break
+                usage_path = parent
+            try:
+                usage = shutil.disk_usage(usage_path)
+                free_bytes = usage.free
+                capacity_bytes = usage.total
+            except OSError:
+                free_bytes = None
+                capacity_bytes = None
+
+            mount_path = usage_path
+            while not os.path.ismount(mount_path):
+                parent = os.path.dirname(mount_path)
+                if parent == mount_path:
+                    break
+                mount_path = parent
+            if sys.platform.startswith("win"):
+                name = os.path.splitdrive(mount_path)[0] or mount_path
+            elif mount_path == os.path.sep:
+                name = "System volume"
+            else:
+                name = os.path.basename(mount_path.rstrip(os.path.sep)) or mount_path
+            return {
+                "name": name,
+                "mount_path": mount_path,
+                "free": free_bytes,
+                "capacity": capacity_bytes,
+            }
+
+        raw_locations = [
+            ("catalog", "Catalog and masks", os.path.dirname(db_path)),
+            (
+                "generated",
+                "Thumbnails, previews, and offline originals",
+                storage_root,
+            ),
+        ]
+        if emb["size"]:
+            raw_locations.append(("embeddings", "Label embeddings", EMB_CACHE_DIR))
+        if models_size:
+            raw_locations.append(("models", "Downloaded models", DEFAULT_MODELS_DIR))
+        if hf_size:
+            raw_locations.append(("hf_cache", "Hugging Face cache", hf_cache))
+
+        locations_by_path = {}
+        for location_id, label, path in raw_locations:
+            normalized = os.path.abspath(path)
+            if normalized not in locations_by_path:
+                locations_by_path[normalized] = {
+                    "id": location_id,
+                    "path": normalized,
+                    "labels": [],
+                    "volume": _volume_for_path(normalized),
+                }
+            locations_by_path[normalized]["labels"].append(label)
+        locations = list(locations_by_path.values())
+
+        volumes_by_mount = {}
+        for location in locations:
+            volume = location["volume"]
+            mount = volume["mount_path"]
+            if mount not in volumes_by_mount:
+                volumes_by_mount[mount] = dict(volume)
+                volumes_by_mount[mount]["location_ids"] = []
+            volumes_by_mount[mount]["location_ids"].append(location["id"])
 
         return jsonify(
             {
                 "total": total,
+                "reclaimable": reclaimable,
+                "storage_root": storage_root,
+                "locations": locations,
+                "volumes": list(volumes_by_mount.values()),
                 "database": {"size": db_size, "path": db_path},
                 "thumbnails": thumb,
                 "previews": preview,
@@ -12373,6 +12473,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "size": offline_size,
                     "path": os.path.join(os.path.dirname(app.config["THUMB_CACHE_DIR"]), "offline"),
                 },
+                "masks": {"size": masks_size, **masks},
             }
         )
 
@@ -12380,28 +12481,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_storage_masks():
         """Per-variant SAM mask summary (counts, bytes, active counts)
         plus stale-mask count for the storage dashboard."""
-        import config as cfg
-
-        db = _get_db()
-        # Storage is global across all workspaces, so the stale floor
-        # must be too. Using the active workspace's detector_confidence
-        # would make stale_count flip when the user switches workspaces
-        # and let masks valid under another workspace's lower floor
-        # show up as stale. The minimum across workspaces is the most
-        # permissive view: only mark a mask stale when no workspace
-        # would still consider it fresh.
-        min_detector_conf = db.min_detector_confidence_across_workspaces(
-            cfg.load()
-        )
-        variants = db.mask_variants_summary()
-        stale = db.find_stale_masks(detector_confidence=min_detector_conf)
-        masks_dir = os.path.join(os.path.dirname(db_path), "masks")
-        return jsonify({
-            "variants": variants,
-            "total_bytes": sum(v["bytes"] for v in variants),
-            "stale_count": len(stale),
-            "path": masks_dir,
-        })
+        return jsonify(_storage_masks_data(_get_db()))
 
     @app.route("/api/storage/masks/delete-variant", methods=["POST"])
     def api_storage_masks_delete_variant():
@@ -12526,14 +12606,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "limit": limit,
         })
 
-    @app.route("/api/storage/clear", methods=["POST"])
-    def api_storage_clear():
-        """Clear a specific cache."""
-        import shutil
-
-        body = request.get_json(silent=True) or {}
-        cache_type = body.get("type", "")
-
+    def _clear_storage_cache(cache_type):
         if cache_type == "previews":
             preview_dir = os.path.join(
                 os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews"
@@ -12576,6 +12649,70 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return jsonify({"ok": True})
         else:
             return json_error("Unknown cache type")
+
+    @app.route("/api/storage/clear", methods=["POST"])
+    def api_storage_clear():
+        """Clear a specific cache."""
+        body = request.get_json(silent=True) or {}
+        return _clear_storage_cache(body.get("type", ""))
+
+    @app.route("/api/storage/clear-safe", methods=["POST"])
+    def api_storage_clear_safe():
+        """Clear every regenerable cache without touching models or originals."""
+        for cache_type in ("thumbnails", "previews", "embeddings"):
+            _clear_storage_cache(cache_type)
+        return jsonify({
+            "ok": True,
+            "cleared": ["thumbnails", "previews", "embeddings"],
+        })
+
+    @app.route("/api/storage/open-folder", methods=["POST"])
+    def api_storage_open_folder():
+        """Open one of Vireo's server-selected storage paths."""
+        from classifier import CACHE_DIR as EMB_CACHE_DIR
+        from models import DEFAULT_MODELS_DIR
+
+        location_id = (request.get_json(silent=True) or {}).get(
+            "location", "generated"
+        )
+        locations = {
+            "catalog": os.path.dirname(db_path),
+            "generated": os.path.dirname(app.config["THUMB_CACHE_DIR"]),
+            "embeddings": EMB_CACHE_DIR,
+            "models": DEFAULT_MODELS_DIR,
+            "hf_cache": os.path.expanduser("~/.cache/huggingface/hub"),
+        }
+        path = locations.get(location_id)
+        if path is None:
+            return json_error("Unknown storage location")
+        path = os.path.abspath(path)
+        if not os.path.isdir(path):
+            return jsonify({"ok": False, "reason": "storage folder not found"})
+        try:
+            if sys.platform == "darwin":
+                proc = subprocess.run(
+                    ["open", "--", path], timeout=5, check=False,
+                    capture_output=True, text=True, **no_window_kwargs(),
+                )
+            elif sys.platform.startswith("win"):
+                proc = subprocess.run(
+                    ["explorer", path], timeout=5, check=False,
+                    capture_output=True, text=True, **no_window_kwargs(),
+                )
+            else:
+                proc = subprocess.run(
+                    ["xdg-open", path], timeout=5, check=False,
+                    capture_output=True, text=True, **no_window_kwargs(),
+                )
+            if not sys.platform.startswith("win") and proc.returncode != 0:
+                reason = (proc.stderr or proc.stdout or "").strip()
+                return jsonify({
+                    "ok": False,
+                    "reason": reason or f"open command exited {proc.returncode}",
+                })
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            return jsonify({"ok": False, "reason": str(exc)})
+        return jsonify({"ok": True})
 
     @app.route("/api/storage/delete-files", methods=["POST"])
     def api_storage_delete_files():
