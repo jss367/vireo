@@ -3572,7 +3572,7 @@ function renderEmptyState(readiness) {
                species_predictions: 'species predictions'})[k] || k;
     });
     body.textContent = 'You can compute results now. Quality will be lower without: '
-      + labels.join(', ') + '. Re-run those stages on the Pipeline page later to improve.';
+      + labels.join(', ') + '. Re-run those stages on the Process page later to improve.';
   }
   actions.innerHTML = '<button class="compute-btn" onclick="computeReviewNow()">'
     + 'Compute results now</button>';
