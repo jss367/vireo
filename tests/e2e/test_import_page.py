@@ -366,8 +366,20 @@ def test_import_destination_structure_hides_on_duplicate_control_toggle(
     page.locator("#chkVerifyByHash").check()
     expect(page.locator("#destStructure")).to_be_hidden()
 
+    page.locator("#btnPreview").click()
+    expect(page.locator("#destStructure")).to_be_visible()
 
-def test_import_duplicate_stream_result_ignored_after_hash_mode_change(
+    page.evaluate("() => addSourcePath('/tmp/card-b')")
+    expect(page.locator("#destStructure")).to_be_hidden()
+
+    page.locator("#btnPreview").click()
+    expect(page.locator("#destStructure")).to_be_visible()
+
+    page.locator("#sourceList .source-item button").first.click()
+    expect(page.locator("#destStructure")).to_be_hidden()
+
+
+def test_import_duplicate_stream_result_ignored_after_controls_change(
     live_server, page
 ):
     url = live_server["url"]
@@ -426,6 +438,7 @@ def test_import_duplicate_stream_result_ignored_after_hash_mode_change(
     page.locator("#destInput").fill("/archive")
     page.locator("#btnPreview").click()
     page.wait_for_function("window.__resolveDuplicates !== null")
+    page.locator("#fileTypePreset").select_option("custom")
     page.locator("#chkVerifyByHash").check()
     page.evaluate("() => window.__resolveDuplicates()")
     page.wait_for_timeout(100)

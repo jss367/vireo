@@ -536,6 +536,7 @@ function renderSources() {
     btn.onclick = () => {
       sources.splice(i, 1);
       delete sourceCounts[s];
+      hideDestStructure();
       renderSources();
     };
     div.appendChild(span);
@@ -622,6 +623,7 @@ function addSourcePath(path) {
   if (!v) return false;
   if (!sources.includes(v)) {
     sources.push(v);
+    hideDestStructure();
     renderSources();
     refreshSourceCount(v);
     return true;
@@ -661,7 +663,10 @@ async function browseForDestination() {
     const result = await pickDirectory('Select archive folder');
     if (result) {
       const path = Array.isArray(result) ? result[0] : result;
-      if (path) document.getElementById('destInput').value = path;
+      if (path) {
+        document.getElementById('destInput').value = path;
+        hideDestStructure();
+      }
       return;
     }
     if (typeof isTauri === 'function' && isTauri()) return;
@@ -880,6 +885,7 @@ function selectImportBrowserFolder() {
   if (browserMode === 'destination') {
     if (!browserPath) return;
     document.getElementById('destInput').value = browserPath;
+    hideDestStructure();
   } else {
     const paths = browserSelectedPaths.length
       ? browserSelectedPaths
@@ -1231,6 +1237,7 @@ async function deleteStaging(path, btn) {
 
 function useStagingAsImportSource(result) {
   sources = [result.source_root];
+  hideDestStructure();
   renderSources();
   // Staging recovery must copy the temporary staging tree into the archive.
   // In-place would catalog paths that disappear once staging is cleaned,
@@ -1242,6 +1249,7 @@ function useStagingAsImportSource(result) {
   }
   if (result.inferred_destination) {
     document.getElementById('destInput').value = result.inferred_destination;
+    hideDestStructure();
   }
   document.getElementById('sourceCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
@@ -1286,18 +1294,20 @@ function destStructureSignature(destination, fileTypes, recursive, excludePaths)
   });
 }
 
-function importPreviewSignature(fileTypes) {
+function importPreviewSignature() {
+  const copyMode = selectedImportMode() === 'copy';
   return JSON.stringify({
     sources: sources.slice(),
-    file_types: fileTypes,
+    mode: copyMode ? 'copy' : 'in_place',
+    file_types: copyMode ? selectedFileTypes() : 'both',
     recursive: document.getElementById('chkRecursive').checked,
     skip_duplicates: document.getElementById('chkSkipDuplicates').checked,
     verify_by_hash: document.getElementById('chkVerifyByHash').checked,
   });
 }
 
-function importPreviewSignatureChanged(signature, fileTypes) {
-  return signature !== importPreviewSignature(fileTypes);
+function importPreviewSignatureChanged(signature) {
+  return signature !== importPreviewSignature();
 }
 
 // Preview the destination folder structure (new vs existing folders) and,
@@ -1399,7 +1409,7 @@ async function previewImport() {
     showError('Choose at least one file extension.');
     return;
   }
-  const requestSignature = importPreviewSignature(fileTypes);
+  const requestSignature = importPreviewSignature();
   const summary = document.getElementById('previewSummary');
   summary.textContent = 'Discovering files…';
   try {
@@ -1414,7 +1424,7 @@ async function previewImport() {
     });
     if (!resp.ok) throw new Error((await resp.json()).error || 'preview failed');
     const data = await resp.json();
-    if (importPreviewSignatureChanged(requestSignature, fileTypes)) {
+    if (importPreviewSignatureChanged(requestSignature)) {
       summary.textContent = '';
       return;
     }
@@ -1464,7 +1474,7 @@ async function previewImport() {
         } catch (e) { /* partial frame */ }
       }
     }
-    if (importPreviewSignatureChanged(requestSignature, fileTypes)) {
+    if (importPreviewSignatureChanged(requestSignature)) {
       summary.textContent = '';
       return;
     }
