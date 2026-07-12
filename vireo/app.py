@@ -5494,6 +5494,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "errors": [],
         }
         result["tagging"] = summary
+        if result.get("cancelled") or (
+            job is not None and runner is not None
+            and runner.is_cancelled(job["id"])
+        ):
+            summary["skipped"] = "import cancelled"
+            return
         if not photo_ids:
             summary["skipped"] = "no new photos"
             return

@@ -3324,6 +3324,52 @@ def test_duplicate_only_import_does_not_tag_existing_photos(
     ).fetchone() is None
 
 
+def test_cancelled_import_does_not_apply_requested_tags(
+    app_and_db, tmp_path, monkeypatch,
+):
+    import import_job
+
+    app, db = app_and_db
+    client = app.test_client()
+    photo_id = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+
+    def cancelled_result(job, runner, db_path, workspace_id, params):
+        return {
+            "ok": False,
+            "cancelled": True,
+            "photo_ids": [photo_id],
+            "discovered": 1,
+            "copied": 1,
+            "verified": 0,
+            "skipped_duplicate": 0,
+            "failed": 0,
+            "safe_to_format": False,
+            "unsafe_files": [],
+            "folders": {},
+            "errors": [],
+        }
+
+    monkeypatch.setattr(import_job, "run_import_job", cancelled_result)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+        "tags": ["Must not be added"],
+        "location_from_gps": True,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    # The synthetic worker returns a cancelled result without setting the
+    # runner's cancellation flag, so JobRunner records this fixture as failed;
+    # the production cancellation path sets both. The behavior under test is
+    # that the result marker alone suppresses all post-import mutations.
+    assert job["status"] == "failed", job
+    assert job["result"]["tagging"]["skipped"] == "import cancelled"
+    assert db.conn.execute(
+        "SELECT 1 FROM keywords WHERE name = ?", ("Must not be added",),
+    ).fetchone() is None
+
+
 @pytest.mark.parametrize("field,value,error", [
     ("tags", "Trip", "tags must be a list"),
     ("tags", ["Trip", 4], "only strings"),
