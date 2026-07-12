@@ -9720,15 +9720,34 @@ class Database:
         # `Saffron Finch` untouched while the species keyword row is
         # `Saffron finch` — and the eligible-highlight/life-list queries
         # compare those strings EXACT against keywords.name, so the curated
-        # selection silently drops out. Case-variant keyword rows themselves
-        # were already merged by the match-key grouping above, so this map
-        # is unambiguous per match key.
+        # selection silently drops out.
+        #
+        # The match-key grouping earlier only merged within
+        # (match_key, parent_id, type), so intentionally-distinct
+        # same-key homonyms across types survive — for example a legacy
+        # `type='general', is_species=1` `Robin` alongside a taxonomy
+        # `robin`. A blind key→first-name map would then rewrite every
+        # curation row for the other spelling to the picked one,
+        # including for photos that carry the other keyword; the joined
+        # highlight/life-list queries then match a species keyword the
+        # photo doesn't have, so that photo's curation silently
+        # disappears. Restrict this pass to match_keys with a single
+        # surviving species keyword. Ambiguous case-variant homonyms are
+        # left as-is; the curation stays exactly where the pre-migration
+        # code had it, which is the same state that survived before the
+        # normalization work.
         species_by_key = {}
         for row in self.conn.execute(
             "SELECT name FROM keywords "
             "WHERE parent_id IS NULL AND (is_species = 1 OR type = 'taxonomy')"
         ).fetchall():
-            species_by_key.setdefault(keyword_match_key(row["name"]), row["name"])
+            species_by_key.setdefault(keyword_match_key(row["name"]), []).append(
+                row["name"]
+            )
+        unique_species_by_key = {
+            key: names[0] for key, names in species_by_key.items()
+            if len(set(names)) == 1
+        }
         for table, rename in (
             ("photo_preferences", self.rename_photo_preferences_species),
             ("species_representatives",
@@ -9741,7 +9760,7 @@ class Database:
                 ).fetchall()
             ]
             for old in names:
-                stored = species_by_key.get(keyword_match_key(old or ""))
+                stored = unique_species_by_key.get(keyword_match_key(old or ""))
                 if not stored or stored == old:
                     continue
                 curation_fixed += rename(old, stored, _commit=False) or 0

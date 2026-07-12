@@ -519,6 +519,55 @@ def test_migration_aligns_curation_case_with_stored_keyword(tmp_path):
         db.close()
 
 
+def test_migration_leaves_curation_alone_for_ambiguous_species_homonyms(
+    tmp_path,
+):
+    """When the DB keeps multiple species-bearing keywords under the same
+    match_key (for example a taxonomy `robin` and a legacy
+    `type='general', is_species=1` `Robin`), the second curation pass must
+    NOT remap curation rows for one spelling onto the other. Doing so
+    would silently drop the highlight/preference for the untouched
+    keyword because the eligible queries join sh.species = k.name exact
+    and the photo is only tagged with the other keyword.
+    """
+    db, ws_id, p1, p2 = _make_db(tmp_path)
+    try:
+        tax_kid = _insert_keyword(db, "robin", "taxonomy", is_species=1)
+        gen_kid = _insert_keyword(db, "Robin", "general", is_species=1)
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (p1, tax_kid),
+        )
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (p2, gen_kid),
+        )
+        db.conn.execute(
+            "INSERT INTO species_highlights "
+            "(workspace_id, species, photo_id, rank) VALUES (?, ?, ?, 1)",
+            (ws_id, "robin", p1),
+        )
+        db.conn.execute(
+            "INSERT INTO species_highlights "
+            "(workspace_id, species, photo_id, rank) VALUES (?, ?, ?, 2)",
+            (ws_id, "Robin", p2),
+        )
+        db.conn.commit()
+
+        db._normalize_keyword_data_once()
+        db.conn.commit()
+
+        rows = db.conn.execute(
+            "SELECT species, photo_id FROM species_highlights ORDER BY rank"
+        ).fetchall()
+        assert [(r["species"], r["photo_id"]) for r in rows] == [
+            ("robin", p1),
+            ("Robin", p2),
+        ]
+    finally:
+        db.close()
+
+
 def test_migration_merges_case_variant_keyword_rows(tmp_path):
     """`Snowy Egret` and `Snowy egret` rows merge into one, and curation
     keyed under the merged-away spelling follows to the survivor."""
