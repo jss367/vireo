@@ -3586,6 +3586,7 @@ var _lbConfirmedFlags = {};   // last server-confirmed flag per photo, isolated 
 var _lbViewportByPhotoId = {};  // per-session lightbox viewport cache keyed by photo id
 var _lbPendingViewportState = null;
 var _lbVisualTransitionPending = false; // keep the outgoing bitmap/transform frozen until the incoming image is decoded
+var _lbDeferredOverlayApply = null; // detections/eye render withheld while _lbVisualTransitionPending; drained when the transition clears
 var _lbAdjacentPreloads = {}; // decoded immediate neighbors, keyed by photo id + source URL
 var _lbEditRecipeByPhoto = {};
 var _lbEditRecipeKnownByPhoto = {};
@@ -5379,6 +5380,21 @@ function _lbApplyViewportState(state) {
   return true;
 }
 
+function _lbFlushDeferredOverlayApply() {
+  // Called from handleInitialImageLoad and the terminal handleInitialImageError
+  // branch, i.e. wherever _lbVisualTransitionPending flips back to false. The
+  // metadata callback stashes the detection/eye render here so overlays don't
+  // paint against the still-frozen outgoing transform. Re-apply the mask
+  // overlay too because _lbApplyMaskVisibility only adds the `show` class when
+  // the transition is clear, so an in-flight mask load could have been gated.
+  var pending = _lbDeferredOverlayApply;
+  _lbDeferredOverlayApply = null;
+  if (typeof pending === 'function') {
+    try { pending(); } catch (_) {}
+  }
+  _lbApplyMaskVisibility();
+}
+
 function _lbClearPendingViewportRestore() {
   // Called from user-driven viewport mutations (wheel/keyboard/click zoom,
   // drag pan) so a still-armed restore carried over by arrow navigation
@@ -5907,17 +5923,26 @@ function _lbApplyMaskVisibility() {
   };
   img.onload = function() {
     // Re-check the toggle: the user may have hidden masks between
-    // src assignment and the load resolving.
-    if (seq === _lbMaskLoadSeq && _lbMasksVisible && _lbMaskCurrentUrl === expectedUrl) {
+    // src assignment and the load resolving. Also re-check the visual
+    // transition: while the outgoing bitmap is still frozen on screen,
+    // painting the incoming photo's mask would show it over the previous
+    // image. handleInitialImageLoad re-runs _lbApplyMaskVisibility once
+    // the transition clears, so the mask surfaces as soon as it is safe.
+    if (
+      seq === _lbMaskLoadSeq
+      && _lbMasksVisible
+      && _lbMaskCurrentUrl === expectedUrl
+      && !_lbVisualTransitionPending
+    ) {
       img.classList.add('show');
     }
   };
   if (img.getAttribute('src') !== expectedUrl) {
     img.classList.remove('show');
     img.src = expectedUrl;
-  } else if (img.naturalWidth > 0) {
+  } else if (img.naturalWidth > 0 && !_lbVisualTransitionPending) {
     // Same URL and we know it loaded successfully — safe to re-show
-    // without re-fetching.
+    // without re-fetching, once the visual transition has cleared.
     img.classList.add('show');
   }
   // If src matches but naturalWidth is 0, the previous load either failed
@@ -6504,6 +6529,11 @@ function openLightbox(photoId, filename, photoList, options) {
   // applied together from handleInitialImageLoad, before the browser's next
   // paint, so an off-center view never flashes through a centered state.
   _lbVisualTransitionPending = alreadyOpen;
+  // A previous open's deferred overlay closure captured the previous photo id
+  // and metadata. If this open's image resolves before its own metadata does,
+  // draining that stale closure would render the previous photo's detections
+  // and eye marker over the incoming bitmap.
+  _lbDeferredOverlayApply = null;
 
   _lightboxCurrentId = photoId;
   if (photoList) _lightboxPhotoList = photoList;
@@ -6653,12 +6683,28 @@ function openLightbox(photoId, filename, photoList, options) {
         _lbRecomputeNativeZoom();
         if (!_lbTryApplyPendingViewportState()) _lbApplyPendingOneToOneZoom();
       }
-      _lbLoadDetections(photoId);
-      _lbRenderEyeCrosshair(data);
+      // Detection boxes, the eye marker, and the mask overlay are children of
+      // lightboxTransform. While _lbVisualTransitionPending is true the
+      // transform is intentionally frozen on the outgoing bitmap, so painting
+      // the incoming photo's overlays now would layer them over the previous
+      // image until handleInitialImageLoad swaps in the new bitmap. Defer the
+      // render calls that actually inject DOM content until the transition
+      // clears; the visibility/toggle helpers are safe to run either way
+      // because they only touch empty containers or button labels.
+      var applyOverlays = function() {
+        _lbLoadDetections(photoId);
+        _lbRenderEyeCrosshair(data);
+      };
       _lbApplyBoxesVisibility();
       _lbApplyEyeVisibility();
       _lbApplyMaskToggleButton();
       _lbApplyMaskVisibility();
+      if (_lbVisualTransitionPending) {
+        _lbDeferredOverlayApply = applyOverlays;
+      } else {
+        _lbDeferredOverlayApply = null;
+        applyOverlays();
+      }
     })
     .catch(function() {
       if (_lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
@@ -6697,6 +6743,7 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbApplyPendingOneToOneZoom();
     }
     _lbApplyTransform();
+    _lbFlushDeferredOverlayApply();
     _lbPrimeAdjacentPhotos(_lbCurrentSrcKey);
   }
   function handleInitialImageError() {
@@ -6714,6 +6761,7 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbRecomputeNativeZoom();
       if (!_lbTryApplyPendingViewportState()) _lbApplyPendingOneToOneZoom();
       _lbApplyTransform();
+      _lbFlushDeferredOverlayApply();
       return;
     }
     _lbOriginalUnavailable = true;
@@ -6991,6 +7039,7 @@ function closeLightbox(e) {
   _lbPanX = 0;
   _lbPanY = 0;
   _lbVisualTransitionPending = false;
+  _lbDeferredOverlayApply = null;
   _lbClearPendingViewportRestore();
   if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
   _lbDesiredSrcKey = null;

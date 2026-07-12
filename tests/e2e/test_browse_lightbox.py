@@ -572,6 +572,170 @@ def test_browse_lightbox_clears_transition_state_when_incoming_image_errors(
     assert saved["returned"] is not None
 
 
+def test_browse_lightbox_defers_overlays_while_visual_transition_pending(
+    live_server, page
+):
+    """Detection boxes must not paint against the frozen outgoing bitmap.
+
+    Regression: while `_lbVisualTransitionPending` is true the transform is
+    intentionally held on the outgoing image so the swap looks atomic. The
+    metadata fetch usually resolves before the incoming bitmap decodes, and
+    the metadata callback triggers `_lbLoadDetections` for the incoming
+    photo. Without deferral the box overlays render into
+    `#lightboxDetections` — a child of `#lightboxTransform` — using the
+    incoming photo's coordinates but drawn over the still-frozen outgoing
+    bitmap, briefly flashing next-photo boxes over the previous image.
+    """
+    first_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#274"/>'
+        '<circle cx="1000" cy="1400" r="180" fill="#fff"/></svg>'
+    )
+    next_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="3000" height="3000" '
+        'viewBox="0 0 3000 3000"><rect width="3000" height="3000" fill="#426"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=first_svg, content_type="image/svg+xml"),
+    )
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{url}/browse")
+    page.locator(".grid-card").nth(1).wait_for(state="visible")
+    next_id = page.evaluate("window.photos[1].id")
+
+    held_original = {}
+
+    def hold_next_original(route):
+        if f"/photos/{next_id}/original" in route.request.url:
+            held_original["route"] = route
+            return
+        route.fulfill(body=first_svg, content_type="image/svg+xml")
+
+    page.route("**/photos/*/original", hold_next_original)
+
+    detection_requests = []
+
+    def serve_detections(route):
+        detection_requests.append(route.request.url)
+        # Two boxes for the incoming photo, one for the outgoing photo so
+        # differentiating between "no detections yet" and "outgoing detections
+        # still showing" would be trivial had the regression re-surfaced.
+        if f"/api/detections/{next_id}" in route.request.url:
+            body = (
+                '[{"box_x":0.1,"box_y":0.2,"box_w":0.15,"box_h":0.20,'
+                '"category":"bird","detector_confidence":0.9},'
+                '{"box_x":0.5,"box_y":0.6,"box_w":0.12,"box_h":0.10,'
+                '"category":"bird","detector_confidence":0.8}]'
+            )
+        else:
+            body = (
+                '[{"box_x":0.3,"box_y":0.3,"box_w":0.1,"box_h":0.1,'
+                '"category":"bird","detector_confidence":0.7}]'
+            )
+        route.fulfill(body=body, content_type="application/json")
+
+    page.route("**/api/detections/*", serve_detections)
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 4000;
+        }"""
+    )
+    # Trigger 1:1 so the arrow navigation opens the incoming photo at /original
+    # (which we hold below to keep the transition pending).
+    page.evaluate(
+        """() => {
+            window._lbPhotoW = 4000;
+            window._lbPhotoH = 2000;
+            window._lbRecomputeNativeZoom();
+            window._lbCurrentSrcKey = 'original';
+            window._lbApplyViewportState({
+                zoom: window._lbNativeZoom,
+                centerX: 0.5,
+                centerY: 0.5,
+                oneToOne: true,
+            });
+            window._lbSaveViewportState(window._lightboxCurrentId);
+        }"""
+    )
+
+    page.locator("[title='Next (→)']").click()
+    expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
+    page.wait_for_function("() => window._lbVisualTransitionPending === true")
+    page.wait_for_function("() => window._lightboxCurrentId === window.photos[1].id")
+
+    # Wait for the incoming photo's metadata /api/photos/{id} to have resolved
+    # (which normally fires the detection load) while the image is still held.
+    page.wait_for_function(
+        """nextId => window._lbPhotoDataByPhoto
+            && Object.prototype.hasOwnProperty.call(
+                window._lbPhotoDataByPhoto, String(nextId)
+            )""",
+        arg=next_id,
+    )
+
+    deadline = time.time() + 2
+    while "route" not in held_original and time.time() < deadline:
+        page.wait_for_timeout(10)
+    assert "route" in held_original
+
+    # Give the deferred detection fetch a chance to have (incorrectly) fired.
+    page.wait_for_timeout(80)
+
+    during_pending = page.evaluate(
+        """() => {
+            const container = document.getElementById('lightboxDetections');
+            return {
+                pending: window._lbVisualTransitionPending,
+                childCount: container ? container.childElementCount : -1,
+                deferred: typeof window._lbDeferredOverlayApply === 'function',
+            };
+        }"""
+    )
+    assert during_pending["pending"] is True, (
+        "test setup: transition should still be pending while image is held"
+    )
+    assert during_pending["childCount"] == 0, (
+        "detection boxes rendered against the frozen outgoing transform"
+    )
+    assert during_pending["deferred"] is True, (
+        "overlay render was not deferred while the transition was pending"
+    )
+    # And the network fetch itself should not have gone out yet for the
+    # incoming photo — the deferral holds both the request and the render.
+    assert not any(
+        f"/api/detections/{next_id}" in url for url in detection_requests
+    ), "detection request for the incoming photo fired while transition pending"
+
+    held_original.pop("route").fulfill(
+        body=next_svg, content_type="image/svg+xml"
+    )
+
+    page.wait_for_function(
+        "() => window._lbVisualTransitionPending === false"
+    )
+    # Once the transition clears, the deferred overlay work runs and the
+    # incoming photo's detection boxes render normally.
+    page.wait_for_function(
+        """() => {
+            const container = document.getElementById('lightboxDetections');
+            return container && container.childElementCount === 2;
+        }""",
+        timeout=3000,
+    )
+    assert any(
+        f"/api/detections/{next_id}" in url for url in detection_requests
+    ), "detection fetch never fired after transition cleared"
+
+
 def test_browse_lightbox_pending_high_zoom_survives_native_zoom_race(live_server, page):
     """A saved zoom > 4 is not lost when native zoom is unknown at first apply.
 
