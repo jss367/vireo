@@ -109,6 +109,7 @@ loadSubjectTypes();
 (function initLocalWorkspace() {
 var _localWorkspaceStatus = null;
 var _localWorkspaceJob = null;
+var _localActionInFlight = false;
 
 function formatLocalBytes(value) {
   var bytes = Number(value || 0);
@@ -219,7 +220,9 @@ async function watchLocalWorkspaceJob(jobId, message) {
 }
 
 async function startWorkLocally() {
+  if (_localActionInFlight) return;
   if (!confirm('Copy every file in this workspace to Vireo\'s managed local storage?\n\nThe original files will not be changed until you choose Finish and Sync Back.')) return;
+  _localActionInFlight = true;
   try {
     var result = await Vireo.api.json('/api/workspaces/active/local-workspace/stage', {
       method: 'POST',
@@ -227,10 +230,14 @@ async function startWorkLocally() {
       body: '{}'
     });
     watchLocalWorkspaceJob(result.job_id, 'Copying workspace locally...');
-  } catch (e) {}
+  } catch (e) {
+  } finally {
+    _localActionInFlight = false;
+  }
 }
 
 async function syncLocalWorkspace() {
+  if (_localActionInFlight) return;
   var changes = (_localWorkspaceStatus && _localWorkspaceStatus.changes) || {};
   var deleted = Number(changes.deleted || 0);
   var message = 'Check the original storage for conflicts, sync all local changes back, and remove the local copy?';
@@ -238,6 +245,7 @@ async function syncLocalWorkspace() {
     message += '\n\nThis will delete ' + deleted + ' file' + (deleted === 1 ? '' : 's') + ' from the original storage.';
   }
   if (!confirm(message)) return;
+  _localActionInFlight = true;
   try {
     var result = await Vireo.api.json('/api/workspaces/active/local-workspace/sync', {
       method: 'POST',
@@ -245,11 +253,16 @@ async function syncLocalWorkspace() {
       body: JSON.stringify({confirm_deletions: deleted > 0})
     });
     watchLocalWorkspaceJob(result.job_id, 'Checking and syncing local changes...');
-  } catch (e) {}
+  } catch (e) {
+  } finally {
+    _localActionInFlight = false;
+  }
 }
 
 async function discardLocalWorkspace(incompleteOnly) {
+  if (_localActionInFlight) return;
   if (!incompleteOnly && !confirm('Discard every local change and return to the original files?\n\nThis cannot be undone. The original storage will not be modified.')) return;
+  _localActionInFlight = true;
   try {
     await Vireo.api.json('/api/workspaces/active/local-workspace/discard', {
       method: 'POST',
@@ -259,7 +272,10 @@ async function discardLocalWorkspace(incompleteOnly) {
     showToast(incompleteOnly ? 'Incomplete local copy removed' : 'Local changes discarded', 'success');
     await loadLocalWorkspace();
     await loadWsFolders();
-  } catch (e) {}
+  } catch (e) {
+  } finally {
+    _localActionInFlight = false;
+  }
 }
 
 document.getElementById('localWorkspaceContent').addEventListener('click', function(event) {

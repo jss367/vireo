@@ -1,4 +1,5 @@
 import os
+import threading
 from pathlib import Path
 
 import pytest
@@ -247,6 +248,47 @@ def test_work_locally_http_job_flow(tmp_path, monkeypatch):
     app.config["TESTING"] = True
     with app.test_client() as client:
         assert client.get("/api/workspaces/active/local-workspace").get_json()["state"] == "remote"
+
+        # Hold the first request inside runner.start while a second request
+        # arrives. The transition lock must let only one job register.
+        import web.local_workspace as local_workspace_routes
+
+        start_entered = threading.Event()
+        allow_start = threading.Event()
+        allow_job = threading.Event()
+        original_start = app._job_runner.start
+
+        def slow_start(*args, **kwargs):
+            start_entered.set()
+            assert allow_start.wait(timeout=5)
+            return original_start(*args, **kwargs)
+
+        def slow_stage(*args, **kwargs):
+            assert allow_job.wait(timeout=5)
+            return {"ok": True, "files": 0, "bytes": 0, "local_path": ""}
+
+        responses = []
+
+        def submit_stage():
+            with app.test_client() as thread_client:
+                response = thread_client.post("/api/workspaces/active/local-workspace/stage", json={})
+                responses.append((response.status_code, response.get_json()))
+
+        with monkeypatch.context() as patcher:
+            patcher.setattr(app._job_runner, "start", slow_start)
+            patcher.setattr(local_workspace_routes, "stage_workspace", slow_stage)
+            first = threading.Thread(target=submit_stage)
+            second = threading.Thread(target=submit_stage)
+            first.start()
+            assert start_entered.wait(timeout=5)
+            second.start()
+            allow_start.set()
+            first.join(timeout=5)
+            second.join(timeout=5)
+            assert sorted(code for code, _body in responses) == [202, 409]
+            job_id = next(body["job_id"] for code, body in responses if code == 202)
+            allow_job.set()
+            assert wait_for_job_via_client(client, job_id)["status"] == "completed"
 
         response = client.post("/api/workspaces/active/local-workspace/stage", json={})
         assert response.status_code == 202
