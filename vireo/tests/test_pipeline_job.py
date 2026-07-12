@@ -7538,6 +7538,157 @@ def test_pipeline_regroup_invalidates_stamp_on_partial_run(tmp_path, monkeypatch
     assert row["last_grouped_at"] is None
 
 
+def test_pipeline_regroup_does_not_stamp_when_eye_override_differs(
+    tmp_path, monkeypatch,
+):
+    """A per-run ``eye_detect_override`` that flips the effective
+    ``eye_detect_enabled`` away from the workspace's own setting means the
+    resulting KEEP/REJECT decisions came from settings the workspace's
+    normal state would not reproduce. ``compute_group_fingerprint`` reads
+    only encounter/burst keys, so stamping it would let a later default-off
+    plan run against the workspace's real settings falsely report Group as
+    'done-prior' against eye-scored results. Regression for Codex thread
+    PRRT_kwDORn8c-s6QN0m3."""
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    # Workspace default: eye detection off. The Process-page checkbox on
+    # this run flips it via ``eye_detect_override=True``.
+    with open(cfg.CONFIG_PATH, "w") as f:
+        json.dump({"pipeline": {"eye_detect_enabled": False}}, f)
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    for name in ("a.jpg", "b.jpg"):
+        Image.new("RGB", (16, 16), "black").save(str(photo_dir / name))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    # Pre-stamp a fingerprint as if a prior FULL default-off regroup had
+    # completed cleanly. The one-off eye-on run must NOT overwrite this
+    # with a fresh stamp — that would lie about workspace freshness.
+    db.set_workspace_group_state(
+        ws_id, fingerprint="pre-existing-default-off", when_ts=1714579200,
+    )
+
+    import pipeline as pipeline_mod
+    monkeypatch.setattr(
+        pipeline_mod, "run_full_pipeline",
+        lambda photos, config=None, emit_trace=False: {
+            "summary": {"groups": 1}, "photos": photos,
+        },
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "save_results",
+        lambda results, cache_dir, workspace_id: None,
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "load_photo_features",
+        lambda thread_db, collection_id=None, config=None: [{"id": 1}],
+    )
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        # Explicit per-run opt-in against workspace's eye-off default.
+        eye_detect_override=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    with contextlib.suppress(Exception):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    db2 = Database(db_path)
+    row = db2.conn.execute(
+        "SELECT last_grouped_at, last_group_fingerprint FROM workspaces WHERE id=?",
+        (ws_id,),
+    ).fetchone()
+    assert row["last_group_fingerprint"] is None, (
+        "one-off eye-on regroup against a default-off workspace stamped "
+        "workspace freshness — a later default-off plan will falsely report "
+        "'done-prior' against eye-scored KEEP/REJECT results"
+    )
+    assert row["last_grouped_at"] is None
+
+
+def test_pipeline_regroup_stamps_when_eye_override_matches_workspace(
+    tmp_path, monkeypatch,
+):
+    """The eye-override guard must only trigger when the override *differs*
+    from the workspace's own eye setting — otherwise a Process-page run
+    that ticks the checkbox in a workspace that already has eye detection
+    on would be treated as partial and the plan would loop forever on
+    'settings changed'."""
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    with open(cfg.CONFIG_PATH, "w") as f:
+        json.dump({"pipeline": {"eye_detect_enabled": True}}, f)
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    for name in ("a.jpg", "b.jpg"):
+        Image.new("RGB", (16, 16), "black").save(str(photo_dir / name))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    import pipeline as pipeline_mod
+    monkeypatch.setattr(
+        pipeline_mod, "run_full_pipeline",
+        lambda photos, config=None, emit_trace=False: {
+            "summary": {"groups": 1}, "photos": photos,
+        },
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "save_results",
+        lambda results, cache_dir, workspace_id: None,
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "load_photo_features",
+        lambda thread_db, collection_id=None, config=None: [{"id": 1}],
+    )
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        eye_detect_override=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    with contextlib.suppress(Exception):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws_id)
+    row = db2.conn.execute(
+        "SELECT last_grouped_at, last_group_fingerprint FROM workspaces WHERE id=?",
+        (ws_id,),
+    ).fetchone()
+    assert row["last_grouped_at"] is not None, (
+        "an eye_detect_override matching the workspace's own setting must "
+        "still stamp workspace freshness — otherwise the plan would loop "
+        "on 'settings changed'"
+    )
+    from pipeline import compute_group_fingerprint
+    effective = db2.get_effective_config(cfg.load())
+    assert row["last_group_fingerprint"] == compute_group_fingerprint(effective)
+
+
 
 # --- Weighted overall progress ---------------------------------------------
 

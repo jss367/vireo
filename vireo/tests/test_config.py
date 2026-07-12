@@ -875,6 +875,47 @@ def test_migrate_eye_detect_default_off_invalidates_default_relying_workspaces(
     )
 
 
+def test_migrate_eye_detect_default_off_invalidates_when_global_key_absent(
+    tmp_path, monkeypatch,
+):
+    """When the raw config lacks ``pipeline.eye_detect_enabled`` entirely,
+    it was relying on the previous DEFAULTS value (``True``) — the same
+    effective pre-migration state as an explicit True. Default-relying
+    workspaces were therefore scoring eye-enabled and their fingerprints
+    must be invalidated even though ``pipeline`` is absent from disk.
+    Regression for Codex thread PRRT_kwDORn8c-s6QN0m2 (invalidation
+    gated only on a raw global True).
+    """
+    import config as cfg
+    from db import Database
+
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(config_path))
+    # Two shapes of the same "no explicit key" case: (a) pipeline block
+    # entirely absent, (b) pipeline present but eye_detect_enabled absent.
+    # Both mean the workspace was relying on the old True DEFAULTS.
+    config_path.write_text(json.dumps({"some_other_setting": 1}))
+
+    db = Database(str(tmp_path / "test.db"), initialize_schema=True)
+    ws_relying_id = db.create_workspace("relying")
+    db.set_workspace_group_state(
+        ws_relying_id, "relying-fp", "2025-01-01T00:00:00Z",
+    )
+
+    cfg.migrate_eye_detect_default_off(db)
+
+    row = db.conn.execute(
+        "SELECT last_group_fingerprint FROM workspaces WHERE id = ?",
+        (ws_relying_id,),
+    ).fetchone()
+    assert row["last_group_fingerprint"] is None, (
+        "workspace relying on the previous True DEFAULTS (raw config has "
+        "no pipeline.eye_detect_enabled key) must have its fingerprint "
+        "cleared when the default flips to False; otherwise the Process "
+        "page keeps reporting eye-scored triage as fresh"
+    )
+
+
 def test_migrate_eye_detect_default_off_keeps_fingerprint_when_global_already_false(
     tmp_path, monkeypatch,
 ):

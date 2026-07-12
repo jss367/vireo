@@ -428,6 +428,15 @@ def migrate_eye_detect_default_off(db=None):
         global_was_true = (
             isinstance(pipeline, dict) and pipeline.get("eye_detect_enabled") is True
         )
+        # An absent ``pipeline.eye_detect_enabled`` key means the config was
+        # relying on the previous DEFAULTS value, which was ``True`` — i.e.
+        # the same effective pre-migration state as an explicit ``True``.
+        # Only an explicit ``False`` in the raw config means the user (or
+        # DEFAULTS-persisting save code) had already committed to eye-off
+        # before this migration ran.
+        global_was_explicit_false = (
+            isinstance(pipeline, dict) and pipeline.get("eye_detect_enabled") is False
+        )
         if global_was_true:
             pipeline["eye_detect_enabled"] = False
             rewrote = True
@@ -441,11 +450,13 @@ def migrate_eye_detect_default_off(db=None):
             # default changes scoring/KEEP/REJECT decisions, but
             # ``compute_group_fingerprint`` only reads encounter/burst
             # settings — so without invalidation the Process page keeps
-            # reporting the prior cache as fresh. When the global default is
-            # flipping, every workspace without an explicit False override
-            # was relying on the True default; clear their fingerprints so
-            # the plan reports Group & Score as needing to re-run.
-            if global_was_true:
+            # reporting the prior cache as fresh. Any global state other than
+            # explicit ``False`` means workspaces without their own explicit
+            # ``False`` override were scoring with eye detection on (either
+            # via an explicit ``True`` global or the old ``True`` DEFAULTS
+            # value); clear their fingerprints so the plan reports Group &
+            # Score as needing to re-run.
+            if not global_was_explicit_false:
                 db.invalidate_group_fingerprints_without_explicit_eye_false()
         applied.append(MIGRATION_EYE_DETECT_DEFAULT_OFF)
         raw["_migrations_applied"] = applied

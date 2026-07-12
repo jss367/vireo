@@ -5198,9 +5198,30 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             (workspace_id,),
                         ).fetchall()
                     }
+                    # A per-run eye override that differs from the
+                    # workspace's own effective ``eye_detect_enabled`` means
+                    # this run's KEEP/REJECT decisions came from scoring
+                    # settings the workspace's normal state wouldn't produce.
+                    # ``compute_group_fingerprint`` reads only encounter/burst
+                    # keys — not ``eye_detect_enabled`` — so stamping it here
+                    # would mark eye-scored (or eye-disabled) results as
+                    # settings-fresh for a later plan run against the
+                    # workspace's real settings. Treat that as a partial run
+                    # so ``pipeline_plan`` reports the cache as needing to
+                    # re-run instead of hiding the mismatch.
+                    workspace_eye_setting = bool(
+                        effective_cfg.get("pipeline", {}).get(
+                            "eye_detect_enabled", False,
+                        )
+                    )
+                    per_run_eye_override_differs = (
+                        params.eye_detect_override is not None
+                        and bool(params.eye_detect_override) != workspace_eye_setting
+                    )
                     covered_full_workspace = (
                         not params.exclude_photo_ids
                         and ws_photo_ids.issubset(collection_photo_ids)
+                        and not per_run_eye_override_differs
                     )
                     if covered_full_workspace:
                         thread_db.set_workspace_group_state(
