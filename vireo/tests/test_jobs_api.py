@@ -3266,6 +3266,291 @@ def test_import_photos_happy_path(app_and_db, tmp_path):
     assert result["safe_to_format"] is True
 
 
+def test_import_photos_adds_requested_tags(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    card = _import_card(tmp_path, ("DSC_0001.jpg", "DSC_0002.jpg"))
+    Image.new("RGB", (16, 16), "blue").save(
+        os.path.join(card, "DSC_0002.jpg")
+    )
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+        "tags": ["Kenya trip", "Portfolio", "kenya trip"],
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job_id = resp.get_json()["job_id"]
+    config = _job_config(client, job_id)
+    assert config["tags"] == ["Kenya trip", "Portfolio"]
+
+    job = wait_for_job_via_client(client, job_id)
+    assert job["status"] == "completed", job
+    result = job["result"]
+    assert result["tagging"]["tagged_photos"] == 2
+    assert result["tagging"]["errors"] == []
+    for photo_id in result["photo_ids"]:
+        names = {row["name"] for row in db.get_photo_keywords(photo_id)}
+        assert {"Kenya trip", "Portfolio"} <= names
+
+
+def test_import_tag_does_not_duplicate_normalized_legacy_peer(
+    app_and_db, tmp_path, monkeypatch,
+):
+    import import_job
+
+    app, db = app_and_db
+    client = app.test_client()
+    photo_id = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    clean_id = db.add_keyword("Import Legacy", kw_type="general")
+    legacy_id = db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES (?, 'general')",
+        ("‘Import Legacy",),
+    ).lastrowid
+    db.conn.commit()
+    db.tag_photo(photo_id, legacy_id)
+
+    def imported_result(job, runner, db_path, workspace_id, params):
+        return {
+            "ok": True,
+            "cancelled": False,
+            "photo_ids": [photo_id],
+            "discovered": 1,
+            "copied": 1,
+            "verified": 1,
+            "skipped_duplicate": 0,
+            "failed": 0,
+            "safe_to_format": True,
+            "unsafe_files": [],
+            "folders": {},
+            "errors": [],
+        }
+
+    monkeypatch.setattr(import_job, "run_import_job", imported_result)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+        "tags": ["Import Legacy"],
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed", job
+    assert job["result"]["tagging"]["tagged_photos"] == 0
+    linked = db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords "
+        "WHERE photo_id = ? AND keyword_id IN (?, ?)",
+        (photo_id, clean_id, legacy_id),
+    ).fetchall()
+    assert [row["keyword_id"] for row in linked] == [legacy_id]
+
+
+def test_duplicate_only_import_does_not_tag_existing_photos(
+    app_and_db, tmp_path,
+):
+    app, db = app_and_db
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    destination = str(tmp_path / "archive")
+
+    first = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": destination, "after_import": None,
+    })
+    wait_for_job_via_client(client, first.get_json()["job_id"])
+
+    second = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": destination,
+        "after_import": None,
+        "tags": ["Do not add to duplicates"],
+    })
+    job = wait_for_job_via_client(client, second.get_json()["job_id"])
+    result = job["result"]
+    assert result["photo_ids"] == []
+    assert result["tagging"]["skipped"] == "no new photos"
+    assert db.conn.execute(
+        "SELECT 1 FROM keywords WHERE name = ?",
+        ("Do not add to duplicates",),
+    ).fetchone() is None
+
+
+def test_cancelled_import_does_not_apply_requested_tags(
+    app_and_db, tmp_path, monkeypatch,
+):
+    import import_job
+
+    app, db = app_and_db
+    client = app.test_client()
+    photo_id = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+
+    def cancelled_result(job, runner, db_path, workspace_id, params):
+        return {
+            "ok": False,
+            "cancelled": True,
+            "photo_ids": [photo_id],
+            "discovered": 1,
+            "copied": 1,
+            "verified": 0,
+            "skipped_duplicate": 0,
+            "failed": 0,
+            "safe_to_format": False,
+            "unsafe_files": [],
+            "folders": {},
+            "errors": [],
+        }
+
+    monkeypatch.setattr(import_job, "run_import_job", cancelled_result)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+        "tags": ["Must not be added"],
+        "location_from_gps": True,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    # The synthetic worker returns a cancelled result without setting the
+    # runner's cancellation flag, so JobRunner records this fixture as failed;
+    # the production cancellation path sets both. The behavior under test is
+    # that the result marker alone suppresses all post-import mutations.
+    assert job["status"] == "failed", job
+    assert job["result"]["tagging"]["skipped"] == "import cancelled"
+    assert db.conn.execute(
+        "SELECT 1 FROM keywords WHERE name = ?", ("Must not be added",),
+    ).fetchone() is None
+
+
+def test_import_gps_tagging_stops_when_cancelled_during_resolution(
+    app_and_db, tmp_path, monkeypatch,
+):
+    import import_job
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+    runner = app._job_runner
+    photo_id = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.clear_photo_location(photo_id)
+
+    def imported_result(job, runner, db_path, workspace_id, params):
+        return {
+            "ok": True,
+            "cancelled": False,
+            "photo_ids": [photo_id],
+            "discovered": 1,
+            "copied": 1,
+            "verified": 1,
+            "skipped_duplicate": 0,
+            "failed": 0,
+            "safe_to_format": True,
+            "unsafe_files": [],
+            "folders": {},
+            "errors": [],
+        }
+
+    original_get = Database.get_photos_by_ids
+
+    def cancel_during_resolution(self, photo_ids):
+        running_ids = [
+            job_id for job_id, job in runner._jobs.items()
+            if job["type"] == "import" and job["status"] == "running"
+        ]
+        assert len(running_ids) == 1
+        assert runner.cancel_job(running_ids[0]) is True
+        return original_get(self, photo_ids)
+
+    monkeypatch.setattr(import_job, "run_import_job", imported_result)
+    monkeypatch.setattr(Database, "get_photos_by_ids", cancel_during_resolution)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": "quick_look",
+        "location_from_gps": True,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "cancelled", job
+    assert job["result"]["cancelled"] is True
+    assert job["result"]["tagging"]["skipped"] == "import cancelled"
+    assert job["result"]["after_import_skipped"] == "import cancelled"
+    assert "process_job_id" not in job["result"]
+    assert db.get_assigned_photo_location(photo_id) is None
+
+
+@pytest.mark.parametrize("field,value,error", [
+    ("tags", "Trip", "tags must be a list"),
+    ("tags", ["Trip", 4], "only strings"),
+    ("tags", ["   "], "must not be empty"),
+    ("location_from_gps", "yes", "must be a boolean"),
+])
+def test_import_tag_options_are_validated_before_starting_job(
+    app_and_db, tmp_path, field, value, error,
+):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+        field: value,
+    })
+    assert resp.status_code == 400
+    assert error in resp.get_json()["error"]
+
+
+def test_import_can_add_structured_locations_from_each_photos_gps(
+    app_and_db, tmp_path, monkeypatch,
+):
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+    original_get = Database.get_photos_by_ids
+    details = {
+        "place_id": "import-gps-place",
+        "name": "Central Park",
+        "lat": 40.785091,
+        "lng": -73.968285,
+        "types": ["park"],
+        "address_components": [
+            {"name": "New York", "types": ["locality"]},
+            {"name": "New York", "types": ["administrative_area_level_1"]},
+            {"name": "United States", "types": ["country"]},
+        ],
+    }
+
+    def photos_with_gps(self, photo_ids):
+        rows = original_get(self, photo_ids)
+        enriched = {}
+        for photo_id, row in rows.items():
+            photo = dict(row)
+            photo["latitude"] = details["lat"]
+            photo["longitude"] = details["lng"]
+            enriched[photo_id] = photo
+        self.reverse_geocode_cache_put(
+            details["lat"], details["lng"], details["place_id"],
+            json.dumps(details),
+        )
+        return enriched
+
+    monkeypatch.setattr(Database, "get_photos_by_ids", photos_with_gps)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+        "location_from_gps": True,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed", job
+    result = job["result"]
+    assert result["tagging"]["locations_added"] == 1
+    photo_id = result["photo_ids"][0]
+    location = db.get_assigned_photo_location(photo_id)
+    assert location["keyword_location_name"] == "Central Park"
+
+
 def test_import_in_place_no_destination_required(app_and_db, tmp_path):
     app, _ = app_and_db
     client = app.test_client()
