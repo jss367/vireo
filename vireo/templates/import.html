@@ -327,6 +327,11 @@ let activeImportMode = 'in_place';
 let importRemoteTargets = [];
 let importRsyncAvailable = false;
 let destStructureSeq = 0;
+// Monotonic sequence for the import preview / duplicate-check flow so a
+// slow older previewImport() response can't overwrite the summary text
+// or trigger a folder-structure render on top of a newer preview's
+// results. Incremented at the top of previewImport().
+let importPreviewSeq = 0;
 
 function selectedImportMode() {
   const checked = document.querySelector('input[name="importMode"]:checked');
@@ -1409,6 +1414,8 @@ async function previewImport() {
     showError('Choose at least one file extension.');
     return;
   }
+  importPreviewSeq += 1;
+  const requestSeq = importPreviewSeq;
   const requestSignature = importPreviewSignature();
   const summary = document.getElementById('previewSummary');
   summary.textContent = 'Discovering files…';
@@ -1424,6 +1431,11 @@ async function previewImport() {
     });
     if (!resp.ok) throw new Error((await resp.json()).error || 'preview failed');
     const data = await resp.json();
+    // A newer previewImport() started while this response was in flight —
+    // it owns the summary and any structure preview now, so bail without
+    // touching either. Clearing summary here would erase the newer run's
+    // "Discovering files…" or completed results.
+    if (requestSeq !== importPreviewSeq) return;
     if (importPreviewSignatureChanged(requestSignature)) {
       return;
     }
@@ -1473,6 +1485,10 @@ async function previewImport() {
         } catch (e) { /* partial frame */ }
       }
     }
+    // Same guard as above for the duplicate-stream leg: a newer
+    // previewImport() may have started while the SSE was draining, and
+    // owns the summary now.
+    if (requestSeq !== importPreviewSeq) return;
     if (importPreviewSignatureChanged(requestSignature)) {
       return;
     }
@@ -1485,6 +1501,9 @@ async function previewImport() {
     // reflect the files that will actually land in the archive.
     await renderDestStructure(duplicatePaths);
   } catch (e) {
+    // Don't let a stale run's error clobber a newer preview's summary
+    // or surface a stale error banner — the newer run owns the UI.
+    if (requestSeq !== importPreviewSeq) return;
     summary.textContent = '';
     showError(String(e.message || e));
   }
@@ -1710,6 +1729,13 @@ function renderModelWarning(res) {
 }
 
 async function initImportPage() {
+  // Install destination-structure invalidation before the first await —
+  // the form controls it listens on are all static template markup, so
+  // they're already in the DOM. Wiring after the /api/volumes,
+  // /api/config, and /api/workspaces/active fetches would leave a gap
+  // where a user can render a preview and then edit the destination,
+  // template, or file-type controls without the rendered structure
+  // being invalidated.
   wireDestStructureInvalidation();
   // Native menu deep link: File > Import Folder... routes here as
   // /import?mode=copy&pick=source so it lands in Copy-to-archive with the

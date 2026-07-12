@@ -447,6 +447,131 @@ def test_import_duplicate_stream_result_ignored_after_controls_change(
     expect(page.locator("#destStructure")).to_be_hidden()
 
 
+def test_import_preview_older_response_does_not_clobber_newer_summary(
+    live_server, page
+):
+    # If an older previewImport() response arrives after a newer one has
+    # already written the summary text, the older run's stale-signature
+    # branch used to clear #previewSummary — erasing the newer run's
+    # results. The importPreviewSeq guard makes the older run bail
+    # without touching summary.
+    url = live_server["url"]
+    page.goto(f"{url}/import")
+    page.evaluate(
+        """
+        () => {
+          const originalFetch = window.fetch.bind(window);
+          // First call to folder-preview stalls forever until we resolve
+          // it manually; subsequent calls resolve immediately.
+          window.__resolveOldPreview = null;
+          window.__folderPreviewCallCount = 0;
+          window.fetch = (input, init) => {
+            const target = typeof input === 'string' ? input : input.url;
+            if (target && target.indexOf('/api/import/folder-preview') === 0) {
+              window.__folderPreviewCallCount += 1;
+              const payload = new Response(JSON.stringify({
+                files: [{path: '/tmp/card-a/IMG_0001.jpg'}],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}});
+              if (window.__folderPreviewCallCount === 1) {
+                return new Promise((resolve) => {
+                  window.__resolveOldPreview = () => resolve(payload);
+                });
+              }
+              return Promise.resolve(payload);
+            }
+            if (target && target.indexOf('/api/import/check-duplicates') === 0) {
+              const frame = 'data: ' + JSON.stringify({
+                done: true, duplicate_count: 0, checked: 1, total: 1,
+              }) + '\\n\\n';
+              return Promise.resolve(new Response(frame, {
+                status: 200,
+                headers: {'Content-Type': 'text/event-stream'},
+              }));
+            }
+            if (target && target.indexOf('/api/import/destination-preview') === 0) {
+              return Promise.resolve(new Response(JSON.stringify({
+                folders: [{
+                  path: '2026/07/11',
+                  full_path: '/archive/2026/07/11',
+                  count: 1,
+                  exists: false,
+                }],
+                total_photos: 1,
+                total_folders: 1,
+                new_folders: 1,
+                existing_folders: 0,
+                managed_archive: null,
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            return originalFetch(input, init);
+          };
+          addSourcePath('/tmp/card-a');
+        }
+        """
+    )
+
+    page.locator("#modeCopy").check()
+    page.locator("#destInput").fill("/archive")
+    # Fire preview #1 — its folder-preview fetch will hang.
+    page.locator("#btnPreview").click()
+    page.wait_for_function("window.__resolveOldPreview !== null")
+    # Change a control that would flip the stale-signature branch, then
+    # fire preview #2 — it resolves immediately and renders results.
+    page.locator("#chkVerifyByHash").check()
+    page.locator("#btnPreview").click()
+    expect(page.locator("#previewSummary")).to_contain_text("1 to copy")
+    # Now let the older, in-flight preview response come back. Its
+    # signature no longer matches; the OLD code would clear the summary
+    # here, wiping preview #2's rendered result.
+    page.evaluate("() => window.__resolveOldPreview()")
+    page.wait_for_timeout(100)
+    expect(page.locator("#previewSummary")).to_contain_text("1 to copy")
+
+
+def test_import_dest_structure_invalidation_survives_slow_startup(live_server, page):
+    # initImportPage() awaits /api/volumes, /api/config, and
+    # /api/workspaces/active before the rest of setup runs. If the
+    # destination-structure invalidation listeners are wired after those
+    # awaits, a user can render a structure preview and edit destInput
+    # while startup is still blocked, leaving the stale structure
+    # visible. Wiring the listeners synchronously (before any await)
+    # closes that gap.
+    url = live_server["url"]
+    # Stall /api/volumes forever so initImportPage() never gets past its
+    # first await. The listeners must already be installed by the time
+    # the page becomes interactive.
+    def volumes(route):
+        # Never fulfill — playwright's route will hang the request.
+        pass
+
+    page.route("**/api/volumes", volumes)
+    page.goto(f"{url}/import", wait_until="domcontentloaded")
+    # Wait until initImportPage() has at least started so its synchronous
+    # prefix (including wireDestStructureInvalidation) has run.
+    page.wait_for_function(
+        "() => typeof wireDestStructureInvalidation === 'function'"
+    )
+    # Fake a rendered destination structure — bypass the full preview
+    # flow, since /api/volumes is stalled and the button pipeline would
+    # await other startup state too. The invalidation contract is:
+    # editing any of the wired controls hides #destStructure.
+    page.evaluate(
+        """
+        () => {
+          const el = document.getElementById('destStructure');
+          el.innerHTML = '<div>fake structure</div>';
+          el.style.display = '';
+        }
+        """
+    )
+    expect(page.locator("#destStructure")).to_be_visible()
+    # Edit destInput — this is one of the controls wireDestStructureInvalidation
+    # listens on. If the listener wasn't installed yet, the structure
+    # would stay visible.
+    page.locator("#destInput").fill("/archive")
+    expect(page.locator("#destStructure")).to_be_hidden()
+
+
 def test_import_copy_start_sends_restored_options(live_server, page):
     url = live_server["url"]
     captured = {}
