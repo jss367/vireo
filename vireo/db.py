@@ -14606,6 +14606,22 @@ class Database:
         """
         return self.conn.execute(query, params).fetchone()[0]
 
+    def rules_resolvable(self, rules):
+        """Return True if a rule tree can be resolved to SQL clauses without
+        executing them.
+
+        Callers (notably ``/api/browse/init``) use this to flag degraded
+        collections at first paint without running the full
+        ``COUNT(DISTINCT p.id)`` per collection — that N+1 is what the
+        Browse client's async ``loadCollectionCounts()`` was built to
+        avoid. Only the query-building step is exercised.
+        """
+        try:
+            self._build_query_from_rules(rules)
+        except ValueError:
+            return False
+        return True
+
     def count_photos_for_rules(self, rules):
         """Return the number of photos in the active workspace that match
         an unsaved rules list. Used by the smart-collection modal preview.

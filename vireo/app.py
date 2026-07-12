@@ -3345,29 +3345,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         collection_dicts = []
         for c in collections:
             d = dict(c)
-            # Mirror /api/collections so the Browse sidebar's first paint already
-            # knows which collections are degraded — otherwise a degraded row
-            # renders as a normal clickable item until loadCollectionCounts()
-            # comes back, and a fast click drops it into the 400 /photos path.
-            # Only rule-validation failures (ValueError from _build_query_from_rules,
-            # including malformed JSON in rules) degrade; real infra errors bubble
-            # up as 500 like elsewhere.
+            # Flag degraded rules at first paint so a fast click on the
+            # sidebar row can't fall into the 400 /photos path before
+            # loadCollectionCounts() lands. Only validate the rules — do
+            # not run COUNT(DISTINCT p.id) per collection here; that
+            # N+1 is what the async loadCollectionCounts() call in
+            # bootstrapBrowse() was designed to avoid, and re-adding it
+            # to the critical first-paint path makes opening Browse wait
+            # on every smart-collection query. Malformed JSON is treated
+            # as degraded too — those rules would 400 downstream just
+            # like an unresolvable rule.
             try:
-                d["photo_count"] = db.count_collection_photos(c["id"])
-            except ValueError:
-                app.logger.exception(
-                    "Failed to count photos for collection %s (%s) during browse init",
+                parsed_rules = json.loads(c["rules"])
+            except (TypeError, ValueError):
+                d["can_add_photos"] = False
+                d["count_error"] = True
+                collection_dicts.append(d)
+                continue
+            d["can_add_photos"] = _collection_accepts_manual_photos(parsed_rules)
+            if not db.rules_resolvable(parsed_rules):
+                app.logger.warning(
+                    "Collection %s (%s) has unresolvable rules; marking degraded",
                     c["id"],
                     c["name"],
                 )
-                d["photo_count"] = None
                 d["count_error"] = True
-            try:
-                d["can_add_photos"] = _collection_accepts_manual_photos(
-                    json.loads(c["rules"])
-                )
-            except (TypeError, ValueError):
-                d["can_add_photos"] = False
             collection_dicts.append(d)
 
         return jsonify(

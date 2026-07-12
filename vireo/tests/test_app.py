@@ -11705,6 +11705,52 @@ def test_collections_list_survives_one_unresolvable_rule(app_and_db):
     assert by_id[bad]["count_error"] is True
 
 
+def test_browse_init_flags_degraded_without_counting(app_and_db, monkeypatch):
+    """/api/browse/init must mark collections with unresolvable rules as
+    degraded (count_error=True) so the sidebar first paint disables them —
+    but it must NOT run COUNT(DISTINCT p.id) per collection to figure that
+    out. That N+1 is what the async loadCollectionCounts() in
+    bootstrapBrowse() was designed to avoid, and re-adding it to the
+    critical first-paint path makes Browse wait on every smart-collection
+    query.
+    """
+    import json
+    import sqlite3
+
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    good = db.add_collection(
+        "Rating 5", json.dumps([{"field": "rating", "op": ">=", "value": 5}])
+    )
+    bad = db.add_collection(
+        "Broken", json.dumps([{"field": "nonexistent_field", "op": "is", "value": 1}])
+    )
+
+    # If browse init still ran a full count per collection, this monkeypatch
+    # would blow up the request. The endpoint must derive the count_error
+    # flag from rule validation alone, with actual counts left to the
+    # client's async /api/collections call.
+    def boom(self, _cid):
+        raise sqlite3.OperationalError("count_collection_photos should not run on browse init")
+
+    monkeypatch.setattr(Database, "count_collection_photos", boom)
+
+    resp = client.get("/api/browse/init")
+    assert resp.status_code == 200
+    by_id = {c["id"]: c for c in resp.get_json()["collections"]}
+
+    # The healthy collection is neither degraded nor eagerly counted.
+    assert by_id[good].get("count_error") in (None, False)
+    assert "photo_count" not in by_id[good]
+
+    # The broken one is still flagged so the sidebar renders it disabled
+    # before loadCollectionCounts() has a chance to run.
+    assert by_id[bad]["count_error"] is True
+
+
 def test_collections_list_surfaces_non_rule_failures(app_and_db, monkeypatch):
     """The count_error path is for rule-validation failures only. If
     count_collection_photos raises a genuine infrastructure error (locked or
