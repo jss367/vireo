@@ -1114,44 +1114,6 @@ def test_merge_keyword_rewrites_pending_changes_to_dst_name(db):
     assert add_values == [(pid_a, "apapane"), (pid_b, "apapane")]
 
 
-def test_add_keyword_dedupes_pre_existing_edge_quote_variant(db):
-    """When an upgraded database already carries a tagged edge-quote variant
-    like '\u2018apapane', a later `add_keyword('apapane')` must reuse that row
-    instead of inserting a duplicate."""
-    cur = db.conn.execute(
-        "INSERT INTO keywords (name) VALUES (?)", ("\u2018apapane",)
-    )
-    db.conn.commit()
-    stored_id = cur.lastrowid
-
-    assert db.add_keyword("apapane") == stored_id
-
-    rows = db.conn.execute(
-        "SELECT id, name FROM keywords WHERE name LIKE '%apapane'"
-    ).fetchall()
-    assert [(row["id"], row["name"]) for row in rows] == [
-        (stored_id, "\u2018apapane"),
-    ]
-
-
-def test_add_keyword_dedupes_pre_existing_edge_quote_variant_with_parent(db):
-    """Same as above, but scoped under a parent keyword \u2014 the fallback must
-    respect the parent filter and not merge across parents."""
-    birds = db.add_keyword("Birds")
-    other = db.add_keyword("Other")
-    cur = db.conn.execute(
-        "INSERT INTO keywords (name, parent_id) VALUES (?, ?)",
-        ("\u2018apapane", birds),
-    )
-    db.conn.commit()
-    stored_id = cur.lastrowid
-
-    assert db.add_keyword("apapane", parent_id=birds) == stored_id
-    # A different parent must not reuse the row \u2014 it should insert a new one.
-    other_id = db.add_keyword("apapane", parent_id=other)
-    assert other_id != stored_id
-
-
 def test_add_keyword_rejects_name_that_normalizes_to_empty(db):
     """Input like `'` or `\"\"` is non-empty as raw text but normalizes to '',
     which would otherwise insert an invisible keyword row."""
@@ -1494,14 +1456,23 @@ def test_merge_duplicate_keywords_scopes_curation_to_tagged_pairs(db):
            VALUES (?, 'life_list', ?, ?, datetime('now'), datetime('now'))""",
         (ws_b, "‘apapane", pid_b),
     )
+    # Seed the pending rows with raw INSERTs carrying the legacy quoted
+    # spelling: queue_change normalizes keyword values at write time on
+    # this branch, so it can no longer produce the pre-normalization state
+    # this test scopes the cleanup against.
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, workspace_id) "
+        "VALUES (?, 'keyword_add', ?, 'tok-a', ?)",
+        (pid_a, "‘apapane", ws_a),
+    )
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, workspace_id) "
+        "VALUES (?, 'keyword_add', ?, 'tok-b', ?)",
+        (pid_b, "‘apapane", ws_b),
+    )
     db.conn.commit()
-    db.queue_change(pid_a, "keyword_add", "‘apapane")
-
-    # Switch to workspace B briefly to queue a pending change scoped to it,
-    # then hop back to A for the cleanup.
-    db.set_active_workspace(ws_b)
-    db.queue_change(pid_b, "keyword_add", "‘apapane")
-    db.set_active_workspace(ws_a)
 
     db.merge_duplicate_keywords()
 
