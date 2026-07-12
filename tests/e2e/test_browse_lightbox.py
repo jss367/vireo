@@ -33,15 +33,18 @@ def test_browse_lightbox_arrows_navigate(live_server, page):
     counter = page.locator("#lightboxCounter")
     expect(counter).to_be_visible()
     expect(counter).to_contain_text("1 /")
+    expect(counter).to_contain_text(first_filename)
 
     page.locator("[title='Next (→)']").click()
 
     expect(filename_display).not_to_have_text(first_filename)
     expect(counter).to_contain_text("2 /")
+    expect(counter).to_contain_text(filename_display.text_content())
 
     page.locator("[title='Previous (←)']").click()
     expect(filename_display).to_have_text(first_filename)
     expect(counter).to_contain_text("1 /")
+    expect(counter).to_contain_text(first_filename)
 
 
 def test_browse_photo_id_deep_link_loads_target_folder_first_page(live_server, page):
