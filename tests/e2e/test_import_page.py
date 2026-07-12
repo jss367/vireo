@@ -853,29 +853,27 @@ def test_import_folder_browser_selects_volumes_from_synthetic_root(live_server, 
     # enable once at least one is picked and must submit the selected drives
     # instead of the (empty) synthetic root.
     url = live_server["url"]
-    page.goto(f"{url}/import")
-    page.evaluate("window.pickDirectory = async () => null")
-    page.evaluate(
+    page.route(
+        "**/api/volumes",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps([
+                {"name": "Volume A", "path": "/Volumes/A"},
+                {"name": "Volume B", "path": "/Volumes/B"},
+            ]),
+        ),
+    )
+    page.add_init_script(
         """
-        () => {
-          Object.defineProperty(navigator, 'userAgent', {
-            value: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-            configurable: true,
-          });
-          const originalFetch = window.fetch.bind(window);
-          window.fetch = (input, init) => {
-            const target = typeof input === 'string' ? input : input.url;
-            if (target && target.indexOf('/api/volumes') >= 0) {
-              return Promise.resolve(new Response(JSON.stringify([
-                {name: 'Volume A', path: '/Volumes/A'},
-                {name: 'Volume B', path: '/Volumes/B'},
-              ]), {status: 200, headers: {'Content-Type': 'application/json'}}));
-            }
-            return originalFetch(input, init);
-          };
-        }
+        Object.defineProperty(navigator, 'userAgent', {
+          value: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+          configurable: true,
+        });
         """
     )
+    page.goto(f"{url}/import")
+    page.evaluate("window.pickDirectory = async () => null")
 
     page.locator("[data-testid='import-source-browse-btn']").click()
     # Non-Mac branch fetches /api/volumes (stubbed) and renders the drives
