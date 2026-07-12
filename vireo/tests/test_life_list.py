@@ -106,6 +106,8 @@ def test_page_renders(life_app):
     assert resp.status_code == 200
     assert b"Life List" in resp.data
     assert b"Export Life List" in resp.data
+    assert b"Life List numbering" in resp.data
+    assert b"Renumber for each view" in resp.data
 
 
 def test_groups_by_species_and_counts(life_app):
