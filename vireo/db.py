@@ -993,6 +993,25 @@ class Database:
                 PRIMARY KEY (lat_grid, lng_grid)
             );
 
+            -- User-editable "saved processes": named snapshots of the process
+            -- page's stage toggles. Global (shared across workspaces); the
+            -- per-workspace and app-wide *default* pointers live in config as
+            -- ``pipeline.default_process_id`` (an id from this table). Seeded
+            -- once from process_strategies.SEED_PROCESSES; see the db_meta
+            -- guards in the migration section.
+            CREATE TABLE IF NOT EXISTS saved_processes (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                name              TEXT NOT NULL UNIQUE,
+                skip_classify     INTEGER NOT NULL DEFAULT 0,
+                skip_extract_masks INTEGER NOT NULL DEFAULT 0,
+                skip_eye_keypoints INTEGER NOT NULL DEFAULT 0,
+                skip_regroup      INTEGER NOT NULL DEFAULT 0,
+                miss_enabled      INTEGER NOT NULL DEFAULT 1,
+                review_mode       TEXT,
+                is_seed           INTEGER NOT NULL DEFAULT 0,
+                sort_order        INTEGER NOT NULL DEFAULT 0
+            );
+
             CREATE INDEX IF NOT EXISTS idx_taxa_parent ON taxa(parent_id);
             CREATE INDEX IF NOT EXISTS idx_taxa_rank ON taxa(rank);
             CREATE INDEX IF NOT EXISTS idx_taxa_name ON taxa(name);
@@ -1423,7 +1442,272 @@ class Database:
                 "WHERE id=? AND active_mask_variant IS NULL",
                 (r["id"],),
             )
+
+        # Seed user-editable saved processes once. db_meta-guarded (NOT
+        # user_version-guarded) because the live DB's user_version can run
+        # ahead of main on parallel branches, which would silently skip a
+        # version-gated seed. The marker also means a user who deletes all
+        # their processes never has the seeds reappear on the next Database
+        # handle. The table itself is created in _create_tables above.
+        import process_strategies as ps
+
+        seeded = self.conn.execute(
+            "SELECT value FROM db_meta WHERE key='saved_processes_seeded'"
+        ).fetchone()
+        if seeded is None:
+            for order, seed in enumerate(ps.SEED_PROCESSES):
+                flags = ps.seed_flags(seed)
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO saved_processes "
+                    "(name, skip_classify, skip_extract_masks, "
+                    " skip_eye_keypoints, skip_regroup, miss_enabled, "
+                    " review_mode, is_seed, sort_order) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)",
+                    (
+                        seed["name"],
+                        int(flags["skip_classify"]),
+                        int(flags["skip_extract_masks"]),
+                        int(flags["skip_eye_keypoints"]),
+                        int(flags["skip_regroup"]),
+                        int(flags["miss_enabled"]),
+                        flags["review_mode"],
+                        order,
+                    ),
+                )
+            self.conn.execute(
+                "INSERT INTO db_meta(key, value) "
+                "VALUES ('saved_processes_seeded', '1')"
+            )
+
+        # One-shot: migrate the former per-workspace pipeline.default_strategy
+        # (a strategy name) to pipeline.default_process_id (a saved_processes
+        # id). Unknown/removed names -> unset (import only). Runs after seeding
+        # so the name->id lookup finds the seed rows; db_meta-guarded so a
+        # later manual edit of the override isn't reverted on the next handle.
+        migrated = self.conn.execute(
+            "SELECT value FROM db_meta WHERE key='default_strategy_to_process_id'"
+        ).fetchone()
+        if migrated is None:
+            name_to_id = {
+                row["name"]: row["id"]
+                for row in self.conn.execute(
+                    "SELECT id, name FROM saved_processes"
+                ).fetchall()
+            }
+            ws_rows = self.conn.execute(
+                "SELECT id, config_overrides FROM workspaces "
+                "WHERE config_overrides IS NOT NULL"
+            ).fetchall()
+            for row in ws_rows:
+                try:
+                    overrides = json.loads(row["config_overrides"])
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(overrides, dict):
+                    continue
+                pipeline_ov = overrides.get("pipeline")
+                if not isinstance(pipeline_ov, dict):
+                    continue
+                if "default_strategy" not in pipeline_ov:
+                    continue
+                old = pipeline_ov.pop("default_strategy")
+                seed_name = (
+                    ps.LEGACY_STRATEGY_NAMES.get(old)
+                    if isinstance(old, str) else None
+                )
+                pid = name_to_id.get(seed_name) if seed_name else None
+                if pid is not None:
+                    pipeline_ov["default_process_id"] = pid
+                self.conn.execute(
+                    "UPDATE workspaces SET config_overrides = ? WHERE id = ?",
+                    (json.dumps(overrides), row["id"]),
+                )
+            self.conn.execute(
+                "INSERT INTO db_meta(key, value) "
+                "VALUES ('default_strategy_to_process_id', '1')"
+            )
         self.conn.commit()
+
+    # ------------------------------------------------------------------
+    # Saved processes (user-editable process presets; global, not scoped)
+    # ------------------------------------------------------------------
+    _PROCESS_FLAG_COLS = (
+        "skip_classify",
+        "skip_extract_masks",
+        "skip_eye_keypoints",
+        "skip_regroup",
+        "miss_enabled",
+    )
+
+    @staticmethod
+    def _saved_process_row_to_dict(row):
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "skip_classify": bool(row["skip_classify"]),
+            "skip_extract_masks": bool(row["skip_extract_masks"]),
+            "skip_eye_keypoints": bool(row["skip_eye_keypoints"]),
+            "skip_regroup": bool(row["skip_regroup"]),
+            "miss_enabled": bool(row["miss_enabled"]),
+            "review_mode": row["review_mode"],
+            "is_seed": bool(row["is_seed"]),
+            "sort_order": row["sort_order"],
+        }
+
+    def get_saved_processes(self):
+        """Return all saved processes ordered for display (sort_order, id)."""
+        rows = self.conn.execute(
+            "SELECT * FROM saved_processes ORDER BY sort_order, id"
+        ).fetchall()
+        return [self._saved_process_row_to_dict(r) for r in rows]
+
+    def get_saved_process(self, process_id):
+        """Return one saved process as a dict, or None if it doesn't exist."""
+        row = self.conn.execute(
+            "SELECT * FROM saved_processes WHERE id = ?", (process_id,)
+        ).fetchone()
+        return self._saved_process_row_to_dict(row) if row else None
+
+    def resolve_process(self, process_id):
+        """Expand a saved-process id into a full stage-flags dict over _BASE.
+
+        Raises ValueError if the id doesn't exist, so callers surface a clean
+        400/404 instead of an AttributeError deeper in the pipeline.
+        """
+        import process_strategies as ps
+
+        proc = self.get_saved_process(process_id)
+        if proc is None:
+            raise ValueError(f"unknown process id: {process_id!r}")
+        return {**ps._BASE, **{k: proc[k] for k in ps.FLAG_FIELDS}}
+
+    @staticmethod
+    def _normalize_process_fields(name, skip_classify, skip_extract_masks,
+                                  skip_eye_keypoints, skip_regroup,
+                                  miss_enabled, review_mode):
+        """Validate + coerce process fields. Raises ValueError on bad input."""
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("process name is required")
+        if review_mode is not None and review_mode != "species":
+            raise ValueError("review_mode must be 'species' or null")
+        return (
+            name.strip(),
+            int(bool(skip_classify)),
+            int(bool(skip_extract_masks)),
+            int(bool(skip_eye_keypoints)),
+            int(bool(skip_regroup)),
+            int(bool(miss_enabled)),
+            review_mode,
+        )
+
+    def create_saved_process(self, name, *, skip_classify=False,
+                             skip_extract_masks=False, skip_eye_keypoints=False,
+                             skip_regroup=False, miss_enabled=True,
+                             review_mode=None):
+        """Insert a saved process and return its id.
+
+        Raises ValueError on a blank/duplicate name or a bad review_mode.
+        """
+        fields = self._normalize_process_fields(
+            name, skip_classify, skip_extract_masks, skip_eye_keypoints,
+            skip_regroup, miss_enabled, review_mode,
+        )
+        # New user processes sort after the seeds; ties break by id.
+        next_order = self.conn.execute(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM saved_processes"
+        ).fetchone()[0]
+        try:
+            cur = self.conn.execute(
+                "INSERT INTO saved_processes "
+                "(name, skip_classify, skip_extract_masks, skip_eye_keypoints, "
+                " skip_regroup, miss_enabled, review_mode, is_seed, sort_order) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)",
+                (*fields, next_order),
+            )
+        except sqlite3.IntegrityError as e:
+            raise ValueError(
+                f"a process named {name.strip()!r} already exists"
+            ) from e
+        self.conn.commit()
+        return cur.lastrowid
+
+    def update_saved_process(self, process_id, *, name=None,
+                             skip_classify=None, skip_extract_masks=None,
+                             skip_eye_keypoints=None, skip_regroup=None,
+                             miss_enabled=None, review_mode=_UNSET):
+        """Update an existing saved process. Returns True if it existed.
+
+        Any field left at its sentinel default (None, or _UNSET for
+        review_mode which is legitimately None) is untouched. Raises
+        ValueError on a blank/duplicate name or a bad review_mode.
+        """
+        current = self.get_saved_process(process_id)
+        if current is None:
+            return False
+        merged = {
+            "name": current["name"] if name is None else name,
+            "skip_classify": current["skip_classify"] if skip_classify is None else skip_classify,
+            "skip_extract_masks": current["skip_extract_masks"] if skip_extract_masks is None else skip_extract_masks,
+            "skip_eye_keypoints": current["skip_eye_keypoints"] if skip_eye_keypoints is None else skip_eye_keypoints,
+            "skip_regroup": current["skip_regroup"] if skip_regroup is None else skip_regroup,
+            "miss_enabled": current["miss_enabled"] if miss_enabled is None else miss_enabled,
+            "review_mode": current["review_mode"] if review_mode is _UNSET else review_mode,
+        }
+        fields = self._normalize_process_fields(
+            merged["name"], merged["skip_classify"], merged["skip_extract_masks"],
+            merged["skip_eye_keypoints"], merged["skip_regroup"],
+            merged["miss_enabled"], merged["review_mode"],
+        )
+        try:
+            self.conn.execute(
+                "UPDATE saved_processes SET name=?, skip_classify=?, "
+                "skip_extract_masks=?, skip_eye_keypoints=?, skip_regroup=?, "
+                "miss_enabled=?, review_mode=? WHERE id=?",
+                (*fields, process_id),
+            )
+        except sqlite3.IntegrityError as e:
+            raise ValueError(
+                f"a process named {merged['name'].strip()!r} already exists"
+            ) from e
+        self.conn.commit()
+        return True
+
+    def delete_saved_process(self, process_id):
+        """Delete a saved process and null out every reference to it.
+
+        Any workspace whose pipeline.default_process_id pointed here falls
+        back to null ("import only"). Returns True if the process existed.
+        The app-wide global default (config.json) is cleared by the caller,
+        which owns config-file I/O. Does not run inside an outer transaction.
+        """
+        if self.get_saved_process(process_id) is None:
+            return False
+        self.conn.execute(
+            "DELETE FROM saved_processes WHERE id = ?", (process_id,)
+        )
+        # Null the per-workspace default pointer wherever it referenced this id.
+        ws_rows = self.conn.execute(
+            "SELECT id, config_overrides FROM workspaces "
+            "WHERE config_overrides IS NOT NULL"
+        ).fetchall()
+        for row in ws_rows:
+            try:
+                overrides = json.loads(row["config_overrides"])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(overrides, dict):
+                continue
+            pipeline_ov = overrides.get("pipeline")
+            if not isinstance(pipeline_ov, dict):
+                continue
+            if pipeline_ov.get("default_process_id") == process_id:
+                pipeline_ov.pop("default_process_id", None)
+                self.conn.execute(
+                    "UPDATE workspaces SET config_overrides = ? WHERE id = ?",
+                    (json.dumps(overrides), row["id"]),
+                )
+        self.conn.commit()
+        return True
 
     def repair_missing_folder_parents(self):
         """Fill parent_id for legacy folder rows whose parent path is known."""

@@ -2768,24 +2768,30 @@ def test_tabs_are_per_workspace(db):
 # ---------------------------------------------------------------------------
 
 
-def _put_default_strategy(client, ws_id, value):
+def _a_process_id(client, name):
+    procs = client.get("/api/processes").get_json()
+    return next(p["id"] for p in procs if p["name"] == name)
+
+
+def _put_default_process(client, ws_id, value):
     return client.put(
         f"/api/workspaces/{ws_id}",
         data=json.dumps(
-            {"config_overrides": {"pipeline": {"default_strategy": value}}}
+            {"config_overrides": {"pipeline": {"default_process_id": value}}}
         ),
         content_type="application/json",
     )
 
 
-def test_workspace_default_strategy_saved_and_effective(client):
+def test_workspace_default_process_saved_and_effective(client):
     resp = client.post(
         "/api/workspaces",
         data=json.dumps({"name": "Strat"}),
         content_type="application/json",
     )
     ws_id = resp.get_json()["id"]
-    resp = _put_default_strategy(client, ws_id, "cull_ready")
+    pid = _a_process_id(client, "Cull-ready")
+    resp = _put_default_process(client, ws_id, pid)
     assert resp.status_code == 200
 
     import config as cfg
@@ -2798,20 +2804,20 @@ def test_workspace_default_strategy_saved_and_effective(client):
     db = Database(db_path)
     db.set_active_workspace(ws_id)
     effective = db.get_effective_config(cfg.load())
-    assert effective["pipeline"]["default_strategy"] == "cull_ready"
+    assert effective["pipeline"]["default_process_id"] == pid
 
 
-def test_workspace_default_strategy_null_means_import_only(client):
-    """None is the "no automatic processing after import" sentinel that
-    PR 3's chaining hook short-circuits on. Saving it must succeed — if
-    this 400s, the "import only" user flow is unreachable."""
+def test_workspace_default_process_null_means_import_only(client):
+    """None is the "no automatic processing after import" sentinel that the
+    chaining hook short-circuits on. Saving it must succeed — if this 400s,
+    the "import only" user flow is unreachable."""
     resp = client.post(
         "/api/workspaces",
         data=json.dumps({"name": "StratNull"}),
         content_type="application/json",
     )
     ws_id = resp.get_json()["id"]
-    resp = _put_default_strategy(client, ws_id, None)
+    resp = _put_default_process(client, ws_id, None)
     assert resp.status_code == 200
 
     import config as cfg
@@ -2820,62 +2826,44 @@ def test_workspace_default_strategy_null_means_import_only(client):
     db = Database(client.application.config["DB_PATH"])
     db.set_active_workspace(ws_id)
     effective = db.get_effective_config(cfg.load())
-    assert effective["pipeline"]["default_strategy"] is None
+    assert effective["pipeline"]["default_process_id"] is None
 
 
-def test_workspace_default_strategy_unknown_400(client):
+def test_workspace_default_process_unknown_400(client):
     resp = client.post(
         "/api/workspaces",
         data=json.dumps({"name": "StratBad"}),
         content_type="application/json",
     )
     ws_id = resp.get_json()["id"]
-    resp = _put_default_strategy(client, ws_id, "yolo")
+    resp = _put_default_process(client, ws_id, 999999)
     assert resp.status_code == 400
-    assert "unknown strategy" in resp.get_json()["error"]
+    assert "unknown process id" in resp.get_json()["error"]
 
 
-def test_workspace_default_strategy_none_string_400(client):
-    """The string "none" is not the null sentinel — the "no process" case
-    uses JSON null, matching /api/jobs/pipeline (which also rejects
-    strategy: "none"). One vocabulary across the workspace default, the
-    API body, and the chaining hook."""
-    resp = client.post(
-        "/api/workspaces",
-        data=json.dumps({"name": "StratNoneStr"}),
-        content_type="application/json",
-    )
-    ws_id = resp.get_json()["id"]
-    resp = _put_default_strategy(client, ws_id, "none")
-    assert resp.status_code == 400
-
-
-@pytest.mark.parametrize("bad", [5, True, ["cull_ready"], {"name": "full"}])
-def test_workspace_default_strategy_non_string_400(client, bad):
-    """A JSON client sending a number, bool, list, or dict for
-    ``pipeline.default_strategy`` must get a 400 validation error, not a
-    500. Before ``resolve_strategy`` guarded non-string inputs, an
-    array/dict here hit ``name not in STRATEGIES`` and raised
-    ``TypeError: unhashable type`` — which the endpoint didn't catch, so
-    it escaped as a 500. Regression tripwire."""
+@pytest.mark.parametrize("bad", [True, "identify", ["1"], {"id": 1}])
+def test_workspace_default_process_non_int_400(client, bad):
+    """A JSON client sending a bool, string, list, or dict for
+    ``pipeline.default_process_id`` must get a 400 validation error, not a
+    500. (bool is a subclass of int and must be rejected explicitly.)"""
     resp = client.post(
         "/api/workspaces",
         data=json.dumps({"name": f"StratBadType-{type(bad).__name__}"}),
         content_type="application/json",
     )
     ws_id = resp.get_json()["id"]
-    resp = _put_default_strategy(client, ws_id, bad)
+    resp = _put_default_process(client, ws_id, bad)
     assert resp.status_code == 400
-    assert "strategy must be a string" in resp.get_json()["error"]
+    assert "integer" in resp.get_json()["error"]
 
 
-def test_config_default_strategy_default_is_none():
+def test_config_default_process_id_default_is_none():
     import os
     import sys
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "vireo"))
     from config import DEFAULTS
 
-    assert DEFAULTS["pipeline"]["default_strategy"] is None
+    assert DEFAULTS["pipeline"]["default_process_id"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -2883,60 +2871,47 @@ def test_config_default_strategy_default_is_none():
 #
 # Regression tripwires for a validation gap on POST /api/workspaces: the
 # create path used to pass ``body.get("config_overrides")`` straight into
-# db.create_workspace without checking pipeline.default_strategy, so a
-# client could seed a workspace with an unknown strategy that PUT and
-# /api/jobs/pipeline would both reject — later feeding the chaining hook
-# an invalid strategy that only surfaces as a job failure.
+# db.create_workspace without checking pipeline.default_process_id, so a
+# client could seed a workspace with a dangling process id that PUT and
+# /api/jobs/pipeline would both reject — later feeding the chaining hook an
+# invalid id that only surfaces as a job failure.
 # ---------------------------------------------------------------------------
 
 
-def test_create_workspace_rejects_unknown_default_strategy(client):
+def test_create_workspace_rejects_unknown_default_process(client):
     resp = client.post(
         "/api/workspaces",
         data=json.dumps({
             "name": "StratBadCreate",
-            "config_overrides": {"pipeline": {"default_strategy": "yolo"}},
+            "config_overrides": {"pipeline": {"default_process_id": 999999}},
         }),
         content_type="application/json",
     )
     assert resp.status_code == 400
-    assert "unknown strategy" in resp.get_json()["error"]
+    assert "unknown process id" in resp.get_json()["error"]
 
 
-def test_create_workspace_rejects_none_string_default_strategy(client):
-    """POST must match PUT and /api/jobs/pipeline: the "no processing"
-    sentinel is JSON null, not the string ``"none"``."""
-    resp = client.post(
-        "/api/workspaces",
-        data=json.dumps({
-            "name": "StratNoneCreate",
-            "config_overrides": {"pipeline": {"default_strategy": "none"}},
-        }),
-        content_type="application/json",
-    )
-    assert resp.status_code == 400
-
-
-@pytest.mark.parametrize("bad", [5, True, ["cull_ready"], {"name": "full"}])
-def test_create_workspace_rejects_non_string_default_strategy(client, bad):
+@pytest.mark.parametrize("bad", [True, "identify", ["1"], {"id": 1}])
+def test_create_workspace_rejects_non_int_default_process(client, bad):
     resp = client.post(
         "/api/workspaces",
         data=json.dumps({
             "name": f"StratBadTypeCreate-{type(bad).__name__}",
-            "config_overrides": {"pipeline": {"default_strategy": bad}},
+            "config_overrides": {"pipeline": {"default_process_id": bad}},
         }),
         content_type="application/json",
     )
     assert resp.status_code == 400
-    assert "strategy must be a string" in resp.get_json()["error"]
+    assert "integer" in resp.get_json()["error"]
 
 
-def test_create_workspace_accepts_valid_default_strategy(client):
+def test_create_workspace_accepts_valid_default_process(client):
+    pid = _a_process_id(client, "Cull-ready")
     resp = client.post(
         "/api/workspaces",
         data=json.dumps({
             "name": "StratCreateOK",
-            "config_overrides": {"pipeline": {"default_strategy": "cull_ready"}},
+            "config_overrides": {"pipeline": {"default_process_id": pid}},
         }),
         content_type="application/json",
     )
@@ -2949,17 +2924,17 @@ def test_create_workspace_accepts_valid_default_strategy(client):
     db = Database(client.application.config["DB_PATH"])
     db.set_active_workspace(ws_id)
     effective = db.get_effective_config(cfg.load())
-    assert effective["pipeline"]["default_strategy"] == "cull_ready"
+    assert effective["pipeline"]["default_process_id"] == pid
 
 
-def test_create_workspace_accepts_null_default_strategy(client):
+def test_create_workspace_accepts_null_default_process(client):
     """Explicit null on create must round-trip — it is the "import only"
     sentinel and mirrors the PUT path's null acceptance."""
     resp = client.post(
         "/api/workspaces",
         data=json.dumps({
             "name": "StratCreateNull",
-            "config_overrides": {"pipeline": {"default_strategy": None}},
+            "config_overrides": {"pipeline": {"default_process_id": None}},
         }),
         content_type="application/json",
     )

@@ -93,10 +93,11 @@ DEFAULTS = {
     "cull_phash_threshold": 19,
     # --- Pipeline (nested — flows through effective_cfg.get("pipeline")) ---
     "pipeline": {
-        # Process strategy to run after an import. None = no automatic
-        # processing (the "import only" choice); otherwise a name from
-        # process_strategies.STRATEGIES. Per-workspace via config_overrides.
-        "default_strategy": None,
+        # Saved process to run after an import. None = no automatic
+        # processing (the "import only" choice); otherwise a saved_processes
+        # id. Per-workspace via config_overrides. Global default stays None
+        # so a fresh workspace is import-only until the user picks a process.
+        "default_process_id": None,
         "w_focus": 0.45,
         "w_exposure": 0.20,
         "w_composition": 0.15,
