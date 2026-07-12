@@ -4778,7 +4778,15 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 thread_db = Database(db_path)
                 thread_db.set_active_workspace(workspace_id)
                 effective_cfg = thread_db.get_effective_config(cfg.load())
-                pipeline_cfg = effective_cfg.get("pipeline", {})
+                pipeline_cfg = dict(effective_cfg.get("pipeline", {}))
+
+                # Reaching this branch means the caller did not set
+                # skip_eye_keypoints=True (checked above) — i.e. the Process
+                # page checkbox is on or an API caller explicitly opted in.
+                # Treat that per-run intent as an override of the Settings
+                # default so the preflight and stage function honor it even
+                # when the workspace/global config has eye_detect_enabled off.
+                pipeline_cfg["eye_detect_enabled"] = True
 
                 # Mirror the stage-level preflight so a no-op run doesn't pay the
                 # O(N) eligibility join cost or report a misleading
