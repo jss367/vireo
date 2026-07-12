@@ -5120,7 +5120,19 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 thread_db.set_active_workspace(workspace_id)
 
                 effective_cfg = thread_db.get_effective_config(cfg.load())
-                pipeline_cfg = effective_cfg.get("pipeline", {})
+                pipeline_cfg = dict(effective_cfg.get("pipeline", {}))
+
+                # Mirror the eye_keypoints_stage per-run override: when the
+                # caller opted in via skip_eye_keypoints=False (Process-page
+                # checkbox or API), carry that intent into scoring too.
+                # Without this, run_full_pipeline reloads the workspace
+                # config with eye_detect_enabled=False (the new default) and
+                # score_encounter ignores the eye_tenengrad values the eye
+                # stage just wrote, so the visible checkbox affects only the
+                # expensive keypoint pass — not the culling result the user
+                # actually sees.
+                if not params.skip_eye_keypoints:
+                    pipeline_cfg["eye_detect_enabled"] = True
 
                 photos = load_photo_features(thread_db, collection_id=collection_id, config=effective_cfg)
                 if params.exclude_photo_ids:
