@@ -5549,20 +5549,46 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     requested_name, kw_type="general", _commit=False,
                 )
                 stored = thread_db.conn.execute(
-                    "SELECT name FROM keywords WHERE id = ?", (keyword_id,),
+                    "SELECT name, parent_id, type FROM keywords WHERE id = ?",
+                    (keyword_id,),
                 ).fetchone()
                 keyword_name = (
                     stored["name"] if stored and stored["name"]
                     else requested_name
                 )
+                variant_ids = [keyword_id]
+                if stored is not None and keyword_match_key(stored["name"]):
+                    normalized_name = normalize_keyword_display(stored["name"])
+                    if stored["parent_id"] is None:
+                        peer_rows = thread_db.conn.execute(
+                            "SELECT id FROM keywords "
+                            "WHERE vireo_normalize_keyword(name) = ? "
+                            "COLLATE NOCASE AND parent_id IS NULL "
+                            "AND type = ? AND id != ?",
+                            (normalized_name, stored["type"], keyword_id),
+                        ).fetchall()
+                    else:
+                        peer_rows = thread_db.conn.execute(
+                            "SELECT id FROM keywords "
+                            "WHERE vireo_normalize_keyword(name) = ? "
+                            "COLLATE NOCASE AND parent_id = ? "
+                            "AND type = ? AND id != ?",
+                            (
+                                normalized_name, stored["parent_id"],
+                                stored["type"], keyword_id,
+                            ),
+                        ).fetchall()
+                    variant_ids.extend(row["id"] for row in peer_rows)
+                variant_placeholders = ",".join("?" for _ in variant_ids)
                 items = []
                 for photo_id in photo_ids:
                     if cancel_requested():
                         break
                     exists = thread_db.conn.execute(
                         "SELECT 1 FROM photo_keywords "
-                        "WHERE photo_id = ? AND keyword_id = ?",
-                        (photo_id, keyword_id),
+                        f"WHERE photo_id = ? AND keyword_id IN "
+                        f"({variant_placeholders})",
+                        [photo_id, *variant_ids],
                     ).fetchone()
                     if exists is not None:
                         continue

@@ -3295,6 +3295,57 @@ def test_import_photos_adds_requested_tags(app_and_db, tmp_path):
         assert {"Kenya trip", "Portfolio"} <= names
 
 
+def test_import_tag_does_not_duplicate_normalized_legacy_peer(
+    app_and_db, tmp_path, monkeypatch,
+):
+    import import_job
+
+    app, db = app_and_db
+    client = app.test_client()
+    photo_id = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    clean_id = db.add_keyword("Import Legacy", kw_type="general")
+    legacy_id = db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES (?, 'general')",
+        ("‘Import Legacy",),
+    ).lastrowid
+    db.conn.commit()
+    db.tag_photo(photo_id, legacy_id)
+
+    def imported_result(job, runner, db_path, workspace_id, params):
+        return {
+            "ok": True,
+            "cancelled": False,
+            "photo_ids": [photo_id],
+            "discovered": 1,
+            "copied": 1,
+            "verified": 1,
+            "skipped_duplicate": 0,
+            "failed": 0,
+            "safe_to_format": True,
+            "unsafe_files": [],
+            "folders": {},
+            "errors": [],
+        }
+
+    monkeypatch.setattr(import_job, "run_import_job", imported_result)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+        "tags": ["Import Legacy"],
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed", job
+    assert job["result"]["tagging"]["tagged_photos"] == 0
+    linked = db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords "
+        "WHERE photo_id = ? AND keyword_id IN (?, ?)",
+        (photo_id, clean_id, legacy_id),
+    ).fetchall()
+    assert [row["keyword_id"] for row in linked] == [legacy_id]
+
+
 def test_duplicate_only_import_does_not_tag_existing_photos(
     app_and_db, tmp_path,
 ):
