@@ -11676,6 +11676,35 @@ def test_save_grouping_defaults_rejects_bad_values(tmp_path, monkeypatch):
         assert _math.isfinite(pipe["tau_enc"])
 
 
+def test_collections_list_survives_one_unresolvable_rule(app_and_db):
+    """A single collection whose rule can't be resolved must not 500 the
+    whole /api/collections list. Before this, one bad rule raised an
+    unhandled ValueError, the endpoint 500'd, and every collection
+    dropdown in the UI came back empty. The bad collection should degrade
+    to photo_count=None with count_error=True; the others still count.
+    """
+    import json
+    app, db = app_and_db
+    client = app.test_client()
+
+    good = db.add_collection(
+        "Rating 5", json.dumps([{"field": "rating", "op": ">=", "value": 5}])
+    )
+    bad = db.add_collection(
+        "Broken", json.dumps([{"field": "nonexistent_field", "op": "is", "value": 1}])
+    )
+
+    resp = client.get("/api/collections")
+    assert resp.status_code == 200
+    by_id = {c["id"]: c for c in resp.get_json()}
+
+    assert by_id[good]["photo_count"] == 1
+    assert "count_error" not in by_id[good]
+
+    assert by_id[bad]["photo_count"] is None
+    assert by_id[bad]["count_error"] is True
+
+
 def test_collection_preview_returns_match_count(app_and_db):
     """POST /api/collections/preview returns the count of photos that
     would match an unsaved rules list. Powers the smart-collection

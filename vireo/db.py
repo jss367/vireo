@@ -14354,9 +14354,15 @@ class Database:
                 base = _path_for_subtree_match(str(value or ""))
                 subtree_params = [base, _escape_like(base) + "/%"]
                 norm = "REPLACE(f.path, '\\', '/')"
-                if op == "under":
+                # Legacy folder collections were saved with op "is"/"is not"
+                # before the rule vocabulary switched to "under"/"not_under".
+                # Treat the old ops as aliases so those rows keep resolving
+                # (a single unrecognized rule used to raise ValueError and 500
+                # the whole /api/collections list). "is" always meant the
+                # folder and its descendants, which is exactly "under".
+                if op in ("under", "is", "equals"):
                     return f"({norm} = ? OR {norm} LIKE ? ESCAPE '\\')", subtree_params
-                if op == "not_under":
+                if op in ("not_under", "is not"):
                     return (
                         f"(f.path IS NULL OR ({norm} != ? AND {norm} NOT LIKE ? ESCAPE '\\'))",
                         subtree_params,

@@ -8168,7 +8168,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result = []
         for c in collections:
             d = dict(c)
-            d["photo_count"] = db.count_collection_photos(c["id"])
+            # A single collection with an unresolvable rule must not 500 the
+            # whole list — that blanks every collection dropdown in the UI.
+            # Degrade to an unknown count and flag it so the client can show
+            # the collection instead of hiding all of them.
+            try:
+                d["photo_count"] = db.count_collection_photos(c["id"])
+            except Exception:
+                app.logger.exception(
+                    "Failed to count photos for collection %s (%s)",
+                    c["id"],
+                    c["name"],
+                )
+                d["photo_count"] = None
+                d["count_error"] = True
             try:
                 d["can_add_photos"] = _collection_accepts_manual_photos(
                     json.loads(c["rules"])
