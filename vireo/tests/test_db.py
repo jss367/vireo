@@ -8938,6 +8938,12 @@ def test_folder_legacy_is_op_resolves_like_under(tmp_path, monkeypatch):
     legacy_is_not = [{"field": "folder", "op": "is not", "value": "/photos/2023"}]
     assert db.count_photos_for_rules(legacy_is_not) == 1  # only the sibling
 
+    # 'equals' is the third legacy alias; it also resolves like 'under'
+    # (the folder plus its descendants), matching how the rule behaved
+    # when the older UI wrote it.
+    legacy_equals = [{"field": "folder", "op": "equals", "value": "/photos/2023"}]
+    assert db.count_photos_for_rules(legacy_equals) == 2
+
     # count_collection_photos (used by /api/collections) must not raise.
     import json
     cid = db.add_collection("Legacy Folder", json.dumps(legacy_is))

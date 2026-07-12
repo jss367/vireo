@@ -3345,6 +3345,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         collection_dicts = []
         for c in collections:
             d = dict(c)
+            # Mirror /api/collections so the Browse sidebar's first paint already
+            # knows which collections are degraded — otherwise a degraded row
+            # renders as a normal clickable item until loadCollectionCounts()
+            # comes back, and a fast click drops it into the 400 /photos path.
+            # Only rule-validation failures (ValueError from _build_query_from_rules,
+            # including malformed JSON in rules) degrade; real infra errors bubble
+            # up as 500 like elsewhere.
+            try:
+                d["photo_count"] = db.count_collection_photos(c["id"])
+            except ValueError:
+                app.logger.exception(
+                    "Failed to count photos for collection %s (%s) during browse init",
+                    c["id"],
+                    c["name"],
+                )
+                d["photo_count"] = None
+                d["count_error"] = True
             try:
                 d["can_add_photos"] = _collection_accepts_manual_photos(
                     json.loads(c["rules"])
