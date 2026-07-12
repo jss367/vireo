@@ -133,9 +133,17 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .folder-browser-item {
   padding: 8px 10px; font-size: 12px; color: var(--text-primary);
   cursor: pointer; border-bottom: 1px solid color-mix(in srgb, var(--border-primary) 60%, transparent);
+  display: flex; align-items: center; gap: 8px;
 }
 .folder-browser-item:hover { background: var(--bg-hover, rgba(255,255,255,0.05)); }
 .folder-browser-item.selected { background: color-mix(in srgb, var(--accent) 15%, transparent); }
+.folder-browser-item-name {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.folder-browser-count {
+  color: var(--text-secondary); font-size: 11px; font-variant-numeric: tabular-nums;
+  flex-shrink: 0; white-space: nowrap;
+}
 .folder-browser-empty { padding: 14px; font-size: 12px; color: var(--text-secondary); }
 .folder-browser-actions {
   display: flex; gap: 8px; justify-content: flex-end;
@@ -349,6 +357,8 @@ let browserMode = 'source';
 let browserPath = '';
 let browserHomePath = '';
 let browserSeq = 0;
+let browserCountsAbort = null;
+let browserCountCache = {};
 let browserEscHandler = null;
 let browserSelectedPaths = [];
 let browserSelectAnchorPath = '';
@@ -614,7 +624,7 @@ function sourceCountKey(path, options) {
 
 function formatPhotoCount(n) {
   const count = Number(n || 0);
-  return count + ' photo' + (count === 1 ? '' : 's');
+  return count.toLocaleString() + ' photo' + (count === 1 ? '' : 's');
 }
 
 async function refreshSourceCount(path) {
@@ -758,6 +768,10 @@ function openImportFolderBrowser(mode, opts = {}) {
 
 function closeImportFolderBrowser() {
   document.getElementById('importFolderBrowser').classList.remove('open');
+  if (browserCountsAbort) {
+    browserCountsAbort.abort();
+    browserCountsAbort = null;
+  }
   if (browserEscHandler) {
     document.removeEventListener('keydown', browserEscHandler);
     browserEscHandler = null;
@@ -767,6 +781,10 @@ function closeImportFolderBrowser() {
 
 async function browseImportFolderTo(path) {
   const seq = ++browserSeq;
+  if (browserCountsAbort) {
+    browserCountsAbort.abort();
+    browserCountsAbort = null;
+  }
   // Clear stale selection while this async navigation is pending. Without
   // this, clicking "Select This Folder" during a slow or failing fetch
   // submits the previous folder instead of the one the user requested —
@@ -842,11 +860,13 @@ function renderImportFolderBrowser(data, opts) {
     parent = data.path.substring(0, data.path.lastIndexOf('/')) || '/';
   }
   if (data.path && data.path !== '/' && parent && parent !== data.path) {
-    html += '<div class="folder-browser-item" data-browse-path="' + importEscapeAttr(parent) + '" data-parent-link="1">&#128193; ..</div>';
+    html += '<div class="folder-browser-item" data-browse-path="' + importEscapeAttr(parent) + '" data-parent-link="1">' +
+      '<span class="folder-browser-item-name">&#128193; ..</span></div>';
   }
   dirs.forEach((d) => {
-    html += '<div class="folder-browser-item" data-browse-path="' + importEscapeAttr(d.path) + '" data-folder-path="' + importEscapeAttr(d.path) + '">&#128193; ' +
-      importEscapeHtml(d.name || d.path) + '</div>';
+    html += '<div class="folder-browser-item" data-browse-path="' + importEscapeAttr(d.path) + '" data-folder-path="' + importEscapeAttr(d.path) + '">' +
+      '<span class="folder-browser-item-name">&#128193; ' + importEscapeHtml(d.name || d.path) + '</span>' +
+      '<span class="folder-browser-count" data-count-path="' + importEscapeAttr(d.path) + '"></span></div>';
   });
   if (!html) {
     html = '<div class="folder-browser-empty">' +
@@ -869,6 +889,60 @@ function renderImportFolderBrowser(data, opts) {
     }
   };
   updateImportBrowserSelection();
+  if (browserMode === 'source') refreshImportBrowserCounts(dirs, browserSeq);
+}
+
+function importBrowserCountKey(path, fileTypes) {
+  const normalized = Array.isArray(fileTypes)
+    ? fileTypes.slice().sort().join(',')
+    : String(fileTypes || 'both');
+  return path + '\n' + normalized;
+}
+
+function applyImportBrowserCount(path, count) {
+  if (!count) return;
+  document.querySelectorAll('#folderBrowserList .folder-browser-count').forEach((badge) => {
+    if (badge.getAttribute('data-count-path') === path) {
+      badge.textContent = formatPhotoCount(count);
+    }
+  });
+}
+
+async function refreshImportBrowserCounts(dirs, seq) {
+  if (!dirs.length || seq !== browserSeq) return;
+  const fileTypes = selectedSourceCountOptions().file_types;
+  const uncached = [];
+  dirs.forEach((dir) => {
+    const key = importBrowserCountKey(dir.path, fileTypes);
+    if (Object.prototype.hasOwnProperty.call(browserCountCache, key)) {
+      applyImportBrowserCount(dir.path, browserCountCache[key]);
+    } else {
+      uncached.push(dir.path);
+    }
+  });
+  if (!uncached.length) return;
+
+  browserCountsAbort = new AbortController();
+  try {
+    const resp = await fetch('/api/browse/photo-counts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths: uncached, file_types: fileTypes }),
+      signal: browserCountsAbort.signal,
+    });
+    if (!resp.ok || seq !== browserSeq) return;
+    const data = await resp.json();
+    if (seq !== browserSeq) return;
+    const counts = data.counts || {};
+    Object.keys(counts).forEach((path) => {
+      browserCountCache[importBrowserCountKey(path, fileTypes)] = counts[path];
+      applyImportBrowserCount(path, counts[path]);
+    });
+  } catch (e) {
+    if (e.name !== 'AbortError') { /* Counts are helpful but non-blocking. */ }
+  } finally {
+    if (seq === browserSeq) browserCountsAbort = null;
+  }
 }
 
 function selectImportBrowserListItem(item, event) {
