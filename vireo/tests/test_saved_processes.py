@@ -239,6 +239,14 @@ def test_legacy_default_strategy_migrates_to_process_id(tmp_path):
 
 
 def test_legacy_unknown_strategy_migrates_to_import_only(tmp_path):
+    """An unrecognized legacy strategy is preserved as explicit import-only.
+
+    The workspace had an *explicit* override, so migrating to a bare key
+    (letting ``get_effective_config`` deep-merge the global default back in)
+    would silently start auto-processing on a workspace whose user had set
+    something specifically different. Explicit ``default_process_id: None``
+    is the right rendering of "the user said not the global default".
+    """
     from db import Database
     db_path = str(tmp_path / "test.db")
     db = Database(db_path)
@@ -254,4 +262,31 @@ def test_legacy_unknown_strategy_migrates_to_import_only(tmp_path):
     db2 = Database(db_path)
     overrides = json.loads(db2.get_workspace(ws_id)["config_overrides"])
     assert "default_strategy" not in overrides["pipeline"]
-    assert "default_process_id" not in overrides["pipeline"]
+    assert overrides["pipeline"]["default_process_id"] is None
+
+
+def test_legacy_null_strategy_migrates_to_explicit_null(tmp_path):
+    """A workspace with ``default_strategy: null`` (explicit "import only")
+    must migrate to ``default_process_id: null``, not to a bare key.
+
+    Without an explicit null, popping the legacy key would let
+    ``get_effective_config()``'s deep_merge inherit whatever the global
+    ``default_process_id`` happens to be, silently starting auto-processing
+    on a workspace that had explicitly said otherwise.
+    """
+    from db import Database
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db.create_workspace(
+        "LegacyImportOnly",
+        config_overrides={"pipeline": {"default_strategy": None}},
+    )
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key='default_strategy_to_process_id'"
+    )
+    db.conn.commit()
+
+    db2 = Database(db_path)
+    overrides = json.loads(db2.get_workspace(ws_id)["config_overrides"])
+    assert "default_strategy" not in overrides["pipeline"]
+    assert overrides["pipeline"]["default_process_id"] is None

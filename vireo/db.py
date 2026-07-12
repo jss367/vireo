@@ -1516,8 +1516,16 @@ class Database:
                     if isinstance(old, str) else None
                 )
                 pid = name_to_id.get(seed_name) if seed_name else None
-                if pid is not None:
-                    pipeline_ov["default_process_id"] = pid
+                # Always write ``default_process_id`` (even ``None``) so the
+                # workspace's explicit override intent survives the migration.
+                # An old ``default_strategy: null`` meant "import only"; without
+                # this line, popping the legacy key would let
+                # ``get_effective_config()``'s deep_merge inherit the *global*
+                # default and silently start auto-processing on imports for a
+                # workspace that had explicitly said otherwise. Same reasoning
+                # for an unrecognized legacy name — the user's explicit choice
+                # was not the current global default.
+                pipeline_ov["default_process_id"] = pid
                 self.conn.execute(
                     "UPDATE workspaces SET config_overrides = ? WHERE id = ?",
                     (json.dumps(overrides), row["id"]),

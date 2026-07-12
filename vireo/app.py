@@ -9854,13 +9854,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("process not found", 404)
         # Per-workspace default pointers are nulled inside the DB call. Clear
         # the app-wide default too if it pointed here (config-file I/O the DB
-        # layer intentionally leaves to the caller).
+        # layer intentionally leaves to the caller). Use the *raw* on-disk
+        # config (not ``cfg.load()``) so we don't fossilize every current
+        # DEFAULTS value as an explicit user override — a future change to
+        # DEFAULTS would otherwise be invisible on this install.
         import config as cfg
 
-        conf = cfg.load()
-        if conf.get("pipeline", {}).get("default_process_id") == process_id:
-            conf["pipeline"]["default_process_id"] = None
-            cfg.save(conf)
+        with _settings_write_lock:
+            raw = _read_raw_config_file()
+            pipeline_raw = raw.get("pipeline")
+            if (
+                isinstance(pipeline_raw, dict)
+                and pipeline_raw.get("default_process_id") == process_id
+            ):
+                pipeline_raw["default_process_id"] = None
+                cfg.save(raw)
         return jsonify({"ok": True})
 
     def _validate_workspace_config_overrides(overrides, db):

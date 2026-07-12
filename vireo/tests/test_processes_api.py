@@ -237,6 +237,46 @@ def test_settings_import_accepts_null_default_process_id(app_and_db):
     assert cfg.load()["pipeline"]["default_process_id"] is None
 
 
+def test_delete_process_does_not_fossilize_defaults(app_and_db):
+    """Deleting the globally-defaulted process must NOT rewrite the raw
+    config with the fully deep-merged DEFAULTS.
+
+    Using ``cfg.load()`` + ``cfg.save()`` in the delete handler would turn
+    every current DEFAULTS value into an explicit user override, so a
+    future change to DEFAULTS would be invisible on this install. Only the
+    ``default_process_id`` entry should change on disk; every other key
+    the user never set stays absent from the raw file.
+    """
+    import json as _json
+
+    import config as cfg
+
+    app, _ = app_and_db
+    client = app.test_client()
+    pid = client.post(
+        "/api/processes", json={"name": "GlobalDefault"},
+    ).get_json()["id"]
+    r = client.patch("/api/settings/global", json={
+        "key": "pipeline.default_process_id", "value": pid,
+    })
+    assert r.status_code == 200, r.get_json()
+
+    with open(cfg.CONFIG_PATH) as f:
+        before = _json.load(f)
+    # Sanity: only the one leaf under ``pipeline``, not every DEFAULT.
+    assert before["pipeline"]["default_process_id"] == pid
+    assert {k for k in before["pipeline"] if k != "default_process_id"} == set()
+
+    # Delete the process; the app-wide default must clear.
+    client.delete(f"/api/processes/{pid}")
+
+    with open(cfg.CONFIG_PATH) as f:
+        after = _json.load(f)
+    assert after["pipeline"]["default_process_id"] is None
+    # Nothing else the user never set should have leaked in from DEFAULTS.
+    assert {k for k in after["pipeline"] if k != "default_process_id"} == set()
+
+
 def test_settings_schema_injects_process_picker(app_and_db):
     """The settings widget renders as a picker: api_settings_schema swaps the
     stored int spec for an enum populated from the live process list.
