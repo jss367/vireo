@@ -2579,14 +2579,17 @@ function renderCollectionList(collections) {
     var canAddPhotos = collectionAcceptsManualPhotos(c);
     var kind = canAddPhotos ? 'manual' : 'smart';
     var kindLabel = canAddPhotos ? 'Manual' : 'Smart';
-    var resolveBtn = (c.name === 'GPS Without Location Keyword')
-      ? '<button class="collection-resolve-btn" type="button" title="Resolve locations from GPS" onclick="event.stopPropagation(); openGpsResolveForCollection(' + c.id + ')">Resolve GPS</button>'
-      : '';
     // count_error: /api/collections couldn't resolve this collection's rules,
     // so filtering to it would 400 the /photos endpoint. Show it as
     // unavailable (with edit still reachable via right-click) instead of
     // rendering a clickable filter that silently fails.
     var unavailable = !!c.count_error;
+    // Suppress the Resolve GPS shortcut on unavailable collections — it
+    // posts collection_id to /api/batch/location/from-exif, which resolves
+    // the same rules and would repeat the failure inside the modal.
+    var resolveBtn = (c.name === 'GPS Without Location Keyword' && !unavailable)
+      ? '<button class="collection-resolve-btn" type="button" title="Resolve locations from GPS" onclick="event.stopPropagation(); openGpsResolveForCollection(' + c.id + ')">Resolve GPS</button>'
+      : '';
     var itemClass = 'tree-item' + (unavailable ? ' unavailable' : '');
     var titleAttr = unavailable
       ? ' title="This collection\'s rules could not be resolved. Right-click → Edit Rules to fix it."'
@@ -5392,6 +5395,19 @@ async function openGpsResolve(source) {
 }
 
 function openGpsResolveForCollection(collectionId) {
+  // Same guard as filterByCollection: degraded collections would just
+  // re-hit the unresolvable rules inside /api/batch/location/from-exif.
+  var collectionMeta = collectionsById[collectionId];
+  if (collectionMeta && collectionMeta.count_error) {
+    if (typeof showToast === 'function') {
+      showToast(
+        (collectionMeta.name || 'This collection') +
+          " is unavailable — its rules could not be resolved. Right-click → Edit Rules to fix it.",
+        'error'
+      );
+    }
+    return;
+  }
   openGpsResolve({collection_id: collectionId});
 }
 
