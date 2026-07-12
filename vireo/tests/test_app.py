@@ -8496,6 +8496,117 @@ def test_highlights_add_appends_after_legacy_cased_selection(app_and_db):
     ]
 
 
+def test_highlights_endpoint_surfaces_legacy_cased_selection(app_and_db):
+    """End-to-end regression for the eligibility-plus-canonicalize path.
+
+    A highlight row stored as ``Common Waxbill`` with the photo's accepted
+    keyword canonicalized to ``Common waxbill`` must still surface through
+    ``/api/highlights`` with ``has_highlight_selection`` true; the DB read
+    already surfaces the legacy row (see test_species_highlights_eligible_
+    matches_legacy_casing in test_db.py), and this test guards the wiring
+    that folds it into the canonical bucket via the app-side merge.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/wax-elig', 'wax', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    waxbill_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Common waxbill', 'taxonomy', 1)"
+    ).lastrowid
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'a.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, waxbill_kw),
+    )
+    db.conn.execute(
+        "INSERT INTO species_highlights "
+        "(workspace_id, species, photo_id, rank) "
+        "VALUES (?, 'Common Waxbill', ?, 1)",
+        (db._ws_id(), pid),
+    )
+    db.conn.commit()
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&confidence_threshold=0.7")
+    assert resp.status_code == 200
+    bucket = resp.get_json()["buckets"][0]
+    assert bucket["species"] == "Common waxbill"
+    assert bucket["has_highlight_selection"] is True
+    assert bucket["highlight_count"] == 1
+
+
+def test_highlights_endpoint_picks_newest_representative_across_casing(app_and_db):
+    """End-to-end regression for representative recency across casing variants.
+
+    When representatives exist under both legacy ``Common Waxbill`` and
+    canonical ``Common waxbill`` keys, the bucket's ``preferred_photo_id``
+    and lead photo must reflect the higher ``selected_order`` regardless of
+    which casing sorts first alphabetically. Guards the wiring between
+    get_species_representative_lists' canonical merge and the app-side
+    Highlights bucket assembly.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/wax-rep', 'wax', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    waxbill_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Common waxbill', 'taxonomy', 1)"
+    ).lastrowid
+    legacy_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'legacy.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    canonical_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'canonical.jpg', 0.8, 'none')",
+        (fid,),
+    ).lastrowid
+    for pid in (legacy_pid, canonical_pid):
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (pid, waxbill_kw),
+        )
+    # Legacy-cased representative picked first (lower selected_order), then a
+    # newer canonical-cased pick. The canonical pick must win in the merged
+    # bucket even though 'Common Waxbill' sorts before 'Common waxbill'.
+    db.conn.execute(
+        "INSERT INTO species_representatives "
+        "(species, photo_id, selected_order) "
+        "VALUES ('Common Waxbill', ?, 1)",
+        (legacy_pid,),
+    )
+    db.conn.execute(
+        "INSERT INTO species_representatives "
+        "(species, photo_id, selected_order) "
+        "VALUES ('Common waxbill', ?, 2)",
+        (canonical_pid,),
+    )
+    db.conn.commit()
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&confidence_threshold=0.7")
+    assert resp.status_code == 200
+    bucket = resp.get_json()["buckets"][0]
+    assert bucket["species"] == "Common waxbill"
+    assert bucket["preferred_photo_id"] == canonical_pid
+    assert bucket["photos"][0]["id"] == canonical_pid
+
+
 def test_highlights_confirmation_filter_splits_confirmed_and_unconfirmed(app_and_db):
     app, db = app_and_db
     client = app.test_client()
