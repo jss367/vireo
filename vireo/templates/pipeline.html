@@ -97,6 +97,10 @@ body { padding-bottom: 36px; }
   background: var(--danger, #E74C3C);
   color: #fff;
 }
+.stage-status-pill.warning {
+  background: color-mix(in srgb, var(--warning, #F0A030) 20%, transparent);
+  color: var(--warning, #F0A030);
+}
 .stage-status-pill.blocked {
   background: color-mix(in srgb, var(--danger, #E74C3C) 18%, transparent);
   color: var(--danger, #E74C3C);
@@ -2354,18 +2358,22 @@ function _updatePipelineStageUI(p) {
   // substages reach a terminal state. Resolving each substage event in
   // isolation made the pill flash 'Done' as soon as the first substage
   // finished, even though more work was pending.
-  var cardAgg = {};  // cardSuffix -> {running, failed, completed, skipped, present}
+  var cardAgg = {};  // cardSuffix -> aggregate substage outcomes
   for (var stageName in stages) {
     var cardSuffix = _stageToCard[stageName];
     if (!cardSuffix) continue;
     var agg = cardAgg[cardSuffix] || (cardAgg[cardSuffix] = {
-      running: false, failed: false, completed: 0, skipped: 0, present: 0,
+      running: false, failed: false, warning: false,
+      completed: 0, skipped: 0, present: 0,
     });
     agg.present += 1;
     var st = stages[stageName].status;
     if (st === 'running') agg.running = true;
     else if (st === 'failed') agg.failed = true;
-    else if (st === 'completed') agg.completed += 1;
+    else if (st === 'completed') {
+      agg.completed += 1;
+      if ((stages[stageName].error_count || 0) > 0) agg.warning = true;
+    }
     else if (st === 'skipped') agg.skipped += 1;
   }
 
@@ -2417,8 +2425,8 @@ function _updatePipelineStageUI(p) {
       numEl.className = 'stage-num complete';
       delete _runningStages[cardSuffix2];
       if (a.completed > 0) {
-        _stageOutcomes[cardSuffix2] = 'done';
-        _setPill(cardSuffix2, 'done');
+        _stageOutcomes[cardSuffix2] = a.warning ? 'warning' : 'done';
+        _setPill(cardSuffix2, a.warning ? 'warning' : 'done');
         if (cardSuffix2 === 'Source') _showSourceEjectSafe(stages['ingest']);
       } else {
         // Every substage was skipped. Backend 'skipped' covers both
@@ -3818,6 +3826,7 @@ function _formatPillLabel(stage, planEntry, state) {
   // labels — counts during a run come from a separate channel.
   if (state === 'running')   return 'Running…';
   if (state === 'done')      return 'Done';
+  if (state === 'warning')   return 'Completed with warnings';
   if (state === 'failed')    return 'Failed';
   if (state === 'cancelled') return 'Cancelled';
   if (state === 'will-skip') return 'Will skip';

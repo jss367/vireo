@@ -457,6 +457,38 @@ def test_generate_all_does_not_record_thumb_path_on_failure(tmp_path, monkeypatc
     assert row["thumb_path"] is None
 
 
+def test_generate_thumbnail_accepts_near_full_raw_active_area(tmp_path, monkeypatch):
+    import thumbnails as thumbnails_mod
+
+    monkeypatch.setattr(
+        thumbnails_mod, "load_image",
+        lambda *args, **kwargs: Image.new("RGB", (5392, 3592), "red"),
+    )
+
+    result = thumbnails_mod.generate_thumbnail(
+        1, str(tmp_path / "photo.NEF"), str(tmp_path / "thumbs"),
+        min_source_size=(5408, 3608),
+    )
+
+    assert result == str(tmp_path / "thumbs" / "1.jpg")
+
+
+def test_generate_thumbnail_rejects_truncated_raw_preview(tmp_path, monkeypatch):
+    import thumbnails as thumbnails_mod
+
+    monkeypatch.setattr(
+        thumbnails_mod, "load_image",
+        lambda *args, **kwargs: Image.new("RGB", (6000, 3376), "red"),
+    )
+
+    result = thumbnails_mod.generate_thumbnail(
+        1, str(tmp_path / "photo.NEF"), str(tmp_path / "thumbs"),
+        min_source_size=(6000, 4000),
+    )
+
+    assert result is None
+
+
 def test_generate_all_uses_near_full_working_copy_after_current_raw_failure(
     tmp_path, monkeypatch,
 ):
