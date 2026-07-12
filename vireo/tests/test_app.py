@@ -11690,6 +11690,22 @@ def test_import_page_resolves_default_strategy_client_side(app_and_db):
     assert "config_overrides" in html
 
 
+def test_import_page_offers_common_and_custom_folder_templates(app_and_db):
+    """Folder organization is approachable without removing strftime's
+    flexibility or breaking custom templates loaded from config."""
+    app, _ = app_and_db
+    client = app.test_client()
+    html = client.get("/import").data.decode()
+
+    assert 'id="folderTemplatePreset"' in html
+    assert '%Y/%m/%d — 2026/07/12' in html
+    assert '%Y/%Y-%m-%d — 2026/2026-07-12' in html
+    assert '<option value="__custom__">Custom…</option>' in html
+    assert 'id="folderTemplate"' in html
+    assert "function selectedFolderTemplate()" in html
+    assert "preset.value = commonOption ? template : '__custom__'" in html
+
+
 def test_process_page_has_no_import_source(app_and_db):
     """The wizard is the Process page now: the Import Photos radio flow is
     gone (it lives at /import); Folders / Collection / New images scopes
