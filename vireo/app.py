@@ -5410,6 +5410,231 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "_details_by_place_id": {k: v["details"] for k, v in groups.items()},
         }, None
 
+    def _validate_import_tag_options(body):
+        """Normalize optional tags attached to a photo import request."""
+        raw_tags = body.get("tags", [])
+        if not isinstance(raw_tags, list):
+            return None, None, json_error("tags must be a list of names")
+        if len(raw_tags) > 50:
+            return None, None, json_error("at most 50 import tags are allowed")
+
+        tags = []
+        seen = set()
+        for raw in raw_tags:
+            if not isinstance(raw, str):
+                return None, None, json_error(
+                    "tags must contain only strings"
+                )
+            name = normalize_keyword_display(raw)
+            if not name:
+                return None, None, json_error("import tags must not be empty")
+            if len(name) > 200:
+                return None, None, json_error(
+                    "import tags must be 200 characters or fewer"
+                )
+            match_key = keyword_match_key(name) or name.casefold()
+            if match_key not in seen:
+                seen.add(match_key)
+                tags.append(name)
+
+        location_from_gps = body.get("location_from_gps", False)
+        if not isinstance(location_from_gps, bool):
+            return None, None, json_error(
+                "location_from_gps must be a boolean"
+            )
+        return tags, location_from_gps, None
+
+    def _queue_import_keyword_add(
+        db, photo_id, keyword_name, workspace_id, *, commit=False,
+    ):
+        """Thread-safe equivalent of _queue_keyword_add for import jobs."""
+        removed = db.remove_pending_changes(
+            photo_id, "keyword_remove", keyword_name,
+            workspace_id=workspace_id, _commit=commit,
+        )
+        if removed == 0:
+            db.queue_change(
+                photo_id, "keyword_add", keyword_name,
+                workspace_id=workspace_id, _commit=commit,
+            )
+
+    def _queue_import_location_sync(
+        db, photo_id, workspace_id, *, commit=False,
+    ):
+        """Thread-safe equivalent of _queue_location_sync_if_enabled."""
+        db.remove_pending_changes(
+            photo_id, "location", workspace_id=workspace_id, _commit=commit,
+        )
+        db.queue_change(
+            photo_id, "location", "effective",
+            workspace_id=workspace_id, _commit=commit,
+        )
+
+    def _apply_import_tags(
+        workspace_id, photo_ids, tags, location_from_gps, result,
+        *, job=None, runner=None,
+    ):
+        """Apply requested common tags and per-photo GPS locations.
+
+        Tagging is deliberately post-import: ``photo_ids`` is the importer's
+        authoritative set of successfully cataloged photos, so skipped
+        archive duplicates never gain tags. Failures here do not change the
+        copy/verification result; they are reported separately in the job.
+        """
+        if not tags and not location_from_gps:
+            return
+
+        summary = {
+            "requested_tags": list(tags),
+            "tagged_photos": 0,
+            "location_requested": bool(location_from_gps),
+            "locations_added": 0,
+            "locations_unresolved": 0,
+            "locations_skipped": 0,
+            "errors": [],
+        }
+        result["tagging"] = summary
+        if not photo_ids:
+            summary["skipped"] = "no new photos"
+            return
+
+        if job is not None and runner is not None:
+            phase = (
+                "Adding tags and GPS locations"
+                if tags and location_from_gps
+                else "Adding GPS locations"
+                if location_from_gps
+                else "Adding tags"
+            )
+            runner.push_event(job["id"], "progress", {
+                "current": job["progress"].get("current", 0),
+                "total": job["progress"].get("total", 0),
+                "current_file": "",
+                "phase": phase,
+            })
+
+        thread_db = Database(db_path)
+        thread_db.set_active_workspace(workspace_id)
+        tagged_photo_ids = set()
+
+        for requested_name in tags:
+            try:
+                keyword_id = thread_db.add_keyword(
+                    requested_name, kw_type="general", _commit=False,
+                )
+                stored = thread_db.conn.execute(
+                    "SELECT name FROM keywords WHERE id = ?", (keyword_id,),
+                ).fetchone()
+                keyword_name = (
+                    stored["name"] if stored and stored["name"]
+                    else requested_name
+                )
+                items = []
+                for photo_id in photo_ids:
+                    exists = thread_db.conn.execute(
+                        "SELECT 1 FROM photo_keywords "
+                        "WHERE photo_id = ? AND keyword_id = ?",
+                        (photo_id, keyword_id),
+                    ).fetchone()
+                    if exists is not None:
+                        continue
+                    thread_db.tag_photo(photo_id, keyword_id, _commit=False)
+                    _queue_import_keyword_add(
+                        thread_db, photo_id, keyword_name, workspace_id,
+                    )
+                    tagged_photo_ids.add(photo_id)
+                    items.append({
+                        "photo_id": photo_id,
+                        "old_value": "",
+                        "new_value": str(keyword_id),
+                    })
+                if items:
+                    thread_db.record_edit(
+                        "keyword_add",
+                        f'Added "{keyword_name}" during import to '
+                        f"{len(items)} photos",
+                        str(keyword_id), items, is_batch=True, _commit=False,
+                    )
+                thread_db.conn.commit()
+            except Exception as exc:
+                thread_db.conn.rollback()
+                log.exception("Failed to add import tag %r", requested_name)
+                summary["errors"].append(
+                    f'Could not add tag "{requested_name}": {exc}'
+                )
+        summary["tagged_photos"] = len(tagged_photo_ids)
+
+        if location_from_gps:
+            unresolved = 0
+            skipped = 0
+            added = 0
+            # The public bulk endpoint caps a request at 10,000 IDs. Imports
+            # can exceed that, so reuse its resolution logic in bounded
+            # chunks while sharing the persistent ~110 m geocode cache.
+            for photo_chunk in _gps_location_chunks(photo_ids, size=10000):
+                try:
+                    payload, error = _bulk_gps_location_payload(
+                        thread_db, {"photo_ids": photo_chunk},
+                    )
+                    if error is not None:
+                        raise RuntimeError("location resolution was rejected")
+                    details_by_place_id = payload.pop(
+                        "_details_by_place_id", {}
+                    )
+                    unresolved += len(payload["unresolved"])
+                    skipped += len(payload["skipped"])
+                    for group in payload["groups"]:
+                        details = details_by_place_id.get(group["place_id"])
+                        if not details:
+                            unresolved += len(group["photo_ids"])
+                            continue
+                        try:
+                            leaf_id = thread_db.upsert_place_chain(details)
+                        except Exception as exc:
+                            log.exception(
+                                "Failed to create GPS import location %s",
+                                group["place_id"],
+                            )
+                            summary["errors"].append(
+                                f"Could not create location "
+                                f"{group.get('summary') or group['place_id']}: "
+                                f"{exc}"
+                            )
+                            unresolved += len(group["photo_ids"])
+                            continue
+                        location_items = []
+                        for photo_id in group["photo_ids"]:
+                            thread_db.set_photo_location(photo_id, leaf_id)
+                            _queue_import_location_sync(
+                                thread_db, photo_id, workspace_id,
+                            )
+                            location_items.append({
+                                "photo_id": photo_id,
+                                "old_value": "",
+                                "new_value": str(leaf_id),
+                            })
+                        added += len(location_items)
+                        if location_items:
+                            thread_db.record_edit(
+                                "location_set",
+                                f"Added GPS location during import to "
+                                f"{len(location_items)} photos",
+                                "from_exif", location_items,
+                                is_batch=True, _commit=False,
+                            )
+                    thread_db.conn.commit()
+                except Exception as exc:
+                    thread_db.conn.rollback()
+                    log.exception("Failed to add GPS locations during import")
+                    summary["errors"].append(
+                        f"Could not add GPS locations: {exc}"
+                    )
+                    unresolved += len(photo_chunk)
+            summary["locations_added"] = added
+            summary["locations_unresolved"] = unresolved
+            summary["locations_skipped"] = skipped
+        thread_db.conn.close()
+
     # -- Edit API routes --
 
     @app.route("/api/photos/<int:photo_id>/wildlife_excluded", methods=["POST"])
@@ -17898,6 +18123,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return json_error(f"source directory not found: {s}")
 
         recursive = bool(body.get("recursive", True))
+        import_tags, location_from_gps, tag_options_err = (
+            _validate_import_tag_options(body)
+        )
+        if tag_options_err is not None:
+            return tag_options_err
         db = _get_db()
         # Preflight an explicit after_import before creating a workspace so
         # a bad value doesn't leave an orphan Card Import behind. The
@@ -18118,7 +18348,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     job["id"], "scan", status="cancelled",
                     summary=f"{indexed} photos (cancelled)",
                 )
-                return {
+                result = {
                     "mode": "in_place",
                     "ok": False,
                     "cancelled": True,
@@ -18128,6 +18358,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "errors": root_errors,
                     "photo_ids": photo_ids,
                 }
+                _apply_import_tags(
+                    active_ws, photo_ids, import_tags, location_from_gps,
+                    result, job=job, runner=runner,
+                )
+                return result
 
             metadata_warning = _scan_metadata_warning()
             summary = f"{indexed} photos"
@@ -18149,6 +18384,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "errors": root_errors,
                 "photo_ids": photo_ids,
             }
+            _apply_import_tags(
+                active_ws, photo_ids, import_tags, location_from_gps, result,
+                job=job, runner=runner,
+            )
             _chain_after_import(job, result)
             return result
 
@@ -18157,6 +18396,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "destination": None,
             "recursive": recursive,
             "after_import": after_import,
+            "tags": import_tags,
+            "location_from_gps": location_from_gps,
             "mode": "in_place",
             "workspace_id": active_ws,
             "created_workspace": created_workspace,
@@ -18378,6 +18619,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         skip_duplicates = bool(body.get("skip_duplicates", True))
         verify_by_hash = bool(body.get("verify_by_hash", False))
         recursive = bool(body.get("recursive", True))
+        import_tags, location_from_gps, tag_options_err = (
+            _validate_import_tag_options(body)
+        )
+        if tag_options_err is not None:
+            return tag_options_err
 
         active_ws, created_workspace, workspace_err = (
             _prepare_import_workspace(db, body)
@@ -18432,6 +18678,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "verify_by_hash": verify_by_hash,
             "recursive": recursive,
             "after_import": after_import,
+            "tags": import_tags,
+            "location_from_gps": location_from_gps,
             "remote_target_id": remote_target_id or None,
             "remote_subpath": remote_subpath or None,
             "workspace_id": active_ws,
@@ -18512,6 +18760,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             try:
                 result = run_import_job(
                     job, runner, db_path, active_ws, params,
+                )
+                _apply_import_tags(
+                    active_ws, result.get("photo_ids") or [], import_tags,
+                    location_from_gps, result, job=job, runner=runner,
                 )
                 _chain_after_import(job, result)
                 return result

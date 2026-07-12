@@ -160,6 +160,16 @@ body { display: flex; flex-direction: column; height: 100vh; }
   display: flex; gap: 8px; justify-content: flex-end;
   padding: 12px 16px; border-top: 1px solid var(--border-primary);
 }
+.import-tag-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.import-tag-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 7px; border: 1px solid var(--border-primary);
+  border-radius: 999px; background: var(--bg-tertiary); font-size: 12px;
+}
+.import-tag-chip button {
+  border: 0; background: transparent; color: var(--text-secondary);
+  cursor: pointer; padding: 0; line-height: 1;
+}
 </style>
 </head>
 <body>
@@ -241,6 +251,29 @@ body { display: flex; flex-direction: column; height: 100vh; }
         <label>Workspace name</label>
         <input type="text" id="newWorkspaceName" class="input-fixed" placeholder="New workspace">
       </div>
+    </div>
+
+    <div class="card" id="tagsCard">
+      <h3>Tags</h3>
+      <div class="row">
+        <input type="text" id="importTagInput" placeholder="Add a tag"
+               aria-label="Tag to add to imported photos"
+               onkeydown="handleImportTagKeydown(event)">
+        <button class="btn" type="button" id="btnAddImportTag"
+                onclick="addImportTagFromInput()">Add tag</button>
+      </div>
+      <div class="import-tag-list" id="importTagList"></div>
+      <div class="section-divider">
+        <label>
+          <input type="checkbox" id="chkLocationFromGps">
+          Add a location tag from each photo's GPS
+        </label>
+        <div class="hint" id="locationGpsHint">
+          Vireo resolves each GPS coordinate to a saved place. Photos without
+          GPS or a confident match remain untagged; existing locations are kept.
+        </div>
+      </div>
+      <div class="hint">Tags above are added to every photo included in this import.</div>
     </div>
 
     <div class="card" id="destCard">
@@ -330,6 +363,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
       <div id="resultSummary" class="hint" style="margin-top:6px;"></div>
       <table class="folder-progress" id="resultFolders"></table>
       <div id="chainInfo" class="hint" style="margin-top:8px;"></div>
+      <div id="taggingInfo" class="hint" style="margin-top:8px;"></div>
       <div id="modelWarning" class="warn" style="display:none;"></div>
       <div class="result-links" style="margin-top:8px;">
         <a href="/browse">Open Browse</a> &nbsp;·&nbsp; <a href="/jobs">Open Jobs</a>
@@ -392,6 +426,53 @@ let destStructureSeq = 0;
 let importPreviewSeq = 0;
 let importPreviewTimer = null;
 let importThumbSchedulerCancel = null;
+let importTags = [];
+
+function normalizedImportTag(name) {
+  return String(name || '').trim().replace(/\s+/g, ' ');
+}
+
+function renderImportTags() {
+  const list = document.getElementById('importTagList');
+  list.innerHTML = '';
+  importTags.forEach((name, index) => {
+    const chip = document.createElement('span');
+    chip.className = 'import-tag-chip';
+    const label = document.createElement('span');
+    label.textContent = name;
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.setAttribute('aria-label', 'Remove tag ' + name);
+    remove.textContent = '×';
+    remove.onclick = () => {
+      importTags.splice(index, 1);
+      renderImportTags();
+    };
+    chip.append(label, remove);
+    list.appendChild(chip);
+  });
+}
+
+function addImportTag(name) {
+  const clean = normalizedImportTag(name);
+  if (!clean) return false;
+  if (!importTags.some(tag => tag.toLocaleLowerCase() === clean.toLocaleLowerCase())) {
+    importTags.push(clean);
+    renderImportTags();
+  }
+  return true;
+}
+
+function addImportTagFromInput() {
+  const input = document.getElementById('importTagInput');
+  if (addImportTag(input.value)) input.value = '';
+}
+
+function handleImportTagKeydown(event) {
+  if (event.key !== 'Enter' && event.key !== ',') return;
+  event.preventDefault();
+  addImportTagFromInput();
+}
 
 function selectedImportMode() {
   const checked = document.querySelector('input[name="importMode"]:checked');
@@ -1913,12 +1994,17 @@ function renderFolderTable(el, folders) {
 
 async function startImport() {
   showError('');
+  addImportTagFromInput();
   if (!sources.length) { showError('Add at least one source folder.'); return; }
   const copyMode = selectedImportMode() === 'copy';
   const body = {
     sources: sources,
     recursive: document.getElementById('chkRecursive').checked,
   };
+  if (importTags.length) body.tags = importTags.slice();
+  if (document.getElementById('chkLocationFromGps').checked) {
+    body.location_from_gps = true;
+  }
   if (document.getElementById('workspaceNew').checked) {
     const name = (document.getElementById('newWorkspaceName').value || '').trim();
     if (!name) { showError('Name the new workspace.'); return; }
@@ -2053,6 +2139,7 @@ function renderResult(res, status) {
       (status && status !== 'completed' ? ' · job ' + status : '');
     document.getElementById('resultFolders').innerHTML = '';
     renderChainInfo(res);
+    renderTaggingInfo(res);
     renderModelWarning(res);
     return;
   }
@@ -2084,7 +2171,39 @@ function renderResult(res, status) {
   renderFolderTable(document.getElementById('resultFolders'), res.folders || {});
 
   renderChainInfo(res);
+  renderTaggingInfo(res);
   renderModelWarning(res);
+}
+
+function renderTaggingInfo(res) {
+  const el = document.getElementById('taggingInfo');
+  const tagging = res.tagging;
+  if (!tagging) {
+    el.textContent = '';
+    return;
+  }
+  const parts = [];
+  if ((tagging.requested_tags || []).length) {
+    parts.push(
+      'Tags added to ' + (tagging.tagged_photos || 0) + ' photo' +
+      ((tagging.tagged_photos || 0) === 1 ? '' : 's')
+    );
+  }
+  if (tagging.location_requested) {
+    parts.push((tagging.locations_added || 0) + ' GPS location' +
+      ((tagging.locations_added || 0) === 1 ? '' : 's') + ' added');
+    if (tagging.locations_unresolved) {
+      parts.push(tagging.locations_unresolved + ' could not be resolved');
+    }
+    if (tagging.locations_skipped) {
+      parts.push(tagging.locations_skipped + ' already had a location');
+    }
+  }
+  if ((tagging.errors || []).length) {
+    parts.push(tagging.errors.join(' '));
+  }
+  if (tagging.skipped) parts.push('Tagging skipped: ' + tagging.skipped);
+  el.textContent = parts.join(' · ');
 }
 
 function renderChainInfo(res) {
@@ -2168,6 +2287,13 @@ async function initImportPage() {
   const pipelineCfg = Object.assign(
     {}, cfg.pipeline || {}, (overrides || {}).pipeline || {},
   );
+  const gpsCheckbox = document.getElementById('chkLocationFromGps');
+  const gpsHint = document.getElementById('locationGpsHint');
+  if (cfgOk && !String(cfg.google_maps_api_key || '').trim()) {
+    gpsCheckbox.disabled = true;
+    gpsHint.textContent =
+      'Add a Google Maps API key in Settings to resolve GPS coordinates into location tags.';
+  }
 
   const recents = ingestCfg.recent_destinations || [];
   const dl = document.getElementById('recentDestinations');

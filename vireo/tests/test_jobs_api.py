@@ -3266,6 +3266,137 @@ def test_import_photos_happy_path(app_and_db, tmp_path):
     assert result["safe_to_format"] is True
 
 
+def test_import_photos_adds_requested_tags(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    card = _import_card(tmp_path, ("DSC_0001.jpg", "DSC_0002.jpg"))
+    Image.new("RGB", (16, 16), "blue").save(
+        os.path.join(card, "DSC_0002.jpg")
+    )
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+        "tags": ["Kenya trip", "Portfolio", "kenya trip"],
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job_id = resp.get_json()["job_id"]
+    config = _job_config(client, job_id)
+    assert config["tags"] == ["Kenya trip", "Portfolio"]
+
+    job = wait_for_job_via_client(client, job_id)
+    assert job["status"] == "completed", job
+    result = job["result"]
+    assert result["tagging"]["tagged_photos"] == 2
+    assert result["tagging"]["errors"] == []
+    for photo_id in result["photo_ids"]:
+        names = {row["name"] for row in db.get_photo_keywords(photo_id)}
+        assert {"Kenya trip", "Portfolio"} <= names
+
+
+def test_duplicate_only_import_does_not_tag_existing_photos(
+    app_and_db, tmp_path,
+):
+    app, db = app_and_db
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    destination = str(tmp_path / "archive")
+
+    first = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": destination, "after_import": None,
+    })
+    wait_for_job_via_client(client, first.get_json()["job_id"])
+
+    second = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": destination,
+        "after_import": None,
+        "tags": ["Do not add to duplicates"],
+    })
+    job = wait_for_job_via_client(client, second.get_json()["job_id"])
+    result = job["result"]
+    assert result["photo_ids"] == []
+    assert result["tagging"]["skipped"] == "no new photos"
+    assert db.conn.execute(
+        "SELECT 1 FROM keywords WHERE name = ?",
+        ("Do not add to duplicates",),
+    ).fetchone() is None
+
+
+@pytest.mark.parametrize("field,value,error", [
+    ("tags", "Trip", "tags must be a list"),
+    ("tags", ["Trip", 4], "only strings"),
+    ("tags", ["   "], "must not be empty"),
+    ("location_from_gps", "yes", "must be a boolean"),
+])
+def test_import_tag_options_are_validated_before_starting_job(
+    app_and_db, tmp_path, field, value, error,
+):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+        field: value,
+    })
+    assert resp.status_code == 400
+    assert error in resp.get_json()["error"]
+
+
+def test_import_can_add_structured_locations_from_each_photos_gps(
+    app_and_db, tmp_path, monkeypatch,
+):
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+    original_get = Database.get_photos_by_ids
+    details = {
+        "place_id": "import-gps-place",
+        "name": "Central Park",
+        "lat": 40.785091,
+        "lng": -73.968285,
+        "types": ["park"],
+        "address_components": [
+            {"name": "New York", "types": ["locality"]},
+            {"name": "New York", "types": ["administrative_area_level_1"]},
+            {"name": "United States", "types": ["country"]},
+        ],
+    }
+
+    def photos_with_gps(self, photo_ids):
+        rows = original_get(self, photo_ids)
+        enriched = {}
+        for photo_id, row in rows.items():
+            photo = dict(row)
+            photo["latitude"] = details["lat"]
+            photo["longitude"] = details["lng"]
+            enriched[photo_id] = photo
+        self.reverse_geocode_cache_put(
+            details["lat"], details["lng"], details["place_id"],
+            json.dumps(details),
+        )
+        return enriched
+
+    monkeypatch.setattr(Database, "get_photos_by_ids", photos_with_gps)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+        "location_from_gps": True,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed", job
+    result = job["result"]
+    assert result["tagging"]["locations_added"] == 1
+    photo_id = result["photo_ids"][0]
+    location = db.get_assigned_photo_location(photo_id)
+    assert location["keyword_location_name"] == "Central Park"
+
+
 def test_import_in_place_no_destination_required(app_and_db, tmp_path):
     app, _ = app_and_db
     client = app.test_client()
