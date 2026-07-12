@@ -9027,26 +9027,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         species = normalize_keyword_display(species)
         if not species:
             return json_error("species required")
-        # Canonicalize the submitted spelling to the stored keyword name
-        # BEFORE the snapshot passes below. add_keyword() reuses any
-        # case-insensitive taxonomy/general match at parent_id IS NULL
-        # and preserves its stored `name`, so a request for `saffron finch`
-        # when the stored keyword and curation rows read `Saffron Finch`
-        # eventually tags the existing row. Without pre-canonicalizing,
-        # the `row["species"] == species` snapshots (hl_dst_preexisting,
-        # pref_dst_taken, rep_dst_preexisting, plus the source-side skips
-        # in the preference/rep passes) would miss those pre-existing
-        # target rows and record dst_existed=false — undo would then
-        # delete the user's pre-existing highlight/preference/rep.
-        existing_species_row = db.conn.execute(
-            "SELECT name FROM keywords "
-            "WHERE name = ? COLLATE NOCASE AND parent_id IS NULL "
-            "AND type IN ('taxonomy', 'general') "
-            "ORDER BY (type = 'taxonomy') DESC, id ASC LIMIT 1",
-            (species,),
-        ).fetchone()
-        if existing_species_row and existing_species_row["name"]:
-            species = existing_species_row["name"]
+        # Canonicalize the submitted spelling to the final stored keyword
+        # name BEFORE the snapshot passes below. resolve_species_display_name
+        # mirrors add_keyword's two branches: preserve an existing NOCASE
+        # match, otherwise apply the species casing convention (`black
+        # phoebe` → `Black Phoebe`). Without this, the `row["species"] ==
+        # species` snapshots (hl_dst_preexisting, pref_dst_taken,
+        # rep_dst_preexisting, plus the source-side skips in the
+        # preference/rep passes) would miss pre-existing target rows for
+        # the destination species — from another keyword row, or from
+        # prediction-seeded curation with no keyword row — and record
+        # dst_existed=false; undo would then delete the user's
+        # pre-existing highlight/preference/rep.
+        species = db.resolve_species_display_name(species)
         error, status = _validate_highlight_photo_ids(db, photo_ids)
         if error:
             return json_error(error, status)
@@ -21160,11 +21153,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 target_enc["confirmed_species"] = species
             save_results_raw(cached, cache_dir, db._active_workspace_id)
 
-        replaced = (
-            previous_species
-            if previous_species and previous_species.strip().lower() != species.lower()
-            else None
-        )
+        # Report `replaced` consistent with the actual replacement decision
+        # (is_replacement, which uses keyword_match_key to match SQLite's
+        # ASCII-only NOCASE). Python's `.lower()` folds non-ASCII pairs like
+        # `Éclair`/`éclair` — which SQLite/add_keyword keep as distinct
+        # keyword rows — so a `.lower()` comparison here would report
+        # replaced=None on a request that actually untagged the previous
+        # species row and tagged a new one.
+        replaced = previous_species if is_replacement else None
         response = {
             "ok": True,
             "species": species,

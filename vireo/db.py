@@ -8428,6 +8428,42 @@ class Database:
             return name.title()
         return name
 
+    def resolve_species_display_name(self, name):
+        """Predict the stored species name that add_keyword(is_species=True) would use.
+
+        Species relabel endpoints snapshot curation dst_existed before
+        add_keyword actually runs, so they need to know the final stored
+        spelling in advance. Two sources contribute:
+
+        1. If a root taxonomy/general keyword row already matches
+           (SQLite ASCII NOCASE), preserve that stored spelling — the
+           existing curation rows key on it.
+        2. Otherwise apply the same species-casing convention that
+           add_keyword applies for new species keywords, so pre-existing
+           curation from predictions (which inserted `Black Phoebe`) is
+           matched even when the request submits `black phoebe`.
+        """
+        name = normalize_keyword_display(name)
+        if not name:
+            return name
+        existing = self.conn.execute(
+            "SELECT name FROM keywords "
+            "WHERE name = ? COLLATE NOCASE AND parent_id IS NULL "
+            "AND type IN ('taxonomy', 'general') "
+            "ORDER BY (type = 'taxonomy') DESC, id ASC LIMIT 1",
+            (name,),
+        ).fetchone()
+        if existing and existing["name"]:
+            return existing["name"]
+        import config as cfg
+        override = cfg.get("keyword_case")
+        if override and override != "auto":
+            return self._apply_case_convention(name, override)
+        convention = self.detect_keyword_case_convention()
+        if convention:
+            return self._apply_case_convention(name, convention)
+        return name
+
     def _lookup_taxon_id_for_keyword(self, name):
         """Return the local taxa.id matching a keyword name, if any."""
         for variant in _taxon_lookup_variants(name):
