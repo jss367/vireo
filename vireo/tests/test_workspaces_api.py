@@ -450,6 +450,18 @@ def _mark_local(db, workspace_id):
     db.conn.commit()
 
 
+def _stage_folder_locally(db, workspace_id, folder_id):
+    """Simulate a locally-staged folder so ``folder_has_local_workspace`` is True."""
+    _mark_local(db, workspace_id)
+    db.conn.execute(
+        """INSERT OR REPLACE INTO local_workspace_folders
+           (workspace_id, folder_id, source_path, local_path, is_root, root_index)
+           VALUES (?, ?, '/nas/src', '/local/dst', 1, 0)""",
+        (workspace_id, folder_id),
+    )
+    db.conn.commit()
+
+
 def test_add_folder_rejected_while_workspace_is_local(app_and_db):
     """A workspace working locally has its paths rebased into the managed copy;
     adding a folder here would leave it untracked by the manifest and local
@@ -518,6 +530,39 @@ def test_move_folders_rejected_when_target_is_local(app_and_db):
     )
     assert resp.status_code == 409
     assert "working locally" in resp.get_json()["error"]
+
+
+def test_folder_relocate_rejected_when_folder_is_locally_staged(app_and_db, tmp_path):
+    """Relocating a folder that another workspace has staged locally would
+    rebase the folders row out from under local_workspace_folders and the
+    manifest, so a later sync/discard could not restore the source layout.
+    The endpoint must refuse until that workspace's local copy is resolved."""
+    app, db = app_and_db
+    client = app.test_client()
+    active = client.get("/api/workspaces/active").get_json()
+    folder = db.conn.execute("SELECT id FROM folders LIMIT 1").fetchone()
+    fid = folder["id"]
+    _stage_folder_locally(db, active["id"], fid)
+    new_path = str(tmp_path / "somewhere-new")
+    (tmp_path / "somewhere-new").mkdir()
+    resp = client.post(f"/api/folders/{fid}/relocate", json={"path": new_path})
+    assert resp.status_code == 409
+    assert "staged locally" in resp.get_json()["error"]
+
+
+def test_folder_delete_rejected_when_folder_is_locally_staged(app_and_db):
+    """Deleting a folder covered by a workspace's local_workspace_folders row
+    removes the folders row the manifest depends on, leaving sync/discard
+    unable to restore the catalog. The endpoint must refuse."""
+    app, db = app_and_db
+    client = app.test_client()
+    active = client.get("/api/workspaces/active").get_json()
+    folder = db.conn.execute("SELECT id FROM folders LIMIT 1").fetchone()
+    fid = folder["id"]
+    _stage_folder_locally(db, active["id"], fid)
+    resp = client.delete(f"/api/folders/{fid}")
+    assert resp.status_code == 409
+    assert "staged locally" in resp.get_json()["error"]
 
 
 # ---- Pin / unpin + ordering ----

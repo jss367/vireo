@@ -319,7 +319,7 @@ async function syncLocalWorkspace() {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(isRecovery
-        ? {confirm_deletions: true}
+        ? {confirm_deletions: true, confirmed_deletion_count: deleted}
         : {confirm_deletions: deleted > 0, confirmed_deletion_count: deleted})
     });
     watchLocalWorkspaceJob(result.job_id, 'sync');

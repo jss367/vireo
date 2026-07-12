@@ -132,6 +132,27 @@ def has_local_workspace(db, workspace_id: int) -> bool:
     return local_state(db, workspace_id) is not None
 
 
+def folder_has_local_workspace(db, folder_id: int) -> tuple[bool, int | None]:
+    """True if this folder is covered by any workspace's local_workspace_folders row.
+
+    Folder-level mutations (relocate/delete on ``/api/folders/<id>``) rebase or
+    remove the ``folders`` row that ``local_workspace_folders`` and the manifest
+    point at, so a later sync/discard would be unable to restore the catalog.
+    Returns the workspace_id so callers can name it in the refusal message.
+    """
+    row = db.conn.execute(
+        """SELECT lwf.workspace_id
+           FROM local_workspace_folders lwf
+           JOIN local_workspaces lw ON lw.workspace_id = lwf.workspace_id
+           WHERE lwf.folder_id = ?
+           LIMIT 1""",
+        (folder_id,),
+    ).fetchone()
+    if row is None:
+        return False, None
+    return True, int(row["workspace_id"])
+
+
 def _db_mappings(db, workspace_id: int) -> list[dict]:
     rows = db.conn.execute(
         """SELECT folder_id, source_path, local_path, original_status, is_root, root_index
@@ -1007,11 +1028,11 @@ def sync_back(
         # attempt, but only for the exact deletions the user confirmed then
         # — any new deletion that appeared after the interruption still needs
         # a fresh count-bound confirmation, which is validated below against
-        # the persisted recovery marker.
+        # the persisted recovery marker OR a fresh ``confirmed_deletions``
+        # count the caller sends alongside ``confirm_deletions: true``.
         recovery_confirmed: set | None = None
         if resuming:
             allow_deletions = True
-            confirmed_deletions = None
             recovery_confirmed = _load_sync_recovery(vireo_dir, workspace_id)
 
         manifest = _load_manifest(vireo_dir, workspace_id)
@@ -1045,17 +1066,26 @@ def sync_back(
         baseline, local, changed, deleted = _local_changes(manifest)
         if deleted and not allow_deletions:
             raise LocalWorkspaceError(f"Local work deleted {len(deleted)} file(s); confirm deletions before syncing")
-        if not resuming and confirmed_deletions is not None and len(deleted) > confirmed_deletions:
+        # Fresh count-bound check applies to both initial and resumed syncs:
+        # if the caller sent a count and it no longer matches the current
+        # deletion set, force the UI to re-prompt against the current facts.
+        if confirmed_deletions is not None and len(deleted) > confirmed_deletions:
             raise LocalWorkspaceError(
                 f"Local deletions changed since you confirmed: {len(deleted)} file(s) would now be "
                 "deleted from the source. Review and confirm again."
             )
         # Resume path: any deletion that appeared after the first attempt was
         # interrupted was NOT part of the user's original count-bound
-        # confirmation. Refuse instead of silently authorizing extra source
-        # deletions when "Finish Sync-back" is clicked. The recovery UI can
-        # then send a fresh confirmation for the current set.
-        if resuming and recovery_confirmed is not None:
+        # confirmation. A caller providing a fresh ``confirmed_deletions`` that
+        # matches the current deletion count counts as re-confirming the
+        # current set; the recovery marker is rewritten below so a second
+        # interruption resumes against those same deletions. Without a fresh
+        # count the marker gate refuses instead of silently authorizing extra
+        # source deletions when "Finish Sync-back" is clicked.
+        fresh_confirmation = (
+            resuming and confirmed_deletions is not None and confirmed_deletions == len(deleted)
+        )
+        if resuming and recovery_confirmed is not None and not fresh_confirmation:
             new_deletions = [key for key in deleted if key not in recovery_confirmed]
             if new_deletions:
                 raise LocalWorkspaceError(
@@ -1121,13 +1151,18 @@ def sync_back(
         # an interruption is recognized as a partially-published sync. The
         # recovery marker records the confirmed deletion set so a resumed
         # sync cannot silently authorize additional deletions that appeared
-        # after the first attempt was interrupted.
+        # after the first attempt was interrupted. On a fresh count-bound
+        # confirmation during resume, rewrite the marker so a second
+        # interruption resumes against the newly-confirmed set instead of the
+        # original (now smaller) one.
         if not resuming:
             _write_sync_recovery(vireo_dir, workspace_id, deleted)
             db.conn.execute(
                 "UPDATE local_workspaces SET state='syncing' WHERE workspace_id=?", (workspace_id,)
             )
             db.conn.commit()
+        elif fresh_confirmation:
+            _write_sync_recovery(vireo_dir, workspace_id, deleted)
 
         total = len(changed) + len(deleted)
         done = 0

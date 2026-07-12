@@ -88,7 +88,7 @@ from render_source import (
     working_copy_path_if_satisfies as _working_copy_path_if_satisfies,
 )
 from schema import ensure_schema
-from services.local_workspace import has_local_workspace
+from services.local_workspace import folder_has_local_workspace, has_local_workspace
 from web.local_workspace import create_local_workspace_blueprint
 from web.pages import pages_blueprint
 from web.photo_labels import create_photo_labels_blueprint
@@ -4521,6 +4521,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not os.path.isdir(new_path):
             return json_error("path does not exist or is not a directory")
 
+        # Relocating a folder that a local workspace has rebased would leave
+        # local_workspace_folders and the manifest pointing at a path this
+        # route just moved out from under them, so a later sync/discard could
+        # not restore the catalog to the source layout.
+        staged, owner_ws = folder_has_local_workspace(db, folder_id)
+        if staged:
+            return json_error(
+                f"Cannot relocate this folder — workspace {owner_ws} has it staged locally. "
+                "Switch to that workspace and sync or discard the local copy first.",
+                409,
+            )
+
         # Capture the old path before the DB rewrite so we can rebase the
         # corresponding darktable output subdir on disk. Developed outputs
         # are nested under developed_folder_key(folder_path), so a path
@@ -4566,6 +4578,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/folders/<int:folder_id>", methods=["DELETE"])
     def api_folder_delete(folder_id):
         db = _get_db()
+        # Deleting a folder that a local workspace has rebased removes the
+        # folders row that local_workspace_folders and the manifest depend on,
+        # so a later sync/discard would be unable to restore the catalog.
+        staged, owner_ws = folder_has_local_workspace(db, folder_id)
+        if staged:
+            return json_error(
+                f"Cannot delete this folder — workspace {owner_ws} has it staged locally. "
+                "Switch to that workspace and sync or discard the local copy first.",
+                409,
+            )
         result = db.delete_folder(folder_id)
         # Clean up cached files alongside the cascaded photo rows so preview
         # files don't get orphaned on disk (untracked by preview_cache).

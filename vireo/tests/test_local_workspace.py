@@ -695,6 +695,92 @@ def test_sync_recovery_refuses_new_deletions_that_were_not_confirmed(local_works
     assert status(env["db"], env["workspace_id"], str(env["vireo_dir"]))["state"] == "recovery"
 
 
+def test_sync_recovery_accepts_fresh_count_confirmation_for_new_deletions(local_workspace_env, monkeypatch):
+    # If a new deletion appears after an interrupted sync, the recovery UI
+    # sends a fresh count-bound confirmation. The service must accept it,
+    # publish the new deletion, and rewrite the recovery marker so a second
+    # interruption resumes against the newly-confirmed set.
+    env = local_workspace_env
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    local_child = Path(_folder_path(env["db"], env["child_id"]))
+    local_root = Path(_folder_path(env["db"], env["root_id"]))
+    (local_child / "bird.jpg").write_bytes(b"edited-locally")
+    os.unlink(local_child / "bird.xmp")
+
+    real_publish = local_workspace._atomic_publish
+
+    def crashing_publish(local_path, remote_path):
+        real_publish(local_path, remote_path)
+        raise RuntimeError("simulated crash mid-sync")
+
+    monkeypatch.setattr(local_workspace, "_atomic_publish", crashing_publish)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        sync_back(
+            env["db"],
+            env["workspace_id"],
+            str(env["vireo_dir"]),
+            allow_deletions=True,
+            confirmed_deletions=1,
+        )
+
+    # After the crash the user deletes another file locally, then finishes the
+    # sync-back with a fresh count-bound confirmation covering both deletions.
+    os.unlink(local_root / "root.jpg")
+    monkeypatch.setattr(local_workspace, "_atomic_publish", real_publish)
+    sync_back(
+        env["db"],
+        env["workspace_id"],
+        str(env["vireo_dir"]),
+        allow_deletions=True,
+        confirmed_deletions=2,
+    )
+
+    assert not (env["source"] / "root.jpg").exists()
+    assert not (env["child"] / "bird.xmp").exists()
+    assert (env["child"] / "bird.jpg").read_bytes() == b"edited-locally"
+
+
+def test_sync_recovery_rejects_stale_count_confirmation_for_new_deletions(local_workspace_env, monkeypatch):
+    # A resume with a fresh count that no longer matches the current deletion
+    # set must refuse — the confirmation is stale and the UI has to re-prompt.
+    env = local_workspace_env
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    local_child = Path(_folder_path(env["db"], env["child_id"]))
+    local_root = Path(_folder_path(env["db"], env["root_id"]))
+    (local_child / "bird.jpg").write_bytes(b"edited-locally")
+    os.unlink(local_child / "bird.xmp")
+
+    real_publish = local_workspace._atomic_publish
+
+    def crashing_publish(local_path, remote_path):
+        real_publish(local_path, remote_path)
+        raise RuntimeError("simulated crash mid-sync")
+
+    monkeypatch.setattr(local_workspace, "_atomic_publish", crashing_publish)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        sync_back(
+            env["db"],
+            env["workspace_id"],
+            str(env["vireo_dir"]),
+            allow_deletions=True,
+            confirmed_deletions=1,
+        )
+
+    os.unlink(local_root / "root.jpg")
+    monkeypatch.setattr(local_workspace, "_atomic_publish", real_publish)
+    with pytest.raises(LocalWorkspaceError, match="confirm again"):
+        sync_back(
+            env["db"],
+            env["workspace_id"],
+            str(env["vireo_dir"]),
+            allow_deletions=True,
+            confirmed_deletions=1,
+        )
+
+    # The unconfirmed new deletion did not reach the source.
+    assert (env["source"] / "root.jpg").exists()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Windows test runners may not permit symlinks")
 def test_sync_refuses_symlinked_source_ancestor_for_new_local_file(local_workspace_env, tmp_path):
     # If a source-side parent is replaced with a symlink after staging,
