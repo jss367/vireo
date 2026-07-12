@@ -13274,6 +13274,454 @@ def test_update_keyword_idempotent_name_update_does_not_auto_retype(tmp_path):
     assert row["taxon_id"] is None
 
 
+def test_update_keyword_rename_normalizes_edge_quotes(tmp_path):
+    """Rename must apply the same normalization as add_keyword so a
+    request like `‘apapane` stores `apapane`. Without this the PUT path
+    bypasses the duplicate-prevention contract enforced on insert."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        kid = db.add_keyword("apapane")
+        db.update_keyword(kid, name="‘apapane")
+
+        row = db.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (kid,)
+        ).fetchone()
+        assert row["name"] == "apapane"
+    finally:
+        db.close()
+
+
+def test_update_keyword_rename_rejects_empty_after_normalization(tmp_path):
+    """A rename whose normalized value is empty (quote-only input) must
+    raise ValueError, mirroring add_keyword. Otherwise the PUT path
+    would store an invisible/invalid keyword row."""
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        kid = db.add_keyword("Real Keyword")
+
+        with pytest.raises(ValueError):
+            db.update_keyword(kid, name="'")
+        with pytest.raises(ValueError):
+            db.update_keyword(kid, name="“”")
+
+        # Original name still in place.
+        row = db.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (kid,)
+        ).fetchone()
+        assert row["name"] == "Real Keyword"
+    finally:
+        db.close()
+
+
+def test_update_keyword_rename_preserves_okina(tmp_path):
+    """Legitimate leading okina (U+02BB) must survive rename normalization
+    the same way it does through add_keyword — species names such as
+    'ʻApapane' are the point of that carve-out."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        kid = db.add_keyword("Placeholder")
+        db.update_keyword(kid, name="ʻApapane")
+
+        row = db.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (kid,)
+        ).fetchone()
+        assert row["name"] == "ʻApapane"
+    finally:
+        db.close()
+
+
+def test_update_keyword_same_name_retype_merges_into_peer(tmp_path):
+    """A PUT that normalizes the name back to the current stored value but
+    changes the type (e.g. `{name: "‘apapane", type: "taxonomy"}` on a
+    general `apapane` row) must run the same peer/collision check that a
+    real rename does. Otherwise the UPDATE silently produces two
+    taxonomy rows that normalize to the same key at the same slot,
+    because UNIQUE(name, parent_id) doesn't constrain NULL parents.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        # Top-level taxonomy `apapane` already exists.
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type) "
+            "VALUES (?, NULL, 1, 'taxonomy')",
+            ("apapane",),
+        )
+        taxonomy_id = cur.lastrowid
+        # A separate top-level general `apapane` row also exists.
+        general_id = db.add_keyword("apapane", kw_type="general")
+        assert general_id != taxonomy_id
+
+        # PUT-style retype whose name normalizes back to the current stored
+        # value (`‘apapane` → `apapane`) but whose type moves to
+        # 'taxonomy'. Must merge into the existing taxonomy peer rather
+        # than promoting the general row and leaving two taxonomy rows.
+        effective_id = db.update_keyword(
+            general_id, name="‘apapane", type="taxonomy"
+        )
+        assert effective_id == taxonomy_id
+
+        # Exactly one top-level taxonomy `apapane` row must remain.
+        rows = db.conn.execute(
+            "SELECT id FROM keywords "
+            "WHERE vireo_normalize_keyword(name) = 'apapane' COLLATE NOCASE "
+            "AND parent_id IS NULL AND type = 'taxonomy'"
+        ).fetchall()
+        assert [r["id"] for r in rows] == [taxonomy_id]
+        # The old general row must be gone (merged away).
+        gone = db.conn.execute(
+            "SELECT id FROM keywords WHERE id = ?", (general_id,)
+        ).fetchone()
+        assert gone is None
+    finally:
+        db.close()
+
+
+def test_update_keyword_type_only_put_merges_into_normalized_peer(tmp_path):
+    """A type-only PUT (no `name` kwarg) must still run the same-slot peer
+    check. Otherwise, changing a clean general `apapane` row's type to
+    `taxonomy` via the Browse/Keywords type dropdown while a legacy
+    edge-quoted `‘apapane` taxonomy peer exists leaves two normalized-equal
+    taxonomy rows at the top level (UNIQUE(name, parent_id) treats NULL
+    parents as distinct), so later calls bind to either id at random.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        # Legacy edge-quoted taxonomy row at the top level (imported/
+        # upgraded DB shape).
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type) "
+            "VALUES (?, NULL, 1, 'taxonomy')",
+            ("‘apapane",),
+        )
+        taxonomy_id = cur.lastrowid
+        # Clean general peer at the same slot.
+        general_id = db.add_keyword("apapane", kw_type="general")
+        assert general_id != taxonomy_id
+
+        # Type-only PUT: the dropdown changes just the type, no name.
+        effective_id = db.update_keyword(general_id, type="taxonomy")
+        assert effective_id == taxonomy_id
+
+        # Exactly one top-level taxonomy row must remain for the normalized
+        # name, and it must be the pre-existing taxonomy row.
+        rows = db.conn.execute(
+            "SELECT id FROM keywords "
+            "WHERE vireo_normalize_keyword(name) = 'apapane' COLLATE NOCASE "
+            "AND parent_id IS NULL AND type = 'taxonomy'"
+        ).fetchall()
+        assert [r["id"] for r in rows] == [taxonomy_id]
+        # The old general row must be gone (merged away).
+        gone = db.conn.execute(
+            "SELECT id FROM keywords WHERE id = ?", (general_id,)
+        ).fetchone()
+        assert gone is None
+    finally:
+        db.close()
+
+
+def test_update_keyword_merge_canonicalizes_legacy_peer_name(tmp_path):
+    """When update_keyword merges a clean row into a legacy edge-quote peer,
+    the survivor's stored name must be the canonical spelling and any
+    pending sidecar changes queued under the legacy spelling must be
+    retargeted to the clean name. Without this, the merge preserves the
+    legacy `‘apapane` as the survivor and _merge_keyword_into rewrites the
+    source's pending changes onto that quoted value, so the keyword remains
+    visible/exported as `‘apapane` even though the requested rename was
+    `apapane`.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        ws_id = db.ensure_default_workspace()
+        db.set_active_workspace(ws_id)
+        fid = db.add_folder('/photos', name='photos')
+        p1 = db.add_photo(
+            folder_id=fid, filename='a.jpg', extension='.jpg',
+            file_size=100, file_mtime=1.0,
+        )
+        p2 = db.add_photo(
+            folder_id=fid, filename='b.jpg', extension='.jpg',
+            file_size=100, file_mtime=1.0,
+        )
+        # Legacy edge-quoted taxonomy row at the top level (imported/
+        # upgraded DB shape). One photo is tagged with it, and its
+        # pending sidecar add is queued under the legacy spelling.
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type) "
+            "VALUES (?, NULL, 1, 'taxonomy')",
+            ("‘apapane",),
+        )
+        legacy_id = cur.lastrowid
+        db.tag_photo(p1, legacy_id)
+        db.queue_change(p1, 'keyword_add', '‘apapane')
+        # Clean general peer at the same slot, tagged on the other photo.
+        general_id = db.add_keyword("apapane", kw_type="general")
+        db.tag_photo(p2, general_id)
+        assert general_id != legacy_id
+
+        # PUT-style retype: turn the clean general row into taxonomy. The
+        # peer lookup finds the legacy row and merges the clean row into
+        # it. The survivor must end up as clean `apapane`, not `‘apapane`.
+        effective_id = db.update_keyword(general_id, type="taxonomy")
+        assert effective_id == legacy_id
+
+        # Survivor's stored name must be the canonical spelling.
+        row = db.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (legacy_id,)
+        ).fetchone()
+        assert row is not None
+        assert row["name"] == "apapane"
+
+        # Pending change queued under the legacy spelling must now
+        # reference the canonical name so sync_to_xmp doesn't leak the
+        # stray-quote spelling back into the sidecar.
+        pending = db.conn.execute(
+            "SELECT value FROM pending_changes "
+            "WHERE photo_id = ? AND change_type = 'keyword_add'",
+            (p1,),
+        ).fetchall()
+        values = sorted(r["value"] for r in pending)
+        assert values == ["apapane"], values
+    finally:
+        db.close()
+
+
+def test_update_keyword_merge_canonicalizes_non_root_peer_name(tmp_path):
+    """The peer-merge canonicalization must work for child keywords too.
+
+    Regression: for non-root rows the surviving `(name, parent_id)` slot is
+    UNIQUE-constrained. Normalizing the peer's stored spelling in place
+    while the clean source still occupies that slot silently no-ops on
+    ``IntegrityError``, so ``_merge_keyword_into`` then deletes the clean
+    source and leaves a legacy-spelled survivor ``Parent > ‘Hawk``. The fix
+    merges first (freeing the slot) and normalizes the peer afterwards, so
+    the surviving child row stores the canonical name.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        ws_id = db.ensure_default_workspace()
+        db.set_active_workspace(ws_id)
+        fid = db.add_folder('/photos', name='photos')
+        p1 = db.add_photo(
+            folder_id=fid, filename='a.jpg', extension='.jpg',
+            file_size=100, file_mtime=1.0,
+        )
+        p2 = db.add_photo(
+            folder_id=fid, filename='b.jpg', extension='.jpg',
+            file_size=100, file_mtime=1.0,
+        )
+        parent_id = db.add_keyword("Parent", kw_type="general")
+        # Legacy edge-quoted taxonomy child (imported/upgraded DB shape).
+        # One photo carries it and its pending sidecar add references the
+        # legacy spelling.
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type) "
+            "VALUES (?, ?, 1, 'taxonomy')",
+            ("‘Hawk", parent_id),
+        )
+        legacy_id = cur.lastrowid
+        db.tag_photo(p1, legacy_id)
+        db.queue_change(p1, 'keyword_add', '‘Hawk')
+        # Clean general child at the same parent, tagged on the other photo.
+        general_id = db.add_keyword("Hawk", parent_id=parent_id, kw_type="general")
+        db.tag_photo(p2, general_id)
+        assert general_id != legacy_id
+
+        # PUT-style retype: turn the clean general child into taxonomy. The
+        # peer lookup finds the legacy child at the same parent and merges
+        # the clean row into it. The survivor must end up as clean `Hawk`,
+        # not `‘Hawk` -- otherwise the UNIQUE(name, parent_id) collision
+        # inside _normalize_keyword_row_name silently leaves the legacy
+        # spelling in place.
+        effective_id = db.update_keyword(general_id, type="taxonomy")
+        assert effective_id == legacy_id
+
+        # Survivor's stored name must be the canonical spelling.
+        row = db.conn.execute(
+            "SELECT name, parent_id, type FROM keywords WHERE id = ?",
+            (legacy_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["name"] == "Hawk", row["name"]
+        assert row["parent_id"] == parent_id
+        assert row["type"] == "taxonomy"
+
+        # Exactly one child row must remain for the normalized name under
+        # this parent.
+        rows = db.conn.execute(
+            "SELECT id FROM keywords "
+            "WHERE vireo_normalize_keyword(name) = 'hawk' COLLATE NOCASE "
+            "AND parent_id = ? AND type = 'taxonomy'",
+            (parent_id,),
+        ).fetchall()
+        assert [r["id"] for r in rows] == [legacy_id]
+        # The old general row must be gone (merged away).
+        gone = db.conn.execute(
+            "SELECT id FROM keywords WHERE id = ?", (general_id,)
+        ).fetchone()
+        assert gone is None
+
+        # Pending change queued under the legacy spelling must now
+        # reference the canonical name so sync_to_xmp doesn't leak the
+        # stray-quote spelling back into the sidecar.
+        pending = db.conn.execute(
+            "SELECT value FROM pending_changes "
+            "WHERE photo_id = ? AND change_type = 'keyword_add'",
+            (p1,),
+        ).fetchall()
+        values = sorted(r["value"] for r in pending)
+        assert values == ["Hawk"], values
+    finally:
+        db.close()
+
+
+def test_add_keyword_species_prefers_taxonomy_peer_over_general_exact_match(tmp_path):
+    """When both a clean `general` row `apapane` and a legacy `taxonomy`
+    edge-quote row `‘apapane` exist at the same slot, add_keyword('apapane',
+    is_species=True) must resolve to the taxonomy peer. Otherwise the fast
+    exact-match query returns the general row and the promotion path stamps
+    a second taxonomy row with the same normalized name — silently
+    duplicating the species keyword and letting later calls bind to either
+    id at random.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        # Legacy edge-quoted taxonomy row that survived normalization on
+        # insert (the UDF fallback is only consulted for casing/quote
+        # variants of the requested name; here we insert directly to
+        # simulate the imported-DB shape Codex flagged).
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type) "
+            "VALUES (?, NULL, 1, 'taxonomy')",
+            ("‘apapane",),
+        )
+        taxonomy_id = cur.lastrowid
+        # A clean general row also exists at the same slot.
+        general_id = db.add_keyword("apapane", kw_type='general')
+        assert general_id != taxonomy_id
+
+        resolved = db.add_keyword("apapane", is_species=True)
+        assert resolved == taxonomy_id
+
+        # Guard against the silent-duplicate: we must NOT have promoted the
+        # general row into a second taxonomy row.
+        rows = db.conn.execute(
+            "SELECT id, type FROM keywords "
+            "WHERE vireo_normalize_keyword(name) = 'apapane' COLLATE NOCASE "
+            "AND parent_id IS NULL AND type = 'taxonomy'"
+        ).fetchall()
+        assert [r["id"] for r in rows] == [taxonomy_id]
+        general_row = db.conn.execute(
+            "SELECT type FROM keywords WHERE id = ?", (general_id,)
+        ).fetchone()
+        assert general_row["type"] == "general"
+    finally:
+        db.close()
+
+
+def test_add_keyword_untyped_prefers_taxonomy_peer_over_general_auto_promote(
+    tmp_path,
+):
+    """Untyped `add_keyword('apapane')` must not silently promote the clean
+    general row to taxonomy when a legacy edge-quote taxonomy peer exists
+    at the same slot. The fast exact-match query returns the general row
+    (raw name matches under COLLATE NOCASE) and the auto-promote branch
+    below would stamp it with type='taxonomy' via
+    `_lookup_taxon_id_for_keyword` — producing two normalized-equal
+    taxonomy rows at the same slot. Untyped callers (typing into a
+    generic keyword input) would then bind to either at random.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        # Seed a taxon so `_lookup_taxon_id_for_keyword('apapane')` matches
+        # and would otherwise trigger the auto-promote path.
+        db.conn.execute(
+            "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+            "VALUES (1, 'Himatione sanguinea', 'apapane', 'species', 'Animalia')"
+        )
+        # Legacy edge-quoted taxonomy row (imported/upgraded DB shape).
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type) "
+            "VALUES (?, NULL, 1, 'taxonomy')",
+            ("‘apapane",),
+        )
+        taxonomy_id = cur.lastrowid
+        # A clean general row exists at the same slot.
+        general_id = db.add_keyword("apapane", kw_type='general')
+        assert general_id != taxonomy_id
+
+        # Untyped call from a generic keyword path — no is_species, no
+        # kw_type.
+        resolved = db.add_keyword("apapane")
+        assert resolved == taxonomy_id
+
+        # Guard against the silent-duplicate: the general row must NOT
+        # have been promoted into a second taxonomy row.
+        taxonomy_rows = db.conn.execute(
+            "SELECT id FROM keywords "
+            "WHERE vireo_normalize_keyword(name) = 'apapane' COLLATE NOCASE "
+            "AND parent_id IS NULL AND type = 'taxonomy'"
+        ).fetchall()
+        assert [r["id"] for r in taxonomy_rows] == [taxonomy_id]
+        general_row = db.conn.execute(
+            "SELECT type FROM keywords WHERE id = ?", (general_id,)
+        ).fetchone()
+        assert general_row["type"] == "general"
+    finally:
+        db.close()
+
+
+def test_add_keyword_untyped_prefers_higher_priority_peer_over_individual_exact(
+    tmp_path,
+):
+    """Untyped `add_keyword('apapane')` must not bind to an exact clean
+    lower-priority typed row when a legacy edge-quote higher-priority peer
+    exists at the same slot. The fast exact-match query returns the
+    individual row (raw name matches under COLLATE NOCASE) and the earlier
+    fix only checked for a taxonomy peer when the exact match was
+    'general' — leaving the individual/location/genre exact-match case
+    silently binding to the wrong row and contradicting the
+    taxonomy > genre > individual > location > general priority.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        # Legacy edge-quoted taxonomy row (imported/upgraded DB shape).
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type) "
+            "VALUES (?, NULL, 1, 'taxonomy')",
+            ("‘apapane",),
+        )
+        taxonomy_id = cur.lastrowid
+        # A clean individual row also exists at the same slot (e.g. a
+        # person tag). This is a deliberate lower-priority type.
+        individual_id = db.add_keyword("apapane", kw_type='individual')
+        assert individual_id != taxonomy_id
+
+        # Untyped call from a generic keyword path — no is_species, no
+        # kw_type.
+        resolved = db.add_keyword("apapane")
+        assert resolved == taxonomy_id
+
+        # The individual row must remain individual — no silent type
+        # rewrite.
+        individual_row = db.conn.execute(
+            "SELECT type FROM keywords WHERE id = ?", (individual_id,)
+        ).fetchone()
+        assert individual_row["type"] == "individual"
+    finally:
+        db.close()
+
+
 def test_add_photo_retries_on_database_is_locked(tmp_path):
     """The INSERT inside add_photo must retry transient 'database is locked'.
 
@@ -15292,3 +15740,44 @@ def test_best_photo_by_taxon(db):
     db.conn.commit()
     best = db.get_life_list_best_photo_by_taxon([ids['Melospiza melodia']])
     assert best[ids['Melospiza melodia']]['filename'] == 'high.jpg'
+
+
+def test_accept_prediction_queues_normalized_species(tmp_path):
+    """When the prediction's species carries stray edge quotes (e.g.
+    `‘apapane`), accept_prediction must tag the photo with the normalized
+    row AND queue the pending sidecar keyword_add / return the payload
+    using the stored (clean) spelling. Without this, the DB tag points to
+    `apapane` while pending changes and the response payload use
+    `‘apapane`, so a later delete queues the clean name, pending changes
+    stop cancelling, and XMP sync persists the stray-quote label."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species="‘apapane",
+                      confidence=0.9, model="bioclip")
+    pred = db.get_predictions()[0]
+
+    result = db.accept_prediction(pred["id"])
+    # The stored keyword name is the normalized (clean) spelling.
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (result["keyword_id"],)
+    ).fetchone()
+    assert row["name"] == "apapane"
+    # Response payload uses the stored spelling too.
+    assert result["species"] == "apapane"
+    # Pending keyword_add uses the clean spelling — a later remove of the
+    # stored keyword can then cancel the queued add.
+    pending = db.get_pending_changes()
+    add_values = [
+        c["value"] for c in pending if c["change_type"] == "keyword_add"
+    ]
+    assert "apapane" in add_values
+    assert "‘apapane" not in add_values

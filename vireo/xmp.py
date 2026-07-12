@@ -9,6 +9,8 @@ import math
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+from keyword_normalization import keyword_match_key
+
 log = logging.getLogger(__name__)
 
 # ── Namespace constants (single source of truth) ────────────────────────
@@ -360,12 +362,21 @@ def write_edit_recipe(xmp_path, recipe_json):
     return True
 
 
-def remove_keywords(xmp_path, keywords_to_remove):
+def remove_keywords(xmp_path, keywords_to_remove, *, hierarchical=True):
     """Remove keywords from dc:subject and lr:hierarchicalSubject in an XMP file.
 
     Args:
         xmp_path: path to the .xmp sidecar
         keywords_to_remove: set of keyword strings to remove
+        hierarchical: When True (default), a hierarchical entry is deleted
+            if any of its pipe-delimited segments matches — used for real
+            keyword removals so ``Animals|Birds|Hawk`` is dropped when the
+            user removes ``Hawk``. When False, hierarchies are left
+            untouched and only the flat ``dc:subject`` bag is pruned — used
+            by the sync path to canonicalize add-equivalent flat variants
+            (e.g. strip a legacy ``'apapane`` before writing the clean
+            ``apapane``) without deleting an unrelated hierarchy whose
+            leaf happens to match the added flat keyword.
     """
     path = Path(xmp_path)
     if not path.exists():
@@ -378,25 +389,40 @@ def remove_keywords(xmp_path, keywords_to_remove):
         return
 
     root = tree.getroot()
-    remove_lower = {kw.lower() for kw in keywords_to_remove}
+    # Compare using the same normalized key add_keyword() uses on insert so a
+    # DB removal of `apapane` also clears a sidecar `‘apapane` (or `´apapane`
+    # / whitespace/casing variants). A plain `.lower()` comparison would leave
+    # the quoted <rdf:li> in place; the next XMP import path would then
+    # re-add the keyword the user removed. Drop empty keys so removing a
+    # keyword whose name normalizes to `""` doesn't accidentally match empty
+    # hierarchical segments (e.g. `"|Birds|"` -> `["", "Birds", ""]`).
+    remove_keys = {keyword_match_key(kw) for kw in keywords_to_remove}
+    remove_keys.discard("")
+    if not remove_keys:
+        return
     removed = []
 
     # Remove from dc:subject bag
     for bag in root.findall(f".//{{{NS_DC}}}subject/{{{NS_RDF}}}Bag"):
         for li in bag.findall(f"{{{NS_RDF}}}li"):
-            if li.text and li.text.lower() in remove_lower:
+            if li.text and keyword_match_key(li.text) in remove_keys:
                 removed.append(li.text)
                 bag.remove(li)
 
-    # Remove from lr:hierarchicalSubject bag (matches if any segment matches)
-    for bag in root.findall(f".//{{{NS_LR}}}hierarchicalSubject/{{{NS_RDF}}}Bag"):
-        for li in bag.findall(f"{{{NS_RDF}}}li"):
-            if li.text:
-                # Hierarchical keywords use pipe-delimited paths like "Animals|Birds|Hawk"
-                segments = {s.lower() for s in li.text.split("|")}
-                if segments & remove_lower:
-                    removed.append(li.text)
-                    bag.remove(li)
+    # Remove from lr:hierarchicalSubject bag (matches if any segment matches).
+    # Skipped when hierarchical=False: the sync path uses the flat-only mode
+    # to canonicalize add-equivalent variants without accidentally deleting
+    # unrelated hierarchies that share a segment with the added flat leaf.
+    if hierarchical:
+        for bag in root.findall(f".//{{{NS_LR}}}hierarchicalSubject/{{{NS_RDF}}}Bag"):
+            for li in bag.findall(f"{{{NS_RDF}}}li"):
+                if li.text:
+                    # Hierarchical keywords use pipe-delimited paths like "Animals|Birds|Hawk"
+                    segments = {keyword_match_key(s) for s in li.text.split("|")}
+                    segments.discard("")
+                    if segments & remove_keys:
+                        removed.append(li.text)
+                        bag.remove(li)
 
     if removed:
         ET.indent(tree, space="  ")

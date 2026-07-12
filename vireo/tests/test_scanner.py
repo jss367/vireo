@@ -664,6 +664,43 @@ def test_scan_imports_xmp_keywords(tmp_path):
     assert 'Birds' in kw_names
 
 
+def test_scan_skips_empty_normalized_keywords(tmp_path):
+    """A sidecar with a lone quote must not abort the scan.
+
+    add_keyword() now raises ValueError when a name normalizes to `""`
+    (e.g. `"'"` or a bare smart quote). Without a caller-side filter, the
+    unhandled ValueError inside _import_keywords_for_photo would propagate
+    and take down the whole scanner run for one malformed <rdf:li>.
+    """
+    from db import Database
+    from scanner import scan
+    from xmp import write_sidecar
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    Image.new('RGB', (100, 100)).save(os.path.join(root, 'bird.jpg'))
+
+    write_sidecar(
+        os.path.join(root, 'bird.xmp'),
+        flat_keywords={"'", "Northern cardinal"},
+        hierarchical_keywords={"Birds|'|Northern cardinal", "Birds|Raptors"},
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+
+    photos = db.get_photos()
+    assert len(photos) == 1
+    kw_names = {k['name'] for k in db.get_photo_keywords(photos[0]['id'])}
+    # The valid flat keyword lands; the lone-quote entry is skipped without
+    # raising. The empty-segment hierarchy is dropped entirely (chain
+    # broken), but the well-formed sibling still lands as a hierarchy.
+    assert 'Northern cardinal' in kw_names
+    tree_names = {k['name'] for k in db.get_keyword_tree()}
+    assert 'Raptors' in tree_names
+    assert 'Birds' in tree_names
+
+
 def test_scan_imports_hierarchical_keywords(tmp_path):
     """scan() creates keyword hierarchy from lr:hierarchicalSubject."""
     from db import Database

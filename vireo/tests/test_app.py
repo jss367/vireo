@@ -78,6 +78,78 @@ def test_api_add_keyword_accepts_existing_keyword_id(app_and_db):
     assert "Cardinal" in names
 
 
+def test_api_add_keyword_skips_normalized_peer_variant(app_and_db):
+    """Single-photo add treats a normalized peer variant as already tagged.
+
+    Regression for Codex thread r3565300310. `api_selection_keyword_suggestions`
+    collapses normalized variants into one representative id; the Browse UI
+    reuses that id for its single-photo Add action. If the photo already
+    carries a legacy edge-quote peer (`‘Cardinal`) and the caller adds the
+    clean `Cardinal` row, the route must not stack the clean row on top or
+    queue a phantom clean `keyword_add` — that leaves duplicate in-app tags
+    and duplicate <rdf:li> entries after sync. Mirrors the batch behavior
+    covered by test_batch_keyword_route_skips_normalized_peer_variants.
+    """
+    app, db = app_and_db
+    photo_row = db.conn.execute(
+        "SELECT id FROM photos WHERE filename = 'bird1.jpg'"
+    ).fetchone()
+    photo_id = photo_row["id"]
+
+    clean_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Cardinal'"
+    ).fetchone()["id"]
+    legacy_id = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES (?, NULL, 0, 'general')",
+        ("‘Cardinal",),
+    ).lastrowid
+    # Untag the fixture clean link so bird1 carries only the LEGACY variant;
+    # the endpoint's peer expansion is what should make it look "already
+    # tagged" rather than a stray exact-id match.
+    db.conn.execute(
+        "DELETE FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (photo_id, clean_id),
+    )
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (photo_id, legacy_id),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{photo_id}/keywords",
+        json={"keyword_id": clean_id},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["ok"] is True
+    # The canonical id is returned even though nothing new was tagged, so
+    # callers that store keyword_id from the response still get the clean
+    # row for subsequent operations.
+    assert body["keyword_id"] == clean_id
+
+    # bird1 should still carry ONLY the legacy variant — no clean row
+    # stacked on top.
+    tags = db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords "
+        "WHERE photo_id = ? AND keyword_id IN (?, ?)",
+        (photo_id, clean_id, legacy_id),
+    ).fetchall()
+    assert sorted(row["keyword_id"] for row in tags) == [legacy_id]
+
+    # No pending clean-name add should be queued — the sidecar already
+    # carries a normalized-equivalent entry.
+    pending = db.conn.execute(
+        """SELECT COUNT(*) AS n FROM pending_changes
+           WHERE change_type = 'keyword_add' AND value = 'Cardinal'
+             AND photo_id = ?""",
+        (photo_id,),
+    ).fetchone()
+    assert pending["n"] == 0
+
+
 def test_help_static_assets_served(app_and_db):
     """The help modal's JS, JSON, and vendored Fuse library must be served.
 
@@ -629,6 +701,190 @@ def test_encounter_species_confirm(app_and_db):
     assert len(kw_adds) == len(photo_ids)
 
 
+def test_encounter_species_canonicalizes_legacy_variant_rows(app_and_db):
+    """Photos tagged with a legacy edge-quote species row get migrated to the
+    clean row instead of ending up with duplicate normalized-equivalent tags.
+
+    Regression for the case where an upgraded DB carries BOTH a legacy quoted
+    row (e.g. `‘apapane`) AND a clean row (`apapane`) as separate taxonomy
+    keywords. add_keyword('apapane', is_species=True) picks the clean row
+    (exact match), the replacement path is skipped because the normalized
+    match_key of previous_species equals the requested species, and without
+    canonicalization the legacy tag is left in place, giving the photo two
+    normalized-equivalent species tags.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    # Insert both rows directly to bypass add_keyword's normalization — mimics
+    # an upgraded DB with a legacy variant alongside a clean row.
+    legacy_kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('‘apapane', 'taxonomy', 1)"
+    ).lastrowid
+    clean_kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('apapane', 'taxonomy', 1)"
+    ).lastrowid
+    db.conn.commit()
+
+    photos = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 2").fetchall()
+    p_legacy, p_other = photos[0]["id"], photos[1]["id"]
+    db.tag_photo(p_legacy, legacy_kid)
+
+    resp = client.post(
+        '/api/encounters/species',
+        json={"species": "apapane", "photo_ids": [p_legacy, p_other]},
+    )
+    assert resp.status_code == 200
+
+    # Both photos should carry exactly one apapane taxonomy tag (the clean
+    # row) — no duplicate legacy row alongside.
+    for pid in (p_legacy, p_other):
+        species_tags = db.conn.execute(
+            """SELECT k.id, k.name FROM keywords k
+               JOIN photo_keywords pk ON pk.keyword_id = k.id
+               WHERE pk.photo_id = ? AND k.is_species = 1""",
+            (pid,),
+        ).fetchall()
+        assert len(species_tags) == 1, (
+            f"photo {pid} should have exactly one species tag after canonicalization, "
+            f"got {[dict(t) for t in species_tags]!r}"
+        )
+        assert species_tags[0]["id"] == clean_kid
+        assert species_tags[0]["name"] == "apapane"
+
+    # The legacy stored spelling must be queued for XMP removal so the
+    # sidecar drops the quoted entry.
+    pending = db.get_pending_changes()
+    legacy_removes = [
+        c for c in pending
+        if c["change_type"] == "keyword_remove"
+        and c["photo_id"] == p_legacy
+        and c["value"] == "‘apapane"
+    ]
+    assert legacy_removes, (
+        f"expected a keyword_remove for the legacy '‘apapane' spelling on photo {p_legacy}; "
+        f"pending: {pending!r}"
+    )
+
+
+def test_encounter_species_canonicalizes_taxonomy_only_legacy_variant(app_and_db):
+    """Legacy `type='taxonomy'` rows without `is_species=1` are still species tags.
+
+    The endpoint elsewhere treats a keyword as a species when
+    ``is_species = 1 OR type = 'taxonomy'`` (see
+    ``Database.get_confirmed_species_for_photo`` and related helpers). Rows can
+    end up with ``type='taxonomy', is_species=0`` after a user promotes a
+    general keyword to taxonomy via the type dropdown, or after an upgrade
+    path that stamped ``type`` without flipping ``is_species``.
+
+    If the canonicalization pass only checks ``is_species = 1``, such a legacy
+    row is invisible to it and the photo keeps the legacy tag alongside the
+    clean row that ``add_keyword`` resolves — the same duplicate-tag failure
+    covered by ``test_encounter_species_canonicalizes_legacy_variant_rows``,
+    but on the taxonomy-only branch of species membership.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    # Legacy edge-quote row with taxonomy typing but is_species=0 — this
+    # combination is what the canonicalization query previously missed.
+    legacy_kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('‘apapane', 'taxonomy', 0)"
+    ).lastrowid
+    clean_kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('apapane', 'taxonomy', 1)"
+    ).lastrowid
+    db.conn.commit()
+
+    photos = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 2").fetchall()
+    p_legacy, p_other = photos[0]["id"], photos[1]["id"]
+    db.tag_photo(p_legacy, legacy_kid)
+
+    resp = client.post(
+        '/api/encounters/species',
+        json={"species": "apapane", "photo_ids": [p_legacy, p_other]},
+    )
+    assert resp.status_code == 200
+
+    # The legacy taxonomy-only row must be untagged from p_legacy, leaving
+    # exactly the clean species row. Species membership matches the
+    # endpoint's own semantics: is_species=1 OR type='taxonomy'.
+    for pid in (p_legacy, p_other):
+        species_tags = db.conn.execute(
+            """SELECT k.id, k.name FROM keywords k
+               JOIN photo_keywords pk ON pk.keyword_id = k.id
+               WHERE pk.photo_id = ?
+                 AND (k.is_species = 1 OR k.type = 'taxonomy')""",
+            (pid,),
+        ).fetchall()
+        assert len(species_tags) == 1, (
+            f"photo {pid} should have exactly one species tag after canonicalization "
+            f"of the taxonomy-only legacy row, got {[dict(t) for t in species_tags]!r}"
+        )
+        assert species_tags[0]["id"] == clean_kid
+        assert species_tags[0]["name"] == "apapane"
+
+    # The legacy stored spelling must be queued for XMP removal so the
+    # sidecar drops the quoted entry.
+    pending = db.get_pending_changes()
+    legacy_removes = [
+        c for c in pending
+        if c["change_type"] == "keyword_remove"
+        and c["photo_id"] == p_legacy
+        and c["value"] == "‘apapane"
+    ]
+    assert legacy_removes, (
+        f"expected a keyword_remove for the legacy '‘apapane' spelling on photo {p_legacy}; "
+        f"pending: {pending!r}"
+    )
+
+
+def test_encounter_species_replacement_finds_taxonomy_only_previous(app_and_db):
+    """Replacement path resolves ``previous_species`` via the taxonomy-only rule.
+
+    When ``previous_species`` (drawn from the pipeline cache's
+    ``confirmed_species``) normalizes to a stored row that carries
+    ``type='taxonomy'`` but ``is_species=0``, the ``old_kid`` lookup must find
+    it. Without ``OR type='taxonomy'`` it misses, ``is_replacement`` stays true
+    but no ``old_kid`` is resolved, so the previously-tagged photo keeps the
+    legacy tag while ``add_keyword`` adds the new species alongside it —
+    leaving two normalized-equivalent taxonomy tags on the same photo.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    prev_kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('apapane', 'taxonomy', 0)"
+    ).lastrowid
+    db.conn.commit()
+
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+    db.tag_photo(photo_id, prev_kid)
+
+    _seed_encounter_cache(app, db, [photo_id], confirmed_species="apapane")
+
+    resp = client.post(
+        '/api/encounters/species',
+        json={"species": "iiwi", "photo_ids": [photo_id]},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json().get("previous_species") == "apapane"
+
+    remaining = db.conn.execute(
+        """SELECT k.name FROM keywords k
+           JOIN photo_keywords pk ON pk.keyword_id = k.id
+           WHERE pk.photo_id = ?
+             AND (k.is_species = 1 OR k.type = 'taxonomy')""",
+        (photo_id,),
+    ).fetchall()
+    names = sorted(row["name"] for row in remaining)
+    assert names == ["iiwi"], (
+        f"expected only the new species after replacement, got {names!r}"
+    )
+
+
 def test_encounter_species_confirm_ignores_corrupt_pipeline_cache(app_and_db):
     """A bad pipeline cache must not turn species confirmation into a 500."""
     app, db = app_and_db
@@ -656,7 +912,7 @@ def test_encounter_species_confirm_ignores_corrupt_pipeline_cache(app_and_db):
 
 def test_encounter_species_validation(app_and_db):
     """POST /api/encounters/species validates required fields."""
-    app, _ = app_and_db
+    app, db = app_and_db
     client = app.test_client()
 
     resp = client.post('/api/encounters/species', json={"species": ""})
@@ -665,6 +921,21 @@ def test_encounter_species_validation(app_and_db):
     resp = client.post('/api/encounters/species',
                        json={"species": "Robin", "photo_ids": []})
     assert resp.status_code == 400
+
+    # A species that normalizes to `""` (bare quote / whitespace / quote-only)
+    # must be rejected as a client validation error before reaching
+    # add_keyword. Without the pre-normalization guard, add_keyword's
+    # ValueError would escape the transaction handler as a 500.
+    photos = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchall()
+    photo_ids = [p["id"] for p in photos]
+    for bad in ("'", "\"", "‘’"):
+        resp = client.post(
+            '/api/encounters/species',
+            json={"species": bad, "photo_ids": photo_ids},
+        )
+        assert resp.status_code == 400, (
+            f"expected 400 for species={bad!r}, got {resp.status_code}: {resp.get_data(as_text=True)}"
+        )
 
 
 def test_encounter_species_rejects_invalid_photo_ids(app_and_db):
@@ -1012,6 +1283,52 @@ def test_burst_override_change_untags_previous(app_and_db):
     values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
     assert ("keyword_remove", "Sparrow") in values
     assert ("keyword_add", "Junco") in values
+
+
+def test_encounter_species_replacement_queues_stored_previous_name(app_and_db):
+    """When the pipeline cache still holds a legacy quoted species like
+    `‘apapane` but the DB row is stored under the normalized `apapane`, the
+    replacement path must queue keyword_remove with the STORED normalized
+    name so it cancels an outstanding keyword_add for the same normalized
+    key. Queuing the raw quoted value would leave both the stale add and a
+    quoted remove in the pending set, and the next XMP sync would then
+    write the stray-quote spelling back to the sidecar.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+
+    # Pretend an earlier confirm queued a keyword_add for the normalized
+    # spelling. This is the state we need cancellation to fire against.
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Apapane", "photo_ids": photo_ids},
+    )
+    assert resp.status_code == 200
+    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    assert ("keyword_add", "Apapane") in values
+
+    # Seed the pipeline cache's confirmed_species with the LEGACY quoted
+    # spelling. In reality this would come from an upgraded pipeline cache
+    # written before keyword normalization landed. The DB row is still stored
+    # as clean `Apapane` (add_keyword strips the leading edge quote).
+    _seed_encounter_cache(app, db, photo_ids, confirmed_species="‘Apapane")
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Blue Jay", "photo_ids": photo_ids},
+    )
+    assert resp.status_code == 200
+
+    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    # The stale keyword_add for the normalized spelling must be cancelled by
+    # a remove that targets the same normalized value — not the raw quoted
+    # cache value. If the queue used the cache spelling, this assertion
+    # would fail because the raw remove wouldn't match the stored add and
+    # both would linger.
+    assert ("keyword_add", "Apapane") not in values
+    assert ("keyword_remove", "‘Apapane") not in values
+    assert ("keyword_add", "Blue Jay") in values
 
 
 def test_encounter_species_confirm_same_species_noop_on_keywords(app_and_db):
@@ -3176,6 +3493,36 @@ def test_keyword_duplicates_scoped_by_workspace(app_and_db):
         assert "sparrow" not in dupe_names
 
 
+def test_keyword_duplicates_reports_edge_quote_variants(app_and_db):
+    """Duplicate keyword listing should use the same normalization as cleanup."""
+    app, db = app_and_db
+    folder_id = db.get_folder_tree()[0]["id"]
+    pid_a = db.add_photo(
+        folder_id, "quote-dupe-a.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    pid_b = db.add_photo(
+        folder_id, "quote-dupe-b.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    clean_id = db.add_keyword("apapane")
+    quoted_id = db.conn.execute(
+        "INSERT INTO keywords (name) VALUES (?)", ("\u2018apapane",)
+    ).lastrowid
+    db.conn.commit()
+    db.tag_photo(pid_a, clean_id)
+    db.tag_photo(pid_b, quoted_id)
+
+    resp = app.test_client().get("/api/keywords/duplicates")
+
+    assert resp.status_code == 200
+    groups = resp.get_json()
+    apapane = next(
+        group for group in groups
+        if {variant["name"] for variant in group["variants"]}
+        == {"apapane", "\u2018apapane"}
+    )
+    assert apapane["keep"] == "apapane"
+
+
 def test_all_keywords_scoped_by_workspace(app_and_db):
     """GET /api/keywords/all only returns keywords used in the active workspace, plus ancestors."""
     app, db = app_and_db
@@ -3420,6 +3767,548 @@ def test_rename_keyword_queues_sidecar_changes(app_and_db):
     actions = [(c["change_type"], c["value"]) for c in changes]
     assert ("keyword_remove", "OldBird") in actions
     assert ("keyword_add", "NewBird") in actions
+
+
+def test_rename_keyword_normalizes_edge_quotes_and_queues_clean_name(app_and_db):
+    """A rename request with stray edge quotes must store the normalized
+    value AND queue that normalized value to sidecars. Otherwise the DB
+    holds the clean spelling while pending changes and history reference
+    the raw quoted variant, and XMP sync would then write the wrong name.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("OldBird")
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.tag_photo(p1, kid)
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    resp = client.put(f"/api/keywords/{kid}", json={"name": "‘apapane"})
+    assert resp.status_code == 200
+
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "apapane"
+
+    changes = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ? ORDER BY id",
+        (p1,),
+    ).fetchall()
+    actions = [(c["change_type"], c["value"]) for c in changes]
+    assert ("keyword_remove", "OldBird") in actions
+    assert ("keyword_add", "apapane") in actions
+    assert ("keyword_add", "‘apapane") not in actions
+
+
+def test_rename_keyword_queues_normalization_only_change_for_stored_edge_quote(
+    app_and_db,
+):
+    """When the PUT body's name matches the current legacy stored spelling
+    verbatim (e.g. an upgraded row still stored as `‘apapane` and a client
+    that faithfully re-sent `‘apapane`), db.update_keyword() still normalizes
+    the row to the clean spelling `apapane`. The route must queue the
+    remove(old_raw) + add(clean) sidecar pair for affected photos and
+    rename species curation accordingly, otherwise the DB row is
+    canonicalized while XMP/highlight rows stay keyed to the legacy
+    spelling."""
+    app, db = app_and_db
+    client = app.test_client()
+    # Insert a legacy quoted row directly so it survives add_keyword's
+    # normalization, then tag a photo with it.
+    db.conn.execute("INSERT INTO keywords (name) VALUES (?)", ("‘apapane",))
+    db.conn.commit()
+    kid = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("‘apapane",)
+    ).fetchone()["id"]
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.tag_photo(p1, kid)
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    resp = client.put(f"/api/keywords/{kid}", json={"name": "‘apapane"})
+    assert resp.status_code == 200
+
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "apapane"
+
+    changes = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ? ORDER BY id",
+        (p1,),
+    ).fetchall()
+    actions = [(c["change_type"], c["value"]) for c in changes]
+    assert ("keyword_remove", "‘apapane") in actions
+    assert ("keyword_add", "apapane") in actions
+
+
+def test_rename_keyword_rejects_empty_after_normalization(app_and_db):
+    """PUT /api/keywords/<id> with a quote-only name must be rejected at
+    the boundary — same contract as add_keyword — instead of storing an
+    invisible empty-string keyword row."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("Real")
+
+    resp = client.put(f"/api/keywords/{kid}", json={"name": "'"})
+    assert resp.status_code == 400
+
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "Real"
+
+
+def test_rename_keyword_merges_into_normalized_peer_toplevel(app_and_db):
+    """Renaming a top-level keyword to a name that normalizes to an existing
+    top-level peer must merge into that peer instead of writing a second row.
+    SQLite treats NULL parent_ids as distinct under UNIQUE(name, parent_id),
+    so without the peer check the rename would silently produce two peer
+    `apapane` rows for later duplicate cleanup to mop up."""
+    app, db = app_and_db
+    client = app.test_client()
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    apapane_id = db.add_keyword("apapane")
+    other_id = db.add_keyword("Other")
+    db.tag_photo(p1, other_id)
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    resp = client.put(f"/api/keywords/{other_id}", json={"name": "‘apapane"})
+    assert resp.status_code == 200
+
+    rows = db.conn.execute(
+        "SELECT id FROM keywords WHERE parent_id IS NULL "
+        "AND name = 'apapane'"
+    ).fetchall()
+    assert [row["id"] for row in rows] == [apapane_id]
+    other_row = db.conn.execute(
+        "SELECT id FROM keywords WHERE id = ?", (other_id,)
+    ).fetchone()
+    assert other_row is None
+    tag_ids = {
+        row["keyword_id"]
+        for row in db.conn.execute(
+            "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (p1,)
+        ).fetchall()
+    }
+    assert apapane_id in tag_ids
+    assert other_id not in tag_ids
+
+    changes = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ? "
+        "ORDER BY id",
+        (p1,),
+    ).fetchall()
+    actions = [(c["change_type"], c["value"]) for c in changes]
+    assert ("keyword_remove", "Other") in actions
+    assert ("keyword_add", "apapane") in actions
+    assert ("keyword_add", "‘apapane") not in actions
+
+
+def test_api_update_keyword_returns_effective_id_and_merged_flag_on_peer_merge(
+    app_and_db,
+):
+    """When ``db.update_keyword`` merges the requested row into a
+    normalized-equal peer, the requested keyword id is deleted server-side.
+    The route must respond with the surviving peer id and a ``merged`` flag
+    so the keywords UI (``keywords.html`` ``renameKeyword`` / ``updateType`` /
+    ``kwBulkApply``) can refetch instead of mutating a stale entry in place
+    — otherwise ``allKeywords`` keeps a phantom row pointing at the deleted
+    id and subsequent rename/type/delete actions on that visible entry
+    silently affect nothing. Plain renames (no merge) must still report
+    ``merged: false`` and the original id so the local optimistic update
+    path stays a no-op refetch."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    # Merge case: rename an unrelated keyword to a name that already belongs
+    # to another top-level peer. update_keyword deletes ``other_id`` and
+    # returns ``apapane_id`` as the survivor.
+    apapane_id = db.add_keyword("apapane")
+    other_id = db.add_keyword("Other")
+
+    resp = client.put(f"/api/keywords/{other_id}", json={"name": "‘apapane"})
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["ok"] is True
+    assert payload["merged"] is True
+    assert payload["effective_id"] == apapane_id
+    # Verify the DB matches the response so the client can trust
+    # ``effective_id`` as the row to switch its selection onto.
+    assert db.conn.execute(
+        "SELECT id FROM keywords WHERE id = ?", (other_id,)
+    ).fetchone() is None
+    survivor = db.conn.execute(
+        "SELECT id FROM keywords WHERE id = ?", (apapane_id,)
+    ).fetchone()
+    assert survivor is not None
+
+    # Plain rename (no peer): merged=false, effective_id matches the
+    # requested id so the client's local update remains correct.
+    plain_id = db.add_keyword("Solo")
+    resp = client.put(f"/api/keywords/{plain_id}", json={"name": "SoloRenamed"})
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["ok"] is True
+    assert payload["merged"] is False
+    assert payload["effective_id"] == plain_id
+
+
+def test_type_only_put_merge_queues_sidecar_rename_for_peer_photos(
+    app_and_db,
+):
+    """Type-only PUT that merges a clean row into a legacy peer must queue
+    keyword_remove(legacy) + keyword_add(canonical) for photos that were
+    ALREADY tagged with the legacy peer, otherwise those sidecars keep
+    exporting the quoted spelling even after the DB row is canonicalized.
+
+    Reproduces the fresh gap after the previous peer-normalization fix
+    (r3565437646). Scenario: an upgraded DB has a clean general keyword
+    ``apapane`` AND a legacy taxonomy peer stored as ``‘apapane`` (edge
+    quote). A photo P is already tagged with the legacy peer, and its
+    sidecar has already been synced under that quoted spelling. The
+    Browse/Keywords UI sends a type dropdown change on the general row —
+    ``PUT /api/keywords/<general_id>`` with ``{"type": "taxonomy"}`` and
+    no ``name`` field.
+
+    ``db.update_keyword`` detects the same-slot taxonomy peer and merges
+    the general row into it, then runs ``_normalize_keyword_row_name`` to
+    rewrite the survivor's DB name from ``‘apapane`` to ``apapane``. That
+    helper retargets ``pending_changes`` and species curation scoped to
+    the peer's tag set — but it does NOT emit new sidecar remove/add rows
+    for photos whose XMP was already synced under the legacy spelling.
+    ``api_update_keyword`` used to only snapshot/queue sidecar work when
+    the request included a ``name``, so the type-only PUT skipped the
+    queue entirely and photos on the peer kept exporting ``‘apapane`` to
+    their sidecars indefinitely.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    # Clean general keyword — the row the user is about to retype.
+    general_id = db.add_keyword("apapane")
+
+    # Legacy taxonomy peer inserted directly to preserve the edge quote
+    # (add_keyword would normalize it away). is_species=1 mirrors an
+    # upgraded taxonomy row.
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'taxonomy', 1)",
+        ("‘apapane",),
+    )
+    db.conn.commit()
+    legacy_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = '‘apapane'"
+    ).fetchone()["id"]
+
+    # Tag photo p1 with the legacy peer — this photo's sidecar has already
+    # been synced under the quoted spelling and needs the remove/add pair.
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.tag_photo(p1, legacy_id)
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    # Type-only PUT: no `name` in body. Mirrors the Browse/Keywords type
+    # dropdown flow.
+    resp = client.put(
+        f"/api/keywords/{general_id}", json={"type": "taxonomy"}
+    )
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["ok"] is True
+    assert payload["merged"] is True
+    assert payload["effective_id"] == legacy_id
+
+    # The merge collapsed general_id into legacy_id AND canonicalized the
+    # survivor's stored name.
+    assert db.conn.execute(
+        "SELECT id FROM keywords WHERE id = ?", (general_id,)
+    ).fetchone() is None
+    survivor = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (legacy_id,)
+    ).fetchone()
+    assert survivor["name"] == "apapane"
+
+    # The regression: photo p1 must have keyword_remove('‘apapane') +
+    # keyword_add('apapane') queued so its sidecar catches up with the
+    # canonicalized DB row. Without the fix, no rows would be queued for
+    # p1 and the sidecar would keep exporting the quoted spelling.
+    changes = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ? "
+        "ORDER BY id",
+        (p1,),
+    ).fetchall()
+    actions = [(c["change_type"], c["value"]) for c in changes]
+    assert ("keyword_remove", "‘apapane") in actions
+    assert ("keyword_add", "apapane") in actions
+
+
+def test_type_only_put_merge_queues_sidecar_rename_for_source_photos(
+    app_and_db,
+):
+    """Type-only PUT that merges a legacy-spelled SOURCE row into a clean
+    peer must queue keyword_remove(legacy) + keyword_add(canonical) for
+    photos that were originally tagged with the source row — otherwise
+    those source photos' sidecars keep exporting the source's legacy
+    spelling even after _merge_keyword_into moves their DB tags to the
+    peer's clean spelling.
+
+    Reproduces the fresh gap after the previous peer-photos fix
+    (r3565437646). Scenario: an upgraded DB has a legacy general keyword
+    stored as ``‘apapane`` (edge quote) AND a clean taxonomy peer
+    ``apapane``. A photo P1 is tagged with the legacy general source row
+    and its sidecar has already been synced under the quoted spelling.
+    The Browse/Keywords UI sends a type dropdown change on the legacy
+    row — ``PUT /api/keywords/<legacy_id>`` with ``{"type": "taxonomy"}``
+    and no ``name`` field.
+
+    ``db.update_keyword`` detects the same-slot clean taxonomy peer and
+    merges the legacy source into it, retargeting P1's DB tag onto the
+    peer's clean spelling. But ``api_update_keyword`` used to only
+    snapshot the source's pre-update state when the request included a
+    ``name``, so the type-only PUT skipped the source-photo queue
+    entirely and P1 kept exporting ``‘apapane`` to its sidecar
+    indefinitely. The peer-photos block (see the sibling test) only
+    handles photos ALREADY tagged with the peer, not those retargeted
+    from the source.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    # Clean taxonomy peer — the target the legacy row will merge into.
+    taxonomy_id = db.add_keyword("apapane", is_species=True)
+    row = db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (taxonomy_id,)
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+
+    # Legacy general row inserted directly to preserve the edge quote
+    # (add_keyword would normalize it away).
+    db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES (?, 'general')",
+        ("‘apapane",),
+    )
+    db.conn.commit()
+    legacy_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = '‘apapane'"
+    ).fetchone()["id"]
+
+    # Tag photo p1 with the legacy SOURCE row — this photo's sidecar has
+    # already been synced under the quoted spelling and needs the
+    # remove/add pair after the merge retargets its DB tag.
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.tag_photo(p1, legacy_id)
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    # Type-only PUT on the legacy row: no `name` in body. Mirrors the
+    # Browse/Keywords type dropdown flow.
+    resp = client.put(
+        f"/api/keywords/{legacy_id}", json={"type": "taxonomy"}
+    )
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["ok"] is True
+    assert payload["merged"] is True
+    assert payload["effective_id"] == taxonomy_id
+
+    # The merge collapsed legacy_id into taxonomy_id and retargeted p1's
+    # DB tag onto the clean spelling.
+    assert db.conn.execute(
+        "SELECT id FROM keywords WHERE id = ?", (legacy_id,)
+    ).fetchone() is None
+    survivor = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (taxonomy_id,)
+    ).fetchone()
+    assert survivor["name"] == "apapane"
+
+    # The regression: source photo p1 must have keyword_remove('‘apapane')
+    # + keyword_add('apapane') queued so its sidecar catches up with the
+    # retargeted DB row. Without the fix, no rows would be queued for p1
+    # and the sidecar would keep exporting the quoted spelling.
+    changes = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ? "
+        "ORDER BY id",
+        (p1,),
+    ).fetchall()
+    actions = [(c["change_type"], c["value"]) for c in changes]
+    assert ("keyword_remove", "‘apapane") in actions
+    assert ("keyword_add", "apapane") in actions
+
+
+def test_type_only_put_merge_skips_queue_when_peer_already_canonical(
+    app_and_db,
+):
+    """When the peer's stored name is already canonical, the survivor
+    keeps its clean spelling and no sidecar remove/add is needed. Verify
+    the new pre-merge peer snapshot doesn't queue phantom rows in that
+    case — otherwise a routine type dropdown change would spam pending
+    ``keyword_remove('apapane')`` + ``keyword_add('apapane')`` pairs that
+    cancel each other but litter the pending panel."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    # Both rows already have canonical names; only their type differs.
+    general_id = db.add_keyword("apapane")
+    # Force a distinct taxonomy peer with the same clean name via direct
+    # INSERT — add_keyword promotes general → taxonomy in place when a
+    # taxon match exists, and top-level UNIQUE(name, parent_id) allows
+    # coexisting rows with different types under a NULL parent.
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'taxonomy', 1)",
+        ("apapane",),
+    )
+    db.conn.commit()
+    taxonomy_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'apapane' AND type = 'taxonomy'"
+    ).fetchone()["id"]
+
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.tag_photo(p1, taxonomy_id)
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    resp = client.put(
+        f"/api/keywords/{general_id}", json={"type": "taxonomy"}
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["merged"] is True
+
+    # No pending_changes for p1 — the survivor's stored name didn't
+    # change (both rows already canonical), so no sidecar rewrite is
+    # needed and the guard on peer_new_name != peer_pre_name must skip
+    # the queue.
+    remaining = db.conn.execute(
+        "SELECT COUNT(*) AS c FROM pending_changes WHERE photo_id = ?",
+        (p1,),
+    ).fetchone()["c"]
+    assert remaining == 0
+
+
+def test_rename_keyword_merges_into_normalized_peer_child(app_and_db):
+    """Same guard for child keywords: without the peer check, two rows under
+    the same parent with normalized-equal names would violate
+    UNIQUE(name, parent_id) at UPDATE time and surface as a 500. The merge
+    turns that into an in-place consolidation instead."""
+    app, db = app_and_db
+    client = app.test_client()
+    parent_id = db.add_keyword("Birds")
+    apapane_id = db.add_keyword("apapane", parent_id=parent_id)
+    other_id = db.add_keyword("Other", parent_id=parent_id)
+
+    resp = client.put(f"/api/keywords/{other_id}", json={"name": "‘apapane"})
+    assert resp.status_code == 200
+
+    rows = db.conn.execute(
+        "SELECT id FROM keywords WHERE parent_id = ? AND name = 'apapane'",
+        (parent_id,),
+    ).fetchall()
+    assert [row["id"] for row in rows] == [apapane_id]
+    other_row = db.conn.execute(
+        "SELECT id FROM keywords WHERE id = ?", (other_id,)
+    ).fetchone()
+    assert other_row is None
+
+
+def test_rename_keyword_detects_stored_edge_quote_peer(app_and_db):
+    """A pre-existing row whose stored spelling still carries edge quotes
+    (imported before normalization landed) must also participate in the
+    peer merge; the check compares via vireo_normalize_keyword so both
+    sides are compared in their cleaned form."""
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT INTO keywords (name) VALUES (?)", ("‘apapane",)
+    )
+    db.conn.commit()
+    legacy_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = '‘apapane'"
+    ).fetchone()["id"]
+    other_id = db.add_keyword("Other")
+
+    resp = client.put(f"/api/keywords/{other_id}", json={"name": "apapane"})
+    assert resp.status_code == 200
+
+    other_row = db.conn.execute(
+        "SELECT id FROM keywords WHERE id = ?", (other_id,)
+    ).fetchone()
+    assert other_row is None
+    # The legacy row survives because the merge target is the peer, not
+    # the renamed row — but its stored spelling is canonicalized to the
+    # clean name so the survivor doesn't remain visible/exported as the
+    # stray-quote variant after a rename to the clean spelling.
+    survived = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (legacy_id,)
+    ).fetchone()
+    assert survived["name"] == "apapane"
+
+
+def test_rename_keyword_does_not_merge_across_types_toplevel(app_and_db):
+    """Cross-type collisions at the top level must not be merged into a
+    peer. Silently moving photos from an 'individual' keyword onto a
+    same-named 'taxonomy' peer would rewrite the tag's semantics; the
+    dedup boundary elsewhere is (name, parent_id, type). SQLite treats
+    NULL parent_ids as distinct under UNIQUE(name, parent_id), so a
+    cross-type rename at the top level is allowed to produce a
+    coexisting row rather than a silent merge."""
+    app, db = app_and_db
+    client = app.test_client()
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    taxonomy_id = db.add_keyword("apapane", kw_type="taxonomy")
+    other_id = db.add_keyword("Other", kw_type="individual")
+    db.tag_photo(p1, other_id)
+
+    resp = client.put(f"/api/keywords/{other_id}", json={"name": "‘apapane"})
+    assert resp.status_code == 200
+
+    # The individual row survives with its normalized name; the taxonomy
+    # peer is untouched.
+    survivor = db.conn.execute(
+        "SELECT id, name, type FROM keywords WHERE id = ?", (other_id,)
+    ).fetchone()
+    assert survivor is not None
+    assert survivor["name"] == "apapane"
+    assert survivor["type"] == "individual"
+    taxonomy_row = db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (taxonomy_id,)
+    ).fetchone()
+    assert taxonomy_row["type"] == "taxonomy"
+    # The individual tag must NOT have silently retargeted onto the
+    # taxonomy peer.
+    tag_ids = {
+        row["keyword_id"]
+        for row in db.conn.execute(
+            "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (p1,)
+        ).fetchall()
+    }
+    assert other_id in tag_ids
+    assert taxonomy_id not in tag_ids
+
+
+def test_rename_keyword_does_not_merge_across_types_child(app_and_db):
+    """Cross-type collisions under the same parent surface as an error
+    rather than silently retagging photos across types. UNIQUE(name,
+    parent_id) fires when the plain UPDATE lands on a cross-type peer."""
+    app, db = app_and_db
+    client = app.test_client()
+    parent_id = db.add_keyword("Birds")
+    db.add_keyword("apapane", parent_id=parent_id, kw_type="taxonomy")
+    other_id = db.add_keyword("Other", parent_id=parent_id, kw_type="individual")
+
+    resp = client.put(f"/api/keywords/{other_id}", json={"name": "‘apapane"})
+    # A cross-type same-name collision under a shared parent hits the
+    # table-level UNIQUE(name, parent_id) at UPDATE time and surfaces to
+    # the caller, rather than being silently absorbed into the wrong-typed
+    # peer.
+    assert resp.status_code >= 400
+    # The original individual keyword is preserved with its old name.
+    survivor = db.conn.execute(
+        "SELECT name, type FROM keywords WHERE id = ?", (other_id,)
+    ).fetchone()
+    assert survivor is not None
+    assert survivor["name"] == "Other"
+    assert survivor["type"] == "individual"
 
 
 def test_rename_keyword_updates_photo_preferences(app_and_db):
@@ -4346,6 +5235,154 @@ def test_batch_keyword_route_handles_non_string_type(app_and_db):
     )
 
 
+def test_add_keyword_route_rejects_name_that_normalizes_to_empty(app_and_db):
+    """Names like `'` are non-empty as raw text (so the `not name` guard
+    passes) but strip to '' during normalization. The route must return a
+    clean 400 rather than 500-ing on add_keyword's ValueError, and must not
+    insert an empty keyword row."""
+    app, db = app_and_db
+    folder_id = db.add_folder("/tmp/pe")
+    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "pe.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    client = app.test_client()
+    before = db.conn.execute("SELECT COUNT(*) FROM keywords").fetchone()[0]
+    for empty in ("'", '"', "‘", "“”"):
+        resp = client.post(
+            f"/api/photos/{photo_id}/keywords",
+            json={"name": empty},
+            content_type="application/json",
+        )
+        assert resp.status_code == 400, (
+            f"expected 400 for name={empty!r}, got {resp.status_code} "
+            f"{resp.get_data(as_text=True)}"
+        )
+    after = db.conn.execute("SELECT COUNT(*) FROM keywords").fetchone()[0]
+    assert after == before
+    assert (
+        db.conn.execute("SELECT COUNT(*) FROM keywords WHERE name = ''").fetchone()[0]
+        == 0
+    )
+
+
+def test_batch_keyword_route_rejects_name_that_normalizes_to_empty(app_and_db):
+    """Same normalized-empty guard on the batch endpoint."""
+    app, db = app_and_db
+    folder_id = db.add_folder("/tmp/qe")
+    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "qe.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    client = app.test_client()
+    before = db.conn.execute("SELECT COUNT(*) FROM keywords").fetchone()[0]
+    resp = client.post(
+        "/api/batch/keyword",
+        json={"photo_ids": [photo_id], "name": "‘"},
+        content_type="application/json",
+    )
+    assert resp.status_code == 400, (
+        f"expected 400 for edge-quote-only name, got {resp.status_code} "
+        f"{resp.get_data(as_text=True)}"
+    )
+    assert (
+        db.conn.execute("SELECT COUNT(*) FROM keywords").fetchone()[0] == before
+    )
+
+
+def test_add_keyword_route_queues_stored_name_after_normalization(app_and_db):
+    """When a stray-quote name is submitted, the pending-change queue must
+    record the stored (normalized) name — not the raw request string —
+    so a later delete (which reads k.name from the DB) queues the same
+    string and the add/remove pair cancels instead of both persisting to
+    XMP."""
+    app, db = app_and_db
+    folder_id = db.add_folder("/tmp/qn")
+    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "qn.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+    client = app.test_client()
+
+    resp = client.post(
+        f"/api/photos/{photo_id}/keywords",
+        json={"name": "‘quailquail"},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    kid = resp.get_json()["keyword_id"]
+    stored = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()["name"]
+    assert stored == "quailquail"
+
+    queued_add = db.conn.execute(
+        "SELECT value FROM pending_changes "
+        "WHERE photo_id = ? AND change_type = 'keyword_add'",
+        (photo_id,),
+    ).fetchall()
+    assert [row["value"] for row in queued_add] == [stored], (
+        "keyword_add queue must record the stored name so it matches what a "
+        "later keyword_remove would queue via k.name"
+    )
+
+    resp = client.delete(f"/api/photos/{photo_id}/keywords/{kid}")
+    assert resp.status_code == 200
+    remaining = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ?",
+        (photo_id,),
+    ).fetchall()
+    assert remaining == [], (
+        f"add/remove should cancel, but pending_changes still has "
+        f"{[dict(r) for r in remaining]}"
+    )
+
+
+def test_batch_keyword_route_queues_stored_name_after_normalization(app_and_db):
+    """Batch endpoint must queue the stored keyword name too, so the
+    per-photo add/remove pair cancels the same way the single endpoint does."""
+    app, db = app_and_db
+    folder_id = db.add_folder("/tmp/qb")
+    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "qb.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/batch/keyword",
+        json={"photo_ids": [photo_id], "name": "‘quailquail"},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    kid = db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (photo_id,)
+    ).fetchone()["keyword_id"]
+    stored = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()["name"]
+    assert stored == "quailquail"
+
+    queued_add = db.conn.execute(
+        "SELECT value FROM pending_changes "
+        "WHERE photo_id = ? AND change_type = 'keyword_add'",
+        (photo_id,),
+    ).fetchall()
+    assert [row["value"] for row in queued_add] == [stored]
+
+    resp = client.delete(f"/api/photos/{photo_id}/keywords/{kid}")
+    assert resp.status_code == 200
+    remaining = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ?",
+        (photo_id,),
+    ).fetchall()
+    assert remaining == []
+
+
 def test_selection_keyword_suggestions_return_partial_keywords(app_and_db):
     """Multi-select suggestions should offer keywords present on only some photos."""
     app, db = app_and_db
@@ -4376,6 +5413,52 @@ def test_selection_keyword_suggestions_return_partial_keywords(app_and_db):
     assert keywords_by_name["Cardinal"]["present_photo_ids"] == [ids[0]]
     assert sorted(keywords_by_name["Cardinal"]["missing_photo_ids"]) == sorted(ids[1:])
     assert keywords_by_name["Sparrow"]["present_photo_ids"] == [ids[1]]
+
+
+def test_selection_keyword_suggestions_normalize_edge_quotes(app_and_db):
+    """Stray leading quote variants should count as the same selected keyword."""
+    app, db = app_and_db
+    folder_id = db.get_folder_tree()[0]["id"]
+    ids = [
+        db.add_photo(
+            folder_id,
+            f"quote-normalize-{idx}.jpg",
+            extension=".jpg",
+            file_size=1,
+            file_mtime=1.0,
+        )
+        for idx in range(3)
+    ]
+    clean_id = db.add_keyword("apapane")
+    quoted_id = db.conn.execute(
+        "INSERT INTO keywords (name) VALUES (?)", ("\u2018apapane",)
+    ).lastrowid
+    db.conn.commit()
+    db.tag_photo(ids[0], clean_id)
+    db.tag_photo(ids[1], quoted_id)
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/selection/keyword-suggestions",
+        json={"photo_ids": ids[:2]},
+        content_type="application/json",
+    )
+
+    assert resp.status_code == 200
+    assert resp.get_json()["suggestions"] == []
+
+    resp = client.post(
+        "/api/selection/keyword-suggestions",
+        json={"photo_ids": ids},
+        content_type="application/json",
+    )
+
+    assert resp.status_code == 200
+    by_name = {item["name"]: item for item in resp.get_json()["suggestions"]}
+    assert sorted(by_name) == ["apapane"]
+    assert by_name["apapane"]["count"] == 2
+    assert by_name["apapane"]["missing_count"] == 1
+    assert by_name["apapane"]["missing_photo_ids"] == [ids[2]]
 
 
 def test_selection_keyword_suggestions_chunks_large_selection(app_and_db):
@@ -4448,6 +5531,85 @@ def test_batch_keyword_route_accepts_existing_keyword_id(app_and_db):
     assert [row["photo_id"] for row in tagged_after_undo] == [ids[0]]
 
 
+def test_batch_keyword_route_skips_normalized_peer_variants(app_and_db):
+    """Batch add should treat photos tagged with any normalized peer as done.
+
+    Regression: `api_selection_keyword_suggestions` collapses variants that
+    share a normalized (name, parent_id, type) key and returns a single
+    representative id. If one selected photo already carries a legacy
+    edge-quote peer of the chosen keyword (e.g. `‘Cardinal` alongside
+    clean `Cardinal`), "Add to N missing" would stack the clean row on
+    top of the legacy variant, leaving duplicate in-app tags and a
+    duplicate `<rdf:li>` in the sidecar. The endpoint must expand the
+    same normalized peer ids used by the remove path.
+    """
+    app, db = app_and_db
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos ORDER BY filename"
+    ).fetchall()
+    ids = [row["id"] for row in rows]
+
+    clean_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Cardinal'"
+    ).fetchone()["id"]
+    legacy_id = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES (?, NULL, 0, 'general')",
+        ("‘Cardinal",),
+    ).lastrowid
+    # Untag the fixture link so bird1 carries only the LEGACY variant; that
+    # way the endpoint's variant expansion is what makes it look "already
+    # tagged" rather than a stray exact-id match.
+    db.conn.execute(
+        "DELETE FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (ids[0], clean_id),
+    )
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (ids[0], legacy_id),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/batch/keyword",
+        json={"photo_ids": ids, "keyword_id": clean_id},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    # bird2 and bird3 had no variant tag, so both get the clean row.
+    # bird1 (with the legacy variant) must be treated as already tagged —
+    # updated == 2, NOT 3.
+    assert resp.get_json()["updated"] == 2
+
+    # bird1 should still carry ONLY the legacy variant — no clean row
+    # stacked on top.
+    bird1_tags = db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords "
+        "WHERE photo_id = ? AND keyword_id IN (?, ?)",
+        (ids[0], clean_id, legacy_id),
+    ).fetchall()
+    assert sorted(row["keyword_id"] for row in bird1_tags) == [legacy_id]
+
+    # bird2 and bird3 got the clean row.
+    for bird_pid in (ids[1], ids[2]):
+        bird_tags = db.conn.execute(
+            "SELECT keyword_id FROM photo_keywords "
+            "WHERE photo_id = ? AND keyword_id = ?",
+            (bird_pid, clean_id),
+        ).fetchall()
+        assert len(bird_tags) == 1
+
+    # No pending sidecar add gets queued for bird1 — it already carries a
+    # normalized-equivalent tag.
+    pending = db.conn.execute(
+        """SELECT photo_id FROM pending_changes
+           WHERE change_type = 'keyword_add' AND value = 'Cardinal'
+           ORDER BY photo_id"""
+    ).fetchall()
+    assert [row["photo_id"] for row in pending] == sorted([ids[1], ids[2]])
+
+
 def test_batch_keyword_remove_route_removes_existing_keyword_id(app_and_db):
     """Selected-keyword removal should only affect selected photos that have it."""
     app, db = app_and_db
@@ -4490,6 +5652,116 @@ def test_batch_keyword_remove_route_removes_existing_keyword_id(app_and_db):
         (cardinal_id,),
     ).fetchall()
     assert [row["photo_id"] for row in tagged_after_undo] == [ids[0]]
+
+
+def test_batch_keyword_remove_untags_normalized_peer_variants(app_and_db):
+    """Batch remove should untag every normalized-peer keyword variant.
+
+    Regression: `api_selection_keyword_suggestions` collapses variants that
+    share a normalized (name, parent_id, type) key and returns a single
+    representative id. If a selection has one photo tagged with the clean
+    row and another with a legacy edge-quote row, "Remove from N" sends
+    the representative id here. Without peer expansion, only the exact
+    keyword_id gets untagged and the other photo keeps its legacy variant.
+    """
+    app, db = app_and_db
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos ORDER BY filename"
+    ).fetchall()
+    ids = [row["id"] for row in rows]
+
+    # Insert a legacy peer directly so add_keyword's normalization doesn't
+    # merge the two rows on write. The rows have identical normalized
+    # (name, parent_id, type); only the stored spelling differs.
+    clean_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Cardinal'"
+    ).fetchone()["id"]
+    legacy_id = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES (?, NULL, 0, 'general')",
+        ("‘Cardinal",),
+    ).lastrowid
+    db.conn.commit()
+
+    # bird1 already carries Cardinal (from the fixture). Tag bird2 with the
+    # legacy variant so it's in the selection but not covered by clean_id.
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (ids[1], legacy_id),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/batch/keyword-remove",
+        json={"photo_ids": ids, "keyword_id": clean_id},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    # Both bird1 (via clean_id) and bird2 (via legacy peer) get untagged.
+    assert resp.get_json()["updated"] == 2
+
+    still_tagged = db.conn.execute(
+        "SELECT photo_id, keyword_id FROM photo_keywords "
+        "WHERE keyword_id IN (?, ?)",
+        (clean_id, legacy_id),
+    ).fetchall()
+    assert still_tagged == []
+
+
+def test_batch_keyword_remove_cancels_legacy_pending_add(app_and_db):
+    """Batch remove must cancel pending adds queued under legacy peer names.
+
+    Regression: when a photo carries a legacy edge-quote peer of a
+    normalized keyword (e.g. `‘Cardinal` alongside clean `Cardinal`) and
+    still has an unsynced `keyword_add` under that legacy spelling, the
+    representative-id remove path used to queue only a `keyword_remove`
+    for the canonical `Cardinal` and leave the legacy pending add in
+    place, so the next XMP sync would write the quoted variant back.
+    """
+    app, db = app_and_db
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos ORDER BY filename"
+    ).fetchall()
+    ids = [row["id"] for row in rows]
+
+    clean_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Cardinal'"
+    ).fetchone()["id"]
+    legacy_id = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES (?, NULL, 0, 'general')",
+        ("‘Cardinal",),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (ids[1], legacy_id),
+    )
+    db.queue_change(ids[1], "keyword_add", "‘Cardinal")
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/batch/keyword-remove",
+        json={"photo_ids": ids, "keyword_id": clean_id},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["updated"] == 2
+
+    still_tagged = db.conn.execute(
+        "SELECT photo_id, keyword_id FROM photo_keywords "
+        "WHERE keyword_id IN (?, ?)",
+        (clean_id, legacy_id),
+    ).fetchall()
+    assert still_tagged == []
+
+    legacy_pending = db.conn.execute(
+        """SELECT change_type FROM pending_changes
+           WHERE photo_id = ? AND value = '‘Cardinal'""",
+        (ids[1],),
+    ).fetchall()
+    assert legacy_pending == []
 
 
 def test_batch_keyword_remove_undo_restores_pending_add(app_and_db):
@@ -4567,6 +5839,73 @@ def test_batch_keyword_remove_undo_restores_pending_add(app_and_db):
     assert pending_after_redo == [], (
         "redo of the cancel-a-pending-add remove must leave no pending "
         "change — mirroring the original bulk remove that cancelled the add"
+    )
+
+
+def test_batch_keyword_remove_undo_cancels_legacy_pending_remove(app_and_db):
+    """Undo of a batch remove must cancel legacy-peer pending removes too.
+
+    When a selection contains one photo tagged with the clean row and
+    another with a legacy edge-quote peer, ``api_batch_keyword_remove``
+    untags both and queues ``keyword_remove`` under each stored spelling.
+    The edit history records only the representative id, so a naive undo
+    that cancels only the representative's stored name leaves the
+    ``keyword_remove('‘Cardinal')`` pending — and the next XMP sync then
+    strips the just-retagged keyword back out of the sidecar because
+    ``remove_keywords`` matches on the normalized key.
+    """
+    app, db = app_and_db
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos ORDER BY filename"
+    ).fetchall()
+    ids = [row["id"] for row in rows]
+
+    clean_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Cardinal'"
+    ).fetchone()["id"]
+    legacy_id = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES (?, NULL, 0, 'general')",
+        ("‘Cardinal",),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (ids[1], legacy_id),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    remove_resp = client.post(
+        "/api/batch/keyword-remove",
+        json={"photo_ids": ids, "keyword_id": clean_id},
+        content_type="application/json",
+    )
+    assert remove_resp.status_code == 200
+    assert remove_resp.get_json()["updated"] == 2
+
+    pending_after_remove = db.conn.execute(
+        """SELECT change_type, value FROM pending_changes
+           WHERE photo_id = ? AND change_type = 'keyword_remove'
+           ORDER BY value""",
+        (ids[1],),
+    ).fetchall()
+    assert [(row["change_type"], row["value"]) for row in pending_after_remove] == [
+        ("keyword_remove", "Cardinal"),
+        ("keyword_remove", "‘Cardinal"),
+    ], "batch remove should queue removes under both variant spellings"
+
+    undo_resp = client.post("/api/undo")
+    assert undo_resp.status_code == 200
+
+    pending_after_undo = db.conn.execute(
+        """SELECT change_type, value FROM pending_changes
+           WHERE photo_id = ? AND value IN ('Cardinal', '‘Cardinal')""",
+        (ids[1],),
+    ).fetchall()
+    assert pending_after_undo == [], (
+        "undo must cancel pending removes for every variant spelling "
+        "queued by the batch remove — otherwise sync strips the "
+        "just-restored tag"
     )
 
 

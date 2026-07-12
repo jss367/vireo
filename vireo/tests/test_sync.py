@@ -53,6 +53,76 @@ def test_sync_to_xmp_writes_keyword_add(tmp_path):
     assert len(db.get_pending_changes()) == 0
 
 
+def test_sync_to_xmp_keyword_add_canonicalizes_existing_variant(tmp_path):
+    """A keyword_add against a sidecar that already contains a normalized-
+    equivalent variant should end up with one clean <rdf:li>, not two.
+
+    Regression: write_sidecar() dedupes by exact-string set difference, so
+    queuing ``keyword_add: apapane`` for a photo whose sidecar carries a
+    legacy ``‘apapane`` used to append a second entry that sync_from_xmp
+    would then never clean up. sync_to_xmp now strips add-equivalent
+    variants first so the sidecar canonicalizes to the clean spelling.
+    """
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_keywords
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(
+        tmp_path, db, keywords={'‘apapane'},
+    )
+
+    db.queue_change(pid, 'keyword_add', 'apapane')
+
+    result = sync_to_xmp(db)
+    assert result['synced'] == 1
+    assert result['failed'] == 0
+
+    keywords = read_keywords(xmp_path)
+    assert keywords == {'apapane'}
+    assert len(db.get_pending_changes()) == 0
+
+
+def test_sync_to_xmp_keyword_add_preserves_hierarchies_with_matching_segment(
+    tmp_path,
+):
+    """A flat keyword_add must not delete an unrelated hierarchy whose leaf
+    happens to share the added keyword.
+
+    Regression: sync canonicalizes sidecar variants of an added keyword by
+    stripping add-equivalents before writing. Using the default
+    remove_keywords semantics (which drop any hierarchy whose segment
+    matches) would delete `Animals|Birds|Hawk` when the user adds a flat
+    `Hawk`, wiping the entire hierarchical tree from the sidecar.
+    """
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_hierarchical_keywords, read_keywords, write_sidecar
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+    # Seed the sidecar with a hierarchy whose leaf matches what we're about
+    # to add flat. write_sidecar accepts both bags in one call.
+    write_sidecar(
+        xmp_path,
+        flat_keywords=set(),
+        hierarchical_keywords={'Animals|Birds|Hawk'},
+    )
+
+    db.queue_change(pid, 'keyword_add', 'Hawk')
+
+    result = sync_to_xmp(db)
+    assert result['synced'] == 1
+    assert result['failed'] == 0
+
+    assert 'Hawk' in read_keywords(xmp_path)
+    assert 'Animals|Birds|Hawk' in read_hierarchical_keywords(xmp_path)
+
+
 def test_sync_to_xmp_writes_rating(tmp_path):
     """sync_to_xmp writes rating changes to XMP sidecars."""
     from xml.etree import ElementTree as ET
@@ -226,6 +296,73 @@ def test_sync_from_xmp_preserves_keyword_when_only_case_differs(tmp_path):
 
     keywords = db.get_photo_keywords(pid)
     assert {k['name'] for k in keywords} == {'Sparrow'}
+
+
+def test_sync_from_xmp_preserves_tag_when_only_edge_quote_differs(tmp_path):
+    """A stray edge-quote variant in XMP should match the clean DB spelling.
+
+    Regression: prior to normalizing both sides of the diff, an XMP file
+    containing '‘apapane' compared against a DB row stored as 'apapane'
+    would land in "add ‘apapane" (a no-op via add_keyword's normalize
+    fallback) followed by "remove apapane" (the DB name isn't in the raw
+    XMP set), leaving the photo untagged.
+    """
+    from db import Database
+    from sync import sync_from_xmp
+    from xmp import write_sidecar
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={'apapane'})
+
+    kid = db.add_keyword('apapane')
+    db.tag_photo(pid, kid)
+
+    os.remove(xmp_path)
+    write_sidecar(
+        xmp_path, flat_keywords={'‘apapane'}, hierarchical_keywords=set(),
+    )
+
+    sync_from_xmp(db, [pid])
+
+    keywords = db.get_photo_keywords(pid)
+    assert {k['name'] for k in keywords} == {'apapane'}
+
+
+def test_sync_from_xmp_skips_xmp_keywords_that_normalize_to_empty(tmp_path):
+    """A sidecar keyword that normalizes to empty (e.g. a lone quote) must
+    be ignored, not aborted. add_keyword now raises ValueError on
+    empty-after-normalization input, so without the pre-filter one
+    malformed edge-quote entry would kill the entire sidecar reconcile
+    and leave every other keyword unsynced.
+    """
+    from db import Database
+    from sync import sync_from_xmp
+    from xmp import write_sidecar
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={'Sparrow'})
+
+    kid = db.add_keyword('Sparrow')
+    db.tag_photo(pid, kid)
+
+    os.remove(xmp_path)
+    # A lone smart quote normalizes to empty; a real second keyword sits
+    # alongside it. The malformed entry must be silently skipped and the
+    # real one still applied.
+    write_sidecar(
+        xmp_path,
+        flat_keywords={'Sparrow', 'Cardinal', '“”'},
+        hierarchical_keywords=set(),
+    )
+
+    sync_from_xmp(db, [pid])
+
+    keywords = db.get_photo_keywords(pid)
+    assert {k['name'] for k in keywords} == {'Sparrow', 'Cardinal'}
 
 
 def test_sync_to_xmp_reports_unsupported_flag_changes_when_disabled(tmp_path, monkeypatch):
@@ -502,3 +639,221 @@ def test_sync_to_xmp_location_cleanup_does_not_write_exif_fallback(tmp_path, mon
     assert "GPSLatitude" not in content
     assert "GPSLongitude" not in content
     assert "vireo:gpsSource" not in content
+
+
+def test_sync_to_xmp_add_survives_normalized_remove_for_same_photo(tmp_path):
+    """A rename queues both remove `‘apapane` and add `apapane` on the same
+    photo. remove_keywords compares by normalized match key, so the newly
+    written clean `<rdf:li>` and the pre-existing quoted variant BOTH match
+    the remove key. sync_to_xmp must apply the remove BEFORE the add so the
+    resulting sidecar carries the clean spelling instead of ending up empty.
+    """
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_keywords
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={"‘apapane"})
+
+    db.queue_change(pid, "keyword_remove", "‘apapane")
+    db.queue_change(pid, "keyword_add", "apapane")
+
+    result = sync_to_xmp(db)
+    assert result["synced"] == 1
+    assert result["failed"] == 0
+
+    kw = read_keywords(xmp_path)
+    assert "apapane" in kw
+    assert "‘apapane" not in kw
+    assert len(db.get_pending_changes()) == 0
+
+
+def test_sync_to_xmp_selected_add_pulls_in_paired_legacy_remove(tmp_path):
+    """When the sync panel filters change_ids to only the keyword_add half
+    of a rename (add `apapane` + legacy remove `‘apapane` for the same
+    photo), sync_to_xmp must pull the paired remove into the same batch.
+
+    Regression: both remove_keywords() (for the paired remove) and the
+    add-canonicalization pass compare by normalized match key. Syncing
+    only the add still runs add-canonicalization -- stripping the legacy
+    `<rdf:li>` before writing the clean spelling. If the paired remove is
+    left pending and later synced on its own, normalized removal matches
+    the clean `<rdf:li>` too and the keyword disappears entirely even
+    though both syncs reported success.
+    """
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_keywords
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={"‘apapane"})
+
+    db.queue_change(pid, "keyword_remove", "‘apapane")
+    db.queue_change(pid, "keyword_add", "apapane")
+    pending = db.get_pending_changes()
+    ids_by_type = {c["change_type"]: c["id"] for c in pending}
+
+    result = sync_to_xmp(db, change_ids=[ids_by_type["keyword_add"]])
+    assert result["failed"] == 0
+
+    kw = read_keywords(xmp_path)
+    assert kw == {"apapane"}
+
+    remaining = db.get_pending_changes()
+    assert remaining == []
+
+
+def test_sync_to_xmp_normalized_rename_preserves_unrelated_hierarchy(tmp_path):
+    """A normalization-only rename queued as ``keyword_remove('‘Birds')`` +
+    ``keyword_add('Birds')`` on the same photo must not strip an unrelated
+    hierarchy like ``Animals|Birds|Hawk``.
+
+    Regression: ``remove_keywords()`` compares each pipe-delimited hierarchy
+    segment by normalized match key, so a naive hierarchical remove of the
+    legacy variant matches the clean ``Birds`` segment inside the unrelated
+    hierarchy and drops the whole ``Animals|Birds|Hawk`` entry from
+    ``lr:hierarchicalSubject``. Applying flat-only removal for the paired
+    remove keeps the hierarchy intact while still canonicalizing the flat
+    legacy ``<rdf:li>‘Birds</rdf:li>`` to ``Birds`` in ``dc:subject``.
+    """
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_hierarchical_keywords, read_keywords, write_sidecar
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+    # Sidecar carries the legacy flat variant AND an unrelated hierarchy
+    # whose middle segment happens to normalize to the same key as the
+    # remove target.
+    write_sidecar(
+        xmp_path,
+        flat_keywords={'‘Birds'},
+        hierarchical_keywords={'Animals|Birds|Hawk'},
+    )
+
+    db.queue_change(pid, 'keyword_remove', '‘Birds')
+    db.queue_change(pid, 'keyword_add', 'Birds')
+
+    result = sync_to_xmp(db)
+    assert result['synced'] == 1
+    assert result['failed'] == 0
+
+    # Flat legacy variant is gone, clean spelling is written.
+    flat = read_keywords(xmp_path)
+    assert 'Birds' in flat
+    assert '‘Birds' not in flat
+    # Unrelated hierarchy survives -- was NOT stripped by the paired
+    # remove even though `Birds` segment normalizes to the remove key.
+    assert 'Animals|Birds|Hawk' in read_hierarchical_keywords(xmp_path)
+
+
+def test_sync_from_xmp_prunes_duplicate_normalized_db_variants(tmp_path):
+    """A single canonical XMP entry must collapse duplicate DB variants.
+
+    Regression: when an upgraded photo carries both a legacy row like
+    ``‘apapane`` and the clean row ``apapane``, and the sidecar has only
+    the canonical ``apapane``, the old prune loop kept both DB tags
+    because ``keyword_match_key`` matched them both against the same XMP
+    key. The reconciler now keeps the canonical row (preferring the
+    stored name equal to ``normalize_keyword_display(xmp_name)``) and
+    untags the rest.
+    """
+    from db import Database
+    from sync import sync_from_xmp
+    from xmp import write_sidecar
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={'apapane'})
+
+    # Clean row (canonical) via the normal path.
+    kid_clean = db.add_keyword('apapane')
+    # Legacy quoted row inserted directly so it survives the
+    # add_keyword() normalization step.
+    db.conn.execute("INSERT INTO keywords (name) VALUES (?)", ('‘apapane',))
+    db.conn.commit()
+    kid_legacy = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ('‘apapane',)
+    ).fetchone()[0]
+
+    db.tag_photo(pid, kid_clean)
+    db.tag_photo(pid, kid_legacy)
+
+    os.remove(xmp_path)
+    write_sidecar(xmp_path, flat_keywords={'apapane'}, hierarchical_keywords=set())
+
+    sync_from_xmp(db, [pid])
+
+    keywords = db.get_photo_keywords(pid)
+    # Exactly one tag survives, and it is the canonical clean row --
+    # not the legacy `‘apapane` id.
+    assert len(keywords) == 1
+    assert keywords[0]['name'] == 'apapane'
+    assert keywords[0]['id'] == kid_clean
+
+
+def test_sync_from_xmp_preserves_cross_slot_homonyms(tmp_path):
+    """Cross-slot same-text keywords must both survive a sidecar reconcile.
+
+    Regression: the earlier duplicate-normalized prune keyed only on
+    ``keyword_match_key(name)``, so a photo legitimately tagged with two
+    distinct DB rows sharing the same normalized text but sitting in
+    different slots (e.g. a taxonomy ``Robin`` and an individual
+    ``Robin``, or the same leaf name under different hierarchical
+    parents) got collapsed to one row -- the reconciler picked a
+    "keeper" and untagged the other. The dedup boundary elsewhere in the
+    codebase is ``(name, parent_id, type)``; a single flat ``Robin`` in
+    the sidecar can't disambiguate between the two homonyms, so both
+    legitimate tags must survive.
+    """
+    from db import Database
+    from sync import sync_from_xmp
+    from xmp import write_sidecar
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={'Robin'})
+
+    # Two top-level rows with the same normalized text but different
+    # types. Insert directly so both rows survive add_keyword's peer
+    # promotion, and so the two rows share a NULL parent_id (SQLite
+    # UNIQUE(name, parent_id) treats NULL as distinct, so this is a
+    # legitimate real-world state).
+    db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES (?, ?)",
+        ('Robin', 'taxonomy'),
+    )
+    db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES (?, ?)",
+        ('Robin', 'individual'),
+    )
+    db.conn.commit()
+    rows = db.conn.execute(
+        "SELECT id, type FROM keywords WHERE name = 'Robin' "
+        "AND parent_id IS NULL"
+    ).fetchall()
+    kid_by_type = {row['type']: row['id'] for row in rows}
+    assert set(kid_by_type) == {'taxonomy', 'individual'}
+
+    db.tag_photo(pid, kid_by_type['taxonomy'])
+    db.tag_photo(pid, kid_by_type['individual'])
+
+    os.remove(xmp_path)
+    write_sidecar(xmp_path, flat_keywords={'Robin'}, hierarchical_keywords=set())
+
+    sync_from_xmp(db, [pid])
+
+    keywords = db.get_photo_keywords(pid)
+    # Both distinct-slot homonyms must survive; sidecar reconciliation
+    # cannot pick between them.
+    surviving_ids = {kw['id'] for kw in keywords}
+    assert kid_by_type['taxonomy'] in surviving_ids
+    assert kid_by_type['individual'] in surviving_ids
