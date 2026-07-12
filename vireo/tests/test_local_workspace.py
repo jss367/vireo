@@ -140,6 +140,37 @@ def test_staging_temp_file_cannot_overwrite_real_sibling(local_workspace_env, mo
     assert (local_root / "collision.vireo-copying").read_bytes() == b"legitimate sibling"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows test runners may not permit symlinks")
+def test_stage_rejects_symlink_that_escapes_workspace(local_workspace_env):
+    env = local_workspace_env
+    outside = env["source"].parent / "outside.jpg"
+    outside.write_bytes(b"outside")
+    os.symlink(outside, env["source"] / "escape.jpg")
+
+    with pytest.raises(LocalWorkspaceError, match="Symlink escapes the workspace"):
+        stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+
+    assert _folder_path(env["db"], env["root_id"]) == str(env["source"])
+
+
+def test_folder_status_survives_stage_and_sync(local_workspace_env):
+    env = local_workspace_env
+    env["db"].conn.execute("UPDATE folders SET status='partial' WHERE id=?", (env["child_id"],))
+    env["db"].conn.commit()
+
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    staged_status = (
+        env["db"].conn.execute("SELECT status FROM folders WHERE id=?", (env["child_id"],)).fetchone()["status"]
+    )
+    assert staged_status == "partial"
+
+    sync_back(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    restored_status = (
+        env["db"].conn.execute("SELECT status FROM folders WHERE id=?", (env["child_id"],)).fetchone()["status"]
+    )
+    assert restored_status == "partial"
+
+
 def test_sync_refuses_source_changes_and_preserves_local_workspace(local_workspace_env):
     env = local_workspace_env
     stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))

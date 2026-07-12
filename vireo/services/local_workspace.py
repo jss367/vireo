@@ -101,6 +101,12 @@ def _physical_is_within(path: str, root: str) -> bool:
         return False
 
 
+def _symlink_stays_within(path: str, root: str) -> bool:
+    target = os.readlink(path)
+    resolved = target if os.path.isabs(target) else os.path.join(os.path.dirname(path), target)
+    return _physical_is_within(resolved, root)
+
+
 def _relative(path: str, root: str) -> str:
     rel = os.path.relpath(path, root)
     if rel == os.curdir:
@@ -151,7 +157,10 @@ def _preflight_sources(roots: list[dict], local_base: Path) -> tuple[int, int]:
             mode = os.lstat(full).st_mode
             if stat.S_ISREG(mode):
                 total_bytes += os.lstat(full).st_size
-            elif not stat.S_ISLNK(mode):
+            elif stat.S_ISLNK(mode):
+                if not _symlink_stays_within(full, source):
+                    raise LocalWorkspaceError(f"Symlink escapes the workspace and cannot be staged: {full}")
+            else:
                 raise LocalWorkspaceError(f"Unsupported special file in workspace: {full}")
             total_files += 1
 
@@ -311,6 +320,7 @@ def _root_records(db, workspace_id: int, local_base: Path) -> tuple[list[dict], 
                 "folder_id": folder["id"],
                 "source_path": folder["path"],
                 "local_path": os.path.normpath(local_path),
+                "status": folder["status"],
             }
         )
     return root_records, folder_records
@@ -368,7 +378,7 @@ def stage_workspace(db, workspace_id: int, vireo_dir: str, *, progress=None, can
             try:
                 for folder in folders:
                     db.conn.execute(
-                        "UPDATE folders SET path=?, status='ok' WHERE id=? AND path=?",
+                        "UPDATE folders SET path=? WHERE id=? AND path=?",
                         (folder["local_path"], folder["folder_id"], folder["source_path"]),
                     )
                     if db.conn.execute("SELECT changes()").fetchone()[0] != 1:
@@ -456,6 +466,8 @@ def _manifest_maps(manifest: dict) -> tuple[dict, dict]:
         if not os.path.isdir(root["local_path"]):
             continue
         for rel, full in _walk_entries(root["local_path"]):
+            if os.path.islink(full) and not _symlink_stays_within(full, root["local_path"]):
+                raise LocalWorkspaceError(f"Symlink escapes the managed local workspace: {full}")
             local[(root_index, rel)] = full
     return baseline, local
 
@@ -502,10 +514,11 @@ def status(db, workspace_id: int, vireo_dir: str) -> dict:
     return result
 
 
-def _preflight_restore_paths(db, manifest: dict) -> list[tuple[int, str, str]]:
+def _preflight_restore_paths(db, manifest: dict) -> list[tuple[int, str, str, str]]:
     """Map all catalog folders under local roots back to source locations."""
     mappings = []
-    rows = db.conn.execute("SELECT id, path FROM folders").fetchall()
+    rows = db.conn.execute("SELECT id, path, status FROM folders").fetchall()
+    original_statuses = {folder["folder_id"]: folder.get("status", "ok") for folder in manifest.get("folders", [])}
     own_ids = set()
     for row in rows:
         matches = [root for root in manifest["roots"] if _is_within(row["path"], root["local_path"])]
@@ -513,10 +526,10 @@ def _preflight_restore_paths(db, manifest: dict) -> list[tuple[int, str, str]]:
             continue
         root = max(matches, key=lambda item: len(_norm(item["local_path"])))
         target = os.path.normpath(os.path.join(root["source_path"], _relative(row["path"], root["local_path"])))
-        mappings.append((row["id"], row["path"], target))
+        mappings.append((row["id"], row["path"], target, original_statuses.get(row["id"], row["status"])))
         own_ids.add(row["id"])
 
-    for folder_id, _old, target in mappings:
+    for folder_id, _old, target, _status in mappings:
         conflict = db.conn.execute("SELECT id FROM folders WHERE path=? AND id != ?", (target, folder_id)).fetchone()
         if conflict and conflict["id"] not in own_ids:
             raise LocalWorkspaceError(f"Cannot restore catalog path because it is already tracked: {target}")
@@ -636,13 +649,16 @@ def sync_back(
         # folders.path UNIQUE constraint midway through restoration.
         db.conn.execute("BEGIN IMMEDIATE")
         try:
-            for folder_id, _old, _target in restore_mappings:
+            for folder_id, _old, _target, _status in restore_mappings:
                 db.conn.execute(
                     "UPDATE folders SET path=? WHERE id=?",
                     (f"__vireo_local_restore__/{workspace_id}/{folder_id}", folder_id),
                 )
-            for folder_id, _old, target in restore_mappings:
-                db.conn.execute("UPDATE folders SET path=?, status='ok' WHERE id=?", (target, folder_id))
+            for folder_id, _old, target, folder_status in restore_mappings:
+                db.conn.execute(
+                    "UPDATE folders SET path=?, status=? WHERE id=?",
+                    (target, folder_status, folder_id),
+                )
             db._relink_parents_by_path([item[0] for item in restore_mappings])
             db.conn.commit()
         except BaseException:
@@ -673,13 +689,16 @@ def discard_local(db, workspace_id: int, vireo_dir: str) -> dict:
         mappings = _preflight_restore_paths(db, manifest)
         db.conn.execute("BEGIN IMMEDIATE")
         try:
-            for folder_id, _old, _target in mappings:
+            for folder_id, _old, _target, _status in mappings:
                 db.conn.execute(
                     "UPDATE folders SET path=? WHERE id=?",
                     (f"__vireo_local_discard__/{workspace_id}/{folder_id}", folder_id),
                 )
-            for folder_id, _old, target in mappings:
-                db.conn.execute("UPDATE folders SET path=?, status='ok' WHERE id=?", (target, folder_id))
+            for folder_id, _old, target, folder_status in mappings:
+                db.conn.execute(
+                    "UPDATE folders SET path=?, status=? WHERE id=?",
+                    (target, folder_status, folder_id),
+                )
             db._relink_parents_by_path([item[0] for item in mappings])
             db.conn.commit()
         except BaseException:
