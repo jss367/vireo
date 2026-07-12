@@ -45,6 +45,28 @@ def test_browse_sidebar_resizer_supports_keyboard_controls(live_server, page):
     expect(resizer).to_have_attribute("aria-valuenow", str(round(initial_width + 10)))
 
 
+def test_browse_sidebar_resizer_keys_do_not_move_grid_selection(live_server, page):
+    # ArrowLeft/ArrowRight on the resize handle also drive the page-level
+    # Browse shortcut handler (moveBrowseSelection), so without
+    # stopPropagation the advertised keyboard resize control would
+    # simultaneously select or move to a photo and pop the detail panel.
+    page.goto(live_server["url"] + "/browse")
+
+    page.locator(".grid-card").first.wait_for(state="visible")
+    assert page.evaluate("selectedIndex") == -1
+
+    resizer = page.locator("#browseSidebarResizer")
+    resizer.focus()
+    resizer.press("ArrowRight")
+    resizer.press("ArrowLeft")
+
+    assert page.evaluate("selectedIndex") == -1
+    assert page.evaluate("selectedPhotoId") is None
+    assert not page.evaluate(
+        "document.getElementById('detailContent').classList.contains('visible')"
+    )
+
+
 def test_browse_sidebar_max_width_reserves_room_for_detail_panel(live_server, page):
     # On a viewport this narrow, the naive `innerWidth - 360` cap would allow
     # the sidebar to grow to 600px, which — combined with the always-visible

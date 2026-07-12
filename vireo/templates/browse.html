@@ -2053,14 +2053,17 @@ function initBrowseSidebarResize() {
   resizer.addEventListener('keydown', function(e) {
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
       e.preventDefault();
+      e.stopPropagation();
       var direction = e.key === 'ArrowRight' ? 1 : -1;
       var step = e.shiftKey ? 50 : 10;
       setBrowseSidebarWidth(sidebar.getBoundingClientRect().width + direction * step, true);
     } else if (e.key === 'Home') {
       e.preventDefault();
+      e.stopPropagation();
       setBrowseSidebarWidth(BROWSE_SIDEBAR_MIN_WIDTH, true);
     } else if (e.key === 'End') {
       e.preventDefault();
+      e.stopPropagation();
       setBrowseSidebarWidth(browseSidebarMaxWidth(), true);
     }
   });
