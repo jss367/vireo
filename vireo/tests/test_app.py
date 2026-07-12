@@ -11862,7 +11862,6 @@ def test_degraded_collections_never_advertise_manual_add(app_and_db, monkeypatch
     append target.
     """
     import json
-    import sqlite3
 
     from db import Database
 
