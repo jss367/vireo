@@ -22019,7 +22019,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "species": source_override["species"],
                 "confirmed": True,
             }
-        elif enc.get("species_confirmed") and enc.get("confirmed_species"):
+        elif enc.get("confirmed_species"):
+            # Inherit the encounter's prior confirmed species by leaving the
+            # override empty. Also covers the mixed/partial state where
+            # species_confirmed is False but confirmed_species records the
+            # dominant prior species (pipeline.py builds encounter payloads
+            # this way for encounters whose photos disagree on confirmed
+            # species). A classifier-guess override here would mask that
+            # prior tag: the confirm endpoint reads species_override.species
+            # without inspecting the confirmed flag, so a later burst confirm
+            # would target the guess as previous_species instead of the real
+            # prior species and leave both keywords on the photo.
             new_burst_override = None
         else:
             new_burst_override = _candidate_species_override(new_burst_species)

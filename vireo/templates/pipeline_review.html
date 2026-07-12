@@ -6223,12 +6223,17 @@ async function grmApply() {
         var detachedPhotos = photo ? [photo] : [];
         var detachedConsensus = buildBurstConsensus(detachedPhotos);
         var sourceOverride = burst && burst.species_override;
+        // Match the server detach-photo elif (vireo/app.py): fall through to
+        // a null override whenever the encounter tracks any confirmed_species,
+        // including the mixed/partial state (species_confirmed=false but
+        // confirmed_species set) where a classifier-guess override would
+        // mask the real prior tag for a later burst-confirm.
         enc.bursts.push({
           photo_ids: [pid],
           species_predictions: detachedConsensus,
           species_override: sourceOverride && sourceOverride.confirmed === true
             ? Object.assign({}, sourceOverride)
-            : (enc.species_confirmed && enc.confirmed_species
+            : (enc.confirmed_species
               ? null
               : candidateSpeciesOverrideFromPhotos(detachedPhotos)),
         });
