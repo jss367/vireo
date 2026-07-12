@@ -653,6 +653,93 @@ def test_sync_refuses_symlinked_source_root_replaced_after_staging(local_workspa
     assert status(env["db"], env["workspace_id"], str(env["vireo_dir"]))["state"] == "active"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows test runners may not permit symlinks")
+def test_sync_refuses_symlinked_managed_local_root_replaced_after_staging(local_workspace_env, tmp_path):
+    # If the managed local root itself is replaced with a symlink after
+    # staging, os.path.isdir would follow the link and status/sync would
+    # walk that outside tree instead of the recorded managed copy — sync
+    # could then publish or delete source files based on files that were
+    # never in the managed copy. The managed-root check must use lstat.
+    env = local_workspace_env
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    local_root = Path(_folder_path(env["db"], env["root_id"]))
+
+    outside = tmp_path / "impostor"
+    outside.mkdir()
+    (outside / "root.jpg").write_bytes(b"impostor-file")
+    shutil.rmtree(local_root)
+    os.symlink(outside, local_root)
+
+    # Status degrades to recovery so Discard remains reachable without
+    # touching source files.
+    current = status(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    assert current["state"] == "recovery"
+    assert str(local_root) in current["missing_local_paths"]
+
+    with pytest.raises(LocalWorkspaceError, match="symlink"):
+        sync_back(env["db"], env["workspace_id"], str(env["vireo_dir"]), allow_deletions=True)
+
+    # No source file was rewritten to the impostor contents and no source
+    # file was deleted because the impostor was empty of the real names.
+    assert (env["source"] / "root.jpg").read_bytes() == b"root-original"
+    assert (env["child"] / "bird.jpg").read_bytes() == b"bird-original"
+
+
+def test_restore_catalog_is_atomic_across_merge_and_state_cleanup(local_workspace_env, monkeypatch):
+    # _restore_catalog performs a self-healing merge, a two-phase rename to
+    # avoid folders.path UNIQUE trips, a stray-row rebase, and drops the
+    # local-workspace state — all inside a single BEGIN IMMEDIATE. If
+    # _merge_into_existing were to commit mid-flow, a later failure would
+    # leave a partially-restored catalog with local-workspace state still
+    # present. Simulate a failure after the first merge and assert the
+    # rollback undoes the merge too.
+    env = local_workspace_env
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+
+    # An import at the original NAS path while staged materializes a
+    # second folder row that will trigger the self-heal merge branch.
+    (env["child"] / "imported.jpg").write_bytes(b"imported")
+    interloper_id = env["db"].add_folder(str(env["child"]), name="2026")
+    assert interloper_id != env["child_id"]
+    env["db"].add_photo(interloper_id, "imported.jpg", ".jpg", 8, 0.0)
+
+    # Fail _relink_parents_by_path, which runs AFTER the self-heal merge
+    # (and after every rebase). If _merge_into_existing had committed
+    # mid-flow, the interloper row would be gone after rollback and the
+    # catalog would be inconsistent with the still-present local-workspace
+    # state. Because it now runs inside the caller's transaction, rollback
+    # unwinds the merge too.
+    original_relink = env["db"]._relink_parents_by_path
+
+    def failing_relink(*args, **kwargs):
+        raise RuntimeError("simulated failure after merge")
+
+    monkeypatch.setattr(env["db"], "_relink_parents_by_path", failing_relink)
+    with pytest.raises(RuntimeError, match="simulated failure"):
+        discard_local(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    monkeypatch.setattr(env["db"], "_relink_parents_by_path", original_relink)
+
+    # The interloper row survived the rollback: the self-heal merge did
+    # NOT commit ahead of the rest of the restore.
+    still_present = env["db"].conn.execute(
+        "SELECT id FROM folders WHERE id=?", (interloper_id,)
+    ).fetchone()
+    assert still_present is not None
+    # Local-workspace state is still present too — the failed restore did
+    # not partially clean it up.
+    lw_row = env["db"].conn.execute(
+        "SELECT workspace_id FROM local_workspaces WHERE workspace_id=?", (env["workspace_id"],)
+    ).fetchone()
+    assert lw_row is not None
+
+    # A subsequent discard succeeds cleanly — the workspace is not wedged.
+    discard_local(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    lw_row_after = env["db"].conn.execute(
+        "SELECT workspace_id FROM local_workspaces WHERE workspace_id=?", (env["workspace_id"],)
+    ).fetchone()
+    assert lw_row_after is None
+
+
 def test_sync_recovery_refuses_new_deletions_that_were_not_confirmed(local_workspace_env, monkeypatch):
     # If a file is deleted from the managed local tree after the first sync
     # attempt was interrupted, clicking Finish Sync-back must NOT silently

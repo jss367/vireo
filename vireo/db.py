@@ -3185,7 +3185,7 @@ class Database:
         self.conn.commit()
         return cascaded
 
-    def _merge_into_existing(self, source_folder_id, target_folder_id, new_path):
+    def _merge_into_existing(self, source_folder_id, target_folder_id, new_path, *, commit=True):
         """Merge photos from a missing folder into an existing folder at the same path.
 
         - Photos with matching filenames in the target are dropped from source
@@ -3194,6 +3194,10 @@ class Database:
         - Missing child folders are cascade-relocated using old_path -> new_path
 
         Returns list of child folder dicts that were also relocated (same as relocate_folder).
+
+        When ``commit`` is False the caller owns the surrounding transaction —
+        used by ``services.local_workspace._restore_catalog`` so the whole
+        catalog restore (merges + rebase + state-row cleanup) commits atomically.
         """
         old_row = self.conn.execute(
             "SELECT path FROM folders WHERE id = ?", (source_folder_id,)
@@ -3308,7 +3312,8 @@ class Database:
                 cascaded.append({"id": child["id"], "old_path": child["path"], "new_path": candidate})
 
         self._relink_parents_by_path([c["id"] for c in cascaded])
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         return cascaded
 
     # -- Move operations --

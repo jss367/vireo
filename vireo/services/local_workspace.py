@@ -746,12 +746,37 @@ def _same_content(first: str, second: str, cancel_check=None) -> bool:
     return _sha256(first, cancel_check) == _sha256(second, cancel_check)
 
 
+def _managed_root_state(local_path: str) -> str:
+    """Classify a managed local root: 'ok', 'missing', 'symlink', or 'invalid'.
+
+    ``os.path.isdir`` follows symlinks, so a managed root replaced with a
+    symlink to another directory after staging would pass an isdir gate and
+    let status/sync traverse the outside tree. Reject the symlink case
+    explicitly instead of following it.
+    """
+    try:
+        st = os.lstat(local_path)
+    except (FileNotFoundError, NotADirectoryError):
+        return "missing"
+    if stat.S_ISLNK(st.st_mode):
+        return "symlink"
+    if stat.S_ISDIR(st.st_mode):
+        return "ok"
+    return "invalid"
+
+
 def _manifest_maps(manifest: dict) -> tuple[dict, dict]:
     """Return (baseline entries, current local entries with stats)."""
     baseline = {(item["root"], item["path"]): item for item in manifest["files"]}
     local = {}
     for root_index, root in enumerate(manifest["roots"]):
-        if not os.path.isdir(root["local_path"]):
+        root_state = _managed_root_state(root["local_path"])
+        if root_state == "symlink":
+            raise LocalWorkspaceError(
+                f"Managed local folder is now a symlink and cannot be trusted: {root['local_path']}. "
+                "Discard restores the catalog without touching source files."
+            )
+        if root_state != "ok":
             continue
         for rel, full, st in _walk_entries(root["local_path"]):
             kind = _entry_type(st)
@@ -820,7 +845,12 @@ def status(db, workspace_id: int, vireo_dir: str) -> dict:
         result.update(_change_summary(manifest, manifest_error))
         return result
 
-    missing_local_roots = [root["local_path"] for root in roots if not os.path.isdir(root["local_path"])]
+    # Symlinked managed roots are treated the same as missing here so the
+    # Workspace page reaches the recovery UI (Discard restores the catalog
+    # without walking the tampered local tree).
+    missing_local_roots = [
+        root["local_path"] for root in roots if _managed_root_state(root["local_path"]) != "ok"
+    ]
     if missing_local_roots:
         result["state"] = "recovery"
         result["missing_local_paths"] = missing_local_roots
@@ -961,7 +991,13 @@ def _restore_catalog(db, workspace_id: int) -> None:
                 (mapping["source_path"], mapping["folder_id"]),
             ).fetchone()
             if conflict and conflict["id"] not in mapped_ids:
-                db._merge_into_existing(conflict["id"], mapping["folder_id"], mapping["source_path"])
+                # ``commit=False`` keeps the whole restore in the BEGIN
+                # IMMEDIATE opened above; a failure below still rolls back
+                # every merge/rebase together instead of leaving a
+                # partially-restored catalog with local-workspace state.
+                db._merge_into_existing(
+                    conflict["id"], mapping["folder_id"], mapping["source_path"], commit=False
+                )
 
         for mapping in mappings:
             db.conn.execute(
@@ -993,7 +1029,7 @@ def _restore_catalog(db, workspace_id: int) -> None:
                 "SELECT id FROM folders WHERE path=? AND id != ?", (target, row["id"])
             ).fetchone()
             if existing:
-                db._merge_into_existing(row["id"], existing["id"], target)
+                db._merge_into_existing(row["id"], existing["id"], target, commit=False)
             else:
                 db.conn.execute("UPDATE folders SET path=? WHERE id=?", (target, row["id"]))
                 relinked.append(row["id"])
@@ -1057,7 +1093,13 @@ def sync_back(
                 )
             if not stat.S_ISDIR(source_st.st_mode):
                 raise LocalWorkspaceError(f"Source storage is unavailable: {root['source_path']}")
-            if not os.path.isdir(root["local_path"]):
+            local_state_kind = _managed_root_state(root["local_path"])
+            if local_state_kind == "symlink":
+                raise LocalWorkspaceError(
+                    f"Managed local folder is now a symlink and cannot be trusted: {root['local_path']}. "
+                    "Discard restores the catalog without touching source files."
+                )
+            if local_state_kind != "ok":
                 raise LocalWorkspaceError(
                     f"Managed local folder is unavailable: {root['local_path']}. "
                     "Restore it or discard the local workspace; source files were not changed."
