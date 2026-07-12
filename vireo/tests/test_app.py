@@ -5563,6 +5563,73 @@ def test_batch_keyword_remove_undo_restores_pending_add(app_and_db):
     )
 
 
+def test_batch_keyword_remove_undo_cancels_legacy_pending_remove(app_and_db):
+    """Undo of a batch remove must cancel legacy-peer pending removes too.
+
+    When a selection contains one photo tagged with the clean row and
+    another with a legacy edge-quote peer, ``api_batch_keyword_remove``
+    untags both and queues ``keyword_remove`` under each stored spelling.
+    The edit history records only the representative id, so a naive undo
+    that cancels only the representative's stored name leaves the
+    ``keyword_remove('‘Cardinal')`` pending — and the next XMP sync then
+    strips the just-retagged keyword back out of the sidecar because
+    ``remove_keywords`` matches on the normalized key.
+    """
+    app, db = app_and_db
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos ORDER BY filename"
+    ).fetchall()
+    ids = [row["id"] for row in rows]
+
+    clean_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Cardinal'"
+    ).fetchone()["id"]
+    legacy_id = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES (?, NULL, 0, 'general')",
+        ("‘Cardinal",),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (ids[1], legacy_id),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    remove_resp = client.post(
+        "/api/batch/keyword-remove",
+        json={"photo_ids": ids, "keyword_id": clean_id},
+        content_type="application/json",
+    )
+    assert remove_resp.status_code == 200
+    assert remove_resp.get_json()["updated"] == 2
+
+    pending_after_remove = db.conn.execute(
+        """SELECT change_type, value FROM pending_changes
+           WHERE photo_id = ? AND change_type = 'keyword_remove'
+           ORDER BY value""",
+        (ids[1],),
+    ).fetchall()
+    assert [(row["change_type"], row["value"]) for row in pending_after_remove] == [
+        ("keyword_remove", "Cardinal"),
+        ("keyword_remove", "‘Cardinal"),
+    ], "batch remove should queue removes under both variant spellings"
+
+    undo_resp = client.post("/api/undo")
+    assert undo_resp.status_code == 200
+
+    pending_after_undo = db.conn.execute(
+        """SELECT change_type, value FROM pending_changes
+           WHERE photo_id = ? AND value IN ('Cardinal', '‘Cardinal')""",
+        (ids[1],),
+    ).fetchall()
+    assert pending_after_undo == [], (
+        "undo must cancel pending removes for every variant spelling "
+        "queued by the batch remove — otherwise sync strips the "
+        "just-restored tag"
+    )
+
+
 def test_batch_keyword_route_chunks_large_existing_keyword_lookup(app_and_db):
     """Large batch keyword adds must not exceed SQLite's variable limit."""
     app, db = app_and_db

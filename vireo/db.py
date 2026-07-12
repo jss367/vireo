@@ -13348,10 +13348,57 @@ class Database:
                             )
                         self.conn.commit()
             elif entry['action_type'] == 'keyword_remove':
-                self.tag_photo(pid, int(entry['new_value']))
-                kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?",
-                                       (int(entry['new_value']),)).fetchone()
+                kid = int(entry['new_value'])
+                self.tag_photo(pid, kid)
+                kw = self.conn.execute(
+                    "SELECT name, parent_id, type FROM keywords WHERE id = ?",
+                    (kid,),
+                ).fetchone()
                 if kw:
+                    # `api_batch_keyword_remove` can queue removes under
+                    # multiple spellings for the same normalized identity:
+                    # the representative kid's stored name plus every
+                    # legacy peer (same normalized name, parent_id, and
+                    # type) that a selected photo carried. Undo only
+                    # records the representative id, so cancellation has
+                    # to cover every peer's stored name too — otherwise a
+                    # `keyword_remove('‘Cardinal')` survives after the
+                    # clean `Cardinal` tag is restored, and the next XMP
+                    # sync strips the (normalized-matched) keyword back
+                    # out of the sidecar. Also handles the plain
+                    # per-photo remove path, where the peer list is empty
+                    # and only the representative name is cancelled.
+                    names_to_cancel = [kw['name']]
+                    norm = normalize_keyword_display(kw['name'])
+                    if norm:
+                        if kw['parent_id'] is None:
+                            peer_rows = self.conn.execute(
+                                """SELECT name FROM keywords
+                                   WHERE vireo_normalize_keyword(name) = ?
+                                     COLLATE NOCASE
+                                     AND parent_id IS NULL
+                                     AND type = ?
+                                     AND id != ?""",
+                                (norm, kw['type'], kid),
+                            ).fetchall()
+                        else:
+                            peer_rows = self.conn.execute(
+                                """SELECT name FROM keywords
+                                   WHERE vireo_normalize_keyword(name) = ?
+                                     COLLATE NOCASE
+                                     AND parent_id = ?
+                                     AND type = ?
+                                     AND id != ?""",
+                                (norm, kw['parent_id'], kw['type'], kid),
+                            ).fetchall()
+                        for row in peer_rows:
+                            if row['name'] and row['name'] not in names_to_cancel:
+                                names_to_cancel.append(row['name'])
+                    total_cancelled = 0
+                    for name in names_to_cancel:
+                        total_cancelled += self.remove_pending_changes(
+                            pid, 'keyword_remove', name
+                        )
                     # Symmetric with `_queue_keyword_remove`: the original
                     # remove either queued a `keyword_remove` or, when a
                     # not-yet-synced `keyword_add` was pending, cancelled
@@ -13359,10 +13406,7 @@ class Database:
                     # the remove touched — otherwise an add → remove → undo
                     # flow leaves the tag on the photo with no pending
                     # sidecar write, and the restored keyword never syncs.
-                    cancelled = self.remove_pending_changes(
-                        pid, 'keyword_remove', kw['name']
-                    )
-                    if cancelled == 0:
+                    if total_cancelled == 0:
                         self.queue_change(pid, 'keyword_add', kw['name'])
             elif entry['action_type'] == 'species_replace':
                 # Atomic swap: the edit replaced old_value's species with
