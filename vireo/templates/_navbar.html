@@ -5638,9 +5638,9 @@ function _lbPersistBool(key, value) {
   try { localStorage.setItem(key, value ? '1' : '0'); } catch (e) {}
 }
 
-var _lbBoxesVisible = _lbStoredBool('vireo.lb.boxesVisible', true);
+var _lbBoxesVisible = _lbStoredBool('vireo.lb.boxesVisible', false);
 var _lbMasksVisible = _lbStoredBool('vireo.lb.masksVisible', false);
-var _lbEyeVisible = _lbStoredBool('vireo.lb.eyeVisible', true);
+var _lbEyeVisible = _lbStoredBool('vireo.lb.eyeVisible', false);
 var _lbInfoVisible = _lbStoredBool('vireo.lb.infoVisible', true);
 var _lbChromeVisible = _lbStoredBool('vireo.lb.chromeVisible', true);
 

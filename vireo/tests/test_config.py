@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 
@@ -300,7 +301,7 @@ def test_eye_focus_defaults_exist():
     from config import DEFAULTS
 
     p = DEFAULTS["pipeline"]
-    assert p["eye_detect_enabled"] is True
+    assert p["eye_detect_enabled"] is False
     assert p["eye_classifier_conf_gate"] == 0.50
     assert p["eye_detection_conf_gate"] == 0.50
     assert p["eye_window_k"] == 0.08
@@ -393,7 +394,10 @@ def test_reject_eye_focus_flows_from_config_to_scoring(tmp_path, monkeypatch):
     import config as cfg
     monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
     with open(cfg.CONFIG_PATH, "w") as f:
-        _json.dump({"pipeline": {"reject_eye_focus": 0.99}}, f)
+        _json.dump(
+            {"pipeline": {"eye_detect_enabled": True, "reject_eye_focus": 0.99}},
+            f,
+        )
 
     from db import Database
     from scoring import score_encounter
@@ -712,6 +716,322 @@ def test_migrate_toggle_ui_h_conflict_no_config_file(tmp_path, monkeypatch):
     assert cfg.migrate_toggle_ui_h_conflict() is False
     raw = _read_raw(cfg.CONFIG_PATH)
     assert cfg.MIGRATION_TOGGLE_UI_H_CONFLICT in raw["_migrations_applied"]
+
+
+def test_migrate_eye_detect_default_off_rewrites_legacy_true(
+    tmp_path, monkeypatch
+):
+    import config as cfg
+
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(config_path))
+    config_path.write_text(
+        json.dumps({"pipeline": {"eye_detect_enabled": True}})
+    )
+
+    assert cfg.migrate_eye_detect_default_off() is True
+    raw = json.loads(config_path.read_text())
+    assert raw["pipeline"]["eye_detect_enabled"] is False
+    assert cfg.MIGRATION_EYE_DETECT_DEFAULT_OFF in raw["_migrations_applied"]
+
+
+def test_migrate_eye_detect_default_off_preserves_false(tmp_path, monkeypatch):
+    import config as cfg
+
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(config_path))
+    config_path.write_text(
+        json.dumps({"pipeline": {"eye_detect_enabled": False}})
+    )
+
+    assert cfg.migrate_eye_detect_default_off() is False
+    raw = json.loads(config_path.read_text())
+    assert raw["pipeline"]["eye_detect_enabled"] is False
+    assert cfg.MIGRATION_EYE_DETECT_DEFAULT_OFF in raw["_migrations_applied"]
+
+
+def test_migrate_eye_detect_default_off_is_one_time(tmp_path, monkeypatch):
+    import config as cfg
+
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(config_path))
+    config_path.write_text(
+        json.dumps({"pipeline": {"eye_detect_enabled": True}})
+    )
+
+    assert cfg.migrate_eye_detect_default_off() is True
+    raw = json.loads(config_path.read_text())
+    raw["pipeline"]["eye_detect_enabled"] = True
+    config_path.write_text(json.dumps(raw))
+
+    assert cfg.migrate_eye_detect_default_off() is False
+    raw = json.loads(config_path.read_text())
+    assert raw["pipeline"]["eye_detect_enabled"] is True
+
+
+def test_migrate_eye_detect_default_off_rewrites_workspace_overrides(
+    tmp_path, monkeypatch
+):
+    import config as cfg
+    from db import Database
+
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(config_path))
+    config_path.write_text("{}")
+    db = Database(str(tmp_path / "test.db"), initialize_schema=True)
+    db.create_workspace(
+        "legacy",
+        config_overrides={"pipeline": {"eye_detect_enabled": True}},
+    )
+
+    assert cfg.migrate_eye_detect_default_off(db) is True
+    rows = db.conn.execute(
+        "SELECT config_overrides FROM workspaces WHERE name = 'legacy'"
+    ).fetchall()
+    overrides = json.loads(rows[0]["config_overrides"])
+    assert overrides["pipeline"]["eye_detect_enabled"] is False
+
+
+def test_migrate_eye_detect_default_off_invalidates_workspace_group_fingerprint(
+    tmp_path, monkeypatch,
+):
+    """A workspace override rewritten from True to False was previously
+    scoring with eye detection on. Its cached
+    ``pipeline_results_ws*.json`` reflects those KEEP/REJECT decisions,
+    but ``compute_group_fingerprint`` only reads encounter/burst settings.
+    The migration must null ``last_group_fingerprint`` on the rewritten
+    workspace so the Process page reports the cache as outdated rather
+    than serving stale eye-enabled scoring after the default flips.
+    """
+    import config as cfg
+    from db import Database
+
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(config_path))
+    config_path.write_text("{}")
+    db = Database(str(tmp_path / "test.db"), initialize_schema=True)
+    ws_id = db.create_workspace(
+        "legacy",
+        config_overrides={"pipeline": {"eye_detect_enabled": True}},
+    )
+    db.set_workspace_group_state(ws_id, "stale-fp", "2025-01-01T00:00:00Z")
+
+    assert cfg.migrate_eye_detect_default_off(db) is True
+
+    row = db.conn.execute(
+        "SELECT last_group_fingerprint FROM workspaces WHERE id = ?", (ws_id,),
+    ).fetchone()
+    assert row["last_group_fingerprint"] is None, (
+        "workspace whose eye_detect_enabled override was rewritten from True "
+        "to False must have its group fingerprint cleared so the plan page "
+        "treats prior eye-enabled scoring as outdated"
+    )
+
+
+def test_migrate_eye_detect_default_off_invalidates_default_relying_workspaces(
+    tmp_path, monkeypatch,
+):
+    """When the global default flips from True to False, workspaces that
+    were relying on the global default (no explicit False override) also
+    had their effective ``eye_detect_enabled`` change. Their cached
+    triage was scored with eye detection on and must be invalidated.
+    Workspaces with an explicit False override were already scoring
+    without eye detection and must keep their fingerprint.
+    """
+    import config as cfg
+    from db import Database
+
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(config_path))
+    config_path.write_text(
+        json.dumps({"pipeline": {"eye_detect_enabled": True}})
+    )
+    db = Database(str(tmp_path / "test.db"), initialize_schema=True)
+    ws_relying_id = db.create_workspace("relying")
+    ws_explicit_false_id = db.create_workspace(
+        "explicit-false",
+        config_overrides={"pipeline": {"eye_detect_enabled": False}},
+    )
+    db.set_workspace_group_state(ws_relying_id, "relying-fp", "2025-01-01T00:00:00Z")
+    db.set_workspace_group_state(
+        ws_explicit_false_id, "explicit-false-fp", "2025-01-01T00:00:00Z",
+    )
+
+    assert cfg.migrate_eye_detect_default_off(db) is True
+
+    rows = {
+        r["id"]: r["last_group_fingerprint"]
+        for r in db.conn.execute(
+            "SELECT id, last_group_fingerprint FROM workspaces",
+        ).fetchall()
+    }
+    assert rows[ws_relying_id] is None, (
+        "workspace relying on the global True default must have its "
+        "fingerprint cleared when the global flips to False"
+    )
+    assert rows[ws_explicit_false_id] == "explicit-false-fp", (
+        "workspace with an explicit False override was already scoring "
+        "eye-disabled; its fingerprint must not be cleared"
+    )
+
+
+def test_migrate_eye_detect_default_off_invalidates_when_global_key_absent(
+    tmp_path, monkeypatch,
+):
+    """When the raw config lacks ``pipeline.eye_detect_enabled`` entirely,
+    it was relying on the previous DEFAULTS value (``True``) — the same
+    effective pre-migration state as an explicit True. Default-relying
+    workspaces were therefore scoring eye-enabled and their fingerprints
+    must be invalidated even though ``pipeline`` is absent from disk.
+    Regression for Codex thread PRRT_kwDORn8c-s6QN0m2 (invalidation
+    gated only on a raw global True).
+    """
+    import config as cfg
+    from db import Database
+
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(config_path))
+    # Two shapes of the same "no explicit key" case: (a) pipeline block
+    # entirely absent, (b) pipeline present but eye_detect_enabled absent.
+    # Both mean the workspace was relying on the old True DEFAULTS.
+    config_path.write_text(json.dumps({"some_other_setting": 1}))
+
+    db = Database(str(tmp_path / "test.db"), initialize_schema=True)
+    ws_relying_id = db.create_workspace("relying")
+    db.set_workspace_group_state(
+        ws_relying_id, "relying-fp", "2025-01-01T00:00:00Z",
+    )
+
+    cfg.migrate_eye_detect_default_off(db)
+
+    row = db.conn.execute(
+        "SELECT last_group_fingerprint FROM workspaces WHERE id = ?",
+        (ws_relying_id,),
+    ).fetchone()
+    assert row["last_group_fingerprint"] is None, (
+        "workspace relying on the previous True DEFAULTS (raw config has "
+        "no pipeline.eye_detect_enabled key) must have its fingerprint "
+        "cleared when the default flips to False; otherwise the Process "
+        "page keeps reporting eye-scored triage as fresh"
+    )
+
+
+def test_migrate_eye_detect_default_off_keeps_fingerprint_when_global_already_false(
+    tmp_path, monkeypatch,
+):
+    """When the global default is already False, workspaces without any
+    eye override were already scoring eye-disabled and their cached
+    triage remains accurate. Only workspaces whose override rewrites
+    from True to False should have their fingerprints cleared.
+    """
+    import config as cfg
+    from db import Database
+
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(config_path))
+    config_path.write_text(
+        json.dumps({"pipeline": {"eye_detect_enabled": False}})
+    )
+    db = Database(str(tmp_path / "test.db"), initialize_schema=True)
+    ws_no_override_id = db.create_workspace("no-override")
+    db.set_workspace_group_state(
+        ws_no_override_id, "keep-me", "2025-01-01T00:00:00Z",
+    )
+
+    assert cfg.migrate_eye_detect_default_off(db) is False
+
+    row = db.conn.execute(
+        "SELECT last_group_fingerprint FROM workspaces WHERE id = ?",
+        (ws_no_override_id,),
+    ).fetchone()
+    assert row["last_group_fingerprint"] == "keep-me", (
+        "when the global default was already False, workspaces without an "
+        "eye override were already scoring eye-disabled and must keep their "
+        "cached fingerprint"
+    )
+
+
+def test_migrate_eye_detect_default_off_preserves_explicit_workspace_opt_ins(
+    tmp_path, monkeypatch,
+):
+    """When the global config already had ``eye_detect_enabled=False`` (an
+    installation that intentionally scored eye-disabled globally before
+    this migration ran), a workspace override of ``True`` is an explicit
+    per-workspace opt-in — the user chose to run eye detection in that
+    workspace despite the global default. The migration must leave those
+    intentional overrides alone; otherwise upgrading silently disables
+    eye detection/scoring for workspaces whose settings intentionally
+    differed from the global default.
+    """
+    import config as cfg
+    from db import Database
+
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(config_path))
+    config_path.write_text(
+        json.dumps({"pipeline": {"eye_detect_enabled": False}})
+    )
+    db = Database(str(tmp_path / "test.db"), initialize_schema=True)
+    db.create_workspace(
+        "opt-in",
+        config_overrides={"pipeline": {"eye_detect_enabled": True}},
+    )
+
+    cfg.migrate_eye_detect_default_off(db)
+
+    row = db.conn.execute(
+        "SELECT config_overrides FROM workspaces WHERE name = 'opt-in'"
+    ).fetchone()
+    overrides = json.loads(row["config_overrides"])
+    assert overrides["pipeline"]["eye_detect_enabled"] is True, (
+        "when the global default was already False, a workspace "
+        "eye_detect_enabled=True override is an explicit per-workspace "
+        "opt-in and must not be flipped by the legacy-default migration"
+    )
+
+
+def test_migrate_eye_detect_default_off_chunks_workspace_invalidation(
+    tmp_path, monkeypatch,
+):
+    """When more workspaces need their fingerprint cleared than SQLite's
+    bound-parameter limit, the invalidation UPDATE must be chunked. A
+    single ``UPDATE ... WHERE id IN (?, ?, ...)`` with a placeholder per
+    workspace raises ``OperationalError: too many SQL variables`` on
+    legacy 999-variable SQLite builds and would prevent the app from
+    starting (the migration runs during ``create_app``). Regression for
+    Codex thread PRRT_kwDORn8c-s6QODfD.
+    """
+    import config as cfg
+    from db import _SQLITE_PARAM_CHUNK_SIZE, Database
+
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(config_path))
+    config_path.write_text(
+        json.dumps({"pipeline": {"eye_detect_enabled": True}})
+    )
+    db = Database(str(tmp_path / "test.db"), initialize_schema=True)
+    # Create more workspaces than the chunk size so a naive single-IN
+    # UPDATE would need >_SQLITE_PARAM_CHUNK_SIZE placeholders. Each must
+    # be marked as having a stamped fingerprint so they enter the
+    # invalidation set.
+    count = _SQLITE_PARAM_CHUNK_SIZE + 25
+    ws_ids = []
+    for i in range(count):
+        ws_id = db.create_workspace(f"ws-{i}")
+        db.set_workspace_group_state(ws_id, f"fp-{i}", "2025-01-01T00:00:00Z")
+        ws_ids.append(ws_id)
+
+    assert cfg.migrate_eye_detect_default_off(db) is True
+
+    rows = db.conn.execute(
+        "SELECT id, last_group_fingerprint FROM workspaces"
+    ).fetchall()
+    fingerprints = {r["id"]: r["last_group_fingerprint"] for r in rows}
+    for ws_id in ws_ids:
+        assert fingerprints[ws_id] is None, (
+            f"workspace {ws_id} was relying on the global True default "
+            f"and must have its fingerprint cleared even at scale"
+        )
 
 
 def test_default_subject_types_includes_taxonomy_individual_genre(tmp_path, monkeypatch):

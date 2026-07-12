@@ -130,6 +130,17 @@ class PipelineParams:
     review_mode: str | None = None
     skip_classify: bool = False
     skip_eye_keypoints: bool = False
+    # Per-run override for the config-gated eye-detect setting. Semantics
+    # match miss_enabled: None defers to the workspace-effective
+    # ``pipeline.eye_detect_enabled``, a bool wins over workspace config in
+    # both directions. Set to True by the Process page when the user
+    # explicitly checks the Eye Keypoints stage box — that box is a
+    # per-run opt-in that must override the (default-off) Settings value
+    # so preflight and scoring see the enabled state. Left None by
+    # strategy expansion (``process_strategies.resolve_strategy``) so a
+    # ``full`` strategy chain from after-import respects the user's
+    # Settings default instead of silently forcing eye detection on.
+    eye_detect_override: bool | None = None
     # Per-run override for the config-gated misses stage. None defers to the
     # workspace-effective ``pipeline.miss_enabled`` (today's behavior); a
     # bool wins over workspace config in BOTH directions, mirroring how the
@@ -4898,7 +4909,21 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 thread_db = Database(db_path)
                 thread_db.set_active_workspace(workspace_id)
                 effective_cfg = thread_db.get_effective_config(cfg.load())
-                pipeline_cfg = effective_cfg.get("pipeline", {})
+                pipeline_cfg = dict(effective_cfg.get("pipeline", {}))
+
+                # Apply the per-run eye-detect override only when the caller
+                # sent an explicit signal. ``skip_eye_keypoints=False`` alone
+                # is not proof of opt-in: ``resolve_strategy('full')`` sets it
+                # to False as a base default, so an after-import ``full``
+                # chain would otherwise force ``eye_detect_enabled=True``
+                # against a workspace whose Settings default is False (the
+                # new default) — triggering SuperAnimal downloads and eye-
+                # based scoring by default. ``eye_detect_override`` is the
+                # explicit signal the Process page sends alongside its
+                # checkbox state; strategy expansion leaves it None, so a
+                # chained ``full`` run respects the user's Settings value.
+                if params.eye_detect_override is not None:
+                    pipeline_cfg["eye_detect_enabled"] = params.eye_detect_override
 
                 # Mirror the stage-level preflight so a no-op run doesn't pay the
                 # O(N) eligibility join cost or report a misleading
@@ -5232,7 +5257,23 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 thread_db.set_active_workspace(workspace_id)
 
                 effective_cfg = thread_db.get_effective_config(cfg.load())
-                pipeline_cfg = effective_cfg.get("pipeline", {})
+                pipeline_cfg = dict(effective_cfg.get("pipeline", {}))
+
+                # Mirror the eye_keypoints_stage per-run override so scoring
+                # honors the same explicit intent. Without carrying the
+                # override into pipeline_cfg here, ``run_full_pipeline``
+                # reloads workspace config with ``eye_detect_enabled=False``
+                # (the new default) and ``score_encounter`` ignores the
+                # ``eye_tenengrad`` values the eye stage just wrote — so the
+                # visible checkbox would affect only the expensive keypoint
+                # pass, not the culling result the user actually sees.
+                # Gated on ``eye_detect_override`` (an explicit per-run
+                # signal), NOT on ``not skip_eye_keypoints``, because the
+                # latter is False by default in ``resolve_strategy('full')``
+                # too — using it would force eye scoring on for any chained
+                # ``full`` run regardless of workspace Settings.
+                if params.eye_detect_override is not None:
+                    pipeline_cfg["eye_detect_enabled"] = params.eye_detect_override
 
                 photos = load_photo_features(thread_db, collection_id=collection_id, config=effective_cfg)
                 if params.exclude_photo_ids:
@@ -5277,9 +5318,30 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             (workspace_id,),
                         ).fetchall()
                     }
+                    # A per-run eye override that differs from the
+                    # workspace's own effective ``eye_detect_enabled`` means
+                    # this run's KEEP/REJECT decisions came from scoring
+                    # settings the workspace's normal state wouldn't produce.
+                    # ``compute_group_fingerprint`` reads only encounter/burst
+                    # keys — not ``eye_detect_enabled`` — so stamping it here
+                    # would mark eye-scored (or eye-disabled) results as
+                    # settings-fresh for a later plan run against the
+                    # workspace's real settings. Treat that as a partial run
+                    # so ``pipeline_plan`` reports the cache as needing to
+                    # re-run instead of hiding the mismatch.
+                    workspace_eye_setting = bool(
+                        effective_cfg.get("pipeline", {}).get(
+                            "eye_detect_enabled", False,
+                        )
+                    )
+                    per_run_eye_override_differs = (
+                        params.eye_detect_override is not None
+                        and bool(params.eye_detect_override) != workspace_eye_setting
+                    )
                     covered_full_workspace = (
                         not params.exclude_photo_ids
                         and ws_photo_ids.issubset(collection_photo_ids)
+                        and not per_run_eye_override_differs
                     )
                     if covered_full_workspace:
                         thread_db.set_workspace_group_state(

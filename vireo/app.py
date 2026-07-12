@@ -2688,6 +2688,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # workspace overrides. Gated by a marker so it runs once; re-saved
     # legacy values are preserved on subsequent boots.
     cfg.migrate_legacy_miss_thresholds(init_db)
+    # One-time rewrite of the previous eye-focus detection default from on to
+    # off in both global config and workspace overrides.
+    cfg.migrate_eye_detect_default_off(init_db)
     # One-time resolution of the browse.toggle_ui="h" default clashing with
     # any pre-existing browse binding on ``h``. Writes an explicit "" so the
     # user's existing action keeps working; they can re-bind toggle_ui from
@@ -3454,7 +3457,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "sam2_variant": sam2_variant,
                 "dinov2_variant": dinov2_variant,
                 "proxy_longest_edge": proxy_longest_edge,
-                "eye_detect_enabled": pipeline_cfg.get("eye_detect_enabled", True),
+                "eye_detect_enabled": pipeline_cfg.get("eye_detect_enabled", False),
                 "preview_max_size": effective_cfg.get("preview_max_size", 1920),
             },
             "mask_variant_coverage": db.mask_variant_coverage(),
@@ -3632,6 +3635,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "review_mode must be a string or null, got "
                 f"{type(review_mode).__name__}", 400,
             )
+        # ``eye_detect_override`` is tri-state (None/True/False); accept
+        # only bool or missing so the plan matches what /api/jobs/pipeline
+        # would do.
+        eye_detect_override_body = body.get("eye_detect_override")
+        if (
+            eye_detect_override_body is not None
+            and not isinstance(eye_detect_override_body, bool)
+        ):
+            return json_error(
+                f"eye_detect_override must be boolean, got "
+                f"{type(eye_detect_override_body).__name__}", 400,
+            )
         params = PipelinePlanParams(
             collection_id=body.get("collection_id"),
             photo_ids=scope_photo_ids,
@@ -3639,6 +3654,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             skip_classify=bool(body.get("skip_classify")),
             skip_extract_masks=bool(body.get("skip_extract_masks")),
             skip_eye_keypoints=bool(body.get("skip_eye_keypoints")),
+            eye_detect_override=eye_detect_override_body,
             skip_regroup=bool(body.get("skip_regroup")),
             model_ids=body.get("model_ids") or (
                 [body["model_id"]] if body.get("model_id") else []
@@ -20801,6 +20817,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 f"{type(miss_enabled_body).__name__}"
             )
 
+        # ``eye_detect_override`` mirrors ``miss_enabled`` as a tri-state
+        # per-run switch (None = defer to workspace config). Same validation
+        # rationale: a string "false" would flow through as truthy and force
+        # eye detection on for a caller expecting the workspace default.
+        eye_detect_override_body = body.get("eye_detect_override")
+        if (
+            eye_detect_override_body is not None
+            and not isinstance(eye_detect_override_body, bool)
+        ):
+            return json_error(
+                f"eye_detect_override must be boolean, got "
+                f"{type(eye_detect_override_body).__name__}"
+            )
+
         # Validate ``model_id`` / ``model_ids`` shape BEFORE the folder-scope
         # collection is materialized. The auto-skip-classify block further
         # down calls ``list(params.model_ids or [])`` and ``by_id.get(mid, ...)``
@@ -20863,6 +20893,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             download_taxonomy=body.get("download_taxonomy", True),
             skip_extract_masks=body.get("skip_extract_masks", False),
             skip_eye_keypoints=body.get("skip_eye_keypoints", False),
+            eye_detect_override=eye_detect_override_body,
             skip_regroup=body.get("skip_regroup", False),
             # ``review_mode`` reaches ``body`` only through the strategy
             # expansion at the top of this handler (identify sets it to

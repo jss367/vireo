@@ -1321,9 +1321,9 @@ def compute_review_readiness(db, mask_threshold=0.25, dinov2_variant=None):
     # lying this PR set out to fix. Mirrors how pipeline_job.py:3064-3066
     # reads the same key off the pipeline sub-dict before invoking the
     # eye stage.
-    eye_conf_gate = db.get_effective_config(cfg.load()).get(
-        "pipeline", {}
-    ).get("eye_classifier_conf_gate", 0.5)
+    pipeline_cfg = db.get_effective_config(cfg.load()).get("pipeline", {})
+    eye_conf_gate = pipeline_cfg.get("eye_classifier_conf_gate", 0.5)
+    eye_detect_enabled = bool(pipeline_cfg.get("eye_detect_enabled", False))
     eye_target = (
         db.count_eye_keypoint_attemptable(eye_conf_gate) if total else 0
     )
@@ -1364,7 +1364,15 @@ def compute_review_readiness(db, mask_threshold=0.25, dinov2_variant=None):
         out["enhancing_missing"].append("masks_partial")
     if usable_embeddings < feature_target:
         out["enhancing_missing"].append("embeddings")
-    if eye_attempts < eye_target:
+    # Only surface an eye-keypoint gap when the workspace has eye detection
+    # turned on. With the new default off, an eye-disabled workspace's
+    # Process flow deliberately skips the stage, so warning that results
+    # were "computed without eye keypoints and should re-run" would tell
+    # the user their run is degraded because of a feature they chose not
+    # to use — the exact kind of misleading readiness signal
+    # CORE_PHILOSOPHY.md's "no black boxes" rule forbids. Regression for
+    # Codex thread PRRT_kwDORn8c-s6QOH4L.
+    if eye_detect_enabled and eye_attempts < eye_target:
         out["enhancing_missing"].append("eye_keypoints")
     if cov["classified"] < feature_target:
         out["enhancing_missing"].append("species_predictions")
@@ -1476,7 +1484,7 @@ def eye_keypoint_stage_preflight(config):
     start (mirroring SAM2/DINOv2), so a missing-weights state is no longer
     a preflight skip — only the explicit config flag is.
     """
-    if not config.get("eye_detect_enabled", True):
+    if not config.get("eye_detect_enabled", False):
         return "Disabled in config"
     return None
 
@@ -1658,7 +1666,7 @@ def detect_eye_keypoints_stage(
     Args:
         db: Database with an active workspace.
         config: dict of tunables. Reads:
-            - eye_detect_enabled (bool, default True)
+            - eye_detect_enabled (bool, default False)
             - eye_classifier_conf_gate (float, default 0.5)
             - eye_detection_conf_gate (float, default 0.5)
             - eye_window_k (float, default 0.08)
