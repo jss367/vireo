@@ -11755,14 +11755,15 @@ def test_pipeline_picker_disables_degraded_collections(app_and_db):
 def test_collection_pickers_disable_degraded_collections(app_and_db):
     """Every page that renders a collection picker from /api/collections must
     honor count_error. Before this fix only the pipeline picker did — the
-    review, cull, compare, and pipeline-review pickers still appended every
-    collection as selectable, so picking a broken one 400'd the downstream
-    request. Regression guard: the same count_error / 'unavailable' branch
-    that exists on the pipeline page must exist on each of these pages too.
+    review, cull, compare, pipeline-review, and browse pickers still appended
+    every collection as selectable, so picking a broken one 400'd the
+    downstream request. Regression guard: the same count_error /
+    'unavailable' branch that exists on the pipeline page must exist on each
+    of these pages too.
     """
     app, _db = app_and_db
     client = app.test_client()
-    for route in ("/review", "/cull", "/compare", "/pipeline/review"):
+    for route in ("/review", "/cull", "/compare", "/pipeline/review", "/browse"):
         html = client.get(route).get_data(as_text=True)
         assert "count_error" in html, (
             f"{route} does not check count_error on its collection picker"
@@ -11770,6 +11771,32 @@ def test_collection_pickers_disable_degraded_collections(app_and_db):
         assert "unavailable" in html, (
             f"{route} does not label degraded collections as unavailable"
         )
+
+
+def test_browse_filter_by_collection_guards_degraded_rows():
+    """The Browse sidebar renders every collection from /api/collections as a
+    clickable filter target (filterByCollection). Before this fix,
+    left-clicking a degraded row hit /api/collections/<id>/photos, which now
+    400s, leaving Browse advertising a source that can't load. Regression
+    guard: filterByCollection must bail out at the top for count_error rows
+    (with a toast) rather than firing the request.
+    """
+    from pathlib import Path
+    src = Path(__file__).parent.parent / "templates" / "browse.html"
+    text = src.read_text()
+    fn_start = text.find("async function filterByCollection")
+    assert fn_start != -1, "filterByCollection function not found"
+    # Grab enough of the function body to include the guard block. The guard
+    # must reference count_error and return before the normal load path runs.
+    body = text[fn_start:fn_start + 2000]
+    assert "count_error" in body, (
+        "browse.html filterByCollection does not check count_error"
+    )
+    guard_end = body.find("return;")
+    fetch_start = body.find("loadPhotos")
+    assert guard_end != -1 and fetch_start != -1 and guard_end < fetch_start, (
+        "browse.html filterByCollection does not early-return before loading"
+    )
 
 
 def test_review_switch_collection_does_not_silently_widen_scope():
