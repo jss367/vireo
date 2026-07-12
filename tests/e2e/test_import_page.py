@@ -257,6 +257,31 @@ def test_import_destination_browse_button_sets_destination(live_server, page):
     expect(page.locator("#destInput")).to_have_value("/tmp/archive")
 
 
+def test_import_recent_destination_button_selects_saved_path(live_server, page):
+    """Saved import destinations remain visible as one-click choices."""
+    import config as cfg
+
+    config = cfg.load()
+    config["ingest"]["recent_destinations"] = [
+        "/Volumes/Photos/Archive",
+        "/Volumes/Photos/Trips",
+    ]
+    cfg.save(config)
+
+    page.goto(f"{live_server['url']}/import")
+    page.locator("#modeCopy").check()
+
+    choices = page.locator("[data-testid='recent-destinations']")
+    expect(choices).to_be_visible()
+    expect(choices).to_contain_text("Archive")
+    expect(choices).to_contain_text("Trips")
+
+    page.get_by_role(
+        "button", name="Use /Volumes/Photos/Trips"
+    ).click()
+    expect(page.locator("#destInput")).to_have_value("/Volumes/Photos/Trips")
+
+
 def test_import_custom_extensions_feed_preview(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/import")
