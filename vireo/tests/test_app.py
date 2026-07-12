@@ -8295,6 +8295,78 @@ def test_highlights_bucket_mixed_accepted_predicted_is_not_accepted(app_and_db):
     assert bucket["is_accepted"] is False
 
 
+def test_highlights_merges_prediction_case_with_existing_species_keyword(app_and_db):
+    """A title-cased classifier label and sentence-cased accepted keyword are
+    the same species bucket.
+
+    Regression for the Common waxbill case: older prediction rows preserve
+    label-file casing (``Common Waxbill``), while accepted keywords may follow
+    the user's keyword convention (``Common waxbill``). Highlights must merge
+    them without requiring a prediction-table backfill.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/wax', 'wax', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    waxbill_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Common waxbill', 'taxonomy', 1)"
+    ).lastrowid
+
+    accepted_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'accepted.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (accepted_pid, waxbill_kw),
+    )
+
+    predicted_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'predicted.jpg', 0.8, 'none')",
+        (fid,),
+    ).lastrowid
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (predicted_pid,),
+    ).lastrowid
+    # Insert the raw legacy shape directly: db.add_prediction now
+    # canonicalizes new writes, but existing databases still have raw labels.
+    db.conn.execute(
+        "INSERT INTO predictions "
+        "(detection_id, classifier_model, species, confidence) "
+        "VALUES (?, 'm', 'Common Waxbill', 0.95)",
+        (did,),
+    )
+    db.conn.execute(
+        "INSERT INTO species_highlights "
+        "(workspace_id, species, photo_id, rank) "
+        "VALUES (?, 'Common Waxbill', ?, 1)",
+        (db._ws_id(), predicted_pid),
+    )
+    db.conn.commit()
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&confidence_threshold=0.7")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data["buckets"]) == 1
+    bucket = data["buckets"][0]
+    assert bucket["species"] == "Common waxbill"
+    assert bucket["photo_count"] == 2
+    assert bucket["is_accepted"] is False
+    assert bucket["has_highlight_selection"] is True
+    predicted = next(p for p in bucket["photos"] if p["id"] == predicted_pid)
+    assert predicted["predicted_species"] == "Common waxbill"
+    assert predicted["is_highlighted"] is True
+
+
 def test_highlights_confirmation_filter_splits_confirmed_and_unconfirmed(app_and_db):
     app, db = app_and_db
     client = app.test_client()

@@ -372,8 +372,34 @@ def _bucket_best_score(photos):
     return max(scores) if scores else None
 
 
+def _canonicalize_species_photo_lists(db, species_map):
+    """Merge {species: [photo_id, ...]} maps under canonical species names."""
+    result = {}
+    for species, photo_ids in species_map.items():
+        canonical = db.canonical_species_name(species)
+        merged = result.setdefault(canonical, [])
+        for photo_id in photo_ids:
+            if photo_id not in merged:
+                merged.append(photo_id)
+    return result
+
+
+def _canonicalize_species_rank_maps(db, species_map):
+    """Merge {species: {photo_id: rank}} maps under canonical species names."""
+    result = {}
+    for species, ranks in species_map.items():
+        canonical = db.canonical_species_name(species)
+        merged = result.setdefault(canonical, {})
+        for photo_id, rank in ranks.items():
+            if photo_id not in merged or rank < merged[photo_id]:
+                merged[photo_id] = rank
+    return result
+
+
 def _apply_highlight_preferences(db, buckets):
-    preferences = db.get_species_representative_lists(eligible_only=True)
+    preferences = _canonicalize_species_photo_lists(
+        db, db.get_species_representative_lists(eligible_only=True)
+    )
     for bucket in buckets:
         representative_ids = preferences.get(bucket["species"]) or []
         representative_set = set(representative_ids)
@@ -415,7 +441,9 @@ def _apply_highlight_preferences(db, buckets):
 
 
 def _apply_ordered_highlights(db, buckets):
-    highlights = db.get_species_highlights(eligible_only=True)
+    highlights = _canonicalize_species_rank_maps(
+        db, db.get_species_highlights(eligible_only=True)
+    )
     for bucket in buckets:
         ranks = highlights.get(bucket["species"], {})
         # Species-level state stays true even when every selected highlight is
@@ -466,7 +494,9 @@ def _photo_highlight_entries(db, photo_id):
         None, min_quality=0.0, photo_id=photo_id
     )
     buckets, _unidentified = _collect_highlight_buckets(
-        candidates, confidence_threshold=0.0
+        candidates,
+        confidence_threshold=0.0,
+        canonicalize_species=db.canonical_species_name,
     )
     entries = []
     for bucket in buckets:
@@ -516,6 +546,7 @@ def _collect_highlight_buckets(
     candidates,
     confidence_threshold,
     confirmation_filter="all",
+    canonicalize_species=None,
 ):
     confirmation_filter = _normalize_highlight_confirmation_filter(
         confirmation_filter
@@ -532,14 +563,20 @@ def _collect_highlight_buckets(
             continue
         predicted_conf = r.get("predicted_confidence")
         if accepted:
-            species = accepted
+            species = (
+                canonicalize_species(accepted)
+                if canonicalize_species else accepted
+            )
             is_accepted = True
         elif (
             r.get("predicted_species")
             and predicted_conf is not None
             and predicted_conf >= confidence_threshold
         ):
-            species = r["predicted_species"]
+            species = (
+                canonicalize_species(r["predicted_species"])
+                if canonicalize_species else r["predicted_species"]
+            )
             is_accepted = False
         else:
             species = None
@@ -568,9 +605,16 @@ def _collect_highlight_buckets(
             "subject_y_median": r.get("subject_y_median"),
             "noise_estimate": r.get("noise_estimate"),
             "eye_tenengrad": r.get("eye_tenengrad"),
-            "species": accepted,
+            "species": (
+                canonicalize_species(accepted)
+                if accepted and canonicalize_species else accepted
+            ),
             "prediction_id": r.get("prediction_id"),
-            "predicted_species": r.get("predicted_species"),
+            "predicted_species": (
+                canonicalize_species(r.get("predicted_species"))
+                if r.get("predicted_species") and canonicalize_species
+                else r.get("predicted_species")
+            ),
             "predicted_confidence": predicted_conf,
             "has_accepted_species": accepted is not None,
             "is_unidentified": species is None,
@@ -8417,8 +8461,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def _photo_can_be_highlights_preference(db, species, photo_id):
         candidates = db.get_highlights_candidates(None, min_quality=0.0)
         buckets, _unidentified = _collect_highlight_buckets(
-            candidates, confidence_threshold=0.0
+            candidates,
+            confidence_threshold=0.0,
+            canonicalize_species=db.canonical_species_name,
         )
+        species = db.canonical_species_name(species)
         for bucket in buckets:
             if bucket["species"] != species:
                 continue
@@ -8441,6 +8488,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         parsed, error = _parse_photo_preference_body(body)
         if error:
             return json_error(error)
+        parsed["species"] = db.canonical_species_name(parsed["species"])
         error, status = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
         if error:
             return json_error(error, status)
@@ -8482,6 +8530,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         parsed, error = _parse_photo_preference_body(body, require_photo=False)
         if error:
             return json_error(error)
+        parsed["species"] = db.canonical_species_name(parsed["species"])
         # See the POST handler: `purpose=highlights` targets one row in the
         # ordered-highlights table, so it needs a photo_id (enforced by
         # _parse_photo_preference_body) and routes to remove_species_highlight
@@ -8528,6 +8577,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         parsed, error = _parse_species_highlight_body(body)
         if error:
             return json_error(error)
+        parsed["species"] = db.canonical_species_name(parsed["species"])
         error, status = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
         if error:
             return json_error(error, status)
@@ -8547,6 +8597,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         parsed, error = _parse_species_highlight_body(body)
         if error:
             return json_error(error)
+        parsed["species"] = db.canonical_species_name(parsed["species"])
         error, status = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
         if error:
             return json_error(error, status)
@@ -8560,6 +8611,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         parsed, error = _parse_species_highlight_body(body, require_direction=True)
         if error:
             return json_error(error)
+        parsed["species"] = db.canonical_species_name(parsed["species"])
         error, status = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
         if error:
             return json_error(error, status)
@@ -8606,7 +8658,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         total_in_scope = db.count_filtered_photos(folder_id=folder_id)
 
         buckets, unidentified_photos = _collect_highlight_buckets(
-            candidates, confidence_threshold, confirmation_filter
+            candidates,
+            confidence_threshold,
+            confirmation_filter,
+            canonicalize_species=db.canonical_species_name,
         )
         eligible_count = sum(b["photo_count"] for b in buckets) + len(
             unidentified_photos
@@ -9587,10 +9642,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         limit = max(1, min(request.args.get("limit", 100, type=int), 500))
         if not species:
             return json_error("species required")
+        if species != "__unidentified__":
+            species = db.canonical_species_name(species)
 
         candidates = db.get_highlights_candidates(folder_id, min_quality=min_quality)
         buckets, unidentified_photos = _collect_highlight_buckets(
-            candidates, confidence_threshold, confirmation_filter
+            candidates,
+            confidence_threshold,
+            confirmation_filter,
+            canonicalize_species=db.canonical_species_name,
         )
         buckets, unidentified_photos = _filter_highlight_sections(
             buckets,

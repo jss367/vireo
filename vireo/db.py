@@ -8447,12 +8447,73 @@ class Database:
             # First word capitalized, rest lowercase: "Black phoebe"
             words = name.split()
             if len(words) > 1:
-                return words[0].capitalize() + " " + " ".join(w.lower() for w in words[1:])
-            return name.capitalize()
+                first = self._sentence_case_first_word(words[0])
+                return first + " " + " ".join(w.lower() for w in words[1:])
+            return self._sentence_case_first_word(name)
         elif convention == "title":
             # Title Case: "Black Phoebe"
             return name.title()
         return name
+
+    @staticmethod
+    def _sentence_case_first_word(word):
+        """Capitalize a first word without mangling mixed-case eponyms."""
+        if not word:
+            return word
+        has_case = any(ch.lower() != ch.upper() for ch in word)
+        if has_case and word == word.upper():
+            chars = list(word.lower())
+            for idx, ch in enumerate(chars):
+                if ch.lower() != ch.upper():
+                    chars[idx] = ch.upper()
+                    break
+            return "".join(chars)
+        return word[0].upper() + word[1:]
+
+    def canonical_species_name(self, name):
+        """Return Vireo's canonical display/storage spelling for a species.
+
+        Classifier labels come from external sources (usually iNaturalist) and
+        can use a different capitalization convention than the user's existing
+        Vireo keywords. Prefer an existing top-level taxonomy/general keyword
+        spelling when one matches case-insensitively after keyword display
+        normalization; otherwise fall back to the configured species keyword
+        casing convention.
+        """
+        if name is None:
+            return None
+        cleaned = normalize_keyword_display(name)
+        if not cleaned:
+            return cleaned
+
+        for sql, params in (
+            (
+                "SELECT name FROM keywords WHERE name = ? COLLATE NOCASE "
+                "AND parent_id IS NULL AND type IN ('taxonomy', 'general') "
+                "ORDER BY (type = 'taxonomy') DESC, id ASC LIMIT 1",
+                (cleaned,),
+            ),
+            (
+                "SELECT name FROM keywords "
+                "WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE "
+                "AND parent_id IS NULL AND type IN ('taxonomy', 'general') "
+                "ORDER BY (type = 'taxonomy') DESC, id ASC LIMIT 1",
+                (cleaned,),
+            ),
+        ):
+            row = self.conn.execute(sql, params).fetchone()
+            if row and row["name"]:
+                return row["name"]
+
+        import config as cfg
+
+        override = cfg.get("keyword_case")
+        if override and override != "auto":
+            return self._apply_case_convention(cleaned, override)
+        convention = self.detect_keyword_case_convention()
+        if convention:
+            return self._apply_case_convention(cleaned, convention)
+        return cleaned
 
     def _lookup_taxon_id_for_keyword(self, name):
         """Return the local taxa.id matching a keyword name, if any."""
@@ -11354,6 +11415,7 @@ class Database:
                 "predictions without a detection row are orphaned and "
                 "invisible to workspace-scoped queries"
             )
+        species = self.canonical_species_name(species)
         tax = taxonomy or {}
         cur = self.conn.execute(
             """INSERT OR IGNORE INTO predictions

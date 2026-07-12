@@ -15781,3 +15781,53 @@ def test_accept_prediction_queues_normalized_species(tmp_path):
     ]
     assert "apapane" in add_values
     assert "‘apapane" not in add_values
+
+
+def test_add_prediction_uses_existing_species_keyword_casing(tmp_path):
+    """New classifier predictions should follow Vireo's existing species
+    keyword spelling rather than preserving label-file capitalization."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Common waxbill', 'taxonomy', 1)"
+    )
+    db.conn.commit()
+
+    db.add_prediction(det_ids[0], species="Common Waxbill",
+                      confidence=0.9, model="bioclip")
+
+    pred = db.conn.execute("SELECT species FROM predictions").fetchone()
+    assert pred["species"] == "Common waxbill"
+
+
+def test_sentence_case_preserves_first_word_internal_caps(tmp_path):
+    """Sentence-case species names must not mangle the leading eponym."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+
+    assert (
+        db._apply_case_convention("LeConte's Sparrow", "lower")
+        == "LeConte's sparrow"
+    )
+    assert (
+        db._apply_case_convention("MacGillivray's Warbler", "lower")
+        == "MacGillivray's warbler"
+    )
+    assert (
+        db._apply_case_convention("COMMON WAXBILL", "lower")
+        == "Common waxbill"
+    )
+    assert (
+        db._apply_case_convention("ʻAPAPANE", "lower")
+        == "ʻApapane"
+    )
