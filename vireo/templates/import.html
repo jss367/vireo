@@ -46,6 +46,34 @@ body { display: flex; flex-direction: column; height: 100vh; }
 }
 .input-fixed { max-width: 240px; flex: 0 1 240px; }
 .preview-summary { font-size: 12px; color: var(--text-secondary); margin-top: 6px; }
+.import-preview-grid { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; max-height: 520px; overflow-y: auto; }
+.import-preview-folder { display: flex; flex-direction: column; gap: 6px; }
+.import-preview-folder-header { font-size: 12px; font-weight: 600; color: var(--text-secondary); overflow-wrap: anywhere; }
+.import-preview-thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 8px; }
+.import-preview-thumb {
+  position: relative; min-width: 0; overflow: hidden; border-radius: 6px;
+  background: var(--bg-tertiary); border: 1px solid var(--border-primary);
+}
+.import-preview-thumb.duplicate { opacity: 0.55; }
+.import-preview-thumb-img { aspect-ratio: 1; background: var(--bg-primary); overflow: hidden; }
+.import-preview-thumb-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.import-preview-thumb.skeleton .import-preview-thumb-img::after {
+  content: ''; display: block; width: 100%; height: 100%;
+  background: linear-gradient(90deg, var(--bg-tertiary) 25%, var(--border-primary) 50%, var(--bg-tertiary) 75%);
+  background-size: 200% 100%; animation: import-shimmer 1.5s infinite;
+}
+@keyframes import-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+.import-preview-badge {
+  position: absolute; top: 6px; left: 6px; border-radius: 3px; padding: 2px 5px;
+  background: rgba(0,0,0,0.72); color: #fff; font-size: 9px; font-weight: 700;
+  letter-spacing: 0; text-transform: uppercase;
+}
+.import-preview-meta { padding: 6px; display: flex; flex-direction: column; gap: 2px; min-height: 54px; }
+.import-preview-name { font-size: 11px; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.import-preview-dest { font-size: 10px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dest-structure { margin-top: 8px; }
 .dest-structure .structure-headline { font-size: 12px; color: var(--text-primary); font-weight: 600; }
 .managed-archive-callout {
@@ -255,6 +283,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
       </div>
       <div class="preview-summary" id="previewSummary"></div>
       <div id="destStructure" class="dest-structure" style="display:none;"></div>
+      <div id="importPreviewGrid" class="import-preview-grid" style="display:none;"></div>
       <div id="importError"></div>
     </div>
 
@@ -332,6 +361,8 @@ let destStructureSeq = 0;
 // or trigger a folder-structure render on top of a newer preview's
 // results. Incremented at the top of previewImport().
 let importPreviewSeq = 0;
+let importPreviewTimer = null;
+let importThumbSchedulerCancel = null;
 
 function selectedImportMode() {
   const checked = document.querySelector('input[name="importMode"]:checked');
@@ -347,11 +378,13 @@ function updateImportMode() {
     copyMode ? 'Check for duplicates' : 'Preview import';
   document.getElementById('previewSummary').textContent = '';
   hideDestStructure();
+  clearImportPreviewGrid();
   showError('');
   updateFileTypeControls();
   updateWorkspaceMode();
   onImportDestModeChange();
   refreshSourceCounts();
+  scheduleImportPreview();
 }
 
 function selectedFileTypes() {
@@ -375,11 +408,18 @@ function wireDestStructureInvalidation() {
   ].forEach((id) => {
     const el = document.getElementById(id);
     if (!el) return;
-    el.addEventListener('change', hideDestStructure);
-    el.addEventListener('input', hideDestStructure);
+    const onPreviewOptionChange = () => {
+      hideDestStructure();
+      scheduleImportPreview();
+    };
+    el.addEventListener('change', onPreviewOptionChange);
+    el.addEventListener('input', onPreviewOptionChange);
   });
   document.querySelectorAll('.file-ext').forEach((el) => {
-    el.addEventListener('change', hideDestStructure);
+    el.addEventListener('change', () => {
+      hideDestStructure();
+      scheduleImportPreview();
+    });
   });
 }
 
@@ -542,7 +582,12 @@ function renderSources() {
       sources.splice(i, 1);
       delete sourceCounts[s];
       hideDestStructure();
+      if (!sources.length) {
+        clearImportPreviewGrid();
+        document.getElementById('previewSummary').textContent = '';
+      }
       renderSources();
+      scheduleImportPreview();
     };
     div.appendChild(span);
     div.appendChild(meta);
@@ -631,6 +676,7 @@ function addSourcePath(path) {
     hideDestStructure();
     renderSources();
     refreshSourceCount(v);
+    scheduleImportPreview();
     return true;
   }
   return false;
@@ -671,6 +717,7 @@ async function browseForDestination() {
       if (path) {
         document.getElementById('destInput').value = path;
         hideDestStructure();
+        scheduleImportPreview();
       }
       return;
     }
@@ -891,6 +938,7 @@ function selectImportBrowserFolder() {
     if (!browserPath) return;
     document.getElementById('destInput').value = browserPath;
     hideDestStructure();
+    scheduleImportPreview();
   } else {
     const paths = browserSelectedPaths.length
       ? browserSelectedPaths
@@ -1244,6 +1292,7 @@ function useStagingAsImportSource(result) {
   sources = [result.source_root];
   hideDestStructure();
   renderSources();
+  refreshSourceCount(result.source_root);
   // Staging recovery must copy the temporary staging tree into the archive.
   // In-place would catalog paths that disappear once staging is cleaned,
   // leaving missing-folder rows, so force Copy to archive here.
@@ -1256,6 +1305,7 @@ function useStagingAsImportSource(result) {
     document.getElementById('destInput').value = result.inferred_destination;
     hideDestStructure();
   }
+  scheduleImportPreview();
   document.getElementById('sourceCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
@@ -1265,6 +1315,175 @@ function hideDestStructure() {
   if (!el) return;
   el.style.display = 'none';
   el.innerHTML = '';
+}
+
+function clearScheduledImportPreview() {
+  if (importPreviewTimer) {
+    clearTimeout(importPreviewTimer);
+    importPreviewTimer = null;
+  }
+}
+
+function scheduleImportPreview() {
+  clearScheduledImportPreview();
+  showError('');
+  if (!sources.length) return;
+  importPreviewTimer = setTimeout(() => {
+    importPreviewTimer = null;
+    previewImport({ automatic: true });
+  }, 350);
+}
+
+function clearImportPreviewGrid() {
+  if (importThumbSchedulerCancel) {
+    importThumbSchedulerCancel();
+    importThumbSchedulerCancel = null;
+  }
+  const grid = document.getElementById('importPreviewGrid');
+  if (!grid) return;
+  grid.style.display = 'none';
+  grid.innerHTML = '';
+}
+
+function importDestinationMap(destinationFiles) {
+  const map = {};
+  (destinationFiles || []).forEach((f) => {
+    if (f && f.path) map[f.path] = f.folder || '.';
+  });
+  return map;
+}
+
+function renderImportPreviewGrid(files, duplicatePaths, destinationFiles) {
+  const grid = document.getElementById('importPreviewGrid');
+  if (!grid) return;
+  if (importThumbSchedulerCancel) {
+    importThumbSchedulerCancel();
+    importThumbSchedulerCancel = null;
+  }
+  grid.innerHTML = '';
+  const dupes = new Set(duplicatePaths || []);
+  const destMap = importDestinationMap(destinationFiles);
+  if (!files || !files.length) {
+    grid.style.display = 'none';
+    return;
+  }
+
+  const groups = {};
+  files.forEach((f) => {
+    const key = f.subfolder || 'Source';
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(f);
+  });
+
+  Object.keys(groups).sort().forEach((subfolder) => {
+    const groupEl = document.createElement('div');
+    groupEl.className = 'import-preview-folder';
+    const header = document.createElement('div');
+    header.className = 'import-preview-folder-header';
+    header.textContent = subfolder + ' (' + groups[subfolder].length + ')';
+    groupEl.appendChild(header);
+
+    const thumbsEl = document.createElement('div');
+    thumbsEl.className = 'import-preview-thumbs';
+    groups[subfolder].forEach((f) => {
+      const isDuplicate = dupes.has(f.path);
+      const card = document.createElement('div');
+      card.className = 'import-preview-thumb skeleton' + (isDuplicate ? ' duplicate' : '');
+      card.dataset.path = f.path || '';
+      if (f.thumb_url) card.dataset.thumbUrl = f.thumb_url;
+      card.title = f.path || f.filename || '';
+
+      const imgWrap = document.createElement('div');
+      imgWrap.className = 'import-preview-thumb-img';
+      const img = document.createElement('img');
+      img.alt = f.filename || '';
+      imgWrap.appendChild(img);
+      card.appendChild(imgWrap);
+
+      if (isDuplicate) {
+        const badge = document.createElement('div');
+        badge.className = 'import-preview-badge';
+        badge.textContent = 'Duplicate';
+        card.appendChild(badge);
+      }
+
+      const meta = document.createElement('div');
+      meta.className = 'import-preview-meta';
+      const name = document.createElement('div');
+      name.className = 'import-preview-name';
+      name.textContent = f.filename || f.path || '';
+      meta.appendChild(name);
+      const dest = document.createElement('div');
+      dest.className = 'import-preview-dest';
+      const folder = destMap[f.path];
+      dest.textContent = folder ? ('To: ' + (folder === '.' ? '(archive root)' : folder)) : (f.subfolder || '');
+      meta.appendChild(dest);
+      card.appendChild(meta);
+
+      thumbsEl.appendChild(card);
+    });
+    groupEl.appendChild(thumbsEl);
+    grid.appendChild(groupEl);
+  });
+  grid.style.display = '';
+  setupImportThumbnailScheduler();
+}
+
+function setupImportThumbnailScheduler() {
+  const grid = document.getElementById('importPreviewGrid');
+  if (!grid) return;
+  const pendingQueue = Array.from(grid.querySelectorAll('.import-preview-thumb.skeleton'));
+  const visibleSet = new Set();
+  let inFlight = 0;
+  let cancelled = false;
+  const concurrency = 4;
+  let observer = null;
+
+  importThumbSchedulerCancel = function() {
+    cancelled = true;
+    pendingQueue.length = 0;
+    if (observer) observer.disconnect();
+  };
+
+  function dispatch(el) {
+    const path = el.dataset.path;
+    const img = el.querySelector('img');
+    if (!img) return;
+    inFlight += 1;
+    const done = function() {
+      el.classList.remove('skeleton');
+      inFlight -= 1;
+      if (!cancelled) pump();
+    };
+    img.onload = done;
+    img.onerror = done;
+    img.src = el.dataset.thumbUrl || ('/api/import/folder-preview/thumbnail?path=' + encodeURIComponent(path));
+  }
+
+  function pump() {
+    while (inFlight < concurrency && pendingQueue.length > 0) {
+      let idx = 0;
+      for (let i = 0; i < pendingQueue.length; i += 1) {
+        if (visibleSet.has(pendingQueue[i])) { idx = i; break; }
+      }
+      dispatch(pendingQueue.splice(idx, 1)[0]);
+    }
+  }
+
+  if (!('IntersectionObserver' in window)) {
+    pump();
+    return;
+  }
+
+  observer = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      if (entry.isIntersecting) visibleSet.add(entry.target);
+      else visibleSet.delete(entry.target);
+    });
+    if (!cancelled) pump();
+  }, { root: grid, rootMargin: '200px' });
+  pendingQueue.forEach((thumb) => observer.observe(thumb));
+  setTimeout(() => { if (!cancelled) pump(); }, 0);
 }
 
 // Resolve the absolute local path files will be cataloged at, for the
@@ -1325,7 +1544,7 @@ function importPreviewSignatureChanged(signature) {
 async function renderDestStructure(excludePaths) {
   hideDestStructure();
   const destination = resolvedCopyDestination();
-  if (!destination) return;
+  if (!destination) return null;
   const fileTypes = selectedFileTypes();
   const recursive = document.getElementById('chkRecursive').checked;
   const requestSeq = destStructureSeq;
@@ -1345,10 +1564,10 @@ async function renderDestStructure(excludePaths) {
         exclude_paths: excludePaths || [],
       }),
     });
-    if (!resp.ok) return;
+    if (!resp.ok) return null;
     data = await resp.json();
   } catch (e) {
-    return;  // structure preview is optional; keep the summary intact
+    return null;  // structure preview is optional; keep the summary intact
   }
   const el = document.getElementById('destStructure');
   if (
@@ -1360,7 +1579,7 @@ async function renderDestStructure(excludePaths) {
     return;
   }
   const folders = data.folders || [];
-  if (!folders.length && !data.managed_archive) return;
+  if (!folders.length && !data.managed_archive) return data;
 
   const headline = document.createElement('div');
   headline.className = 'structure-headline';
@@ -1402,9 +1621,11 @@ async function renderDestStructure(excludePaths) {
   });
   el.appendChild(table);
   el.style.display = '';
+  return data;
 }
 
-async function previewImport() {
+async function previewImport(opts) {
+  clearScheduledImportPreview();
   showError('');
   hideDestStructure();
   if (!sources.length) { showError('Add at least one source folder.'); return; }
@@ -1418,6 +1639,8 @@ async function previewImport() {
   const requestSeq = importPreviewSeq;
   const requestSignature = importPreviewSignature();
   const summary = document.getElementById('previewSummary');
+  const btnPreview = document.getElementById('btnPreview');
+  if (btnPreview) btnPreview.disabled = true;
   summary.textContent = 'Discovering files…';
   try {
     const resp = await fetch('/api/import/folder-preview', {
@@ -1440,7 +1663,12 @@ async function previewImport() {
       return;
     }
     const files = data.files || [];
-    if (!files.length) { summary.textContent = 'No importable files found.'; return; }
+    if (!files.length) {
+      summary.textContent = 'No importable files found.';
+      clearImportPreviewGrid();
+      return;
+    }
+    renderImportPreviewGrid(files, [], null);
     if (!copyMode) {
       summary.textContent = files.length + ' files found · originals will stay in place';
       return;
@@ -1449,7 +1677,10 @@ async function previewImport() {
       summary.textContent = files.length + ' files found · duplicates will be copied';
       // No dedup gate, so every discovered file lands — pass no exclusions
       // so the folder-structure counts match the full copy set.
-      await renderDestStructure([]);
+      const destData = await renderDestStructure([]);
+      if (requestSeq !== importPreviewSeq) return;
+      if (importPreviewSignatureChanged(requestSignature)) return;
+      if (destData && destData.files) renderImportPreviewGrid(files, [], destData.files);
       return;
     }
     summary.textContent = files.length + ' files found — checking for duplicates…';
@@ -1496,16 +1727,25 @@ async function previewImport() {
     summary.textContent = files.length + ' files found · ' + dupCount +
       ' already in your library (will be skipped) · ' +
       (files.length - dupCount) + ' to copy';
+    renderImportPreviewGrid(files, duplicatePaths, null);
     // Skipped duplicates aren't copied, so exclude them from the
     // folder-structure preview — the new/existing folder counts must
     // reflect the files that will actually land in the archive.
-    await renderDestStructure(duplicatePaths);
+    const destData = await renderDestStructure(duplicatePaths);
+    if (requestSeq !== importPreviewSeq) return;
+    if (importPreviewSignatureChanged(requestSignature)) return;
+    if (destData && destData.files) renderImportPreviewGrid(files, duplicatePaths, destData.files);
   } catch (e) {
     // Don't let a stale run's error clobber a newer preview's summary
     // or surface a stale error banner — the newer run owns the UI.
     if (requestSeq !== importPreviewSeq) return;
+    if (importPreviewSignatureChanged(requestSignature)) return;
     summary.textContent = '';
     showError(String(e.message || e));
+  } finally {
+    if (requestSeq === importPreviewSeq && btnPreview) {
+      btnPreview.disabled = false;
+    }
   }
 }
 
